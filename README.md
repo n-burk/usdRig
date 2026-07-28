@@ -197,35 +197,74 @@ gen_schema.bat
 Codeless means no compilation and no generated C++ — the domain is registered
 purely from `generatedSchema.usda` + `plugInfo.json`.
 
-### 3. Register the plugins
-
-There are **no CMake `install()` rules**; the plugin layout is in-tree and
-registration is by environment variable. With `RIG` = this repo's root and
-`USD` = your USD prefix:
+### 3. Install
 
 ```
-PXR_PLUGINPATH_NAME = %RIG%\plugin\rigExecSchema\resources    (schema domain)
-                      %RIG%\plugin\rigExecImaging\resources   (scene-index plugin)
-                      %RIG%\plugin\rigExecUsdview             (usdview only)
+cmake --install build --prefix <your-rigexec-prefix>
+```
 
-PYTHONPATH         += %RIG%\plugin\rigExecUsdview             (usdview only)
-PATH               += %RIG%\build;%USD%\bin;%USD%\lib
+The layout mirrors OpenUSD's own tree:
+
+```
+<prefix>/
+  include/rigExec/          rigEvaluator.h, tapSet.h, moverGraph.h, types.h, ...
+  include/rigExecMath/      pointFrame.h, solvers.h, geometryKernels.h, ...
+  include/rigExecImaging/   registry.h, bridge.h, sceneIndices.h, ...
+  lib/                      rigExec.dll, rigExecImaging.dll (+ import libraries)
+  lib/usd/rigExecSchema/resources/    plugInfo.json, generatedSchema.usda
+  lib/usd/rigExecImaging/resources/   plugInfo.json
+  lib/python/rigExecUsdview/          plugInfo.json, rigExecUsdview.py
+  lib/cmake/rigExec/                  rigExecConfig.cmake + targets
+```
+
+Shared libraries land in `lib/` beside their import libraries rather than
+`bin/`, because that is what USD does on Windows — it keeps the installed
+plugin's `"LibraryPath": "../../rigExecImaging.dll"` resolving exactly the way
+`usd_usdSkelImaging.dll` does. The install rewrites that path automatically;
+the copy checked into `plugin/` still points at the in-tree `build/`
+directory, and the two cannot drift because the install derives from it.
+
+Every destination is overridable if your tree differs — `RIGEXEC_INSTALL_LIBDIR`,
+`RIGEXEC_INSTALL_INCLUDEDIR`, `RIGEXEC_INSTALL_PLUGINDIR`,
+`RIGEXEC_INSTALL_PYTHONDIR`, `RIGEXEC_INSTALL_CMAKEDIR`. Installing with
+`--prefix <your-usd-prefix>` merges into the USD install itself, putting the
+RigExec plugins in the same `lib/usd` directory USD's own plugins live in.
+
+### 4. Register the plugins
+
+With `RIG` = your RigExec prefix and `USD` = your USD prefix:
+
+```
+PXR_PLUGINPATH_NAME = %RIG%\lib\usd\rigExecSchema\resources    (schema domain)
+                      %RIG%\lib\usd\rigExecImaging\resources   (scene-index plugin)
+                      %RIG%\lib\python\rigExecUsdview          (usdview only)
+
+PYTHONPATH         += %RIG%\lib\python\rigExecUsdview          (usdview only)
+PATH               += %RIG%\lib;%USD%\bin;%USD%\lib
 ```
 
 (one variable per block above; entries are `;`-separated on Windows)
 
-> **Caveat.** `plugin/rigExecImaging/resources/plugInfo.json` declares
-> `"LibraryPath": "../../../build/rigExecImaging.dll"`, i.e. it assumes the
-> build tree is `<repo>/build`. If you build elsewhere, edit that path or copy
-> the `resources` directory next to your binaries.
+`find_package(rigExec)` publishes those same three directories as
+`rigExec_PLUGINPATHS`, so a consuming build can compose the variable without
+hardcoding the layout.
 
-`launch_usdview.bat`, `run_probe.bat`, and `run_testusdview.bat` are working
-examples of exactly this environment.
+To run **uninstalled** instead, point the same variables at
+`%RIG%\plugin\...` and `%RIG%\build` — `launch_usdview.bat`, `run_probe.bat`,
+and `run_testusdview.bat` are working examples of exactly that environment.
 
-### 4. Choose an integration level
+### 5. Choose an integration level
 
-**(a) As a library.** Link `rigExec`, construct a `RigExecRigEvaluator` over
-your stage, then:
+**(a) As a library.** Consume the installed CMake package:
+
+```cmake
+find_package(rigExec REQUIRED)          # add the prefix to CMAKE_PREFIX_PATH
+target_link_libraries(myapp PRIVATE rigExec::rigExec)
+```
+
+That carries the include directories and the OpenUSD link interface with it —
+`rigExec::rigExecMath` and `rigExec::rigExecImaging` are exported too. Then
+construct a `RigExecRigEvaluator` over your stage:
 
 ```cpp
 RigExecRigPose pose = evaluator.Evaluate(time); // one complete generation
