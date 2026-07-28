@@ -146,6 +146,13 @@ add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 
+# The engine authors nothing: asserted by whole-scene equality rather than by
+# probing for the specific artifacts the deleted compiler used to leave.
+add_executable(testRigExecNoAuthoring tests/testRigExecNoAuthoring.cpp)
+target_link_libraries(testRigExecNoAuthoring PRIVATE rigExecImaging)
+add_test(NAME testRigExecNoAuthoring COMMAND testRigExecNoAuthoring
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
 add_executable(probeCodingError tests/probeCodingError.cpp)
 target_link_libraries(probeCodingError PRIVATE rigExec)
 

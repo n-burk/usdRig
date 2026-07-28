@@ -64,12 +64,28 @@ composition, weighting, cardinality guards, and every pass-through path
 examples\ArmShotAnim.usda` shows the arm deforming from OpenExec evaluation
 per frame.
 
-**Prototype means** the seam is proven, not the full contracts. Still open for
-Phase 1/2 conformance: stage-owned persistent `ExecUsdSystem` with off-stage
-`SdfChangeBlock` epoch diffs, per-target parameter specialization for fan-out
-(multi-target blend movers are currently **rejected** rather than silently
-wrong), complete cycle/catalog validation, exact type/role/ordinal in the tap
-identity, authored-base PointBased materialization
+**Prototype means** the seam is proven, not the full contracts.
+
+The largest gap is **incremental recompilation**. Today a structural edit
+bumps a composed-topology digest, and the next `Evaluate` notices the change
+and runs a *full* `Compile()` (`libs/rigExec/rigEvaluator.cpp`). The
+conformant design instead keeps a stage-owned persistent `ExecUsdSystem` and
+hands it epoch *diffs*, with incoming edits batched inside an
+`SdfChangeBlock` so a burst of edits yields one invalidation rather than one
+per edit, and the compiled network updates in place instead of being rebuilt.
+
+To be explicit, since the name invites the opposite reading:
+`SdfChangeBlock` here is about **consuming** edits somebody else makes to the
+stage — it batches change *notification*. It is not an authoring mechanism,
+and nothing about it would change the fact that the engine writes nothing
+(see [The one architectural fact](#the-one-architectural-fact), which
+`testRigExecNoAuthoring` asserts by whole-scene equality).
+
+Also still open for Phase 1/2 conformance: per-target parameter
+specialization for fan-out (multi-target blend movers are currently
+**rejected** rather than silently wrong), complete cycle/catalog validation,
+exact type/role/ordinal in the tap identity, authored-base PointBased
+materialization
 (velocities/accelerations), aim `upPolicy`/`preserve` consumption,
 weight-packet target/domain/cardinality identity fields, `FloatMathMover`
 chains as addressable revisions, FK hierarchy packing, render-preflight and
@@ -95,6 +111,7 @@ part of this repository.
 | `testRigExecMath` | §5 math conformance: reconstruction policies, degeneracy ladder, Points↔Matrix round trip, SVD/SRT with pinned reflection axis, IK, blend, twist |
 | `testRigExecArm` | end-to-end exec/animation/geometry against the `examples/` reference assets |
 | `testRigExecMoverGraph` | every revision op, chained and mixed composition, weighting, cardinality guards, all pass-through paths |
+| `testRigExecNoAuthoring` | that the engine authors nothing: the whole composed scene is byte-identical before and after compile, evaluation over six frames, and the full Hydra activate/publish/teardown cycle |
 | `testRigExecImaging` | §14.5 construction/pull goldens, narrow-locator matrix, motion capability matrix, legacy render-index pickup, and a recursive terminal audit proving no RigExec name crosses the renderer boundary |
 
 `ctest --test-dir build` runs all four. Two probes
