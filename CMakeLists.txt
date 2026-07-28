@@ -39,6 +39,20 @@ set(RIGEXEC_INSTALL_PYTHONDIR  "lib/python"
 set(RIGEXEC_INSTALL_CMAKEDIR   "lib/cmake/rigExec"
     CACHE STRING "Install directory for the CMake package, relative to the prefix")
 
+# Runtime library resolution on ELF/Mach-O. rigExecImaging is dlopen'd by USD's
+# Plug, but the library itself sits in lib/ beside rigExec, so a loader-relative
+# rpath is what lets it find its sibling once loaded from an arbitrary working
+# directory; USE_LINK_PATH adds the USD prefix's lib directory on top. Windows
+# has no rpath and resolves DLLs through PATH instead, which is why the README
+# puts %RIG%\lib there.
+if (APPLE)
+    set(CMAKE_INSTALL_NAME_DIR "@rpath")
+    set(CMAKE_INSTALL_RPATH "@loader_path")
+elseif (UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+endif()
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+
 # ---------------------------------------------------------------------------
 # rigExecMath: pure point-frame and solver kernels (spec §5).
 # ---------------------------------------------------------------------------
@@ -93,10 +107,25 @@ target_link_libraries(rigExecImaging PUBLIC
     usdImaging
     usdUtils
 )
+# Selects dllexport over dllimport in registry.h's C surface while building
+# this library; consumers including the installed header get dllimport.
+target_compile_definitions(rigExecImaging PRIVATE RIGEXEC_IMAGING_EXPORTS)
 
 # ---------------------------------------------------------------------------
 # Tests
+#
+# Off by default when cross-compiling: these are host command-line executables
+# driven by ctest, which cannot run on an iOS/Android device target.
 # ---------------------------------------------------------------------------
+if (CMAKE_CROSSCOMPILING)
+    set(_rigexec_tests_default OFF)
+else()
+    set(_rigexec_tests_default ON)
+endif()
+option(RIGEXEC_BUILD_TESTS "Build the RigExec test and probe executables"
+       ${_rigexec_tests_default})
+
+if (RIGEXEC_BUILD_TESTS)
 enable_testing()
 
 add_executable(testRigExecMath tests/testRigExecMath.cpp)
@@ -125,6 +154,8 @@ target_link_libraries(probeCodingError PRIVATE rigExec)
 # it runs from run_probe-style environments rather than bare ctest.
 add_executable(probeImagingPipeline tests/probeImagingPipeline.cpp)
 target_link_libraries(probeImagingPipeline PRIVATE rigExecImaging usdImaging usdGeom)
+
+endif()  # RIGEXEC_BUILD_TESTS
 
 # ---------------------------------------------------------------------------
 # Install
@@ -164,37 +195,32 @@ install(FILES
         plugin/rigExecUsdview/rigExecUsdview.py
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview")
 
-# rigExecImaging's plugInfo.json is the one that does carry a LibraryPath, and
-# in the source tree it points at the sibling build/ directory. Rewrite the
-# three location fields for the install layout instead of keeping a second
-# copy of the file, so the Types block cannot drift between the two.
-set(_rigexec_pluginfo_src
-    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecImaging/resources/plugInfo.json")
-file(READ "${_rigexec_pluginfo_src}" _rigexec_pluginfo)
-string(REPLACE
-    "\"LibraryPath\": \"../../../build/rigExecImaging.dll\""
-    "\"LibraryPath\": \"../../${CMAKE_SHARED_LIBRARY_PREFIX}rigExecImaging${CMAKE_SHARED_LIBRARY_SUFFIX}\""
-    _rigexec_pluginfo "${_rigexec_pluginfo}")
-string(REPLACE "\"ResourcePath\": \".\"" "\"ResourcePath\": \"resources\""
-    _rigexec_pluginfo "${_rigexec_pluginfo}")
-string(REPLACE "\"Root\": \".\"" "\"Root\": \"..\""
-    _rigexec_pluginfo "${_rigexec_pluginfo}")
+# rigExecImaging is the one plugin whose plugInfo.json names a library, so it
+# is generated from a template rather than checked in: the filename is
+# .dll/.so/.dylib depending on the platform, and $<TARGET_FILE_NAME:> is the
+# only thing that actually knows it.
+#
+# One generated file serves both trees. The build copy sits under
+# build/usd/rigExecImaging/resources/ precisely so that its "../../<library>"
+# hop lands on the build directory the same way the installed copy's hop lands
+# on lib/ -- identical content, identical relative shape, nothing to drift.
+#
+# Note this assumes the library name does not vary by configuration; it does
+# not here, since no debug postfix is set. If one is ever added, file(GENERATE)
+# fails loudly at generate time rather than emitting a wrong file, and the
+# output path then needs a $<CONFIG> component.
+set(_rigexec_pluginfo
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecImaging/resources/plugInfo.json")
+file(READ
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecImaging/resources/plugInfo.json.in"
+    _rigexec_pluginfo_content)
+string(REPLACE "@RIGEXEC_IMAGING_LIBRARY_FILENAME@"
+    "$<TARGET_FILE_NAME:rigExecImaging>"
+    _rigexec_pluginfo_content "${_rigexec_pluginfo_content}")
+file(GENERATE OUTPUT "${_rigexec_pluginfo}"
+    CONTENT "${_rigexec_pluginfo_content}")
 
-# Fail loudly rather than installing a plugInfo.json that still points into a
-# build tree: a silently-unrewritten LibraryPath produces a plugin that
-# registers and then fails to load, which is a miserable thing to debug.
-string(FIND "${_rigexec_pluginfo}" "../../../build/" _rigexec_stale_path)
-if (NOT _rigexec_stale_path EQUAL -1)
-    message(FATAL_ERROR
-        "Could not rewrite LibraryPath in ${_rigexec_pluginfo_src} for the "
-        "install tree. The expected in-tree value changed; update the "
-        "string(REPLACE) above to match.")
-endif()
-
-file(GENERATE
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/install/rigExecImaging/plugInfo.json"
-    CONTENT "${_rigexec_pluginfo}")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/install/rigExecImaging/plugInfo.json"
+install(FILES "${_rigexec_pluginfo}"
     DESTINATION "${RIGEXEC_INSTALL_PLUGINDIR}/rigExecImaging/resources")
 
 # CMake package, so consumers can find_package(rigExec) and link

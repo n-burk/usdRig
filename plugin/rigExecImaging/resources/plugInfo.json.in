@@ -11,10 +11,10 @@
                     }
                 }
             },
-            "LibraryPath": "../../../build/rigExecImaging.dll",
+            "LibraryPath": "../../@RIGEXEC_IMAGING_LIBRARY_FILENAME@",
             "Name": "rigExecImaging",
-            "ResourcePath": ".",
-            "Root": ".",
+            "ResourcePath": "resources",
+            "Root": "..",
             "Type": "library"
         }
     ]

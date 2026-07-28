@@ -85,16 +85,33 @@ private:
 
 }  // namespace rigExec
 
+// Visibility for the C surface below. Windows needs dllexport while building
+// rigExecImaging and dllimport when a consumer includes this header -- the
+// build defines RIGEXEC_IMAGING_EXPORTS to tell the two apart. Elsewhere the
+// ELF/Mach-O equivalent is default visibility, which also keeps the symbols
+// alive if the tree is ever built with -fvisibility=hidden.
+#if defined(_WIN32)
+#  if defined(RIGEXEC_IMAGING_EXPORTS)
+#    define RIGEXEC_IMAGING_C_API __declspec(dllexport)
+#  else
+#    define RIGEXEC_IMAGING_C_API __declspec(dllimport)
+#  endif
+#elif defined(__GNUC__) || defined(__clang__)
+#  define RIGEXEC_IMAGING_C_API __attribute__((visibility("default")))
+#else
+#  define RIGEXEC_IMAGING_C_API
+#endif
+
 // C surface for language-neutral activation (e.g. the usdview Python
 // plugin via ctypes + UsdUtilsStageCache ids). Returns 0 on success.
 extern "C" {
 
-__declspec(dllexport) int RigExecImaging_Activate(
+RIGEXEC_IMAGING_C_API int RigExecImaging_Activate(
     long long stageCacheId, const char *rigPath, double initialFrame);
-__declspec(dllexport) int RigExecImaging_SetTime(double frame);
-__declspec(dllexport) void RigExecImaging_Deactivate();
+RIGEXEC_IMAGING_C_API int RigExecImaging_SetTime(double frame);
+RIGEXEC_IMAGING_C_API void RigExecImaging_Deactivate();
 /// Current published snapshot generation (0 before first publication).
-__declspec(dllexport) long long RigExecImaging_GetGeneration();
+RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGeneration();
 
 }
 

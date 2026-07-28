@@ -166,7 +166,9 @@ delegates are not installable in this environment.
 - **OpenUSD v26.08** built with OpenExec (`PXR_BUILD_EXEC=ON`, the default).
   RigExec needs `exec`, `execUsd`, `ef`, and `vdf` present in the install.
 - A C++17 toolchain matching your USD build's compiler and ABI.
-- In practice Windows/MSVC only — see [Portability](#portability).
+- Only ever compiled with MSVC on Windows x64; the tree is written to build on
+  Linux and macOS but that is unverified — see
+  [Platform support](#platform-support).
 
 ### 1. Build against your install
 
@@ -220,9 +222,15 @@ The layout mirrors OpenUSD's own tree:
 Shared libraries land in `lib/` beside their import libraries rather than
 `bin/`, because that is what USD does on Windows — it keeps the installed
 plugin's `"LibraryPath": "../../rigExecImaging.dll"` resolving exactly the way
-`usd_usdSkelImaging.dll` does. The install rewrites that path automatically;
-the copy checked into `plugin/` still points at the in-tree `build/`
-directory, and the two cannot drift because the install derives from it.
+`usd_usdSkelImaging.dll` does.
+
+That `plugInfo.json` is the only one naming a library, so it is generated from
+`plugin/rigExecImaging/resources/plugInfo.json.in` rather than checked in — the
+filename is `.dll` / `.so` / `.dylib` depending on the platform, and
+`$<TARGET_FILE_NAME:>` is the only thing that knows it. One generated file
+serves both trees: the build copy lands in `build/usd/rigExecImaging/resources/`
+so its `../../<library>` hop reaches the build directory exactly as the
+installed copy's hop reaches `lib/`.
 
 Every destination is overridable if your tree differs — `RIGEXEC_INSTALL_LIBDIR`,
 `RIGEXEC_INSTALL_INCLUDEDIR`, `RIGEXEC_INSTALL_PLUGINDIR`,
@@ -249,9 +257,19 @@ PATH               += %RIG%\lib;%USD%\bin;%USD%\lib
 `rigExec_PLUGINPATHS`, so a consuming build can compose the variable without
 hardcoding the layout.
 
-To run **uninstalled** instead, point the same variables at
-`%RIG%\plugin\...` and `%RIG%\build` — `launch_usdview.bat`, `run_probe.bat`,
-and `run_testusdview.bat` are working examples of exactly that environment.
+To run **uninstalled**, point the same variables at the source and build trees
+instead — note that `rigExecImaging`'s plugin directory is generated into the
+build tree, since its `plugInfo.json` has to name the built library:
+
+```
+PXR_PLUGINPATH_NAME = %RIG%\plugin\rigExecSchema\resources
+                      %RIG%\build\usd\rigExecImaging\resources   <-- generated
+                      %RIG%\plugin\rigExecUsdview
+PATH               += %RIG%\build;%USD%\bin;%USD%\lib
+```
+
+`launch_usdview.bat`, `run_probe.bat`, and `run_testusdview.bat` are working
+examples of exactly that environment.
 
 ### 5. Choose an integration level
 
@@ -337,12 +355,71 @@ chain, two-bone IK, IK/FK blend, blend shapes, twist ribbon spine, lattice,
 surface drape, aim, property math movers, aim xform). Each is a complete
 worked example; `examples/README.md` indexes them.
 
-### Portability
+### Platform support
 
-Built and tested only on Windows (MSVC 19.36, Python 3.10, Ninja). The C
-activation surface uses `__declspec(dllexport)` unconditionally and the helper
-scripts are all `.bat`, but the CMake build and the libraries carry no other
-platform dependency — a POSIX port is mostly export-macro and script work.
+| Platform | Status |
+|---|---|
+| Windows x64 | **Built and tested.** MSVC 19.36, Python 3.10, Ninja — everything documented above is verified here |
+| Linux x86_64 | Should build; **not compiled on the platform** |
+| macOS x86_64 | Should build; **not compiled on the platform** |
+| macOS arm64 (Apple Silicon) | Should build; the arm64 code path is exercised on x86 (see below), the rest is unverified |
+| iOS | Core libraries only, and not as a plugin — see [iOS](#ios) |
+
+Be clear about what "should build" means: **no compiler other than MSVC has
+been run against this tree.** The portability below is by construction and
+review, not a green build on those platforms.
+
+What was made portable:
+
+- `RigExecApplyWeightedMatrixSimd` selects SSE2 on x86 and a scalar
+  implementation everywhere else, so arm64 compiles instead of failing on
+  `<emmintrin.h>`. The non-SSE path delegates to `RigExecApplyWeightedMatrix`
+  — the same scalar reference kernel the parity mode compares SIMD against —
+  so on those targets the two agree exactly rather than to tolerance.
+  Building with `-DRIGEXEC_DISABLE_SSE2` forces that path on an x86 machine;
+  the full ctest suite passes that way, which is how the arm64 code path is
+  checked without arm64 hardware.
+- The C activation surface uses an export macro (`dllexport` while building,
+  `dllimport` for consumers, default visibility on ELF/Mach-O) rather than a
+  bare `__declspec(dllexport)`, which was a hard compile failure off MSVC.
+- The imaging `plugInfo.json` is generated from a template using
+  `$<TARGET_FILE_NAME:>`, so it names `.dll` / `.so` / `.dylib` correctly in
+  both the build and install trees.
+- Installed binaries get `$ORIGIN` (ELF) or `@loader_path` (Mach-O) on
+  `INSTALL_RPATH`, plus `CMAKE_INSTALL_RPATH_USE_LINK_PATH`, so a `dlopen`ed
+  `rigExecImaging` resolves `rigExec` beside it and the USD libraries in their
+  own prefix. Note that bakes an absolute path to that USD install into the
+  installed binaries.
+- The tests are host command-line executables driven by ctest, so they are off
+  by default when `CMAKE_CROSSCOMPILING`; `RIGEXEC_BUILD_TESTS` overrides.
+
+Still Windows-only: the `.bat` helpers, which additionally carry absolute
+`D:\work\usdRig\...` paths. There is no shell-script equivalent yet — on
+Linux/macOS set `PXR_PLUGINPATH_NAME` (`:`-separated there), `PYTHONPATH`, and
+`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` by hand from the tables above.
+
+#### iOS
+
+The core libraries can compile for iOS once the arm64 path is taken, but the
+**plugin-based integration does not carry over**, and none of this has been
+attempted:
+
+- The usdview integration (level **c**) simply does not exist — there is no
+  usdview host on iOS.
+- `PXR_PLUGINPATH_NAME` is not a deployment mechanism for a shipped app.
+  Bundle the plugin resources and call `PlugRegistry::RegisterPlugins()` with
+  the app-bundle path instead.
+- A bare `.dylib` in `lib/` is not loadable by a third-party iOS app —
+  dynamic code must ship as an embedded, signed framework. So `rigExecImaging`
+  has to be either force-linked into a static/monolithic build behind an
+  explicit registration entry point, or packaged as a framework whose binary
+  is what `LibraryPath` names.
+- The codeless schema domain survives unchanged as bundled resources; it is
+  only JSON and `.usda`.
+
+The realistic iOS design is therefore static/monolithic with explicit
+registration, consuming RigExec as a library (level **a**). The install layout
+here targets desktop and does not produce a framework.
 
 ## Build (this repo's own layout)
 

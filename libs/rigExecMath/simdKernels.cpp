@@ -1,12 +1,50 @@
 //
-// RigExec CPU SIMD kernels implementation (SSE, baseline x64).
+// RigExec CPU SIMD kernels implementation.
+//
+// SSE2 where the target has it -- every x86-64 build, and 32-bit x86 built
+// with /arch:SSE2 or -msse2 -- and a scalar fallback everywhere else, so this
+// file compiles on arm64 (Apple Silicon, iOS) instead of failing on the x86
+// intrinsic headers. ARM64EC is deliberately excluded even though MSVC
+// defines _M_X64 there.
+//
+// The fallback delegates to RigExecApplyWeightedMatrix, the same scalar
+// reference kernel the parity mode (spec §13.4) compares SIMD output against,
+// so on a non-SSE target the two paths agree exactly rather than to tolerance.
 //
 #include "simdKernels.h"
 
-#include <emmintrin.h>
-#include <xmmintrin.h>
+#include "solvers.h"
+
+// RIGEXEC_DISABLE_SSE2 forces the fallback on a machine that has SSE2, so the
+// non-x86 path can be compiled and run through the test suite here rather than
+// only ever being exercised on hardware nobody building this owns.
+#if !defined(RIGEXEC_DISABLE_SSE2)                                       \
+    && (defined(__SSE2__) || (defined(_M_X64) && !defined(_M_ARM64EC))   \
+        || (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
+#  define RIGEXEC_HAS_SSE2 1
+#endif
+
+#if defined(RIGEXEC_HAS_SSE2)
+#  include <emmintrin.h>
+#  include <xmmintrin.h>
+#endif
 
 namespace rigExec {
+
+#if !defined(RIGEXEC_HAS_SSE2)
+
+void
+RigExecApplyWeightedMatrixSimd(
+    const GfVec3f *in, GfVec3f *out, const float *weights, size_t count,
+    const GfMatrix4d &transform)
+{
+    for (size_t i = 0; i < count; ++i) {
+        out[i] = GfVec3f(RigExecApplyWeightedMatrix(
+            GfVec3d(in[i]), transform, weights[i]));
+    }
+}
+
+#else
 
 void
 RigExecApplyWeightedMatrixSimd(
@@ -47,5 +85,7 @@ RigExecApplyWeightedMatrixSimd(
         out[i] = GfVec3f(result[0], result[1], result[2]);
     }
 }
+
+#endif  // RIGEXEC_HAS_SSE2
 
 }  // namespace rigExec
