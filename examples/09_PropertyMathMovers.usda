@@ -1,0 +1,163 @@
+#usda 1.0
+(
+    """
+    RigExec example 09 - property-domain math movers (AUTHORING ONLY).
+
+    Covers the three statically typed property movers that no other example
+    exercises: RigExecFloatMathMover, RigExecVec3fMathMover, and
+    RigExecMatrixMathMover. Each moves an exact scalar/vector/matrix property
+    rather than a point3f[] array, so none of them is a point-chain revision.
+
+    ** These three movers are NOT EVALUATED in v0.1-alpha. **
+
+    They are declared in the schema and validated by the compiler, but there
+    is no kernel behind any of them: RigExecFloatMathMover only emits a trace
+    diagnostic ("float property mover lowered into consumer" - the consuming
+    RigExecBlendPointFrames hardcodes its own weight clamp), and the Vec3f and
+    Matrix variants have no evaluator handling at all. A rig that opens this
+    file will compile and publish, and the three targets below will hold their
+    authored values unchanged.
+
+    This file therefore documents the authoring surface and serves as the
+    fixture for whoever implements them - it is deliberately NOT a
+    demonstration of working deformation. Every other example in this
+    directory shows a mover that actually computes; this one is the exception
+    and says so.
+
+    Structure: a single joint driven by an FK chain, plus three property
+    targets that the math movers name via rigExec:moves.
+    """
+    defaultPrim = "PropMathAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PropMathAsset"
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "PropMathAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "RootCtl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 40; post linear,
+                    1048: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </PropMathAsset/Rig/Controls/RootCtl>
+                rel rigExec:joints = </PropMathAsset/Rig/Joints/Root>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        # The three property targets. Each is an ordinary authored attribute;
+        # the movers below name them with rigExec:moves exactly the way a
+        # point-chain mover names a .points property.
+        def Scope "Channels"
+        {
+            def Scope "Dials"
+            {
+                float rigExec:gain = 2.5
+                float3 rigExec:offset = (0, 3, 0)
+                matrix4d rigExec:localOffset = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # Clamp a float dial into [0, 1]. With the operation unevaluated,
+            # rigExec:gain stays at its authored 2.5 rather than clamping to 1.
+            def RigExecFloatMathMover "ClampGain" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "clamp"
+                float inputs:min = 0
+                float inputs:max = 1
+                rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:gain>
+            }
+
+            # Add a constant vector to a float3 dial.
+            def RigExecVec3fMathMover "OffsetLift" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float3 inputs:value = (0, 2, 0)
+                rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:offset>
+            }
+
+            # Post-multiply a matrix dial by a constant translation.
+            def RigExecMatrixMathMover "OffsetSpace" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "multiply"
+                float inputs:weight = 1
+                matrix4d inputs:value = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
+                rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:localOffset>
+            }
+
+            # A working point chain, so the file is a live rig rather than a
+            # collection of inert declarations: the witness card follows the
+            # posed joint. This is the part that actually deforms.
+            def RigExecMatrixMover "CardSkin" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:transform = </PropMathAsset/Rig/Joints/Root>
+                uniform token rigExec:transformReadPhase = "final"
+                rel rigExec:weightObject = </PropMathAsset/Rig/Weights/CardW>
+                rel rigExec:moves = </PropMathAsset/Geom/Card.points>
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "CardW"
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </PropMathAsset/Geom/Card.points>
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # A witness mesh carried by the joint, so the file is viewable and the
+        # rig has a real point chain. This part DOES evaluate.
+        def Mesh "Card"
+        {
+            float3[] extent = [(-1, -0.5, 0), (1, 0.5, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(-1, -0.5, 0), (1, -0.5, 0), (1, 0.5, 0), (-1, 0.5, 0)]
+        }
+    }
+}

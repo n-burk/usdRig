@@ -1,0 +1,681 @@
+#usda 1.0
+(
+    """
+    RigExec schema domain (spec section 4).
+
+    Granular, composition-native rig object model: controls, joints,
+    transform providers, solvers, movers, reusable weight objects, and
+    blend inputs/samples each receive independent layer opinions. Movers
+    author rel rigExec:moves naming the exact prim/property they modify;
+    the composed Movers namespace supplies operation order.
+    """
+    subLayers = [
+        @usd/schema.usda@,
+        @usdGeom/schema.usda@
+    ]
+)
+
+over "GLOBAL" (
+    customData = {
+        string libraryName = "rigExecSchema"
+        string libraryPath = "rigExecSchema"
+        string libraryPrefix = "RigExec"
+        bool skipCodeGeneration = true
+    }
+)
+{
+}
+
+################################################################
+# Applied API schemas
+################################################################
+
+class "RigExecControlAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "ControlAPI"
+        token apiSchemaType = "singleApply"
+    }
+    doc = """Channel semantics and computational limits for animator-authored
+    controls. Keyability, mirroring, presentation, and manipulation metadata
+    are deferred (spec section 4.1)."""
+)
+{
+    uniform token rigExec:channelRole = "pose" (
+        allowedTokens = ["pose", "switch", "tweak"]
+    )
+}
+
+class "RigExecMoverAPI" (
+    inherits = </APISchemaBase>
+    customData = {
+        string className = "MoverAPI"
+        token apiSchemaType = "singleApply"
+    }
+    doc = """Marks an operation for hierarchy-ordered compilation. rigExec:moves
+    targets the exact prim or property the operation modifies; target-list
+    order is non-semantic. The mover prim's position in the composed USD
+    namespace supplies operation order (spec sections 4.1-4.2)."""
+)
+{
+    rel rigExec:moves (
+        doc = "Reserved write-set relationship: exact prim/property targets."
+    )
+    bool inputs:enabled = true (
+        doc = """Shape-preserving enable. Disabled movers pass their preceding
+        revision through unchanged (value-only edit)."""
+    )
+}
+
+################################################################
+# Rig root
+################################################################
+
+class RigExecRig "RigExecRig" (
+    inherits = </Typed>
+    customData = {
+        string className = "Rig"
+    }
+    doc = """Character root: partition and namespace root for control,
+    joint, and mover discovery (spec section 4.1). Publishes
+    computeDiagnostics.
+
+    The rig declares no membership lists. Controls, joints, and movers are
+    all discovered from the composed namespace beneath it: a RigExecControl
+    is a control, a RigExecJoint is a joint output, and a prim carrying
+    rigExec:moves is a mover. Operator wiring (a solver's ordered
+    rigExec:joints and rigExec:controls) is the graph, and the rig is where
+    that graph is rooted -- not a second place to restate it."""
+)
+{
+    uniform token rigExec:partition = ""
+}
+
+################################################################
+# Transform providers
+################################################################
+
+class RigExecControl "RigExecControl" (
+    inherits = </RigExecXformable>
+    customData = {
+        string className = "Control"
+    }
+    doc = """An animator-facing RigExecXformable: animation is authored
+    on the avars (or an authored/connected posed:space), exactly like an
+    Ir xformable. Channel semantics live on the applied
+    RigExecControlAPI. Publishes computePointFrame/computeRestFrame/
+    computeMatrix (spec section 4.1)."""
+)
+{
+}
+
+class "RigExecXformable" (
+    inherits = </Typed>
+    customData = {
+        string className = "Xformable"
+    }
+    doc = """An abstract animation interface for an animatable coordinate
+    space, mirroring OpenExec's IrXformable contract exactly
+    (user-directed alignment, 2026-07-25): matrix4d local-to-world
+    rest/default/posed/parent spaces and scalar avars (rotations in
+    degrees). For a joint, the posed space comes from the compiler's
+    private solver binding (view-free extraction: one element of the
+    source solver's computePointFrameArray); a connected or
+    non-identity authored posed:space is otherwise used directly;
+    otherwise the xformable follows its namespace-parent xformable's posed
+    space with its local rest offset and avars applied. Rest spaces are
+    always orthonormalized (per Ir); stretch survives because the
+    extracted frame carries posed/rest axis length ratios. Point frames (spec section 5) remain the engine's
+    internal value type: xformables publish
+    computePointFrame/computeRestFrame/computeMatrix derived from these
+    spaces."""
+)
+{
+    double rest:tx = 0
+    double rest:ty = 0
+    double rest:tz = 0
+    double rest:rx = 0
+    double rest:ry = 0
+    double rest:rz = 0
+    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = "Local-to-world bind transform; always orthonormalized."
+    )
+    double default:tx = 0
+    double default:ty = 0
+    double default:tz = 0
+    double default:rx = 0
+    double default:ry = 0
+    double default:rz = 0
+    matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = "Local-to-world zero position for posing."
+    )
+    matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """Final local-to-world transform. For a joint this is
+        supplied by the compiler's private solver binding (view-free
+        extraction); it may also be authored or
+        connected directly. Unwired xformables follow the parent chain
+        with rest offsets and avars."""
+    )
+    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    double avars:tx = 0
+    double avars:ty = 0
+    double avars:tz = 0
+    double avars:rx = 0
+    double avars:ry = 0
+    double avars:rz = 0
+    double avars:rspin = 0
+    token avars:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    double avars:unitScaleFactor = 1
+    matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d parent:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+}
+
+class RigExecJoint "RigExecJoint" (
+    inherits = </RigExecXformable>
+    customData = {
+        string className = "Joint"
+    }
+    doc = """The joint of an armature-based rig, mirroring OpenExec's
+    IrJointScope exactly: a RigExecXformable specialized so guides can be
+    drawn (a sphere at the posed origin and a cone of guide:length along
+    the posed aim axis, purpose guide). Hierarchy is namespace nesting (a
+    child joint is authored inside its parent joint)."""
+)
+{
+    double guide:length = 0
+    double guide:radius = 1.0 (
+        doc = """Radius of BOTH guide primitives: the sphere at the posed
+        origin and the cone drawn along the aim axis. guide:length sizes the
+        cone's height only, so without this the guides are stuck at Hydra's
+        fallback radius of 1.0 -- correct at arm scale, far larger than the
+        geometry on a small asset. Zero or negative draws no guides at all."""
+    )
+    color3f guide:displayColor = (1.0, 0.3, 0.3)
+    float guide:displayOpacity = 0.5
+}
+
+################################################################
+# Solvers
+#
+# View-free extraction (user-directed 2026-07-25, RigExecPointFrameView
+# DELETED): every solver owns an ordered rigExec:joints list; the compiler
+# binds each listed joint to one aggregate element in the
+# derived layer (list position = aggregate element index; length = sample
+# count). The joint self-extracts its posed frame from the solver's
+# computePointFrameArray. No per-element view prim and no connections.
+################################################################
+
+class RigExecFkChain "RigExecFkChain" (
+    inherits = </Typed>
+    customData = {
+        string className = "FkChain"
+    }
+    doc = """Applies control frames/offsets to a rest hierarchy. Publishes
+    aggregate computePointFrameArray; addressable joint providers publish
+    scalar frames (spec section 4.1)."""
+)
+{
+    rel rigExec:controls (
+        doc = "Ordered chain controls (parents resolved via rigExec:parent)."
+    )
+    rel rigExec:joints (
+        doc = """Ordered output joints this solver poses (view-free
+        extraction, user-directed 2026-07-25). List position is the
+        aggregate element index; length is the effective sample count.
+        The compiler binds each joint to one aggregate element
+        in the derived layer."""
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1.0)
+    float guide:displayOpacity = 0.5
+}
+
+class RigExecTwoBoneIk "RigExecTwoBoneIk" (
+    inherits = </Typed>
+    customData = {
+        string className = "TwoBoneIk"
+    }
+    doc = """Analytic two-bone IK with pole, stretch, softness, and preferred
+    bend. Publishes computePointFrameArray of [root, mid, end] frames."""
+)
+{
+    rel rigExec:rootControl
+    rel rigExec:effectorControl
+    rel rigExec:poleControl
+    double rigExec:upperLength = 1
+    double rigExec:lowerLength = 1
+    uniform token rigExec:stretchPolicy = "uniformSegments" (
+        allowedTokens = ["uniformSegments"]
+    )
+    uniform token rigExec:unreachablePolicy = "clampWithSoftness" (
+        allowedTokens = ["clampWithSoftness"]
+    )
+    double rigExec:preferredBendRadians = 0
+    float inputs:stretch = 1 (
+        doc = "Permitted stretch beyond full reach, in [0, 1]."
+    )
+    float inputs:softness = 0 (
+        doc = "Soft-reach fraction of the chain length."
+    )
+    rel rigExec:joints (
+        doc = """Ordered output joints [root, mid, end] posed by this solve
+        (view-free extraction). Position is the element index; the compiler
+        binds each joint to one aggregate element."""
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1.0)
+    float guide:displayOpacity = 0.5
+}
+
+class RigExecBlendPointFrames "RigExecBlendPointFrames" (
+    inherits = </Typed>
+    customData = {
+        string className = "BlendPointFrames"
+    }
+    doc = """IK/FK or general frame blend of two aggregate providers.
+    Publishes computePointFrameArray. Weight 0 selects inputA; 1 selects
+    inputB."""
+)
+{
+    rel rigExec:inputA
+    rel rigExec:inputB
+    float inputs:weight = 0
+    uniform token rigExec:rotationBlend = "shortestArc" (
+        allowedTokens = ["shortestArc"]
+    )
+    uniform token rigExec:scaleBlend = "log" (
+        allowedTokens = ["log", "linear"]
+    )
+    rel rigExec:joints (
+        doc = """Ordered output joints posed by the blended result (view-free
+        extraction). List position is the element index; the compiler
+        binds each joint to one aggregate element."""
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1.0)
+    float guide:displayOpacity = 0.5
+}
+
+class RigExecTwistDistribution "RigExecTwistDistribution" (
+    inherits = </Typed>
+    customData = {
+        string className = "TwistDistribution"
+    }
+    doc = """Distributes unwrapped twist over N frames between start and end
+    providers. Publishes computePointFrameArray."""
+)
+{
+    rel rigExec:start
+    rel rigExec:end
+    uniform int rigExec:count = 1
+    uniform float[] rigExec:weights = []
+    uniform token rigExec:distribution = "minimumEnergy" (
+        allowedTokens = ["minimumEnergy"]
+    )
+    rel rigExec:joints (
+        doc = """Ordered output joints posed by the distributed twist frames
+        (view-free extraction). The compiler authors each joint's
+        one aggregate element."""
+    )
+    uniform int[] rigExec:jointElements = [] (
+        doc = """Optional aggregate element index for each rigExec:joints
+        entry (parallel array). When absent/empty, element = list position.
+        Lets a joint bind a specific distributed frame (e.g. the middle of
+        an N-frame twist) without listing every element, matching the
+        deleted view's arbitrary-element selection."""
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1.0)
+    float guide:displayOpacity = 0.5
+}
+
+class RigExecRibbon "RigExecRibbon" (
+    inherits = </Typed>
+    customData = {
+        string className = "Ribbon"
+    }
+    doc = """Samples a native UsdGeomBasisCurves.points driver, constructs
+    transported frames, and optionally conforms to a native mesh surface.
+    Publishes computePointFrameArray (spec section 4.1)."""
+)
+{
+    rel rigExec:driverCurve
+    rel rigExec:startFrame
+    rel rigExec:endFrame
+    rel rigExec:twistFrames
+
+    uniform int rigExec:sampleCount = 5
+    uniform token rigExec:parameterization = "arcLength" (
+        allowedTokens = ["arcLength", "parametric"]
+    )
+    uniform token rigExec:frameTransport = "rotationMinimizing" (
+        allowedTokens = ["rotationMinimizing"]
+    )
+    uniform token rigExec:driverCurveReadPhase = "base" (
+        allowedTokens = ["base", "final"]
+    )
+    uniform token rigExec:surfaceReadPhase = "base" (
+        allowedTokens = ["base", "final"]
+    )
+    rel rigExec:joints (
+        doc = """Ordered output joints posed along the ribbon (view-free
+        extraction). The compiler authors each joint's
+        one aggregate element."""
+    )
+    uniform int[] rigExec:jointElements = [] (
+        doc = """Optional aggregate element index per rigExec:joints entry
+        (parallel array). When absent/empty, element = list position."""
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1.0)
+    float guide:displayOpacity = 0.5
+}
+
+################################################################
+# Pose-domain movers / operations
+################################################################
+
+class RigExecAimConstraint "RigExecAimConstraint" (
+    inherits = </Typed>
+    customData = {
+        string className = "AimConstraint"
+    }
+    doc = """Moves a transform target by replacing aim/up orientation while
+    preserving declared position/scale components (spec section 4.1)."""
+)
+{
+    rel rigExec:aimTarget
+    float inputs:weight = 1
+    uniform token rigExec:aimAxis = "x" (
+        allowedTokens = ["x", "y", "z"]
+    )
+    uniform token rigExec:upPolicy = "preserveInputUp" (
+        allowedTokens = ["preserveInputUp"]
+    )
+    uniform token[] rigExec:preserve = ["origin", "scale"]
+}
+
+class RigExecFloatMathMover "RigExecFloatMathMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "FloatMathMover"
+    }
+    doc = """Statically typed add, multiply, clamp, remap, or blend over an
+    exact float property target."""
+)
+{
+    uniform token rigExec:operation = "clamp" (
+        allowedTokens = ["add", "multiply", "clamp", "remap", "blend"]
+    )
+    float inputs:value = 0
+    float inputs:min = 0
+    float inputs:max = 1
+}
+
+################################################################
+# Weight objects
+################################################################
+
+class "RigExecWeightObject" (
+    inherits = </Typed>
+    customData = {
+        string className = "WeightObject"
+    }
+    doc = """Abstract common contract for a total scalar weight field over
+    the logical elements of one exact prim or property target. Publishes
+    computeWeightDescriptor and computeWeightPacket (spec section 4.1)."""
+)
+{
+    rel rigExec:weightTarget (
+        doc = "Canonical prim or exact property carrying the weighted domain."
+    )
+    uniform token rigExec:representation = "constant" (
+        allowedTokens = ["constant", "dense", "sparse"]
+    )
+    uniform token rigExec:rangePolicy = "strict" (
+        allowedTokens = ["strict", "clamp"]
+    )
+}
+
+class RigExecStaticWeight "RigExecStaticWeight" (
+    inherits = </RigExecWeightObject>
+    customData = {
+        string className = "StaticWeight"
+    }
+    doc = """Time-invariant constant, dense, or sparse authored weight field;
+    every target element resolves to an explicit value or the authored
+    sparse default (spec section 4.1)."""
+)
+{
+    uniform float[] rigExec:values = []
+    uniform int[] rigExec:indices = []
+    uniform float rigExec:defaultWeight = 0
+}
+
+class RigExecDynamicWeight "RigExecDynamicWeight" (
+    inherits = </RigExecWeightObject>
+    customData = {
+        string className = "DynamicWeight"
+    }
+    doc = """Epoch-shape-stable weight field recomputed from statically
+    declared inputs, optionally modulating a base weight object:
+    r_i = (b_i * d) * s + a; w_i = RangePolicy(r_i) (spec section 4.1)."""
+)
+{
+    rel rigExec:baseWeight
+    uniform token rigExec:operation = "multiply" (
+        allowedTokens = ["multiply"]
+    )
+    float inputs:driver = 1
+    float inputs:scale = 1
+    float inputs:bias = 0
+}
+
+################################################################
+# Geometry movers
+################################################################
+
+class RigExecMatrixMover "RigExecMatrixMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "MatrixMover"
+    }
+    doc = """Moves the preceding native point3f[] points value through one
+    declared target-local affine transform and blends each point with exactly
+    one compatible weight object: p' = q + w (T q - q) (spec section 7.4)."""
+)
+{
+    rel rigExec:transform (
+        doc = "Exactly one GfMatrix4d provider (computeMatrix)."
+    )
+    rel rigExec:weightObject (
+        doc = "Exactly one compatible weight object for the points target."
+    )
+    uniform token rigExec:transformReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecBlendShapeMover "RigExecBlendShapeMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "BlendShapeMover"
+    }
+    doc = """Applies independently composed blend inputs and native
+    target-shape points samples to an exact standard UsdGeomPointBased.points
+    property (spec section 7.3)."""
+)
+{
+    rel rigExec:blendInputs
+    rel rigExec:weightObject (
+        doc = "Optional per-point weight multiplying the final delta."
+    )
+}
+
+class RigExecBlendInput "RigExecBlendInput" (
+    inherits = </Typed>
+    customData = {
+        string className = "BlendInput"
+    }
+    doc = """One independently composable blend channel with an authored or
+    connected weight and relationships to samples."""
+)
+{
+    float inputs:weight = 0
+    rel rigExec:samples
+}
+
+class RigExecBlendSample "RigExecBlendSample" (
+    inherits = </Typed>
+    customData = {
+        string className = "BlendSample"
+    }
+    doc = """One target or in-between activation related to an exact native
+    target-shape points property; dense deltas are derived against the base
+    points."""
+)
+{
+    float rigExec:activation = 1
+    rel rigExec:targetPoints (
+        doc = "Exact native points property of the target shape."
+    )
+    uniform token rigExec:pointsReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecCurveMover "RigExecCurveMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "CurveMover"
+    }
+    doc = """Reads standard basis-curve properties for wire, spline-IK,
+    ribbon, and curve-coordinate movement and writes an exact native
+    UsdGeomPointBased points property (spec section 7.5)."""
+)
+{
+    rel rigExec:driverCurve
+    rel rigExec:driverFrames
+    rel rigExec:bindCoordinates
+    uniform token rigExec:mode = "ribbon" (
+        allowedTokens = ["ribbon", "emitGuidePoints"]
+    )
+    uniform token rigExec:driverCurveReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecVec3fMathMover "RigExecVec3fMathMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "Vec3fMathMover"
+    }
+    doc = """Statically typed add, multiply, clamp, remap, or blend over an
+    exact float3/vector-valued property target (spec section 4.1)."""
+)
+{
+    uniform token rigExec:operation = "add" (
+        allowedTokens = ["add", "multiply", "clamp", "remap", "blend"]
+    )
+    float3 inputs:value = (0, 0, 0)
+    float3 inputs:min = (0, 0, 0)
+    float3 inputs:max = (1, 1, 1)
+}
+
+class RigExecMatrixMathMover "RigExecMatrixMathMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "MatrixMathMover"
+    }
+    doc = """Statically typed multiply or blend over an exact matrix4d
+    property target (spec section 4.1). Distinct from the point-moving
+    RigExecMatrixMover."""
+)
+{
+    uniform token rigExec:operation = "multiply" (
+        allowedTokens = ["multiply", "blend"]
+    )
+    matrix4d inputs:value = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    float inputs:weight = 1
+}
+
+class RigExecLatticeMover "RigExecLatticeMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "LatticeMover"
+    }
+    doc = """Reads cage points from a native mesh/points prim and writes
+    exactly one exact native UsdGeomPointBased points property through
+    tensor-product basis evaluation (spec sections 4.1, 7.5)."""
+)
+{
+    rel rigExec:cage (
+        doc = "Native mesh/points prim supplying cage control points."
+    )
+    uniform token rigExec:basis = "bspline" (
+        allowedTokens = ["bspline", "bernstein"]
+    )
+    int3 rigExec:divisions = (2, 2, 2)
+    uniform token rigExec:cageReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecSurfaceMover "RigExecSurfaceMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "SurfaceMover"
+    }
+    doc = """Reads standard mesh properties for attachment/projection/
+    sliding and surface-driven correction and writes an exact native
+    UsdGeomPointBased points property (spec sections 4.1, 7.5)."""
+)
+{
+    rel rigExec:surface (
+        doc = "Native mesh prim supplying the driver surface."
+    )
+    uniform token rigExec:mode = "attach" (
+        allowedTokens = ["attach", "project"]
+    )
+    uniform token rigExec:surfaceReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecSmoothMover "RigExecSmoothMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "SmoothMover"
+    }
+    doc = """Moves exactly one exact native UsdGeomPointBased points
+    property through uniform-weight Laplacian smoothing with fixed edge
+    adjacency taken from the destination's standard topology (spec
+    section 7.6 revised: the former post-mover smooth operation as a
+    first-class mover)."""
+)
+{
+    float inputs:strength = 0.5 (
+        doc = "Blend of the Laplacian step per point, in [0, 1]."
+    )
+}
+
+class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "VolumeCorrectMover"
+    }
+    doc = """Moves exactly one exact native UsdGeomPointBased points
+    property by uniform centroid scaling toward the authored rest bound
+    volume (spec section 7.6 revised: the former post-mover volumeCorrect
+    operation as a first-class mover)."""
+)
+{
+    float inputs:strength = 0 (
+        doc = "Blend toward full bound-volume restoration, in [0, 1]."
+    )
+}
+
+################################################################
+# Generated application schemas (spec section 4.1). These are
+# compiler-owned hidden behavior hosts authored only in the derived
+# session layer under __RigExecGenerated; they are not authorable
+# geometry schemas. Their attributes use only stock Sdf value types.
+################################################################

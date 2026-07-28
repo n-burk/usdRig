@@ -1,0 +1,173 @@
+#usda 1.0
+(
+    """
+    RigExec example 04 - blend shapes with in-betweens in action.
+
+    A face card is deformed by a RigExecBlendShapeMover with two independently
+    composed blend channels: Smile carries an in-between sample at activation
+    0.5 (corners widen first) plus a full target (corners lift), and BrowRaise
+    carries a single full target. Channel weights animate with splines, and a
+    constant-representation weight object scales the final summed delta.
+    The compiler maintains the card's authored normals and extent
+    automatically after the shape pass.
+    """
+    defaultPrim = "FaceAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "FaceAsset"
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "FaceAsset"
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Head" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.5, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+            }
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "Smile" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                float inputs:weight.spline = {
+                    bezier,
+                    1001: 0; pre (0, 0); post curve (8, 0),
+                    1024: 1; pre (8, 0); post curve (8, 0),
+                    1048: 0.3; pre (8, 0); post held,
+                }
+                rel rigExec:samples = [
+                    </FaceAsset/Rig/BlendInputs/Smile/Half>,
+                    </FaceAsset/Rig/BlendInputs/Smile/Full>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../icons/blend_input.png@
+
+                def RigExecBlendSample "Half" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    float rigExec:activation = 0.5
+                    rel rigExec:targetPoints = </FaceAsset/Targets/SmileHalf.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/blend_sample.png@
+                }
+
+                def RigExecBlendSample "Full" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </FaceAsset/Targets/SmileFull.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/blend_sample.png@
+                }
+            }
+
+            def RigExecBlendInput "BrowRaise" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                float inputs:weight.spline = {
+                    bezier,
+                    1001: 0; pre (0, 0); post held,
+                    1016: 0; post curve (6, 0),
+                    1040: 1; pre (6, 0); post held,
+                    1048: 1; post held,
+                }
+                rel rigExec:samples = </FaceAsset/Rig/BlendInputs/BrowRaise/Full>
+                uniform asset ui:nodegraph:node:icon = @../icons/blend_input.png@
+
+                def RigExecBlendSample "Full" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </FaceAsset/Targets/BrowRaise.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/blend_sample.png@
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "FaceMask" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </FaceAsset/Geom/FaceCard.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecBlendShapeMover "FaceShapes" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:blendInputs = [
+                        </FaceAsset/Rig/BlendInputs/Smile>,
+                        </FaceAsset/Rig/BlendInputs/BrowRaise>,
+                    ]
+                    rel rigExec:moves = </FaceAsset/Geom/FaceCard.points>
+                    rel rigExec:weightObject = </FaceAsset/Rig/Weights/FaceMask>
+                    uniform asset ui:nodegraph:node:icon = @../icons/blendshape_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "FaceCard"
+        {
+            float3[] extent = [(-1.5, 0, 0), (1.5, 3, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6, 4, 5, 9, 8, 5, 6, 10, 9, 6, 7, 11, 10, 8, 9, 13, 12, 9, 10, 14, 13, 10, 11, 15, 14]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-1.5, 0, 0), (-0.5, 0, 0), (0.5, 0, 0), (1.5, 0, 0), (-1.5, 1, 0), (-0.5, 1, 0), (0.5, 1, 0), (1.5, 1, 0), (-1.5, 2, 0), (-0.5, 2, 0), (0.5, 2, 0), (1.5, 2, 0), (-1.5, 3, 0), (-0.5, 3, 0), (0.5, 3, 0), (1.5, 3, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "Targets"
+    {
+        def Points "SmileHalf"
+        {
+            point3f[] points = [(-1.5, 0, 0), (-0.5, 0, 0), (0.5, 0, 0), (1.5, 0, 0), (-1.6, 1.1, 0.05), (-0.5, 1.05, 0.02), (0.5, 1.05, 0.02), (1.6, 1.1, 0.05), (-1.5, 2, 0), (-0.5, 2, 0), (0.5, 2, 0), (1.5, 2, 0), (-1.5, 3, 0), (-0.5, 3, 0), (0.5, 3, 0), (1.5, 3, 0)]
+            token visibility = "invisible"
+        }
+
+        def Points "SmileFull"
+        {
+            point3f[] points = [(-1.5, 0, 0), (-0.5, 0, 0), (0.5, 0, 0), (1.5, 0, 0), (-1.7, 1.4, 0.1), (-0.5, 1.15, 0.05), (0.5, 1.15, 0.05), (1.7, 1.4, 0.1), (-1.5, 2, 0), (-0.5, 2, 0), (0.5, 2, 0), (1.5, 2, 0), (-1.5, 3, 0), (-0.5, 3, 0), (0.5, 3, 0), (1.5, 3, 0)]
+            token visibility = "invisible"
+        }
+
+        def Points "BrowRaise"
+        {
+            point3f[] points = [(-1.5, 0, 0), (-0.5, 0, 0), (0.5, 0, 0), (1.5, 0, 0), (-1.5, 1, 0), (-0.5, 1, 0), (0.5, 1, 0), (1.5, 1, 0), (-1.5, 2, 0), (-0.5, 2.1, 0.05), (0.5, 2.1, 0.05), (1.5, 2, 0), (-1.5, 3.3, 0.1), (-0.5, 3.3, 0.1), (0.5, 3.3, 0.1), (1.5, 3.3, 0.1)]
+            token visibility = "invisible"
+        }
+    }
+}
+

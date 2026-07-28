@@ -1,0 +1,105 @@
+#usda 1.0
+(
+    """
+    RigExec example 06 - lattice, smoothing, and volume correction in action.
+
+    A 2x2x3 Bernstein cage (a native Points prim; default-time points are the
+    bind cage, timeSamples the posed cage) bulges its middle layer outward,
+    deforming a strip mesh through a RigExecLatticeMover. The result then
+    passes through a RigExecSmoothMover and a RigExecVolumeCorrectMover that
+    pulls the bulge back toward the rest bound volume; the compiler maintains
+    the authored normals and extent automatically.
+    Cage points are ordered x-fastest, then y, then z.
+    """
+    defaultPrim = "LatticeAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "LatticeAsset"
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "LatticeAsset"
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "SlabRoot" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 2, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecVolumeCorrectMover "VolumeCorrect" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:strength = 0.35
+                    rel rigExec:moves = </LatticeAsset/Geom/Slab.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/volume_correct_mover.png@
+
+                    def RigExecSmoothMover "Smooth" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        float inputs:strength = 0.6
+                        rel rigExec:moves = </LatticeAsset/Geom/Slab.points>
+                        uniform asset ui:nodegraph:node:icon = @../icons/smooth_mover.png@
+
+                        def RigExecLatticeMover "CageDeform" (
+                            prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                        )
+                        {
+                            uniform token rigExec:basis = "bernstein"
+                            rel rigExec:cage = </LatticeAsset/Geom/Cage>
+                            uniform token rigExec:cageReadPhase = "base"
+                            int3 rigExec:divisions = (2, 2, 3)
+                            rel rigExec:moves = </LatticeAsset/Geom/Slab.points>
+                            uniform asset ui:nodegraph:node:icon = @../icons/lattice_mover.png@
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Points "Cage"
+        {
+            point3f[] points = [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0), (-1, -1, 2), (1, -1, 2), (-1, 1, 2), (1, 1, 2), (-1, -1, 4), (1, -1, 4), (-1, 1, 4), (1, 1, 4)]
+            point3f[] points.timeSamples = {
+                1001: [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0), (-1, -1, 2), (1, -1, 2), (-1, 1, 2), (1, 1, 2), (-1, -1, 4), (1, -1, 4), (-1, 1, 4), (1, 1, 4)],
+                1024: [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0), (-2, -2, 2), (2, -2, 2), (-2, 2, 2), (2, 2, 2), (-1, -1, 4), (1, -1, 4), (-1, 1, 4), (1, 1, 4)],
+                1048: [(-1, -1, 0), (1, -1, 0), (-1, 1, 0), (1, 1, 0), (-1, -1, 2), (1, -1, 2), (-1, 1, 2), (1, 1, 2), (-1, -1, 4), (1, -1, 4), (-1, 1, 4), (1, 1, 4)],
+            }
+            token visibility = "invisible"
+            float[] widths = [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05] (
+                interpolation = "vertex"
+            )
+        }
+
+        def Mesh "Slab"
+        {
+            float3[] extent = [(-0.5, 0, 0), (0.5, 0, 4)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8]
+            normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-0.5, 0, 0), (0.5, 0, 0), (-0.5, 0, 1), (0.5, 0, 1), (-0.5, 0, 2), (0.5, 0, 2), (-0.5, 0, 3), (0.5, 0, 3), (-0.5, 0, 4), (0.5, 0, 4)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}
+

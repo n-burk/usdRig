@@ -1,0 +1,255 @@
+#usda 1.0
+(
+    """
+    RigExec example 05 - twist distribution and ribbon transport in action.
+
+    A native BasisCurves driver animates a sideways bend; a RigExecRibbon
+    samples it with rotation-minimizing frames against its bind-time rest
+    value, and a RigExecCurveMover in ribbon mode carries the spine strip
+    along through rest-relative rigid transport keyed by its primvars:st
+    bind coordinates. A second CurveMover emits the ribbon frame origins
+    into a native guide curve. Independently, the chest control's animated
+    avars:rspin unwinds through a RigExecTwistDistribution between the FK
+    root and chest joints; a joint indexing the middle distributed frame
+    skins a fin card so the interpolated twist is visible. The compiler
+    maintains every written mesh's authored normals and extent
+    automatically.
+    """
+    defaultPrim = "SpineAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "SpineAsset"
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "SpineAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "RootCtl" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "ChestCtl" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rspin = 0
+                double avars:rspin.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1048: 68.755; post linear,
+                }
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 25; post linear,
+                    1048: 0; post linear,
+                }
+                matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 4, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "SpineFK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </SpineAsset/Rig/Controls/RootCtl>,
+                    </SpineAsset/Rig/Controls/ChestCtl>,
+                ]
+                rel rigExec:joints = [
+                    </SpineAsset/Rig/Joints/Root>,
+                    </SpineAsset/Rig/Joints/Root/Chest>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../icons/fk_chain.png@
+            }
+
+            def RigExecTwistDistribution "SpineTwist" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                int rigExec:count = 5
+                uniform token rigExec:distribution = "minimumEnergy"
+                rel rigExec:end = </SpineAsset/Rig/Joints/Root/Chest>
+                int[] rigExec:jointElements = [2]
+                rel rigExec:joints = </SpineAsset/Rig/Joints/TwistMid>
+                rel rigExec:start = </SpineAsset/Rig/Joints/Root>
+                float[] rigExec:weights = [0, 0.25, 0.5, 0.75, 1]
+                uniform asset ui:nodegraph:node:icon = @../icons/twist_distribution.png@
+            }
+
+            def RigExecRibbon "SpineRibbon" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:driverCurve = </SpineAsset/Geom/SpineCurve>
+                rel rigExec:endFrame = </SpineAsset/Rig/Joints/Root/Chest>
+                uniform token rigExec:frameTransport = "rotationMinimizing"
+                uniform token rigExec:parameterization = "arcLength"
+                int rigExec:sampleCount = 5
+                rel rigExec:startFrame = </SpineAsset/Rig/Joints/Root>
+                rel rigExec:twistFrames = </SpineAsset/Rig/Solvers/SpineTwist>
+                uniform asset ui:nodegraph:node:icon = @../icons/ribbon.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:length = 4
+                double guide:radius = 0.25
+                matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                def RigExecJoint "Chest" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    double guide:length = 4
+                    double guide:radius = 0.25
+                    matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 4, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+                }
+            }
+
+            def RigExecJoint "TwistMid" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:length = 4
+                double guide:radius = 0.25
+                matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 2, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "FinW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </SpineAsset/Geom/Fin.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecCurveMover "RibbonWrap" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:bindCoordinates = </SpineAsset/Geom/SpineStrip.primvars:st>
+                    rel rigExec:driverCurve = </SpineAsset/Geom/SpineCurve>
+                    rel rigExec:driverFrames = </SpineAsset/Rig/Solvers/SpineRibbon>
+                    uniform token rigExec:mode = "ribbon"
+                    rel rigExec:moves = </SpineAsset/Geom/SpineStrip.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/curve_mover.png@
+                }
+
+                def RigExecCurveMover "EmitGuides" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:driverFrames = </SpineAsset/Rig/Solvers/SpineRibbon>
+                    uniform token rigExec:mode = "emitGuidePoints"
+                    rel rigExec:moves = </SpineAsset/Geom/SpineGuides.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/curve_mover.png@
+                }
+
+                def RigExecMatrixMover "FinSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SpineAsset/Geom/Fin.points>
+                    rel rigExec:transform = </SpineAsset/Rig/Joints/TwistMid>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SpineAsset/Rig/Weights/FinW>
+                    uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def BasisCurves "SpineCurve"
+        {
+            uniform token basis = "bspline"
+            int[] curveVertexCounts = [4]
+            point3f[] points = [(0, 0, 0), (0, 2.7, 0), (0, 5.3, 0), (0, 8, 0)]
+            point3f[] points.timeSamples = {
+                1001: [(0, 0, 0), (0, 2.7, 0), (0, 5.3, 0), (0, 8, 0)],
+                1024: [(0, 0, 0), (0.4, 2.7, 0), (1.4, 5.3, 0), (2.8, 7.6, 0)],
+                1048: [(0, 0, 0), (0, 2.7, 0), (0, 5.3, 0), (0, 8, 0)],
+            }
+            uniform token type = "cubic"
+            token visibility = "invisible"
+            float[] widths = [0.1, 0.1, 0.1, 0.1] (
+                interpolation = "vertex"
+            )
+            uniform token wrap = "nonperiodic"
+        }
+
+        def BasisCurves "SpineGuides"
+        {
+            int[] curveVertexCounts = [5]
+            float3[] extent = [(-0.03, -0.03, -0.03), (0.03, 8.03, 0.03)]
+            point3f[] points = [(0, 0, 0), (0, 2, 0), (0, 4, 0), (0, 6, 0), (0, 8, 0)]
+            uniform token type = "linear"
+            float[] widths = [0.06, 0.06, 0.06, 0.06, 0.06] (
+                interpolation = "vertex"
+            )
+            uniform token wrap = "nonperiodic"
+        }
+
+        def Mesh "SpineStrip"
+        {
+            float3[] extent = [(-0.6, 0, 0), (0.6, 8, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-0.6, 0, 0), (0.6, 0, 0), (-0.6, 2, 0), (0.6, 2, 0), (-0.6, 4, 0), (0.6, 4, 0), (-0.6, 6, 0), (0.6, 6, 0), (-0.6, 8, 0), (0.6, 8, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (0, 1), (0.25, 0), (0.25, 1), (0.5, 0), (0.5, 1), (0.75, 0), (0.75, 1), (1, 0), (1, 1)] (
+                interpolation = "vertex"
+            )
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "Fin"
+        {
+            float3[] extent = [(0.6, 1.7, 0), (1.6, 2.3, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0.6, 1.7, 0), (1.6, 1.7, 0), (1.6, 2.3, 0), (0.6, 2.3, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}
+

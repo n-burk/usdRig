@@ -1,0 +1,143 @@
+#usda 1.0
+(
+    """
+    RigExec example 10 - a constraint driving an Xform, geometry parented under it.
+
+    The counterpart to 08_AimEyes, and the correct model for a RIGID object.
+
+    08 aims a RigExecJoint and then carries its eye cards with matrix movers at
+    constant weight 1 - a rigid transform computed per vertex. That is right for
+    skinning, where points genuinely deform, and wrong for a solid prop, where
+    every point shares one transform.
+
+    Here the aim constraint moves a plain UsdGeomXform. The engine publishes the
+    revised transform onto that prim, and the barrel mesh parented underneath
+    inherits it through Hydra's flatten. No matrix mover, no weight object, no
+    per-point work: one matrix for the whole object.
+
+    Nothing is applied to the Xform - no RigExecPointTransformAPI, no marker.
+    A constraint target only has to be a UsdGeomXformable; its own composed
+    transform is the base frame the constraint revises.
+
+    The turret tracks an animated target that swings through the scene, so the
+    barrel's z-axis stays pointed at it.
+    """
+    defaultPrim = "TurretAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "TurretAsset"
+{
+    # The ASSET's placement on the stage, non-identity on purpose and
+    # distinct from the Geom offset below. The two catch different errors:
+    # Geom catches a base frame taken local-to-parent, and this catches one
+    # taken local-to-world. Rig frames (rest:space plus avars) carry no stage
+    # placement, so the constraint's base must be relative to THIS prim --
+    # neither of the other two spaces. With an identity asset root all three
+    # coincide and both errors are invisible.
+    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (100, 0, 0, 1) )
+    uniform token[] xformOpOrder = ["xformOp:transform"]
+
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "TurretAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "TrackTarget" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: -8; pre (0, 0); post linear,
+                    1024: 8; post linear,
+                    1048: -8; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 10, 1) )
+            }
+        }
+
+        # A joint is still required: the rig root discovers joint outputs, and
+        # a rig with none is rejected. This one anchors the turret base and is
+        # not what the constraint drives.
+        def Scope "Joints"
+        {
+            def RigExecJoint "Base"
+            {
+                double guide:length = 1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # The whole rig, in one prim: aim the Xform, and everything under
+            # it follows. Compare with 08's EyeLSkin/EyeRSkin, which need a
+            # matrix mover AND a weight object per eye to achieve the same
+            # rigid result.
+            def RigExecAimConstraint "AimBarrel" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:weight = 1
+                uniform token rigExec:aimAxis = "z"
+                rel rigExec:aimTarget = </TurretAsset/Rig/Controls/TrackTarget>
+                rel rigExec:moves = </TurretAsset/Geom/Turret>
+            }
+        }
+    }
+
+    # A NON-IDENTITY offset on the way down to the constraint target, on
+    # purpose. With identity ancestors a prim's local transform and its world
+    # transform are the same matrix, and a constraint that solves a local
+    # frame against a world-space aim target looks perfectly correct. This
+    # offset is what makes that class of error visible.
+    def Xform "Geom"
+    {
+        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 1, -3, 1) )
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+
+        # The constraint target. Its authored transform is the base frame; the
+        # published revision replaces it for rendering, and the stage itself is
+        # never written.
+        def Xform "Turret"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 2, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+            # Parented geometry - inherits the revised transform. No mover
+            # names these; they are carried by hierarchy alone.
+            def Mesh "Barrel"
+            {
+                float3[] extent = [(-0.3, -0.3, 0), (0.3, 0.3, 4)]
+                int[] faceVertexCounts = [4, 4, 4, 4]
+                int[] faceVertexIndices = [
+                    0, 1, 5, 4,
+                    1, 2, 6, 5,
+                    2, 3, 7, 6,
+                    3, 0, 4, 7,
+                ]
+                point3f[] points = [
+                    (-0.3, -0.3, 0), (0.3, -0.3, 0), (0.3, 0.3, 0), (-0.3, 0.3, 0),
+                    (-0.3, -0.3, 4), (0.3, -0.3, 4), (0.3, 0.3, 4), (-0.3, 0.3, 4),
+                ]
+            }
+
+            def Mesh "Sight"
+            {
+                float3[] extent = [(-0.1, 0.3, 2.5), (0.1, 0.6, 3)]
+                int[] faceVertexCounts = [4]
+                int[] faceVertexIndices = [0, 1, 2, 3]
+                point3f[] points = [
+                    (-0.1, 0.3, 2.5), (0.1, 0.3, 2.5),
+                    (0.1, 0.6, 3), (-0.1, 0.6, 3),
+                ]
+            }
+        }
+    }
+}

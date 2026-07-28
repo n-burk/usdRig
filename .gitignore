@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Third-party and build trees
+#
+# RigExec builds against an UNMODIFIED OpenUSD v26.08 (spec §3.5) installed as
+# a sibling of this repository (`..\usd-install`), so neither the upstream
+# OpenUSD clone nor its install tree lives here -- see README for how to
+# produce them.
+# ---------------------------------------------------------------------------
+
+# CMake/Ninja build output
+build/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# ---------------------------------------------------------------------------
+# Local assistant/tooling state
+#
+# These directories carry session state and, in .omc/artifacts, FULL PRIOR
+# CONVERSATION TRANSCRIPTS along with absolute local paths and session ids.
+# They are working state, not source, and must never be published.
+# ---------------------------------------------------------------------------
+.omc/
+.claude/
+.codex/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store

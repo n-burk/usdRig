@@ -1,0 +1,270 @@
+#usda 1.0
+(
+    """
+    RigExec example 01 - FK chain in action.
+
+    A four-segment tail driven by a RigExecFkChain: each Ir-style control
+    authors a local rotation through avars:rz, the chain composes them down
+    the hierarchy, and animated avars:rspin on the base control rolls the
+    whole tail. Joints connect posed:space to per-element solver views and
+    weighted matrix movers skin a simple strip mesh; the compiler maintains
+    the authored normals and extent automatically.
+    """
+    defaultPrim = "TailAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "TailAsset"
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "TailAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Tail1" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rspin = 0
+                double avars:rspin.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1048: 51.566; post linear,
+                }
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 25; post linear,
+                    1048: 45; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "Tail2" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 25; post linear,
+                    1048: 45; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "Tail3" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 25; post linear,
+                    1048: 45; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "Tail4" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1024: 25; post linear,
+                    1048: 45; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "TailFK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </TailAsset/Rig/Controls/Tail1>,
+                    </TailAsset/Rig/Controls/Tail2>,
+                    </TailAsset/Rig/Controls/Tail3>,
+                    </TailAsset/Rig/Controls/Tail4>,
+                ]
+                rel rigExec:joints = [
+                    </TailAsset/Rig/Joints/Seg1>,
+                    </TailAsset/Rig/Joints/Seg1/Seg2>,
+                    </TailAsset/Rig/Joints/Seg1/Seg2/Seg3>,
+                    </TailAsset/Rig/Joints/Seg1/Seg2/Seg3/Seg4>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Seg1" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:length = 2
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                def RigExecJoint "Seg2" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    double guide:length = 2
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                    def RigExecJoint "Seg3" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        double guide:length = 2
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                        def RigExecJoint "Seg4" (
+                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                        )
+                        {
+                            double guide:length = 2
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
+                            uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+                        }
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "Seg1W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [1, 0.6, 0.2, 0, 0, 1, 0.6, 0.2, 0, 0]
+                rel rigExec:weightTarget = </TailAsset/Geom/TailStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Seg2W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0.4, 0.6, 0.2, 0, 0, 0.4, 0.6, 0.2, 0]
+                rel rigExec:weightTarget = </TailAsset/Geom/TailStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Seg3W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0.2, 0.6, 0.3, 0, 0, 0.2, 0.6, 0.3]
+                rel rigExec:weightTarget = </TailAsset/Geom/TailStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Seg4W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform int[] rigExec:indices = [3, 4, 8, 9]
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "sparse"
+                uniform float[] rigExec:values = [0.2, 0.7, 0.2, 0.7]
+                rel rigExec:weightTarget = </TailAsset/Geom/TailStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "Seg1Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
+                    rel rigExec:transform = </TailAsset/Rig/Joints/Seg1>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg1W>
+                    uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                    def RigExecMatrixMover "Seg2Skin" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
+                        rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2>
+                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg2W>
+                        uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                        def RigExecMatrixMover "Seg3Skin" (
+                            prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                        )
+                        {
+                            rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
+                            rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2/Seg3>
+                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg3W>
+                            uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                            def RigExecMatrixMover "Seg4Skin" (
+                                prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                            )
+                            {
+                                rel rigExec:moves = </TailAsset/Geom/TailStrip.points>
+                                rel rigExec:transform = </TailAsset/Rig/Joints/Seg1/Seg2/Seg3/Seg4>
+                                uniform token rigExec:transformReadPhase = "final"
+                                rel rigExec:weightObject = </TailAsset/Rig/Weights/Seg4W>
+                                uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "TailStrip"
+        {
+            float3[] extent = [(0, 4.5, 0), (8, 5.5, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0, 4.5, 0), (2, 4.5, 0), (4, 4.5, 0), (6, 4.5, 0), (8, 4.5, 0), (0, 5.5, 0), (2, 5.5, 0), (4, 5.5, 0), (6, 5.5, 0), (8, 5.5, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}
+

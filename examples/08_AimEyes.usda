@@ -1,0 +1,197 @@
+#usda 1.0
+(
+    """
+    RigExec example 08 - pose-phase aim constraints in action.
+
+    Two eye joints hold static pose frames; sibling RigExecAimConstraint
+    movers in the Pose phase re-aim each joint's z-axis at an animated
+    look-at control while preserving origin and scale. The constraint
+    weights ramp in over the first half-second, so the eyes ease into
+    tracking. Geometry-phase matrix movers (constant-representation weight
+    objects) carry each eye card along its posed joint, read at the final
+    phase after the pose movers have run.
+    """
+    defaultPrim = "EyesAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "EyesAsset"
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "EyesAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "LookAt" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1016: -4; post linear,
+                    1032: 4; post linear,
+                    1048: 0; post linear,
+                }
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1016: 2; post linear,
+                    1032: -2; post linear,
+                    1048: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 6, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "EyeL" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:length = 1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1, 10, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+            }
+
+            def RigExecJoint "EyeR" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:length = 1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 10, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "EyeLW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </EyesAsset/Geom/EyeCardL.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "EyeRW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </EyesAsset/Geom/EyeCardR.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            reorder nameChildren = ["Pose", "Geometry"]
+            def Scope "Pose"
+            {
+                def RigExecAimConstraint "AimL" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:weight = 1
+                    float inputs:weight.spline = {
+                        bezier,
+                        1001: 0; pre (0, 0); post curve (4, 0),
+                        1012: 1; pre (4, 0); post held,
+                        1048: 1; post held,
+                    }
+                    uniform token rigExec:aimAxis = "z"
+                    rel rigExec:aimTarget = </EyesAsset/Rig/Controls/LookAt>
+                    rel rigExec:moves = </EyesAsset/Rig/Joints/EyeL>
+                    uniform token[] rigExec:preserve = ["origin", "scale"]
+                    uniform token rigExec:upPolicy = "preserveInputUp"
+                    uniform asset ui:nodegraph:node:icon = @../icons/aim_constraint.png@
+                }
+
+                def RigExecAimConstraint "AimR" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:weight = 1
+                    float inputs:weight.spline = {
+                        bezier,
+                        1001: 0; pre (0, 0); post curve (4, 0),
+                        1012: 1; pre (4, 0); post held,
+                        1048: 1; post held,
+                    }
+                    uniform token rigExec:aimAxis = "z"
+                    rel rigExec:aimTarget = </EyesAsset/Rig/Controls/LookAt>
+                    rel rigExec:moves = </EyesAsset/Rig/Joints/EyeR>
+                    uniform token[] rigExec:preserve = ["origin", "scale"]
+                    uniform token rigExec:upPolicy = "preserveInputUp"
+                    uniform asset ui:nodegraph:node:icon = @../icons/aim_constraint.png@
+                }
+            }
+
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "EyeLSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </EyesAsset/Geom/EyeCardL.points>
+                    rel rigExec:transform = </EyesAsset/Rig/Joints/EyeL>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </EyesAsset/Rig/Weights/EyeLW>
+                    uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "EyeRSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </EyesAsset/Geom/EyeCardR.points>
+                    rel rigExec:transform = </EyesAsset/Rig/Joints/EyeR>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </EyesAsset/Rig/Weights/EyeRW>
+                    uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "EyeCardL"
+        {
+            float3[] extent = [(-1.3, 9.7, 0.3), (-0.7, 10.3, 0.3)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-1.3, 9.7, 0.3), (-0.7, 9.7, 0.3), (-0.7, 10.3, 0.3), (-1.3, 10.3, 0.3)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "EyeCardR"
+        {
+            float3[] extent = [(0.7, 9.7, 0.3), (1.3, 10.3, 0.3)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0.7, 9.7, 0.3), (1.3, 9.7, 0.3), (1.3, 10.3, 0.3), (0.7, 10.3, 0.3)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}
+

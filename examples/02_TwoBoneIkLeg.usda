@@ -1,0 +1,249 @@
+#usda 1.0
+(
+    """
+    RigExec example 02 - analytic two-bone IK in action.
+
+    A leg driven by RigExecTwoBoneIk: the animated foot effector plants and
+    reaches while the knee pole steers the bend plane. inputs:stretch ramps
+    from 0 to 1 so the out-of-reach pose at 1032 visibly stretches the chain,
+    and inputs:softness eases into full extension. A RigExecDynamicWeight
+    modulates the painted knee weights with an animated driver before the
+    weighted matrix movers skin the leg strip.
+    """
+    defaultPrim = "LegAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "LegAsset"
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "LegAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "HipRoot" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 8, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "FootIK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1016: 1.5; post linear,
+                    1032: 0.5; post linear,
+                    1048: 0; post linear,
+                }
+                double avars:tz = 0
+                double avars:tz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1016: 1.5; post linear,
+                    1032: 3.5; post linear,
+                    1048: 1; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "KneePole" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1048: 0.8; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 4, 3, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecTwoBoneIk "LegIK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:softness = 0.15
+                float inputs:stretch = 0
+                float inputs:stretch.spline = {
+                    bezier,
+                    1001: 0; pre (0, 0); post curve (10, 0),
+                    1032: 1; pre (10, 0); post held,
+                    1048: 1; post held,
+                }
+                rel rigExec:effectorControl = </LegAsset/Rig/Controls/FootIK>
+                rel rigExec:joints = [
+                    </LegAsset/Rig/Joints/Hip>,
+                    </LegAsset/Rig/Joints/Hip/Knee>,
+                    </LegAsset/Rig/Joints/Hip/Knee/Ankle>,
+                ]
+                double rigExec:lowerLength = 4
+                rel rigExec:poleControl = </LegAsset/Rig/Controls/KneePole>
+                double rigExec:preferredBendRadians = 0.3
+                rel rigExec:rootControl = </LegAsset/Rig/Controls/HipRoot>
+                uniform token rigExec:stretchPolicy = "uniformSegments"
+                uniform token rigExec:unreachablePolicy = "clampWithSoftness"
+                double rigExec:upperLength = 4
+                uniform asset ui:nodegraph:node:icon = @../icons/two_bone_ik.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Hip" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:length = 4
+                matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 8, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                def RigExecJoint "Knee" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    double guide:length = 4
+                    matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 4, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                    def RigExecJoint "Ankle" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        double guide:length = 1
+                        matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "HipW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [1, 1, 0.4, 0.4, 0, 0]
+                rel rigExec:weightTarget = </LegAsset/Geom/LegStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "KneePaint" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0.6, 0.6, 0.2, 0.2]
+                rel rigExec:weightTarget = </LegAsset/Geom/LegStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecDynamicWeight "KneeDriven" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:bias = 0
+                float inputs:driver = 1
+                float inputs:driver.spline = {
+                    bezier,
+                    1001: 0.4; pre (0, 0); post curve (12, 0),
+                    1032: 1; pre (12, 0); post held,
+                    1048: 1; post held,
+                }
+                float inputs:scale = 1
+                rel rigExec:baseWeight = </LegAsset/Rig/Weights/KneePaint>
+                uniform token rigExec:operation = "multiply"
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                rel rigExec:weightTarget = </LegAsset/Geom/LegStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/dynamic_weight.png@
+            }
+
+            def RigExecStaticWeight "AnkleW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0.8, 0.8]
+                rel rigExec:weightTarget = </LegAsset/Geom/LegStrip.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "HipSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </LegAsset/Geom/LegStrip.points>
+                    rel rigExec:transform = </LegAsset/Rig/Joints/Hip>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </LegAsset/Rig/Weights/HipW>
+                    uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                    def RigExecMatrixMover "KneeSkin" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        rel rigExec:moves = </LegAsset/Geom/LegStrip.points>
+                        rel rigExec:transform = </LegAsset/Rig/Joints/Hip/Knee>
+                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:weightObject = </LegAsset/Rig/Weights/KneeDriven>
+                        uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                        def RigExecMatrixMover "AnkleSkin" (
+                            prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                        )
+                        {
+                            rel rigExec:moves = </LegAsset/Geom/LegStrip.points>
+                            rel rigExec:transform = </LegAsset/Rig/Joints/Hip/Knee/Ankle>
+                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:weightObject = </LegAsset/Rig/Weights/AnkleW>
+                            uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "LegStrip"
+        {
+            float3[] extent = [(-0.5, 0, 0), (0.5, 8, 0)]
+            int[] faceVertexCounts = [4, 4]
+            int[] faceVertexIndices = [2, 3, 1, 0, 4, 5, 3, 2]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(-0.5, 8, 0), (0.5, 8, 0), (-0.5, 4, 0), (0.5, 4, 0), (-0.5, 0, 0), (0.5, 0, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+}
+

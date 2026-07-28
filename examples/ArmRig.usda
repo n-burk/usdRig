@@ -1,0 +1,488 @@
+#usda 1.0
+(
+    defaultPrim = "ArmAsset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "ArmAsset" (
+    variants = {
+        string rigComplexity = "film"
+    }
+    prepend variantSets = "rigComplexity"
+)
+{
+    def RigExecRig "Rig"
+    {
+        uniform token rigExec:partition = "ArmAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "ShoulderFK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "ElbowFK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 10, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "WristFK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (8, 10, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "HandIK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (8, 10, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+
+            def RigExecControl "ElbowPole" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 10, -4, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "FK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </ArmAsset/Rig/Controls/ShoulderFK>,
+                    </ArmAsset/Rig/Controls/ElbowFK>,
+                    </ArmAsset/Rig/Controls/WristFK>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../icons/fk_chain.png@
+            }
+
+            def RigExecTwoBoneIk "IK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:softness = 0.15
+                float inputs:stretch = 1
+                rel rigExec:effectorControl = </ArmAsset/Rig/Controls/HandIK>
+                double rigExec:lowerLength = 4
+                rel rigExec:poleControl = </ArmAsset/Rig/Controls/ElbowPole>
+                double rigExec:preferredBendRadians = -0.35
+                rel rigExec:rootControl = </ArmAsset/Rig/Controls/ShoulderFK>
+                uniform token rigExec:stretchPolicy = "uniformSegments"
+                uniform token rigExec:unreachablePolicy = "clampWithSoftness"
+                double rigExec:upperLength = 4
+                uniform asset ui:nodegraph:node:icon = @../icons/two_bone_ik.png@
+            }
+
+            def RigExecBlendPointFrames "IKFKBlend" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                rel rigExec:inputA = </ArmAsset/Rig/Solvers/FK>
+                rel rigExec:inputB = </ArmAsset/Rig/Solvers/IK>
+                rel rigExec:joints = [
+                    </ArmAsset/Rig/Joints/Shoulder>,
+                    </ArmAsset/Rig/Joints/Shoulder/Elbow>,
+                    </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                uniform token rigExec:rotationBlend = "shortestArc"
+                uniform token rigExec:scaleBlend = "log"
+                uniform asset ui:nodegraph:node:icon = @../icons/blend_point_frames.png@
+            }
+
+            def RigExecTwistDistribution "ForearmTwist" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                int rigExec:count = 5
+                uniform token rigExec:distribution = "minimumEnergy"
+                rel rigExec:end = </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>
+                rel rigExec:start = </ArmAsset/Rig/Joints/Shoulder/Elbow>
+                float[] rigExec:weights = [0, 0.2, 0.5, 0.8, 1]
+                uniform asset ui:nodegraph:node:icon = @../icons/twist_distribution.png@
+            }
+
+            def RigExecRibbon "ArmRibbon" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:driverCurve = </ArmAsset/Geom/RibbonDriver>
+                rel rigExec:endFrame = </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>
+                uniform token rigExec:frameTransport = "rotationMinimizing"
+                uniform token rigExec:parameterization = "arcLength"
+                int rigExec:sampleCount = 5
+                rel rigExec:startFrame = </ArmAsset/Rig/Joints/Shoulder>
+                rel rigExec:twistFrames = </ArmAsset/Rig/Solvers/ForearmTwist>
+                uniform asset ui:nodegraph:node:icon = @../icons/ribbon.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Shoulder" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:length = 4
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                def RigExecJoint "Elbow" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    double guide:length = 4
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 10, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+
+                    def RigExecJoint "Wrist" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        double guide:length = 2
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (8, 10, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "ShoulderPoints" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [1, 0.1, 0, 1]
+                rel rigExec:weightTarget = </ArmAsset/Geom/ArmBody.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "ElbowPaint" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0.8, 0.3, 0]
+                rel rigExec:weightTarget = </ArmAsset/Geom/ArmBody.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecDynamicWeight "ElbowDriven" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:bias = 0
+                float inputs:driver = 1
+                float inputs:scale = 1
+                rel rigExec:baseWeight = </ArmAsset/Rig/Weights/ElbowPaint>
+                uniform token rigExec:operation = "multiply"
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                rel rigExec:weightTarget = </ArmAsset/Geom/ArmBody.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/dynamic_weight.png@
+            }
+
+            def RigExecStaticWeight "WristPoints" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform int[] rigExec:indices = [1, 2]
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "sparse"
+                uniform float[] rigExec:values = [0.1, 0.7]
+                rel rigExec:weightTarget = </ArmAsset/Geom/ArmBody.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "BicepMask" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 1, 1, 0]
+                rel rigExec:weightTarget = </ArmAsset/Geom/ArmBody.points>
+                uniform asset ui:nodegraph:node:icon = @../icons/static_weight.png@
+            }
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "BicepFlex" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0.35
+                rel rigExec:samples = </ArmAsset/Rig/BlendInputs/BicepFlex/Full>
+                uniform asset ui:nodegraph:node:icon = @../icons/blend_input.png@
+
+                def RigExecBlendSample "Full" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </ArmAsset/Targets/BicepFlexTarget.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/blend_sample.png@
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            reorder nameChildren = ["Pose", "Geometry"]
+            def Scope "Pose"
+            {
+                def RigExecAimConstraint "WristAim" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:weight = 0.2
+                    uniform token rigExec:aimAxis = "x"
+                    rel rigExec:aimTarget = </ArmAsset/Rig/Controls/ElbowPole>
+                    rel rigExec:moves = </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>
+                    uniform token[] rigExec:preserve = ["origin", "scale"]
+                    uniform token rigExec:upPolicy = "preserveInputUp"
+                    uniform asset ui:nodegraph:node:icon = @../icons/aim_constraint.png@
+
+                    def RigExecFloatMathMover "ClampIKFKWeight" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        float inputs:max = 1
+                        float inputs:min = 0
+                        rel rigExec:moves = </ArmAsset/Rig/Solvers/IKFKBlend.inputs:weight>
+                        uniform token rigExec:operation = "clamp"
+                        uniform asset ui:nodegraph:node:icon = @../icons/float_math_mover.png@
+                    }
+                }
+            }
+
+            def Scope "Geometry"
+            {
+                def RigExecVolumeCorrectMover "VolumeCorrect" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:strength = 0.25
+                    rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/volume_correct_mover.png@
+
+                    def RigExecCurveMover "RibbonWrap" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        rel rigExec:bindCoordinates = </ArmAsset/Geom/ArmBody.primvars:st>
+                        rel rigExec:driverCurve = </ArmAsset/Geom/RibbonDriver>
+                        rel rigExec:driverFrames = </ArmAsset/Rig/Solvers/ArmRibbon>
+                        uniform token rigExec:mode = "ribbon"
+                        rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
+                        uniform asset ui:nodegraph:node:icon = @../icons/curve_mover.png@
+
+                        def RigExecMatrixMover "ShoulderMatrix" (
+                            prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                        )
+                        {
+                            rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
+                            rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder>
+                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:weightObject = </ArmAsset/Rig/Weights/ShoulderPoints>
+                            uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                            def RigExecMatrixMover "ElbowMatrix" (
+                                prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                            )
+                            {
+                                rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
+                                rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder/Elbow>
+                                uniform token rigExec:transformReadPhase = "final"
+                                rel rigExec:weightObject = </ArmAsset/Rig/Weights/ElbowDriven>
+                                uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                                def RigExecMatrixMover "WristMatrix" (
+                                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                                )
+                                {
+                                    rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
+                                    rel rigExec:transform = </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>
+                                    uniform token rigExec:transformReadPhase = "final"
+                                    rel rigExec:weightObject = </ArmAsset/Rig/Weights/WristPoints>
+                                    uniform asset ui:nodegraph:node:icon = @../icons/matrix_mover.png@
+
+                                    def RigExecBlendShapeMover "BicepFlex" (
+                                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        rel rigExec:blendInputs = </ArmAsset/Rig/BlendInputs/BicepFlex>
+                                        rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
+                                        rel rigExec:weightObject = </ArmAsset/Rig/Weights/BicepMask>
+                                        uniform asset ui:nodegraph:node:icon = @../icons/blendshape_mover.png@
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                def RigExecCurveMover "GuideFromRibbon" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:driverFrames = </ArmAsset/Rig/Solvers/ArmRibbon>
+                    uniform token rigExec:mode = "emitGuidePoints"
+                    rel rigExec:moves = </ArmAsset/Geom/RibbonGuides.points>
+                    uniform asset ui:nodegraph:node:icon = @../icons/curve_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def BasisCurves "RibbonDriver"
+        {
+            uniform token basis = "bspline"
+            int[] curveVertexCounts = [4]
+            point3f[] points = [(0, 10, 0), (2.7, 10, 0), (5.3, 10, 0), (8, 10, 0)]
+            uniform token type = "cubic"
+            token visibility = "invisible"
+            float[] widths = [0.1, 0.1, 0.1, 0.1] (
+                interpolation = "vertex"
+            )
+            uniform token wrap = "nonperiodic"
+        }
+
+        def BasisCurves "RibbonGuides"
+        {
+            int[] curveVertexCounts = [5]
+            float3[] extent = [(-0.03, 9.97, -0.03), (8.03, 10.03, 0.03)]
+            point3f[] points = [(0, 10, 0), (2, 10, 0), (4, 10, 0), (6, 10, 0), (8, 10, 0)]
+            uniform token type = "linear"
+            float[] widths (
+                interpolation = "vertex"
+            )
+            uniform token wrap = "nonperiodic"
+        }
+
+        def Mesh "ArmBody"
+        {
+            float3[] extent = [(0, 9.5, 0), (8, 10.5, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0, 9.5, 0), (8, 9.5, 0), (8, 10.5, 0), (0, 10.5, 0)]
+            texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+                interpolation = "vertex"
+            )
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "Targets"
+    {
+        def Points "BicepFlexTarget"
+        {
+            point3f[] points = [(0, 9.5, 0), (8, 9.75, -0.15), (8, 10.75, 0.15), (0, 10.5, 0)]
+            token visibility = "invisible"
+        }
+    }
+    variantSet "rigComplexity" = {
+        "animation" {
+            over "Rig"
+            {
+                over "Movers"
+                {
+                    over "Geometry"
+                    {
+                        over "VolumeCorrect"
+                        {
+                            bool inputs:enabled = 0
+                        }
+                    }
+                }
+            }
+
+            over "Geom"
+            {
+                over "RibbonGuides"
+                {
+                    float[] widths = [0.06, 0.06, 0.06, 0.06, 0.06]
+                }
+            }
+
+        }
+        "film" {
+            over "Geom"
+            {
+                over "RibbonGuides"
+                {
+                    float[] widths = [0.06, 0.06, 0.06, 0.06, 0.06]
+                }
+            }
+
+        }
+        "preview" {
+            over "Rig"
+            {
+                over "Movers"
+                {
+                    over "Geometry"
+                    {
+                        over "VolumeCorrect"
+                        {
+                            bool inputs:enabled = 0
+
+                            over "RibbonWrap"
+                            {
+                                bool inputs:enabled = 0
+                            }
+                        }
+
+                        over "GuideFromRibbon"
+                        {
+                            bool inputs:enabled = 0
+                        }
+                    }
+                }
+            }
+
+            over "Geom"
+            {
+                over "RibbonGuides"
+                {
+                    float[] widths = [0, 0, 0, 0, 0] (
+                        interpolation = "vertex"
+                    )
+                }
+            }
+
+        }
+    }
+}
+

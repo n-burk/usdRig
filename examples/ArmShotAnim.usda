@@ -1,0 +1,83 @@
+#usda 1.0
+(
+    defaultPrim = "Shot"
+    startTimeCode = 1001
+    endTimeCode = 1048
+    timeCodesPerSecond = 24
+)
+
+def Xform "Shot"
+{
+    def Xform "HeroArm" (
+        prepend references = @./ArmRig.usda@</ArmAsset>
+        variants = {
+            string rigComplexity = "animation"
+        }
+    )
+    {
+        over "Rig"
+        {
+            over "Controls"
+            {
+                over "HandIK"
+                {
+                    double avars:tx.spline = {
+                        1001: 0; post linear,
+                        1024: -2; post linear,
+                        1048: 1; post linear,
+                    }
+                    double avars:ty.spline = {
+                        1001: 0; post linear,
+                        1024: 3; post linear,
+                        1048: 1; post linear,
+                    }
+                    double avars:tz.spline = {
+                        1001: 0; post linear,
+                        1024: 2; post linear,
+                        1048: -1; post linear,
+                    }
+                }
+                over "ElbowPole"
+                {
+                    double avars:tx.spline = {
+                        1001: 0; post linear,
+                        1048: 1; post linear,
+                    }
+                    double avars:ty.spline = {
+                        1001: 0; post linear,
+                        1048: 2; post linear,
+                    }
+                    double avars:tz.spline = {
+                        1001: 0; post linear,
+                        1048: -1; post linear,
+                    }
+                }
+            }
+            over "Solvers"
+            {
+                over "IKFKBlend"
+                {
+                    float inputs:weight.spline = {
+                        bezier,
+                        1001: 0; post held,
+                        1012: 0; post held,
+                        1013: 1; post held,
+                        1048: 1; post held,
+                    }
+                }
+            }
+            over "Weights"
+            {
+                over "ElbowDriven"
+                {
+                    float inputs:driver.spline = {
+                        bezier,
+                        1001: 0.5; pre (0, 0); post curve (8, 0),
+                        1024: 1; pre (8, 0); post curve (8, 0),
+                        1048: 0.75; pre (8, 0); post curve (0, 0)
+                    }
+                }
+            }
+        }
+    }
+}
