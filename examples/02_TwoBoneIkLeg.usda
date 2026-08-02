@@ -9,6 +9,11 @@
     and inputs:softness eases into full extension. A RigExecDynamicWeight
     modulates the painted knee weights with an animated driver before the
     weighted matrix movers skin the leg strip.
+
+    The controls draw the guide shapes that route through Hydra's implicit
+    primitives rather than through synthesized topology: a solid cube at the
+    hip root, a small solid sphere on the knee pole, and the three-ring wire
+    sphere on the foot effector.
     """
     defaultPrim = "LegAsset"
     endTimeCode = 1048
@@ -31,6 +36,11 @@ def Xform "LegAsset"
             )
             {
                 matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 8, 0, 1) )
+                uniform token guide:shape = "cube"
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.6
+                double guide:scaleY = 0.6
+                double guide:scaleZ = 0.6
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -53,6 +63,7 @@ def Xform "LegAsset"
                     1048: 1; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform token guide:shape = "sphere"
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -66,6 +77,11 @@ def Xform "LegAsset"
                     1048: 0.8; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 4, 3, 1) )
+                uniform token guide:shape = "sphere"
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.4
+                double guide:scaleY = 0.4
+                double guide:scaleZ = 0.4
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
         }

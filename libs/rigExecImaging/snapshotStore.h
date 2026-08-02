@@ -11,6 +11,8 @@
 
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/vec3d.h"
+#include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/path.h"
 
@@ -70,6 +72,32 @@ struct RigExecPublishedPrim {
     std::vector<double> guideRadii;
     GfVec3f guideColor{1.0f, 0.3f, 0.3f};
     float guideOpacity = 0.5f;
+
+    /// Control guide payload (spec §10.3 extension): a control draws ONE
+    /// synthesized shape at its posed frame, chosen and sized by the
+    /// authored guide attributes.
+    ///
+    /// Separate from the guideFrames vector above rather than folded into
+    /// it, because the two are different drawings: the joint payload is N
+    /// sphere+cone pairs whose only authored dimension is a radius, while
+    /// this is a single shape whose prim type depends on the authored
+    /// shape/drawMode pair. Sharing the array would make "which element is
+    /// which kind" a thing every consumer had to decide.
+    ///
+    /// guideColor/guideOpacity above are shared: both payloads read the
+    /// same guide:displayColor / guide:displayOpacity attributes, and a
+    /// prim never carries both payloads (a control is not a joint).
+    bool hasControlGuide = false;
+    /// Rigidized, ASSET-space, like guideFrames.
+    GfMatrix4d controlGuideFrame{1.0};
+    /// sphere|circle|box|cube|diamond|pyramid.
+    TfToken controlGuideShape;
+    /// wire|geometry.
+    TfToken controlGuideDrawMode;
+    /// Per-axis draw scale. Authored as three separate doubles (deliberately
+    /// not a vec3, per direction); stored as one vector because nothing
+    /// downstream has a reason to take the axes apart again.
+    GfVec3d controlGuideScale{1.0, 1.0, 1.0};
 };
 
 /// One complete immutable generation (spec §8.2: consumers see complete
@@ -206,10 +234,25 @@ private:
             before->hasNormals != after.hasNormals ||
             before->hasExtent != after.hasExtent ||
             before->hasGuides != after.hasGuides ||
-            before->guideFrames.size() != after.guideFrames.size()) {
+            before->guideFrames.size() != after.guideFrames.size() ||
+            before->hasControlGuide != after.hasControlGuide) {
+            return RigExecChangeStructural;
+        }
+        // Shape and draw mode decide the synthesized child's PRIM TYPE, so
+        // editing either is structural for exactly the reason a guide count
+        // change is: the consumer has to be told the prim it cached is a
+        // different prim now, not that one of its values moved.
+        if (after.hasControlGuide &&
+            (before->controlGuideShape != after.controlGuideShape ||
+             before->controlGuideDrawMode != after.controlGuideDrawMode)) {
             return RigExecChangeStructural;
         }
         uint8_t changes = RigExecChangeNone;
+        // Styling is shared by both guide payloads (one prim never carries
+        // both), so it is compared once here and folded into whichever one
+        // this prim publishes.
+        const bool styleChanged = before->guideColor != after.guideColor ||
+                                  before->guideOpacity != after.guideOpacity;
         // Both halves matter: the consumer publishes a delta built from the
         // pair, so a moving base with a static revision still moves the prim.
         if (after.hasXform && (before->xform != after.xform ||
@@ -232,9 +275,13 @@ private:
         if (after.hasGuides &&
             (before->guideFrames != after.guideFrames ||
              before->guideLengths != after.guideLengths ||
-             before->guideRadii != after.guideRadii ||
-             before->guideColor != after.guideColor ||
-             before->guideOpacity != after.guideOpacity)) {
+             before->guideRadii != after.guideRadii || styleChanged)) {
+            changes |= RigExecChangeGuides;
+        }
+        if (after.hasControlGuide &&
+            (before->controlGuideFrame != after.controlGuideFrame ||
+             before->controlGuideScale != after.controlGuideScale ||
+             styleChanged)) {
             changes |= RigExecChangeGuides;
         }
         return changes;

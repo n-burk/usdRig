@@ -5,7 +5,7 @@
 
 class "RigExecControlAPI" (
     customData = {
-        string userDocBrief = """Channel semantics and computational limits for animator-authored\r
+        string userDocBrief = """Channel semantics and computational limits for animator-authored
     controls."""
     }
 )
@@ -35,7 +35,7 @@ class "RigExecMoverAPI" (
 
 class RigExecRig "RigExecRig" (
     customData = {
-        string userDocBrief = """Character root: partition and namespace root for control,\r
+        string userDocBrief = """Character root: partition and namespace root for control,
     joint, and mover discovery (spec section 4.1)."""
     }
 )
@@ -45,8 +45,8 @@ class RigExecRig "RigExecRig" (
 
 class RigExecControl "RigExecControl" (
     customData = {
-        string userDocBrief = """An animator-facing RigExecXformable: animation is authored\r
-    on the avars (or an authored/connected posed:space), exactly like an\r
+        string userDocBrief = """An animator-facing RigExecXformable: animation is authored
+    on the avars (or an authored/connected posed:space), exactly like an
     Ir xformable."""
     }
 )
@@ -74,6 +74,40 @@ class RigExecControl "RigExecControl" (
     double default:tx = 0
     double default:ty = 0
     double default:tz = 0
+    color3f guide:displayColor = (1, 0.85, 0.2)
+    float guide:displayOpacity = 1
+    uniform token guide:drawMode = "wire" (
+        allowedTokens = ["wire", "geometry"]
+        customData = {
+            string userDocBrief = """wire draws the guide as hairline curves (no widths are
+        authored; Storm's fallback width gives the intended hairline
+        look)."""
+        }
+    )
+    double guide:scaleX = 1 (
+        customData = {
+            string userDocBrief = """Per-axis draw scale of the guide shape, deliberately
+        three separate double properties rather than a vec3."""
+        }
+    )
+    double guide:scaleY = 1 (
+        customData = {
+            string userDocBrief = "Per-axis draw scale along the local Y axis; see guide:scaleX."
+        }
+    )
+    double guide:scaleZ = 1 (
+        customData = {
+            string userDocBrief = "Per-axis draw scale along the local Z axis; see guide:scaleX."
+        }
+    )
+    uniform token guide:shape = "circle" (
+        allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
+        customData = {
+            string userDocBrief = """Guide primitive synthesized at the control's posed frame
+        origin (spec section 10.3 extension), exactly parallel to the
+        RigExecJoint sphere/cone guides."""
+        }
+    )
     matrix4d parent:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
@@ -97,10 +131,10 @@ class RigExecControl "RigExecControl" (
 
 class "RigExecXformable" (
     customData = {
-        string userDocBrief = """An abstract animation interface for an animatable coordinate\r
-    space, mirroring OpenExec's IrXformable contract exactly\r
-    (user-directed alignment, 2026-07-25): matrix4d local-to-world\r
-    rest/default/posed/parent spaces and scalar avars (rotations in\r
+        string userDocBrief = """An abstract animation interface for an animatable coordinate
+    space, mirroring OpenExec's IrXformable contract exactly
+    (user-directed alignment, 2026-07-25): matrix4d local-to-world
+    rest/default/posed/parent spaces and scalar avars (rotations in
     degrees)."""
     }
 )
@@ -151,9 +185,9 @@ class "RigExecXformable" (
 
 class RigExecJoint "RigExecJoint" (
     customData = {
-        string userDocBrief = """The joint of an armature-based rig, mirroring OpenExec's\r
-    IrJointScope exactly: a RigExecXformable specialized so guides can be\r
-    drawn (a sphere at the posed origin and a cone of guide:length along\r
+        string userDocBrief = """The joint of an armature-based rig, mirroring OpenExec's
+    IrJointScope exactly: a RigExecXformable specialized so guides can be
+    drawn (a sphere at the posed origin and a cone of guide:length along
     the posed aim axis, purpose guide)."""
     }
 )
@@ -186,7 +220,7 @@ class RigExecJoint "RigExecJoint" (
     double guide:length = 0
     double guide:radius = 1 (
         customData = {
-            string userDocBrief = """Radius of BOTH guide primitives: the sphere at the posed\r
+            string userDocBrief = """Radius of BOTH guide primitives: the sphere at the posed
         origin and the cone drawn along the aim axis."""
         }
     )
@@ -226,7 +260,7 @@ class RigExecFkChain "RigExecFkChain" (
     )
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints this solver poses (view-free\r
+            string userDocBrief = """Ordered output joints this solver poses (view-free
         extraction, user-directed 2026-07-25)."""
         }
     )
@@ -234,7 +268,7 @@ class RigExecFkChain "RigExecFkChain" (
 
 class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     customData = {
-        string userDocBrief = """Analytic two-bone IK with pole, stretch, softness, and preferred\r
+        string userDocBrief = """Analytic two-bone IK with pole, stretch, softness, and preferred
     bend."""
     }
 )
@@ -254,7 +288,7 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     rel rigExec:effectorControl
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints [root, mid, end] posed by this solve\r
+            string userDocBrief = """Ordered output joints [root, mid, end] posed by this solve
         (view-free extraction)."""
         }
     )
@@ -273,8 +307,7 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
 
 class RigExecBlendPointFrames "RigExecBlendPointFrames" (
     customData = {
-        string userDocBrief = """IK/FK or general frame blend of two aggregate providers.\r
-    Publishes computePointFrameArray."""
+        string userDocBrief = "IK/FK or general frame blend of two aggregate providers."
     }
 )
 {
@@ -285,7 +318,7 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
     rel rigExec:inputB
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints posed by the blended result (view-free\r
+            string userDocBrief = """Ordered output joints posed by the blended result (view-free
         extraction)."""
         }
     )
@@ -299,7 +332,7 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
 
 class RigExecTwistDistribution "RigExecTwistDistribution" (
     customData = {
-        string userDocBrief = """Distributes unwrapped twist over N frames between start and end\r
+        string userDocBrief = """Distributes unwrapped twist over N frames between start and end
     providers."""
     }
 )
@@ -313,13 +346,13 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
     rel rigExec:end
     uniform int[] rigExec:jointElements = [] (
         customData = {
-            string userDocBrief = """Optional aggregate element index for each rigExec:joints\r
+            string userDocBrief = """Optional aggregate element index for each rigExec:joints
         entry (parallel array)."""
         }
     )
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints posed by the distributed twist frames\r
+            string userDocBrief = """Ordered output joints posed by the distributed twist frames
         (view-free extraction)."""
         }
     )
@@ -329,9 +362,8 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
 
 class RigExecRibbon "RigExecRibbon" (
     customData = {
-        string userDocBrief = """Samples a native UsdGeomBasisCurves.points driver, constructs\r
-    transported frames, and optionally conforms to a native mesh surface.\r
-    Publishes computePointFrameArray (spec section 4.1)."""
+        string userDocBrief = """Samples a native UsdGeomBasisCurves.points driver, constructs
+    transported frames, and optionally conforms to a native mesh surface."""
     }
 )
 {
@@ -347,13 +379,13 @@ class RigExecRibbon "RigExecRibbon" (
     )
     uniform int[] rigExec:jointElements = [] (
         customData = {
-            string userDocBrief = """Optional aggregate element index per rigExec:joints entry\r
+            string userDocBrief = """Optional aggregate element index per rigExec:joints entry
         (parallel array)."""
         }
     )
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints posed along the ribbon (view-free\r
+            string userDocBrief = """Ordered output joints posed along the ribbon (view-free
         extraction)."""
         }
     )
@@ -370,7 +402,7 @@ class RigExecRibbon "RigExecRibbon" (
 
 class RigExecAimConstraint "RigExecAimConstraint" (
     customData = {
-        string userDocBrief = """Moves a transform target by replacing aim/up orientation while\r
+        string userDocBrief = """Moves a transform target by replacing aim/up orientation while
     preserving declared position/scale components (spec section 4.1)."""
     }
 )
@@ -388,7 +420,7 @@ class RigExecAimConstraint "RigExecAimConstraint" (
 
 class RigExecFloatMathMover "RigExecFloatMathMover" (
     customData = {
-        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an\r
+        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an
     exact float property target."""
     }
 )
@@ -403,7 +435,7 @@ class RigExecFloatMathMover "RigExecFloatMathMover" (
 
 class "RigExecWeightObject" (
     customData = {
-        string userDocBrief = """Abstract common contract for a total scalar weight field over\r
+        string userDocBrief = """Abstract common contract for a total scalar weight field over
     the logical elements of one exact prim or property target."""
     }
 )
@@ -423,8 +455,8 @@ class "RigExecWeightObject" (
 
 class RigExecStaticWeight "RigExecStaticWeight" (
     customData = {
-        string userDocBrief = """Time-invariant constant, dense, or sparse authored weight field;\r
-    every target element resolves to an explicit value or the authored\r
+        string userDocBrief = """Time-invariant constant, dense, or sparse authored weight field;
+    every target element resolves to an explicit value or the authored
     sparse default (spec section 4.1)."""
     }
 )
@@ -447,8 +479,8 @@ class RigExecStaticWeight "RigExecStaticWeight" (
 
 class RigExecDynamicWeight "RigExecDynamicWeight" (
     customData = {
-        string userDocBrief = """Epoch-shape-stable weight field recomputed from statically\r
-    declared inputs, optionally modulating a base weight object:\r
+        string userDocBrief = """Epoch-shape-stable weight field recomputed from statically
+    declared inputs, optionally modulating a base weight object:
     r_i = (b_i * d) * s + a; w_i = RangePolicy(r_i) (spec section 4.1)."""
     }
 )
@@ -475,8 +507,8 @@ class RigExecDynamicWeight "RigExecDynamicWeight" (
 
 class RigExecMatrixMover "RigExecMatrixMover" (
     customData = {
-        string userDocBrief = """Moves the preceding native point3f[] points value through one\r
-    declared target-local affine transform and blends each point with exactly\r
+        string userDocBrief = """Moves the preceding native point3f[] points value through one
+    declared target-local affine transform and blends each point with exactly
     one compatible weight object: p' = q + w (T q - q) (spec section 7.4)."""
     }
 )
@@ -498,8 +530,8 @@ class RigExecMatrixMover "RigExecMatrixMover" (
 
 class RigExecBlendShapeMover "RigExecBlendShapeMover" (
     customData = {
-        string userDocBrief = """Applies independently composed blend inputs and native\r
-    target-shape points samples to an exact standard UsdGeomPointBased.points\r
+        string userDocBrief = """Applies independently composed blend inputs and native
+    target-shape points samples to an exact standard UsdGeomPointBased.points
     property (spec section 7.3)."""
     }
 )
@@ -514,7 +546,7 @@ class RigExecBlendShapeMover "RigExecBlendShapeMover" (
 
 class RigExecBlendInput "RigExecBlendInput" (
     customData = {
-        string userDocBrief = """One independently composable blend channel with an authored or\r
+        string userDocBrief = """One independently composable blend channel with an authored or
     connected weight and relationships to samples."""
     }
 )
@@ -525,8 +557,8 @@ class RigExecBlendInput "RigExecBlendInput" (
 
 class RigExecBlendSample "RigExecBlendSample" (
     customData = {
-        string userDocBrief = """One target or in-between activation related to an exact native\r
-    target-shape points property; dense deltas are derived against the base\r
+        string userDocBrief = """One target or in-between activation related to an exact native
+    target-shape points property; dense deltas are derived against the base
     points."""
     }
 )
@@ -544,8 +576,8 @@ class RigExecBlendSample "RigExecBlendSample" (
 
 class RigExecCurveMover "RigExecCurveMover" (
     customData = {
-        string userDocBrief = """Reads standard basis-curve properties for wire, spline-IK,\r
-    ribbon, and curve-coordinate movement and writes an exact native\r
+        string userDocBrief = """Reads standard basis-curve properties for wire, spline-IK,
+    ribbon, and curve-coordinate movement and writes an exact native
     UsdGeomPointBased points property (spec section 7.5)."""
     }
 )
@@ -563,7 +595,7 @@ class RigExecCurveMover "RigExecCurveMover" (
 
 class RigExecVec3fMathMover "RigExecVec3fMathMover" (
     customData = {
-        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an\r
+        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an
     exact float3/vector-valued property target (spec section 4.1)."""
     }
 )
@@ -578,7 +610,7 @@ class RigExecVec3fMathMover "RigExecVec3fMathMover" (
 
 class RigExecMatrixMathMover "RigExecMatrixMathMover" (
     customData = {
-        string userDocBrief = """Statically typed multiply or blend over an exact matrix4d\r
+        string userDocBrief = """Statically typed multiply or blend over an exact matrix4d
     property target (spec section 4.1)."""
     }
 )
@@ -592,8 +624,8 @@ class RigExecMatrixMathMover "RigExecMatrixMathMover" (
 
 class RigExecLatticeMover "RigExecLatticeMover" (
     customData = {
-        string userDocBrief = """Reads cage points from a native mesh/points prim and writes\r
-    exactly one exact native UsdGeomPointBased points property through\r
+        string userDocBrief = """Reads cage points from a native mesh/points prim and writes
+    exactly one exact native UsdGeomPointBased points property through
     tensor-product basis evaluation (spec sections 4.1, 7.5)."""
     }
 )
@@ -614,8 +646,8 @@ class RigExecLatticeMover "RigExecLatticeMover" (
 
 class RigExecSurfaceMover "RigExecSurfaceMover" (
     customData = {
-        string userDocBrief = """Reads standard mesh properties for attachment/projection/\r
-    sliding and surface-driven correction and writes an exact native\r
+        string userDocBrief = """Reads standard mesh properties for attachment/projection/
+    sliding and surface-driven correction and writes an exact native
     UsdGeomPointBased points property (spec sections 4.1, 7.5)."""
     }
 )
@@ -635,10 +667,10 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
 
 class RigExecSmoothMover "RigExecSmoothMover" (
     customData = {
-        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points\r
-    property through uniform-weight Laplacian smoothing with fixed edge\r
-    adjacency taken from the destination's standard topology (spec\r
-    section 7.6 revised: the former post-mover smooth operation as a\r
+        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points
+    property through uniform-weight Laplacian smoothing with fixed edge
+    adjacency taken from the destination's standard topology (spec
+    section 7.6 revised: the former post-mover smooth operation as a
     first-class mover)."""
     }
 )
@@ -652,9 +684,9 @@ class RigExecSmoothMover "RigExecSmoothMover" (
 
 class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
     customData = {
-        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points\r
-    property by uniform centroid scaling toward the authored rest bound\r
-    volume (spec section 7.6 revised: the former post-mover volumeCorrect\r
+        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points
+    property by uniform centroid scaling toward the authored rest bound
+    volume (spec section 7.6 revised: the former post-mover volumeCorrect
     operation as a first-class mover)."""
     }
 )

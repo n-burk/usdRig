@@ -14,6 +14,52 @@ namespace rigExec {
 
 namespace {
 
+// The rigid ASSET-space placement matrix of one posed frame, or nothing
+// when the frame cannot supply one.
+//
+// Guides are rigid: the frame's scale/shear is stripped so the authored
+// guide dimensions (a joint's length/radius, a control's per-axis scale)
+// are the SOLE dimensional scale. An affine basis would apply the bone
+// scale a second time -- to the cone height and base offset for a joint,
+// to the whole shape for a control.
+//
+// Shared by the joint/solver payload and the control guides so the two
+// cannot drift apart: a guide drawn from a frame one of them rejects and
+// the other accepts would be a difference nobody could see coming.
+bool
+_RigidGuideMatrix(const RigExecPointFrame &frame, GfMatrix4d *result)
+{
+    if (!frame.IsValid() || frame.IsDegenerate()) {
+        return false;
+    }
+    static const RigExecPointFrame identity;
+    GfMatrix4d m(1.0);
+    if (!RigExecPointsToMatrix(identity.points, frame.points, &m)) {
+        return false;
+    }
+    // A basis that cannot be orthonormalized (collapsed/collinear axes)
+    // draws nothing rather than publishing a broken placement.
+    if (!m.Orthonormalize(/* issueWarning = */ false)) {
+        return false;
+    }
+    // Proper rigid rotation: a reflected frame keeps its +X aim but has
+    // its Z basis flipped so the determinant is positive.
+    if (m.GetDeterminant3() < 0) {
+        for (int c = 0; c < 3; ++c) {
+            m[2][c] = -m[2][c];
+        }
+    }
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            if (!std::isfinite(m[r][c])) {
+                return false;
+            }
+        }
+    }
+    *result = m;
+    return true;
+}
+
 // One guide element from a posed frame: rig-space placement matrix, cone
 // length, and primitive radius. Joints use the authored guide:length
 // exactly (Ir contract: zero draws no cone); solver elements — which have
@@ -29,28 +75,9 @@ _AppendGuideFrame(
     double authoredRadius, bool useAimFallback,
     RigExecPublishedPrim *published)
 {
-    if (!frame.IsValid() || frame.IsDegenerate()) {
-        return false;
-    }
-    static const RigExecPointFrame identity;
     GfMatrix4d m(1.0);
-    if (!RigExecPointsToMatrix(identity.points, frame.points, &m)) {
+    if (!_RigidGuideMatrix(frame, &m)) {
         return false;
-    }
-    // Guides are rigid: strip the frame's scale/shear so guideLengths is
-    // the sole dimensional scale (an affine basis would apply the bone
-    // scale a second time to the cone height and base offset). A basis
-    // that cannot be orthonormalized (collapsed/collinear axes) draws
-    // nothing rather than publishing a broken placement.
-    if (!m.Orthonormalize(/* issueWarning = */ false)) {
-        return false;
-    }
-    // Proper rigid rotation: a reflected frame keeps its +X aim but has
-    // its Z basis flipped so the determinant is positive.
-    if (m.GetDeterminant3() < 0) {
-        for (int c = 0; c < 3; ++c) {
-            m[2][c] = -m[2][c];
-        }
     }
     double length = authoredLength;
     if (length <= 0.0) {
@@ -62,13 +89,6 @@ _AppendGuideFrame(
     }
     if (!std::isfinite(authoredRadius) || authoredRadius <= 0.0) {
         return false;
-    }
-    for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) {
-            if (!std::isfinite(m[r][c])) {
-                return false;
-            }
-        }
     }
     published->guideFrames.push_back(m);
     published->guideLengths.push_back(length);
@@ -200,6 +220,71 @@ RigExecImagingBridge::_FillGuides(
     }
 }
 
+// Controls draw one synthesized shape each at their posed frame
+// (spec §10.3 extension): shape, draw mode, and per-axis scale are
+// authored on the control, and the results scene index turns the published
+// payload into the child prim.
+void
+RigExecImagingBridge::_FillControlGuides(
+    const RigExecRigPose &pose, RigExecImagingSnapshot *snapshot) const
+{
+    // Set here as well as in _FillGuides: control guide frames are
+    // asset-space too, and a rig can publish these and no joint guides at
+    // all (every joint frame degenerate, say), in which case this is the
+    // only place the anchor gets recorded.
+    snapshot->assetRoot = _rigPath.GetParentPath();
+
+    for (const auto &[controlPath, frame] : pose.controlFrames) {
+        GfMatrix4d placement(1.0);
+        if (!_RigidGuideMatrix(frame, &placement)) {
+            continue;
+        }
+        const UsdPrim prim = _stage->GetPrimAtPath(controlPath);
+        // The schema fallbacks, restated. Normally GetAttribute resolves
+        // them for us, but a stage composed without the codeless schema
+        // plugin registered has no fallback to find, and an empty shape
+        // token names no shape at all -- so a rig would silently stop
+        // drawing control guides rather than draw the documented default.
+        TfToken shape("circle");
+        TfToken drawMode("wire");
+        GfVec3d scale(1.0, 1.0, 1.0);
+        if (prim) {
+            if (UsdAttribute a = prim.GetAttribute(TfToken("guide:shape"))) {
+                a.Get(&shape, pose.time);
+            }
+            if (UsdAttribute a =
+                    prim.GetAttribute(TfToken("guide:drawMode"))) {
+                a.Get(&drawMode, pose.time);
+            }
+            static const TfToken scaleAttrs[3] = {
+                TfToken("guide:scaleX"), TfToken("guide:scaleY"),
+                TfToken("guide:scaleZ")};
+            for (int axis = 0; axis < 3; ++axis) {
+                if (UsdAttribute a = prim.GetAttribute(scaleAttrs[axis])) {
+                    a.Get(&scale[axis], pose.time);
+                }
+            }
+        }
+        // A non-finite or non-positive scale on ANY axis draws nothing,
+        // mirroring the joint guide:radius rule: a flattened shape is
+        // invisible from most angles and degenerate from the rest, so
+        // publishing it would only cost the viewer geometry it cannot
+        // meaningfully see.
+        if (!std::isfinite(scale[0]) || !std::isfinite(scale[1]) ||
+            !std::isfinite(scale[2]) || scale[0] <= 0.0 ||
+            scale[1] <= 0.0 || scale[2] <= 0.0) {
+            continue;
+        }
+        RigExecPublishedPrim &published = snapshot->prims[controlPath];
+        published.hasControlGuide = true;
+        published.controlGuideFrame = placement;
+        published.controlGuideShape = shape;
+        published.controlGuideDrawMode = drawMode;
+        published.controlGuideScale = scale;
+        _ReadGuideStyle(prim, pose.time, &published);
+    }
+}
+
 bool
 RigExecImagingBridge::EvaluateAndPublish(UsdTimeCode time)
 {
@@ -255,6 +340,7 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     // results scene index like OpenExec's IrJointScope guides).
     _FillProviderXforms(pose, snapshot.get());
     _FillGuides(pose, snapshot.get());
+    _FillControlGuides(pose, snapshot.get());
 
     // 3. A structural recompile publishes a replacement binding epoch
     // before value notices (spec §10.4).
@@ -339,7 +425,8 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
         if (i == baseIndex) {
             // Guides are single-sampled at the base offset.
             _FillProviderXforms(pose, snapshot.get());
-    _FillGuides(pose, snapshot.get());
+            _FillGuides(pose, snapshot.get());
+            _FillControlGuides(pose, snapshot.get());
         }
         for (const auto &[propertyPath, value] : pose.movedProperties) {
             const SdfPath primPath = propertyPath.GetPrimPath();

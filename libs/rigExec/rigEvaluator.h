@@ -51,6 +51,16 @@ struct RigExecRigPose {
     /// Joint path -> final rest->pose affine map (target-local).
     std::map<SdfPath, GfMatrix4d> jointMatricesFinal;
 
+    /// Control path -> posed frame, ASSET-space like the joint frames.
+    ///
+    /// The BASE phase is the whole story for a control: controls are rig
+    /// inputs, not outputs. Nothing in the pose domain writes them (a mover
+    /// that did would make the animator's channel disagree with the thing
+    /// they are dragging), so base and final are the same frame and only
+    /// one is published. Consumed by the imaging bridge to place the
+    /// synthesized control guides (spec §10.3 extension).
+    std::map<SdfPath, RigExecPointFrame> controlFrames;
+
     /// Transform provider -> revised ASSET-SPACE matrix for the prim.
     ///
     /// For a provider that is a plain UsdGeomXformable (not a Joint or
@@ -183,6 +193,14 @@ private:
     std::unique_ptr<RigExecTapSet> _guideTaps;
 
     std::vector<SdfPath> _jointPaths;
+    /// Every RigExecControl beneath the rig, discovered exactly the way the
+    /// joint outputs are (spec §4.1: the rig is a namespace root, not a
+    /// manifest). Unlike the joints an empty set is legal -- a rig driven
+    /// entirely by avars on its joints has no control prims at all -- so it
+    /// never fails Compile.
+    std::vector<SdfPath> _controlPaths;
+    /// Base computePointFrame per control, parallel to _controlPaths.
+    std::vector<RigExecTapId> _controlFrameTaps;
     /// Solver->joint binding, held in memory rather than authored.
     ///
     /// This is what Pass 0 used to write onto each joint as

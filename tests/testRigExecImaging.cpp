@@ -19,8 +19,14 @@
 
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/imaging/hd/basisCurvesSchema.h"
+#include "pxr/imaging/hd/basisCurvesTopologySchema.h"
+#include "pxr/imaging/hd/cubeSchema.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/imaging/hd/extentSchema.h"
+#include "pxr/imaging/hd/meshSchema.h"
+#include "pxr/imaging/hd/meshTopologySchema.h"
+#include "pxr/imaging/hd/sphereSchema.h"
 #include "pxr/imaging/hd/flattenedDataSourceProviders.h"
 #include "pxr/imaging/hd/flatteningSceneIndex.h"
 #include "pxr/imaging/hd/purposeSchema.h"
@@ -37,8 +43,11 @@
 #include "pxr/imaging/hd/xformSchema.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 using namespace rigExec;
 
@@ -966,6 +975,840 @@ TestBridgeOverShotStage(const std::string &examplesDir)
     results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
 }
 
+// Control guides (spec §10.3 extension): every RigExecControl grows one
+// synthesized `rigGuideCtrl` child drawing the authored guide:shape in the
+// authored guide:drawMode, sized by guide:scaleX/Y/Z and placed at the
+// control's posed frame.
+//
+// The shape table is asserted exhaustively -- all six shapes in both draw
+// modes -- because the prim type and the topology are the contract a
+// renderer consumes, and a wrong count draws a shape that is merely
+// plausible: a 32-gon missing its closing vertex still renders, as an arc.
+static void
+TestControlGuides(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmShotAnim.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath rigPath("/Shot/HeroArm/Rig");
+    const SdfPath controls("/Shot/HeroArm/Rig/Controls");
+    const SdfPath shoulderFk = controls.AppendChild(TfToken("ShoulderFK"));
+    const SdfPath elbowFk = controls.AppendChild(TfToken("ElbowFK"));
+    const SdfPath wristFk = controls.AppendChild(TfToken("WristFK"));
+    const SdfPath handIk = controls.AppendChild(TfToken("HandIK"));
+    const SdfPath elbowPole = controls.AppendChild(TfToken("ElbowPole"));
+    static const TfToken guideChild("rigGuideCtrl");
+
+    RigExecImagingBridge bridge(stage, rigPath);
+    std::vector<std::string> errors;
+    const bool compiled = bridge.Compile(&errors);
+    for (const std::string &e : errors) {
+        std::printf("compile error: %s\n", e.c_str());
+    }
+    CHECK(compiled);
+    if (!compiled) return;
+
+    // Upstream prim shells for the controls: a guide only synthesizes
+    // beneath a parent that exists upstream. WristFK is hidden and carries
+    // a primOrigin, exactly as a flattened UsdImaging prim would.
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    HdRetainedSceneIndex::AddedPrimEntries shells;
+    for (const SdfPath &p :
+         {shoulderFk, elbowFk, handIk, elbowPole}) {
+        shells.push_back({p, TfToken(),
+                          HdRetainedContainerDataSource::New(0, nullptr,
+                                                             nullptr)});
+    }
+    static const TfToken wristNames[] = {
+        HdVisibilitySchema::GetSchemaToken(),
+        HdPrimOriginSchema::GetSchemaToken()};
+    const HdDataSourceBaseHandle wristValues[] = {
+        HdVisibilitySchema::Builder()
+            .SetVisibility(HdRetainedTypedSampledDataSource<bool>::New(false))
+            .Build(),
+        HdRetainedContainerDataSource::New(
+            HdPrimOriginSchemaTokens->scenePath,
+            HdRetainedTypedSampledDataSource<
+                HdPrimOriginSchema::OriginPath>::New(
+                    HdPrimOriginSchema::OriginPath(wristFk)))};
+    shells.push_back({wristFk, TfToken(),
+                      HdRetainedContainerDataSource::New(2, wristNames,
+                                                         wristValues)});
+    upstream->AddPrims(shells);
+
+    auto binding = RigExecBindingResolvingSceneIndex::New(upstream);
+    auto results = RigExecResultsSceneIndex::New(binding, bridge.GetStore());
+    bridge.SetSceneIndices(binding, results);
+    _RecordingObserver observer;
+    results->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    // Authoring through the schema-declared attribute, not CreateAttribute:
+    // an invalid handle here means the codeless schema lost the property,
+    // and that must fail loudly rather than quietly author nothing.
+    auto setToken = [&stage](const SdfPath &path, const char *name,
+                             const char *value) {
+        const UsdAttribute a =
+            stage->GetPrimAtPath(path).GetAttribute(TfToken(name));
+        return a && a.Set(TfToken(value));
+    };
+    auto setDouble = [&stage](const SdfPath &path, const char *name,
+                              double value) {
+        const UsdAttribute a =
+            stage->GetPrimAtPath(path).GetAttribute(TfToken(name));
+        return a && a.Set(value);
+    };
+
+    auto guidePath = [&](const SdfPath &control) {
+        return control.AppendChild(guideChild);
+    };
+    auto hasGuideChild = [&](const SdfPath &control) {
+        for (const SdfPath &p : results->GetChildPrimPaths(control)) {
+            if (p == guidePath(control)) return true;
+        }
+        return false;
+    };
+    // curveVertexCounts for a wire guide, faceVertexCounts for a mesh one.
+    auto topologyCounts = [](const HdSceneIndexPrim &prim) {
+        VtIntArray counts;
+        if (!prim.dataSource) return counts;
+        if (HdBasisCurvesSchema curves =
+                HdBasisCurvesSchema::GetFromParent(prim.dataSource)) {
+            if (HdIntArrayDataSourceHandle ds =
+                    curves.GetTopology().GetCurveVertexCounts()) {
+                counts = ds->GetTypedValue(0.0f);
+            }
+        } else if (HdMeshSchema mesh =
+                       HdMeshSchema::GetFromParent(prim.dataSource)) {
+            if (HdIntArrayDataSourceHandle ds =
+                    mesh.GetTopology().GetFaceVertexCounts()) {
+                counts = ds->GetTypedValue(0.0f);
+            }
+        }
+        return counts;
+    };
+    auto faceVertexIndices = [](const HdSceneIndexPrim &prim) {
+        VtIntArray indices;
+        if (prim.dataSource) {
+            if (HdMeshSchema mesh =
+                    HdMeshSchema::GetFromParent(prim.dataSource)) {
+                if (HdIntArrayDataSourceHandle ds =
+                        mesh.GetTopology().GetFaceVertexIndices()) {
+                    indices = ds->GetTypedValue(0.0f);
+                }
+            }
+        }
+        return indices;
+    };
+
+    // ---- Nothing authored at all: the schema fallbacks draw a wire
+    // circle. This runs FIRST, before any guide attribute is set, because
+    // it is the only moment the unauthored state exists -- and it is the
+    // state every control in every rig that predates this feature is in, so
+    // it is the one that decides whether they all suddenly draw nothing.
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+    {
+        CHECK(hasGuideChild(elbowFk));
+        const HdSceneIndexPrim guide = results->GetPrim(guidePath(elbowFk));
+        CHECK(guide.primType == HdPrimTypeTokens->basisCurves);
+        const VtIntArray counts = topologyCounts(guide);
+        CHECK(counts.size() == 1);
+        if (counts.size() == 1) {
+            CHECK(counts[0] == 33);
+        }
+        CHECK(_GetPointsPrimvar(guide).size() == 33);
+    }
+    // ...and the attributes really are schema-declared: an invalid handle
+    // here means the codeless schema lost the property, which must fail
+    // loudly rather than quietly author nothing.
+    CHECK(setToken(shoulderFk, "guide:shape", "circle"));
+
+    // ---- Every shape in every draw mode, one publication each.
+    //
+    // Wire rings close by repeating their first point, so a ring of N
+    // segments is N+1 points; the mesh forms drop the repeat because a face
+    // closes itself.
+    // faceVertexIndices are asserted in ORDER, not merely counted. The
+    // order IS the winding, and a wrong winding is invisible to a count and
+    // nearly invisible on screen: doubleSided keeps an inward-wound solid
+    // from disappearing, so it survives a look at the viewport while
+    // inverting every derived normal a normal AOV or a front/back-sensitive
+    // material sees. The solid pyramid shipped inward-wound on all five
+    // faces behind exactly that gap.
+    struct _Expected {
+        const char *shape;
+        const char *drawMode;
+        TfToken primType;
+        std::vector<int> counts;    // empty for the implicits
+        size_t points;              // 0 for the implicits
+        std::vector<int> indices;   // faceVertexIndices; empty unless a mesh
+    };
+    // The circle mesh is one n-gon over consecutive vertices.
+    std::vector<int> circleFan(32);
+    for (int i = 0; i < 32; ++i) {
+        circleFan[i] = i;
+    }
+    const std::vector<_Expected> expectations = {
+        {"circle", "wire", HdPrimTypeTokens->basisCurves, {33}, 33, {}},
+        {"sphere", "wire", HdPrimTypeTokens->basisCurves,
+         {33, 33, 33}, 99, {}},
+        {"box", "wire", HdPrimTypeTokens->basisCurves, {5}, 5, {}},
+        {"cube", "wire", HdPrimTypeTokens->basisCurves,
+         {5, 5, 2, 2, 2, 2}, 18, {}},
+        {"diamond", "wire", HdPrimTypeTokens->basisCurves,
+         {5, 5, 5}, 15, {}},
+        {"pyramid", "wire", HdPrimTypeTokens->basisCurves,
+         {5, 2, 2, 2, 2}, 13, {}},
+        {"sphere", "geometry", HdPrimTypeTokens->sphere, {}, 0, {}},
+        {"cube", "geometry", HdPrimTypeTokens->cube, {}, 0, {}},
+        {"circle", "geometry", HdPrimTypeTokens->mesh, {32}, 32, circleFan},
+        // The unit quad in the XZ plane, wound counter-clockwise seen from
+        // +Y so its derived normal is +Y.
+        {"box", "geometry", HdPrimTypeTokens->mesh, {4}, 4, {0, 1, 2, 3}},
+        // Octahedron, vertices [+X, -X, +Y, -Y, +Z, -Z]: four faces around
+        // +Y then four around -Y, every one wound counter-clockwise seen
+        // from outside.
+        {"diamond", "geometry", HdPrimTypeTokens->mesh,
+         {3, 3, 3, 3, 3, 3, 3, 3}, 6,
+         {0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0,
+          0, 4, 3, 4, 1, 3, 1, 5, 3, 5, 0, 3}},
+        // Base corners [0..3] counter-clockwise seen from +Y, apex 4. Each
+        // side takes two base corners in ring order then the apex; the base
+        // quad takes the ring REVERSED, because it is the one face whose
+        // outward direction is -Y.
+        {"pyramid", "geometry", HdPrimTypeTokens->mesh,
+         {3, 3, 3, 3, 4}, 5,
+         {0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4, 3, 2, 1, 0}}};
+    for (const _Expected &expected : expectations) {
+        CHECK(setToken(shoulderFk, "guide:shape", expected.shape));
+        CHECK(setToken(shoulderFk, "guide:drawMode", expected.drawMode));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+
+        CHECK(hasGuideChild(shoulderFk));
+        const HdSceneIndexPrim guide =
+            results->GetPrim(guidePath(shoulderFk));
+        if (guide.primType != expected.primType) {
+            std::printf("  %s/%s drew a %s, expected %s\n", expected.shape,
+                        expected.drawMode, guide.primType.GetText(),
+                        expected.primType.GetText());
+        }
+        CHECK(guide.primType == expected.primType);
+        CHECK(guide.dataSource);
+        if (!guide.dataSource) continue;
+
+        const VtIntArray counts = topologyCounts(guide);
+        const bool countsMatch =
+            counts.size() == expected.counts.size() &&
+            std::equal(counts.begin(), counts.end(),
+                       expected.counts.begin());
+        if (!countsMatch) {
+            std::printf("  %s/%s topology counts: got %zu entries, "
+                        "expected %zu\n", expected.shape, expected.drawMode,
+                        counts.size(), expected.counts.size());
+        }
+        CHECK(countsMatch);
+        CHECK(_GetPointsPrimvar(guide).size() == expected.points);
+
+        const VtIntArray indices = faceVertexIndices(guide);
+        const bool indicesMatch =
+            indices.size() == expected.indices.size() &&
+            std::equal(indices.begin(), indices.end(),
+                       expected.indices.begin());
+        if (!indicesMatch) {
+            std::printf("  %s/%s faceVertexIndices differ (got %zu, expected "
+                        "%zu) -- a reordered face is a flipped winding\n",
+                        expected.shape, expected.drawMode, indices.size(),
+                        expected.indices.size());
+            for (size_t i = 0; i < indices.size() &&
+                               i < expected.indices.size(); ++i) {
+                if (indices[i] != expected.indices[i]) {
+                    std::printf("    first difference at %zu: %d != %d\n", i,
+                                indices[i], expected.indices[i]);
+                    break;
+                }
+            }
+        }
+        CHECK(indicesMatch);
+
+        // The implicits carry their dimension in their own schema; the
+        // explicit shapes carry a local unit extent instead.
+        if (expected.primType == HdPrimTypeTokens->sphere) {
+            HdSphereSchema sphere =
+                HdSphereSchema::GetFromParent(guide.dataSource);
+            CHECK(sphere.GetRadius() &&
+                  sphere.GetRadius()->GetTypedValue(0.0f) == 1.0);
+        } else if (expected.primType == HdPrimTypeTokens->cube) {
+            HdCubeSchema cube =
+                HdCubeSchema::GetFromParent(guide.dataSource);
+            CHECK(cube.GetSize() &&
+                  cube.GetSize()->GetTypedValue(0.0f) == 2.0);
+        } else {
+            HdExtentSchema extent =
+                HdExtentSchema::GetFromParent(guide.dataSource);
+            CHECK(extent.GetMin() && extent.GetMax());
+            if (extent.GetMin() && extent.GetMax()) {
+                const GfVec3d min = extent.GetMin()->GetTypedValue(0.0f);
+                const GfVec3d max = extent.GetMax()->GetTypedValue(0.0f);
+                // Unit shapes: no axis reaches past 1, and the bound is a
+                // bound (the planar shapes are flat in Y, so min == max
+                // there is expected).
+                for (size_t i = 0; i < 3; ++i) {
+                    CHECK(min[i] >= -1.0 - 1e-6 && max[i] <= 1.0 + 1e-6);
+                    CHECK(min[i] <= max[i]);
+                }
+            }
+        }
+        // Meshes are double-sided: a guide is looked at from every side.
+        if (expected.primType == HdPrimTypeTokens->mesh) {
+            HdMeshSchema mesh =
+                HdMeshSchema::GetFromParent(guide.dataSource);
+            CHECK(mesh.GetDoubleSided() &&
+                  mesh.GetDoubleSided()->GetTypedValue(0.0f));
+        }
+        // Wire guides author NO widths: Storm's fallback width is what
+        // gives them the intended hairline look.
+        if (expected.primType == HdPrimTypeTokens->basisCurves) {
+            HdPrimvarsSchema primvars =
+                HdPrimvarsSchema::GetFromParent(guide.dataSource);
+            CHECK(!primvars.GetPrimvar(HdTokens->widths));
+        }
+    }
+
+    // ---- Style and placement, on the default-shaped guide.
+    CHECK(setToken(shoulderFk, "guide:shape", "circle"));
+    CHECK(setToken(shoulderFk, "guide:drawMode", "wire"));
+    CHECK(setToken(elbowFk, "guide:shape", "sphere"));
+    CHECK(setToken(handIk, "guide:shape", "diamond"));
+    CHECK(setToken(handIk, "guide:drawMode", "geometry"));
+    CHECK(setToken(wristFk, "guide:shape", "cube"));
+    CHECK(setToken(wristFk, "guide:drawMode", "geometry"));
+    CHECK(setToken(elbowPole, "guide:shape", "pyramid"));
+    CHECK(setDouble(elbowPole, "guide:scaleX", 2.0));
+    CHECK(setDouble(elbowPole, "guide:scaleY", 3.0));
+    CHECK(setDouble(elbowPole, "guide:scaleZ", 0.5));
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+
+    {
+        const HdSceneIndexPrim guide =
+            results->GetPrim(guidePath(shoulderFk));
+        CHECK(guide.dataSource);
+        if (guide.dataSource) {
+            HdPurposeSchema purpose =
+                HdPurposeSchema::GetFromParent(guide.dataSource);
+            CHECK(purpose.GetPurpose() &&
+                  purpose.GetPurpose()->GetTypedValue(0.0f) ==
+                      HdRenderTagTokens->guide);
+
+            HdPrimvarsSchema primvars =
+                HdPrimvarsSchema::GetFromParent(guide.dataSource);
+            HdPrimvarSchema color =
+                primvars.GetPrimvar(HdTokens->displayColor);
+            CHECK(color.GetInterpolation() &&
+                  color.GetInterpolation()->GetTypedValue(0.0f) ==
+                      HdPrimvarSchemaTokens->constant);
+            HdPrimvarSchema opacity =
+                primvars.GetPrimvar(HdTokens->displayOpacity);
+            CHECK(opacity.GetInterpolation() &&
+                  opacity.GetInterpolation()->GetTypedValue(0.0f) ==
+                      HdPrimvarSchemaTokens->constant);
+            // The control schema's own default, not the joint guide red.
+            if (HdSampledDataSourceHandle v = color.GetPrimvarValue()) {
+                const VtValue held = v->GetValue(0.0f);
+                CHECK(held.IsHolding<VtVec3fArray>());
+                if (held.IsHolding<VtVec3fArray>()) {
+                    const VtVec3fArray c = held.UncheckedGet<VtVec3fArray>();
+                    CHECK(c.size() == 1);
+                    if (c.size() == 1) {
+                        CHECK(std::abs(c[0][1] - 0.85f) < 1e-5f);
+                    }
+                }
+            }
+        }
+    }
+
+    // The guide sits at the control's posed frame, in ASSET space: nothing
+    // upstream places /Shot/HeroArm here, so the asset root resolves to
+    // identity and ShoulderFK's rest translate is the whole transform.
+    auto guideXform = [&](const SdfPath &control) {
+        HdXformSchema xf = HdXformSchema::GetFromParent(
+            results->GetPrim(guidePath(control)).dataSource);
+        return xf && xf.GetMatrix() ? xf.GetMatrix()->GetTypedValue(0.0f)
+                                    : GfMatrix4d(1.0);
+    };
+    CHECK((guideXform(shoulderFk).ExtractTranslation() -
+           GfVec3d(0, 10, 0)).GetLength() < 1e-6);
+
+    // Per-axis scale shows up as the basis-vector lengths, and ONLY there:
+    // the posed frame is orthonormalized before it places the guide, so
+    // guide:scaleX/Y/Z is the sole dimensional scale.
+    {
+        const GfMatrix4d xform = guideXform(elbowPole);
+        const double expectedLengths[3] = {2.0, 3.0, 0.5};
+        for (size_t i = 0; i < 3; ++i) {
+            const double length = xform.GetRow3(i).GetLength();
+            if (std::abs(length - expectedLengths[i]) > 1e-6) {
+                std::printf("  basis %zu length %g, expected %g -- per-axis "
+                            "guide scale not applied\n", i, length,
+                            expectedLengths[i]);
+            }
+            CHECK(std::abs(length - expectedLengths[i]) < 1e-6);
+        }
+    }
+
+    // Inherited visibility: WristFK is hidden upstream, so its guide is
+    // hidden too. A synthesized prim with no visibility of its own falls
+    // back to VISIBLE, which would float a guide over a hidden control.
+    {
+        const HdSceneIndexPrim guide = results->GetPrim(guidePath(wristFk));
+        CHECK(guide.dataSource);
+        HdVisibilitySchema vis =
+            HdVisibilitySchema::GetFromParent(guide.dataSource);
+        const bool visible = !vis || !vis.GetVisibility() ||
+                             vis.GetVisibility()->GetTypedValue(0.0f);
+        if (visible) {
+            std::printf("  control guide under a hidden control is still "
+                        "visible -- inherited visibility not applied\n");
+        }
+        CHECK(!visible);
+
+        // ...and picking it must select the CONTROL, which is the whole
+        // point of drawing a control guide.
+        HdPrimOriginSchema origin =
+            HdPrimOriginSchema::GetFromParent(guide.dataSource);
+        const SdfPath resolved =
+            origin ? origin.GetOriginPath(HdPrimOriginSchemaTokens->scenePath)
+                   : SdfPath();
+        if (resolved != wristFk) {
+            std::printf("  control guide has no primOrigin -- picking it "
+                        "resolves to nothing selectable\n");
+        }
+        CHECK(resolved == wristFk);
+    }
+
+    // The guide follows the pose per generation: HandIK is animated, so
+    // its guide moves and the child is dirtied.
+    {
+        const GfMatrix4d rest = guideXform(handIk);
+        observer.dirtied.clear();
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        const GfMatrix4d posed = guideXform(handIk);
+        CHECK(rest != posed);
+        bool sawGuideDirty = false;
+        for (const SdfPath &p : observer.dirtied) {
+            if (p == guidePath(handIk)) sawGuideDirty = true;
+        }
+        CHECK(sawGuideDirty);
+    }
+
+    // A shape edit WITHIN one draw mode keeps the prim type and changes the
+    // topology under it -- wire circle and wire pyramid are both
+    // basisCurves. There is no re-add to carry that (the type is what an
+    // add announces), so the consumer learns it from the structural dirty
+    // on the child, and a consumer that cached the old container has to be
+    // told to drop it. Without that, a retyped guide keeps drawing its old
+    // shape forever.
+    {
+        CHECK(setToken(elbowPole, "guide:shape", "circle"));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        const VtIntArray before =
+            topologyCounts(results->GetPrim(guidePath(elbowPole)));
+        CHECK(before.size() == 1);
+
+        observer.dirtied.clear();
+        CHECK(setToken(elbowPole, "guide:shape", "pyramid"));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        const HdSceneIndexPrim guide =
+            results->GetPrim(guidePath(elbowPole));
+        CHECK(guide.primType == HdPrimTypeTokens->basisCurves);
+        const VtIntArray after = topologyCounts(guide);
+        const bool resynced =
+            after.size() == 5 && after[0] == 5 && after[1] == 2 &&
+            after[2] == 2 && after[3] == 2 && after[4] == 2;
+        if (!resynced) {
+            std::printf("  a guide:shape change within one draw mode left "
+                        "%zu curve(s), expected the pyramid's 5\n",
+                        after.size());
+        }
+        CHECK(resynced);
+        bool sawGuideDirty = false;
+        for (const SdfPath &p : observer.dirtied) {
+            if (p == guidePath(elbowPole)) sawGuideDirty = true;
+        }
+        if (!sawGuideDirty) {
+            std::printf("  a guide:shape change did not dirty the guide -- "
+                        "a cached consumer keeps the old topology\n");
+        }
+        CHECK(sawGuideDirty);
+    }
+
+    // A shape or draw-mode edit changes the child's PRIM TYPE, so it is
+    // structural: the consumer is told through a fresh PrimsAdded carrying
+    // the new type, not through a value dirty on a prim it still believes
+    // is a basisCurves.
+    {
+        observer.added.clear();
+        CHECK(setToken(handIk, "guide:drawMode", "wire"));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(results->GetPrim(guidePath(handIk)).primType ==
+              HdPrimTypeTokens->basisCurves);
+        bool reAnnounced = false;
+        for (const SdfPath &p : observer.added) {
+            if (p == guidePath(handIk)) reAnnounced = true;
+        }
+        if (!reAnnounced) {
+            std::printf("  a draw-mode change re-typed the guide without "
+                        "re-announcing it\n");
+        }
+        CHECK(reAnnounced);
+    }
+
+    // A non-positive scale on ANY axis draws nothing at all -- the same
+    // rule the joint guide:radius follows. The child disappears from the
+    // traversal, is removed, and stops resolving.
+    {
+        observer.removed.clear();
+        CHECK(setDouble(elbowPole, "guide:scaleY", 0.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(!hasGuideChild(elbowPole));
+        CHECK(!results->GetPrim(guidePath(elbowPole)).dataSource);
+        bool sawRemoval = false;
+        for (const SdfPath &p : observer.removed) {
+            if (p == guidePath(elbowPole)) sawRemoval = true;
+        }
+        CHECK(sawRemoval);
+
+        // ...and restoring it brings the guide back.
+        observer.added.clear();
+        CHECK(setDouble(elbowPole, "guide:scaleY", 1.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(hasGuideChild(elbowPole));
+        bool sawAdd = false;
+        for (const SdfPath &p : observer.added) {
+            if (p == guidePath(elbowPole)) sawAdd = true;
+        }
+        CHECK(sawAdd);
+
+        // A NEGATIVE scale is rejected on the same rule, and rejected
+        // rather than mirrored: a negative axis would flip the shape's
+        // winding, so accepting it would draw an inside-out guide instead
+        // of no guide at all.
+        CHECK(setDouble(elbowPole, "guide:scaleX", -1.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(!hasGuideChild(elbowPole));
+        CHECK(!results->GetPrim(guidePath(elbowPole)).dataSource);
+        CHECK(setDouble(elbowPole, "guide:scaleX", 2.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(hasGuideChild(elbowPole));
+    }
+
+    // An authored prim occupying the guide's name wins it, as everywhere
+    // else in this index; removing it reveals the synthesized guide again.
+    {
+        upstream->AddPrims(
+            {{guidePath(elbowFk), HdPrimTypeTokens->mesh,
+              HdRetainedContainerDataSource::New(0, nullptr, nullptr)}});
+        CHECK(results->GetPrim(guidePath(elbowFk)).primType ==
+              HdPrimTypeTokens->mesh);
+        observer.added.clear();
+        upstream->RemovePrims({{guidePath(elbowFk)}});
+        int adds = 0;
+        for (const SdfPath &p : observer.added) {
+            if (p == guidePath(elbowFk)) ++adds;
+        }
+        CHECK(adds == 1);
+        CHECK(results->GetPrim(guidePath(elbowFk)).primType ==
+              HdPrimTypeTokens->basisCurves);
+    }
+
+    // A control whose shell is not upstream synthesizes nothing: the guide
+    // hangs off a prim that must exist for a traversal to ever find it.
+    {
+        upstream->RemovePrims({{shoulderFk}});
+        CHECK(!results->GetPrim(guidePath(shoulderFk)).dataSource);
+        CHECK(!hasGuideChild(shoulderFk));
+    }
+
+    results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+}
+
+// A constraint-driven ASSET ROOT carries the synthesized guides with it,
+// and says so.
+//
+// A guide's matrix is not inherited, it is BAKED: the builder composes the
+// asset root's world transform into the guide's own matrix and declares the
+// stack reset. So when the rig drives its own root, every guide's transform
+// changes while its published payload -- frame, scale, styling -- stays
+// byte-identical. RigExecChangeGuides never fires, and Hydra dirtiness is
+// not hierarchical, so no ancestor notice reaches a reset-stack prim
+// either. Nothing but this walk can tell a cached renderer to pull again;
+// without it the asset walks off and its guides stay where they were.
+static void
+TestGuidesFollowDrivenAssetRoot()
+{
+    const SdfPath assetRoot("/Asset");
+    const SdfPath rig("/Asset/Rig");
+    const SdfPath controls("/Asset/Rig/Controls");
+    const SdfPath control("/Asset/Rig/Controls/Ctrl");
+    const SdfPath guide = control.AppendChild(TfToken("rigGuideCtrl"));
+
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    static const TfToken xformName = HdXformSchemaTokens->xform;
+    const HdDataSourceBaseHandle identityXform =
+        HdXformSchema::Builder()
+            .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                GfMatrix4d(1.0)))
+            .SetResetXformStack(
+                HdRetainedTypedSampledDataSource<bool>::New(true))
+            .Build();
+    upstream->AddPrims(
+        {{assetRoot, TfToken(),
+          HdRetainedContainerDataSource::New(1, &xformName, &identityXform)},
+         {rig, TfToken(),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)},
+         {controls, TfToken(),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)},
+         {control, TfToken(),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)}});
+
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    auto results = RigExecResultsSceneIndex::New(upstream, store);
+    _RecordingObserver observer;
+    results->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    // The control's guide payload is IDENTICAL across both generations --
+    // only the asset root's driven transform moves. That is the whole point:
+    // the diff produces no guide change for the control at all.
+    auto publish = [&](double rootX) {
+        auto snapshot = std::make_shared<RigExecImagingSnapshot>();
+        snapshot->assetRoot = assetRoot;
+        RigExecPublishedPrim &root = snapshot->prims[assetRoot];
+        root.hasXform = true;
+        root.xformBase = GfMatrix4d(1.0);
+        GfMatrix4d revised(1.0);
+        revised.SetTranslateOnly(GfVec3d(rootX, 0, 0));
+        root.xform = revised;
+        RigExecPublishedPrim &published = snapshot->prims[control];
+        published.hasControlGuide = true;
+        published.controlGuideFrame = GfMatrix4d(1.0);
+        published.controlGuideShape = TfToken("circle");
+        published.controlGuideDrawMode = TfToken("wire");
+        published.controlGuideScale = GfVec3d(1, 1, 1);
+        results->NotifyGenerationPublished(store->Publish(snapshot));
+    };
+    auto guideTranslation = [&]() {
+        HdXformSchema xf = HdXformSchema::GetFromParent(
+            results->GetPrim(guide).dataSource);
+        return xf && xf.GetMatrix()
+            ? xf.GetMatrix()->GetTypedValue(0.0f).ExtractTranslation()
+            : GfVec3d(0);
+    };
+
+    publish(0.0);
+    CHECK(results->GetPrim(guide).dataSource);
+    CHECK((guideTranslation() - GfVec3d(0, 0, 0)).GetLength() < 1e-6);
+
+    observer.dirtied.clear();
+    publish(5.0);
+
+    // The pull is right...
+    const GfVec3d moved = guideTranslation();
+    if ((moved - GfVec3d(5, 0, 0)).GetLength() >= 1e-6) {
+        std::printf("  guide at (%g, %g, %g), expected the asset root's "
+                    "(5, 0, 0)\n", moved[0], moved[1], moved[2]);
+    }
+    CHECK((moved - GfVec3d(5, 0, 0)).GetLength() < 1e-6);
+
+    // ...and the renderer was told to take it.
+    bool sawGuideDirty = false;
+    for (const SdfPath &p : observer.dirtied) {
+        if (p == guide) sawGuideDirty = true;
+    }
+    if (!sawGuideDirty) {
+        std::printf("  a driven asset root moved the guide without dirtying "
+                    "it -- a cached viewport leaves it behind\n");
+    }
+    CHECK(sawGuideDirty);
+
+    results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+}
+
+// The shipped examples' authored control guides actually draw.
+//
+// An unrecognized guide:shape token draws nothing, silently and by design
+// (allowedTokens is documentation, not enforcement). That makes a typo in
+// an example a defect no other test can see: the rig still compiles, still
+// evaluates, and still publishes -- it just stops showing the thing the
+// example exists to show.
+static void
+TestExampleControlGuides(const std::string &examplesDir)
+{
+    struct _Case {
+        const char *control;
+        TfToken primType;
+        std::vector<int> counts;    // empty for the implicits
+        GfVec3d scale;              // authored guide:scaleX/Y/Z
+    };
+    const GfVec3d unit(1, 1, 1);
+    const struct {
+        const char *file;
+        const char *rig;
+        const char *controls;
+        std::vector<_Case> cases;
+    } examples[] = {
+        {"/01_FkChainTail.usda", "/TailAsset/Rig", "/TailAsset/Rig/Controls",
+         {// diamond wire: three orthogonal rings through the ±axis vertices
+          {"Tail1", HdPrimTypeTokens->basisCurves, {5, 5, 5}, unit},
+          // box geometry: one quad face
+          {"Tail2", HdPrimTypeTokens->mesh, {4}, unit},
+          // circle wire: one 33-point closed ring, flattened in Y
+          {"Tail3", HdPrimTypeTokens->basisCurves, {33},
+           GfVec3d(1.5, 0.3, 1.5)},
+          // pyramid wire: base ring plus four apex edges
+          {"Tail4", HdPrimTypeTokens->basisCurves, {5, 2, 2, 2, 2}, unit}}},
+        {"/02_TwoBoneIkLeg.usda", "/LegAsset/Rig", "/LegAsset/Rig/Controls",
+         {{"HipRoot", HdPrimTypeTokens->cube, {}, GfVec3d(0.6, 0.6, 0.6)},
+          {"FootIK", HdPrimTypeTokens->basisCurves, {33, 33, 33}, unit},
+          {"KneePole", HdPrimTypeTokens->sphere, {},
+           GfVec3d(0.4, 0.4, 0.4)}}}};
+
+    for (const auto &example : examples) {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + example.file);
+        CHECK(stage);
+        if (!stage) continue;
+        RigExecImagingBridge bridge(stage, SdfPath(example.rig));
+        std::vector<std::string> errors;
+        const bool compiled = bridge.Compile(&errors);
+        for (const std::string &e : errors) {
+            std::printf("%s compile error: %s\n", example.file, e.c_str());
+        }
+        CHECK(compiled);
+        if (!compiled) continue;
+
+        // Shells carrying a primOrigin, as flattened UsdImaging prims do:
+        // picking a guide has to resolve back to the control it draws.
+        HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+        HdRetainedSceneIndex::AddedPrimEntries shells;
+        for (const _Case &c : example.cases) {
+            const SdfPath control =
+                SdfPath(example.controls).AppendChild(TfToken(c.control));
+            shells.push_back(
+                {control, TfToken(),
+                 HdRetainedContainerDataSource::New(
+                     HdPrimOriginSchema::GetSchemaToken(),
+                     HdRetainedContainerDataSource::New(
+                         HdPrimOriginSchemaTokens->scenePath,
+                         HdRetainedTypedSampledDataSource<
+                             HdPrimOriginSchema::OriginPath>::New(
+                                 HdPrimOriginSchema::OriginPath(control))))});
+        }
+        upstream->AddPrims(shells);
+        auto results =
+            RigExecResultsSceneIndex::New(upstream, bridge.GetStore());
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+
+        for (const _Case &c : example.cases) {
+            const SdfPath control =
+                SdfPath(example.controls).AppendChild(TfToken(c.control));
+            const SdfPath guide =
+                control.AppendChild(TfToken("rigGuideCtrl"));
+
+            bool announced = false;
+            for (const SdfPath &p : results->GetChildPrimPaths(control)) {
+                if (p == guide) announced = true;
+            }
+            CHECK(announced);
+
+            const HdSceneIndexPrim prim = results->GetPrim(guide);
+            if (prim.primType != c.primType) {
+                std::printf("  %s %s: guide is a '%s', expected '%s' -- an "
+                            "unrecognized guide:shape/drawMode draws "
+                            "nothing\n", example.file, c.control,
+                            prim.primType.GetText(), c.primType.GetText());
+            }
+            CHECK(prim.primType == c.primType);
+            CHECK(prim.dataSource);
+            if (!prim.dataSource) continue;
+
+            // Topology, for the shapes that carry their own.
+            VtIntArray counts;
+            if (HdBasisCurvesSchema curves =
+                    HdBasisCurvesSchema::GetFromParent(prim.dataSource)) {
+                if (HdIntArrayDataSourceHandle ds =
+                        curves.GetTopology().GetCurveVertexCounts()) {
+                    counts = ds->GetTypedValue(0.0f);
+                }
+            } else if (HdMeshSchema mesh =
+                           HdMeshSchema::GetFromParent(prim.dataSource)) {
+                if (HdIntArrayDataSourceHandle ds =
+                        mesh.GetTopology().GetFaceVertexCounts()) {
+                    counts = ds->GetTypedValue(0.0f);
+                }
+            }
+            const bool countsMatch =
+                counts.size() == c.counts.size() &&
+                std::equal(counts.begin(), counts.end(), c.counts.begin());
+            if (!countsMatch) {
+                std::printf("  %s %s: %zu topology entries, expected %zu\n",
+                            example.file, c.control, counts.size(),
+                            c.counts.size());
+            }
+            CHECK(countsMatch);
+
+            // The authored per-axis scale, as the xform's basis lengths.
+            // Nothing upstream places the asset root, so it resolves to
+            // identity and the guide's transform is scale * posed frame.
+            HdXformSchema xf =
+                HdXformSchema::GetFromParent(prim.dataSource);
+            CHECK(xf && xf.GetMatrix());
+            if (xf && xf.GetMatrix()) {
+                const GfMatrix4d xform = xf.GetMatrix()->GetTypedValue(0.0f);
+                for (size_t i = 0; i < 3; ++i) {
+                    const double length = xform.GetRow3(i).GetLength();
+                    if (std::abs(length - c.scale[i]) > 1e-6) {
+                        std::printf("  %s %s: basis %zu length %g, expected "
+                                    "%g\n", example.file, c.control, i,
+                                    length, c.scale[i]);
+                    }
+                    CHECK(std::abs(length - c.scale[i]) < 1e-6);
+                }
+            }
+
+            // Purpose, styling, and picking.
+            HdPurposeSchema purpose =
+                HdPurposeSchema::GetFromParent(prim.dataSource);
+            CHECK(purpose.GetPurpose() &&
+                  purpose.GetPurpose()->GetTypedValue(0.0f) ==
+                      HdRenderTagTokens->guide);
+
+            HdPrimvarsSchema primvars =
+                HdPrimvarsSchema::GetFromParent(prim.dataSource);
+            for (const TfToken &name :
+                 {HdTokens->displayColor, HdTokens->displayOpacity}) {
+                HdPrimvarSchema primvar = primvars.GetPrimvar(name);
+                CHECK(primvar.GetPrimvarValue());
+                CHECK(primvar.GetInterpolation() &&
+                      primvar.GetInterpolation()->GetTypedValue(0.0f) ==
+                          HdPrimvarSchemaTokens->constant);
+            }
+
+            HdPrimOriginSchema origin =
+                HdPrimOriginSchema::GetFromParent(prim.dataSource);
+            const SdfPath resolved =
+                origin ? origin.GetOriginPath(
+                             HdPrimOriginSchemaTokens->scenePath)
+                       : SdfPath();
+            if (resolved != control) {
+                std::printf("  %s %s: guide primOrigin resolves to '%s' -- "
+                            "picking it does not select the control\n",
+                            example.file, c.control,
+                            resolved.GetText());
+            }
+            CHECK(resolved == control);
+        }
+    }
+}
+
 // Edit-driven re-evaluation (registry): any authored edit beneath the
 // rig's asset re-evaluates at the last-set time and republishes;
 // unrelated edits do not.
@@ -1003,6 +1846,25 @@ TestEditTriggeredReevaluation(const std::string &examplesDir)
         .Set(3.5);
     snapshot = registry.GetStore()->Get();
     CHECK(snapshot && snapshot->generation > generation1);
+
+    // ...as does a control guide edit, which is how an animator retyping a
+    // guide sees it change in the viewport rather than on the next frame
+    // change. The republished payload carries the new shape.
+    const uint64_t generationGuide = snapshot->generation;
+    const SdfPath shoulderFk("/ArmAsset/Rig/Controls/ShoulderFK");
+    CHECK(stage->GetPrimAtPath(shoulderFk)
+              .GetAttribute(TfToken("guide:shape"))
+              .Set(TfToken("pyramid")));
+    snapshot = registry.GetStore()->Get();
+    CHECK(snapshot && snapshot->generation > generationGuide);
+    if (snapshot) {
+        const auto it = snapshot->prims.find(shoulderFk);
+        CHECK(it != snapshot->prims.end());
+        if (it != snapshot->prims.end()) {
+            CHECK(it->second.hasControlGuide);
+            CHECK(it->second.controlGuideShape == TfToken("pyramid"));
+        }
+    }
 
     // Unrelated edits outside the asset do not re-evaluate.
     const uint64_t generation2 = snapshot->generation;
@@ -1604,6 +2466,9 @@ main(int argc, char **argv)
     TestNarrowLocators();
     TestFilterChainOverRetainedScene();
     TestBridgeOverShotStage(examplesDir);
+    TestControlGuides(examplesDir);
+    TestGuidesFollowDrivenAssetRoot();
+    TestExampleControlGuides(examplesDir);
     TestMotionCapabilityMatrix(examplesDir);
     TestLegacyRenderIndexPickup(examplesDir);
     TestEditTriggeredReevaluation(examplesDir);

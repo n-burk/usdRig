@@ -122,6 +122,34 @@ _DiscoverJointOutputs(const UsdStageRefPtr &stage, const SdfPath &rigPath)
     return joints;
 }
 
+// Discovers the rig's controls the same implicit way (spec §4.1): being a
+// RigExecControl under the rig is what makes a prim a control. Returned in
+// namespace pre-order so the discovered order -- and with it the epoch
+// digest -- is stable against unrelated edits.
+//
+// No union pass over operator wiring, unlike the joints. A solver's
+// rigExec:controls names inputs it READS, and reading a control does not
+// make it one; the type does. And no emptiness rule either: a rig whose
+// joints are animated directly has no control prims, which is a legal rig
+// that simply draws no control guides.
+std::vector<SdfPath>
+_DiscoverControls(const UsdStageRefPtr &stage, const SdfPath &rigPath)
+{
+    static const TfToken kControlType("RigExecControl");
+
+    std::vector<SdfPath> controls;
+    const UsdPrim rig = stage->GetPrimAtPath(rigPath);
+    if (!rig) {
+        return controls;
+    }
+    for (const UsdPrim &prim : UsdPrimRange(rig)) {
+        if (prim.GetTypeName() == kControlType) {
+            controls.push_back(prim.GetPath());
+        }
+    }
+    return controls;
+}
+
 }  // namespace
 
 RigExecRigEvaluator::RigExecRigEvaluator(
@@ -218,6 +246,17 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     // identity through the points-chain targets below.
     for (const SdfPath &jointPath : _DiscoverJointOutputs(_stage, _rigPath)) {
         digest += jointPath.GetString();
+        digest += ',';
+    }
+    digest += '|';
+
+    // The discovered control set, for the same reason: it decides which
+    // computePointFrame taps the epoch's prepared request carries. A control
+    // that no solver reads is otherwise invisible to this digest -- adding
+    // one purely to draw a guide would leave the compiled tap set behind and
+    // the guide would never appear.
+    for (const SdfPath &controlPath : _DiscoverControls(_stage, _rigPath)) {
+        digest += controlPath.GetString();
         digest += ',';
     }
     digest += '|';
@@ -483,6 +522,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     _rigPath.GetString());
         return false;
     }
+    // Controls are discovered alongside the joints but never gate the
+    // compile: zero controls is an ordinary rig, not a broken one.
+    std::vector<SdfPath> newControlPaths =
+        _DiscoverControls(_stage, _rigPath);
 
     std::vector<SdfPath> solverArrayPaths;
     std::map<SdfPath, SdfPath> newRibbonDriverPoints;
@@ -1299,6 +1342,17 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 jointPath, TfToken("computeMatrix"), finalPhase)));
     }
 
+    // Control frames, base phase only: a control is an input, so nothing in
+    // the pose domain revises it and its base frame IS its posed frame.
+    // Same request as the joints -- a control that cannot produce a frame
+    // means the animator's own channel failed to evaluate, which is not a
+    // condition to publish a generation under.
+    std::vector<RigExecTapId> newControlFrameTaps;
+    for (const SdfPath &controlPath : newControlPaths) {
+        newControlFrameTaps.push_back(newTaps->Add(RigExecValueAddress::Prim(
+            controlPath, _computePointFrame, basePhase)));
+    }
+
     // The compiled mover graph, built from the same composed post-order walk
     // the generated prims come from. It runs alongside them for now: Evaluate
     // compares the two and diagnoses any disagreement, so the graph can be
@@ -1452,6 +1506,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // Commit the new epoch atomically with respect to evaluator state.
     _movers = std::move(newMovers);
     _jointPaths = std::move(newJointPaths);
+    _controlPaths = std::move(newControlPaths);
+    _controlFrameTaps = std::move(newControlFrameTaps);
     _frameChains = std::move(newFrameChains);
     _providerRestFrameTaps = std::move(newProviderRestFrameTaps);
     _providerBaseFrameTaps = std::move(newProviderBaseFrameTaps);
@@ -2615,6 +2671,15 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 " has a degenerate final frame; matrix omitted");
         }
     }
+    // 3a. Control frames, straight from the base taps. A degenerate or
+    // invalid frame is published as it stands, exactly like a joint's: the
+    // imaging bridge is what decides a guide cannot be drawn from it, and it
+    // already makes that judgement for every joint frame it sees.
+    for (size_t i = 0; i < _controlPaths.size(); ++i) {
+        pose.controlFrames[_controlPaths[i]] =
+            snapshot.Get<RigExecPointFrame>(_controlFrameTaps[i]);
+    }
+
     // Observational solver guides never gate the rig snapshot: an
     // incomplete guide evaluation degrades to a diagnostic.
     if (_guideTaps) {

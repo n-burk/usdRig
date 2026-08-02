@@ -155,8 +155,17 @@ public:
         const RigExecImagingSnapshot &snapshot,
         GfMatrix4d *result) const;
 
-    /// Dirties \p locators on every descendant present upstream.
+    /// Dirties \p locators on every descendant present upstream, plus the
+    /// synthesized guide children present only here.
     void _DirtySubtree(
+        const SdfPath &path,
+        const HdDataSourceLocatorSet &locators,
+        HdSceneIndexObserver::DirtiedPrimEntries *entries) const;
+
+    /// Dirties \p locators on the synthesized guide children announced
+    /// under \p path. Their matrices bake the asset root's world transform,
+    /// so no ancestor's dirtiness reaches them.
+    void _DirtyAnnouncedGuideChildren(
         const SdfPath &path,
         const HdDataSourceLocatorSet &locators,
         HdSceneIndexObserver::DirtiedPrimEntries *entries) const;
@@ -179,6 +188,18 @@ public:
     /// Records the guide count without emitting. Runs whether or not this
     /// index is observed.
     void _RefreshAnnouncedGuides(const SdfPath &path);
+
+    /// The Hydra prim type this prim's synthesized control guide should
+    /// have in the current generation, or an empty token when it should
+    /// have none (spec §10.3 extension). The type IS the desired-state
+    /// answer here: a control draws exactly one guide child, but changing
+    /// guide:shape or guide:drawMode changes what kind of prim it is.
+    TfToken _DesiredControlGuideType(const SdfPath &path) const;
+
+    /// Records the control-guide announcement without emitting. Runs
+    /// whether or not this index is observed, for the same reason
+    /// _RefreshAnnouncedGuides does.
+    void _RefreshAnnouncedControlGuide(const SdfPath &path);
 
     void NotifyGenerationPublished(
         const RigExecPublishedDirtyVector &dirtied);
@@ -211,10 +232,25 @@ private:
         HdSceneIndexObserver::AddedPrimEntries *added,
         HdSceneIndexObserver::RemovedPrimEntries *removed);
 
+    /// The same reconciliation for the single synthesized control-guide
+    /// child, whose desired state is a prim type rather than a count.
+    void _SyncControlGuideChild(
+        const SdfPath &path,
+        HdSceneIndexObserver::AddedPrimEntries *added,
+        HdSceneIndexObserver::RemovedPrimEntries *removed);
+
     std::shared_ptr<RigExecSnapshotStore> _store;
     /// Guide-element counts already announced per published prim
     /// (mutated only on the serialized publication path).
     std::map<SdfPath, size_t> _announcedGuides;
+    /// Control prims whose rigGuideCtrl child has been announced, and the
+    /// prim type it was announced with.
+    ///
+    /// The type is kept, not just the fact of the announcement: an author
+    /// switching guide:drawMode from wire to geometry leaves the child
+    /// present but turns it from a basisCurves into a mesh, and a consumer
+    /// only learns that from a fresh PrimsAdded carrying the new type.
+    std::map<SdfPath, TfToken> _announcedControlGuides;
 
     /// Prims whose transform we published a driven override for, as of the
     /// last announcement. Needed to invalidate a subtree when a driven

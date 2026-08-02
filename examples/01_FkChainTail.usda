@@ -9,6 +9,12 @@
     whole tail. Joints connect posed:space to per-element solver views and
     weighted matrix movers skin a simple strip mesh; the compiler maintains
     the authored normals and extent automatically.
+
+    Each control also authors a different viewport guide (guide:shape,
+    guide:drawMode, and the per-axis guide:scaleX/Y/Z on Tail3): wire
+    diamond, solid box, flattened wire circle, and wire pyramid. The guides
+    are synthesized by the imaging chain at the posed control frames and
+    are never authored to the stage.
     """
     defaultPrim = "TailAsset"
     endTimeCode = 1048
@@ -42,6 +48,7 @@ def Xform "TailAsset"
                     1048: 45; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
+                uniform token guide:shape = "diamond"
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -56,6 +63,8 @@ def Xform "TailAsset"
                     1048: 45; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
+                uniform token guide:shape = "box"
+                uniform token guide:drawMode = "geometry"
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -70,6 +79,10 @@ def Xform "TailAsset"
                     1048: 45; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
+                uniform token guide:shape = "circle"
+                double guide:scaleX = 1.5
+                double guide:scaleY = 0.3
+                double guide:scaleZ = 1.5
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -84,6 +97,7 @@ def Xform "TailAsset"
                     1048: 45; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
+                uniform token guide:shape = "pyramid"
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
         }

@@ -104,9 +104,47 @@ class RigExecControl "RigExecControl" (
     on the avars (or an authored/connected posed:space), exactly like an
     Ir xformable. Channel semantics live on the applied
     RigExecControlAPI. Publishes computePointFrame/computeRestFrame/
-    computeMatrix (spec section 4.1)."""
+    computeMatrix (spec section 4.1). A synthesized viewport guide can be
+    drawn at the posed frame origin (see guide:shape), purpose guide, the
+    same synthesis-only style as the RigExecJoint guides."""
 )
 {
+    uniform token guide:shape = "circle" (
+        allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
+        doc = """Guide primitive synthesized at the control's posed frame
+        origin (spec section 10.3 extension), exactly parallel to the
+        RigExecJoint sphere/cone guides. Every shape is unit-sized and
+        centered at the origin: sphere and circle have radius 1, box and
+        cube span +-1, diamond (octahedron) has vertices at +-1 on each
+        axis, and pyramid has base corners (+-1, -1, +-1) with apex
+        (0, 1, 0). circle and box are the planar shapes -- normal +Y,
+        drawn in the local XZ plane -- while cube is the 3D box; this is
+        the conventional rigging distinction between the two box-ish
+        tokens."""
+    )
+    uniform token guide:drawMode = "wire" (
+        allowedTokens = ["wire", "geometry"]
+        doc = """wire draws the guide as hairline curves (no widths are
+        authored; Storm's fallback width gives the intended hairline
+        look). geometry draws solid shapes instead."""
+    )
+    double guide:scaleX = 1.0 (
+        doc = """Per-axis draw scale of the guide shape, deliberately
+        three separate double properties rather than a vec3. This is the
+        SOLE dimensional scale applied to the guide -- the control's
+        posed frame is orthonormalized before drawing (guides are rigid),
+        so guide:scaleX/Y/Z is what actually sizes the shape. A
+        non-positive or non-finite value on any axis draws no guide at
+        all, mirroring the RigExecJoint guide:radius rule."""
+    )
+    double guide:scaleY = 1.0 (
+        doc = "Per-axis draw scale along the local Y axis; see guide:scaleX."
+    )
+    double guide:scaleZ = 1.0 (
+        doc = "Per-axis draw scale along the local Z axis; see guide:scaleX."
+    )
+    color3f guide:displayColor = (1.0, 0.85, 0.2)
+    float guide:displayOpacity = 1.0
 }
 
 class "RigExecXformable" (

@@ -106,6 +106,12 @@ private:
         const RigExecRigPose &pose,
         RigExecImagingSnapshot *snapshot) const;
 
+    /// Publishes the single synthesized guide shape each control draws at
+    /// its posed frame (spec §10.3 extension).
+    void _FillControlGuides(
+        const RigExecRigPose &pose,
+        RigExecImagingSnapshot *snapshot) const;
+
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
     std::unique_ptr<RigExecRigEvaluator> _evaluator;
