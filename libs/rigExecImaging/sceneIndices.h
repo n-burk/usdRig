@@ -17,6 +17,8 @@
 
 #include "snapshotStore.h"
 
+#include "pxr/base/tf/token.h"
+
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 
 #include <memory>
@@ -34,6 +36,16 @@ using RigExecBindingResolvingSceneIndexRefPtr =
     TfRefPtr<RigExecBindingResolvingSceneIndex>;
 class RigExecResultsSceneIndex;
 using RigExecResultsSceneIndexRefPtr = TfRefPtr<RigExecResultsSceneIndex>;
+
+/// Whether a control guide with this shape/drawMode pair is DRAWN at all.
+///
+/// The single predicate behind both the synthesized prim and the computed
+/// extent. allowedTokens is documentation rather than enforcement, so an
+/// unrecognized pair has to mean something definite -- it means nothing is
+/// drawn, and the extent has to agree or a host frames empty space around a
+/// guide that does not exist.
+bool RigExecControlGuideIsDrawn(
+    const TfToken &shape, const TfToken &drawMode);
 
 /// Removes only the derived __RigExecGenerated application paths owned by
 /// the current system (spec §10.1). The predicate is deliberately narrow:

@@ -241,7 +241,10 @@ Shared libraries land in `lib/` beside their import libraries rather than
 plugin's `"LibraryPath": "../../rigExecImaging.dll"` resolving exactly the way
 `usd_usdSkelImaging.dll` does.
 
-That `plugInfo.json` is the only one naming a library, so it is generated from
+That `plugInfo.json` and the generated schema plugin's (which names the same
+imaging library so Plug can load the compute-extent registration for the
+Boundable RigExec types — see `docs/control-guides.md`) are the only ones
+naming a library. The imaging one is generated from
 `plugin/rigExecImaging/resources/plugInfo.json.in` rather than checked in — the
 filename is `.dll` / `.so` / `.dylib` depending on the platform, and
 `$<TARGET_FILE_NAME:>` is the only thing that knows it. One generated file
@@ -275,11 +278,16 @@ PATH               += %RIG%\lib;%USD%\bin;%USD%\lib
 hardcoding the layout.
 
 To run **uninstalled**, point the same variables at the source and build trees
-instead — note that `rigExecImaging`'s plugin directory is generated into the
-build tree, since its `plugInfo.json` has to name the built library:
+instead — note that BOTH plugin directories are generated into the build
+tree, since each `plugInfo.json` has to name the built library. The schema
+one does because it declares `implementsComputeExtent`, and that flag is a
+promise Plug can load code to satisfy: the checked-in copy under
+`plugin/rigExecSchema/resources` is data-only and deliberately does not
+carry it, so pointing a host there gives Boundable prims with silently
+empty bounds:
 
 ```
-PXR_PLUGINPATH_NAME = %RIG%\plugin\rigExecSchema\resources
+PXR_PLUGINPATH_NAME = %RIG%\build\usd\rigExecSchema\resources    <-- generated
                       %RIG%\build\usd\rigExecImaging\resources   <-- generated
                       %RIG%\plugin\rigExecUsdview
 PATH               += %RIG%\build;%USD%\bin;%USD%\lib

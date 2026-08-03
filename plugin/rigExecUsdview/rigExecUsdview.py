@@ -9,9 +9,22 @@
 #
 import ctypes
 import os
+import sys
 
 from pxr import Tf, Usd, UsdUtils
 from pxr.Usdviewq.plugin import PluginContainer
+
+
+
+def _LibraryFileName():
+    # The build directory's library name is the platform's, not Windows':
+    # ctypes gets no search-path help here, so the default must name the
+    # exact file CMake produced.
+    if os.name == "nt":
+        return "rigExecImaging.dll"
+    if sys.platform == "darwin":
+        return "librigExecImaging.dylib"
+    return "librigExecImaging.so"
 
 
 def _LoadRigExecImaging():
@@ -19,7 +32,7 @@ def _LoadRigExecImaging():
         "RIGEXEC_IMAGING_DLL",
         os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "build", "rigExecImaging.dll")))
+            "..", "..", "build", _LibraryFileName())))
     lib = ctypes.CDLL(dllPath)
     lib.RigExecImaging_Activate.argtypes = [
         ctypes.c_longlong, ctypes.c_char_p, ctypes.c_double]
@@ -46,6 +59,7 @@ class RigExecUsdviewContainer(PluginContainer):
         self._api = plugCtx
         self._lib = None
         self._active = False
+        self._rigPath = None
 
         # A manual re-activation command (also anchors this container via
         # its bound-method callback).
@@ -83,9 +97,12 @@ class RigExecUsdviewContainer(PluginContainer):
                 self._lib.RigExecImaging_Deactivate()
             return
         # Only engage for stages that actually carry a RigExec rig.
-        hasRig = any(
-            prim.GetTypeName() == "RigExecRig" for prim in stage.Traverse())
-        if not hasRig:
+        self._rigPath = None
+        for prim in stage.Traverse():
+            if prim.GetTypeName() == "RigExecRig":
+                self._rigPath = prim.GetPath()
+                break
+        if self._rigPath is None:
             return
         try:
             if self._lib is None:

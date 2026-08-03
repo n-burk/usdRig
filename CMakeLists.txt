@@ -128,17 +128,25 @@ option(RIGEXEC_BUILD_TESTS "Build the RigExec test and probe executables"
 if (RIGEXEC_BUILD_TESTS)
 enable_testing()
 
+# The tests load the codeless schema from the GENERATED resource directory,
+# not the source one: only the generated plugInfo carries the LibraryPath
+# that lets Plug load the compute-extent registration on demand.
+set(_rigexec_schema_resource_define
+    RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+
 add_executable(testRigExecMath tests/testRigExecMath.cpp)
 target_link_libraries(testRigExecMath PRIVATE rigExecMath)
 add_test(NAME testRigExecMath COMMAND testRigExecMath)
 
 add_executable(testRigExecArm tests/testRigExecArm.cpp)
 target_link_libraries(testRigExecArm PRIVATE rigExec)
+target_compile_definitions(testRigExecArm PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecArm COMMAND testRigExecArm
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecImaging tests/testRigExecImaging.cpp)
 target_link_libraries(testRigExecImaging PRIVATE rigExecImaging)
+target_compile_definitions(testRigExecImaging PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
@@ -150,17 +158,30 @@ add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 # probing for the specific artifacts the deleted compiler used to leave.
 add_executable(testRigExecNoAuthoring tests/testRigExecNoAuthoring.cpp)
 target_link_libraries(testRigExecNoAuthoring PRIVATE rigExecImaging)
+target_compile_definitions(testRigExecNoAuthoring PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecNoAuthoring COMMAND testRigExecNoAuthoring
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# Native bounds in a host that runs NO RigExec code: deliberately links
+# usdGeom and plug only, never rigExecImaging, so the compute-extent
+# function can only arrive through Plug's load-on-demand path.
+add_executable(testRigExecBounds tests/testRigExecBounds.cpp)
+target_link_libraries(testRigExecBounds PRIVATE plug tf gf usd usdGeom)
+target_compile_definitions(testRigExecBounds PRIVATE ${_rigexec_schema_resource_define})
+add_dependencies(testRigExecBounds rigExecImaging)
+add_test(NAME testRigExecBounds COMMAND testRigExecBounds
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(probeCodingError tests/probeCodingError.cpp)
 target_link_libraries(probeCodingError PRIVATE rigExec)
+target_compile_definitions(probeCodingError PRIVATE ${_rigexec_schema_resource_define})
 
 # End-to-end against the real UsdImagingCreateSceneIndices chain. Not a unit
 # test: it needs the RigExec scene index plugin discoverable through Plug, so
 # it runs from run_probe-style environments rather than bare ctest.
 add_executable(probeImagingPipeline tests/probeImagingPipeline.cpp)
 target_link_libraries(probeImagingPipeline PRIVATE rigExecImaging usdImaging usdGeom)
+target_compile_definitions(probeImagingPipeline PRIVATE ${_rigexec_schema_resource_define})
 
 endif()  # RIGEXEC_BUILD_TESTS
 
@@ -188,13 +209,62 @@ foreach(_lib rigExecMath rigExec rigExecImaging)
             PATTERN "*.h")
 endforeach()
 
-# The codeless schema domain and the usdview plugin are location-independent:
-# their plugInfo.json carries no LibraryPath, so both install verbatim. Files
-# are listed explicitly rather than globbed so that local tooling state
-# (.omc/, __pycache__/) cannot follow them into the install tree.
+# The codeless schema domain is no longer location-independent: it declares
+# implementsComputeExtent, so Plug has to be able to LOAD it on demand to get
+# the registering code (UsdGeomBoundable compute-extent) into the process.
+# That needs a LibraryPath naming the imaging library -- and a library-type
+# plugin, because Plug treats a "resource" plugin as already loaded and never
+# dlopens it (plug/plugin.cpp: _isLoaded(type == ResourceType)).
+#
+# So the schema plugInfo is generated rather than installed verbatim, exactly
+# like rigExecImaging's and for the same reason: the filename is platform
+# dependent, and only $<TARGET_FILE_NAME:> knows it. Generating it under
+# build/usd/rigExecSchema/resources/ is what lets ONE file serve both trees --
+# from there "../../../<library>" lands on build/, and from
+# lib/usd/rigExecSchema/resources/ the identical hop lands on lib/.
+#
+# The schema DECLARATIONS stay data-only: generatedSchema.usda is copied
+# beside it untouched, and no schema C++ class exists or is generated.
+set(_rigexec_schema_resources
+    "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+set(_rigexec_schema_pluginfo "${_rigexec_schema_resources}/plugInfo.json")
+file(READ
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/plugInfo.json"
+    _rigexec_schema_pluginfo_content)
+string(REPLACE "\"Type\": \"resource\"" "\"Type\": \"library\""
+    _rigexec_schema_pluginfo_content "${_rigexec_schema_pluginfo_content}")
+
+# implementsComputeExtent is added HERE, not left in the checked-in copy.
+#
+# The flag is a promise that Plug can load code which registers a
+# compute-extent function. Only this generated copy can keep that promise:
+# it is the one with a LibraryPath. Advertising it from the source-tree
+# resources -- which are a data-only "resource" plugin Plug never dlopens --
+# promises an extent that never arrives, and a host registering those
+# resources gets Boundable prims whose bounds are silently empty. Better to
+# be honestly non-Boundable-with-extents there than dishonestly Boundable.
+foreach(_rigexec_boundable
+        RigExecXformable RigExecControl RigExecJoint RigExecFkChain
+        RigExecTwoBoneIk RigExecBlendPointFrames RigExecTwistDistribution
+        RigExecRibbon)
+    string(REPLACE
+        "\"schemaIdentifier\": \"${_rigexec_boundable}\""
+        "\"implementsComputeExtent\": true, \"schemaIdentifier\": \"${_rigexec_boundable}\""
+        _rigexec_schema_pluginfo_content "${_rigexec_schema_pluginfo_content}")
+endforeach()
+string(REPLACE "\"Name\": \"rigExecSchema\""
+    "\"LibraryPath\": \"../../../$<TARGET_FILE_NAME:rigExecImaging>\", \"Name\": \"rigExecSchema\""
+    _rigexec_schema_pluginfo_content "${_rigexec_schema_pluginfo_content}")
+file(GENERATE OUTPUT "${_rigexec_schema_pluginfo}"
+    CONTENT "${_rigexec_schema_pluginfo_content}")
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/generatedSchema.usda"
+    "${_rigexec_schema_resources}/generatedSchema.usda" COPYONLY)
+
 install(FILES
-        plugin/rigExecSchema/resources/plugInfo.json
-        plugin/rigExecSchema/resources/generatedSchema.usda
+        "${_rigexec_schema_pluginfo}"
+        "${_rigexec_schema_resources}/generatedSchema.usda"
     DESTINATION "${RIGEXEC_INSTALL_PLUGINDIR}/rigExecSchema/resources")
 
 install(FILES

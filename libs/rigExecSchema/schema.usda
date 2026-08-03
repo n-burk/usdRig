@@ -124,9 +124,24 @@ class RigExecControl "RigExecControl" (
     )
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry"]
-        doc = """wire draws the guide as hairline curves (no widths are
-        authored; Storm's fallback width gives the intended hairline
-        look). geometry draws solid shapes instead."""
+        doc = """wire draws the guide as curves, widthed by
+        guide:wireWidth. geometry draws solid shapes instead."""
+    )
+    double guide:wireWidth = 0.05 (
+        doc = """Width authored onto the wire curves, in the LOCAL
+        pre-scale units of the unit shape -- so the drawn width tracks
+        guide:scaleX/Y/Z along with the rest of the shape, and a
+        non-uniform scale thickens the curve anisotropically exactly as
+        it stretches the points.
+
+        Zero or negative authors no widths at all and falls back to
+        hairline rendering; geometry draw mode ignores this entirely.
+
+        It has a default rather than being left unauthored because
+        usdview picks with a single-pixel window: an unwidthed hairline
+        is a one-pixel target that a real click virtually never lands
+        on, and an empty pick deselects to the pseudo-root. The default
+        width is what makes a wire control selectable at all."""
     )
     double guide:scaleX = 1.0 (
         doc = """Per-axis draw scale of the guide shape, deliberately
@@ -148,7 +163,7 @@ class RigExecControl "RigExecControl" (
 }
 
 class "RigExecXformable" (
-    inherits = </Typed>
+    inherits = </Boundable>
     customData = {
         string className = "Xformable"
     }
@@ -166,7 +181,23 @@ class "RigExecXformable" (
     extracted frame carries posed/rest axis length ratios. Point frames (spec section 5) remain the engine's
     internal value type: xformables publish
     computePointFrame/computeRestFrame/computeMatrix derived from these
-    spaces."""
+    spaces.
+
+    Inherits UsdGeomBoundable (and through it Xformable and Imageable) so
+    that the guide a provider draws has real BOUNDS: UsdGeomBBoxCache is
+    what usdview, Solaris, and mayaUsd all consult, and a type that is not
+    Boundable reports nothing, so framing a control moved the camera
+    nowhere in every host. The extent is computed by a registered
+    compute-extent function, never authored -- the engine still writes
+    nothing to the stage.
+
+    The xformOps that arrive with Xformable are NOT a transform authority
+    here. rest:space plus the avars remain the only one (the Ir
+    alignment), and authoring ops on a provider would create a second,
+    silently-ignored one; the compiler warns when it finds any. For the
+    same reason the computed extent bakes the posed frame into
+    asset-relative space, which is correct exactly while no Xformable sits
+    between the asset root and the provider -- also a compiler warning."""
 )
 {
     double rest:tx = 0
@@ -223,6 +254,20 @@ class RigExecJoint "RigExecJoint" (
     child joint is authored inside its parent joint)."""
 )
 {
+    uniform token purpose = "guide" (
+        doc = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides.
+
+        This is the stock attribute rather than a RigExec-specific token so
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache
+        classifies a prim's extent by this exact attribute, and the results
+        scene index stamps the same resolved value onto the guide it
+        synthesizes. A control keeps the inherited `default` -- it is the
+        rig's interaction surface, not a diagnostic -- and authoring
+        `guide` on one moves both its drawing and its bounds together."""
+    )
+
     double guide:length = 0
     double guide:radius = 1.0 (
         doc = """Radius of BOTH guide primitives: the sphere at the posed
@@ -247,7 +292,7 @@ class RigExecJoint "RigExecJoint" (
 ################################################################
 
 class RigExecFkChain "RigExecFkChain" (
-    inherits = </Typed>
+    inherits = </Boundable>
     customData = {
         string className = "FkChain"
     }
@@ -256,6 +301,20 @@ class RigExecFkChain "RigExecFkChain" (
     scalar frames (spec section 4.1)."""
 )
 {
+    uniform token purpose = "guide" (
+        doc = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides.
+
+        This is the stock attribute rather than a RigExec-specific token so
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache
+        classifies a prim's extent by this exact attribute, and the results
+        scene index stamps the same resolved value onto the guide it
+        synthesizes. A control keeps the inherited `default` -- it is the
+        rig's interaction surface, not a diagnostic -- and authoring
+        `guide` on one moves both its drawing and its bounds together."""
+    )
+
     rel rigExec:controls (
         doc = "Ordered chain controls (parents resolved via rigExec:parent)."
     )
@@ -271,7 +330,7 @@ class RigExecFkChain "RigExecFkChain" (
 }
 
 class RigExecTwoBoneIk "RigExecTwoBoneIk" (
-    inherits = </Typed>
+    inherits = </Boundable>
     customData = {
         string className = "TwoBoneIk"
     }
@@ -279,6 +338,20 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     bend. Publishes computePointFrameArray of [root, mid, end] frames."""
 )
 {
+    uniform token purpose = "guide" (
+        doc = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides.
+
+        This is the stock attribute rather than a RigExec-specific token so
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache
+        classifies a prim's extent by this exact attribute, and the results
+        scene index stamps the same resolved value onto the guide it
+        synthesizes. A control keeps the inherited `default` -- it is the
+        rig's interaction surface, not a diagnostic -- and authoring
+        `guide` on one moves both its drawing and its bounds together."""
+    )
+
     rel rigExec:rootControl
     rel rigExec:effectorControl
     rel rigExec:poleControl
@@ -307,7 +380,7 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
 }
 
 class RigExecBlendPointFrames "RigExecBlendPointFrames" (
-    inherits = </Typed>
+    inherits = </Boundable>
     customData = {
         string className = "BlendPointFrames"
     }
@@ -316,6 +389,20 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
     inputB."""
 )
 {
+    uniform token purpose = "guide" (
+        doc = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides.
+
+        This is the stock attribute rather than a RigExec-specific token so
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache
+        classifies a prim's extent by this exact attribute, and the results
+        scene index stamps the same resolved value onto the guide it
+        synthesizes. A control keeps the inherited `default` -- it is the
+        rig's interaction surface, not a diagnostic -- and authoring
+        `guide` on one moves both its drawing and its bounds together."""
+    )
+
     rel rigExec:inputA
     rel rigExec:inputB
     float inputs:weight = 0
@@ -335,7 +422,7 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
 }
 
 class RigExecTwistDistribution "RigExecTwistDistribution" (
-    inherits = </Typed>
+    inherits = </Boundable>
     customData = {
         string className = "TwistDistribution"
     }
@@ -343,6 +430,20 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
     providers. Publishes computePointFrameArray."""
 )
 {
+    uniform token purpose = "guide" (
+        doc = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides.
+
+        This is the stock attribute rather than a RigExec-specific token so
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache
+        classifies a prim's extent by this exact attribute, and the results
+        scene index stamps the same resolved value onto the guide it
+        synthesizes. A control keeps the inherited `default` -- it is the
+        rig's interaction surface, not a diagnostic -- and authoring
+        `guide` on one moves both its drawing and its bounds together."""
+    )
+
     rel rigExec:start
     rel rigExec:end
     uniform int rigExec:count = 1
@@ -367,7 +468,7 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
 }
 
 class RigExecRibbon "RigExecRibbon" (
-    inherits = </Typed>
+    inherits = </Boundable>
     customData = {
         string className = "Ribbon"
     }
@@ -376,6 +477,20 @@ class RigExecRibbon "RigExecRibbon" (
     Publishes computePointFrameArray (spec section 4.1)."""
 )
 {
+    uniform token purpose = "guide" (
+        doc = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides.
+
+        This is the stock attribute rather than a RigExec-specific token so
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache
+        classifies a prim's extent by this exact attribute, and the results
+        scene index stamps the same resolved value onto the guide it
+        synthesizes. A control keeps the inherited `default` -- it is the
+        rig's interaction surface, not a diagnostic -- and authoring
+        `guide` on one moves both its drawing and its bounds together."""
+    )
+
     rel rigExec:driverCurve
     rel rigExec:startFrame
     rel rigExec:endFrame

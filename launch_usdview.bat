@@ -9,7 +9,7 @@ set PATH=%RIG%\build;%USD%\bin;%USD%\lib;%PATH%
 cmake --build %RIG%\build >nul
 if errorlevel 1 exit /b 1
 set PYTHONPATH=%RIG%\plugin\rigExecUsdview;%USD%\Lib\site-packages
-set PXR_PLUGINPATH_NAME=%RIG%\plugin\rigExecSchema\resources;%RIG%\build\usd\rigExecImaging\resources;%RIG%\plugin\rigExecUsdview
+set PXR_PLUGINPATH_NAME=%RIG%\build\usd\rigExecSchema\resources;%RIG%\build\usd\rigExecImaging\resources;%RIG%\plugin\rigExecUsdview
 set STAGE=%1
 if "%STAGE%"=="" set STAGE=%RIG%\examples\ArmShotAnim.usda
 set RENDERER_ARG=

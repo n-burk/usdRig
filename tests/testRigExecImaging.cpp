@@ -17,6 +17,7 @@
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 
+#include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
@@ -24,6 +25,7 @@
 #include "pxr/imaging/hd/cubeSchema.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/imaging/hd/extentSchema.h"
+#include "pxr/imaging/hd/legacyDisplayStyleSchema.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
 #include "pxr/imaging/hd/sphereSchema.h"
@@ -41,7 +43,13 @@
 #include "pxr/imaging/hd/primOriginSchema.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/bboxCache.h"
+#include "pxr/usd/usdGeom/boundable.h"
+#include "pxr/usd/usdGeom/tokens.h"
+#include "pxr/usd/usdGeom/imageable.h"
+#include "pxr/usd/usdGeom/xformable.h"
 
 #include <algorithm>
 #include <cmath>
@@ -99,6 +107,31 @@ _GetPointsPrimvar(const HdSceneIndexPrim &prim)
         }
     }
     return VtVec3fArray();
+}
+
+// curveVertexCounts for a wire guide, faceVertexCounts for a mesh one;
+// empty for the implicits, which carry no topology of their own.
+static VtIntArray
+_GuideTopologyCounts(const HdSceneIndexPrim &prim)
+{
+    VtIntArray counts;
+    if (!prim.dataSource) {
+        return counts;
+    }
+    if (HdBasisCurvesSchema curves =
+            HdBasisCurvesSchema::GetFromParent(prim.dataSource)) {
+        if (HdIntArrayDataSourceHandle ds =
+                curves.GetTopology().GetCurveVertexCounts()) {
+            counts = ds->GetTypedValue(0.0f);
+        }
+    } else if (HdMeshSchema mesh =
+                   HdMeshSchema::GetFromParent(prim.dataSource)) {
+        if (HdIntArrayDataSourceHandle ds =
+                mesh.GetTopology().GetFaceVertexCounts()) {
+            counts = ds->GetTypedValue(0.0f);
+        }
+    }
+    return counts;
 }
 
 // The standard three-filter chain over one upstream (spec §10.1).
@@ -1265,12 +1298,34 @@ TestControlGuides(const std::string &examplesDir)
             CHECK(mesh.GetDoubleSided() &&
                   mesh.GetDoubleSided()->GetTypedValue(0.0f));
         }
-        // Wire guides author NO widths: Storm's fallback width is what
-        // gives them the intended hairline look.
+        // Wire guides carry a constant width from guide:wireWidth, which
+        // is what makes them clickable: usdview picks with a single-pixel
+        // window, so an unwidthed hairline is a target real clicks miss.
+        // Nothing else authors widths -- a mesh or an implicit has no
+        // curves to widen.
+        HdPrimvarsSchema primvars =
+            HdPrimvarsSchema::GetFromParent(guide.dataSource);
+        HdPrimvarSchema widths = primvars.GetPrimvar(HdTokens->widths);
         if (expected.primType == HdPrimTypeTokens->basisCurves) {
-            HdPrimvarsSchema primvars =
-                HdPrimvarsSchema::GetFromParent(guide.dataSource);
-            CHECK(!primvars.GetPrimvar(HdTokens->widths));
+            CHECK(widths.GetPrimvarValue());
+            CHECK(widths.GetInterpolation() &&
+                  widths.GetInterpolation()->GetTypedValue(0.0f) ==
+                      HdPrimvarSchemaTokens->constant);
+            if (HdSampledDataSourceHandle v = widths.GetPrimvarValue()) {
+                const VtValue held = v->GetValue(0.0f);
+                CHECK(held.IsHolding<VtFloatArray>());
+                if (held.IsHolding<VtFloatArray>()) {
+                    const VtFloatArray w =
+                        held.UncheckedGet<VtFloatArray>();
+                    CHECK(w.size() == 1);
+                    // The schema default.
+                    if (w.size() == 1) {
+                        CHECK(std::abs(w[0] - 0.05f) < 1e-6f);
+                    }
+                }
+            }
+        } else {
+            CHECK(!widths);
         }
     }
 
@@ -1293,11 +1348,14 @@ TestControlGuides(const std::string &examplesDir)
             results->GetPrim(guidePath(shoulderFk));
         CHECK(guide.dataSource);
         if (guide.dataSource) {
+            // Controls draw as ordinary GEOMETRY, not as diagnostics: an
+            // animator must not have to find a viewer setting before the
+            // thing they are meant to click appears.
             HdPurposeSchema purpose =
                 HdPurposeSchema::GetFromParent(guide.dataSource);
             CHECK(purpose.GetPurpose() &&
                   purpose.GetPurpose()->GetTypedValue(0.0f) ==
-                      HdRenderTagTokens->guide);
+                      HdRenderTagTokens->geometry);
 
             HdPrimvarsSchema primvars =
                 HdPrimvarsSchema::GetFromParent(guide.dataSource);
@@ -1501,6 +1559,171 @@ TestControlGuides(const std::string &examplesDir)
         CHECK(hasGuideChild(elbowPole));
     }
 
+    // ---- purpose. The STOCK UsdGeomImageable attribute, not a RigExec
+    // token: BBoxCache buckets a prim's extent by this exact attribute, so
+    // routing the drawn render tag through it is what keeps the bounds and
+    // the drawing in the same bucket. Controls keep the inherited
+    // `default`; authoring `guide` moves drawing AND bounds together.
+    {
+        auto guidePurpose = [&]() {
+            HdPurposeSchema purpose = HdPurposeSchema::GetFromParent(
+                results->GetPrim(guidePath(handIk)).dataSource);
+            return purpose.GetPurpose()
+                ? purpose.GetPurpose()->GetTypedValue(0.0f) : TfToken();
+        };
+        CHECK(setToken(handIk, "purpose", "guide"));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(guidePurpose() == HdRenderTagTokens->guide);
+
+        // ...and back, which also proves the diff notices a purpose edit
+        // rather than leaving the old render tag in place.
+        observer.dirtied.clear();
+        CHECK(setToken(handIk, "purpose", "default"));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(guidePurpose() == HdRenderTagTokens->geometry);
+        bool sawPurposeDirty = false;
+        for (const SdfPath &p : observer.dirtied) {
+            if (p == guidePath(handIk)) sawPurposeDirty = true;
+        }
+        CHECK(sawPurposeDirty);
+    }
+
+    // ---- guide:wireWidth, which is what makes a wire control clickable.
+    //
+    // usdview's interactive pick window is one physical pixel, so an
+    // unwidthed hairline is a target a real click virtually never lands on
+    // -- and an empty pick deselects to the pseudo-root, which is what the
+    // user actually saw. The width is the fix, so it is pinned here.
+    {
+        CHECK(setToken(elbowPole, "guide:shape", "circle"));
+        CHECK(setToken(elbowPole, "guide:drawMode", "wire"));
+        // The authored width, or a negative sentinel when the primvar is
+        // absent entirely (which is the hairline fallback).
+        auto wireWidth = [&]() -> float {
+            const HdSceneIndexPrim guide =
+                results->GetPrim(guidePath(elbowPole));
+            if (!guide.dataSource) return -1.0f;
+            HdPrimvarSchema widths =
+                HdPrimvarsSchema::GetFromParent(guide.dataSource)
+                    .GetPrimvar(HdTokens->widths);
+            if (!widths) return -1.0f;
+            HdSampledDataSourceHandle value = widths.GetPrimvarValue();
+            if (!value) return -1.0f;
+            const VtValue held = value->GetValue(0.0f);
+            if (!held.IsHolding<VtFloatArray>()) return -1.0f;
+            const VtFloatArray w = held.UncheckedGet<VtFloatArray>();
+            return w.size() == 1 ? w[0] : -1.0f;
+        };
+
+        // A widthed wire guide also asks to be REFINED, or the width is
+        // decoration: Storm honours a curve's width only once the curve is
+        // refined (HdStBasisCurves::_SupportsRefinement is refineLevel > 0),
+        // and usdview's default complexity is refineLevel 0. Measured
+        // against the real single-pixel pick path, this is the difference
+        // between 8 and 89 hits out of 1681.
+        auto refineLevel = [&]() -> int {
+            const HdSceneIndexPrim guide =
+                results->GetPrim(guidePath(elbowPole));
+            if (!guide.dataSource) return -1;
+            HdLegacyDisplayStyleSchema style =
+                HdLegacyDisplayStyleSchema::GetFromParent(guide.dataSource);
+            if (!style || !style.GetRefineLevel()) return -1;
+            return style.GetRefineLevel()->GetTypedValue(0.0f);
+        };
+
+        // Unauthored: the schema default reaches the curves.
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(std::abs(wireWidth() - 0.05f) < 1e-6f);
+        CHECK(refineLevel() == 1);
+
+        // An authored width flows through...
+        CHECK(setDouble(elbowPole, "guide:wireWidth", 0.25));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(std::abs(wireWidth() - 0.25f) < 1e-6f);
+
+        // ...and changing it dirties the guide child, or a cached consumer
+        // goes on drawing the old thickness forever.
+        observer.dirtied.clear();
+        CHECK(setDouble(elbowPole, "guide:wireWidth", 0.4));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(std::abs(wireWidth() - 0.4f) < 1e-6f);
+        bool sawWidthDirty = false;
+        for (const SdfPath &p : observer.dirtied) {
+            if (p == guidePath(elbowPole)) sawWidthDirty = true;
+        }
+        if (!sawWidthDirty) {
+            std::printf("  a guide:wireWidth change did not dirty the "
+                        "guide -- the drawn width goes stale\n");
+        }
+        CHECK(sawWidthDirty);
+
+        // Zero authors NO widths at all -- the hairline fallback, which is
+        // exactly what wire guides drew before this attribute existed.
+        // Unlike a bad scale, this still draws the guide.
+        CHECK(setDouble(elbowPole, "guide:wireWidth", 0.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(results->GetPrim(guidePath(elbowPole)).dataSource);
+        CHECK(wireWidth() < 0.0f);
+        // ...and a hairline asks for no refinement either: there is no
+        // width for refinement to make visible, so it would be pure
+        // tessellation cost.
+        CHECK(refineLevel() == -1);
+
+        // ...and so does a negative one.
+        CHECK(setDouble(elbowPole, "guide:wireWidth", -2.0));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(results->GetPrim(guidePath(elbowPole)).dataSource);
+        CHECK(wireWidth() < 0.0f);
+        CHECK(refineLevel() == -1);
+
+        // The geometry draw mode ignores the width entirely: a mesh has no
+        // curves to widen, and a stray widths primvar is one more thing a
+        // renderer has to decide what to do with.
+        CHECK(setDouble(elbowPole, "guide:wireWidth", 0.25));
+        CHECK(setToken(elbowPole, "guide:drawMode", "geometry"));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+        CHECK(results->GetPrim(guidePath(elbowPole)).primType ==
+              HdPrimTypeTokens->mesh);
+        CHECK(wireWidth() < 0.0f);
+        // A mesh has nothing to refine here either.
+        CHECK(refineLevel() == -1);
+
+        // Back to a widthed wire for whatever runs after this.
+        CHECK(setToken(elbowPole, "guide:drawMode", "wire"));
+        CHECK(setToken(elbowPole, "guide:shape", "pyramid"));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1024)));
+
+        // The diff arm directly: two generations differing ONLY in the
+        // width report a guide VALUE change. Asserted as an exact equality
+        // rather than a bit test, because the failure that matters in both
+        // directions is silent -- no bit at all leaves the width stale,
+        // and a structural bit would resync the child on every width
+        // nudge.
+        {
+            RigExecSnapshotStore diffStore;
+            const SdfPath probe("/DiffProbe/Ctrl");
+            auto generation = [&probe](double width) {
+                auto snap = std::make_shared<RigExecImagingSnapshot>();
+                RigExecPublishedPrim &published = snap->prims[probe];
+                published.hasControlGuide = true;
+                published.controlGuideShape = TfToken("circle");
+                published.controlGuideDrawMode = TfToken("wire");
+                published.controlGuideWireWidth = width;
+                return snap;
+            };
+            diffStore.Publish(generation(0.05));
+            const RigExecPublishedDirtyVector dirty =
+                diffStore.Publish(generation(0.2));
+            CHECK(dirty.size() == 1);
+            if (dirty.size() == 1) {
+                CHECK(dirty[0].path == probe);
+                CHECK(dirty[0].changes == RigExecChangeGuides);
+            }
+            // ...and an unchanged width reports nothing at all.
+            CHECK(diffStore.Publish(generation(0.2)).empty());
+        }
+    }
+
     // An authored prim occupying the guide's name wins it, as everywhere
     // else in this index; removing it reveals the synthesized guide again.
     {
@@ -1655,16 +1878,28 @@ TestExampleControlGuides(const std::string &examplesDir)
         const char *controls;
         std::vector<_Case> cases;
     } examples[] = {
+        // Every scale here is above 1 on purpose: at rest the control, its
+        // joint, and its solver element coincide, and the unit-radius
+        // joint/solver guides would otherwise swallow every click aimed at
+        // the control. The values are load-bearing for selectability, not
+        // decoration, so they are asserted rather than left to drift.
+        // The example draws only 3D shapes: the planar circle and box lie
+        // in the local XZ plane and are edge-on from the default front
+        // view, so they read as bare lines there. Their topology is
+        // asserted exhaustively in TestControlGuides, and again in memory
+        // at the end of this function.
         {"/01_FkChainTail.usda", "/TailAsset/Rig", "/TailAsset/Rig/Controls",
          {// diamond wire: three orthogonal rings through the ±axis vertices
-          {"Tail1", HdPrimTypeTokens->basisCurves, {5, 5, 5}, unit},
-          // box geometry: one quad face
-          {"Tail2", HdPrimTypeTokens->mesh, {4}, unit},
-          // circle wire: one 33-point closed ring, flattened in Y
-          {"Tail3", HdPrimTypeTokens->basisCurves, {33},
-           GfVec3d(1.5, 0.3, 1.5)},
+          {"Tail1", HdPrimTypeTokens->basisCurves, {5, 5, 5},
+           GfVec3d(1.6, 1.6, 1.6)},
+          // cube geometry: Hydra's implicit, sized by the xform alone
+          {"Tail2", HdPrimTypeTokens->cube, {}, GfVec3d(1.2, 1.2, 1.2)},
+          // sphere wire: three orthogonal 33-point rings, squashed in Y
+          {"Tail3", HdPrimTypeTokens->basisCurves, {33, 33, 33},
+           GfVec3d(1.8, 0.6, 1.8)},
           // pyramid wire: base ring plus four apex edges
-          {"Tail4", HdPrimTypeTokens->basisCurves, {5, 2, 2, 2, 2}, unit}}},
+          {"Tail4", HdPrimTypeTokens->basisCurves, {5, 2, 2, 2, 2},
+           GfVec3d(1.5, 1.5, 1.5)}}},
         {"/02_TwoBoneIkLeg.usda", "/LegAsset/Rig", "/LegAsset/Rig/Controls",
          {{"HipRoot", HdPrimTypeTokens->cube, {}, GfVec3d(0.6, 0.6, 0.6)},
           {"FootIK", HdPrimTypeTokens->basisCurves, {33, 33, 33}, unit},
@@ -1731,20 +1966,7 @@ TestExampleControlGuides(const std::string &examplesDir)
             if (!prim.dataSource) continue;
 
             // Topology, for the shapes that carry their own.
-            VtIntArray counts;
-            if (HdBasisCurvesSchema curves =
-                    HdBasisCurvesSchema::GetFromParent(prim.dataSource)) {
-                if (HdIntArrayDataSourceHandle ds =
-                        curves.GetTopology().GetCurveVertexCounts()) {
-                    counts = ds->GetTypedValue(0.0f);
-                }
-            } else if (HdMeshSchema mesh =
-                           HdMeshSchema::GetFromParent(prim.dataSource)) {
-                if (HdIntArrayDataSourceHandle ds =
-                        mesh.GetTopology().GetFaceVertexCounts()) {
-                    counts = ds->GetTypedValue(0.0f);
-                }
-            }
+            const VtIntArray counts = _GuideTopologyCounts(prim);
             const bool countsMatch =
                 counts.size() == c.counts.size() &&
                 std::equal(counts.begin(), counts.end(), c.counts.begin());
@@ -1754,6 +1976,23 @@ TestExampleControlGuides(const std::string &examplesDir)
                             c.counts.size());
             }
             CHECK(countsMatch);
+
+            // The implicits carry no topology at all: their dimension is
+            // the unit one, and the authored scale reaches them only
+            // through the xform asserted below. A cube that shipped at
+            // Hydra's fallback size would draw at half the authored size
+            // with nothing else to show for it.
+            if (c.primType == HdPrimTypeTokens->cube) {
+                HdCubeSchema cube =
+                    HdCubeSchema::GetFromParent(prim.dataSource);
+                CHECK(cube.GetSize() &&
+                      cube.GetSize()->GetTypedValue(0.0f) == 2.0);
+            } else if (c.primType == HdPrimTypeTokens->sphere) {
+                HdSphereSchema sphere =
+                    HdSphereSchema::GetFromParent(prim.dataSource);
+                CHECK(sphere.GetRadius() &&
+                      sphere.GetRadius()->GetTypedValue(0.0f) == 1.0);
+            }
 
             // The authored per-axis scale, as the xform's basis lengths.
             // Nothing upstream places the asset root, so it resolves to
@@ -1779,7 +2018,7 @@ TestExampleControlGuides(const std::string &examplesDir)
                 HdPurposeSchema::GetFromParent(prim.dataSource);
             CHECK(purpose.GetPurpose() &&
                   purpose.GetPurpose()->GetTypedValue(0.0f) ==
-                      HdRenderTagTokens->guide);
+                      HdRenderTagTokens->geometry);
 
             HdPrimvarsSchema primvars =
                 HdPrimvarsSchema::GetFromParent(prim.dataSource);
@@ -1805,6 +2044,67 @@ TestExampleControlGuides(const std::string &examplesDir)
                             resolved.GetText());
             }
             CHECK(resolved == control);
+        }
+
+        // ---- The planar shapes, authored in memory on this same rig.
+        //
+        // No example draws circle or box any more: both lie in the local
+        // XZ plane, so they are edge-on from the default front view and
+        // read as bare lines there. They are still shapes a real rig must
+        // be able to draw, and dropping them from the examples must not
+        // quietly drop them from the coverage -- so they are authored here
+        // instead, keeping the planar topology asserted against a composed
+        // example stage rather than only against the synthetic sweep in
+        // TestControlGuides.
+        const SdfPath probe =
+            SdfPath(example.controls)
+                .AppendChild(TfToken(example.cases.front().control));
+        const SdfPath probeGuide =
+            probe.AppendChild(TfToken("rigGuideCtrl"));
+        struct _Planar {
+            const char *shape;
+            const char *drawMode;
+            TfToken primType;
+            std::vector<int> counts;
+            size_t points;
+        };
+        const _Planar planars[] = {
+            // One 33-point closed ring: 32 segments plus the repeat that
+            // closes it.
+            {"circle", "wire", HdPrimTypeTokens->basisCurves, {33}, 33},
+            // One quad face.
+            {"box", "geometry", HdPrimTypeTokens->mesh, {4}, 4}};
+        for (const _Planar &planar : planars) {
+            const UsdPrim probePrim = stage->GetPrimAtPath(probe);
+            CHECK(probePrim.GetAttribute(TfToken("guide:shape"))
+                      .Set(TfToken(planar.shape)));
+            CHECK(probePrim.GetAttribute(TfToken("guide:drawMode"))
+                      .Set(TfToken(planar.drawMode)));
+            CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+
+            const HdSceneIndexPrim guide = results->GetPrim(probeGuide);
+            if (guide.primType != planar.primType) {
+                std::printf("  %s in-memory %s/%s drew a '%s', expected "
+                            "'%s'\n", example.file, planar.shape,
+                            planar.drawMode, guide.primType.GetText(),
+                            planar.primType.GetText());
+            }
+            CHECK(guide.primType == planar.primType);
+            CHECK(guide.dataSource);
+            if (!guide.dataSource) continue;
+            const VtIntArray counts = _GuideTopologyCounts(guide);
+            const bool countsMatch =
+                counts.size() == planar.counts.size() &&
+                std::equal(counts.begin(), counts.end(),
+                           planar.counts.begin());
+            if (!countsMatch) {
+                std::printf("  %s in-memory %s/%s: %zu topology entries, "
+                            "expected %zu\n", example.file, planar.shape,
+                            planar.drawMode, counts.size(),
+                            planar.counts.size());
+            }
+            CHECK(countsMatch);
+            CHECK(_GetPointsPrimvar(guide).size() == planar.points);
         }
     }
 }
@@ -2442,6 +2742,526 @@ TestDrivenXformConditioning()
     }
 }
 
+// The guide-bounds C export (registry.h), which is what gives usdview a
+// box to frame.
+//
+// Nothing a rig draws is reachable by UsdGeomBBoxCache: the guides are
+// synthesized inside the imaging chain and never authored, and the RigExec
+// prim types are not UsdGeomImageable. So the published snapshot is the
+// only place the drawn extent exists, and these bounds are asserted
+// EXACTLY -- a framing box that is quietly half the right size still frames
+// something, which is how a wrong one survives being looked at.
+static void
+TestGuideBoundsExport()
+{
+    // Publishing straight into the process-global store the export reads.
+    // Deactivating first so a bridge left over from an earlier test cannot
+    // republish over the fixture and make this order-dependent.
+    RigExecImaging_Deactivate();
+    const std::shared_ptr<RigExecSnapshotStore> &store =
+        RigExecImagingRegistry::GetInstance().GetStore();
+
+    const SdfPath joint("/R/Joint");
+    const SdfPath control("/R/Ctrl");
+    const SdfPath turned("/R/Turned");
+    const SdfPath silent("/R/Silent");
+
+    auto snapshot = std::make_shared<RigExecImagingSnapshot>();
+    {
+        // Sphere r=2 at (10,0,0) plus a cone reaching 4 along +X: the box
+        // spans the sphere at the origin and the sphere at the tip.
+        RigExecPublishedPrim &published = snapshot->prims[joint];
+        published.hasGuides = true;
+        GfMatrix4d frame(1.0);
+        frame.SetTranslateOnly(GfVec3d(10, 0, 0));
+        published.guideFrames.push_back(frame);
+        published.guideLengths.push_back(4.0);
+        published.guideRadii.push_back(2.0);
+    }
+    {
+        // Unit shape scaled per axis, then placed by the frame.
+        RigExecPublishedPrim &published = snapshot->prims[control];
+        published.hasControlGuide = true;
+        GfMatrix4d frame(1.0);
+        frame.SetTranslateOnly(GfVec3d(0, 5, 0));
+        published.controlGuideFrame = frame;
+        published.controlGuideScale = GfVec3d(2, 3, 4);
+        published.controlGuideShape = TfToken("circle");
+        published.controlGuideDrawMode = TfToken("wire");
+        // Hairline, so the box is the shape's own and the arithmetic below
+        // stays about placement rather than about wire width.
+        published.controlGuideWireWidth = 0.0;
+    }
+    {
+        // ...and rotated, which is what proves the frame is applied rather
+        // than just its translation: a quarter turn about Z swaps the X and
+        // Y half-extents of the aligned box.
+        RigExecPublishedPrim &published = snapshot->prims[turned];
+        published.hasControlGuide = true;
+        published.controlGuideFrame =
+            GfMatrix4d(1.0).SetRotate(GfRotation(GfVec3d(0, 0, 1), 90.0));
+        published.controlGuideScale = GfVec3d(2, 3, 4);
+        published.controlGuideShape = TfToken("box");
+        published.controlGuideDrawMode = TfToken("geometry");
+    }
+    {
+        // Published, but draws nothing.
+        RigExecPublishedPrim &published = snapshot->prims[silent];
+        published.hasPoints = true;
+        published.points = VtVec3fArray{GfVec3f(0, 0, 0)};
+    }
+    store->Publish(snapshot);
+
+    double b[6] = {0, 0, 0, 0, 0, 0};
+    auto bounds = [&b](const SdfPath &path) {
+        return RigExecImaging_GetGuideBoundsAssetSpace(
+            path.GetString().c_str(), b);
+    };
+    auto matches = [&b](const GfVec3d &min, const GfVec3d &max) {
+        for (size_t i = 0; i < 3; ++i) {
+            if (std::abs(b[i] - min[i]) > 1e-9 ||
+                std::abs(b[i + 3] - max[i]) > 1e-9) {
+                std::printf("  bounds (%g %g %g)..(%g %g %g), expected "
+                            "(%g %g %g)..(%g %g %g)\n", b[0], b[1], b[2],
+                            b[3], b[4], b[5], min[0], min[1], min[2],
+                            max[0], max[1], max[2]);
+                return false;
+            }
+        }
+        return true;
+    };
+
+    CHECK(bounds(joint) == 1);
+    CHECK(matches(GfVec3d(8, -2, -2), GfVec3d(16, 2, 2)));
+
+    CHECK(bounds(control) == 1);
+    CHECK(matches(GfVec3d(-2, 2, -4), GfVec3d(2, 8, 4)));
+
+    CHECK(bounds(turned) == 1);
+    CHECK(matches(GfVec3d(-3, -2, -4), GfVec3d(3, 2, 4)));
+
+    // A prim that draws nothing, an unpublished prim, and a malformed path
+    // all decline rather than reporting a degenerate box at the origin --
+    // which would frame the camera on empty space.
+    CHECK(bounds(silent) == 0);
+    CHECK(bounds(SdfPath("/R/Absent")) == 0);
+    CHECK(RigExecImaging_GetGuideBoundsAssetSpace("not a path", b) == 0);
+    CHECK(RigExecImaging_GetGuideBoundsAssetSpace(nullptr, b) == 0);
+
+    // The whole-rig union, which is what framing the RigExecRig uses.
+    CHECK(RigExecImaging_GetAllGuideBoundsAssetSpace(b) == 1);
+    CHECK(matches(GfVec3d(-3, -2, -4), GfVec3d(16, 8, 4)));
+
+    // An empty generation draws nothing at all.
+    store->Publish(nullptr);
+    CHECK(RigExecImaging_GetAllGuideBoundsAssetSpace(b) == 0);
+    CHECK(bounds(joint) == 0);
+}
+
+// The codeless schema's resource directory.
+//
+// The GENERATED one when the build supplied it: only that copy carries the
+// LibraryPath that lets Plug load the compute-extent registration on demand,
+// which is what makes UsdGeomBBoxCache answer for RigExec prims. The source
+// tree's copy is data-only and is the fallback for an ad hoc build.
+static std::string
+_SchemaResourceDir(const std::string &examplesDir)
+{
+#ifdef RIGEXEC_SCHEMA_RESOURCE_DIR
+    (void)examplesDir;
+    return TfAbsPath(RIGEXEC_SCHEMA_RESOURCE_DIR);
+#else
+    return TfAbsPath(examplesDir + "/../plugin/rigExecSchema/resources");
+#endif
+}
+
+// Transform-authority validation (host-durability redesign): the compiler
+// warns about the two things that leave a provider's computed extent
+// placing its guide somewhere the rig is not, without failing a compile
+// over what is only a framing inaccuracy.
+static void
+TestTransformAuthorityWarnings(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath rigPath("/TailAsset/Rig");
+    const SdfPath tail1("/TailAsset/Rig/Controls/Tail1");
+
+    // A clean rig warns about nothing -- the check has to be quiet on the
+    // ordinary shape of a rig, where joints nest under joints and every
+    // one of them is Xformable now.
+    {
+        RigExecImagingBridge bridge(stage, rigPath);
+        std::vector<std::string> errors;
+        CHECK(bridge.Compile(&errors));
+        for (const std::string &e : errors) {
+            std::printf("  unexpected compile diagnostic: %s\n", e.c_str());
+        }
+        CHECK(errors.empty());
+    }
+
+    auto warnedAbout = [](const std::vector<std::string> &errors,
+                          const char *needle) {
+        for (const std::string &e : errors) {
+            if (e.rfind("warning: ", 0) == 0 &&
+                e.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // xformOps on a provider: a second transform authority that nothing
+    // reads. The compile still succeeds -- evaluation is unaffected.
+    {
+        UsdGeomXformable(stage->GetPrimAtPath(tail1))
+            .AddTranslateOp()
+            .Set(GfVec3d(3, 0, 0));
+        RigExecImagingBridge bridge(stage, rigPath);
+        std::vector<std::string> errors;
+        const bool compiled = bridge.Compile(&errors);
+        CHECK(compiled);
+        if (!warnedAbout(errors, "authors xformOps")) {
+            std::printf("  no xformOps warning for %s\n",
+                        tail1.GetString().c_str());
+        }
+        CHECK(warnedAbout(errors, "authors xformOps"));
+    }
+
+    // A solver is a provider too, now that it inherits Boundable: an
+    // authored op there is applied by BBoxCache to an already-baked extent
+    // while the guide it draws ignores it.
+    {
+        UsdGeomXformable(
+            stage->GetPrimAtPath(SdfPath("/TailAsset/Rig/Solvers/TailFK")))
+            .AddTranslateOp()
+            .Set(GfVec3d(0, 4, 0));
+        RigExecImagingBridge bridge(stage, rigPath);
+        std::vector<std::string> errors;
+        CHECK(bridge.Compile(&errors));
+        bool solverWarned = false;
+        for (const std::string &e : errors) {
+            if (e.find("TailFK") != std::string::npos &&
+                e.find("authors xformOps") != std::string::npos) {
+                solverWarned = true;
+            }
+        }
+        if (!solverWarned) {
+            std::printf("  no xformOps warning for the solver\n");
+        }
+        CHECK(solverWarned);
+    }
+
+    // Geometry parented under a provider falls outside its extent, and
+    // bounds stop descending at a Boundable, so it vanishes from every
+    // ancestor's box too.
+    {
+        stage->DefinePrim(SdfPath("/TailAsset/Rig/Controls/Tail1/Extra"),
+                          TfToken("Sphere"));
+        RigExecImagingBridge bridge(stage, rigPath);
+        std::vector<std::string> errors;
+        CHECK(bridge.Compile(&errors));
+        if (!warnedAbout(errors, "is parented under RigExec provider")) {
+            std::printf("  no nested-gprim warning\n");
+        }
+        CHECK(warnedAbout(errors, "is parented under RigExec provider"));
+    }
+
+    // An Xformable between the asset root and a provider: its transform is
+    // never composed into the rig's frames, so the baked extent puts the
+    // guide where the provider would be if that Xform were identity.
+    {
+        const SdfPath intervening("/TailAsset/Rig/Extra");
+        stage->DefinePrim(intervening, TfToken("Xform"));
+        stage->DefinePrim(intervening.AppendChild(TfToken("Ctrl")),
+                          TfToken("RigExecControl"));
+        RigExecImagingBridge bridge(stage, rigPath);
+        std::vector<std::string> errors;
+        CHECK(bridge.Compile(&errors));
+        if (!warnedAbout(errors, "sits between the asset root")) {
+            std::printf("  no intervening-Xformable warning\n");
+        }
+        CHECK(warnedAbout(errors, "sits between the asset root"));
+    }
+}
+
+// The computed extent follows the POSE when a generation is published, and
+// falls back to the rest pose when none is.
+//
+// Both halves matter: the rest answer is what an un-evaluated stage frames
+// on, and the posed answer is what has to agree with the thing on screen.
+static void
+TestSnapshotBackedExtent(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) return;
+    const SdfPath tail4("/TailAsset/Rig/Controls/Tail4");
+    UsdGeomBoundable boundable(stage->GetPrimAtPath(tail4));
+    CHECK(boundable);
+
+    auto extentAt = [&boundable](double frame, VtVec3fArray *out) {
+        return boundable.ComputeExtent(UsdTimeCode(frame), out);
+    };
+
+    // Nothing activated: the rest fallback answers, from authored data.
+    RigExecImaging_Deactivate();
+    VtVec3fArray rest;
+    CHECK(extentAt(1024, &rest));
+    CHECK(rest.size() == 2);
+
+    // Now publish a real generation. Frame 1024 rotates the tail, so the
+    // control's posed frame is not its rest frame.
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    const bool activated = registry.Activate(
+        stage, SdfPath("/TailAsset/Rig"), UsdTimeCode(1024), &errors);
+    CHECK(activated);
+    if (!activated) return;
+
+    VtVec3fArray posed;
+    CHECK(extentAt(1024, &posed));
+    CHECK(posed.size() == 2);
+    if (posed.size() == 2 && rest.size() == 2) {
+        const bool moved = !GfIsClose(GfVec3d(posed[0]), GfVec3d(rest[0]),
+                                      1e-4) ||
+                           !GfIsClose(GfVec3d(posed[1]), GfVec3d(rest[1]),
+                                      1e-4);
+        if (!moved) {
+            std::printf("  posed extent equals the rest extent -- the "
+                        "snapshot is not reaching ComputeExtent\n");
+        }
+        CHECK(moved);
+    }
+    registry.Deactivate();
+}
+
+// The extent callback is a PURE FUNCTION of (stage, time).
+//
+// The snapshot store is a process-global singleton and USD calls this
+// callback with a stage and a time of its own choosing, so a lookup by
+// path alone answers a query about one stage/frame with another's pose --
+// plausible, wrong, and invisible downstream. Both halves are pinned here.
+//
+// Also pins the documented CACHING contract. UsdGeomBBoxCache caches a
+// plugin-computed extent as constant: nothing about it is time-varying,
+// because RigExec authors no extent attribute (and must not -- see
+// testRigExecNoAuthoring). Measured: after SetTime(1024) a long-lived
+// cache still returns the 1001 box while a fresh cache returns 1024's.
+// So the contract is per-query correctness; a holder of a long-lived
+// cache must Clear() it, and SetTime alone is NOT enough.
+static void
+TestExtentIsPureFunctionOfStageAndTime(const std::string &examplesDir)
+{
+    const std::string file = examplesDir + "/01_FkChainTail.usda";
+    UsdStageRefPtr stage = UsdStage::Open(file);
+    CHECK(stage);
+    if (!stage) return;
+    const SdfPath control("/TailAsset/Rig/Controls/Tail4");
+    UsdGeomBoundable boundable(stage->GetPrimAtPath(control));
+    CHECK(boundable);
+
+    auto extent = [](const UsdGeomBoundable &b, double frame) {
+        VtVec3fArray out;
+        return b.ComputeExtent(UsdTimeCode(frame), &out) && out.size() == 2
+            ? GfVec3d(out[0]) : GfVec3d(1e9);
+    };
+
+    RigExecImaging_Deactivate();
+    const GfVec3d rest = extent(boundable, 1024);
+
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    const bool activated = registry.Activate(
+        stage, SdfPath("/TailAsset/Rig"), UsdTimeCode(1024), &errors);
+    CHECK(activated);
+    if (!activated) return;
+
+    // The generation describes frame 1024, so 1024 is answered from it...
+    const GfVec3d posed = extent(boundable, 1024);
+    CHECK(!GfIsClose(posed, rest, 1e-4));
+
+    // ...and 1001 is NOT. Before the time gate this returned the 1024
+    // pose for a 1001 query; now it falls back to the rest pose, which is
+    // the only answer this callback can give for a frame nothing has
+    // evaluated.
+    const GfVec3d otherFrame = extent(boundable, 1001);
+    if (GfIsClose(otherFrame, posed, 1e-4)) {
+        std::printf("  a 1001 query was answered from the 1024 "
+                    "generation\n");
+    }
+    CHECK(!GfIsClose(otherFrame, posed, 1e-4));
+    CHECK(GfIsClose(otherFrame, rest, 1e-4));
+
+    // A DIFFERENT stage must not be answered from this stage's generation
+    // -- and the case that matters is two stages sharing the SAME ROOT
+    // LAYER, differing only by session layer. That is the ordinary way a
+    // host opens a second view of one asset, and it is exactly what a
+    // root-layer-identifier comparison cannot tell apart.
+    {
+        SdfLayerRefPtr root = SdfLayer::FindOrOpen(file);
+        CHECK(root);
+        UsdStageRefPtr other =
+            UsdStage::Open(root, SdfLayer::CreateAnonymous());
+        CHECK(other);
+        if (other) {
+            CHECK(other != stage);
+            CHECK(other->GetRootLayer() == stage->GetRootLayer());
+            UsdGeomBoundable otherBoundable(other->GetPrimAtPath(control));
+            CHECK(otherBoundable);
+            if (otherBoundable) {
+                const GfVec3d fromOtherStage = extent(otherBoundable, 1024);
+                if (GfIsClose(fromOtherStage, posed, 1e-4)) {
+                    std::printf("  a second stage over the same root layer "
+                                "was answered from this stage's "
+                                "generation\n");
+                }
+                CHECK(!GfIsClose(fromOtherStage, posed, 1e-4));
+                CHECK(GfIsClose(fromOtherStage, rest, 1e-4));
+            }
+        }
+    }
+
+    // The caching contract, measured rather than assumed.
+    {
+        UsdGeomBBoxCache longLived(UsdTimeCode(1024),
+                                   {UsdGeomTokens->default_});
+        const GfRange3d atPosed =
+            longLived.ComputeWorldBound(stage->GetPrimAtPath(control))
+                .ComputeAlignedRange();
+        registry.SetTime(UsdTimeCode(1001));
+        longLived.SetTime(UsdTimeCode(1001));
+        const GfRange3d afterSetTime =
+            longLived.ComputeWorldBound(stage->GetPrimAtPath(control))
+                .ComputeAlignedRange();
+        UsdGeomBBoxCache fresh(UsdTimeCode(1001), {UsdGeomTokens->default_});
+        const GfRange3d freshRange =
+            fresh.ComputeWorldBound(stage->GetPrimAtPath(control))
+                .ComputeAlignedRange();
+
+        // A fresh cache is correct for its time...
+        CHECK(!freshRange.IsEmpty());
+        // ...and the long-lived one is documented-stale after SetTime
+        // alone. Asserted so the day USD starts re-querying, this test
+        // fails and the documentation gets corrected rather than quietly
+        // becoming wrong.
+        CHECK(afterSetTime.GetMin() == atPosed.GetMin());
+        CHECK(freshRange.GetMin() != atPosed.GetMin());
+    }
+    registry.Deactivate();
+}
+
+// One extent carries ONE purpose (codex P1): a descendant whose resolved
+// purpose differs from the boundable's is excluded from its bounds, and
+// the compiler says so rather than leaving it a silent hole.
+static void
+TestPurposeScopedBounds(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    // A default-purpose control parented under a guide-purpose joint.
+    const SdfPath joint("/TailAsset/Rig/Joints/Seg1");
+    const SdfPath nested = joint.AppendChild(TfToken("NestedCtrl"));
+    UsdPrim control = stage->DefinePrim(nested, TfToken("RigExecControl"));
+    CHECK(control);
+    GfMatrix4d far(1.0);
+    far.SetTranslateOnly(GfVec3d(0, 60, 0));
+    CHECK(control.GetAttribute(TfToken("rest:space")).Set(far));
+
+    CHECK(UsdGeomImageable(stage->GetPrimAtPath(joint)).ComputePurpose() ==
+          UsdGeomTokens->guide);
+    CHECK(UsdGeomImageable(control).ComputePurpose() ==
+          UsdGeomTokens->default_);
+
+    // The joint's guide-purpose bound must not swallow it: at y=60 the
+    // control is nowhere near the joint chain, so inclusion is obvious.
+    RigExecImaging_Deactivate();
+    UsdGeomBBoxCache guideOnly(UsdTimeCode(1001), {UsdGeomTokens->guide});
+    const GfRange3d jointRange =
+        guideOnly.ComputeWorldBound(stage->GetPrimAtPath(joint))
+            .ComputeAlignedRange();
+    CHECK(!jointRange.IsEmpty());
+    if (!jointRange.IsEmpty() && jointRange.GetMax()[1] > 30.0) {
+        std::printf("  a default-purpose control was folded into a "
+                    "guide-purpose bound (maxY %g)\n",
+                    jointRange.GetMax()[1]);
+    }
+    CHECK(jointRange.GetMax()[1] < 30.0);
+
+    // ...and the author is told, because nothing in the namespace hints at
+    // it.
+    {
+        RigExecImagingBridge bridge(stage, SdfPath("/TailAsset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(bridge.Compile(&errors));
+        bool warned = false;
+        for (const std::string &e : errors) {
+            if (e.find("one extent carries one purpose") !=
+                std::string::npos) {
+                warned = true;
+            }
+        }
+        if (!warned) {
+            std::printf("  no mixed-purpose nesting warning\n");
+        }
+        CHECK(warned);
+    }
+}
+
+// Every stock purpose maps to its own Hydra render tag, so drawing and
+// bounds classification agree for all four allowed tokens.
+static void
+TestAllPurposeRenderTags(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) return;
+    const SdfPath control("/TailAsset/Rig/Controls/Tail1");
+    const SdfPath guidePath = control.AppendChild(TfToken("rigGuideCtrl"));
+
+    RigExecImagingBridge bridge(stage, SdfPath("/TailAsset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(bridge.Compile(&errors));
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    upstream->AddPrims(
+        {{control, TfToken(),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)}});
+    auto results =
+        RigExecResultsSceneIndex::New(upstream, bridge.GetStore());
+
+    const struct {
+        TfToken purpose;
+        TfToken renderTag;
+    } cases[] = {{UsdGeomTokens->default_, HdRenderTagTokens->geometry},
+                 {UsdGeomTokens->guide, HdRenderTagTokens->guide},
+                 {UsdGeomTokens->render, HdRenderTagTokens->render},
+                 {UsdGeomTokens->proxy, HdRenderTagTokens->proxy}};
+    for (const auto &c : cases) {
+        CHECK(UsdGeomImageable(stage->GetPrimAtPath(control))
+                  .GetPurposeAttr()
+                  .Set(c.purpose));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        HdPurposeSchema purpose = HdPurposeSchema::GetFromParent(
+            results->GetPrim(guidePath).dataSource);
+        const TfToken drawn = purpose.GetPurpose()
+            ? purpose.GetPurpose()->GetTypedValue(0.0f) : TfToken();
+        if (drawn != c.renderTag) {
+            std::printf("  purpose '%s' drew render tag '%s', expected "
+                        "'%s'\n", c.purpose.GetText(), drawn.GetText(),
+                        c.renderTag.GetText());
+        }
+        CHECK(drawn == c.renderTag);
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2450,8 +3270,7 @@ main(int argc, char **argv)
         return 2;
     }
     const std::string examplesDir = argv[1];
-    const std::string resources = TfAbsPath(
-        examplesDir + "/../plugin/rigExecSchema/resources");
+    const std::string resources = _SchemaResourceDir(examplesDir);
     if (PlugRegistry::GetInstance().RegisterPlugins(resources).empty()) {
         std::printf("FATAL: no schema plugin found at %s\n",
                     resources.c_str());
@@ -2473,6 +3292,13 @@ main(int argc, char **argv)
     TestLegacyRenderIndexPickup(examplesDir);
     TestEditTriggeredReevaluation(examplesDir);
     TestConstraintDrivenXformPublishes(examplesDir);
+    // Last: it publishes a fixture into the process-global registry store.
+    TestGuideBoundsExport();
+    TestTransformAuthorityWarnings(examplesDir);
+    TestSnapshotBackedExtent(examplesDir);
+    TestExtentIsPureFunctionOfStageAndTime(examplesDir);
+    TestPurposeScopedBounds(examplesDir);
+    TestAllPurposeRenderTags(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

@@ -7,6 +7,8 @@
 
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usdGeom/imageable.h"
+#include "pxr/usd/usdGeom/tokens.h"
 
 #include <cmath>
 
@@ -96,6 +98,20 @@ _AppendGuideFrame(
     return true;
 }
 
+// The prim's resolved render purpose, which is what BBoxCache classifies
+// its extent by -- so the guide it draws is stamped with the same value.
+TfToken
+_ReadGuidePurpose(const UsdPrim &prim)
+{
+    if (const UsdGeomImageable imageable = UsdGeomImageable(prim)) {
+        const TfToken purpose = imageable.ComputePurpose();
+        if (!purpose.IsEmpty()) {
+            return purpose;
+        }
+    }
+    return UsdGeomTokens->default_;
+}
+
 void
 _ReadGuideStyle(
     const UsdPrim &prim, UsdTimeCode time, RigExecPublishedPrim *published)
@@ -103,6 +119,7 @@ _ReadGuideStyle(
     if (!prim) {
         return;
     }
+    published->guidePurpose = _ReadGuidePurpose(prim);
     if (UsdAttribute a = prim.GetAttribute(TfToken("guide:displayColor"))) {
         a.Get(&published->guideColor, time);
     }
@@ -248,6 +265,7 @@ RigExecImagingBridge::_FillControlGuides(
         TfToken shape("circle");
         TfToken drawMode("wire");
         GfVec3d scale(1.0, 1.0, 1.0);
+        double wireWidth = 0.05;
         if (prim) {
             if (UsdAttribute a = prim.GetAttribute(TfToken("guide:shape"))) {
                 a.Get(&shape, pose.time);
@@ -264,6 +282,17 @@ RigExecImagingBridge::_FillControlGuides(
                     a.Get(&scale[axis], pose.time);
                 }
             }
+            if (UsdAttribute a =
+                    prim.GetAttribute(TfToken("guide:wireWidth"))) {
+                a.Get(&wireWidth, pose.time);
+            }
+        }
+        // Unlike the scale, a non-positive width is NOT a reason to draw
+        // nothing: it selects the hairline fallback, which is what wire
+        // guides did before the width existed. Non-finite collapses to the
+        // same thing rather than reaching the curves as a NaN.
+        if (!std::isfinite(wireWidth) || wireWidth <= 0.0) {
+            wireWidth = 0.0;
         }
         // A non-finite or non-positive scale on ANY axis draws nothing,
         // mirroring the joint guide:radius rule: a flattened shape is
@@ -281,8 +310,25 @@ RigExecImagingBridge::_FillControlGuides(
         published.controlGuideShape = shape;
         published.controlGuideDrawMode = drawMode;
         published.controlGuideScale = scale;
+        published.controlGuideWireWidth = wireWidth;
         _ReadGuideStyle(prim, pose.time, &published);
     }
+}
+
+
+// Stamps WHICH STAGE and WHICH TIME a generation describes onto it.
+//
+// The store is process-global, so a consumer that finds a prim by path
+// alone -- the compute-extent callback is the one USD calls with a stage
+// and time of its own choosing -- would otherwise accept whatever rig
+// published last, for whatever frame.
+void
+RigExecImagingBridge::_StampGeneration(
+    UsdTimeCode time, RigExecImagingSnapshot *snapshot) const
+{
+    snapshot->stage = UsdStageWeakPtr(_stage);
+    snapshot->sampleTimeIsDefault = time.IsDefault();
+    snapshot->sampleTime = time.IsDefault() ? 0.0 : time.GetValue();
 }
 
 bool
@@ -316,6 +362,7 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     // (spec §10.2). Only standard data crosses this boundary.
     auto snapshot = std::make_shared<RigExecImagingSnapshot>();
     snapshot->generation = ++_generation;
+    _StampGeneration(time, snapshot.get());
     for (const auto &[propertyPath, value] : pose.movedProperties) {
         const SdfPath primPath = propertyPath.GetPrimPath();
         const TfToken property = propertyPath.GetNameToken();
@@ -467,6 +514,9 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
         published.pointsSamples = std::move(samples);
     }
     snapshot->generation = ++_generation;
+    // The sampled path is identified by its BASE time: that is the frame a
+    // consumer asks about, and the offsets are relative to it.
+    _StampGeneration(baseTime, snapshot.get());
 
     const size_t epochDigest = _evaluator->GetBindingEpochDigest();
     if (epochDigest != _publishedEpochDigest) {

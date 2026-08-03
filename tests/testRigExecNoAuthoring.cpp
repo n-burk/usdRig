@@ -200,6 +200,23 @@ TestImagingPublicationAuthorsNothing(const std::string &examplesDir)
 
 }  // namespace
 
+// The codeless schema's resource directory.
+//
+// The GENERATED one when the build supplied it: only that copy carries the
+// LibraryPath that lets Plug load the compute-extent registration on demand,
+// which is what makes UsdGeomBBoxCache answer for RigExec prims. The source
+// tree's copy is data-only and is the fallback for an ad hoc build.
+static std::string
+_SchemaResourceDir(const std::string &examplesDir)
+{
+#ifdef RIGEXEC_SCHEMA_RESOURCE_DIR
+    (void)examplesDir;
+    return TfAbsPath(RIGEXEC_SCHEMA_RESOURCE_DIR);
+#else
+    return TfAbsPath(examplesDir + "/../plugin/rigExecSchema/resources");
+#endif
+}
+
 int
 main(int argc, char **argv)
 {
@@ -210,7 +227,7 @@ main(int argc, char **argv)
     const std::string examplesDir = argv[1];
 
     const std::string resources =
-        TfAbsPath(examplesDir + "/../plugin/rigExecSchema/resources");
+        _SchemaResourceDir(examplesDir);
     if (PlugRegistry::GetInstance().RegisterPlugins(resources).empty()) {
         std::printf("FATAL: no schema plugin found at %s\n", resources.c_str());
         return 2;

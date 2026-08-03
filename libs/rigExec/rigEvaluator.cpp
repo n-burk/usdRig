@@ -8,12 +8,16 @@
 #include "rigExecMath/solvers.h"
 
 #include "pxr/base/gf/rotation.h"
+#include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/stringUtils.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usdGeom/basisCurves.h"
 #include "pxr/usd/usdGeom/curves.h"
+#include "pxr/usd/usdGeom/gprim.h"
+#include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdGeom/xformable.h"
@@ -526,6 +530,151 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // compile: zero controls is an ordinary rig, not a broken one.
     std::vector<SdfPath> newControlPaths =
         _DiscoverControls(_stage, _rigPath);
+
+    // Transform-authority validation (host-durability redesign).
+    //
+    // Neither condition can FAIL a compile, and both are reported rather
+    // than fixed: the rig still evaluates exactly right, because the
+    // evaluator reads rest:space and the avars and nothing else. What
+    // breaks is the BOUNDS -- a provider's computed extent bakes its posed
+    // frame into asset-relative space, which is only the whole story while
+    // nothing else contributes a transform between the asset root and the
+    // provider. Refusing to compile over a framing inaccuracy would be
+    // wildly out of proportion; saying nothing would leave an author
+    // wondering why one control frames to the wrong place.
+    {
+        const SdfPath assetRoot = _rigPath.GetParentPath();
+        auto warn = [errors](const std::string &message) {
+            // Both channels on purpose: TF_WARN is what a host surfaces to
+            // the author, and the errors vector is what a test can read.
+            // Compile still returns true.
+            if (errors) {
+                errors->push_back("warning: " + message);
+            }
+            TF_WARN("%s", message.c_str());
+        };
+        // Every Boundable provider, aggregate solvers included: they
+        // inherit Boundable/Xformable too, so an authored op on one is
+        // applied by BBoxCache to an already-baked extent while the guide
+        // it draws ignores it entirely.
+        std::vector<SdfPath> providers = newJointPaths;
+        providers.insert(providers.end(), newControlPaths.begin(),
+                         newControlPaths.end());
+        {
+            static const std::set<TfToken> kBoundableSolverTypes = {
+                TfToken("RigExecFkChain"), TfToken("RigExecTwoBoneIk"),
+                TfToken("RigExecBlendPointFrames"),
+                TfToken("RigExecTwistDistribution"),
+                TfToken("RigExecRibbon")};
+            if (const UsdPrim solverRoot = _stage->GetPrimAtPath(
+                    _rigPath.AppendChild(TfToken("Solvers")))) {
+                for (const UsdPrim &solver : UsdPrimRange(solverRoot)) {
+                    if (kBoundableSolverTypes.count(solver.GetTypeName())) {
+                        providers.push_back(solver.GetPath());
+                    }
+                }
+            }
+        }
+        for (const SdfPath &providerPath : providers) {
+            const UsdPrim prim = _stage->GetPrimAtPath(providerPath);
+            if (!prim) {
+                continue;
+            }
+            // xformOps arrive on every provider now that RigExecXformable
+            // inherits UsdGeomBoundable, but they are NOT a transform
+            // authority: rest:space plus the avars are the only one (the
+            // Ir alignment). An authored op is a second one that nothing
+            // reads, so the prim moves in a stock UsdGeom traversal while
+            // the rig ignores it entirely.
+            if (const UsdGeomXformable xformable = UsdGeomXformable(prim)) {
+                bool resetsStack = false;
+                if (!xformable.GetOrderedXformOps(&resetsStack).empty()) {
+                    warn(prim.GetTypeName().GetString() + " " +
+                         providerPath.GetString() +
+                         " authors xformOps, which are not a transform "
+                         "authority for a RigExec provider (rest:space and "
+                         "the avars are); the ops are ignored by evaluation "
+                         "and are not in the computed extent");
+                }
+            }
+            // ...and nothing between the provider and the asset root may
+            // contribute one either. RigExec's own types are skipped: a
+            // joint nested under a joint is the ordinary shape of a rig,
+            // and the loop above already polices ops authored on those.
+            for (SdfPath ancestorPath = providerPath.GetParentPath();
+                 ancestorPath != assetRoot &&
+                     !ancestorPath.IsAbsoluteRootPath() &&
+                     !ancestorPath.IsEmpty();
+                 ancestorPath = ancestorPath.GetParentPath()) {
+                const UsdPrim ancestor = _stage->GetPrimAtPath(ancestorPath);
+                if (!ancestor) {
+                    break;
+                }
+                if (TfStringStartsWith(ancestor.GetTypeName().GetString(),
+                                       "RigExec")) {
+                    continue;
+                }
+                if (UsdGeomXformable(ancestor)) {
+                    warn("Xformable " + ancestorPath.GetString() +
+                         " sits between the asset root and provider " +
+                         providerPath.GetString() +
+                         "; its transform is not composed into the "
+                         "provider's frames, so the computed extent places "
+                         "the guide as if it were identity");
+                }
+            }
+
+            // A provider's extent covers the guides beneath it, and only
+            // those. Authored geometry parented under one is invisible to
+            // it -- and to every ancestor, because UsdGeomBBoxCache stops
+            // descending at a Boundable -- so the gprim silently drops out
+            // of every bounding box in the scene.
+            for (const UsdPrim &descendant : UsdPrimRange(prim)) {
+                if (descendant == prim) {
+                    continue;
+                }
+                // A provider nested under a provider with a DIFFERENT
+                // resolved purpose is dropped from the ancestor's extent
+                // on purpose: one extent carries one purpose, and the
+                // bounding-box cache files it under the ancestor's. Nobody
+                // reading the namespace would guess that, so say it.
+                if (descendant.IsA<UsdGeomImageable>()) {
+                    const UsdGeomImageable descendantImageable(descendant);
+                    const UsdGeomImageable providerImageable(prim);
+                    const TfToken descendantPurpose =
+                        descendantImageable.ComputePurpose();
+                    const TfToken providerPurpose =
+                        providerImageable.ComputePurpose();
+                    if (!descendantPurpose.IsEmpty() &&
+                        !providerPurpose.IsEmpty() &&
+                        descendantPurpose != providerPurpose &&
+                        TfStringStartsWith(
+                            descendant.GetTypeName().GetString(),
+                            "RigExec")) {
+                        warn(descendant.GetTypeName().GetString() + " " +
+                             descendant.GetPath().GetString() +
+                             " has purpose '" +
+                             descendantPurpose.GetString() +
+                             "' but is nested under " +
+                             providerPath.GetString() + " whose purpose is '" +
+                             providerPurpose.GetString() +
+                             "'; one extent carries one purpose, so this "
+                             "provider is excluded from its ancestor's "
+                             "bounds");
+                    }
+                }
+                if (descendant.IsA<UsdGeomGprim>()) {
+                    warn("gprim " + descendant.GetPath().GetString() +
+                         " is parented under RigExec provider " +
+                         providerPath.GetString() +
+                         "; a provider's computed extent covers only the "
+                         "guides beneath it, and bounds stop descending at "
+                         "a Boundable, so this geometry is absent from "
+                         "every bounding box that should contain it");
+                }
+            }
+        }
+    }
 
     std::vector<SdfPath> solverArrayPaths;
     std::map<SdfPath, SdfPath> newRibbonDriverPoints;

@@ -12,9 +12,19 @@
 
     Each control also authors a different viewport guide (guide:shape,
     guide:drawMode, and the per-axis guide:scaleX/Y/Z on Tail3): wire
-    diamond, solid box, flattened wire circle, and wire pyramid. The guides
+    diamond, solid cube, squashed wire sphere, and wire pyramid -- 3D
+    shapes on purpose, so every guide reads from the default front view
+    (the planar circle/box lie in the local XZ plane and are edge-on
+    from the front; they suit rigs viewed from above). The guides
     are synthesized by the imaging chain at the posed control frames and
     are never authored to the stage.
+
+    The control guide scales are all above 1 on purpose. At rest a control,
+    the joint it drives, and the solver element that poses it share one
+    position, and the joint/solver guides draw a unit-radius sphere and cone
+    there; a unit control shape would sit inside them and every click would
+    land on the solver. These scales put each control's shape outside that
+    radius, which is what makes the controls selectable in the viewport.
     """
     defaultPrim = "TailAsset"
     endTimeCode = 1048
@@ -49,6 +59,9 @@ def Xform "TailAsset"
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
                 uniform token guide:shape = "diamond"
+                double guide:scaleX = 1.6
+                double guide:scaleY = 1.6
+                double guide:scaleZ = 1.6
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -63,8 +76,11 @@ def Xform "TailAsset"
                     1048: 45; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
-                uniform token guide:shape = "box"
+                uniform token guide:shape = "cube"
                 uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 1.2
+                double guide:scaleY = 1.2
+                double guide:scaleZ = 1.2
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -79,10 +95,10 @@ def Xform "TailAsset"
                     1048: 45; post linear,
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
-                uniform token guide:shape = "circle"
-                double guide:scaleX = 1.5
-                double guide:scaleY = 0.3
-                double guide:scaleZ = 1.5
+                uniform token guide:shape = "sphere"
+                double guide:scaleX = 1.8
+                double guide:scaleY = 0.6
+                double guide:scaleZ = 1.8
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -98,6 +114,9 @@ def Xform "TailAsset"
                 }
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
                 uniform token guide:shape = "pyramid"
+                double guide:scaleX = 1.5
+                double guide:scaleY = 1.5
+                double guide:scaleZ = 1.5
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
         }

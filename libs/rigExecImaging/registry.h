@@ -113,6 +113,32 @@ RIGEXEC_IMAGING_C_API void RigExecImaging_Deactivate();
 /// Current published snapshot generation (0 before first publication).
 RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGeneration();
 
+/// ASSET-SPACE axis-aligned bounds of everything the current generation
+/// draws for \p primPath, as min xyz then max xyz in \p outMinMax.
+/// Returns 1 when the prim draws something, 0 otherwise (\p outMinMax is
+/// then untouched).
+///
+/// This exists because a rig draws nothing a bounding box can be computed
+/// from the ordinary way. Guides are synthesized inside the imaging chain
+/// and never authored, and the RigExec prim types are not UsdGeomImageable,
+/// so UsdGeomBBoxCache -- which is what usdview's frame-selection goes
+/// through -- correctly reports an empty box for every joint, control, and
+/// solver on the stage. Framing a control therefore moved the camera
+/// nowhere. The snapshot is the only place the drawn extent exists, so the
+/// answer has to come from here.
+///
+/// Asset space, not world: guide frames carry no stage placement (see
+/// RigExecImagingSnapshot::assetRoot), so the caller composes the asset
+/// root's own world transform. No Hydra dependency -- snapshot data only.
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetGuideBoundsAssetSpace(
+    const char *primPath, double outMinMax[6]);
+
+/// The union of RigExecImaging_GetGuideBoundsAssetSpace over every prim in
+/// the current generation, so framing the rig frames its whole guide set.
+/// Returns 1 when anything at all draws, 0 otherwise.
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetAllGuideBoundsAssetSpace(
+    double outMinMax[6]);
+
 }
 
 #endif  // RIGEXEC_IMAGING_REGISTRY_H

@@ -11,6 +11,7 @@
 #include "pxr/imaging/hd/cubeSchema.h"
 #include "pxr/imaging/hd/dataSource.h"
 #include "pxr/imaging/hd/extentSchema.h"
+#include "pxr/imaging/hd/legacyDisplayStyleSchema.h"
 #include "pxr/imaging/hd/meshSchema.h"
 #include "pxr/imaging/hd/meshTopologySchema.h"
 #include "pxr/imaging/hd/overlayContainerDataSource.h"
@@ -21,6 +22,7 @@
 #include "pxr/imaging/hd/retainedDataSource.h"
 #include "pxr/imaging/hd/sphereSchema.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/imaging/hd/visibilitySchema.h"
 #include "pxr/imaging/hd/xformSchema.h"
 
@@ -377,11 +379,15 @@ _GuideName(bool isCone, size_t index)
 // The constant styling every synthesized guide carries, from the authored
 // guide:displayColor / guide:displayOpacity of the prim it hangs off, plus
 // the guide's own points when it is an explicit primitive rather than one
-// of Hydra's implicits.
+// of Hydra's implicits, plus a constant width when it is a wire curve.
+//
+// \p wireWidth of zero authors no widths at all, which is the hairline
+// fallback and the only thing the joint sphere/cone guides ever want.
 HdContainerDataSourceHandle
 _BuildGuideStylePrimvars(
     const RigExecPublishedPrim &published,
-    const VtVec3fArray &points = VtVec3fArray())
+    const VtVec3fArray &points = VtVec3fArray(),
+    double wireWidth = 0.0)
 {
     TfTokenVector names{HdTokens->displayColor, HdTokens->displayOpacity};
     std::vector<HdDataSourceBaseHandle> values{
@@ -407,6 +413,21 @@ _BuildGuideStylePrimvars(
                         points))
                 .SetInterpolation(_Token(HdPrimvarSchemaTokens->vertex))
                 .SetRole(_Token(HdPrimvarSchemaTokens->point))
+                .Build());
+    }
+    if (wireWidth > 0.0) {
+        // Constant interpolation: one width for the whole curve set. The
+        // value is in the curve's LOCAL space, which the guide's xform then
+        // scales along with the points -- so a non-uniform guide scale
+        // thickens the curve anisotropically, exactly as it stretches the
+        // shape it belongs to.
+        names.push_back(HdTokens->widths);
+        values.push_back(
+            HdPrimvarSchema::Builder()
+                .SetPrimvarValue(
+                    HdRetainedTypedSampledDataSource<VtFloatArray>::New(
+                        VtFloatArray{static_cast<float>(wireWidth)}))
+                .SetInterpolation(_Token(HdPrimvarSchemaTokens->constant))
                 .Build());
     }
     return HdRetainedContainerDataSource::New(
@@ -455,6 +476,33 @@ _AppendInheritedGuideState(
         names->push_back(HdPrimOriginSchema::GetSchemaToken());
         values->push_back(origin);
     }
+}
+
+// The Hydra render tag for a published prim's resolved USD purpose.
+//
+// One mapping for joints, solvers, and controls alike: BBoxCache buckets a
+// prim's extent by its purpose, so the tag its guide draws under has to be
+// derived from the same value or the two disagree -- a guide that renders
+// as a diagnostic while its bounds count as ordinary geometry, or worse
+// the reverse.
+const TfToken &
+_GuideRenderTag(const RigExecPublishedPrim &published)
+{
+    // All four allowed purposes, not just guide-or-not: `render` and
+    // `proxy` are legal on any Imageable, and collapsing them into
+    // geometry would draw a proxy-purpose guide in the geometry pass while
+    // BBoxCache filed its bounds under proxy -- the same disagreement this
+    // mapping exists to prevent, just in a less-travelled corner.
+    if (published.guidePurpose == UsdGeomTokens->guide) {
+        return HdRenderTagTokens->guide;
+    }
+    if (published.guidePurpose == UsdGeomTokens->proxy) {
+        return HdRenderTagTokens->proxy;
+    }
+    if (published.guidePurpose == UsdGeomTokens->render) {
+        return HdRenderTagTokens->render;
+    }
+    return HdRenderTagTokens->geometry;
 }
 
 HdContainerDataSourceHandle
@@ -508,7 +556,7 @@ _BuildGuidePrim(
     names.push_back(HdPurposeSchema::GetSchemaToken());
     values.push_back(
         HdPurposeSchema::Builder()
-            .SetPurpose(_Token(HdRenderTagTokens->guide))
+            .SetPurpose(_Token(_GuideRenderTag(published)))
             .Build());
     _AppendInheritedGuideState(parentDataSource, &names, &values);
     names.push_back(HdPrimvarsSchemaTokens->primvars);
@@ -668,9 +716,9 @@ _BuildControlGuideShapes()
         shapes.push_back(std::move(entry));
     };
 
-    // ---- wire: linear nonperiodic basisCurves, no widths authored, so
-    // UsdImaging/Storm's fallback width draws them as the hairlines a wire
-    // guide is supposed to be.
+    // ---- wire: linear nonperiodic basisCurves. The width comes from
+    // guide:wireWidth at publication (see _BuildControlGuidePrim); the
+    // topology below is width-free unit geometry.
     {
         VtVec3fArray points;
         _AppendGuideRing(_kGuideRingSegments, /* X */ 0, /* Z */ 2, -1.0,
@@ -850,14 +898,50 @@ _BuildControlGuidePrim(
             .SetResetXformStack(
                 HdRetainedTypedSampledDataSource<bool>::New(true))
             .Build());
+    // Purpose comes from the CONTROL's own resolved UsdGeomImageable
+    // purpose -- the stock attribute, whose fallback RigExecControl leaves
+    // at `default` while joints and solvers override it to `guide`. Using
+    // the standard attribute rather than a RigExec token is what keeps the
+    // drawn render tag and UsdGeomBBoxCache's classification of the same
+    // prim in agreement by construction.
     names.push_back(HdPurposeSchema::GetSchemaToken());
     values.push_back(
         HdPurposeSchema::Builder()
-            .SetPurpose(_Token(HdRenderTagTokens->guide))
+            .SetPurpose(_Token(_GuideRenderTag(published)))
             .Build());
     _AppendInheritedGuideState(parentDataSource, &names, &values);
     names.push_back(HdPrimvarsSchemaTokens->primvars);
-    values.push_back(_BuildGuideStylePrimvars(published, shape.points));
+    // Width belongs to the wire draw mode alone: the meshes and the
+    // implicits have no curves to widen, and authoring a stray widths
+    // primvar on them would be a primvar a renderer has to decide what to
+    // do with.
+    values.push_back(_BuildGuideStylePrimvars(
+        published, shape.points,
+        shape.primType == HdPrimTypeTokens->basisCurves
+            ? published.controlGuideWireWidth : 0.0));
+
+    if (shape.primType == HdPrimTypeTokens->basisCurves &&
+        published.controlGuideWireWidth > 0.0) {
+        // Refine the curves, or the width above is decoration.
+        //
+        // Storm honours a curve's width only once the curve is REFINED:
+        // HdStBasisCurves::_SupportsRefinement is `refineLevel > 0`, and
+        // below that a linear basisCurves draws as one-pixel GL lines with
+        // widths ignored outright. usdview's default complexity is "low",
+        // which is refineLevel 0 -- so an authored width changed nothing at
+        // all where it mattered most, and the control stayed as unclickable
+        // as the hairline it replaced (measured: 8 hits out of 1681
+        // single-pixel picks at low, 97 at high).
+        //
+        // Asking for refinement on the guide itself decouples that from the
+        // viewer's global complexity setting, which is a display preference
+        // about the ASSET and has no business deciding whether the rig's
+        // controls can be clicked.
+        names.push_back(HdLegacyDisplayStyleSchemaTokens->displayStyle);
+        values.push_back(HdRetainedContainerDataSource::New(
+            HdLegacyDisplayStyleSchemaTokens->refineLevel,
+            HdRetainedTypedSampledDataSource<int>::New(1)));
+    }
 
     if (shape.primType == HdPrimTypeTokens->basisCurves) {
         names.push_back(HdBasisCurvesSchema::GetSchemaToken());
@@ -1103,6 +1187,12 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
 }
 
 }  // namespace
+
+bool
+RigExecControlGuideIsDrawn(const TfToken &shape, const TfToken &drawMode)
+{
+    return _FindControlGuideShape(shape, drawMode) != nullptr;
+}
 
 // The world transform \p primPath should have once every constraint-driven
 // ancestor (and possibly itself) is accounted for, or nothing when no driven

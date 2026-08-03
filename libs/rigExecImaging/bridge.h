@@ -108,6 +108,10 @@ private:
 
     /// Publishes the single synthesized guide shape each control draws at
     /// its posed frame (spec §10.3 extension).
+    /// Records the stage identity and sample time on a generation.
+    void _StampGeneration(
+        UsdTimeCode time, RigExecImagingSnapshot *snapshot) const;
+
     void _FillControlGuides(
         const RigExecRigPose &pose,
         RigExecImagingSnapshot *snapshot) const;

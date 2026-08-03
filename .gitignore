@@ -27,6 +27,7 @@ build/
 .omc/
 .claude/
 .codex/
+.cache/
 
 # Python
 __pycache__/

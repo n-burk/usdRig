@@ -15,11 +15,14 @@
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usd/timeCode.h"
 
 #include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -72,6 +75,12 @@ struct RigExecPublishedPrim {
     std::vector<double> guideRadii;
     GfVec3f guideColor{1.0f, 0.3f, 0.3f};
     float guideOpacity = 0.5f;
+    /// The prim's RESOLVED UsdGeomImageable purpose, stamped onto whatever
+    /// guide it draws. Shared by both payloads because it comes from the
+    /// prim, not from the drawing: UsdGeomBBoxCache classifies the prim's
+    /// extent by this exact attribute, so publishing anything else here
+    /// would let a guide draw in one bucket and bound in another.
+    TfToken guidePurpose;
 
     /// Control guide payload (spec §10.3 extension): a control draws ONE
     /// synthesized shape at its posed frame, chosen and sized by the
@@ -98,6 +107,10 @@ struct RigExecPublishedPrim {
     /// not a vec3, per direction); stored as one vector because nothing
     /// downstream has a reason to take the axes apart again.
     GfVec3d controlGuideScale{1.0, 1.0, 1.0};
+    /// Width for the wire draw mode, in the guide's LOCAL pre-scale units.
+    /// Zero or negative publishes no widths at all (hairline fallback);
+    /// the geometry draw mode ignores it.
+    double controlGuideWireWidth = 0.05;
 };
 
 /// One complete immutable generation (spec §8.2: consumers see complete
@@ -125,6 +138,44 @@ struct RigExecImagingSnapshot {
     /// baked into the rig's own frames; composing the parent's flattened
     /// matrix would apply it twice.
     SdfPath assetRoot;
+
+    /// WHICH STAGE, and WHICH TIME, this generation describes.
+    ///
+    /// The snapshot store is a process-global singleton, so without these a
+    /// consumer that looks a prim up by path alone gets an answer from
+    /// whatever rig happened to publish last: open a second stage whose rig
+    /// uses the same paths and the first stage's poses are served for it,
+    /// silently and plausibly. Time has the same shape of problem in one
+    /// stage -- a query at frame 12 answered from the generation published
+    /// for frame 30 is wrong in a way nothing downstream can detect.
+    ///
+    /// This matters for the compute-extent callback specifically, because
+    /// that is the one consumer USD may call with a stage and a time of its
+    /// own choosing, rather than being handed values by the bridge. It
+    /// compares both and falls back to the rest pose on any mismatch, which
+    /// is what makes the callback a pure function of (stage, time).
+    ///
+    /// Identity is the STAGE OBJECT, not its root layer's identifier: two
+    /// stages routinely share a root layer and differ only in their session
+    /// layer, and a string comparison hands one of them the other's poses.
+    /// Weak on purpose -- a published generation must not keep a stage
+    /// alive, and a stage that has gone away can no longer be queried.
+    UsdStageWeakPtr stage;
+    /// The evaluated sample time. Default() is its own value, not 0.
+    bool sampleTimeIsDefault = true;
+    double sampleTime = 0.0;
+
+    /// True when this generation describes \p queryStage at \p time.
+    bool Describes(const UsdStageWeakPtr &queryStage,
+                   const UsdTimeCode &time) const {
+        if (!stage || stage != queryStage) {
+            return false;
+        }
+        if (time.IsDefault() || sampleTimeIsDefault) {
+            return time.IsDefault() && sampleTimeIsDefault;
+        }
+        return time.GetValue() == sampleTime;
+    }
 };
 
 using RigExecImagingSnapshotConstPtr =
@@ -275,12 +326,20 @@ private:
         if (after.hasGuides &&
             (before->guideFrames != after.guideFrames ||
              before->guideLengths != after.guideLengths ||
-             before->guideRadii != after.guideRadii || styleChanged)) {
+             before->guideRadii != after.guideRadii ||
+             before->guidePurpose != after.guidePurpose || styleChanged)) {
             changes |= RigExecChangeGuides;
         }
+        // Width rides the value arm rather than the structural one even
+        // though crossing zero adds or drops the widths primvar outright:
+        // RigExecChangeGuides dirties the synthesized child with the
+        // universal locator set, so the consumer re-pulls the whole
+        // container and sees the primvar appear or disappear either way.
         if (after.hasControlGuide &&
             (before->controlGuideFrame != after.controlGuideFrame ||
              before->controlGuideScale != after.controlGuideScale ||
+             before->controlGuideWireWidth != after.controlGuideWireWidth ||
+             before->guidePurpose != after.guidePurpose ||
              styleChanged)) {
             changes |= RigExecChangeGuides;
         }
