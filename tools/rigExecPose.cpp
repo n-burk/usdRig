@@ -1,0 +1,378 @@
+//
+// rigExecPose -- evaluate a rig and print what came out.
+//
+// The test suites assert against fixtures they own. This is the tool for the
+// other case: an arbitrary stage carrying a RigExecRig, evaluated at chosen
+// frames so an author can see whether the rig they just wrote compiles, what
+// the compiler objected to, where the joints ended up, and how far each moved
+// property actually travelled.
+//
+//   rigExecPose <stage> [--rig <primPath>] [--frames 1001,1024,1048]
+//               [--joints] [--targets] [--joints-out <file.usda>]
+//
+// With no --frames it evaluates the stage's start time code (or Default when
+// the stage has no time range). Exit status is non-zero when the rig fails to
+// compile or an evaluation comes back invalid, so it can gate a build.
+//
+// --joints-out writes the evaluated joint frames, as asset-space matrices
+// sampled at every requested frame, to a plain USD layer. It is deliberately
+// schema-neutral -- a joint path list and a parallel matrix array per time
+// sample, nothing else -- because its point is to hand the rig's own answer to
+// something that is not RigExec: a converter to another skinning schema, or a
+// comparison against one. It is a diagnostic export of what the evaluator
+// computed, not a baked character.
+//
+#include "rigExec/frameExtraction.h"
+#include "rigExec/rigEvaluator.h"
+#include "rigExec/types.h"
+#include "rigExecMath/pointFrame.h"
+
+#include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/range3f.h"
+#include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/tf/stringUtils.h"
+#include "pxr/base/vt/array.h"
+// usd/stage.h only forward-declares UsdAttribute and UsdPrim.
+#include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/stage.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <string>
+#include <vector>
+
+PXR_NAMESPACE_USING_DIRECTIVE
+
+namespace {
+
+// The generated resource directory is the one that carries the LibraryPath
+// implementsComputeExtent needs; the source-tree copy is a data-only
+// fallback for an ad hoc build (see the CMakeLists commentary).
+std::string
+SchemaResourceDir()
+{
+#ifdef RIGEXEC_SCHEMA_RESOURCE_DIR
+    return TfAbsPath(RIGEXEC_SCHEMA_RESOURCE_DIR);
+#else
+    return std::string();
+#endif
+}
+
+SdfPath
+FindRig(const UsdStageRefPtr &stage)
+{
+    for (const UsdPrim &prim : stage->TraverseAll()) {
+        if (prim.GetTypeName() == TfToken("RigExecRig")) {
+            return prim.GetPath();
+        }
+    }
+    return SdfPath();
+}
+
+std::string
+FormatVec(const GfVec3d &v)
+{
+    return TfStringPrintf("(%8.4f %8.4f %8.4f)", v[0], v[1], v[2]);
+}
+
+// A moved property is only interesting as a change: printing 1864 points
+// says nothing, but the bound they occupy and the largest single
+// displacement say whether the chain did anything and whether it went mad.
+void
+ReportPoints(const std::string &label, const VtValue &value,
+             const VtVec3fArray &rest)
+{
+    if (!value.IsHolding<VtVec3fArray>()) {
+        std::printf("      %-52s <%s>\n", label.c_str(),
+                    value.GetTypeName().c_str());
+        return;
+    }
+    const VtVec3fArray points = value.UncheckedGet<VtVec3fArray>();
+    GfRange3f bound;
+    double worst = 0.0;
+    double total = 0.0;
+    for (size_t i = 0; i < points.size(); ++i) {
+        bound.UnionWith(points[i]);
+        if (i < rest.size()) {
+            const double d = (points[i] - rest[i]).GetLength();
+            worst = std::max(worst, d);
+            total += d;
+        }
+    }
+    std::printf("      %-52s n=%zu\n", label.c_str(), points.size());
+    std::printf("        bound %s .. %s\n",
+                FormatVec(GfVec3d(bound.GetMin())).c_str(),
+                FormatVec(GfVec3d(bound.GetMax())).c_str());
+    if (!rest.empty()) {
+        std::printf("        moved max %.5f  mean %.5f\n",
+                    worst, points.empty() ? 0.0 : total / points.size());
+    }
+}
+
+// Collects one asset-space matrix per joint per evaluated frame, in a stable
+// joint order, and writes them out as a neutral USD layer.
+class JointExport {
+public:
+    void Add(const rigExec::RigExecRigPose &pose, double frame)
+    {
+        std::vector<GfMatrix4d> row;
+        row.reserve(pose.jointFramesFinal.size());
+        std::vector<SdfPath> order;
+        order.reserve(pose.jointFramesFinal.size());
+        for (const auto &[path, frameValue] : pose.jointFramesFinal) {
+            GfMatrix4d matrix(1.0);
+            // The same construction the imaging bridge uses for guides: the
+            // affine map that carries the identity landmarks onto the posed
+            // ones IS the joint's local-to-asset transform.
+            if (!frameValue.IsValid() ||
+                !rigExec::RigExecPointsToMatrix(
+                    rigExec::RigExecIdentityLandmarks(), frameValue.points,
+                    &matrix)) {
+                matrix.SetIdentity();
+                ++_degenerate;
+            }
+            order.push_back(path);
+            row.push_back(matrix);
+        }
+        // A joint set that changes shape mid-export would silently misalign
+        // the arrays against the path list, so it fails instead.
+        if (_paths.empty()) {
+            _paths = order;
+        } else if (_paths != order) {
+            _inconsistent = true;
+            return;
+        }
+        _frames.push_back(frame);
+        _rows.push_back(std::move(row));
+    }
+
+    bool Write(const std::string &path, std::string *error) const
+    {
+        if (_inconsistent) {
+            *error = "the joint set changed between frames";
+            return false;
+        }
+        if (_paths.empty()) {
+            *error = "no joints were evaluated";
+            return false;
+        }
+        const UsdStageRefPtr out = UsdStage::CreateNew(path);
+        if (!out) {
+            *error = "cannot create " + path;
+            return false;
+        }
+        const UsdPrim prim =
+            out->DefinePrim(SdfPath("/RigExecJoints"), TfToken("Scope"));
+        out->SetDefaultPrim(prim);
+
+        VtArray<TfToken> tokens;
+        tokens.reserve(_paths.size());
+        for (const SdfPath &jointPath : _paths) {
+            tokens.push_back(TfToken(jointPath.GetString()));
+        }
+        UsdAttribute paths = prim.CreateAttribute(
+            TfToken("rigExec:jointPaths"), SdfValueTypeNames->TokenArray,
+            /* custom = */ false, SdfVariabilityUniform);
+        paths.Set(tokens);
+
+        UsdAttribute transforms = prim.CreateAttribute(
+            TfToken("rigExec:jointTransforms"),
+            SdfValueTypeNames->Matrix4dArray);
+        for (size_t i = 0; i < _frames.size(); ++i) {
+            VtArray<GfMatrix4d> row(_rows[i].begin(), _rows[i].end());
+            transforms.Set(row, UsdTimeCode(_frames[i]));
+        }
+        out->SetStartTimeCode(_frames.front());
+        out->SetEndTimeCode(_frames.back());
+        out->GetRootLayer()->SetComment(
+            "Asset-space joint transforms evaluated by RigExec "
+            "(rigExecPose --joints-out). rigExec:jointPaths is parallel to "
+            "every rigExec:jointTransforms time sample.");
+        out->GetRootLayer()->Save();
+        return true;
+    }
+
+    size_t Degenerate() const { return _degenerate; }
+
+private:
+    std::vector<SdfPath> _paths;
+    std::vector<double> _frames;
+    std::vector<std::vector<GfMatrix4d>> _rows;
+    size_t _degenerate = 0;
+    bool _inconsistent = false;
+};
+
+std::vector<double>
+ParseFrames(const std::string &text)
+{
+    std::vector<double> frames;
+    for (const std::string &piece : TfStringSplit(text, ",")) {
+        if (!piece.empty()) {
+            frames.push_back(std::atof(piece.c_str()));
+        }
+    }
+    return frames;
+}
+
+}  // namespace
+
+int
+main(int argc, char **argv)
+{
+    if (argc < 2) {
+        std::printf(
+            "usage: rigExecPose <stage> [--rig <primPath>] "
+            "[--frames a,b,c] [--joints] [--targets] "
+            "[--joints-out <file.usda>]\n");
+        return 2;
+    }
+    std::string stagePath = argv[1];
+    std::string rigArg;
+    std::string jointsOut;
+    std::vector<double> frames;
+    bool showJoints = false;
+    bool showTargets = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--rig" && i + 1 < argc) {
+            rigArg = argv[++i];
+        } else if (arg == "--frames" && i + 1 < argc) {
+            frames = ParseFrames(argv[++i]);
+        } else if (arg == "--joints") {
+            showJoints = true;
+        } else if (arg == "--targets") {
+            showTargets = true;
+        } else if (arg == "--joints-out" && i + 1 < argc) {
+            jointsOut = argv[++i];
+        } else {
+            std::printf("unknown argument: %s\n", arg.c_str());
+            return 2;
+        }
+    }
+
+    const std::string resources = SchemaResourceDir();
+    if (!resources.empty() &&
+        PlugRegistry::GetInstance().RegisterPlugins(resources).empty()) {
+        std::printf("FATAL: no schema plugin at %s\n", resources.c_str());
+        return 2;
+    }
+
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    if (!stage) {
+        std::printf("FATAL: cannot open %s\n", stagePath.c_str());
+        return 2;
+    }
+    const SdfPath rigPath =
+        rigArg.empty() ? FindRig(stage) : SdfPath(rigArg);
+    if (rigPath.IsEmpty() || !stage->GetPrimAtPath(rigPath)) {
+        std::printf("FATAL: no RigExecRig in %s\n", stagePath.c_str());
+        return 2;
+    }
+    std::printf("stage %s\n  rig %s\n", stagePath.c_str(),
+                rigPath.GetText());
+
+    rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    const bool compiled = evaluator.Compile(&errors);
+    for (const std::string &error : errors) {
+        std::printf("  %s\n", error.c_str());
+    }
+    std::printf("  compile: %s (%zu mover applications, digest %zu)\n",
+                compiled ? "ok" : "FAILED",
+                evaluator.GetMoverOrder().size(),
+                evaluator.GetBindingEpochDigest());
+    if (!compiled) {
+        return 1;
+    }
+    if (showTargets) {
+        for (const rigExec::RigExecMoverRecord &record :
+                 evaluator.GetMoverOrder()) {
+            std::printf("    %3d %-28s %s\n", record.ordinal,
+                        record.schemaType.GetText(),
+                        record.moverPath.GetName().c_str());
+            for (const SdfPath &target : record.targets) {
+                std::printf("        -> %s\n", target.GetText());
+            }
+        }
+    }
+
+    if (frames.empty()) {
+        frames.push_back(stage->HasAuthoredTimeCodeRange()
+                             ? stage->GetStartTimeCode()
+                             : UsdTimeCode::Default().GetValue());
+    }
+
+    // Rest values, so displacements are reported against the authored
+    // geometry rather than against the previous frame.
+    std::map<SdfPath, VtVec3fArray> rest;
+
+    JointExport jointExport;
+    int status = 0;
+    for (double frame : frames) {
+        const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
+        if (!jointsOut.empty()) {
+            jointExport.Add(pose, frame);
+        }
+        std::printf("\n  frame %g: %s  (%zu moved properties, "
+                    "%zu parity agreements / %zu mismatches, "
+                    "%zu override rounds%s)\n",
+                    frame, pose.valid ? "valid" : "INVALID",
+                    pose.movedProperties.size(),
+                    pose.moverGraphParityAgreements,
+                    pose.moverGraphParityMismatches,
+                    pose.solverOverrideRounds,
+                    pose.solverOverridesConverged ? "" : ", NOT CONVERGED");
+        if (!pose.valid || pose.moverGraphParityMismatches) {
+            status = 1;
+        }
+        for (const std::string &diagnostic : pose.diagnostics) {
+            std::printf("    diagnostic: %s\n", diagnostic.c_str());
+        }
+        if (showJoints) {
+            for (const auto &[path, frameValue] : pose.jointFramesFinal) {
+                std::printf("    %-46s %s%s\n", path.GetText(),
+                            FormatVec(frameValue.points[0]).c_str(),
+                            frameValue.IsValid() ? "" : "  INVALID");
+            }
+            for (const auto &[path, matrix] : pose.providerXforms) {
+                std::printf("    xform %-40s %s\n", path.GetText(),
+                            FormatVec(matrix.ExtractTranslation()).c_str());
+            }
+        }
+        for (const auto &[path, value] : pose.movedProperties) {
+            if (rest.find(path) == rest.end()) {
+                VtValue authored;
+                if (const UsdAttribute attribute =
+                        stage->GetAttributeAtPath(path)) {
+                    attribute.Get(&authored, UsdTimeCode::Default());
+                }
+                rest[path] = authored.IsHolding<VtVec3fArray>()
+                                 ? authored.UncheckedGet<VtVec3fArray>()
+                                 : VtVec3fArray();
+            }
+            ReportPoints(path.GetString(), value, rest[path]);
+        }
+    }
+
+    if (!jointsOut.empty()) {
+        std::string error;
+        if (!jointExport.Write(jointsOut, &error)) {
+            std::printf("\n  joint export FAILED: %s\n", error.c_str());
+            status = 1;
+        } else {
+            std::printf("\n  wrote %s (%zu frames%s)\n", jointsOut.c_str(),
+                        frames.size(),
+                        jointExport.Degenerate()
+                            ? TfStringPrintf(", %zu degenerate frames written "
+                                             "as identity",
+                                             jointExport.Degenerate()).c_str()
+                            : "");
+        }
+    }
+    return status;
+}

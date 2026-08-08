@@ -19,6 +19,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace rigExec {
@@ -46,6 +47,15 @@ public:
 
     /// Serialized evaluate-then-publish, broadcast to every chain.
     bool SetTime(UsdTimeCode time);
+
+    /// Selects the weight object painted as the influence overlay, and
+    /// republishes at the current time so the viewport updates without
+    /// waiting for a frame change. An empty string turns the overlay off.
+    ///
+    /// The selection is remembered even with no bridge activated, so a
+    /// host that sets it before opening a rig gets the overlay on the
+    /// first generation rather than none at all.
+    bool SetWeightOverlay(const std::string &weightPrimPath);
 
     /// Drops the bridge; chains remain and read the (cleared) store.
     void Deactivate();
@@ -80,6 +90,10 @@ private:
     SdfPath _generatedScope;
     SdfPath _assetRoot;
     UsdTimeCode _lastTime = UsdTimeCode::Default();
+    /// The influence-overlay selection, held HERE rather than only on the
+    /// bridge because it outlives one: a host may select before
+    /// activation, and Deactivate/Activate must not silently drop it.
+    SdfPath _weightOverlay;
     TfNotice::Key _changeKey;
 };
 
@@ -138,6 +152,22 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_GetGuideBoundsAssetSpace(
 /// Returns 1 when anything at all draws, 0 otherwise.
 RIGEXEC_IMAGING_C_API int RigExecImaging_GetAllGuideBoundsAssetSpace(
     double outMinMax[6]);
+
+/// Paints \p weightPrimPath's resolved weight field onto the geometry it
+/// weights, as a grey-to-red vertex gradient in the viewport (the R&H
+/// "Voodoo" influence display). Null or empty turns the overlay off.
+/// Returns 0 on success, non-zero on failure.
+///
+/// This exists because a weight volume is invisible and its effect is only
+/// legible after the fact: a rigger placing one is otherwise reading a
+/// deformation and inferring the region that caused it. The overlay shows
+/// the region directly, and shows the field a mover ACTUALLY consumed
+/// rather than a re-derivation of it.
+///
+/// Republishes at the current time before returning, so the viewport
+/// updates immediately rather than at the next frame change.
+RIGEXEC_IMAGING_C_API int RigExecImaging_SetWeightOverlay(
+    const char *weightPrimPath);
 
 }
 

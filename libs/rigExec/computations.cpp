@@ -352,6 +352,28 @@ _ComputeJointMatrix(const VdfContext &ctx)
 
 RIGEXEC_REGISTER_XFORMABLE(RigExecJoint)
 RIGEXEC_REGISTER_XFORMABLE(RigExecControl)
+
+// The volumetric weight objects are RigExecXformables too (spec §4.1
+// volumetric extension), so they get the same placement contract: a
+// volume authored inside a joint follows it through the same
+// NamespaceAncestor chain, with nothing wired.
+//
+// Registered ONCE on the ABSTRACT base, unlike the two above. Exec
+// composes a prim's computation set by walking its full ancestor type
+// vector strongest-to-weakest (exec/definitionRegistry.cpp
+// _GetFullyExpandedSchemaTypeVector), so the three concrete volume
+// weights inherit these three computations from RigExecVolumeWeight.
+//
+// It has to be the base rather than the concrete types, because the
+// concrete types already carry an
+// EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA block in moverKernels.cpp for
+// computeWeightPacket, and one schema may only be opened once: the macro
+// emits a whole registration function plus its TF_REGISTRY_FUNCTION per
+// invocation, and a second block for the same schema is a second,
+// independent registration pass over a type the first pass has already
+// marked complete. Splitting by TYPE instead of by file keeps each
+// schema opened exactly once.
+RIGEXEC_REGISTER_XFORMABLE(RigExecVolumeWeight)
 #undef RIGEXEC_REGISTER_XFORMABLE
 
 // ---------------------------------------------------------------------------

@@ -61,8 +61,44 @@ RigExecImagingRegistry::Activate(
     UsdTimeCode initialTime, std::vector<std::string> *errors)
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    // Edit-driven re-evaluation: listen on the source stage so property
+    // edits republish at the current time (the rig's inputs all live
+    // beneath the asset root; cross-asset writes are rejected).
+    //
+    // REGISTERED FIRST, BEFORE Compile(), AND THAT ORDER IS LOAD-BEARING.
+    //
+    // Tf_NoticeRegistry::_Register PREPENDS its deliverer, so listeners are
+    // delivered most-recently-registered FIRST. OpenExec's own
+    // ExecUsdSystem::_NoticeListener -- the thing that invalidates every
+    // cached computed value when an attribute is authored -- is created by
+    // the ExecUsdSystem constructor, which happens inside Compile(). So
+    // registering after Compile() put us AHEAD of exec in delivery order,
+    // and _OnObjectsChanged re-evaluated while exec still held the
+    // pre-edit value: every generation published from an edit was one
+    // edit stale. Measured on 11_VolumeWeights: with the overlay on and
+    // inputs:falloffMax dragged 4.46 -> 9 -> 1.5, the stage already
+    // resolved to the new value inside the callback while the published
+    // field was the previous one, and a second Evaluate in the same
+    // dispatch was equally stale -- only an evaluation after the dispatch
+    // ended came back fresh.
+    //
+    // Registering first puts us at the BACK of the list, which is where a
+    // re-evaluating listener belongs: every recompile builds a new
+    // ExecUsdSystem that prepends ahead of us again, so this holds for the
+    // life of the rig rather than only until the first structural edit.
+    //
+    // Nothing between here and the end of Activate() may author to \p
+    // stage: _OnObjectsChanged takes the same non-recursive _mutex this
+    // function holds. Compile() authors nothing by construction (that is
+    // what testRigExecNoAuthoring asserts), which is what makes this safe.
+    TfNotice::Revoke(_changeKey);
+    _changeKey = TfNotice::Register(
+        TfCreateWeakPtr(this), &RigExecImagingRegistry::_OnObjectsChanged,
+        stage);
     _bridge = std::make_unique<RigExecImagingBridge>(stage, rigPath, _store);
     if (!_bridge->Compile(errors)) {
+        TfNotice::Revoke(_changeKey);
+        _changeKey = TfNotice::Key();
         _bridge.reset();
         return false;
     }
@@ -72,15 +108,13 @@ RigExecImagingRegistry::Activate(
             chain.pruning->SetOwnedScopes({_generatedScope});
         }
     }
-    // Edit-driven re-evaluation: listen on the source stage so property
-    // edits republish at the current time (the rig's inputs all live
-    // beneath the asset root; cross-asset writes are rejected).
+    // The asset root arms _OnObjectsChanged: until it is set, a notice
+    // arriving mid-Activate is ignored rather than re-entering the lock.
     _assetRoot = rigPath.GetParentPath();
     _lastTime = initialTime;
-    TfNotice::Revoke(_changeKey);
-    _changeKey = TfNotice::Register(
-        TfCreateWeakPtr(this), &RigExecImagingRegistry::_OnObjectsChanged,
-        stage);
+    // A selection made before this rig was activated applies to it: the
+    // overlay is a viewer mode, not a property of one bridge.
+    _bridge->SetWeightOverlay(_weightOverlay);
     _Broadcast(_bridge->EvaluateAndPublishResult(initialTime));
     return true;
 }
@@ -97,6 +131,44 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
         _bridge->EvaluateAndPublishResult(time);
     _Broadcast(result);
     return result.ok;
+}
+
+bool
+RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
+{
+    UsdTimeCode time;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        SdfPath resolved;
+        if (!weightPrimPath.empty()) {
+            // An arbitrary caller-supplied string reaches SdfPath here and
+            // its constructor is loud about a malformed one. Ask first --
+            // the same guard RigExecImaging_GetGuideBoundsAssetSpace uses.
+            if (!SdfPath::IsValidPathString(weightPrimPath)) {
+                return false;
+            }
+            resolved = SdfPath(weightPrimPath);
+            if (!resolved.IsAbsolutePath() || !resolved.IsPrimPath()) {
+                return false;
+            }
+        }
+        _weightOverlay = resolved;
+        if (!_bridge) {
+            // Remembered for whenever a rig is activated. Not a failure:
+            // a host that sets its viewer mode before opening a stage has
+            // done nothing wrong.
+            return true;
+        }
+        _bridge->SetWeightOverlay(resolved);
+        time = _lastTime;
+    }
+    // Republished OUTSIDE the lock, exactly as _OnObjectsChanged does it:
+    // SetTime takes the same plain (non-recursive) std::mutex, so calling
+    // it while still holding _mutex is a self-deadlock. This is also what
+    // makes the change visible immediately -- the fresh generation's diff
+    // reports the overlay's displayColor primvar appearing or disappearing
+    // as structural, which dirties the mesh universally.
+    return SetTime(time);
 }
 
 void
@@ -258,6 +330,36 @@ _AccumulateGuideBounds(
             PXR_NS::GfBBox3d(PXR_NS::GfRange3d(-half, half),
                              published.controlGuideFrame)
                 .ComputeAlignedRange());
+        any = true;
+    }
+
+    // Volume weight iso-surfaces. Their points are already the drawn
+    // geometry in the element's own local space, so the exact bound is one
+    // transformed range -- no per-shape table and no unit-size convention
+    // to keep in step, which is what the control arm above has to settle
+    // for. The implicits (a solid sphere iso-surface) carry no points and
+    // are the unit sphere by construction, so ±1 is exact for them too.
+    for (const rigExec::RigExecVolumeGuideElement &element :
+             published.volumeGuides) {
+        PXR_NS::GfRange3d local;
+        for (const PXR_NS::GfVec3f &p : element.points) {
+            local.UnionWith(PXR_NS::GfVec3d(p));
+        }
+        if (local.IsEmpty()) {
+            local = PXR_NS::GfRange3d(PXR_NS::GfVec3d(-1, -1, -1),
+                                      PXR_NS::GfVec3d(1, 1, 1));
+        }
+        // Wire curves are drawn with a width in the element's own local
+        // units, so the drawn geometry reaches half a width past the
+        // points -- the same correction the control arm applies.
+        if (element.wireWidth > 0.0 &&
+            std::isfinite(element.wireWidth)) {
+            const PXR_NS::GfVec3d pad(element.wireWidth * 0.5);
+            local = PXR_NS::GfRange3d(local.GetMin() - pad,
+                                      local.GetMax() + pad);
+        }
+        range->UnionWith(
+            PXR_NS::GfBBox3d(local, element.xform).ComputeAlignedRange());
         any = true;
     }
     return any;
@@ -673,6 +775,14 @@ RigExecImaging_GetGuideBoundsAssetSpace(
     }
     _WriteBounds(range, outMinMax);
     return 1;
+}
+
+int
+RigExecImaging_SetWeightOverlay(const char *weightPrimPath)
+{
+    return RigExecImagingRegistry::GetInstance().SetWeightOverlay(
+               weightPrimPath ? std::string(weightPrimPath) : std::string())
+        ? 0 : 1;
 }
 
 int

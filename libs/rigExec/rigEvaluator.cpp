@@ -6,8 +6,10 @@
 #include "frameExtraction.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/solvers.h"
+#include "rigExecMath/weightFields.h"
 
 #include "pxr/base/gf/rotation.h"
+#include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/usd/usd/attribute.h"
@@ -39,6 +41,91 @@ const TfToken _computePointFrameArray("computePointFrameArray");
 const TfToken _movesRel("rigExec:moves");
 const TfToken _enabledAttr("inputs:enabled");
 const TfToken _restPointsAttr("rigExec:restPoints");
+const TfToken _computeFalloffLut("computeFalloffLut");
+const TfToken _falloffProfileAttr("rigExec:falloffProfile");
+const TfToken _falloffCurveAttr("rigExec:falloffCurve");
+const TfToken _samplePhaseAttr("rigExec:samplePhase");
+
+/// True for the schema types that GENERATE a weight field from a placed
+/// volume, as opposed to storing or modulating one.
+bool
+_IsVolumeWeightType(const TfToken &typeName)
+{
+    return typeName == "RigExecSphereWeight" ||
+           typeName == "RigExecPlaneWeight" ||
+           typeName == "RigExecCurveWeight";
+}
+
+/// True for every schema that publishes computeWeightPacket.
+///
+/// The volumetric types are NOT RigExecWeightObject subclasses -- a typed
+/// schema gets exactly one base and they spend it on RigExecXformable, to
+/// be placeable (see the RigExecVolumeWeight schema doc) -- so weight-object
+/// identity is a type-name question here rather than an IsA one. That is
+/// what the rest of this file already does for RigExecDynamicWeight.
+bool
+_IsWeightObjectType(const TfToken &typeName)
+{
+    return typeName == "RigExecStaticWeight" ||
+           typeName == "RigExecDynamicWeight" ||
+           typeName == "RigExecCombineWeight" ||
+           _IsVolumeWeightType(typeName);
+}
+
+/// Bakes a volumetric weight's distance-to-weight remap into the lookup
+/// table its exec kernel consumes.
+///
+/// The named profiles bake analytically; `curve` resamples the Ts spline
+/// authored on rigExec:falloffCurve. Both land in the same table, so the
+/// kernel has one remap path and an author switching between a preset and
+/// a hand-drawn curve changes only the numbers.
+std::vector<float>
+_BakeFalloffLut(const UsdPrim &prim)
+{
+    TfToken profile("smooth");
+    if (UsdAttribute a = prim.GetAttribute(_falloffProfileAttr)) {
+        a.Get(&profile);
+    }
+    if (profile == "linear") {
+        return RigExecBuildFalloffLut(RigExecFalloffProfile::Linear);
+    }
+    if (profile == "smooth") {
+        return RigExecBuildFalloffLut(RigExecFalloffProfile::Smooth);
+    }
+    if (profile == "easeIn") {
+        return RigExecBuildFalloffLut(RigExecFalloffProfile::EaseIn);
+    }
+    if (profile == "easeOut") {
+        return RigExecBuildFalloffLut(RigExecFalloffProfile::EaseOut);
+    }
+    if (profile == "constant") {
+        return RigExecBuildFalloffLut(RigExecFalloffProfile::Constant);
+    }
+    if (profile != "curve") {
+        return {};  // unknown token: linear, never coerced to a preset
+    }
+
+    const UsdAttribute curve = prim.GetAttribute(_falloffCurveAttr);
+    if (!curve || !curve.HasSpline()) {
+        // `curve` with nothing drawn is linear, not empty: the profile
+        // token is a promise about SHAPE, and an author who selects it
+        // before touching the editor should see the identity ramp.
+        return RigExecBuildFalloffLut(RigExecFalloffProfile::Linear);
+    }
+    const TsSpline spline = curve.GetSpline();
+    std::vector<float> lut(RigExecFalloffLutSize);
+    for (size_t i = 0; i < RigExecFalloffLutSize; ++i) {
+        const double x = double(i) / double(RigExecFalloffLutSize - 1);
+        float value = 0.0f;
+        // Ts extrapolates HELD outside the authored knot range, so a
+        // curve drawn over a shorter span still yields a total field.
+        if (!spline.Eval(x, &value) || !std::isfinite(value)) {
+            value = float(x);
+        }
+        lut[i] = value;
+    }
+    return lut;
+}
 
 bool
 _GetLandmarks(
@@ -216,11 +303,29 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
 
     // Weight-object descriptor shape is epoch identity (spec §4.1):
     // target, representation, policy, and canonical sparse support.
-    auto appendWeightObject = [&](const SdfPath &weightPath) {
+    //
+    // Recursive, because a combine's field shape is its inputs' shapes:
+    // an edit inside a composed input has to re-epoch the combine that
+    // folds it, or the baked falloff tables replay stale.
+    //
+    // Cycle-TRACKED rather than depth-limited. A depth cap terminates,
+    // but it terminates by silently dropping everything below it, so a
+    // legitimately deep composition stops contributing to the epoch
+    // identity and edits down there stop triggering a recompile. Marking
+    // the path being walked costs the same and is exact; a genuine cycle
+    // is caught and reported by the compile-time walk instead.
+    std::set<SdfPath> digestVisiting;
+    std::function<void(const SdfPath &)> appendWeightObject =
+        [&](const SdfPath &weightPath) {
         const UsdPrim w = _stage->GetPrimAtPath(weightPath);
-        if (!w) {
+        if (!w || !digestVisiting.insert(weightPath).second) {
             return;
         }
+        struct Pop {
+            std::set<SdfPath> &s;
+            const SdfPath &p;
+            ~Pop() { s.erase(p); }
+        } pop{digestVisiting, weightPath};
         digest += w.GetTypeName().GetString();
         digest += '|';
         appendRelTargets(w, "rigExec:weightTarget", true);
@@ -239,6 +344,71 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             digest += ',';
         }
         digest += '|';
+
+        // Volumetric extension. Only STRUCTURAL properties belong here:
+        // the shape family, which axis it measures, where it samples,
+        // and the baked remap. inputs:falloffMin/Max, invert, strength,
+        // scaleX/Y/Z and extentU/V are deliberately absent -- they are
+        // per-frame exec values, and hashing them would recompile every
+        // frame an artist scrubs one. rigExec:planeBounds IS here
+        // because it selects which field function runs, exactly as
+        // rigExec:planeAxis selects which coordinate it measures.
+        appendToken(w, "rigExec:falloffProfile");
+        appendToken(w, "rigExec:samplePhase");
+        appendToken(w, "rigExec:planeAxis");
+        appendToken(w, "rigExec:planeBounds");
+        appendToken(w, "rigExec:combineMode");
+        appendRelTargets(w, "rigExec:curve", true);
+        appendRelTargets(w, "rigExec:sampleSource", true);
+        // The falloff curve is structural: it is resampled to a table
+        // once per epoch, so an edit to it has to begin a new one.
+        //
+        // What gets hashed is the BAKED TABLE, not the knots. Hashing
+        // knot times and values misses everything else that changes the
+        // curve's shape -- interpolation mode, tangent slopes and widths,
+        // dual values, extrapolation, loops -- so flipping a knot from
+        // curve to held left the digest unchanged, the epoch unrebuilt,
+        // and exec replaying a stale LUT while the CPU oracle rebaked the
+        // live spline. Hashing the table is exact by construction: it is
+        // precisely the bytes exec consumes, so anything that changes
+        // them re-epochs and nothing that does not, does.
+        //
+        // This also folds in rigExec:falloffProfile, which is why that
+        // token is not hashed separately.
+        if (_IsVolumeWeightType(w.GetTypeName())) {
+            const std::vector<float> lut = _BakeFalloffLut(w);
+            digest += "lut=";
+            digest.append(reinterpret_cast<const char *>(lut.data()),
+                          lut.size() * sizeof(float));
+            digest += '|';
+        }
+
+        // Composition order is semantic for subtract and overlay, so the
+        // input list is hashed UNSORTED -- unlike every other
+        // relationship here, whose permutation is explicitly not.
+        SdfPathVector inputs;
+        if (UsdRelationship rel =
+                w.GetRelationship(TfToken("rigExec:inputWeights"))) {
+            rel.GetTargets(&inputs);
+        }
+        digest += "rigExec:inputWeights=";
+        for (const SdfPath &t : inputs) {
+            digest += t.GetString();
+            digest += ',';
+        }
+        digest += '|';
+        for (const SdfPath &t : inputs) {
+            appendWeightObject(t);
+        }
+        // A dynamic weight's base is composed the same way.
+        SdfPathVector bases;
+        if (UsdRelationship rel =
+                w.GetRelationship(TfToken("rigExec:baseWeight"))) {
+            rel.GetTargets(&bases);
+        }
+        for (const SdfPath &t : bases) {
+            appendWeightObject(t);
+        }
     };
 
     // Rig output set. Discovered rather than authored, so the digest hashes the
@@ -1376,6 +1546,143 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     std::map<SdfPath, RigExecTapId> newSolverArrayTaps;
     std::map<SdfPath, RigExecTapId> newJointSolverArrayTaps;
 
+    // Volumetric weight epoch state (spec §4.1 volumetric extension).
+    std::vector<RigExecValueOverride> newFalloffLutOverrides;
+    std::set<SdfPath> newCurrentPhaseWeights;
+    std::map<SdfPath, RigExecTapId> newVolumeWeightMatrixTaps;
+
+    // Walks a weight object and everything it composes, gathering what
+    // the volumetric types need beyond their computeWeightPacket tap.
+    // Depth-limited for the same reason the structure digest is: a cycle
+    // is authoring error, and the bound only has to keep this
+    // terminating.
+    // Structural authoring errors on a volume weight, collected during
+    // the walk below and reported before the epoch commits.
+    //
+    // These are cardinality rules on the points-bearing relationships,
+    // and they exist because the two evaluation paths CANNOT disagree
+    // about them safely: the exec kernel receives a relationship's
+    // targets as one flattened value stream, so two targets on
+    // rigExec:curve silently concatenate into one polyline with a
+    // spurious segment joining them, while the CPU oracle reads targets
+    // explicitly and rejects the pair. Catching it here means neither
+    // path ever sees the ambiguous authoring.
+    std::string volumeWeightError;
+
+    // Weight objects currently being visited, for cycle detection. A
+    // cycle is an authoring error and must be DIAGNOSED, not survived:
+    // the CPU resolver recurses through the same edges with no depth
+    // guard of its own, so an undetected cycle exhausts the stack rather
+    // than producing a bad answer.
+    std::set<SdfPath> visiting;
+
+    // Returns true when this weight object, or anything it composes,
+    // samples the in-flight points.
+    //
+    // The answer has to propagate UP: the graph build loop tests the
+    // weight object a mover actually binds, which for a composed field is
+    // the combine, not the sphere inside it. Recording only the leaf left
+    // exec applying the reference-phase packet while the CPU oracle
+    // reached a leaf with no in-flight points and failed.
+    std::function<bool(const SdfPath &)> registerVolumeWeights =
+        [&](const SdfPath &weightPath) -> bool {
+        const UsdPrim w = _stage->GetPrimAtPath(weightPath);
+        if (!w) {
+            return false;
+        }
+        if (!visiting.insert(weightPath).second) {
+            volumeWeightError =
+                weightPath.GetString() +
+                ": weight object composition contains a cycle";
+            return false;
+        }
+        struct Pop {
+            std::set<SdfPath> &s;
+            const SdfPath &p;
+            ~Pop() { s.erase(p); }
+        } pop{visiting, weightPath};
+
+        if (newVolumeWeightMatrixTaps.count(weightPath) ||
+            newCurrentPhaseWeights.count(weightPath)) {
+            // Already walked through another consumer; its answer stands.
+            return newCurrentPhaseWeights.count(weightPath) != 0;
+        }
+        bool isCurrent = false;
+        if (_IsVolumeWeightType(w.GetTypeName())) {
+            auto requireTargets = [&](const char *rel, size_t exact,
+                                      const char *what) {
+                SdfPathVector targets;
+                if (UsdRelationship r = w.GetRelationship(TfToken(rel))) {
+                    r.GetTargets(&targets);
+                }
+                if (targets.size() > exact) {
+                    volumeWeightError =
+                        weightPath.GetString() + ": " + rel + " must name " +
+                        what;
+                }
+                return targets.size();
+            };
+            // At most one sampling override; exactly one curve for a
+            // curve weight.
+            requireTargets("rigExec:sampleSource", 1,
+                           "at most one points source");
+            if (w.GetTypeName() == "RigExecCurveWeight" &&
+                requireTargets("rigExec:curve", 1,
+                               "exactly one points source") != 1) {
+                volumeWeightError =
+                    weightPath.GetString() +
+                    ": rigExec:curve must name exactly one points source";
+            }
+        }
+        if (_IsVolumeWeightType(w.GetTypeName())) {
+            // computePointFrame, NOT computeMatrix: the latter is the
+            // rest->posed map, so an unanimated volume's is the identity
+            // and its field would land at the origin however the prim is
+            // placed. See _RigidWorldToLocal in moverKernels.cpp.
+            newVolumeWeightMatrixTaps[weightPath] =
+                newTaps->Add(RigExecValueAddress::Prim(
+                    weightPath, _computePointFrame));
+
+            RigExecValueOverride lutOverride;
+            lutOverride.prim = weightPath;
+            lutOverride.computation = _computeFalloffLut;
+            RigExecFalloffLut lut;
+            lut.samples = _BakeFalloffLut(w);
+            lutOverride.value = VtValue(lut);
+            newFalloffLutOverrides.push_back(std::move(lutOverride));
+
+            TfToken phase("reference");
+            if (UsdAttribute a = w.GetAttribute(_samplePhaseAttr)) {
+                a.Get(&phase);
+            }
+            if (phase == "current") {
+                newCurrentPhaseWeights.insert(weightPath);
+                isCurrent = true;
+            }
+        }
+        for (const char *rel :
+             {"rigExec:inputWeights", "rigExec:baseWeight"}) {
+            SdfPathVector targets;
+            if (UsdRelationship r = w.GetRelationship(TfToken(rel))) {
+                r.GetTargets(&targets);
+            }
+            for (const SdfPath &t : targets) {
+                // Not short-circuited: every reachable weight object
+                // still needs its matrix tap and LUT override, so the
+                // walk must complete even once the answer is known.
+                if (registerVolumeWeights(t)) {
+                    isCurrent = true;
+                }
+            }
+        }
+        // A composed field is current-phase if anything inside it is, so
+        // that the combine a mover actually binds tests true.
+        if (isCurrent) {
+            newCurrentPhaseWeights.insert(weightPath);
+        }
+        return isCurrent;
+    };
+
     // The aggregate frame array of every solver that poses a joint, in its
     // own request so it can be evaluated first: the authoritative request
     // below is computed with each bound joint's frame overridden by an
@@ -1550,6 +1857,12 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 revision.weightTap = newTaps->Add(RigExecValueAddress::Prim(
                     revision.binding.weightObject,
                     TfToken("computeWeightPacket")));
+                // Volumetric weights need two things exec cannot supply
+                // on its own: a baked falloff table (no spline accessor
+                // exists -- see RigExecFalloffLut) and, for the CPU
+                // oracle, their resolved placement. Both are gathered
+                // once here, following composition into combines.
+                registerVolumeWeights(revision.binding.weightObject);
             }
             if (!revision.binding.driverFrames.IsEmpty()) {
                 revision.driverFramesTap =
@@ -1662,6 +1975,16 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _providerBaseFrameTaps = std::move(newProviderBaseFrameTaps);
     _xformDerivedProviders = std::move(newXformDerivedProviders);
     _ribbonDriverPoints = std::move(newRibbonDriverPoints);
+    if (!volumeWeightError.empty()) {
+        reportError(volumeWeightError);
+        restorePreviousEpoch();
+        return false;
+    }
+
+    _falloffLutOverrides = std::move(newFalloffLutOverrides);
+    _currentPhaseWeights = std::move(newCurrentPhaseWeights);
+    _volumeWeightMatrixTaps = std::move(newVolumeWeightMatrixTaps);
+    _volumeWeightMatrices.clear();
     _structureDigest = newDigest;
     _taps = std::move(newTaps);
     _guideTaps = std::move(newGuideTaps);
@@ -1775,15 +2098,302 @@ RigExecRigEvaluator::_ValidateMatrixMover(
 }
 
 bool
+RigExecRigEvaluator::_ReadTargetPoints(
+    const UsdPrim &prim, const char *relationshipName, UsdTimeCode time,
+    std::vector<GfVec3f> *points) const
+{
+    points->clear();
+    SdfPathVector targets;
+    if (UsdRelationship rel = prim.GetRelationship(TfToken(relationshipName))) {
+        rel.GetTargets(&targets);
+    }
+    if (targets.size() != 1) {
+        return false;
+    }
+    const SdfPath canonical = _CanonicalizeTarget(_stage, targets[0]);
+    const UsdAttribute attr = _stage->GetAttributeAtPath(canonical);
+    VtVec3fArray value;
+    if (!attr || !attr.Get(&value, time)) {
+        return false;
+    }
+    points->assign(value.begin(), value.end());
+    return true;
+}
+
+bool
+RigExecRigEvaluator::_ResolveVolumeWeights(
+    const UsdPrim &prim, size_t count, UsdTimeCode time,
+    std::vector<float> *weights, std::string *error,
+    const std::vector<GfVec3f> *currentPoints) const
+{
+    const std::string who = prim.GetPath().GetString();
+    const TfToken typeName = prim.GetTypeName();
+
+    // The composed field folds its inputs; it measures nothing itself.
+    if (typeName == "RigExecCombineWeight") {
+        SdfPathVector inputs;
+        if (UsdRelationship rel =
+                prim.GetRelationship(TfToken("rigExec:inputWeights"))) {
+            rel.GetTargets(&inputs);
+        }
+        TfToken modeName("multiply");
+        if (UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:combineMode"))) {
+            a.Get(&modeName, time);
+        }
+        RigExecWeightCombine mode;
+        if (modeName == "multiply") {
+            mode = RigExecWeightCombine::Multiply;
+        } else if (modeName == "add") {
+            mode = RigExecWeightCombine::Add;
+        } else if (modeName == "subtract") {
+            mode = RigExecWeightCombine::Subtract;
+        } else if (modeName == "max") {
+            mode = RigExecWeightCombine::Max;
+        } else if (modeName == "min") {
+            mode = RigExecWeightCombine::Min;
+        } else if (modeName == "average") {
+            mode = RigExecWeightCombine::Average;
+        } else if (modeName == "overlay") {
+            mode = RigExecWeightCombine::Overlay;
+        } else {
+            *error = who + ": unknown rigExec:combineMode " +
+                     modeName.GetString();
+            return false;
+        }
+
+        // Authored order, unsorted: subtract and overlay are order
+        // dependent by design (see the schema doc).
+        std::vector<std::vector<float>> fields;
+        fields.reserve(inputs.size());
+        for (const SdfPath &input : inputs) {
+            std::vector<float> field;
+            if (!_ResolveWeights(input, count, time, &field, error,
+                                 currentPoints)) {
+                return false;
+            }
+            fields.push_back(std::move(field));
+        }
+        if (!RigExecCombineWeightFields(mode, fields, count, weights)) {
+            *error = who + ": combine inputs disagree on element count";
+            return false;
+        }
+        float strength = 1.0f, invert = 0.0f;
+        if (UsdAttribute a = prim.GetAttribute(TfToken("inputs:strength"))) {
+            a.Get(&strength, time);
+        }
+        if (UsdAttribute a = prim.GetAttribute(TfToken("inputs:invert"))) {
+            a.Get(&invert, time);
+        }
+        for (float &w : *weights) {
+            w = (w + (1.0f - 2.0f * w) * invert) * strength;
+        }
+        return true;
+    }
+
+    // Placement.
+    //
+    // Taken from the volume's own exec computeMatrix rather than
+    // recomputed here. The oracle exists to check the WEIGHT FIELD math
+    // independently, not the xformable frame chain -- that already has
+    // its own parity coverage, and a second hand-rolled implementation
+    // of posed:space + rest offsets + avars + rotation order is exactly
+    // the drift frameExtraction.h was created to prevent.
+    const auto matrixIt = _volumeWeightMatrices.find(prim.GetPath());
+    if (matrixIt == _volumeWeightMatrices.end()) {
+        *error = who + ": no resolved placement for this volume weight";
+        return false;
+    }
+    // Scale and shear are removed so the field matches the rigid guide a
+    // viewer draws; inputs:scaleX/Y/Z is the sole authority on
+    // anisotropy (see the RigExecVolumeWeight schema doc).
+    GfMatrix4d rigid = matrixIt->second.RemoveScaleShear();
+    const double det = rigid.GetDeterminant();
+    if (!std::isfinite(det) || std::abs(det) < 1e-12) {
+        *error = who + ": degenerate volume placement";
+        return false;
+    }
+    GfMatrix4d worldToLocal = rigid.GetInverse();
+
+    // Which points the distance function measures.
+    std::vector<GfVec3f> samplePoints;
+    TfToken samplePhase("reference");
+    if (UsdAttribute a = prim.GetAttribute(_samplePhaseAttr)) {
+        a.Get(&samplePhase, time);
+    }
+    if (samplePhase == "current") {
+        if (!currentPoints) {
+            *error = who +
+                     ": rigExec:samplePhase is `current` but no in-flight "
+                     "points were supplied";
+            return false;
+        }
+        samplePoints = *currentPoints;
+    } else if (samplePhase == "reference") {
+        // An explicit sampleSource wins over the weighted domain, which
+        // is how one mesh is weighted by another mesh's shape.
+        if (!_ReadTargetPoints(prim, "rigExec:sampleSource", time,
+                               &samplePoints) &&
+            !_ReadTargetPoints(prim, "rigExec:weightTarget", time,
+                               &samplePoints)) {
+            *error = who + ": could not read the points to sample";
+            return false;
+        }
+    } else {
+        *error = who + ": unknown rigExec:samplePhase " +
+                 samplePhase.GetString();
+        return false;
+    }
+    if (samplePoints.size() != count) {
+        *error = who + ": sampled point count does not match the target";
+        return false;
+    }
+
+    RigExecFalloffParams params;
+    auto readFloat = [&prim, time](const char *name, float fallback) {
+        float v = fallback;
+        if (UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+            a.Get(&v, time);
+        }
+        return v;
+    };
+    params.falloffMin = readFloat("inputs:falloffMin", 0.0f);
+    params.falloffMax = readFloat("inputs:falloffMax", 1.0f);
+    params.invert = readFloat("inputs:invert", 0.0f);
+    params.strength = readFloat("inputs:strength", 1.0f);
+    params.curve = _BakeFalloffLut(prim);
+
+    if (typeName == "RigExecPlaneWeight") {
+        TfToken axis("y");
+        if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:planeAxis"))) {
+            a.Get(&axis, time);
+        }
+        const int axisIndex =
+            axis == "x" ? 0 : (axis == "y" ? 1 : (axis == "z" ? 2 : -1));
+        if (axisIndex < 0) {
+            *error = who + ": unknown rigExec:planeAxis " + axis.GetString();
+            return false;
+        }
+        // Bounded clips the field to the in-plane rectangle. Mirrors
+        // _BuildPlaneWeightPacket exactly, including reading the extents
+        // only in the bounded arm -- the two paths have to agree value
+        // for value or the parity harness fires.
+        TfToken boundsMode("unbounded");
+        if (UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:planeBounds"))) {
+            a.Get(&boundsMode, time);
+        }
+        RigExecPlaneBounds extent;
+        const RigExecPlaneBounds *extentPtr = nullptr;
+        if (boundsMode == "bounded") {
+            extent.extentU = readFloat("inputs:extentU", 1.0f);
+            extent.extentV = readFloat("inputs:extentV", 1.0f);
+            for (const float e : {extent.extentU, extent.extentV}) {
+                if (!std::isfinite(e) || e <= 0.0f) {
+                    *error = who +
+                             ": inputs:extentU/V must be finite and positive "
+                             "when rigExec:planeBounds is `bounded`";
+                    return false;
+                }
+            }
+            extentPtr = &extent;
+        } else if (boundsMode != "unbounded") {
+            *error = who + ": unknown rigExec:planeBounds " +
+                     boundsMode.GetString();
+            return false;
+        }
+        RigExecPlaneWeightField(
+            samplePoints, worldToLocal, axisIndex, params, weights, extentPtr);
+        return true;
+    }
+
+    // Sphere and curve both take the per-axis divisors, folded into the
+    // matrix so the hot loop stays one transform.
+    const float sx = readFloat("inputs:scaleX", 1.0f);
+    const float sy = readFloat("inputs:scaleY", 1.0f);
+    const float sz = readFloat("inputs:scaleZ", 1.0f);
+    for (float s : {sx, sy, sz}) {
+        if (!std::isfinite(s) || s <= 0.0f) {
+            *error = who + ": inputs:scaleX/Y/Z must be finite and positive";
+            return false;
+        }
+    }
+    GfMatrix4d divide(1.0);
+    divide.SetScale(GfVec3d(1.0 / double(sx), 1.0 / double(sy),
+                            1.0 / double(sz)));
+    worldToLocal = worldToLocal * divide;
+
+    if (typeName == "RigExecSphereWeight") {
+        RigExecSphereWeightField(samplePoints, worldToLocal, params, weights);
+        return true;
+    }
+    if (typeName == "RigExecCurveWeight") {
+        std::vector<GfVec3f> curvePoints;
+        if (!_ReadTargetPoints(prim, "rigExec:curve", time, &curvePoints) ||
+            curvePoints.empty()) {
+            *error = who + ": rigExec:curve must name exactly one points source";
+            return false;
+        }
+        RigExecCurveWeightField(
+            samplePoints, curvePoints, worldToLocal, params, weights);
+        return true;
+    }
+    *error = who + ": not a volumetric weight object";
+    return false;
+}
+
+bool
 RigExecRigEvaluator::_ResolveWeights(
     const SdfPath &weightPrimPath, size_t count, UsdTimeCode time,
-    std::vector<float> *weights, std::string *error) const
+    std::vector<float> *weights, std::string *error,
+    const std::vector<GfVec3f> *currentPoints) const
 {
     weights->assign(count, 1.0f);
     const UsdPrim prim = _stage->GetPrimAtPath(weightPrimPath);
     if (!prim) {
         *error = "missing weight object " + weightPrimPath.GetString();
         return false;
+    }
+
+    // A type this oracle does not understand must FAIL, never fall
+    // through to the authored-table path. That path reads no
+    // representation and no defaultWeight off a volumetric prim and so
+    // returns an all-zero field and `true` -- a silently wrong answer,
+    // and the one shape of bug the parity harness cannot catch because
+    // both sides would agree on nothing.
+    const TfToken typeName = prim.GetTypeName();
+    if (!_IsWeightObjectType(typeName)) {
+        *error = "unknown weight object type " + typeName.GetString() +
+                 " on " + weightPrimPath.GetString();
+        return false;
+    }
+    if (_IsVolumeWeightType(typeName) || typeName == "RigExecCombineWeight") {
+        std::vector<float> resolved;
+        if (!_ResolveVolumeWeights(prim, count, time, &resolved, error,
+                                   currentPoints)) {
+            return false;
+        }
+        TfToken volumePolicy("clamp");
+        if (UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:rangePolicy"))) {
+            a.Get(&volumePolicy, time);
+        }
+        for (float &w : resolved) {
+            if (!std::isfinite(w)) {
+                *error = "non-finite weight on " + weightPrimPath.GetString();
+                return false;
+            }
+            if (w < 0.0f || w > 1.0f) {
+                if (volumePolicy != "clamp") {
+                    *error = "strict range violation on " +
+                             weightPrimPath.GetString();
+                    return false;
+                }
+                w = std::min(std::max(w, 0.0f), 1.0f);
+            }
+        }
+        *weights = std::move(resolved);
+        return true;
     }
 
     TfToken representation("constant");
@@ -1899,7 +2509,12 @@ RigExecRigEvaluator::_ResolveWeights(
                     }
                 }
             }
-            if (!_ResolveWeights(baseTargets[0], count, time, &base, error)) {
+            // currentPoints is forwarded: a dynamic weight modulating a
+            // current-phase volume must still measure against the
+            // in-flight points, or the base silently reverts to the
+            // reference field.
+            if (!_ResolveWeights(baseTargets[0], count, time, &base, error,
+                                 currentPoints)) {
                 return false;
             }
         }
@@ -2076,9 +2691,19 @@ RigExecRigEvaluator::_EvaluateChain(
                 rel.GetTargets(&weightObj);
             }
             std::string error;
+            // `points` IS the in-flight buffer here, so a current-phase
+            // volume measures the same thing the graph measures (see the
+            // graph build loop in Evaluate). The copy is taken only when
+            // one is actually authored.
+            std::vector<GfVec3f> inFlight;
+            const std::vector<GfVec3f> *currentPoints = nullptr;
+            if (!weightObj.empty() && _currentPhaseWeights.count(weightObj[0])) {
+                inFlight.assign(points.begin(), points.end());
+                currentPoints = &inFlight;
+            }
             if (!weightObj.empty() &&
                 !_ResolveWeights(weightObj[0], points.size(), time, &mask,
-                                 &error)) {
+                                 &error, currentPoints)) {
                 diagnostics->push_back(
                     "MoverFailed " + mover->moverPath.GetString() + ": " +
                     error);
@@ -2279,8 +2904,16 @@ RigExecRigEvaluator::_EvaluateChain(
             }
             std::vector<float> weights;
             std::string error;
+            // See the blend branch above: the in-flight buffer is copied
+            // only for a volume that asked to measure against it.
+            std::vector<GfVec3f> inFlight;
+            const std::vector<GfVec3f> *currentPoints = nullptr;
+            if (_currentPhaseWeights.count(weightObj[0])) {
+                inFlight.assign(points.begin(), points.end());
+                currentPoints = &inFlight;
+            }
             if (!_ResolveWeights(weightObj[0], points.size(), time, &weights,
-                                 &error)) {
+                                 &error, currentPoints)) {
                 diagnostics->push_back(
                     "MoverFailed " + mover->moverPath.GetString() + ": " +
                     error);
@@ -2635,6 +3268,14 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         }
     }
 
+    // Baked falloff tables ride along with the joint overrides. They are
+    // epoch-constant, so this replays the same values Compile produced
+    // until the next epoch -- exec has no accessor for an attribute's
+    // spline, and a falloff curve is the whole function rather than one
+    // resolved value (see RigExecFalloffLut in types.h).
+    jointOverrides.insert(jointOverrides.end(), _falloffLutOverrides.begin(),
+                          _falloffLutOverrides.end());
+
     // 1. Transforms and solvers through OpenExec. An incomplete snapshot
     // means some computation failed to compile or evaluate; refusing to
     // continue prevents default-constructed values from masquerading as
@@ -2646,6 +3287,24 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                                : "snapshot evaluation failed");
         return pose;
     }
+
+    // Resolved volume placements, for the CPU oracle and for any
+    // `current`-phase field recomputed against the in-flight points.
+    _volumeWeightMatrices.clear();
+    for (const auto &[weightPath, tap] : _volumeWeightMatrixTaps) {
+        // The tap is the ABSOLUTE posed frame; the placement is the map
+        // taking the identity landmarks to it.
+        const RigExecPointFrame posed = snapshot.Get<RigExecPointFrame>(tap);
+        GfMatrix4d placement(1.0);
+        if (posed.IsValid() && !posed.IsDegenerate()) {
+            RigExecPointsToMatrix(
+                RigExecIdentityLandmarks(), posed.points, &placement);
+        }
+        _volumeWeightMatrices[weightPath] = placement;
+    }
+    // Published as-is: the imaging bridge draws each volume's falloff
+    // iso-surfaces in exactly the space its field was measured in.
+    pose.weightFrames = _volumeWeightMatrices;
     // 2. Pose-domain frame revisions (aim constraints), applied in memory.
     //
     // These used to be generated RigExecPointFrameMoverApplication prims that
@@ -2925,6 +3584,63 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 weights =
                     snapshot.Get<RigExecWeightPacket>(revision.weightTap);
                 values.weights = &weights;
+
+                // rigExec:samplePhase = "current": the field is measured
+                // against the points AS THEY STAND HERE, not the
+                // authored base, so the volume grabs whatever is inside
+                // it right now.
+                //
+                // It cannot come from exec. The revision node's only
+                // inputs are its parameters, its status, and the
+                // read-write point buffer, and the parameters are baked
+                // as a VDF constant when the graph is built -- nothing
+                // in the packet can depend on a value the graph has not
+                // computed yet. What CAN be done is evaluate the chain
+                // built SO FAR (RigExecMoverGraph::Evaluate is const and
+                // takes any masked output), measure against that, and
+                // bake the result into this revision's parameters. One
+                // extra graph evaluation per current-phase revision,
+                // paid only by rigs that ask for it.
+                if (_currentPhaseWeights.count(
+                        revision.binding.weightObject)) {
+                    const VtVec3fArray inFlight = graph.Evaluate(head);
+                    const std::vector<GfVec3f> currentPoints(
+                        inFlight.begin(), inFlight.end());
+                    std::vector<float> field;
+                    std::string weightError;
+                    if (_ResolveWeights(revision.binding.weightObject,
+                                        currentPoints.size(), time, &field,
+                                        &weightError, &currentPoints)) {
+                        weights.representation = TfToken("dense");
+                        weights.values = std::move(field);
+                        weights.indices.clear();
+                        weights.defaultWeight = 0.0f;
+                        weights.valid = true;
+                    } else {
+                        // An invalid packet is the kernel's atomic
+                        // MoverFailed pass-through, which is the right
+                        // answer here: publishing the reference-phase
+                        // field instead would silently be a different
+                        // deformation.
+                        weights = RigExecWeightPacket();
+                        pose.diagnostics.push_back(
+                            "current-phase weight failed: " + weightError);
+                    }
+                }
+            }
+            // Publish the field an authoring tool paints as an influence
+            // overlay. Taken from the packet the mover is about to
+            // consume, so what a rigger sees is exactly what deformed
+            // the geometry -- not a re-derivation that could drift.
+            if (revision.weightTap >= 0 && weights.valid) {
+                RigExecResolvedWeightField &field =
+                    pose.weightFields[revision.binding.weightObject];
+                field.target = target;
+                field.weights.assign(basePoints.size(), 0.0f);
+                for (size_t i = 0; i < basePoints.size(); ++i) {
+                    const float w = weights.Resolve(i, basePoints.size());
+                    field.weights[i] = w < 0.0f ? 0.0f : w;
+                }
             }
             values.basePoints.assign(basePoints.begin(), basePoints.end());
             if (!revision.blendChannelTaps.empty()) {

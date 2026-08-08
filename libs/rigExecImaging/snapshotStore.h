@@ -14,6 +14,7 @@
 #include "pxr/base/gf/vec3d.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/types.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
@@ -28,6 +29,48 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+
+/// One drawn iso-surface of one placed influence volume.
+///
+/// Self-describing geometry rather than an index into a shared unit-shape
+/// table (the way the control guides reference _ControlGuideShape): a
+/// curve weight's guide is built from the AUTHORED curve, so its points
+/// differ per prim and per generation and there is no fixed table entry to
+/// point at. Carrying the shape here keeps sphere, plane, and curve on one
+/// code path in the scene index, which is the only way the three cannot
+/// drift apart in how they are announced and dirtied.
+struct RigExecVolumeGuideElement {
+    /// ASSET-space placement, including whatever dimensional scale the
+    /// shape carries in its transform rather than in its points -- a
+    /// sphere's iso-surface is the UNIT wire sphere scaled by the radius,
+    /// so the radius appears exactly once and the implicit and wire draw
+    /// modes are sized by the same factor. Shapes with no implicit form
+    /// (the plane square, the curve tube) instead bake their dimensions
+    /// into `points`, in the volume's own local space.
+    GfMatrix4d xform{1.0};
+    /// basisCurves | mesh | sphere. Per ELEMENT rather than per prim: a
+    /// volume publishes its falloffMin and falloffMax surfaces as two
+    /// elements, and the drawMode that picks the type is shared, but
+    /// keeping it per element is what lets the announcement machinery
+    /// treat a type change as the structural event it is.
+    TfToken primType;
+    VtVec3fArray points;   ///< empty for the implicits
+    VtIntArray counts;     ///< curveVertexCounts, or faceVertexCounts
+    VtIntArray indices;    ///< faceVertexIndices; empty for curves
+    /// Wire width in the element's own LOCAL (pre-xform) units. Zero or
+    /// negative publishes no widths at all -- the hairline fallback, and
+    /// what the non-wire draw modes always want.
+    double wireWidth = 0.0;
+
+    bool operator==(const RigExecVolumeGuideElement &other) const {
+        return xform == other.xform && primType == other.primType &&
+               points == other.points && counts == other.counts &&
+               indices == other.indices && wireWidth == other.wireWidth;
+    }
+    bool operator!=(const RigExecVolumeGuideElement &other) const {
+        return !(*this == other);
+    }
+};
 
 /// The published results for one Hydra prim in one generation. Only
 /// standard data crosses this boundary (spec §10.2): local xforms,
@@ -111,6 +154,39 @@ struct RigExecPublishedPrim {
     /// Zero or negative publishes no widths at all (hairline fallback);
     /// the geometry draw mode ignores it.
     double controlGuideWireWidth = 0.05;
+
+    /// Influence overlay (the "Voodoo" visualisation): the resolved
+    /// weight field of ONE selected weight object, one value per logical
+    /// element of THIS prim's points, painted onto the geometry as a
+    /// grey-to-red vertex gradient.
+    ///
+    /// Keyed onto the WEIGHTED GEOMETRY rather than onto the weight
+    /// object, because that is the prim Hydra draws. The selection lives
+    /// in the registry (one overlay at a time, by design: two overlapping
+    /// gradients on one mesh are unreadable), so this is already the
+    /// resolved answer -- a consumer never has to know which volume it
+    /// came from.
+    ///
+    /// Off by default and absent from the published container when off,
+    /// so an ordinary render is byte-for-byte what it was.
+    bool hasWeightOverlay = false;
+    VtFloatArray weightOverlay;
+
+    /// Volume weight guide payload: the falloffMin and falloffMax
+    /// iso-surfaces one placed influence volume draws.
+    ///
+    /// A third payload rather than a reuse of either existing one, for
+    /// the reason the control payload is separate from the joint payload:
+    /// these are N shapes whose PRIM TYPE varies per element, while the
+    /// joint payload is a fixed sphere/cone pair and the control payload
+    /// is exactly one shape. Folding them together would make "which
+    /// element is which kind" a question every consumer had to answer.
+    ///
+    /// guideColor/guideOpacity/guidePurpose above are shared, as they are
+    /// between the other two payloads: a prim is a volume weight or a
+    /// joint or a control, never two of them.
+    bool hasVolumeGuides = false;
+    std::vector<RigExecVolumeGuideElement> volumeGuides;
 };
 
 /// One complete immutable generation (spec §8.2: consumers see complete
@@ -197,6 +273,11 @@ enum RigExecPublishedChange : uint8_t {
     /// The prim's guide payload changed (frames/lengths/styling with an
     /// unchanged element count; count changes are structural).
     RigExecChangeGuides = 1 << 5,
+    /// The influence overlay's VALUES changed with the overlay staying on
+    /// for this prim. Turning it on or off changes the owned leaf set --
+    /// the displayColor primvar appears or disappears -- and reports
+    /// structural instead, exactly as points ownership does.
+    RigExecChangeWeightOverlay = 1 << 6,
 };
 
 struct RigExecPublishedDirty {
@@ -286,8 +367,30 @@ private:
             before->hasExtent != after.hasExtent ||
             before->hasGuides != after.hasGuides ||
             before->guideFrames.size() != after.guideFrames.size() ||
-            before->hasControlGuide != after.hasControlGuide) {
+            before->hasControlGuide != after.hasControlGuide ||
+            // The overlay begins or ends owning a displayColor primvar,
+            // which is a change to the owned leaf set and not to a value
+            // in it -- the same rule points ownership follows above. It
+            // is also what makes RigExecImaging_SetWeightOverlay redraw
+            // immediately: universal dirtiness re-pulls the container and
+            // the new primvar is simply there.
+            before->hasWeightOverlay != after.hasWeightOverlay ||
+            before->hasVolumeGuides != after.hasVolumeGuides ||
+            before->volumeGuides.size() != after.volumeGuides.size()) {
             return RigExecChangeStructural;
+        }
+        // A volume guide element's prim type decides what KIND of prim the
+        // synthesized child is (a wire iso-surface is a basisCurves, a
+        // solid one a mesh or an implicit sphere), so editing
+        // guide:drawMode is structural for the same reason editing a
+        // control's guide:shape is.
+        if (after.hasVolumeGuides) {
+            for (size_t i = 0; i < after.volumeGuides.size(); ++i) {
+                if (before->volumeGuides[i].primType !=
+                    after.volumeGuides[i].primType) {
+                    return RigExecChangeStructural;
+                }
+            }
         }
         // Shape and draw mode decide the synthesized child's PRIM TYPE, so
         // editing either is structural for exactly the reason a guide count
@@ -342,6 +445,20 @@ private:
              before->guidePurpose != after.guidePurpose ||
              styleChanged)) {
             changes |= RigExecChangeGuides;
+        }
+        // Volume guides ride the SAME change bit as the other two guide
+        // payloads. They are announced and dirtied by the same machinery
+        // in the results scene index, which re-pulls the whole synthesized
+        // child either way, so a separate bit would only be a second name
+        // for the identical consequence.
+        if (after.hasVolumeGuides &&
+            (before->volumeGuides != after.volumeGuides ||
+             before->guidePurpose != after.guidePurpose || styleChanged)) {
+            changes |= RigExecChangeGuides;
+        }
+        if (after.hasWeightOverlay &&
+            before->weightOverlay != after.weightOverlay) {
+            changes |= RigExecChangeWeightOverlay;
         }
         return changes;
     }

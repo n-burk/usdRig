@@ -1,0 +1,10 @@
+testRigExecMath 2 0.0105484
+testRigExecWeightFields 2 0.0103883
+testRigExecArm 2 0.161487
+testRigExecImaging 2 0.142479
+testRigExecVolumeWeights 2 0.0668997
+testRigExecWeightOverlay 2 0.0632074
+testRigExecMoverGraph 2 0.0441066
+testRigExecNoAuthoring 2 0.0771879
+testRigExecBounds 2 0.0385778
+---

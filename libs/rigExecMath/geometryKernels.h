@@ -39,8 +39,12 @@ void RigExecApplyLaplacianSmooth(
     const std::vector<int> &faceVertexIndices,
     double strength);
 
-/// Area-weighted vertex normals from standard polygon topology
+/// Angle-weighted vertex normals from standard polygon topology
 /// (RigExecPostMover "recomputeNormals", spec §7.6).
+///
+/// Each face contributes its Newell normal to its own corners, weighted by
+/// the interior angle there, so the result is correct for a non-planar
+/// n-gon and independent of how that n-gon would be triangulated.
 std::vector<GfVec3f> RigExecComputeVertexNormals(
     const std::vector<GfVec3f> &points,
     const std::vector<int> &faceVertexCounts,

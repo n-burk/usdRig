@@ -84,6 +84,33 @@ struct RigExecWeightPacket {
     float Resolve(size_t i, size_t count) const;
 };
 
+/// Baked distance-to-weight remap for one volumetric weight object
+/// (spec §4.1 volumetric extension): uniformly spaced samples of the
+/// falloff curve over the ramp parameter r in [0, 1]. Empty means linear.
+///
+/// This exists as a packet, and reaches exec as a value OVERRIDE on a
+/// stub computation, because exec has no accessor for an attribute's
+/// spline -- `// XXX:TODO Accessors for AnimSpline` in
+/// exec/computationBuilders.h is still open in v26.08. A computation can
+/// resolve an attribute at ONE time; a falloff curve is the whole
+/// function, so it cannot be an ordinary input.
+///
+/// That is not a workaround so much as the correct shape: the curve is
+/// epoch-structural (spec §4.1 shape stability), so baking it once per
+/// binding epoch and overriding is exactly what the ribbon's driver
+/// points already do for the same class of reason (see
+/// RigExecPointsPacket and RigExecValueOverride::attribute).
+struct RigExecFalloffLut {
+    std::vector<float> samples;
+
+    bool operator==(const RigExecFalloffLut &o) const {
+        return samples == o.samples;
+    }
+    bool operator!=(const RigExecFalloffLut &o) const {
+        return !(*this == o);
+    }
+};
+
 /// One blend sample's activation and native target-shape points
 /// (spec §7.3), delivered by RigExecBlendSample.computeBlendSampleData.
 struct RigExecBlendSampleData {

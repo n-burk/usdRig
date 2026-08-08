@@ -7,7 +7,36 @@
 import ctypes
 import os
 
-from pxr import Usd
+from pxr import Usd, Sdf
+
+
+MESH = "/Shot/HeroArm/Geom/ArmBody"
+
+
+def _Observer():
+    """A HydraObserver on the app's own TERMINAL scene index."""
+    from pxr.Usdviewq._usdviewq import HydraObserver
+
+    names = HydraObserver.GetRegisteredSceneIndexNames()
+    if not names:
+        raise AssertionError("no registered scene indices")
+    observer = HydraObserver()
+    observer.TargetToNamedSceneIndex(names[-1])
+    return observer
+
+
+def _Points(observer):
+    """The deformed points the terminal scene index is serving."""
+    primType, dataSource = observer.GetPrim(Sdf.Path(MESH))
+    if not dataSource or "primvars" not in dataSource.GetNames():
+        raise AssertionError("no primvars on %s" % MESH)
+    primvars = dataSource.Get("primvars")
+    entry = primvars.Get("points")
+    value = entry.Get("primvarValue") if entry else None
+    if not value:
+        raise AssertionError("no points on %s" % MESH)
+    return [tuple(round(float(c), 5) for c in p)
+            for p in value.GetValue(0.0)]
 
 
 def testUsdviewInputFunction(appController):
@@ -34,5 +63,39 @@ def testUsdviewInputFunction(appController):
             "timeline changes did not publish: %d -> %d"
             % (generation0, generation1))
 
-    print("RIGEXEC_USDVIEW_OK generations %d -> %d"
-          % (generation0, generation1))
+    # WHICH frame got published, not just how many publications happened.
+    #
+    # Counting generations is what let a one-frame-stale scrub ship:
+    # RootDataModel's setter emits currentFrameChanged(value) and only
+    # THEN assigns self._currentFrame (rootDataModel.py:158-160), so a
+    # handler that re-read dataModel.currentFrame published the frame the
+    # artist had just LEFT. Every publication still happened, on time and
+    # in order, with the wrong pose in it -- and a drag hides that almost
+    # perfectly because each step draws the step before it.
+    #
+    # RigExecImaging_SetTime(frame) is unambiguous by construction, so
+    # driving the same frame both ways and comparing the POINTS is what
+    # separates "published" from "published the right thing".
+    observer = _Observer()
+
+    dataModel.currentFrame = Usd.TimeCode(1001)
+    viaSignalEarly = _Points(observer)
+    dataModel.currentFrame = Usd.TimeCode(1024)
+    viaSignal = _Points(observer)
+    dll.RigExecImaging_SetTime(ctypes.c_double(1024.0))
+    viaDirect = _Points(observer)
+
+    if viaSignalEarly == viaDirect:
+        raise AssertionError(
+            "frames 1001 and 1024 deform identically -- this case cannot "
+            "tell a stale frame from a fresh one")
+    if viaSignal != viaDirect:
+        raise AssertionError(
+            "the timeline published the WRONG FRAME: setting "
+            "currentFrame = 1024 gave %s, RigExecImaging_SetTime(1024) "
+            "gives %s (use the frame the signal carries, never "
+            "dataModel.currentFrame, inside currentFrameChanged)"
+            % (viaSignal[0], viaDirect[0]))
+
+    print("RIGEXEC_USDVIEW_OK generations %d -> %d, frame 1024 published "
+          "the frame 1024 pose" % (generation0, generation1))

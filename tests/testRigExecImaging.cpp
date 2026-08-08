@@ -1855,6 +1855,70 @@ TestGuidesFollowDrivenAssetRoot()
     results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
 }
 
+// An aggregate solver's guides are sized by guide:radius on the SOLVER,
+// the same way a joint's are sized by guide:radius on the joint.
+//
+// The elements have no prim of their own, which is why they were pinned at
+// Hydra's fallback radius of 1.0 long after the joints stopped being. On an
+// asset authored at one unit -- chars/puppetA is 0.59 units tall -- that is
+// several times the whole character, so turning guide display on buried the
+// rig in solver spheres and cones. The solver prim already carries the
+// guide colour and opacity; the radius is read from the same place.
+static void
+TestSolverGuideRadius(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath rig("/TailAsset/Rig");
+    const SdfPath solver("/TailAsset/Rig/Solvers/TailFK");
+    RigExecImagingBridge bridge(stage, rig);
+    std::vector<std::string> errors;
+    const bool compiled = bridge.Compile(&errors);
+    for (const std::string &e : errors) {
+        std::printf("  compile error: %s\n", e.c_str());
+    }
+    CHECK(compiled);
+    if (!compiled) return;
+
+    // Guides only synthesize under a parent the upstream index knows.
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    upstream->AddPrims({{solver, TfToken(), nullptr}});
+    auto results = RigExecResultsSceneIndex::New(upstream, bridge.GetStore());
+
+    const SdfPath sphere = solver.AppendChild(TfToken("rigGuideSphere_0"));
+    auto radius = [&]() {
+        HdSphereSchema s =
+            HdSphereSchema::GetFromParent(results->GetPrim(sphere).dataSource);
+        return s.GetRadius() ? s.GetRadius()->GetTypedValue(0.0f) : -1.0;
+    };
+    auto announced = [&]() {
+        for (const SdfPath &p : results->GetChildPrimPaths(solver)) {
+            if (p == sphere) return true;
+        }
+        return false;
+    };
+
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+    CHECK(announced());
+    CHECK(radius() == 1.0);  // the schema default: unchanged for every
+                             // rig that authors nothing
+
+    UsdPrim solverPrim = stage->GetPrimAtPath(solver);
+    CHECK(solverPrim);
+    CHECK(solverPrim.GetAttribute(TfToken("guide:radius")).Set(0.25));
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+    CHECK(radius() == 0.25);
+
+    // Zero draws nothing at all, exactly as it does on a joint -- which is
+    // how an author turns a solver's diagnostics off.
+    CHECK(solverPrim.GetAttribute(TfToken("guide:radius")).Set(0.0));
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+    CHECK(!announced());
+}
+
 // The shipped examples' authored control guides actually draw.
 //
 // An unrecognized guide:shape token draws nothing, silently and by design
@@ -3171,9 +3235,11 @@ TestPurposeScopedBounds(const std::string &examplesDir)
     const SdfPath nested = joint.AppendChild(TfToken("NestedCtrl"));
     UsdPrim control = stage->DefinePrim(nested, TfToken("RigExecControl"));
     CHECK(control);
-    GfMatrix4d far(1.0);
-    far.SetTranslateOnly(GfVec3d(0, 60, 0));
-    CHECK(control.GetAttribute(TfToken("rest:space")).Set(far));
+    // Not `far`: WinDef.h still defines that as an empty legacy macro, so
+    // the declaration silently loses its name and the file stops compiling.
+    GfMatrix4d wayOut(1.0);
+    wayOut.SetTranslateOnly(GfVec3d(0, 60, 0));
+    CHECK(control.GetAttribute(TfToken("rest:space")).Set(wayOut));
 
     CHECK(UsdGeomImageable(stage->GetPrimAtPath(joint)).ComputePurpose() ==
           UsdGeomTokens->guide);
@@ -3287,6 +3353,7 @@ main(int argc, char **argv)
     TestBridgeOverShotStage(examplesDir);
     TestControlGuides(examplesDir);
     TestGuidesFollowDrivenAssetRoot();
+    TestSolverGuideRadius(examplesDir);
     TestExampleControlGuides(examplesDir);
     TestMotionCapabilityMatrix(examplesDir);
     TestLegacyRenderIndexPickup(examplesDir);

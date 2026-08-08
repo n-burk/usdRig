@@ -43,6 +43,7 @@ TF_REGISTRY_FUNCTION(ExecTypeRegistry)
     ExecTypeRegistry::RegisterType(rigExec::RigExecPointFrameArray{});
     ExecTypeRegistry::RegisterType(rigExec::RigExecPointsPacket{});
     ExecTypeRegistry::RegisterType(rigExec::RigExecWeightPacket{});
+    ExecTypeRegistry::RegisterType(rigExec::RigExecFalloffLut{});
     ExecTypeRegistry::RegisterType(rigExec::RigExecBlendSampleData{});
     ExecTypeRegistry::RegisterType(rigExec::RigExecBlendChannel{});
     ExecTypeRegistry::RegisterType(rigExec::RigExecMoverParameters{});

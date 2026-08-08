@@ -72,6 +72,20 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
   constraints re-aim the eye joints' z-axes at an animated look-at
   control with ramped weights; geometry-phase matrix movers read the
   posed joints at the `final` phase to carry the eye cards.
+- **11_VolumeWeights.usda** — volumetric weight objects: nothing is
+  painted. A `RigExecSphereWeight` authored *inside* the shoulder joint
+  rides it with nothing wired (a volume weight is a `RigExecXformable`,
+  so it follows its namespace-parent's posed space); a
+  `RigExecCombineWeight` multiplies a *bounded* `RigExecPlaneWeight`
+  gradient by a second sphere to clip the mid joint's influence to one
+  side; and a `RigExecCurveWeight` measures distance to a driver curve
+  through a hand-drawn falloff spline. `inputs:falloffMax` is animated,
+  so the shoulder's influence visibly widens over the shot. The plane
+  shows the two axes apart: `inputs:falloffMin`/`falloffMax` run *along*
+  `rigExec:planeAxis` and slide the drawn surfaces, while
+  `inputs:extentU`/`extentV` size them *across* it and, under
+  `rigExec:planeBounds = "bounded"`, stop the field at that rectangle. See
+  [`docs/volume-weights.md`](../docs/volume-weights.md).
 
 ## Authoring conventions the engine expects
 

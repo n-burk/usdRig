@@ -60,6 +60,7 @@ add_library(rigExecMath STATIC
     libs/rigExecMath/pointFrame.cpp
     libs/rigExecMath/solvers.cpp
     libs/rigExecMath/geometryKernels.cpp
+    libs/rigExecMath/weightFields.cpp
     libs/rigExecMath/simdKernels.cpp
 )
 target_include_directories(rigExecMath PUBLIC
@@ -112,6 +113,18 @@ target_link_libraries(rigExecImaging PUBLIC
 target_compile_definitions(rigExecImaging PRIVATE RIGEXEC_IMAGING_EXPORTS)
 
 # ---------------------------------------------------------------------------
+# Tools
+#
+# rigExecPose evaluates an arbitrary rig stage and prints the result. Unlike
+# the tests it asserts nothing about a fixture it owns, which is what makes it
+# usable on an asset being authored -- see tools/rigExecPose.cpp.
+# ---------------------------------------------------------------------------
+add_executable(rigExecPose tools/rigExecPose.cpp)
+target_link_libraries(rigExecPose PRIVATE rigExec)
+target_compile_definitions(rigExecPose PRIVATE
+    RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+
+# ---------------------------------------------------------------------------
 # Tests
 #
 # Off by default when cross-compiling: these are host command-line executables
@@ -138,6 +151,10 @@ add_executable(testRigExecMath tests/testRigExecMath.cpp)
 target_link_libraries(testRigExecMath PRIVATE rigExecMath)
 add_test(NAME testRigExecMath COMMAND testRigExecMath)
 
+add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
+target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)
+add_test(NAME testRigExecWeightFields COMMAND testRigExecWeightFields)
+
 add_executable(testRigExecArm tests/testRigExecArm.cpp)
 target_link_libraries(testRigExecArm PRIVATE rigExec)
 target_compile_definitions(testRigExecArm PRIVATE ${_rigexec_schema_resource_define})
@@ -148,6 +165,18 @@ add_executable(testRigExecImaging tests/testRigExecImaging.cpp)
 target_link_libraries(testRigExecImaging PRIVATE rigExecImaging)
 target_compile_definitions(testRigExecImaging PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecVolumeWeights tests/testRigExecVolumeWeights.cpp)
+target_link_libraries(testRigExecVolumeWeights PRIVATE rigExec)
+target_compile_definitions(testRigExecVolumeWeights PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecVolumeWeights COMMAND testRigExecVolumeWeights
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecWeightOverlay tests/testRigExecWeightOverlay.cpp)
+target_link_libraries(testRigExecWeightOverlay PRIVATE rigExecImaging)
+target_compile_definitions(testRigExecWeightOverlay PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecWeightOverlay COMMAND testRigExecWeightOverlay
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
@@ -270,6 +299,7 @@ install(FILES
 install(FILES
         plugin/rigExecUsdview/plugInfo.json
         plugin/rigExecUsdview/rigExecUsdview.py
+        plugin/rigExecUsdview/volumeWeightUI.py
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview")
 
 # rigExecImaging is the one plugin whose plugInfo.json names a library, so it

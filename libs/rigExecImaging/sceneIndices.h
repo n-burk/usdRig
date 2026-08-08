@@ -23,6 +23,7 @@
 
 #include <memory>
 #include <set>
+#include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
 
@@ -213,6 +214,21 @@ public:
     /// _RefreshAnnouncedGuides does.
     void _RefreshAnnouncedControlGuide(const SdfPath &path);
 
+    /// The Hydra prim types this prim's synthesized volume weight guide
+    /// children should have in the current generation, in index order;
+    /// empty for none (spec §4.1 volumetric extension, drawn side).
+    ///
+    /// Both a count and a set of types, unlike its two siblings, because
+    /// a volume guide varies in both: the number of drawn iso-surfaces
+    /// depends on the falloff band, and guide:drawMode decides what kind
+    /// of prim each surface is.
+    std::vector<TfToken> _DesiredVolumeGuideTypes(const SdfPath &path) const;
+
+    /// Records the volume-guide announcement without emitting. Runs
+    /// whether or not this index is observed, for the same reason
+    /// _RefreshAnnouncedGuides does.
+    void _RefreshAnnouncedVolumeGuides(const SdfPath &path);
+
     void NotifyGenerationPublished(
         const RigExecPublishedDirtyVector &dirtied);
 
@@ -251,6 +267,13 @@ private:
         HdSceneIndexObserver::AddedPrimEntries *added,
         HdSceneIndexObserver::RemovedPrimEntries *removed);
 
+    /// The same reconciliation for the volume weight iso-surface
+    /// children, whose desired state is a per-index list of prim types.
+    void _SyncVolumeGuideChildren(
+        const SdfPath &path,
+        HdSceneIndexObserver::AddedPrimEntries *added,
+        HdSceneIndexObserver::RemovedPrimEntries *removed);
+
     std::shared_ptr<RigExecSnapshotStore> _store;
     /// Guide-element counts already announced per published prim
     /// (mutated only on the serialized publication path).
@@ -264,12 +287,37 @@ private:
     /// only learns that from a fresh PrimsAdded carrying the new type.
     std::map<SdfPath, TfToken> _announcedControlGuides;
 
+    /// Volume weight prims whose rigGuideVol_N children have been
+    /// announced, and the prim type each was announced with.
+    ///
+    /// Types and not just a count, for both reasons at once: a
+    /// guide:drawMode edit changes what kind of prim an existing child is,
+    /// and the count itself moves when the falloff band changes. One
+    /// vector answers both, so the announcement can never be half right.
+    std::map<SdfPath, std::vector<TfToken>> _announcedVolumeGuides;
+
     /// Prims whose transform we published a driven override for, as of the
     /// last announcement. Needed to invalidate a subtree when a driven
     /// transform is REMOVED: by then the snapshot no longer mentions the
     /// prim, so nothing else records that its descendants carry a stale
     /// delta.
     std::set<SdfPath> _announcedDrivenXforms;
+
+    /// Prims we have announced an influence-overlay displayColor on.
+    ///
+    /// Needed because a primvar APPEARING is not a dirty, it is a resync.
+    /// HdSceneIndexAdapterSceneDelegate caches each rprim's primvar
+    /// DESCRIPTORS and rebuilds them on PrimsAdded, not on a dirty --
+    /// even a universal one. So turning the overlay on while the mesh is
+    /// already synced leaves Storm drawing the mesh grey forever: the
+    /// value is right there in the scene index, and nothing ever asks for
+    /// it. Verified against a real usdview: the dirty-notice path leaves
+    /// the mesh grey, a cold renderer rebuild draws it red.
+    ///
+    /// Kept as our own record for the same reason _announcedDrivenXforms
+    /// is: by the time the overlay is turned OFF the snapshot no longer
+    /// says the prim ever had one.
+    std::set<SdfPath> _announcedWeightOverlays;
 };
 
 }  // namespace rigExec

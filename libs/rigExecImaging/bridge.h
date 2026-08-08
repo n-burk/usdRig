@@ -95,6 +95,23 @@ public:
     /// snapshot, then send coalesced dirtied notices.
     bool EvaluateAndPublish(UsdTimeCode time);
 
+    /// Selects the weight object whose resolved field is painted onto its
+    /// weighted geometry as the influence overlay; an empty path turns
+    /// the overlay off.
+    ///
+    /// ONE at a time on purpose. Two gradients composited onto one mesh
+    /// are a picture of neither field, and a rigger placing a volume is
+    /// asking about exactly one of them.
+    ///
+    /// Takes effect on the next publication -- this only records the
+    /// selection, because publishing is the caller's serialization point
+    /// (the registry republishes at the current time right after).
+    void SetWeightOverlay(const SdfPath &weightPrimPath) {
+        _weightOverlay = weightPrimPath;
+    }
+
+    const SdfPath &GetWeightOverlay() const { return _weightOverlay; }
+
 private:
     /// Publishes guide payloads (joints and aggregate solvers draw as
     /// guide geometry like OpenExec's IrJointScope) into the snapshot.
@@ -116,8 +133,24 @@ private:
         const RigExecRigPose &pose,
         RigExecImagingSnapshot *snapshot) const;
 
+    /// Publishes the wire (or solid) falloffMin/falloffMax iso-surfaces
+    /// every placed influence volume draws, so a rigger can see the shape
+    /// being placed rather than infer it from the deformation.
+    void _FillVolumeGuides(
+        const RigExecRigPose &pose,
+        RigExecImagingSnapshot *snapshot) const;
+
+    /// Copies the selected weight object's resolved field onto the
+    /// geometry prim it weights (spec §10.3 influence-overlay extension).
+    void _FillWeightOverlay(
+        const RigExecRigPose &pose,
+        RigExecImagingSnapshot *snapshot) const;
+
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
+    /// Weight object currently painted as the influence overlay; empty
+    /// means off, which is the default and the ordinary render.
+    SdfPath _weightOverlay;
     std::unique_ptr<RigExecRigEvaluator> _evaluator;
     std::shared_ptr<RigExecSnapshotStore> _store;
     RigExecBindingResolvingSceneIndexRefPtr _binding;

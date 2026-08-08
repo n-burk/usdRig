@@ -269,6 +269,7 @@ RigExecResultsSceneIndex::RigExecResultsSceneIndex(
             // children that never existed.
             _RefreshAnnouncedGuides(path);
             _RefreshAnnouncedControlGuide(path);
+            _RefreshAnnouncedVolumeGuides(path);
         }
     }
 }
@@ -1014,6 +1015,179 @@ _BuildControlGuidePrim(
         names.size(), names.data(), values.data());
 }
 
+// ---------------------------------------------------------------------------
+// Synthesized volume weight guides (spec §4.1 volumetric extension, drawn
+// side): one child per published iso-surface, announced and dirtied by the
+// same protocol as the joint and control guides above. Only the geometry
+// and the child naming differ — the payload arrives fully built from the
+// bridge (see RigExecVolumeGuideElement), because a curve weight's guide is
+// derived from the AUTHORED curve and has no unit form to table.
+// ---------------------------------------------------------------------------
+
+const std::string _volumeGuidePrefix("rigGuideVol_");
+
+bool
+_ParseVolumeGuideName(const TfToken &name, size_t *index)
+{
+    const std::string &s = name.GetString();
+    if (s.compare(0, _volumeGuidePrefix.size(), _volumeGuidePrefix) != 0) {
+        return false;
+    }
+    const std::string digits = s.substr(_volumeGuidePrefix.size());
+    if (digits.empty() || digits.size() > 9 ||
+        digits.find_first_not_of("0123456789") != std::string::npos) {
+        return false;
+    }
+    size_t value = 0;
+    for (const char c : digits) {
+        value = value * 10 + static_cast<size_t>(c - '0');
+    }
+    *index = value;
+    return true;
+}
+
+TfToken
+_VolumeGuideName(size_t index)
+{
+    return TfToken(_volumeGuidePrefix + std::to_string(index));
+}
+
+HdContainerDataSourceHandle
+_BuildVolumeGuidePrim(
+    const RigExecPublishedPrim &published, size_t index,
+    const HdContainerDataSourceHandle &parentDataSource,
+    const GfMatrix4d &assetRootWorld)
+{
+    const RigExecVolumeGuideElement &element = published.volumeGuides[index];
+
+    TfTokenVector names;
+    std::vector<HdDataSourceBaseHandle> values;
+    // Composed with the ASSET ROOT's world transform and declared final,
+    // for exactly the reasons _BuildGuidePrim spells out: volume frames
+    // are asset-space and nothing downstream composes them for us.
+    names.push_back(HdXformSchemaTokens->xform);
+    values.push_back(
+        HdXformSchema::Builder()
+            .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                element.xform * assetRootWorld))
+            .SetResetXformStack(
+                HdRetainedTypedSampledDataSource<bool>::New(true))
+            .Build());
+    names.push_back(HdPurposeSchema::GetSchemaToken());
+    values.push_back(
+        HdPurposeSchema::Builder()
+            .SetPurpose(_Token(_GuideRenderTag(published)))
+            .Build());
+    _AppendInheritedGuideState(parentDataSource, &names, &values);
+    names.push_back(HdPrimvarsSchemaTokens->primvars);
+    values.push_back(_BuildGuideStylePrimvars(published, element.points,
+                                              element.wireWidth));
+
+    if (element.primType == HdPrimTypeTokens->basisCurves) {
+        if (element.wireWidth > 0.0) {
+            // Storm honours a curve width only once the curve is REFINED
+            // (HdStBasisCurves::_SupportsRefinement), and usdview's default
+            // complexity is refineLevel 0 -- so ask for refinement here
+            // rather than let a viewer preference about the ASSET decide
+            // whether the rig's guides are visible. Same reasoning, same
+            // fix, as the control guides.
+            names.push_back(HdLegacyDisplayStyleSchemaTokens->displayStyle);
+            values.push_back(HdRetainedContainerDataSource::New(
+                HdLegacyDisplayStyleSchemaTokens->refineLevel,
+                HdRetainedTypedSampledDataSource<int>::New(1)));
+        }
+        names.push_back(HdBasisCurvesSchema::GetSchemaToken());
+        values.push_back(
+            HdBasisCurvesSchema::Builder()
+                .SetTopology(
+                    HdBasisCurvesTopologySchema::Builder()
+                        .SetCurveVertexCounts(
+                            HdRetainedTypedSampledDataSource<VtIntArray>::New(
+                                element.counts))
+                        .SetBasis(_Token(HdTokens->linear))
+                        .SetType(_Token(HdTokens->linear))
+                        .SetWrap(_Token(HdTokens->nonperiodic))
+                        .Build())
+                .Build());
+    } else if (element.primType == HdPrimTypeTokens->mesh) {
+        names.push_back(HdMeshSchema::GetSchemaToken());
+        values.push_back(
+            HdMeshSchema::Builder()
+                .SetTopology(
+                    HdMeshTopologySchema::Builder()
+                        .SetFaceVertexCounts(
+                            HdRetainedTypedSampledDataSource<VtIntArray>::New(
+                                element.counts))
+                        .SetFaceVertexIndices(
+                            HdRetainedTypedSampledDataSource<VtIntArray>::New(
+                                element.indices))
+                        .SetOrientation(
+                            _Token(HdMeshTopologySchemaTokens->rightHanded))
+                        .Build())
+                // A falloff plane is looked at from both sides by
+                // definition -- the band straddles it.
+                .SetDoubleSided(
+                    HdRetainedTypedSampledDataSource<bool>::New(true))
+                .Build());
+    } else if (element.primType == HdPrimTypeTokens->sphere) {
+        // Unit radius: the iso-surface radius rides in the xform. Set
+        // EXPLICITLY because an absent radius silently becomes 1.0
+        // (hdsi/implicitSurfaceSceneIndex.cpp) -- which happens to be the
+        // same number here, and would stop being so the moment anyone
+        // changed the convention.
+        names.push_back(HdSphereSchema::GetSchemaToken());
+        values.push_back(
+            HdSphereSchema::Builder()
+                .SetRadius(HdRetainedTypedSampledDataSource<double>::New(1.0))
+                .Build());
+    }
+    // The element's LOCAL bound, so a renderer that culls or frames on
+    // extent sees a guide of the right size. The implicits publish none:
+    // Hydra derives theirs from the schema.
+    if (!element.points.empty()) {
+        GfRange3d bound;
+        for (const GfVec3f &p : element.points) {
+            bound.UnionWith(GfVec3d(p));
+        }
+        if (!bound.IsEmpty()) {
+            names.push_back(HdExtentSchemaTokens->extent);
+            values.push_back(
+                HdExtentSchema::Builder()
+                    .SetMin(HdRetainedTypedSampledDataSource<GfVec3d>::New(
+                        bound.GetMin()))
+                    .SetMax(HdRetainedTypedSampledDataSource<GfVec3d>::New(
+                        bound.GetMax()))
+                    .Build());
+        }
+    }
+    return HdRetainedContainerDataSource::New(
+        names.size(), names.data(), values.data());
+}
+
+// The influence overlay's colour ramp: neutral grey where the field is off,
+// saturated red where it is fully on.
+//
+// One named function so the look is tunable in one place, and so the test
+// can assert the two endpoints rather than a magic triple. Linear in RGB
+// rather than perceptually uniform on purpose -- the artist is reading
+// WHERE the boundary is, and a linear ramp puts the visual midpoint at
+// w = 0.5, which is the number they are about to type into falloffMin.
+//
+// Red because that is what the R&H "Voodoo" influence display used and
+// what RigExecVolumeWeight's guide:displayColor already defaults to: the
+// volume and the region it grabs read as one object.
+GfVec3f
+_WeightOverlayColor(float weight)
+{
+    static const GfVec3f kOff(0.55f, 0.55f, 0.55f);
+    static const GfVec3f kOn(1.0f, 0.05f, 0.05f);
+    // Clamped rather than extrapolated: rigExec:rangePolicy already lets a
+    // volume publish out-of-range weights under `clamp`, and a colour
+    // channel outside [0, 1] is a renderer's problem, not a signal.
+    const float t = weight < 0.0f ? 0.0f : (weight > 1.0f ? 1.0f : weight);
+    return kOff + (kOn - kOff) * t;
+}
+
 // Reject an inversion whose linear block is this badly conditioned. This is a
 // reciprocal-condition proxy -- ||A|| * ||A^-1|| on the 3x3 -- which is
 // dimensionless and scale-free, unlike a determinant threshold: a uniform
@@ -1160,6 +1334,47 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
                         published.normals))
                 .SetInterpolation(_Token(HdPrimvarSchemaTokens->vertex))
                 .SetRole(_Token(HdPrimvarSchemaTokens->normal))
+                .Build());
+    }
+
+    // The influence overlay, as a VERTEX displayColor primvar.
+    //
+    // A primvar and not a material, deliberately. This is a DIAGNOSTIC
+    // that has to appear the instant a rigger selects a volume and vanish
+    // the instant they deselect it, over whatever the asset is already
+    // shaded with -- and it must not disturb that shading in any way a
+    // later render could inherit. Binding a material would mean
+    // synthesizing a material network prim, authoring a binding onto the
+    // mesh, and putting the asset's real binding back afterwards: three
+    // pieces of state to keep consistent, on the drawing path, for a
+    // picture that is deliberately unlit and flat. displayColor is the one
+    // channel every Hydra renderer already reads without any of that, and
+    // it is what the joint and control guides are styled with two hundred
+    // lines above -- there with CONSTANT interpolation, here with VERTEX,
+    // because the whole point is that the value varies per point.
+    //
+    // Only emitted when the overlay is on for THIS prim: with it off the
+    // container below is exactly what it always was, so a normal render is
+    // untouched rather than merely unchanged-looking.
+    //
+    // displayOpacity is deliberately NOT published alongside. Fading the
+    // mesh by weight would make a zero-weight region translucent, which
+    // reads as "not there" rather than "not grabbed", and it would
+    // overwrite an authored per-point opacity that the asset may be
+    // relying on. The gradient carries the whole signal.
+    if (published.hasWeightOverlay && !published.weightOverlay.empty()) {
+        VtVec3fArray colors(published.weightOverlay.size());
+        for (size_t i = 0; i < published.weightOverlay.size(); ++i) {
+            colors[i] = _WeightOverlayColor(published.weightOverlay[i]);
+        }
+        primvarNames.push_back(HdTokens->displayColor);
+        primvarValues.push_back(
+            HdPrimvarSchema::Builder()
+                .SetPrimvarValue(
+                    HdRetainedTypedSampledDataSource<VtVec3fArray>::New(
+                        colors))
+                .SetInterpolation(_Token(HdPrimvarSchemaTokens->vertex))
+                .SetRole(_Token(HdPrimvarSchemaTokens->color))
                 .Build());
     }
     if (!primvarNames.empty()) {
@@ -1356,6 +1571,35 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
         }
         return HdSceneIndexPrim();
     }
+    // The volume weight iso-surfaces, on the same three rules: authored
+    // prims win the name, the parent must still exist upstream, and the
+    // element must exist in the current generation.
+    size_t volumeIndex = 0;
+    if (primPath.IsPrimPath() && !primPath.IsAbsoluteRootPath() &&
+        _ParseVolumeGuideName(primPath.GetNameToken(), &volumeIndex) &&
+        !_GetInputSceneIndex()->GetPrim(primPath).dataSource) {
+        const HdSceneIndexPrim parent =
+            _GetInputSceneIndex()->GetPrim(primPath.GetParentPath());
+        if (parent.dataSource) {
+            if (const RigExecImagingSnapshotConstPtr snapshot =
+                    _store->Get()) {
+                const auto it =
+                    snapshot->prims.find(primPath.GetParentPath());
+                if (it != snapshot->prims.end() &&
+                    it->second.hasVolumeGuides &&
+                    volumeIndex < it->second.volumeGuides.size()) {
+                    HdSceneIndexPrim prim;
+                    prim.primType =
+                        it->second.volumeGuides[volumeIndex].primType;
+                    prim.dataSource = _BuildVolumeGuidePrim(
+                        it->second, volumeIndex, parent.dataSource,
+                        _ResolveAssetRootWorld(*snapshot));
+                    return prim;
+                }
+            }
+        }
+        return HdSceneIndexPrim();
+    }
 
     HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
     // A null upstream root means no prim and therefore no RigExec
@@ -1423,7 +1667,8 @@ RigExecResultsSceneIndex::GetChildPrimPaths(const SdfPath &primPath) const
     }
     const auto it = snapshot->prims.find(primPath);
     if (it == snapshot->prims.end() ||
-        (!it->second.hasGuides && !it->second.hasControlGuide) ||
+        (!it->second.hasGuides && !it->second.hasControlGuide &&
+         !it->second.hasVolumeGuides) ||
         !_GetInputSceneIndex()->GetPrim(primPath).dataSource) {
         return children;
     }
@@ -1449,6 +1694,15 @@ RigExecResultsSceneIndex::GetChildPrimPaths(const SdfPath &primPath) const
         _FindControlGuideShape(it->second.controlGuideShape,
                                it->second.controlGuideDrawMode)) {
         append(primPath.AppendChild(_controlGuideName));
+    }
+    // One child per published iso-surface. Every element the bridge
+    // published is drawable by construction (its primType names a prim
+    // this builds), so unlike the control case there is no shape table to
+    // consult first.
+    if (it->second.hasVolumeGuides) {
+        for (size_t i = 0; i < it->second.volumeGuides.size(); ++i) {
+            append(primPath.AppendChild(_VolumeGuideName(i)));
+        }
     }
     return children;
 }
@@ -1516,6 +1770,101 @@ RigExecResultsSceneIndex::_RefreshAnnouncedControlGuide(const SdfPath &path)
         _announcedControlGuides.erase(path);
     } else {
         _announcedControlGuides[path] = desired;
+    }
+}
+
+// The prim types this prim's volume guide children should have in the
+// current generation, in index order; empty for none.
+//
+// A VECTOR of types rather than a count, because a volume guide is both:
+// the number of iso-surfaces varies (a sphere whose falloffMin is zero
+// draws one surface, not two) AND guide:drawMode decides what kind of prim
+// each one is. Answering both questions from one desired-state function is
+// what keeps GetChildPrimPaths, GetPrim, and the announcements agreeing --
+// the same reason _DesiredControlGuideType returns a type.
+//
+// Requires the parent upstream for the same reason the other two do: this
+// is what a traversing observer actually finds.
+std::vector<TfToken>
+RigExecResultsSceneIndex::_DesiredVolumeGuideTypes(const SdfPath &path) const
+{
+    const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
+    if (!snapshot) {
+        return {};
+    }
+    const auto it = snapshot->prims.find(path);
+    if (it == snapshot->prims.end() || !it->second.hasVolumeGuides ||
+        !_GetInputSceneIndex()->GetPrim(path).dataSource) {
+        return {};
+    }
+    std::vector<TfToken> types;
+    types.reserve(it->second.volumeGuides.size());
+    for (const RigExecVolumeGuideElement &element : it->second.volumeGuides) {
+        types.push_back(element.primType);
+    }
+    return types;
+}
+
+// Records the announcement without emitting; must run even while
+// unobserved, exactly as its two siblings must.
+void
+RigExecResultsSceneIndex::_RefreshAnnouncedVolumeGuides(const SdfPath &path)
+{
+    std::vector<TfToken> desired = _DesiredVolumeGuideTypes(path);
+    if (desired.empty()) {
+        _announcedVolumeGuides.erase(path);
+    } else {
+        _announcedVolumeGuides[path] = std::move(desired);
+    }
+}
+
+void
+RigExecResultsSceneIndex::_SyncVolumeGuideChildren(
+    const SdfPath &path,
+    HdSceneIndexObserver::AddedPrimEntries *added,
+    HdSceneIndexObserver::RemovedPrimEntries *removed)
+{
+    const std::vector<TfToken> desired = _DesiredVolumeGuideTypes(path);
+    const auto it = _announcedVolumeGuides.find(path);
+    const std::vector<TfToken> announced =
+        it != _announcedVolumeGuides.end() ? it->second
+                                           : std::vector<TfToken>();
+    if (desired.empty() && announced.empty()) {
+        // Nothing believed on either side. Worth its own exit: every
+        // published joint and control comes through here too, and this
+        // spares them an upstream pull for a child nobody wants.
+        return;
+    }
+    // Authored prims win colliding names: never claim (or remove) a path
+    // that exists upstream.
+    auto existsUpstream = [this](const SdfPath &childPath) {
+        return static_cast<bool>(
+            _GetInputSceneIndex()->GetPrim(childPath).dataSource);
+    };
+    for (size_t i = 0; i < desired.size(); ++i) {
+        // Re-added on a TYPE change as well as on a first appearance: an
+        // author switching guide:drawMode from wire to geometry keeps the
+        // child but turns a basisCurves into a mesh, and a fresh
+        // PrimsAdded is how a consumer learns the prim it cached is a
+        // different kind of prim now.
+        if (i < announced.size() && announced[i] == desired[i]) {
+            continue;
+        }
+        const SdfPath childPath = path.AppendChild(_VolumeGuideName(i));
+        if (!existsUpstream(childPath)) {
+            added->emplace_back(childPath, desired[i]);
+        }
+    }
+    for (size_t i = desired.size(); i < announced.size(); ++i) {
+        const SdfPath childPath = path.AppendChild(_VolumeGuideName(i));
+        if (!existsUpstream(childPath)) {
+            removed->emplace_back(childPath);
+        }
+    }
+    if (desired.empty()) {
+        _announcedVolumeGuides.erase(path);
+    } else {
+        _announcedVolumeGuides[path] = desired;
     }
 }
 
@@ -1638,6 +1987,12 @@ RigExecResultsSceneIndex::_DirtyAnnouncedGuideChildren(
     if (_announcedControlGuides.count(path) != 0) {
         emit(path.AppendChild(_controlGuideName));
     }
+    const auto volumes = _announcedVolumeGuides.find(path);
+    if (volumes != _announcedVolumeGuides.end()) {
+        for (size_t i = 0; i < volumes->second.size(); ++i) {
+            emit(path.AppendChild(_VolumeGuideName(i)));
+        }
+    }
 }
 
 // Dirties \p locators on every descendant of \p path present upstream, plus
@@ -1733,6 +2088,7 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             _RefreshDrivenXform(entry.path);
             _RefreshAnnouncedGuides(entry.path);
             _RefreshAnnouncedControlGuide(entry.path);
+            _RefreshAnnouncedVolumeGuides(entry.path);
         }
         return;
     }
@@ -1749,6 +2105,49 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
         if (entry.changes & RigExecChangeStructural) {
             entries.emplace_back(
                 entry.path, HdDataSourceLocatorSet::UniversalSet());
+
+            // An influence overlay APPEARING or DISAPPEARING changes which
+            // primvars this prim owns, and that is a RESYNC, not a dirty.
+            //
+            // HdSceneIndexAdapterSceneDelegate caches each rprim's primvar
+            // DESCRIPTORS and rebuilds them from PrimsAdded; a dirty --
+            // even the universal one emitted just above -- re-pulls values
+            // for the descriptors it already has. A primvar that was not
+            // there at sync time is therefore never asked for, and the
+            // mesh renders grey with a perfectly correct red displayColor
+            // sitting in the scene index one hop upstream. Measured in a
+            // real usdview: dirty-notice path leaves 1003 red-ish pixels
+            // (i.e. none, just the yellow control guide), a cold renderer
+            // rebuild gives 3456.
+            //
+            // Re-announcing the prim with its upstream type is the same
+            // move _SyncGuideChildren already makes for a synthesized
+            // child whose prim type changed, and it is cheap: it happens
+            // only on the transition, not per frame.
+            {
+                const bool wasOverlaid =
+                    _announcedWeightOverlays.count(entry.path) != 0;
+                bool isOverlaid = false;
+                if (const RigExecImagingSnapshotConstPtr snapshot =
+                        _store ? _store->Get() : nullptr) {
+                    const auto it = snapshot->prims.find(entry.path);
+                    isOverlaid = it != snapshot->prims.end() &&
+                                 it->second.hasWeightOverlay &&
+                                 !it->second.weightOverlay.empty();
+                }
+                if (wasOverlaid != isOverlaid) {
+                    if (isOverlaid) {
+                        _announcedWeightOverlays.insert(entry.path);
+                    } else {
+                        _announcedWeightOverlays.erase(entry.path);
+                    }
+                    const TfToken primType =
+                        _GetInputSceneIndex()->GetPrim(entry.path).primType;
+                    if (!primType.IsEmpty()) {
+                        addedGuides.emplace_back(entry.path, primType);
+                    }
+                }
+            }
 
             // A driven transform APPEARING or DISAPPEARING moves the whole
             // subtree just as much as one changing value does, and every
@@ -1811,6 +2210,26 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                         childPath, HdDataSourceLocatorSet::UniversalSet());
                 }
             }
+
+            // The volume guide children, on the same reasoning again: an
+            // element that survives a structural entry with its prim type
+            // intact gets no add of its own, so a surface whose radius or
+            // placement moved in the same generation would otherwise keep
+            // its old geometry forever.
+            const size_t survivingVolumes = std::min(
+                _announcedVolumeGuides.count(entry.path)
+                    ? _announcedVolumeGuides[entry.path].size() : size_t(0),
+                _DesiredVolumeGuideTypes(entry.path).size());
+            _SyncVolumeGuideChildren(entry.path, &addedGuides,
+                                     &removedGuides);
+            for (size_t i = 0; i < survivingVolumes; ++i) {
+                const SdfPath childPath =
+                    entry.path.AppendChild(_VolumeGuideName(i));
+                if (!_GetInputSceneIndex()->GetPrim(childPath).dataSource) {
+                    entries.emplace_back(
+                        childPath, HdDataSourceLocatorSet::UniversalSet());
+                }
+            }
             continue;
         }
         if (entry.changes & RigExecChangeGuides) {
@@ -1855,6 +2274,30 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                             childPath,
                             HdDataSourceLocatorSet::UniversalSet());
                     }
+                }
+            }
+
+            // Volume guide elements keep their prim types across a value
+            // change (drawMode edits report structural), so this is the
+            // radius/placement/styling case.
+            const auto announcedVolumes =
+                _announcedVolumeGuides.find(entry.path);
+            if (announcedVolumes == _announcedVolumeGuides.end()) {
+                // Never announced (late consumer): the adds carry the
+                // fresh payload; no dirtying needed.
+                _SyncVolumeGuideChildren(entry.path, &addedGuides,
+                                         &removedGuides);
+            } else {
+                for (size_t i = 0; i < announcedVolumes->second.size(); ++i) {
+                    const SdfPath childPath =
+                        entry.path.AppendChild(_VolumeGuideName(i));
+                    if (_GetInputSceneIndex()
+                            ->GetPrim(childPath)
+                            .dataSource) {
+                        continue;
+                    }
+                    entries.emplace_back(
+                        childPath, HdDataSourceLocatorSet::UniversalSet());
                 }
             }
         }
@@ -1902,6 +2345,16 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                 HdPrimvarsSchemaTokens->primvars, HdTokens->normals,
                 HdPrimvarSchemaTokens->primvarValue));
         }
+        if (entry.changes & RigExecChangeWeightOverlay) {
+            // The narrowest leaf, exactly like points and normals: the
+            // overlay only ever reaches this arm while it is already ON
+            // for this prim (an on/off transition changes the owned leaf
+            // set and arrives as structural instead), so the primvar the
+            // consumer cached is present and only its value moved.
+            leaves.insert(HdDataSourceLocator(
+                HdPrimvarsSchemaTokens->primvars, HdTokens->displayColor,
+                HdPrimvarSchemaTokens->primvarValue));
+        }
         if (entry.changes & RigExecChangeExtent) {
             leaves.insert(HdDataSourceLocator(
                 HdExtentSchemaTokens->extent, HdExtentSchemaTokens->min));
@@ -1942,6 +2395,7 @@ RigExecResultsSceneIndex::_PrimsAdded(
             _RefreshDrivenXform(entry.primPath);
             _RefreshAnnouncedGuides(entry.primPath);
             _RefreshAnnouncedControlGuide(entry.primPath);
+            _RefreshAnnouncedVolumeGuides(entry.primPath);
         }
         return;
     }
@@ -1962,6 +2416,9 @@ RigExecResultsSceneIndex::_PrimsAdded(
         _SyncGuideChildren(entry.primPath, &addedGuides, &removedGuides);
         _announcedControlGuides.erase(entry.primPath);
         _SyncControlGuideChild(entry.primPath, &addedGuides, &removedGuides);
+        _announcedVolumeGuides.erase(entry.primPath);
+        _SyncVolumeGuideChildren(entry.primPath, &addedGuides,
+                                 &removedGuides);
     }
     if (!removedGuides.empty()) {
         _SendPrimsRemoved(removedGuides);
@@ -1990,6 +2447,11 @@ RigExecResultsSceneIndex::_PrimsRemoved(
                 it = it->first.HasPrefix(entry.primPath)
                     ? _announcedControlGuides.erase(it) : std::next(it);
             }
+            for (auto it = _announcedVolumeGuides.begin();
+                 it != _announcedVolumeGuides.end();) {
+                it = it->first.HasPrefix(entry.primPath)
+                    ? _announcedVolumeGuides.erase(it) : std::next(it);
+            }
             for (auto it = _announcedDrivenXforms.begin();
                  it != _announcedDrivenXforms.end();) {
                 it = it->HasPrefix(entry.primPath)
@@ -2003,6 +2465,7 @@ RigExecResultsSceneIndex::_PrimsRemoved(
     HdSceneIndexObserver::RemovedPrimEntries removedGuides;
     std::set<SdfPath> revealedParents;
     std::set<SdfPath> revealedControlParents;
+    std::set<SdfPath> revealedVolumeParents;
     for (const auto &entry : entries) {
         // Subtree removal removes announced guide children with it:
         // forget their announcements.
@@ -2018,6 +2481,14 @@ RigExecResultsSceneIndex::_PrimsRemoved(
              it != _announcedControlGuides.end();) {
             if (it->first.HasPrefix(entry.primPath)) {
                 it = _announcedControlGuides.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = _announcedVolumeGuides.begin();
+             it != _announcedVolumeGuides.end();) {
+            if (it->first.HasPrefix(entry.primPath)) {
+                it = _announcedVolumeGuides.erase(it);
             } else {
                 ++it;
             }
@@ -2047,6 +2518,9 @@ RigExecResultsSceneIndex::_PrimsRemoved(
             } else if (entry.primPath.GetNameToken() == _controlGuideName) {
                 revealedControlParents.insert(
                     entry.primPath.GetParentPath());
+            } else if (_ParseVolumeGuideName(entry.primPath.GetNameToken(),
+                                             &index)) {
+                revealedVolumeParents.insert(entry.primPath.GetParentPath());
             }
         }
     }
@@ -2060,6 +2534,10 @@ RigExecResultsSceneIndex::_PrimsRemoved(
     for (const SdfPath &parent : revealedControlParents) {
         _announcedControlGuides.erase(parent);
         _SyncControlGuideChild(parent, &addedGuides, &removedGuides);
+    }
+    for (const SdfPath &parent : revealedVolumeParents) {
+        _announcedVolumeGuides.erase(parent);
+        _SyncVolumeGuideChildren(parent, &addedGuides, &removedGuides);
     }
     if (!removedGuides.empty()) {
         _SendPrimsRemoved(removedGuides);
@@ -2103,6 +2581,12 @@ RigExecResultsSceneIndex::_PrimsDirtied(
         };
         if (_announcedControlGuides.count(entry.primPath) != 0) {
             forward(entry.primPath.AppendChild(_controlGuideName));
+        }
+        const auto volumes = _announcedVolumeGuides.find(entry.primPath);
+        if (volumes != _announcedVolumeGuides.end()) {
+            for (size_t i = 0; i < volumes->second.size(); ++i) {
+                forward(entry.primPath.AppendChild(_VolumeGuideName(i)));
+            }
         }
         const auto announced = _announcedGuides.find(entry.primPath);
         if (announced == _announcedGuides.end()) {

@@ -1,0 +1,21 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "RigExecUsdImagingSceneIndexPlugin": {
+                        "bases": [
+                            "UsdImagingSceneIndexPlugin"
+                        ],
+                        "displayName": "RigExec results scene indices"
+                    }
+                }
+            },
+            "LibraryPath": "../../rigExecImaging.dll",
+            "Name": "rigExecImaging",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

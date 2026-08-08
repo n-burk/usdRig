@@ -131,29 +131,74 @@ RigExecComputeVertexNormals(
     const std::vector<int> &faceVertexIndices)
 {
     std::vector<GfVec3f> normals(points.size(), GfVec3f(0));
+    std::vector<int> ring;
     size_t offset = 0;
     for (int faceCount : faceVertexCounts) {
-        for (int c = 1; c + 1 < faceCount; ++c) {
-            const size_t i0 = offset, i1 = offset + c, i2 = offset + c + 1;
-            if (i2 >= faceVertexIndices.size()) {
-                return normals;
+        if (faceCount < 3 ||
+            offset + static_cast<size_t>(faceCount) >
+                faceVertexIndices.size()) {
+            return normals;
+        }
+        // Gather the face once, dropping indices that do not address a
+        // point rather than letting them into the arithmetic.
+        ring.clear();
+        for (int k = 0; k < faceCount; ++k) {
+            const int v = faceVertexIndices[offset + k];
+            if (v >= 0 && static_cast<size_t>(v) < points.size()) {
+                ring.push_back(v);
             }
-            const int a = faceVertexIndices[i0];
-            const int b = faceVertexIndices[i1];
-            const int d = faceVertexIndices[i2];
-            if (a < 0 || b < 0 || d < 0 ||
-                static_cast<size_t>(a) >= points.size() ||
-                static_cast<size_t>(b) >= points.size() ||
-                static_cast<size_t>(d) >= points.size()) {
-                continue;
-            }
-            const GfVec3f n =
-                GfCross(points[b] - points[a], points[d] - points[a]);
-            normals[a] += n;
-            normals[b] += n;
-            normals[d] += n;
         }
         offset += faceCount;
+        const size_t n = ring.size();
+        if (n < 3) {
+            continue;
+        }
+
+        // Newell's method for the face normal: the only construction that
+        // is correct for a non-planar n-gon, and the only one that does
+        // not depend on how the polygon happens to be triangulated.
+        //
+        // Triangulating the face and accumulating per-triangle normals --
+        // which this kernel used to do -- gives every vertex only the fan
+        // triangles it happens to belong to. A vertex neighbouring the fan
+        // anchor gets exactly one sliver triangle out of the whole face,
+        // whose normal is the sliver's rather than the surface's; where two
+        // faces meet along a symmetry seam the two slivers are mirror
+        // images and cancel EXACTLY, leaving a valid manifold vertex with a
+        // zero normal. That is observable on puppetA (chars/puppetA),
+        // whose retopologised n-gons produce one such vertex.
+        GfVec3f faceNormal(0);
+        for (size_t k = 0; k < n; ++k) {
+            const GfVec3f &p = points[ring[k]];
+            const GfVec3f &q = points[ring[(k + 1) % n]];
+            faceNormal += GfVec3f((p[1] - q[1]) * (p[2] + q[2]),
+                                  (p[2] - q[2]) * (p[0] + q[0]),
+                                  (p[0] - q[0]) * (p[1] + q[1]));
+        }
+        const float faceLength = faceNormal.GetLength();
+        if (faceLength < 1e-20f) {
+            continue;  // a fully degenerate face contributes nothing
+        }
+        faceNormal /= faceLength;
+
+        // Weighted by the interior angle at each corner, so the result is
+        // independent of tessellation and a vertex touching a face across
+        // a wide corner is influenced by it more than one clipping a
+        // corner. Zero-length edges fall back to an unweighted share
+        // rather than dropping the corner's contribution entirely.
+        for (size_t k = 0; k < n; ++k) {
+            const GfVec3f &p = points[ring[k]];
+            const GfVec3f a = points[ring[(k + 1) % n]] - p;
+            const GfVec3f b = points[ring[(k + n - 1) % n]] - p;
+            const float la = a.GetLength(), lb = b.GetLength();
+            float weight = 1.0f;
+            if (la > 1e-20f && lb > 1e-20f) {
+                const GfVec3f ua = a / la, ub = b / lb;
+                weight = std::atan2(GfCross(ua, ub).GetLength(),
+                                    GfDot(ua, ub));
+            }
+            normals[ring[k]] += faceNormal * weight;
+        }
     }
     for (GfVec3f &n : normals) {
         const float len = n.GetLength();

@@ -113,13 +113,46 @@ part of this repository.
 | `testRigExecMoverGraph` | every revision op, chained and mixed composition, weighting, cardinality guards, all pass-through paths |
 | `testRigExecNoAuthoring` | that the engine authors nothing: the whole composed scene is byte-identical before and after compile, evaluation over six frames, and the full Hydra activate/publish/teardown cycle |
 | `testRigExecImaging` | §14.5 construction/pull goldens, narrow-locator matrix, motion capability matrix, legacy render-index pickup, and a recursive terminal audit proving no RigExec name crosses the renderer boundary |
+| `testRigExecWeightFields` | the volumetric falloff remap in isolation: band placement, reversed and degenerate bands, invert as a continuous lerp, every baked profile, the three distance functions, and weight-object composition including the non-commutative modes |
+| `testRigExecVolumeWeights` | sphere/plane/curve fields driving real matrix movers, composition, the authored falloff spline, and both sample phases — every case asserting `moverGraphParityMismatches == 0`, i.e. that the exec kernels and the CPU oracle independently computed the same field |
+| `testRigExecWeightOverlay` | the influence overlay through the scene index: displayColor tracking the weights, upstream primvars surviving, the on/off toggle dirtying structurally, the value-only change dirtying the narrow `primvars/displayColor` locator, and the volume guides for all three shapes |
 
-`ctest --test-dir build` runs all four. Two probes
+`ctest --test-dir build` runs all of them. Two probes
 (`probeCodingError`, `probeImagingPipeline`) need the scene-index plugin
 discoverable through `Plug`, so they run from a `run_probe.bat`-style
 environment rather than bare ctest. `run_testusdview.bat [renderer]` verifies
 live activation and per-frame publication headlessly; both Storm and Embree
 produce identical publications.
+
+`run_testusdview_overlay.bat [renderer]` closes the one gap the C++ suites
+cannot: they drive a synthetic scene index upstream, which proves the filter
+publishes a `displayColor` but not that usdview's *own* chain carries it. That
+script turns the influence overlay on inside a real usdview, reads the terminal
+scene index back through the same `HydraObserver` the Hydra Scene Browser uses,
+and asserts the colours are a gradient rather than a flat wash — a constant
+colour would satisfy every other check and still mean the weights never
+arrived.
+
+Those all assert against fixtures they own. For a rig you are *writing*,
+`build/rigExecPose` evaluates an arbitrary stage and prints what came out —
+what the compiler objected to, where the joints ended up, and how far each
+moved property travelled:
+
+```
+rigExecPose <stage> [--rig <primPath>] [--frames a,b,c] [--joints] [--targets]
+            [--joints-out <file.usda>]
+```
+
+It exits non-zero when the rig fails to compile or a generation comes back
+invalid, so it can gate a build.
+
+`--joints-out` writes the evaluated joint frames, as asset-space matrices
+sampled at every requested frame, to a plain USD layer — a joint path list
+and a parallel matrix array per time sample, nothing else. It is deliberately
+schema-neutral, because its point is to hand the rig's own answer to
+something that is not RigExec: a converter to another skinning schema, or a
+comparison against one. `chars/puppetA` uses it to build and check a UsdSkel
+copy of the same character.
 
 ## Layout
 
@@ -131,14 +164,15 @@ produce identical publications.
 | `libs/rigExecImaging` | — | Hydra 2.0 publication (§10): the three filtering scene indices over an atomic `RigExecSnapshotStore`, the `UsdImagingSceneIndexPlugin`, and the C activation surface |
 | `examples/` | — | `ArmRig.usda` / `ArmShotAnim.usda` (the spec §4.5/§4.6 reference assets) plus ten self-contained animated demo stages — see `examples/README.md` |
 | `tests/` | rigExecValidation (seed) | the four ctest suites and the two probes |
+| `tools/` | — | `rigExecPose`, which evaluates any rig stage and reports the result — see [Verification](#verification) |
 | `docs/` | — | full spec mirror, verified OpenExec API references (`exec-api-notes.md`, `execusd-api-notes.md`), Hydra integration notes, and the cutover/removal working notes |
 
 ### Schema domain
 
-27 classes, codeless (`skipCodeGeneration = true`), prefix `RigExec`:
+32 classes, codeless (`skipCodeGeneration = true`), prefix `RigExec`:
 
 - **Abstract bases** — `RigExecXformable` (a property-exact IrXformable
-  mirror), `RigExecWeightObject`
+  mirror), `RigExecWeightObject`, `RigExecVolumeWeight`
 - **Core** — `RigExecRig`, `RigExecControl`, `RigExecJoint`
 - **Solvers** — `RigExecFkChain`, `RigExecTwoBoneIk`, `RigExecBlendPointFrames`,
   `RigExecTwistDistribution`, `RigExecRibbon`, `RigExecAimConstraint`
@@ -147,7 +181,15 @@ produce identical publications.
   `RigExecSurfaceMover`, `RigExecSmoothMover`, `RigExecVolumeCorrectMover`,
   and the math movers `RigExecFloatMathMover`, `RigExecVec3fMathMover`,
   `RigExecMatrixMathMover`
-- **Weights** — `RigExecStaticWeight`, `RigExecDynamicWeight`
+- **Weights** — `RigExecStaticWeight`, `RigExecDynamicWeight`, and the
+  volumetric field generators `RigExecSphereWeight`, `RigExecPlaneWeight`,
+  `RigExecCurveWeight` plus `RigExecCombineWeight`, which folds any of
+  them together (see [`docs/volume-weights.md`](docs/volume-weights.md)).
+  The volumetric types inherit `RigExecXformable`, not
+  `RigExecWeightObject` — a typed schema gets exactly one base and they
+  spend it on being *placeable*, so a volume authored inside a joint
+  rides that joint with nothing wired. They redeclare the weight-object
+  contract verbatim; weight-object identity is by type name.
 - **Applied APIs** — `RigExecControlAPI`, `RigExecMoverAPI`
 
 Geometry stays native `UsdGeom` — points, normals, extent, widths, primvars.
@@ -371,7 +413,11 @@ run_testusdview.bat                                   # headless verification
 ```
 
 Joints and aggregate solvers draw as **guide geometry** — a sphere at each
-posed frame origin plus a cone along the aim axis.
+posed frame origin plus a cone along the aim axis. Both size those
+primitives with `guide:radius`, which matters as soon as an asset is not
+built at the tens-of-units scale Hydra's fallback radius of 1.0 suits; zero
+or negative draws nothing, which is how a solver's diagnostics are turned
+off.
 
 ### Authoring a rig
 
@@ -502,6 +548,14 @@ gprim authors normals/extent is the only control, and authoring or removing
 those properties is a structural edit in the epoch digest. The derived-property
 revisions fail the chain when recomputed cardinality disagrees with the
 authored property, rather than silently resizing it.
+
+Normal recomputation accumulates each face's Newell normal onto its own
+corners, weighted by the interior angle there. That is correct for a
+non-planar n-gon and independent of how the polygon would be triangulated —
+unlike the per-triangle fan it replaced (2026-08-06), which gave a vertex
+adjacent to the fan anchor only one sliver triangle out of the whole face
+and could cancel a valid manifold vertex's normal to zero where two faces
+meet along a symmetry seam.
 
 **§4.1 / §4.3 — joint and control schemas (user direction, 2026-07-25).**
 Joints and controls mirror OpenExec's Ir contract exactly, with no Ir

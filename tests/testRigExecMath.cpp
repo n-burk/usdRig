@@ -636,6 +636,26 @@ TestGeometryKernels()
             {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}, {4}, {0, 1, 2, 3});
         CHECK(normals.size() == 4);
         CHECK(Near(GfVec3d(normals[0]), GfVec3d(0, 0, 1), 1e-6));
+
+        // Two pentagons meeting along a seam, both flat in z = 0 and both
+        // wound counter-clockwise, so every vertex normal is unambiguously
+        // +Z. Vertex 2 is the seam's middle, and in BOTH faces it lands
+        // next to the fan anchor: a per-triangle kernel -- which this one
+        // used to be -- therefore gives it exactly one sliver triangle from
+        // each face, the two are mirror images, and they cancel to a zero
+        // normal on a perfectly valid manifold vertex. puppetA
+        // (chars/puppetA) has one such vertex on its face.
+        const auto seam = RigExecComputeVertexNormals(
+            {{0, 0, 0}, {0, 1, 0}, {0.05f, 0.5f, 0},      // the seam
+             {1, 0.2f, 0}, {1, 0.8f, 0},                  // +x side
+             {-1, 0.2f, 0}, {-1, 0.8f, 0}},               // -x side
+            {5, 5},
+            {0, 3, 4, 1, 2,
+             0, 2, 1, 6, 5});
+        CHECK(seam.size() == 7);
+        for (size_t i = 0; i < seam.size(); ++i) {
+            CHECK(Near(GfVec3d(seam[i]), GfVec3d(0, 0, 1), 1e-6));
+        }
         const auto extent = RigExecComputeExtent(
             {{0, 0, 0}, {1, 2, 3}}, {1.0f, 1.0f});
         CHECK(extent.size() == 2);

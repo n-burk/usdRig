@@ -38,6 +38,16 @@ struct RigExecMoverRecord {
     bool enabledFallback = true;
 };
 
+/// One weight object's resolved field, as a mover actually consumed it.
+///
+/// Dense and already range-policed, so a consumer can index it by element
+/// without knowing whether the field came from an authored table, a
+/// driven modulation, a placed volume, or a composition of those.
+struct RigExecResolvedWeightField {
+    SdfPath target;              ///< canonical points property weighted
+    std::vector<float> weights;  ///< one per logical element
+};
+
 /// One evaluated generation of a rig.
 struct RigExecRigPose {
     UsdTimeCode time = UsdTimeCode::Default();
@@ -98,6 +108,33 @@ struct RigExecRigPose {
     /// RigExecRigEvaluator::cpuParityMode is set (scalar-reference
     /// parity, spec §7.4).
     std::map<SdfPath, VtValue> movedPropertiesCpu;
+
+    /// Resolved weight field of every weight object a mover consumed this
+    /// generation, keyed by the weight object's prim path.
+    ///
+    /// This is what an authoring tool paints as an influence overlay: a
+    /// weight object is otherwise invisible, and a rigger placing a
+    /// volume needs to see the region it actually grabs rather than
+    /// infer it from where the geometry ends up. Filled from the packets
+    /// the movers already resolved, so it costs a copy and no extra
+    /// evaluation.
+    std::map<SdfPath, RigExecResolvedWeightField> weightFields;
+
+    /// Volumetric weight object path -> the ASSET-SPACE placement matrix
+    /// this generation resolved for it, for every volume reachable in
+    /// the current epoch.
+    ///
+    /// The companion to weightFields, and published for the same
+    /// consumer: an authoring tool that paints the influence overlay
+    /// also has to DRAW the volume, and a falloff iso-surface can only be
+    /// drawn in the space the field was measured in. Taken from the
+    /// volume's own computeMatrix tap rather than left to the consumer to
+    /// re-derive, because a second hand-rolled composition of
+    /// posed:space + rest offsets + avars + rotation order is exactly the
+    /// drift frameExtraction.h exists to prevent -- the same reasoning
+    /// that made _ResolveVolumeWeights read this map instead of
+    /// recomputing it.
+    std::map<SdfPath, GfMatrix4d> weightFrames;
 
     /// Pass-through, failure, and unimplemented-operation reports
     /// (spec §6.6: disabled/failed movers pass through with diagnostics).
@@ -178,9 +215,35 @@ private:
         UsdTimeCode time,
         std::vector<std::string> *diagnostics) const;
 
+    /// CPU-side resolution of one weight object's field, the parity
+    /// oracle's mirror of the exec computeWeightPacket kernels.
+    ///
+    /// \p currentPoints, when non-null, are the IN-FLIGHT points at the
+    /// consuming operation's position in the mover stack. A volumetric
+    /// weight whose rigExec:samplePhase is `current` measures against
+    /// those; everything else ignores them and reads the authored base.
+    /// Passing null where `current` was authored is an error rather than
+    /// a silent fall back to the base, because the two fields differ and
+    /// quietly publishing the wrong one is exactly the failure the
+    /// parity harness exists to catch.
     bool _ResolveWeights(
         const SdfPath &weightPrimPath, size_t count, UsdTimeCode time,
-        std::vector<float> *weights, std::string *error) const;
+        std::vector<float> *weights, std::string *error,
+        const std::vector<GfVec3f> *currentPoints = nullptr) const;
+
+    /// The volumetric half of _ResolveWeights: sphere, plane, curve, and
+    /// the combine that folds them.
+    bool _ResolveVolumeWeights(
+        const UsdPrim &prim, size_t count, UsdTimeCode time,
+        std::vector<float> *weights, std::string *error,
+        const std::vector<GfVec3f> *currentPoints) const;
+
+    /// Reads \p prim's points-bearing target relationship and returns its
+    /// authored value at \p time. Accepts either an exact property path
+    /// or a prim path canonicalizing to .points.
+    bool _ReadTargetPoints(
+        const UsdPrim &prim, const char *relationshipName, UsdTimeCode time,
+        std::vector<GfVec3f> *points) const;
 
     size_t _ComputeStructureDigest() const;
 
@@ -290,6 +353,30 @@ private:
     /// they cannot simply live in _graphChains.
     std::map<SdfPath, std::vector<_GraphRevision>> _graphDerivedChains;
     std::vector<RigExecMoverRecord> _movers;
+
+    /// Baked falloff remaps for every volumetric weight object reachable
+    /// in this epoch, ready to hand to RigExecTapSet::Evaluate as value
+    /// overrides on each volume's computeFalloffLut stub.
+    ///
+    /// They live here rather than being rebuilt per frame because a
+    /// falloff curve is epoch-structural: exec has no accessor for an
+    /// attribute's spline (see RigExecFalloffLut in types.h), so the
+    /// curve is resampled once at Compile and replayed unchanged until
+    /// the next epoch.
+    std::vector<RigExecValueOverride> _falloffLutOverrides;
+
+    /// Volume weight objects whose rigExec:samplePhase is `current`,
+    /// which have to measure the IN-FLIGHT points at their own position
+    /// in the mover stack rather than the authored base.
+    std::set<SdfPath> _currentPhaseWeights;
+
+    /// computeMatrix taps for every volumetric weight object reachable
+    /// in this epoch, and the matrices the current generation resolved
+    /// them to. The CPU oracle reads the resolved matrix rather than
+    /// recomputing the xformable frame chain a second time.
+    std::map<SdfPath, RigExecTapId> _volumeWeightMatrixTaps;
+    std::map<SdfPath, GfMatrix4d> _volumeWeightMatrices;
+
     size_t _structureDigest = 0;
     bool _compiled = false;
 };
