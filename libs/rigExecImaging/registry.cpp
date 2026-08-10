@@ -21,9 +21,31 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 
 namespace rigExec {
+
+namespace {
+
+uint64_t
+_HashEpochPart(uint64_t hash, const void *data, size_t size)
+{
+    const unsigned char *bytes = static_cast<const unsigned char *>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= uint64_t(bytes[i]);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+uint64_t
+_HashEpochPart(uint64_t hash, const std::string &value)
+{
+    return _HashEpochPart(hash, value.data(), value.size());
+}
+
+}  // namespace
 
 RigExecImagingRegistry &
 RigExecImagingRegistry::GetInstance()
@@ -49,10 +71,120 @@ RigExecImagingRegistry::RegisterChain(
              get_pointer(pruning)),
          TfWeakPtr<RigExecBindingResolvingSceneIndex>(get_pointer(binding)),
          TfWeakPtr<RigExecResultsSceneIndex>(get_pointer(results))});
-    // A chain constructed after activation adopts the current epoch scope.
-    if (!_generatedScope.IsEmpty()) {
-        pruning->SetOwnedScopes({_generatedScope});
+    // A chain constructed after activation adopts every active rig's scope.
+    if (!_generatedScopes.empty()) {
+        pruning->SetOwnedScopes(_generatedScopes);
     }
+}
+
+bool
+RigExecImagingRegistry::_EvaluateSessions(
+    RigSessions *sessions,
+    const UsdStageRefPtr &stage,
+    UsdTimeCode time,
+    std::shared_ptr<RigExecImagingSnapshot> *snapshot,
+    RigExecBindingResolvingSceneIndex::BindingEpochConstPtr *epoch,
+    std::vector<std::string> *errors)
+{
+    auto combined = std::make_shared<RigExecImagingSnapshot>();
+    combined->stage = UsdStageWeakPtr(stage);
+    combined->sampleTimeIsDefault = time.IsDefault();
+    combined->sampleTime = time.IsDefault() ? 0.0 : time.GetValue();
+
+    auto combinedEpoch = std::make_shared<
+        RigExecBindingResolvingSceneIndex::BindingEpoch>();
+    uint64_t epochId = 1469598103934665603ULL;
+    SdfPath commonAssetRoot;
+    bool firstRoot = true;
+
+    for (RigSession &session : *sessions) {
+        const RigExecImagingBridge::PublishResult result =
+            session.bridge->EvaluateAndPublishResult(time);
+        if (!result.ok) {
+            if (errors) {
+                errors->push_back(
+                    "initial/evaluated generation failed for rig " +
+                    session.rigPath.GetString());
+            }
+            return false;
+        }
+        if (result.epoch) {
+            session.epoch = result.epoch;
+        }
+
+        const RigExecImagingSnapshotConstPtr rigSnapshot =
+            session.store->Get();
+        if (!rigSnapshot || !rigSnapshot->Describes(stage, time)) {
+            if (errors) {
+                errors->push_back(
+                    "rig did not publish the requested stage/time: " +
+                    session.rigPath.GetString());
+            }
+            return false;
+        }
+
+        // A zero digest is legal.  The bridge normally supplies the epoch on
+        // its first publication; construct the same payload defensively so a
+        // legal zero cannot leave a stage without a binding epoch.
+        if (!session.epoch) {
+            auto rigEpoch = std::make_shared<
+                RigExecBindingResolvingSceneIndex::BindingEpoch>();
+            rigEpoch->id = session.bridge->GetBindingEpochDigest();
+            for (const auto &[path, published] : rigSnapshot->prims) {
+                rigEpoch->publishedPrims.insert(path);
+            }
+            session.epoch = std::move(rigEpoch);
+        }
+
+        epochId = _HashEpochPart(epochId, session.rigPath.GetString());
+        const uint64_t rigEpochId = session.epoch->id;
+        epochId = _HashEpochPart(epochId, &rigEpochId, sizeof(rigEpochId));
+        combinedEpoch->publishedPrims.insert(
+            session.epoch->publishedPrims.begin(),
+            session.epoch->publishedPrims.end());
+
+        if (firstRoot) {
+            commonAssetRoot = session.assetRoot;
+            firstRoot = false;
+        } else if (commonAssetRoot != session.assetRoot) {
+            commonAssetRoot = SdfPath();
+        }
+
+        for (const auto &[path, published] : rigSnapshot->prims) {
+            if (!combined->prims.emplace(path, published).second) {
+                if (errors) {
+                    errors->push_back(
+                        "two rigs publish the same Hydra prim " +
+                        path.GetString() + "; cross-rig output overlap is "
+                        "not allowed");
+                }
+                return false;
+            }
+        }
+    }
+
+    // Reserve zero for the registry's no-published-epoch state.
+    combinedEpoch->id = epochId ? epochId : 1;
+    combined->assetRoot = commonAssetRoot;
+    *snapshot = std::move(combined);
+    *epoch = std::move(combinedEpoch);
+    return true;
+}
+
+RigExecImagingBridge::PublishResult
+RigExecImagingRegistry::_Publish(
+    std::shared_ptr<RigExecImagingSnapshot> snapshot,
+    const RigExecBindingResolvingSceneIndex::BindingEpochConstPtr &epoch)
+{
+    RigExecImagingBridge::PublishResult result;
+    snapshot->generation = ++_generation;
+    result.dirtied = _store->Publish(std::move(snapshot));
+    if (epoch && epoch->id != _publishedEpochId) {
+        result.epoch = epoch;
+        _publishedEpochId = epoch->id;
+    }
+    result.ok = true;
+    return result;
 }
 
 bool
@@ -61,9 +193,35 @@ RigExecImagingRegistry::Activate(
     UsdTimeCode initialTime, std::vector<std::string> *errors)
 {
     std::lock_guard<std::mutex> lock(_mutex);
+    if (!stage) {
+        if (errors) {
+            errors->push_back("no stage to activate");
+        }
+        return false;
+    }
+
+    std::vector<SdfPath> rigPaths;
+    if (!rigPath.IsEmpty()) {
+        rigPaths.push_back(rigPath);
+    } else {
+        for (const UsdPrim &prim : stage->Traverse()) {
+            if (prim.GetTypeName() == "RigExecRig") {
+                rigPaths.push_back(prim.GetPath());
+            }
+        }
+    }
+    std::sort(rigPaths.begin(), rigPaths.end());
+    rigPaths.erase(std::unique(rigPaths.begin(), rigPaths.end()),
+                   rigPaths.end());
+    if (rigPaths.empty()) {
+        if (errors) {
+            errors->push_back("no RigExecRig prim found");
+        }
+        return false;
+    }
+
     // Edit-driven re-evaluation: listen on the source stage so property
-    // edits republish at the current time (the rig's inputs all live
-    // beneath the asset root; cross-asset writes are rejected).
+    // edits under any active character asset republish at the current time.
     //
     // REGISTERED FIRST, BEFORE Compile(), AND THAT ORDER IS LOAD-BEARING.
     //
@@ -87,35 +245,94 @@ RigExecImagingRegistry::Activate(
     // ExecUsdSystem that prepends ahead of us again, so this holds for the
     // life of the rig rather than only until the first structural edit.
     //
-    // Nothing between here and the end of Activate() may author to \p
-    // stage: _OnObjectsChanged takes the same non-recursive _mutex this
-    // function holds. Compile() authors nothing by construction (that is
-    // what testRigExecNoAuthoring asserts), which is what makes this safe.
+    // Registering this early also arms _OnObjectsChanged across the whole
+    // compile-and-evaluate window, so _assetRoots -- what arms it -- stays
+    // empty until the commit below, and a failure restores the previously
+    // active stage's listener. Nothing in that window may author to \p stage
+    // regardless: _OnObjectsChanged takes the same non-recursive _mutex this
+    // function holds. Neither Compile() nor evaluation authors anything by
+    // construction (that is what testRigExecNoAuthoring asserts), which is
+    // what makes this safe.
+    const UsdStageRefPtr previousStage = _stage;
+    const bool hadSessions = !_sessions.empty();
+    const std::set<SdfPath> previousAssetRoots = _assetRoots;
+    _assetRoots.clear();
     TfNotice::Revoke(_changeKey);
     _changeKey = TfNotice::Register(
         TfCreateWeakPtr(this), &RigExecImagingRegistry::_OnObjectsChanged,
         stage);
-    _bridge = std::make_unique<RigExecImagingBridge>(stage, rigPath, _store);
-    if (!_bridge->Compile(errors)) {
+
+    // Activation is transactional: a rig that fails to compile or evaluate
+    // leaves the previously published generation, and the listener feeding
+    // it, exactly as they were rather than tearing the viewport down.
+    const auto abandon = [&]() {
         TfNotice::Revoke(_changeKey);
         _changeKey = TfNotice::Key();
-        _bridge.reset();
+        _assetRoots = previousAssetRoots;
+        if (hadSessions && previousStage) {
+            _changeKey = TfNotice::Register(
+                TfCreateWeakPtr(this),
+                &RigExecImagingRegistry::_OnObjectsChanged, previousStage);
+        }
+    };
+
+    // Prepare a complete replacement without touching the active stage,
+    // scene-index scopes, or published store.
+    RigSessions candidate;
+    candidate.reserve(rigPaths.size());
+    for (const SdfPath &path : rigPaths) {
+        const UsdPrim rig = stage->GetPrimAtPath(path);
+        if (!rig || rig.GetTypeName() != "RigExecRig") {
+            if (errors) {
+                errors->push_back(
+                    "activation path is not a RigExecRig: " +
+                    path.GetString());
+            }
+            abandon();
+            return false;
+        }
+        RigSession session;
+        session.rigPath = path;
+        session.assetRoot = path.GetParentPath();
+        session.store = std::make_shared<RigExecSnapshotStore>();
+        session.bridge = std::make_unique<RigExecImagingBridge>(
+            stage, path, session.store);
+        // A selection made before this rig was activated applies to it: the
+        // overlay is a viewer mode, not a property of one bridge. Set before
+        // the first evaluation so the initial generation already carries it.
+        session.bridge->SetWeightOverlay(_weightOverlay);
+        if (!session.bridge->Compile(errors)) {
+            abandon();
+            return false;
+        }
+        candidate.push_back(std::move(session));
+    }
+
+    std::shared_ptr<RigExecImagingSnapshot> initialSnapshot;
+    RigExecBindingResolvingSceneIndex::BindingEpochConstPtr initialEpoch;
+    if (!_EvaluateSessions(&candidate, stage, initialTime,
+                           &initialSnapshot, &initialEpoch, errors)) {
+        abandon();
         return false;
     }
-    _generatedScope = _bridge->GetGeneratedScope();
+
+    // Commit the fully compiled and evaluated stage in one transaction.
+    // Repopulating _assetRoots is what arms _OnObjectsChanged.
+    _sessions = std::move(candidate);
+    _stage = stage;
+    _generatedScopes.clear();
+    _assetRoots.clear();
+    for (const RigSession &session : _sessions) {
+        _generatedScopes.insert(session.bridge->GetGeneratedScope());
+        _assetRoots.insert(session.assetRoot);
+    }
     for (Chain &chain : _chains) {
         if (chain.pruning) {
-            chain.pruning->SetOwnedScopes({_generatedScope});
+            chain.pruning->SetOwnedScopes(_generatedScopes);
         }
     }
-    // The asset root arms _OnObjectsChanged: until it is set, a notice
-    // arriving mid-Activate is ignored rather than re-entering the lock.
-    _assetRoot = rigPath.GetParentPath();
     _lastTime = initialTime;
-    // A selection made before this rig was activated applies to it: the
-    // overlay is a viewer mode, not a property of one bridge.
-    _bridge->SetWeightOverlay(_weightOverlay);
-    _Broadcast(_bridge->EvaluateAndPublishResult(initialTime));
+    _Broadcast(_Publish(std::move(initialSnapshot), initialEpoch));
     return true;
 }
 
@@ -123,14 +340,18 @@ bool
 RigExecImagingRegistry::SetTime(UsdTimeCode time)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    if (!_bridge) {
+    if (_sessions.empty() || !_stage) {
+        return false;
+    }
+    std::shared_ptr<RigExecImagingSnapshot> snapshot;
+    RigExecBindingResolvingSceneIndex::BindingEpochConstPtr epoch;
+    if (!_EvaluateSessions(
+            &_sessions, _stage, time, &snapshot, &epoch, nullptr)) {
         return false;
     }
     _lastTime = time;
-    const RigExecImagingBridge::PublishResult result =
-        _bridge->EvaluateAndPublishResult(time);
-    _Broadcast(result);
-    return result.ok;
+    _Broadcast(_Publish(std::move(snapshot), epoch));
+    return true;
 }
 
 bool
@@ -153,13 +374,17 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
             }
         }
         _weightOverlay = resolved;
-        if (!_bridge) {
+        if (_sessions.empty()) {
             // Remembered for whenever a rig is activated. Not a failure:
             // a host that sets its viewer mode before opening a stage has
             // done nothing wrong.
             return true;
         }
-        _bridge->SetWeightOverlay(resolved);
+        // Offered to every active rig: the path selects at most one rig's
+        // weight object, and a bridge that does not own it draws no overlay.
+        for (RigSession &session : _sessions) {
+            session.bridge->SetWeightOverlay(resolved);
+        }
         time = _lastTime;
     }
     // Republished OUTSIDE the lock, exactly as _OnObjectsChanged does it:
@@ -175,23 +400,28 @@ void
 RigExecImagingRegistry::_OnObjectsChanged(
     const UsdNotice::ObjectsChanged &notice, const UsdStageWeakPtr &)
 {
-    SdfPath assetRoot;
+    std::set<SdfPath> assetRoots;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        if (!_bridge || _assetRoot.IsEmpty()) {
+        if (_sessions.empty() || _assetRoots.empty()) {
             return;
         }
-        assetRoot = _assetRoot;
+        assetRoots = _assetRoots;
     }
     // Any edit touching the asset can factor into the final frame
     // (solvers, joints, movers, controls, weights, driver geometry,
     // guide styling): re-evaluate at the current time. The evaluator's
     // epoch digest turns structural edits into recompiles; value edits
     // flow through exec invalidation on the shared layers.
-    auto touchesAsset = [&assetRoot](const SdfPath &path) {
+    auto touchesAsset = [&assetRoots](const SdfPath &path) {
         const SdfPath primPath = path.GetPrimPath();
-        return primPath.HasPrefix(assetRoot) ||
-               assetRoot.HasPrefix(primPath);
+        for (const SdfPath &assetRoot : assetRoots) {
+            if (primPath.HasPrefix(assetRoot) ||
+                assetRoot.HasPrefix(primPath)) {
+                return true;
+            }
+        }
+        return false;
     };
     bool relevant = false;
     for (const SdfPath &path : notice.GetResyncedPaths()) {
@@ -224,9 +454,16 @@ RigExecImagingRegistry::Deactivate()
     std::lock_guard<std::mutex> lock(_mutex);
     TfNotice::Revoke(_changeKey);
     _changeKey = TfNotice::Key();
-    _assetRoot = SdfPath();
-    _bridge.reset();
-    _generatedScope = SdfPath();
+    _assetRoots.clear();
+    _generatedScopes.clear();
+    _sessions.clear();
+    _stage.Reset();
+    _publishedEpochId = 0;
+    for (Chain &chain : _chains) {
+        if (chain.pruning) {
+            chain.pruning->SetOwnedScopes({});
+        }
+    }
     RigExecImagingBridge::PublishResult cleared;
     cleared.ok = true;
     cleared.dirtied = _store->Publish(nullptr);
@@ -699,19 +936,11 @@ RigExecImaging_Activate(
 
     PXR_NS::SdfPath path;
     if (rigPath && rigPath[0]) {
-        path = PXR_NS::SdfPath(rigPath);
-    } else {
-        // Discover the first RigExecRig prim on the stage.
-        for (const PXR_NS::UsdPrim &prim : stage->Traverse()) {
-            if (prim.GetTypeName() == "RigExecRig") {
-                path = prim.GetPath();
-                break;
-            }
+        if (!PXR_NS::SdfPath::IsValidPathString(rigPath)) {
+            std::printf("rigExecImaging: invalid rig path '%s'\n", rigPath);
+            return 2;
         }
-    }
-    if (path.IsEmpty()) {
-        std::printf("rigExecImaging: no RigExecRig prim found\n");
-        return 2;
+        path = PXR_NS::SdfPath(rigPath);
     }
 
     std::vector<std::string> errors;
@@ -722,7 +951,11 @@ RigExecImaging_Activate(
         }
         return 3;
     }
-    std::printf("rigExecImaging: activated %s\n", path.GetText());
+    if (path.IsEmpty()) {
+        std::printf("rigExecImaging: activated all RigExecRig prims\n");
+    } else {
+        std::printf("rigExecImaging: activated %s\n", path.GetText());
+    }
     return 0;
 }
 
@@ -798,8 +1031,27 @@ RigExecImaging_GetAllGuideBoundsAssetSpace(double outMinMax[6])
     }
     PXR_NS::GfRange3d range;
     bool any = false;
+    PXR_NS::SdfPath commonAssetRoot;
     for (const auto &[path, published] : snapshot->prims) {
-        any = _AccumulateGuideBounds(published, &range) || any;
+        PXR_NS::GfRange3d publishedRange;
+        if (!_AccumulateGuideBounds(published, &publishedRange)) {
+            continue;
+        }
+
+        const PXR_NS::SdfPath &assetRoot = published.assetRoot.IsEmpty()
+            ? snapshot->assetRoot
+            : published.assetRoot;
+        if (!any) {
+            commonAssetRoot = assetRoot;
+        } else if (commonAssetRoot != assetRoot) {
+            // Asset-space bounds from independently placed assets cannot be
+            // combined meaningfully.  Callers must query each prim and apply
+            // that prim's asset-root transform instead.
+            return 0;
+        }
+
+        range.UnionWith(publishedRange);
+        any = true;
     }
     if (!any || range.IsEmpty()) {
         return 0;

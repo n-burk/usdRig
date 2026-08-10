@@ -212,6 +212,8 @@ private:
         const SdfPath &target,
         const std::vector<const RigExecMoverRecord *> &chain,
         const RigExecRigPose &pose,
+        const std::map<SdfPath, GfMatrix4d> &baseProviderMatrices,
+        const std::map<SdfPath, GfMatrix4d> &finalProviderMatrices,
         UsdTimeCode time,
         std::vector<std::string> *diagnostics) const;
 

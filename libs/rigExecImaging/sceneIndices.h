@@ -189,6 +189,7 @@ public:
     /// The asset root's world transform as THIS index reports it, so a
     /// driven asset root carries its guides with it.
     GfMatrix4d _ResolveAssetRootWorld(
+        const SdfPath &assetRoot,
         const RigExecImagingSnapshot &snapshot) const;
 
     /// Brings _announcedDrivenXforms for \p path in line with the current

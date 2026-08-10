@@ -612,6 +612,12 @@ TestGeometryKernels()
     // RMF sampling on a straight-line control polygon: samples are
     // colinear, equally spaced in arc length, and frames orthonormal.
     {
+        // Zero- and one-point drivers have no segment to sample.  They must
+        // fail closed rather than entering the linear interpolation branch
+        // (the one-point case previously indexed controlPoints[-1]).
+        CHECK(RigExecSampleCurveRMF({}, 5).GetSize() == 0);
+        CHECK(RigExecSampleCurveRMF({{1, 2, 3}}, 5).GetSize() == 0);
+
         const auto samples = RigExecSampleCurveRMF(
             {{0, 0, 0}, {3, 0, 0}, {6, 0, 0}, {9, 0, 0}}, 5);
         CHECK(samples.GetSize() == 5);

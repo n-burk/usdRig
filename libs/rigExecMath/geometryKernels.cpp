@@ -413,7 +413,11 @@ RigExecSampleCurveRMF(
     const std::vector<GfVec3f> &controlPoints, int sampleCount)
 {
     RigExecCurveFrameSamples samples;
-    if (sampleCount < 2 || controlPoints.empty()) {
+    // The short-curve branch below interpolates segments [i, i + 1].  A
+    // single point has no segment; accepting it makes `size() - 2` equal -1
+    // and indexes before the vector.  Treat it like every other degenerate
+    // driver and publish no frames.
+    if (sampleCount < 2 || controlPoints.size() < 2) {
         return samples;
     }
 

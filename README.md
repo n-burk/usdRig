@@ -391,7 +391,7 @@ Either call the registry directly from C++:
 
 ```cpp
 auto &reg = rigExec::RigExecImagingRegistry::GetInstance();
-reg.Activate(stage, rigPath, initialTime, &errors);
+reg.Activate(stage, SdfPath(), initialTime, &errors); // every rig on stage
 reg.SetTime(frame);          // evaluate + publish, broadcast to every chain
 reg.Deactivate();
 ```
@@ -409,11 +409,18 @@ long long RigExecImaging_GetGeneration(void);   // 0 before first publication
 
 `stageCacheId` is a `UsdUtilsStageCache` id, so any language that can put a
 stage in the cache can activate — that is exactly how the Python usdview
-plugin does it via `ctypes`. Order does not matter: chains and activation
+plugin does it via `ctypes`. An empty/null `rigPath` activates every
+`RigExecRig` on the stage and publishes them as one atomic generation; an
+explicit path remains available for a single-rig host. Activation is
+transactional, so compile or initial-evaluation failure does not replace the
+current coherent generation. Order does not matter: chains and activation
 rendezvous through a process-global registry reading an atomic snapshot store,
-so activation may happen before or after chain construction. Authored edits
-anywhere under the rig re-evaluate and republish automatically, so property
-edits redraw exactly like timeline changes.
+so activation may happen before or after chain construction. The registry is
+one-active-stage-per-process; hosts rendering concurrent stages should own one
+`RigExecImagingBridge` and snapshot store per stage instead of using this
+stock-usdview rendezvous. Authored edits anywhere under an active rig's asset
+re-evaluate every rig and republish once, so property edits redraw exactly like
+timeline changes.
 
 **(c) In stock usdview.** Set the three variables above and launch usdview
 normally. The `RigExecUsdviewContainer` `PluginContainer` activates for any

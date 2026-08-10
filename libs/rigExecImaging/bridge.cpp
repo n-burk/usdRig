@@ -539,6 +539,7 @@ RigExecImagingBridge::_FillGuides(
         RigExecPublishedPrim &published = snapshot->prims[jointPath];
         if (_AppendGuideFrame(frame, authoredLength, authoredRadius,
                               /* useAimFallback = */ false, &published)) {
+            published.assetRoot = _rigPath.GetParentPath();
             published.hasGuides = true;
             _ReadGuideStyle(prim, pose.time, &published);
         }
@@ -566,6 +567,7 @@ RigExecImagingBridge::_FillGuides(
                   any;
         }
         if (any) {
+            published.assetRoot = _rigPath.GetParentPath();
             published.hasGuides = true;
             _ReadGuideStyle(solverPrim, pose.time, &published);
         } else if (!published.hasPoints && !published.hasNormals &&
@@ -643,6 +645,7 @@ RigExecImagingBridge::_FillControlGuides(
             continue;
         }
         RigExecPublishedPrim &published = snapshot->prims[controlPath];
+        published.assetRoot = _rigPath.GetParentPath();
         published.hasControlGuide = true;
         published.controlGuideFrame = placement;
         published.controlGuideShape = shape;
@@ -814,6 +817,7 @@ RigExecImagingBridge::_FillVolumeGuides(
         // Composed with the asset root by the scene index, like every
         // other guide: these frames carry no stage placement.
         RigExecPublishedPrim &published = snapshot->prims[weightPath];
+        published.assetRoot = _rigPath.GetParentPath();
         published.hasVolumeGuides = true;
         published.volumeGuides = std::move(elements);
         _ReadGuideStyle(prim, pose.time, &published);

@@ -1533,7 +1533,11 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
                     prim.dataSource = _BuildGuidePrim(
                         it->second, guideIsCone, guideIndex,
                         parent.dataSource,
-                        _ResolveAssetRootWorld(*snapshot));
+                        _ResolveAssetRootWorld(
+                            it->second.assetRoot.IsEmpty()
+                                ? snapshot->assetRoot
+                                : it->second.assetRoot,
+                            *snapshot));
                     return prim;
                 }
             }
@@ -1563,7 +1567,11 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
                         prim.primType = shape->primType;
                         prim.dataSource = _BuildControlGuidePrim(
                             it->second, *shape, parent.dataSource,
-                            _ResolveAssetRootWorld(*snapshot));
+                            _ResolveAssetRootWorld(
+                                it->second.assetRoot.IsEmpty()
+                                    ? snapshot->assetRoot
+                                    : it->second.assetRoot,
+                                *snapshot));
                         return prim;
                     }
                 }
@@ -1593,7 +1601,11 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
                         it->second.volumeGuides[volumeIndex].primType;
                     prim.dataSource = _BuildVolumeGuidePrim(
                         it->second, volumeIndex, parent.dataSource,
-                        _ResolveAssetRootWorld(*snapshot));
+                        _ResolveAssetRootWorld(
+                            it->second.assetRoot.IsEmpty()
+                                ? snapshot->assetRoot
+                                : it->second.assetRoot,
+                            *snapshot));
                     return prim;
                 }
             }
@@ -2032,9 +2044,10 @@ RigExecResultsSceneIndex::_RefreshDrivenXform(const SdfPath &path)
 // whenever the rig moves its own root.
 GfMatrix4d
 RigExecResultsSceneIndex::_ResolveAssetRootWorld(
+    const SdfPath &assetRoot,
     const RigExecImagingSnapshot &snapshot) const
 {
-    if (snapshot.assetRoot.IsEmpty()) {
+    if (assetRoot.IsEmpty()) {
         return GfMatrix4d(1.0);
     }
     // Resolved against the snapshot the CALLER is holding, not through our
@@ -2053,9 +2066,9 @@ RigExecResultsSceneIndex::_ResolveAssetRootWorld(
     // matrix otherwise -- because _ComputeDrivenXform already takes the
     // generation to resolve against as a parameter.
     const HdSceneIndexPrim prim =
-        _GetInputSceneIndex()->GetPrim(snapshot.assetRoot);
+        _GetInputSceneIndex()->GetPrim(assetRoot);
     GfMatrix4d driven(1.0);
-    if (_ComputeDrivenXform(snapshot.assetRoot, prim.dataSource, snapshot,
+    if (_ComputeDrivenXform(assetRoot, prim.dataSource, snapshot,
                             &driven)) {
         return driven;
     }

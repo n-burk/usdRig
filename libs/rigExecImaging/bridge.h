@@ -82,6 +82,10 @@ public:
     /// The reserved generated scope this rig owns (for pruning).
     SdfPath GetGeneratedScope() const;
 
+    size_t GetBindingEpochDigest() const {
+        return _evaluator->GetBindingEpochDigest();
+    }
+
     /// Wires the filters that receive epoch swaps and generation notices.
     void SetSceneIndices(
         const RigExecBindingResolvingSceneIndexRefPtr &binding,

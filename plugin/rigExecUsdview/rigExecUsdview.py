@@ -29,11 +29,25 @@ def _LibraryFileName():
 
 
 def _LoadRigExecImaging():
-    dllPath = os.environ.get(
-        "RIGEXEC_IMAGING_DLL",
-        os.path.normpath(os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "build", _LibraryFileName())))
+    explicit = os.environ.get("RIGEXEC_IMAGING_DLL")
+    if explicit:
+        dllPath = explicit
+    else:
+        moduleDir = os.path.dirname(os.path.abspath(__file__))
+        # Installed layout:
+        #   <prefix>/lib/python/rigExecUsdview/rigExecUsdview.py
+        #   <prefix>/lib/librigExecImaging.*
+        # Source/build layout remains a supported developer fallback:
+        #   <repo>/plugin/rigExecUsdview/rigExecUsdview.py
+        #   <repo>/build/librigExecImaging.*
+        candidates = [
+            os.path.normpath(os.path.join(
+                moduleDir, "..", "..", _LibraryFileName())),
+            os.path.normpath(os.path.join(
+                moduleDir, "..", "..", "build", _LibraryFileName())),
+        ]
+        dllPath = next((path for path in candidates if os.path.isfile(path)),
+                       candidates[0])
     lib = ctypes.CDLL(dllPath)
     lib.RigExecImaging_Activate.argtypes = [
         ctypes.c_longlong, ctypes.c_char_p, ctypes.c_double]
@@ -74,7 +88,7 @@ class RigExecUsdviewContainer(PluginContainer):
         self._api = plugCtx
         self._lib = None
         self._active = False
-        self._rigPath = None
+        self._rigPaths = []
         self._cachedStage = None
 
         # Release the stage BEFORE the interpreter finalizes.
@@ -265,6 +279,12 @@ class RigExecUsdviewContainer(PluginContainer):
     def _OnStageReplaced(self):
         stage = self._api.dataModel.stage
         self._active = False
+        self._rigPaths = []
+        # A scene-index store outlives a stage replacement.  Clear the old
+        # activation before inspecting or attempting the new stage so a
+        # no-rig stage, load failure, or compile failure cannot inherit a
+        # previous stage's path-addressed deformation.
+        #
         # Deactivate BEFORE erasing: the imaging registry resolves the
         # stage out of the cache, so pulling it first would leave the
         # registry holding a handle to something it can no longer look up.
@@ -273,13 +293,13 @@ class RigExecUsdviewContainer(PluginContainer):
         self._ReleaseCachedStage()
         if not stage:
             return
-        # Only engage for stages that actually carry a RigExec rig.
-        self._rigPath = None
+        # An empty path passed to the C surface means every RigExecRig on the
+        # stage.  Keep the paths here for diagnostics/UI rather than silently
+        # selecting the first character.
         for prim in stage.Traverse():
             if prim.GetTypeName() == "RigExecRig":
-                self._rigPath = prim.GetPath()
-                break
-        if self._rigPath is None:
+                self._rigPaths.append(prim.GetPath())
+        if not self._rigPaths:
             return
         if self._EnsureLibrary() is None:
             return

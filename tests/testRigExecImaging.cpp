@@ -16,6 +16,7 @@
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/references.h"
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
@@ -2177,6 +2178,81 @@ TestExampleControlGuides(const std::string &examplesDir)
 // rig's asset re-evaluates at the last-set time and republishes;
 // unrelated edits do not.
 static void
+TestMultiRigAtomicActivation(const std::string &examplesDir)
+{
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    registry.Deactivate();
+
+    // Two independent references exercise different character roots while
+    // keeping the fixture small and identical to the single-rig goldens.
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    CHECK(stage);
+    if (!stage) return;
+    const std::string asset = TfAbsPath(examplesDir + "/ArmRig.usda");
+    const UsdPrim armA = stage->DefinePrim(SdfPath("/ArmA"), TfToken("Xform"));
+    const UsdPrim armB = stage->DefinePrim(SdfPath("/ArmB"), TfToken("Xform"));
+    CHECK(armA.GetReferences().AddReference(asset, SdfPath("/ArmAsset")));
+    CHECK(armB.GetReferences().AddReference(asset, SdfPath("/ArmAsset")));
+    CHECK(stage->GetPrimAtPath(SdfPath("/ArmA/Rig")));
+    CHECK(stage->GetPrimAtPath(SdfPath("/ArmB/Rig")));
+
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(
+        stage, SdfPath(), UsdTimeCode(1001.0), &errors));
+    for (const std::string &error : errors) {
+        std::printf("  multi-rig activation: %s\n", error.c_str());
+    }
+    RigExecImagingSnapshotConstPtr snapshot = registry.GetStore()->Get();
+    CHECK(snapshot);
+    if (!snapshot) {
+        registry.Deactivate();
+        return;
+    }
+    CHECK(snapshot->Describes(stage, UsdTimeCode(1001.0)));
+    CHECK(snapshot->prims.count(SdfPath("/ArmA/Geom/ArmBody")) != 0);
+    CHECK(snapshot->prims.count(SdfPath("/ArmB/Geom/ArmBody")) != 0);
+    const auto guideA = snapshot->prims.find(
+        SdfPath("/ArmA/Rig/Controls/ShoulderFK"));
+    const auto guideB = snapshot->prims.find(
+        SdfPath("/ArmB/Rig/Controls/ShoulderFK"));
+    CHECK(guideA != snapshot->prims.end());
+    CHECK(guideB != snapshot->prims.end());
+    if (guideA != snapshot->prims.end()) {
+        CHECK(guideA->second.assetRoot == SdfPath("/ArmA"));
+    }
+    if (guideB != snapshot->prims.end()) {
+        CHECK(guideB->second.assetRoot == SdfPath("/ArmB"));
+    }
+    double bounds[6];
+    CHECK(RigExecImaging_GetGuideBoundsAssetSpace(
+              "/ArmA/Rig/Controls/ShoulderFK", bounds) == 1);
+    CHECK(RigExecImaging_GetAllGuideBoundsAssetSpace(bounds) == 0);
+
+    const uint64_t generation = snapshot->generation;
+    CHECK(registry.SetTime(UsdTimeCode(1024.0)));
+    snapshot = registry.GetStore()->Get();
+    CHECK(snapshot && snapshot->generation == generation + 1);
+    CHECK(snapshot && snapshot->prims.count(
+                           SdfPath("/ArmA/Geom/ArmBody")) != 0);
+    CHECK(snapshot && snapshot->prims.count(
+                           SdfPath("/ArmB/Geom/ArmBody")) != 0);
+
+    // A replacement that cannot compile/evaluate must not tear down or
+    // overwrite the coherent stage that is already active.
+    const RigExecImagingSnapshotConstPtr beforeFailure = snapshot;
+    const UsdStageRefPtr noRig = UsdStage::CreateInMemory();
+    errors.clear();
+    CHECK(!registry.Activate(
+        noRig, SdfPath(), UsdTimeCode(1.0), &errors));
+    CHECK(!errors.empty());
+    CHECK(registry.IsActive());
+    CHECK(registry.GetStore()->Get() == beforeFailure);
+
+    registry.Deactivate();
+    CHECK(!registry.GetStore()->Get());
+}
+
+static void
 TestEditTriggeredReevaluation(const std::string &examplesDir)
 {
     UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmRig.usda");
@@ -3357,6 +3433,7 @@ main(int argc, char **argv)
     TestExampleControlGuides(examplesDir);
     TestMotionCapabilityMatrix(examplesDir);
     TestLegacyRenderIndexPickup(examplesDir);
+    TestMultiRigAtomicActivation(examplesDir);
     TestEditTriggeredReevaluation(examplesDir);
     TestConstraintDrivenXformPublishes(examplesDir);
     // Last: it publishes a fixture into the process-global registry store.

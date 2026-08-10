@@ -76,6 +76,11 @@ struct RigExecVolumeGuideElement {
 /// standard data crosses this boundary (spec §10.2): local xforms,
 /// points/normals as flat primvars, and the two-element extent.
 struct RigExecPublishedPrim {
+    /// Asset-space anchor for guide frames on this prim.  Stored per prim so
+    /// one atomic stage generation can contain multiple character rigs with
+    /// different asset roots.
+    SdfPath assetRoot;
+
     /// The revised LOCAL transform, and the local transform it revised.
     ///
     /// Both are needed because the RigExec scene index is installed
@@ -206,7 +211,9 @@ struct RigExecImagingSnapshot {
     /// the prims. Setting it wrong loses transforms silently.
     bool hasDrivenXforms = false;
 
-    /// The rig's asset root (the rig prim's parent).
+    /// The rig's asset root (the rig prim's parent) for a single-rig
+    /// generation.  Empty for a merged multi-root generation; guide consumers
+    /// use RigExecPublishedPrim::assetRoot.
     ///
     /// Guide frames are ASSET-space, so placing them needs the asset root's
     /// transform -- NOT the guide parent's. A joint may sit under an
@@ -391,6 +398,14 @@ private:
                     return RigExecChangeStructural;
                 }
             }
+        }
+        // Every guide payload is placed in ASSET space, so re-anchoring the
+        // prim to a different asset root moves the synthesized children even
+        // though no guide value changed.
+        if ((after.hasGuides || after.hasControlGuide ||
+             after.hasVolumeGuides) &&
+            before->assetRoot != after.assetRoot) {
+            return RigExecChangeStructural;
         }
         // Shape and draw mode decide the synthesized child's PRIM TYPE, so
         // editing either is structural for exactly the reason a guide count

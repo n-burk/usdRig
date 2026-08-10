@@ -2663,6 +2663,8 @@ RigExecRigEvaluator::_EvaluateChain(
     const SdfPath &target,
     const std::vector<const RigExecMoverRecord *> &chain,
     const RigExecRigPose &pose,
+    const std::map<SdfPath, GfMatrix4d> &baseProviderMatrices,
+    const std::map<SdfPath, GfMatrix4d> &finalProviderMatrices,
     UsdTimeCode time,
     std::vector<std::string> *diagnostics) const
 {
@@ -2902,11 +2904,20 @@ RigExecRigEvaluator::_EvaluateChain(
                     "one target");
                 continue;
             }
-            const auto matrixIt = pose.jointMatricesFinal.find(transforms[0]);
-            if (matrixIt == pose.jointMatricesFinal.end()) {
+            TfToken phase("base");
+            if (const UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:transformReadPhase"))) {
+                a.Get(&phase);
+            }
+            const auto &matrices =
+                phase == "final" ? finalProviderMatrices
+                                 : baseProviderMatrices;
+            const auto matrixIt = matrices.find(transforms[0]);
+            if (matrixIt == matrices.end()) {
                 diagnostics->push_back(
                     "MoverFailed " + mover->moverPath.GetString() +
-                    ": no matrix provider at " + transforms[0].GetString());
+                    ": no " + phase.GetString() + " matrix provider at " +
+                    transforms[0].GetString());
                 continue;
             }
             std::vector<float> weights;
@@ -3539,6 +3550,27 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         }
     }
 
+    // The independent CPU parity path must consume the same declared
+    // provider phase as the graph while resolving it independently.  Capture
+    // every matrix provider the graph taps (controls as well as joints), then
+    // overlay the evaluator-side frame revisions for final-phase reads.
+    std::map<SdfPath, GfMatrix4d> baseProviderMatrices;
+    for (const auto &[target, revisions] : _graphChains) {
+        for (const _GraphRevision &revision : revisions) {
+            if (revision.transformTap >= 0 &&
+                !revision.binding.transform.IsEmpty() &&
+                !baseProviderMatrices.count(revision.binding.transform)) {
+                baseProviderMatrices[revision.binding.transform] =
+                    snapshot.Get<GfMatrix4d>(revision.transformTap);
+            }
+        }
+    }
+    std::map<SdfPath, GfMatrix4d> finalProviderMatrices =
+        baseProviderMatrices;
+    for (const auto &[provider, matrix] : finalMatrices) {
+        finalProviderMatrices[provider] = matrix;
+    }
+
     // 3. Geometry point chains from the generated applications: the chain
     // head's passive outputs:value bridge extracts the exact native
     // VtVec3fArray (spec §7.2). Unsupported v0.1-alpha operations were
@@ -3556,10 +3588,10 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     //
     // Correctness is policed by the scalar CPU reference below, which resolves
     // its own inputs off the authored stage and authors nothing. A
-    // disagreement is counted on the pose, never silently substituted:
-    // grepping a diagnostic string is what let a packet-assembly drift reach
-    // usdview once already (see docs/mover-graph-cutover.md).
-    size_t graphChainsChecked = 0;
+    // disagreement rejects the complete pose: grepping a diagnostic string
+    // is what let a packet-assembly drift reach usdview once already (see
+    // docs/mover-graph-cutover.md), so a known-bad generation cannot publish.
+    size_t graphChainsBuilt = 0;
     size_t graphRevisionsBuilt = 0;
 
     // Curvenet chains run FIRST.
@@ -3737,7 +3769,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 
         const VtVec3fArray graphPoints = graph.Evaluate(head);
         pose.movedProperties[target] = VtValue(graphPoints);
-        ++graphChainsChecked;
+        ++graphChainsBuilt;
 
         // Derived maintenance reads this chain's final points, which is why it
         // runs here rather than as another entry in _graphChains.
@@ -3770,7 +3802,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             const VtVec3fArray derivedResult =
                 derivedGraph.Evaluate(derivedHead);
             pose.movedProperties[derived.target] = VtValue(derivedResult);
-            ++graphChainsChecked;
+            ++graphChainsBuilt;
         }
     }
     // The same chains against the scalar CPU reference (spec §7.4). This is
@@ -3779,6 +3811,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // the compiler's deletion, and it is a genuinely independent
     // implementation -- it does not call RigExecAssembleParameters, which is
     // why it can catch a packet-assembly drift rather than share one.
+    size_t parityAgreements = 0;
     {
         std::map<SdfPath, std::vector<const RigExecMoverRecord *>> chains;
         for (const RigExecMoverRecord &mover : _movers) {
@@ -3814,7 +3847,9 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             }
             std::vector<std::string> quiet;
             const VtVec3fArray reference =
-                _EvaluateChain(target, chain, pose, time, &quiet);
+                _EvaluateChain(
+                    target, chain, pose, baseProviderMatrices,
+                    finalProviderMatrices, time, &quiet);
             const VtVec3fArray &graphValue =
                 graphIt->second.UncheckedGet<VtVec3fArray>();
             if (reference.size() != graphValue.size()) {
@@ -3824,6 +3859,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 ++pose.moverGraphParityMismatches;
                 continue;
             }
+            bool agrees = true;
             for (size_t i = 0; i < reference.size(); ++i) {
                 if (!GfIsClose(reference[i], graphValue[i], 1e-4)) {
                     pose.diagnostics.push_back(
@@ -3831,8 +3867,12 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                         target.GetString() + " at element " +
                         std::to_string(i));
                     ++pose.moverGraphParityMismatches;
+                    agrees = false;
                     break;
                 }
+            }
+            if (agrees) {
+                ++parityAgreements;
             }
         }
     }
@@ -3844,14 +3884,22 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         pose.diagnostics.push_back(std::move(message));
     }
 
-    // Reported unconditionally, including the zero case: a parity pass that
-    // silently checked nothing is indistinguishable from one that passed, and
-    // that is exactly how a no-op hides (spec §7.4 parity reporting).
-    pose.moverGraphParityAgreements = graphChainsChecked;
+    // Report actual reference comparisons, not every graph/derived chain that
+    // happened to build.  Derived normals/extents are not part of this scalar
+    // point-chain oracle and a mismatched point chain is never an agreement.
+    pose.moverGraphParityAgreements = parityAgreements;
     pose.diagnostics.push_back(
-        "mover graph parity: " + std::to_string(graphChainsChecked) +
-        " chain(s) agreed over " + std::to_string(graphRevisionsBuilt) +
-        " revision(s)");
+        "mover graph parity: " + std::to_string(parityAgreements) +
+        " point chain(s) agreed, " +
+        std::to_string(pose.moverGraphParityMismatches) +
+        " mismatched; " + std::to_string(graphChainsBuilt) +
+        " graph/derived chain(s) built over " +
+        std::to_string(graphRevisionsBuilt) + " revision(s)");
+    if (pose.moverGraphParityMismatches != 0) {
+        pose.diagnostics.push_back(
+            "mover graph parity failed; refusing to publish generation");
+        return pose;  // pose.valid remains false
+    }
     // Optional CPU reference-kernel parity for the lowered chains
     // (scalar-reference goldens, spec §7.4).
     if (cpuParityMode) {
@@ -3883,7 +3931,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 continue;
             }
             pose.movedPropertiesCpu[target] = VtValue(_EvaluateChain(
-                target, chain, pose, time, &pose.diagnostics));
+                target, chain, pose, baseProviderMatrices,
+                finalProviderMatrices, time, &pose.diagnostics));
         }
     }
 

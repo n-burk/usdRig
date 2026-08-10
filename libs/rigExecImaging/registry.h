@@ -19,6 +19,7 @@
 
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -39,8 +40,10 @@ public:
         const RigExecBindingResolvingSceneIndexRefPtr &binding,
         const RigExecResultsSceneIndexRefPtr &results);
 
-    /// Activates evaluation for one rig on a stage; compiles and
-    /// publishes the initial generation at the given frame.
+    /// Activates evaluation for one rig, or every RigExecRig when rigPath is
+    /// empty.  Compilation and the first evaluation complete off to the side;
+    /// the active stage and Hydra generation change only after every rig has
+    /// succeeded.
     bool Activate(
         const UsdStageRefPtr &stage, const SdfPath &rigPath,
         UsdTimeCode initialTime, std::vector<std::string> *errors);
@@ -60,7 +63,7 @@ public:
     /// Drops the bridge; chains remain and read the (cleared) store.
     void Deactivate();
 
-    bool IsActive() const { return static_cast<bool>(_bridge); }
+    bool IsActive() const { return !_sessions.empty(); }
 
 private:
     RigExecImagingRegistry();
@@ -72,6 +75,28 @@ private:
         TfWeakPtr<RigExecBindingResolvingSceneIndex> binding;
         TfWeakPtr<RigExecResultsSceneIndex> results;
     };
+
+    struct RigSession {
+        SdfPath rigPath;
+        SdfPath assetRoot;
+        std::shared_ptr<RigExecSnapshotStore> store;
+        std::unique_ptr<RigExecImagingBridge> bridge;
+        RigExecBindingResolvingSceneIndex::BindingEpochConstPtr epoch;
+    };
+
+    using RigSessions = std::vector<RigSession>;
+
+    bool _EvaluateSessions(
+        RigSessions *sessions,
+        const UsdStageRefPtr &stage,
+        UsdTimeCode time,
+        std::shared_ptr<RigExecImagingSnapshot> *snapshot,
+        RigExecBindingResolvingSceneIndex::BindingEpochConstPtr *epoch,
+        std::vector<std::string> *errors);
+
+    RigExecImagingBridge::PublishResult _Publish(
+        std::shared_ptr<RigExecImagingSnapshot> snapshot,
+        const RigExecBindingResolvingSceneIndex::BindingEpochConstPtr &epoch);
 
     void _Broadcast(const RigExecImagingBridge::PublishResult &result);
 
@@ -86,14 +111,17 @@ private:
     std::mutex _mutex;
     std::shared_ptr<RigExecSnapshotStore> _store;
     std::vector<Chain> _chains;
-    std::unique_ptr<RigExecImagingBridge> _bridge;
-    SdfPath _generatedScope;
-    SdfPath _assetRoot;
+    RigSessions _sessions;
+    UsdStageRefPtr _stage;
+    std::set<SdfPath> _generatedScopes;
+    std::set<SdfPath> _assetRoots;
     UsdTimeCode _lastTime = UsdTimeCode::Default();
     /// The influence-overlay selection, held HERE rather than only on the
     /// bridge because it outlives one: a host may select before
     /// activation, and Deactivate/Activate must not silently drop it.
     SdfPath _weightOverlay;
+    uint64_t _generation = 0;
+    uint64_t _publishedEpochId = 0;
     TfNotice::Key _changeKey;
 };
 
@@ -148,8 +176,10 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_GetGuideBoundsAssetSpace(
     const char *primPath, double outMinMax[6]);
 
 /// The union of RigExecImaging_GetGuideBoundsAssetSpace over every prim in
-/// the current generation, so framing the rig frames its whole guide set.
-/// Returns 1 when anything at all draws, 0 otherwise.
+/// the current generation, so framing one rig frames its whole guide set.
+/// Returns 0 when guides belong to multiple asset roots because their
+/// asset-space ranges cannot be combined before applying distinct root
+/// transforms. Returns 1 when anything at all draws, 0 otherwise.
 RIGEXEC_IMAGING_C_API int RigExecImaging_GetAllGuideBoundsAssetSpace(
     double outMinMax[6]);
 
