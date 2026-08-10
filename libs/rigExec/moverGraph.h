@@ -21,6 +21,8 @@
 
 #include "types.h"
 
+#include "rigExecMath/profileMover.h"
+
 #include "pxr/base/vt/array.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/exec/vdf/maskedOutput.h"
@@ -29,6 +31,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -51,6 +54,7 @@ enum class RigExecRevisionOp {
     SurfaceProject,
     Ribbon,
     EmitGuidePoints,
+    Curvenet,
     RecomputeNormals,
     RecomputeExtent,
 };
@@ -76,9 +80,55 @@ struct RigExecRevisionBinding {
     SdfPath bindCoords;       ///< ribbon bind coordinates
     SdfPath driverFrames;     ///< aggregate frame provider
     SdfPath widths;           ///< authored widths (extent maintenance)
+    SdfPath curvenet;         ///< RigExecCurvenet prim (Profile Mover)
+    SdfPath curvenetPoints;   ///< that curvenet's points property
     std::vector<SdfPath> blendInputs;  ///< sorted blend channels
 
     bool operator==(const RigExecRevisionBinding &o) const;
+};
+
+/// Profile Mover bindings, held across frames and keyed by (mover, target).
+///
+/// Cutting a mesh and factorizing its Laplacian is the expensive half of the
+/// technique and depends only on the layout -- the curvenet's rest points,
+/// its spline indices, and the target's base geometry. Rebuilding it per
+/// frame would make the mover unusable, and rebuilding it never would make an
+/// edited curvenet silently stale, so the cache is keyed by a digest of
+/// exactly those inputs.
+///
+/// A failed bind is remembered too: a rig whose curvenet cannot be bound
+/// should report that once, not re-attempt the cut on every frame.
+class RigExecCurvenetBindCache
+{
+public:
+    /// Returns the binding for \p key, calling \p build when the cached
+    /// digest differs. Returns null on a failed bind and fills \p error.
+    std::shared_ptr<const RigExecProfileMoverBinding> Resolve(
+        const SdfPath &mover, const SdfPath &target, size_t digest,
+        const std::function<bool(RigExecProfileMoverBinding *, std::string *)>
+            &build,
+        std::string *error);
+
+    /// Messages accumulated by binds since the last call, and clears them.
+    ///
+    /// Cutting a mesh is where a curvenet's real problems surface -- faces
+    /// the cut lost, segments it could not route, a net floating so far off
+    /// the surface that its profile means nothing. None of that is fatal, so
+    /// none of it can be an error return, and a silently bad deformation is
+    /// exactly the failure mode worth spending a diagnostic on.
+    std::vector<std::string> TakeDiagnostics();
+
+    void Clear() { _entries.clear(); }
+    size_t GetSize() const { return _entries.size(); }
+
+private:
+    struct _Entry {
+        size_t digest = 0;
+        std::shared_ptr<const RigExecProfileMoverBinding> binding;
+        std::string error;
+    };
+    std::map<std::pair<SdfPath, SdfPath>, _Entry> _entries;
+    std::vector<std::string> _pending;
 };
 
 /// Resolves a mover's side-input bindings from the authored stage.
@@ -129,6 +179,14 @@ struct RigExecProviderValues {
     const RigExecPointFrameArray *driverFrames = nullptr;
     std::vector<GfVec3f> basePoints;   ///< authored base of the target
     std::vector<GfVec3f> blendDeltas;  ///< summed channel deltas
+    /// Posed control points of the mover's curvenet. Supplied by the
+    /// evaluator, which runs curvenet chains first so a curvenet posed by
+    /// ordinary movers reaches the Profile Mover already articulated; empty
+    /// falls back to reading the curvenet's authored points at the time.
+    std::vector<GfVec3f> curvenetPoints;
+    /// Cache for the expensive half of the Profile Mover. Null binds fresh
+    /// every call, which is correct but only sane in a test.
+    RigExecCurvenetBindCache *curvenetCache = nullptr;
 };
 
 /// Sums blend channels into dense per-point deltas against \p base

@@ -86,6 +86,18 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
   `inputs:extentU`/`extentV` size them *across* it and, under
   `rigExec:planeBounds = "bounded"`, stop the field at that rectangle. See
   [`docs/volume-weights.md`](../docs/volume-weights.md).
+- **12_CurvenetProfile.usda** — curvenets and the Profile Mover
+  (de Goes, Sheffler & Fleischer, SIGGRAPH 2022). Three profile rings
+  joined by four longitudinal rails around a tube; every ring knot is
+  shared by two ring spans and two rails, which is what makes it an
+  *intersection* and lets §3 deduce the frames, widths and twist that
+  nobody authors. The net's knots are posed by an ORDINARY
+  `RigExecMatrixMover` driven by an FK joint through a weight object —
+  76 pool points against 208 tube vertices the rig never mentions — and
+  `RigExecCurvenetMover` propagates that onto the surface. Re-mesh the
+  tube and the same net still articulates it. **Generated** by
+  `build_curvenet_example.py`; edit that, not the `.usda`. See
+  [`docs/curvenet.md`](../docs/curvenet.md).
 
 ## Authoring conventions the engine expects
 

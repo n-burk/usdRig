@@ -1,0 +1,92 @@
+
+===== PAGE 1 =====
+Pixar’s Inside Out 2: Character Rig Challenges and Techniques
+CHRISTIAN HOFFMAN, MICHAEL NIEVES, JACOB SPEIRS, and BRENDA LIN ZHANG, Pixar
+Animation Studios, USA
+The characters team on Pixar’s Inside Out 2 shares some of the technical & design challenges on our character rigs and presents the
+techniques used to solve them.
+ACM Reference Format:
+Christian Hoffman, Michael Nieves, Jacob Speirs, and Brenda Lin Zhang. 2024. Pixar’s Inside Out 2: Character Rig Challenges and
+Techniques. In Special Interest Group on Computer Graphics and Interactive Techniques Conference Talks (SIGGRAPH Talks ’24), July 27 -
+August 01, 2024. ACM, New York, NY, USA, 3 pages. https://doi.org/10.1145/3641233.3664342
+1
+JOY’S EYELIDS & EYE AUTO GAZE CORRECTION
+Fig. 1. © Disney/Pixar
+Joy’s iconic large eyes pose both artistic and technical hurdles in character design. Conven-
+tionally, our characters’ eyelids feature an inside and an outside corner connecting the upper
+and lower lids. However, during the production of Inside Out we encountered a significant
+challenge: whenever Joy’s lids were halfway open, her eyes appeared smaller rather than
+partially shut. Our solution on Inside Out 2 was to equip Joy with four lid corners — two for
+the upper lid and two for the lower lid. We will present the unique technique we used that
+ultimately gave Animation the ability to choose any position along the lid edge’s topology
+for the corners of both the upper and lower lids.
+On the original Inside Out, Animation spent a lot of time polishing the eye directions
+on the larger eyed characters to make it appear as if both eyes were looking in the same
+direction. The curvature of the eyeballs would often make the eye gaze appear different,
+especially as the eyes are angled away from camera and the amount of exposed iris/pupil
+was diminished or wrapped around the horizon of the eyeball. We will discuss the cheats we
+explored to unify the character gaze direction, some that are relative to the eye and eyelid
+shapes themselves, and others that are computed relative to the camera. In addition, we will
+talk about the process of preventing the pupils from becoming obscured under the eyelids when the neutral eye position
+is biased with minimal space on one side of the eye and significantly more on the opposing side.
+2
+CURVENET USAGE
+Hand Curvenet Rig. Most of our character’s hands in Inside Out 2 are traditional hands — four fingers and a thumb.
+We like to share topology and weighting where possible but historically any character with unique topology has to
+be rigged from scratch. We wanted to change that. Over the past few productions Pixar has been developing new
+articulation tools called curvenet and Profile Mover. These tools allow us to deform our subdivision surfaces completely
+independent of shape or topology. On Inside Out 2, we used these tools to create, for the first time at Pixar, a fully
+Permission to make digital or hard copies of part or all of this work for personal or classroom use is granted without fee provided that copies are not
+made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page. Copyrights for third-party
+components of this work must be honored. For all other uses, contact the owner/author(s).
+© 2024 Copyright held by the owner/author(s).
+Manuscript submitted to ACM
+1
+
+===== PAGE 2 =====
+SIGGRAPH Talks ’24, July 27 - August 01, 2024, Denver, CO, USA
+Porter et al.
+Fig. 2. © Disney/Pixar
+articulated hand curvenet as a shareable rig. The result was fully rigged hands for all of our characters, out-of-the-box,
+without doing any rigging work on the geometry, regardless of shape or topology. We would like to share our setup,
+the results, and discuss the next steps for the use-case.
+Shape-N-Bake. On Inside Out 2, we created a new workflow that uses curvenets as a shaping tool instead of a
+deformation tool. This gives the artist the option to interface with sparse point data on a curvenet but then to bake
+the shapes down into our traditional subdivision deformation stack. Curvenet enables artists to manipulate character
+articulation shapes with sparse points, particularly useful for maintaining volumes in various directional spaces. The
+Shape-n-bake approach leverages the strengths of curvenet while circumventing the weakness of the sparse topology
+(such as candy wrapping with twists) to create corrective shapes more efficiently.
+Character & cloth rigging. The body deformations for some of the new characters were rigged using a curvenet and
+Profile Mover. There were also some circumstances where we applied the sparse point rigging approach to garments.
+While most characters typically don’t require extensive cloth rigging, specific control over some of the garments was
+needed in shots due to their importance of the character’s personality. This required fine-tuning aspects of the costume
+to enhance the character’s performance and by using curvenets we were able to provide those controls to Animation.
+3
+CRAFTING ANXIETY’S EXPRESSIVE MOUTH: INNOVATIVE RIGGING SOLUTIONS
+Fig. 3. © Disney/Pixar
+Inside Out 2 introduces Anxiety, a character with a unique design akin to a cloth
+puppet, demanding specialized mouth rigging setups for flexible and precise
+control in Animation. Anxiety’s design required a rigging solution that could
+accommodate her unique features. Our team devised a mouth corner rig consisting
+of three layers of controls. The first manipulates the outer silhouette of the mouth
+and face, allowing for broad adjustments to shape and expression. The second
+focuses on moving the mouth corners within the face silhouette, and the third is
+dedicated to refining the outer silhouette without affecting the teeth placement.
+To achieve the desired wavy lip shapes, we added additional lip controls, providing
+nine sections on each lip. This enables animators to establish the base wavy shape.
+Additionally, we introduced a curvenet setup on both the lips and the head for
+detailed polishing, allowing control over the entire facial shape and thickness
+between the lips and face silhouette. This grants animators flexibility in shaping
+Anxiety’s facial expressions, enabling them to convey a wide range of emotions with precision. In developing the teeth
+setup for Anxiety, we used curves wrapped around the lips and constrained each tooth to follow the contours of the
+lips. Individual controls were implemented on each tooth to enable animators to toggle the constraint on or off, slide
+2
+
+===== PAGE 3 =====
+Pixar’s Inside Out 2: Character Rig Challenges and Techniques
+SIGGRAPH Talks ’24, July 27 - August 01, 2024, Denver, CO, USA
+the teeth along the curve, and pose them separately. The teeth constraint setup remained unaffected by the polishing
+curvenet. These rigging solutions provided animators with a comprehensive toolkit, ranging from rough adjustments to
+fine detailing, empowering them to craft dynamic and precise mouth movements that perfectly complement Anxiety’s
+wide array of facial expressions.
+3

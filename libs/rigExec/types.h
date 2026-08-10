@@ -13,9 +13,12 @@
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3i.h"
 
+#include <memory>
 #include <vector>
 
 namespace rigExec {
+
+struct RigExecProfileMoverBinding;
 
 /// Aggregate result of a packed solver boundary (spec §4.3): an immutable
 /// sequence of frames plus the per-element reference (rest) landmark sets
@@ -179,6 +182,13 @@ struct RigExecMoverParameters {
     /// Widths for the extent computation (empty, one, or per-point).
     std::vector<float> widths;
 
+    /// Profile Mover state: the epoch's cut-mesh and factorization, shared
+    /// rather than copied because it is large and identity IS the equality
+    /// that matters -- two packets naming the same binding name the same
+    /// cut. Held as an incomplete type so the geometry solver's headers stay
+    /// out of every exec translation unit.
+    std::shared_ptr<const RigExecProfileMoverBinding> curvenetBinding;
+
     bool operator==(const RigExecMoverParameters &o) const {
         return kind == o.kind && enabled == o.enabled && valid == o.valid &&
                transform == o.transform && weights == o.weights &&
@@ -190,7 +200,7 @@ struct RigExecMoverParameters {
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&
                restPoints == o.restPoints && divisions == o.divisions &&
                bindCoords == o.bindCoords && frames == o.frames &&
-               widths == o.widths;
+               widths == o.widths && curvenetBinding == o.curvenetBinding;
     }
     bool operator!=(const RigExecMoverParameters &o) const {
         return !(*this == o);

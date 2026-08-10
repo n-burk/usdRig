@@ -312,6 +312,13 @@ private:
     };
     /// Exact points target -> its revisions, in composed post-order.
     std::map<SdfPath, std::vector<_GraphRevision>> _graphChains;
+    /// Profile Mover cut-meshes and factorizations, kept across frames.
+    ///
+    /// Lives on the evaluator rather than in the parameter packet because it
+    /// is epoch state, not a value: the cut depends on the layout, and the
+    /// layout is what an epoch IS. Keyed and digest-checked internally, so a
+    /// curvenet edit rebinds and an unchanged one does not.
+    mutable RigExecCurvenetBindCache _curvenetBindings;
     /// One pose-domain frame revision: an aim constraint on a transform
     /// provider, evaluated in memory instead of through a generated
     /// RigExecPointFrameMoverApplication.

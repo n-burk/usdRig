@@ -103,6 +103,13 @@ class RigExecUsdviewContainer(PluginContainer):
             "Volume Weight Authoring",
             lambda api: self._OpenVolumeWeightPanel(api))
 
+        # The curvenet authoring window. Same lazy-import reasoning as the
+        # volume weight panel: its module pulls in Qt.
+        self._curvenets = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.curvenets",
+            "Curvenet Authoring",
+            lambda api: self._OpenCurvenetPanel(api))
+
         dataModel = self._api.dataModel
         # Plugins load before the stage opens: activate on stage
         # replacement and re-evaluate on every timeline change.
@@ -116,6 +123,7 @@ class RigExecUsdviewContainer(PluginContainer):
         menu = plugUIBuilder.findOrCreateMenu("RigExec")
         menu.addItem(self._reactivate)
         menu.addItem(self._volumeWeights)
+        menu.addItem(self._curvenets)
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring
@@ -176,6 +184,17 @@ class RigExecUsdviewContainer(PluginContainer):
             usdviewApi,
             setWeightOverlay=self._SetWeightOverlay,
             hasWeightOverlay=self._HasWeightOverlay)
+
+    def _OpenCurvenetPanel(self, usdviewApi):
+        # Same lazy sibling import as _OpenVolumeWeightPanel.
+        try:
+            import curvenetUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import curvenetUI
+
+        return curvenetUI.OpenCurvenetPanel(usdviewApi)
 
     def _FrameValue(self, frame=None):
         """

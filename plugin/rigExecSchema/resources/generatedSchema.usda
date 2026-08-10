@@ -1953,6 +1953,180 @@ class RigExecSmoothMover "RigExecSmoothMover" (
     )
 }
 
+class RigExecCurvenet "RigExecCurvenet" (
+    customData = {
+        string userDocBrief = '''A net of cubic splines profiling a surface, the rigging\r
+    representation of de Goes, Sheffler and Fleischer, "Character\r
+    Articulation through Profile Curves" (SIGGRAPH 2022), section 3.\r
+\r
+    Inherited `points` is the shared pool of control points -- knots AND\r
+    tangent handles -- in the PROJECTION pose, the pose the net was drawn\r
+    in.'''
+    }
+)
+{
+    vector3f[] accelerations (
+        customData = {
+            string userDocBrief = """If provided, 'accelerations' should be used with
+        velocities to compute positions between samples for the 'points'
+        attribute rather than interpolating between neighboring 'points'
+        samples."""
+        }
+    )
+    uniform bool doubleSided = 0 (
+        customData = {
+            string userDocBrief = """Although some renderers treat all parametric or polygonal
+        surfaces as if they were effectively laminae with outward-facing
+        normals on both sides, some renderers derive significant optimizations
+        by considering these surfaces to have only a single outward side,
+        typically determined by control-point winding order and/or 
+        orientation."""
+        }
+    )
+    float3[] extent (
+        customData = {
+            string userDocBrief = """Extent is a three dimensional range measuring the geometric
+        extent of the authored gprim in its own local space (i.e."""
+        }
+    )
+    color3f guide:displayColor = (0.9, 0.4, 1)
+    float guide:displayOpacity = 1
+    double guide:radius = 0 (
+        customData = {
+            string userDocBrief = "Knot marker radius for the viewport; zero draws no markers."
+        }
+    )
+    int64[] ids (
+        customData = {
+            string userDocBrief = """Ids are optional; if authored, the ids array should be the same
+                 length as the points array, specifying (at each timesample if
+                 point identities are changing) the id of each point."""
+        }
+    )
+    normal3f[] normals (
+        customData = {
+            string userDocBrief = """Provide an object-space orientation for individual points, 
+        which, depending on subclass, may define a surface, curve, or free 
+        points."""
+        }
+    )
+    uniform token orientation = "rightHanded" (
+        allowedTokens = ["rightHanded", "leftHanded"]
+        customData = {
+            string userDocBrief = """Orientation specifies whether the gprim's surface normal 
+        should be computed using the right hand rule, or the left hand rule."""
+        }
+    )
+    point3f[] points (
+        customData = {
+            string userDocBrief = """The primary geometry attribute for all PointBased
+        primitives, describes points in (local) space."""
+        }
+    )
+    color3f[] primvars:displayColor (
+        customData = {
+            string userDocBrief = '''It is useful to have an "official" colorSet that can be used
+        as a display or modeling color, even in the absence of any specified
+        shader for a gprim.'''
+        }
+    )
+    float[] primvars:displayOpacity (
+        customData = {
+            string userDocBrief = """Companion to displayColor that specifies opacity, broken
+        out as an independent attribute rather than an rgba color, both so that
+        each can be independently overridden, and because shaders rarely consume
+        rgba parameters."""
+        }
+    )
+    rel proxyPrim (
+        customData = {
+            string userDocBrief = '''The proxyPrim relationship allows us to link a
+        prim whose purpose is "render" to its (single target)
+        purpose="proxy" prim.'''
+        }
+    )
+    uniform token purpose = "default" (
+        allowedTokens = ["default", "render", "proxy", "guide"]
+        customData = {
+            string userDocBrief = """Purpose is a classification of geometry into categories that 
+        can each be independently included or excluded from traversals of prims 
+        on a stage, such as rendering or bounding-box computation traversals."""
+        }
+    )
+    uniform token rigExec:basis = "bezier" (
+        allowedTokens = ["bezier", "catmullRom"]
+        customData = {
+            string userDocBrief = "Curve basis."
+        }
+    )
+    uniform int rigExec:samplesPerSpline = 5 (
+        customData = {
+            string userDocBrief = """Sampling density before the mesh-resolution scaling of\r
+        section 3: the count per spline is this value times the ratio of the\r
+        spline's control polygon length to the surface's mean edge length."""
+        }
+    )
+    int[] rigExec:splineIndices = [] (
+        customData = {
+            string userDocBrief = "Four control point indices per cubic spline."
+        }
+    )
+    vector3f[] velocities (
+        customData = {
+            string userDocBrief = """If provided, 'velocities' should be used by renderers to 
+
+        compute positions between samples for the 'points' attribute, rather
+        than interpolating between neighboring 'points' samples."""
+        }
+    )
+    token visibility = "inherited" (
+        allowedTokens = ["inherited", "invisible"]
+        customData = {
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+        visibility that is supported by most DCC apps.'''
+        }
+    )
+    float[] widths (
+        customData = {
+            string userDocBrief = """Widths are defined as the diameter of the points, in 
+                 object space."""
+        }
+    )
+    uniform token[] xformOpOrder (
+        customData = {
+            string userDocBrief = """Encodes the sequence of transformation operations in the
+        order in which they should be pushed onto a transform stack while
+        visiting a UsdStage's prims in a graph traversal that will effect
+        the desired positioning for this prim and its descendant prims."""
+        }
+    )
+}
+
+class RigExecCurvenetMover "RigExecCurvenetMover" (
+    customData = {
+        string userDocBrief = """The Profile Mover: propagates a rigged curvenet's articulation\r
+    over one exact native UsdGeomPointBased points property (2022 paper\r
+    section 4).\r
+\r
+    Binding is precomputed once per epoch against the target's authored\r
+    base points -- the projection pose -- by cutting the mesh along the\r
+    curvenet and factorizing the resulting cut-aware Laplacian."""
+    }
+)
+{
+    float inputs:strength = 1 (
+        customData = {
+            string userDocBrief = """Blend of the solved surface against the incoming one, in\r
+        [0, 1]."""
+        }
+    )
+    rel rigExec:curvenet (
+        customData = {
+            string userDocBrief = "Exactly one RigExecCurvenet supplying the posed control points."
+        }
+    )
+}
+
 class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
     customData = {
         string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points\r

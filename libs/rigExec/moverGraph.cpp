@@ -9,7 +9,9 @@
 #include "rigExecMath/solvers.h"
 
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/hash.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/exec/vdf/connectorSpecs.h"
@@ -223,6 +225,31 @@ _RevisionNode::Compute(const VdfContext &ctx) const
                 return true;
             });
         return;
+    case RigExecRevisionOp::Curvenet:
+        _RunScratchKernel(
+            ctx, TfToken("curvenet"),
+            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
+                if (!p.curvenetBinding) {
+                    return false;
+                }
+                // The incoming points ARE the rest surface (§5): a curvenet
+                // layered on top of skinning deforms from the skinned shape,
+                // and when it is first in the chain they are the projection
+                // pose and the solve takes its fast path.
+                std::vector<GfVec3f> solved;
+                std::string error;
+                if (!RigExecEvaluateProfileMover(*p.curvenetBinding,
+                                                 p.auxPoints, *pts, p.strength,
+                                                 &solved, &error)) {
+                    return false;
+                }
+                if (solved.size() != pts->size()) {
+                    return false;
+                }
+                pts->swap(solved);
+                return true;
+            });
+        return;
     case RigExecRevisionOp::RecomputeNormals:
         _ComputeRecomputed(ctx, TfToken("recomputeNormals"));
         return;
@@ -406,7 +433,9 @@ RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
            topologyIndices == o.topologyIndices &&
            cagePoints == o.cagePoints && surfacePoints == o.surfacePoints &&
            bindCoords == o.bindCoords && driverFrames == o.driverFrames &&
-           widths == o.widths && blendInputs == o.blendInputs;
+           widths == o.widths && curvenet == o.curvenet &&
+           curvenetPoints == o.curvenetPoints &&
+           blendInputs == o.blendInputs;
 }
 
 std::optional<RigExecRevisionOp>
@@ -430,6 +459,9 @@ RigExecRevisionOpForSchema(const TfToken &schemaType, const TfToken &curveMode)
     if (schemaType == "RigExecSurfaceMover") {
         return RigExecRevisionOp::SurfaceProject;
     }
+    if (schemaType == "RigExecCurvenetMover") {
+        return RigExecRevisionOp::Curvenet;
+    }
     if (schemaType == "RigExecCurveMover") {
         // The curve mover's frozen signature branches on its authored mode.
         return curveMode == "emitGuidePoints"
@@ -437,6 +469,65 @@ RigExecRevisionOpForSchema(const TfToken &schemaType, const TfToken &curveMode)
             : RigExecRevisionOp::Ribbon;
     }
     return std::nullopt;
+}
+
+std::shared_ptr<const RigExecProfileMoverBinding>
+RigExecCurvenetBindCache::Resolve(
+    const SdfPath &mover, const SdfPath &target, size_t digest,
+    const std::function<bool(RigExecProfileMoverBinding *, std::string *)>
+        &build,
+    std::string *error)
+{
+    _Entry &entry = _entries[{mover, target}];
+    if (entry.digest == digest && (entry.binding || !entry.error.empty())) {
+        if (!entry.binding && error) {
+            *error = entry.error;
+        }
+        return entry.binding;
+    }
+
+    entry.digest = digest;
+    entry.binding.reset();
+    entry.error.clear();
+    auto built = std::make_shared<RigExecProfileMoverBinding>();
+    std::string reason;
+    if (!build(built.get(), &reason)) {
+        // Remembered, so a rig with an unbindable curvenet reports once
+        // instead of re-cutting the mesh on every frame.
+        entry.error = reason.empty() ? "curvenet bind failed" : reason;
+        if (error) {
+            *error = entry.error;
+        }
+        return nullptr;
+    }
+    // Reported once per (re)bind, not per frame: the cache exists precisely
+    // so this happens on a layout change and nowhere else.
+    const RigExecCutMeshReport &cut = built->report;
+    char summary[320];
+    std::snprintf(
+        summary, sizeof(summary),
+        "curvenet bind %s -> %s: %d cut faces, %d samples, %d cracks, "
+        "%d traced, %d unknowns, %zu factor nonzeros",
+        mover.GetString().c_str(), target.GetString().c_str(),
+        cut.cutFaceCount, cut.sampleCount, cut.crackCount, cut.tracedSegments,
+        built->cutMesh.unknownCount,
+        built->solver ? built->solver->GetFactorNonzeros() : size_t(0));
+    _pending.push_back(summary);
+    for (const std::string &warning : cut.warnings) {
+        _pending.push_back("curvenet bind " + mover.GetString() + ": " +
+                           warning);
+    }
+
+    entry.binding = std::move(built);
+    return entry.binding;
+}
+
+std::vector<std::string>
+RigExecCurvenetBindCache::TakeDiagnostics()
+{
+    std::vector<std::string> out;
+    out.swap(_pending);
+    return out;
 }
 
 namespace {
@@ -526,6 +617,21 @@ RigExecResolveRevisionBinding(
                 surfacePrim.AppendProperty(TfToken("faceVertexCounts"));
             binding.topologyIndices =
                 surfacePrim.AppendProperty(TfToken("faceVertexIndices"));
+        }
+    } else if (schemaType == "RigExecCurvenetMover") {
+        // The Profile Mover reads the target's own topology to cut it, and
+        // its authored base points are the projection pose the cut is
+        // computed against (§4.1).
+        binding.base = target;
+        binding.topologyCounts =
+            ownerPath.AppendProperty(TfToken("faceVertexCounts"));
+        binding.topologyIndices =
+            ownerPath.AppendProperty(TfToken("faceVertexIndices"));
+        const SdfPathVector nets = _Targets(moverPrim, "rigExec:curvenet");
+        if (!nets.empty()) {
+            binding.curvenet = nets[0].GetPrimPath();
+            binding.curvenetPoints =
+                binding.curvenet.AppendProperty(TfToken("points"));
         }
     } else if (schemaType == "RigExecCurveMover") {
         const SdfPathVector binds = _Targets(moverPrim, "rigExec:bindCoordinates");
@@ -751,6 +857,9 @@ RigExecAssembleParameters(
     case RigExecRevisionOp::EmitGuidePoints:
         params.kind = TfToken("emitGuidePoints");
         break;
+    case RigExecRevisionOp::Curvenet:
+        params.kind = TfToken("curvenet");
+        break;
     case RigExecRevisionOp::RecomputeNormals:
         params.kind = TfToken("recomputeNormals");
         break;
@@ -803,6 +912,115 @@ RigExecAssembleParameters(
             _Array<int>(moverPrim, binding.topologyIndices, time);
         params.valid = !params.topologyCounts.empty();
         break;
+
+    case RigExecRevisionOp::Curvenet: {
+        params.strength = _Float(moverPrim, "inputs:strength", 1.0f, time);
+        if (!std::isfinite(params.strength)) {
+            break;  // MoverFailed rather than a NaN surface
+        }
+        const UsdPrim netPrim =
+            binding.curvenet.IsEmpty()
+                ? UsdPrim()
+                : moverPrim.GetStage()->GetPrimAtPath(binding.curvenet);
+        if (!netPrim) {
+            break;  // no curvenet: MoverFailed pass-through
+        }
+
+        // The projection pose is the curvenet and the surface as AUTHORED --
+        // Default time on both. Everything the cut depends on is read here,
+        // and its digest is what decides whether the cache still applies.
+        const std::vector<GfVec3f> restNet = _Array<GfVec3f>(
+            moverPrim, binding.curvenetPoints, UsdTimeCode::Default());
+        std::vector<int> splineIndices;
+        if (const UsdAttribute a =
+                netPrim.GetAttribute(TfToken("rigExec:splineIndices"))) {
+            VtIntArray value;
+            a.Get(&value, UsdTimeCode::Default());
+            splineIndices.assign(value.begin(), value.end());
+        }
+        int samplesPerSpline = 5;
+        if (const UsdAttribute a =
+                netPrim.GetAttribute(TfToken("rigExec:samplesPerSpline"))) {
+            a.Get(&samplesPerSpline);
+        }
+        const TfToken basisToken = _Token(netPrim, "rigExec:basis", "bezier");
+        params.topologyCounts =
+            _Array<int>(moverPrim, binding.topologyCounts, UsdTimeCode::Default());
+        params.topologyIndices =
+            _Array<int>(moverPrim, binding.topologyIndices,
+                        UsdTimeCode::Default());
+        // The projection surface is the target's points at DEFAULT, not at
+        // the evaluated time. It is a fixed neutral pose by definition (§4.1
+        // cuts against it once), and reading the animated value instead would
+        // put a per-frame quantity in the bind digest -- re-cutting the mesh
+        // and re-factorizing its Laplacian on every frame, while also making
+        // the cut mean something different at each one.
+        params.restPoints = _Array<GfVec3f>(moverPrim, binding.base,
+                                            UsdTimeCode::Default());
+        if (restNet.empty() || splineIndices.empty() ||
+            params.topologyCounts.empty() || params.restPoints.empty()) {
+            break;
+        }
+
+        // The posed net: the evaluator hands over the result of the
+        // curvenet's own mover chain when it has one, so knots articulated by
+        // ordinary movers arrive already posed. Otherwise the authored value
+        // at this time, which is what a keyframed or sculpted net gives.
+        params.auxPoints = values.curvenetPoints.empty()
+                               ? _Array<GfVec3f>(moverPrim,
+                                                 binding.curvenetPoints, time)
+                               : values.curvenetPoints;
+        if (params.auxPoints.size() != restNet.size()) {
+            break;  // the pool changed shape under the bind
+        }
+
+        size_t digest = TfHash()(basisToken);
+        digest = TfHash::Combine(digest, samplesPerSpline);
+        for (int index : splineIndices) {
+            digest = TfHash::Combine(digest, index);
+        }
+        for (const GfVec3f &p : restNet) {
+            digest = TfHash::Combine(digest, p[0], p[1], p[2]);
+        }
+        for (const GfVec3f &p : params.restPoints) {
+            digest = TfHash::Combine(digest, p[0], p[1], p[2]);
+        }
+        for (int c : params.topologyCounts) {
+            digest = TfHash::Combine(digest, c);
+        }
+        for (int i : params.topologyIndices) {
+            digest = TfHash::Combine(digest, i);
+        }
+
+        auto build = [&](RigExecProfileMoverBinding *out, std::string *why) {
+            RigExecCurvenetTopology topology;
+            const RigExecCurvenetBasis basis =
+                (basisToken == "catmullRom")
+                    ? RigExecCurvenetBasis::CatmullRom
+                    : RigExecCurvenetBasis::Bezier;
+            if (!RigExecBuildCurvenetTopology(splineIndices, restNet.size(),
+                                              basis, restNet, nullptr,
+                                              &topology, why)) {
+                return false;
+            }
+            return RigExecBindProfileMover(
+                topology, restNet, params.restPoints, params.topologyCounts,
+                params.topologyIndices, samplesPerSpline, out, why);
+        };
+
+        std::string reason;
+        if (values.curvenetCache) {
+            params.curvenetBinding = values.curvenetCache->Resolve(
+                binding.moverPath, binding.target, digest, build, &reason);
+        } else {
+            auto fresh = std::make_shared<RigExecProfileMoverBinding>();
+            if (build(fresh.get(), &reason)) {
+                params.curvenetBinding = fresh;
+            }
+        }
+        params.valid = params.curvenetBinding != nullptr;
+        break;
+    }
 
     case RigExecRevisionOp::Lattice: {
         params.restPoints = values.basePoints;

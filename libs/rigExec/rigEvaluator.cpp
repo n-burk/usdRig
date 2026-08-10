@@ -625,6 +625,11 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             appendRelTargets(prim, "rigExec:bindCoordinates", false);
             appendRelTargets(prim, "rigExec:driverFrames", false);
             appendRelTargets(prim, "rigExec:driverCurve", false);
+            // Authored order, not sorted: the binding takes targets[0], so
+            // reordering a multi-target relationship changes the wiring and
+            // must therefore change the digest (the ordering class audited in
+            // codex rounds 8-9).
+            appendRelTargets(prim, "rigExec:curvenet", false);
             for (const SdfPath &w :
                  appendRelTargets(prim, "rigExec:weightObject", true)) {
                 appendWeightObject(w);
@@ -1019,6 +1024,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     TfToken("RigExecLatticeMover"),
                     TfToken("RigExecSurfaceMover"),
                     TfToken("RigExecCurveMover"),
+                    TfToken("RigExecCurvenetMover"),
                     TfToken("RigExecBlendShapeMover")};
                 if (pointsMoverTypes.count(record.schemaType)) {
                     for (const SdfPath &t : record.targets) {
@@ -1052,7 +1058,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // target's parameters onto every application.
             if ((record.schemaType == "RigExecSmoothMover" ||
                  record.schemaType == "RigExecVolumeCorrectMover" ||
-                 record.schemaType == "RigExecLatticeMover") &&
+                 record.schemaType == "RigExecLatticeMover" ||
+                 record.schemaType == "RigExecCurvenetMover") &&
                 record.targets.size() != 1) {
                 reportError(record.schemaType.GetString() + " " +
                             prim.GetPath().GetString() +
@@ -3033,6 +3040,22 @@ RigExecRigEvaluator::_EvaluateChain(
                     strength);
             }
             std::copy(scratch.begin(), scratch.end(), points.begin());
+        } else if (type == "RigExecCurvenetMover") {
+            // No scalar oracle. Every other mover here is a few lines of
+            // arithmetic that can be written twice independently, which is
+            // what makes the parity check worth anything; the Profile Mover
+            // is a mesh cut plus two sparse solves, and a second
+            // "independent" copy of that would be the same code with the
+            // same bugs. Say so rather than leave the points untouched and
+            // let parity mode report a difference it cannot explain.
+            if (diagnostics) {
+                diagnostics->push_back(
+                    "cpu parity: " + prim.GetPath().GetString() +
+                    " is a RigExecCurvenetMover, which has no scalar "
+                    "reference kernel; its chain is covered by "
+                    "testRigExecCurvenet instead");
+            }
+            continue;
         } else if (type == "RigExecLatticeMover") {
             // Independent of RigExecAssembleParameters on purpose: this is the
             // parity oracle, so it resolves its own inputs off the stage. A
@@ -3538,7 +3561,35 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // usdview once already (see docs/mover-graph-cutover.md).
     size_t graphChainsChecked = 0;
     size_t graphRevisionsBuilt = 0;
+
+    // Curvenet chains run FIRST.
+    //
+    // A curvenet is a UsdGeomPointBased, so its knots are posed by ordinary
+    // movers -- which is the paper's whole rigging model, and the reason no
+    // curvenet-specific articulation code exists. For a Profile Mover to see
+    // an articulated net, that net's own chain has to have been evaluated
+    // already, and _graphChains is keyed by SdfPath, so its natural order is
+    // alphabetical and says nothing about this dependency. Two passes give
+    // the ordering; a curvenet driven by another curvenet is not supported
+    // and falls back to the authored points, which is why pass 0 does not
+    // recurse.
+    std::vector<SdfPath> chainOrder;
+    chainOrder.reserve(_graphChains.size());
+    std::vector<SdfPath> laterChains;
     for (const auto &[target, revisions] : _graphChains) {
+        const UsdPrim owner = _stage->GetPrimAtPath(target.GetPrimPath());
+        if (owner && owner.GetTypeName() == "RigExecCurvenet") {
+            chainOrder.push_back(target);
+        } else {
+            laterChains.push_back(target);
+        }
+    }
+    chainOrder.insert(chainOrder.end(), laterChains.begin(),
+                      laterChains.end());
+
+    for (const SdfPath &target : chainOrder) {
+        const std::vector<_GraphRevision> &revisions =
+            _graphChains.find(target)->second;
         VtVec3fArray basePoints;
         const UsdAttribute baseAttr = _stage->GetAttributeAtPath(target);
         if (!baseAttr || !baseAttr.Get(&basePoints, time)) {
@@ -3643,6 +3694,19 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 }
             }
             values.basePoints.assign(basePoints.begin(), basePoints.end());
+            if (revision.op == RigExecRevisionOp::Curvenet) {
+                values.curvenetCache = &_curvenetBindings;
+                // The curvenet's own chain result if it has one; pass 0 above
+                // guarantees it has already been computed.
+                const auto posed =
+                    pose.movedProperties.find(revision.binding.curvenetPoints);
+                if (posed != pose.movedProperties.end() &&
+                    posed->second.IsHolding<VtVec3fArray>()) {
+                    const VtVec3fArray &net =
+                        posed->second.UncheckedGet<VtVec3fArray>();
+                    values.curvenetPoints.assign(net.begin(), net.end());
+                }
+            }
             if (!revision.blendChannelTaps.empty()) {
                 std::vector<RigExecBlendChannel> channels;
                 channels.reserve(revision.blendChannelTaps.size());
@@ -3731,6 +3795,23 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 !graphIt->second.IsHolding<VtVec3fArray>()) {
                 continue;
             }
+            // A Profile Mover has no scalar oracle (see _EvaluateChain), so
+            // comparing against one reports a "mismatch" that means only
+            // "the reference does not implement this". Skipped and said,
+            // rather than counted as a defect.
+            bool hasCurvenet = false;
+            for (const RigExecMoverRecord *mover : chain) {
+                if (mover->schemaType == "RigExecCurvenetMover") {
+                    hasCurvenet = true;
+                    break;
+                }
+            }
+            if (hasCurvenet) {
+                pose.diagnostics.push_back(
+                    "cpu reference parity: " + target.GetString() +
+                    " skipped, its chain contains a RigExecCurvenetMover");
+                continue;
+            }
             std::vector<std::string> quiet;
             const VtVec3fArray reference =
                 _EvaluateChain(target, chain, pose, time, &quiet);
@@ -3756,6 +3837,13 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         }
     }
 
+    // Whatever the Profile Mover binds reported. Emitted here rather than
+    // from inside packet assembly because that has no diagnostic channel,
+    // and drained so a cached bind stays silent on every later frame.
+    for (std::string &message : _curvenetBindings.TakeDiagnostics()) {
+        pose.diagnostics.push_back(std::move(message));
+    }
+
     // Reported unconditionally, including the zero case: a parity pass that
     // silently checked nothing is indistinguishable from one that passed, and
     // that is exactly how a no-op hides (spec §7.4 parity reporting).
@@ -3777,6 +3865,23 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             }
         }
         for (const auto &[target, chain] : chains) {
+            // A chain containing a Profile Mover has no scalar oracle (see
+            // _EvaluateChain), so publishing a CPU value for it would report
+            // a "mismatch" that means only "the reference does not implement
+            // this". Skip the chain and say so instead.
+            bool hasCurvenet = false;
+            for (const RigExecMoverRecord *mover : chain) {
+                if (mover->schemaType == "RigExecCurvenetMover") {
+                    hasCurvenet = true;
+                    break;
+                }
+            }
+            if (hasCurvenet) {
+                pose.diagnostics.push_back(
+                    "cpu parity: " + target.GetString() +
+                    " skipped, its chain contains a RigExecCurvenetMover");
+                continue;
+            }
             pose.movedPropertiesCpu[target] = VtValue(_EvaluateChain(
                 target, chain, pose, time, &pose.diagnostics));
         }

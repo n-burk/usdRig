@@ -62,6 +62,10 @@ add_library(rigExecMath STATIC
     libs/rigExecMath/geometryKernels.cpp
     libs/rigExecMath/weightFields.cpp
     libs/rigExecMath/simdKernels.cpp
+    libs/rigExecMath/curvenet.cpp
+    libs/rigExecMath/sparseSolve.cpp
+    libs/rigExecMath/cutMesh.cpp
+    libs/rigExecMath/profileMover.cpp
 )
 target_include_directories(rigExecMath PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -150,6 +154,10 @@ set(_rigexec_schema_resource_define
 add_executable(testRigExecMath tests/testRigExecMath.cpp)
 target_link_libraries(testRigExecMath PRIVATE rigExecMath)
 add_test(NAME testRigExecMath COMMAND testRigExecMath)
+
+add_executable(testRigExecCurvenet tests/testRigExecCurvenet.cpp)
+target_link_libraries(testRigExecCurvenet PRIVATE rigExecMath)
+add_test(NAME testRigExecCurvenet COMMAND testRigExecCurvenet)
 
 add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
 target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)
@@ -300,6 +308,7 @@ install(FILES
         plugin/rigExecUsdview/plugInfo.json
         plugin/rigExecUsdview/rigExecUsdview.py
         plugin/rigExecUsdview/volumeWeightUI.py
+        plugin/rigExecUsdview/curvenetUI.py
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview")
 
 # rigExecImaging is the one plugin whose plugInfo.json names a library, so it

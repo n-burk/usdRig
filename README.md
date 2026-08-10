@@ -55,14 +55,27 @@ IK/FK blend, twist distribution, aim constraints, and ribbons compile and
 evaluate as OpenExec computations, pulled through batched prepared requests
 (`RigExecTapSet`) with native USD value resolution (splines via `Ts`, sparse
 timeSamples) supplying every animated input at explicit `ChangeTime` time
-codes. All ten geometry revision ops — matrix, blendShape, volumeCorrect,
-smooth, lattice, surfaceProject, ribbon, emitGuidePoints, recomputeNormals,
+codes. All eleven geometry revision ops — matrix, blendShape, volumeCorrect,
+smooth, lattice, surfaceProject, ribbon, emitGuidePoints, **curvenet**,
+recomputeNormals,
 recomputeExtent — execute through the mover graph, with chained and mixed-op
 composition, weighting, cardinality guards, and every pass-through path
 (failed status, invalid packet, kind mismatch) under test. Hydra publication
 (spec §10) drives **stock usdview** live: `launch_usdview.bat
 examples\ArmShotAnim.usda` shows the arm deforming from OpenExec evaluation
 per frame.
+
+**Curvenets and the Profile Mover.** Pixar's curve-based articulation
+(de Goes, Sheffler & Fleischer, SIGGRAPH 2022) is implemented end to end:
+`RigExecCurvenet` is a net of cubic splines over a shared control-point
+pool, and `RigExecCurvenetMover` cuts the target mesh along it, builds the
+cut-aware polygonal Laplacian, and reconstructs the surface from the net's
+per-side deformation gradients. Because the curvenet is a
+`UsdGeomPointBased`, its knots are posed by the ORDINARY movers — which
+is the paper's own rigging model, and needs no curvenet-specific
+articulation code. See `docs/curvenet.md` (the papers are in
+`docs/papers/`), `examples/12_CurvenetProfile.usda`, and the authoring
+panel under the usdview **RigExec ▸ Curvenet Authoring** menu.
 
 **Prototype means** the seam is proven, not the full contracts.
 

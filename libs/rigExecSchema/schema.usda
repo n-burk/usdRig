@@ -1231,6 +1231,91 @@ class RigExecSmoothMover "RigExecSmoothMover" (
     )
 }
 
+class RigExecCurvenet "RigExecCurvenet" (
+    inherits = </Points>
+    customData = {
+        string className = "Curvenet"
+    }
+    doc = """A net of cubic splines profiling a surface, the rigging
+    representation of de Goes, Sheffler and Fleischer, "Character
+    Articulation through Profile Curves" (SIGGRAPH 2022), section 3.
+
+    Inherited `points` is the shared pool of control points -- knots AND
+    tangent handles -- in the PROJECTION pose, the pose the net was drawn
+    in. `rigExec:splineIndices` names four of them per cubic spline, and
+    two splines meet because they name the SAME pool entry: index sharing
+    is the whole connectivity model, which is what detaches the rig from
+    the surface tessellation.
+
+    The derived structure the deformation needs is computed, never
+    authored: an endpoint shared by three or more splines is an
+    intersection, one incident to a single spline is an anchor, and the
+    chains between them are the curves. Orientation and non-uniform scale
+    along every curve follow from that layout, so no normals, twists or
+    handles are authored anywhere.
+
+    Being a UsdGeomPointBased is deliberate: the pool is an exact native
+    point3f[], so every existing RigExec mover can pose the knots with no
+    curvenet-specific rigging code, which is what the paper means by
+    articulating knots "using traditional rigging tools"."""
+)
+{
+    int[] rigExec:splineIndices = [] (
+        doc = """Four control point indices per cubic spline. For the bezier
+        basis they are p0, h0, h1, p1, so entries 0 and 3 are the knots and
+        the two between are tangent handles."""
+    )
+    uniform token rigExec:basis = "bezier" (
+        allowedTokens = ["bezier", "catmullRom"]
+        doc = """Curve basis. "bezier" is the paper's cubic Bezier. The
+        centripetal Catmull-Rom of the 2026 face-parametrization talk puts
+        every control point exactly on the curve, which suits nets traced
+        onto a surface."""
+    )
+    uniform int rigExec:samplesPerSpline = 5 (
+        doc = """Sampling density before the mesh-resolution scaling of
+        section 3: the count per spline is this value times the ratio of the
+        spline's control polygon length to the surface's mean edge length."""
+    )
+    color3f guide:displayColor = (0.9, 0.4, 1)
+    float guide:displayOpacity = 1
+    double guide:radius = 0 (
+        doc = "Knot marker radius for the viewport; zero draws no markers."
+    )
+}
+
+class RigExecCurvenetMover "RigExecCurvenetMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "CurvenetMover"
+    }
+    doc = """The Profile Mover: propagates a rigged curvenet's articulation
+    over one exact native UsdGeomPointBased points property (2022 paper
+    section 4).
+
+    Binding is precomputed once per epoch against the target's authored
+    base points -- the projection pose -- by cutting the mesh along the
+    curvenet and factorizing the resulting cut-aware Laplacian. Each frame
+    the mover interpolates the curvenet's per-side deformation gradients
+    over that cut-mesh and reconstructs vertex positions, so the surface
+    reproduces the curves while keeping its own detail, and each side of a
+    curve deforms independently.
+
+    The surface this deforms FROM is whatever the preceding revision in the
+    chain produced, which is exactly the paper's section 5 separation of
+    the projection pose from the rest pose: a curvenet layers over skinning,
+    another curvenet, or a simulation with no extra setup."""
+)
+{
+    rel rigExec:curvenet (
+        doc = "Exactly one RigExecCurvenet supplying the posed control points."
+    )
+    float inputs:strength = 1 (
+        doc = """Blend of the solved surface against the incoming one, in
+        [0, 1]. Applied after the solve, so zero is exactly a no-op."""
+    )
+}
+
 class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
     inherits = </Typed>
     customData = {
