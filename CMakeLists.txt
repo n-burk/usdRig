@@ -59,6 +59,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 add_library(rigExecMath STATIC
     libs/rigExecMath/pointFrame.cpp
     libs/rigExecMath/solvers.cpp
+    libs/rigExecMath/propertyMath.cpp
     libs/rigExecMath/geometryKernels.cpp
     libs/rigExecMath/weightFields.cpp
     libs/rigExecMath/simdKernels.cpp

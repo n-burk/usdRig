@@ -6,6 +6,7 @@
 //
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/propertyMath.h"
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
 
@@ -713,6 +714,105 @@ TestWeightedMatrix()
     CHECK(Near(RigExecApplyWeightedMatrix(p, t, 0.5), GfVec3d(1, 2, 1)));
 }
 
+// Property-domain math movers: the five float/vec3f operations, the two
+// matrix ones, and the uniform weight rule that wraps all of them.
+static void
+TestPropertyMath()
+{
+    // Unknown operations are rejected, not defaulted: the operation selects
+    // the kernel, and quietly computing a different one is the failure mode
+    // the return value exists to prevent.
+    RigExecPropertyOp parsed;
+    CHECK(RigExecParsePropertyOp(TfToken("clamp"), &parsed));
+    CHECK(parsed == RigExecPropertyOp::Clamp);
+    CHECK(!RigExecParsePropertyOp(TfToken("smoothstep"), &parsed));
+    CHECK(!RigExecParsePropertyOp(TfToken(), &parsed));
+
+    auto floatParams = [](RigExecPropertyOp op, float value, float lo,
+                          float hi, float w) {
+        RigExecPropertyMathParams<float> p;
+        p.op = op;
+        p.value = value;
+        p.min = lo;
+        p.max = hi;
+        p.weight = w;
+        return p;
+    };
+
+    CHECK(std::abs(RigExecApplyFloatMath(
+              2.0f, floatParams(RigExecPropertyOp::Add, 3, 0, 1, 1)) -
+                   5.0f) < 1e-6f);
+    CHECK(std::abs(RigExecApplyFloatMath(
+              2.0f, floatParams(RigExecPropertyOp::Multiply, 3, 0, 1, 1)) -
+                   6.0f) < 1e-6f);
+    CHECK(std::abs(RigExecApplyFloatMath(
+              2.5f, floatParams(RigExecPropertyOp::Clamp, 0, 0, 1, 1)) -
+                   1.0f) < 1e-6f);
+    CHECK(std::abs(RigExecApplyFloatMath(
+              -0.25f, floatParams(RigExecPropertyOp::Clamp, 0, 0, 1, 1))) <
+          1e-6f);
+    CHECK(std::abs(RigExecApplyFloatMath(
+              0.5f, floatParams(RigExecPropertyOp::Blend, 1, 0, 1, 1)) -
+                   1.0f) < 1e-6f);
+
+    // remap normalizes [min, max] -> [0, 1] and deliberately does NOT clamp:
+    // an out-of-range input stays out of range so a following clamp mover is
+    // the thing that bounds it, and the two operations stay distinguishable.
+    CHECK(std::abs(RigExecApplyFloatMath(
+              5.0f, floatParams(RigExecPropertyOp::Remap, 0, 0, 10, 1)) -
+                   0.5f) < 1e-6f);
+    CHECK(RigExecApplyFloatMath(
+              20.0f, floatParams(RigExecPropertyOp::Remap, 0, 0, 10, 1)) >
+          1.5f);
+    // A zero span has no meaningful normalization; 0 rather than an infinity.
+    CHECK(std::abs(RigExecApplyFloatMath(
+              5.0f, floatParams(RigExecPropertyOp::Remap, 0, 3, 3, 1))) <
+          1e-6f);
+
+    // The weight is the uniform mover blend: 0 is a pass-through, 1 is the
+    // operation outright, and the midpoint is halfway between them.
+    CHECK(std::abs(RigExecApplyFloatMath(
+              2.0f, floatParams(RigExecPropertyOp::Add, 4, 0, 1, 0)) -
+                   2.0f) < 1e-6f);
+    CHECK(std::abs(RigExecApplyFloatMath(
+              2.0f, floatParams(RigExecPropertyOp::Add, 4, 0, 1, 0.5f)) -
+                   4.0f) < 1e-6f);
+
+    // Vec3f is component-wise in every operation, bounds included.
+    RigExecPropertyMathParams<GfVec3f> v;
+    v.op = RigExecPropertyOp::Add;
+    v.value = GfVec3f(0, 2, 0);
+    CHECK(Near(GfVec3d(RigExecApplyVec3fMath(GfVec3f(0, 3, 0), v)),
+               GfVec3d(0, 5, 0), 1e-6));
+    v.op = RigExecPropertyOp::Clamp;
+    v.min = GfVec3f(0, 0, 0);
+    v.max = GfVec3f(1, 10, 1);
+    CHECK(Near(GfVec3d(RigExecApplyVec3fMath(GfVec3f(-1, 5, 3), v)),
+               GfVec3d(0, 5, 1), 1e-6));
+
+    // Matrix: multiply post-multiplies (row-vector convention), so the
+    // authored value is applied AFTER the incoming matrix.
+    GfMatrix4d base(1.0), offset(1.0), out(1.0);
+    base.SetTranslate(GfVec3d(1, 0, 0));
+    offset.SetTranslate(GfVec3d(0, 5, 0));
+    CHECK(RigExecApplyMatrixMath(base, RigExecPropertyOp::Multiply, offset,
+                                 1.0f, &out));
+    CHECK(Near(out.ExtractTranslation(), GfVec3d(1, 5, 0), 1e-9));
+    // Weight 0 leaves the incoming matrix exactly where it was.
+    CHECK(RigExecApplyMatrixMath(base, RigExecPropertyOp::Multiply, offset,
+                                 0.0f, &out));
+    CHECK(Near(out.ExtractTranslation(), GfVec3d(1, 0, 0), 1e-9));
+    CHECK(RigExecApplyMatrixMath(base, RigExecPropertyOp::Blend, offset, 1.0f,
+                                 &out));
+    CHECK(Near(out.ExtractTranslation(), GfVec3d(0, 5, 0), 1e-9));
+    // add/clamp/remap have no matrix meaning and are refused rather than
+    // approximated.
+    CHECK(!RigExecApplyMatrixMath(base, RigExecPropertyOp::Add, offset, 1.0f,
+                                  &out));
+    CHECK(!RigExecApplyMatrixMath(base, RigExecPropertyOp::Clamp, offset, 1.0f,
+                                  &out));
+}
+
 int
 main()
 {
@@ -734,6 +834,7 @@ main()
     TestGeometryKernels();
     TestSimdParity();
     TestWeightedMatrix();
+    TestPropertyMath();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
