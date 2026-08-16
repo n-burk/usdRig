@@ -28,27 +28,39 @@ def _LibraryFileName():
     return "librigExecImaging.so"
 
 
-def _LoadRigExecImaging():
+def ImagingLibraryPath():
+    """Where rigExecImaging is, for this platform and this layout.
+
+    Public because the testusdview scripts load the same library directly to
+    read the generation counter and drive the overlay; sharing this keeps the
+    platform naming and the search order in one place instead of letting each
+    caller guess at a path.
+
+    RIGEXEC_IMAGING_DLL overrides the search entirely.
+    """
     explicit = os.environ.get("RIGEXEC_IMAGING_DLL")
     if explicit:
-        dllPath = explicit
-    else:
-        moduleDir = os.path.dirname(os.path.abspath(__file__))
-        # Installed layout:
-        #   <prefix>/lib/python/rigExecUsdview/rigExecUsdview.py
-        #   <prefix>/lib/librigExecImaging.*
-        # Source/build layout remains a supported developer fallback:
-        #   <repo>/plugin/rigExecUsdview/rigExecUsdview.py
-        #   <repo>/build/librigExecImaging.*
-        candidates = [
-            os.path.normpath(os.path.join(
-                moduleDir, "..", "..", _LibraryFileName())),
-            os.path.normpath(os.path.join(
-                moduleDir, "..", "..", "build", _LibraryFileName())),
-        ]
-        dllPath = next((path for path in candidates if os.path.isfile(path)),
-                       candidates[0])
-    lib = ctypes.CDLL(dllPath)
+        return explicit
+
+    moduleDir = os.path.dirname(os.path.abspath(__file__))
+    # Installed layout:
+    #   <prefix>/lib/python/rigExecUsdview/rigExecUsdview.py
+    #   <prefix>/lib/librigExecImaging.*
+    # Source/build layout remains a supported developer fallback:
+    #   <repo>/plugin/rigExecUsdview/rigExecUsdview.py
+    #   <repo>/build/librigExecImaging.*
+    candidates = [
+        os.path.normpath(os.path.join(
+            moduleDir, "..", "..", _LibraryFileName())),
+        os.path.normpath(os.path.join(
+            moduleDir, "..", "..", "build", _LibraryFileName())),
+    ]
+    return next((path for path in candidates if os.path.isfile(path)),
+                candidates[0])
+
+
+def _LoadRigExecImaging():
+    lib = ctypes.CDLL(ImagingLibraryPath())
     lib.RigExecImaging_Activate.argtypes = [
         ctypes.c_longlong, ctypes.c_char_p, ctypes.c_double]
     lib.RigExecImaging_Activate.restype = ctypes.c_int
@@ -310,6 +322,15 @@ class RigExecUsdviewContainer(PluginContainer):
             cacheId, b"", self._FrameValue())
         if status == 0:
             self._active = True
+            # RigExec controls/joints/guides are purpose=guide — Storm only draws
+            # them when the viewer has guide purpose enabled.  Auto-enable it
+            # the moment a RigExecRig is found so a fresh launch shows the rig.
+            try:
+                vs = self._api.dataModel.viewSettings
+                if not vs.displayGuide:
+                    vs.displayGuide = True
+            except Exception:
+                pass
         else:
             Tf.Warn("rigExecUsdview: activation failed (%d)" % status)
             self._ReleaseCachedStage()

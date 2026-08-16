@@ -484,11 +484,11 @@ and a silent no-op are indistinguishable otherwise, which is how the
 
 ```
 cmake --build build && ctest --test-dir build     # 4 suites
-run_probe.bat <scratch>/verify_rigs.py        # 9 examples, joint counts
-run_probe.bat <scratch>/verify_variants.py    # 3 ArmRig variants + shot
-run_probe.bat <scratch>/verify_surface.py     # authoring surface stays clean
-run_probe.bat <scratch>/verify_edges.py       # no-joint rig, stale manifests
-run_probe.bat <scratch>/verify_no_joint_authoring.py  # nothing leaked on stage
+bin/run_probe.bat <scratch>/verify_rigs.py        # 9 examples, joint counts
+bin/run_probe.bat <scratch>/verify_variants.py    # 3 ArmRig variants + shot
+bin/run_probe.bat <scratch>/verify_surface.py     # authoring surface stays clean
+bin/run_probe.bat <scratch>/verify_edges.py       # no-joint rig, stale manifests
+bin/run_probe.bat <scratch>/verify_no_joint_authoring.py  # nothing leaked on stage
 ```
 
 Sharpest checks, in order of what they would catch:

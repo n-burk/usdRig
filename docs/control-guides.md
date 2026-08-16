@@ -75,7 +75,7 @@ Each attribute carries a doc string in the style of the `RigExecJoint` guide
 attrs (see `guide:radius` there). The codeless plugin
 `plugin/rigExecSchema/resources/generatedSchema.usda` is regenerated with
 `usdGenSchema` from the new install once USD finishes building (recipe:
-`gen_schema.bat`, run its steps manually on macOS with
+`bin/gen_schema.bat`, run its steps manually on macOS with
 `PYTHONPATH=$USD/lib/python`).
 
 ## Evaluator (`libs/rigExec/rigEvaluator.{h,cpp}`)

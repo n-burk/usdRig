@@ -40,10 +40,12 @@ def _Points(observer):
 
 
 def testUsdviewInputFunction(appController):
-    dllPath = os.environ.get(
-        "RIGEXEC_IMAGING_DLL",
-        r"D:\work\usdRig\usdRig\build\rigExecImaging.dll")
-    dll = ctypes.CDLL(dllPath)
+    # The plugin owns the platform naming (.dll/.dylib/.so) and the
+    # installed-vs-build search order; asking it keeps this script working on
+    # every platform without repeating either rule.
+    from rigExecUsdview import ImagingLibraryPath
+
+    dll = ctypes.CDLL(ImagingLibraryPath())
     dll.RigExecImaging_GetGeneration.restype = ctypes.c_longlong
 
     dataModel = appController._dataModel

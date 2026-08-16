@@ -29,6 +29,17 @@ build/
 .codex/
 .cache/
 
+# ---------------------------------------------------------------------------
+# Secrets
+#
+# MUSE_API_KEY and friends reach the assistant through the environment that
+# launches usdview (bin/launch.sh), never through a file the code reads. A
+# dotenv file is a local convenience for exporting them and must never be
+# committed. Matches both a plain `.env` file and a `.env/` directory.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+
 # Python
 __pycache__/
 *.py[cod]
