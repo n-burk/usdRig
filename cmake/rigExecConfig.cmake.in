@@ -14,7 +14,8 @@ set_and_check(rigExec_LIBRARY_DIR "@PACKAGE_RIGEXEC_INSTALL_LIBDIR@")
 set(rigExec_PLUGINPATHS
     "${rigExec_PLUGIN_DIR}/rigExecSchema/resources"
     "${rigExec_PLUGIN_DIR}/rigExecImaging/resources"
-    "${rigExec_PYTHON_DIR}/rigExecUsdview")
+    "${rigExec_PYTHON_DIR}/rigExecUsdview"
+    "${rigExec_PYTHON_DIR}/museAssistant")
 
 # RigExec's public link interface exposes OpenUSD imported targets (usd, sdf,
 # exec, vdf, ...), so consumers need the same pxr package this was built

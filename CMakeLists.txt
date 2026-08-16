@@ -311,6 +311,15 @@ install(FILES
         plugin/rigExecUsdview/curvenetUI.py
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview")
 
+install(FILES
+        plugin/museAssistant/plugInfo.json
+        plugin/museAssistant/museAssistant.py
+        # museAgent.py carries the agent core (message shaping, tool loop,
+        # image metadata); museAssistant imports it, so shipping one without
+        # the other installs a plugin that fails at import.
+        plugin/museAssistant/museAgent.py
+    DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/museAssistant")
+
 # rigExecImaging is the one plugin whose plugInfo.json names a library, so it
 # is generated from a template rather than checked in: the filename is
 # .dll/.so/.dylib depending on the platform, and $<TARGET_FILE_NAME:> is the

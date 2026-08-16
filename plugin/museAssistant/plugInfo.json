@@ -1,0 +1,21 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "museAssistant.MuseAssistantContainer": {
+                        "bases": [
+                            "pxr.Usdviewq.plugin.PluginContainer"
+                        ],
+                        "displayName": "Meta Muse Assistant"
+                    }
+                }
+            },
+            "LibraryPath": "",
+            "Name": "museAssistant",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "python"
+        }
+    ]
+}
