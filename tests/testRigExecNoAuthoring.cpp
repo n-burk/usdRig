@@ -232,7 +232,7 @@ TestEveryExampleAuthorsNothing(const std::string &examplesDir)
         }
         SdfPath rigPath;
         for (const UsdPrim &p : stage->Traverse()) {
-            if (p.GetTypeName() == TfToken("RigExecRig")) {
+            if (p.GetTypeName() == TfToken("RigExecRoot")) {
                 rigPath = p.GetPath();
                 break;
             }

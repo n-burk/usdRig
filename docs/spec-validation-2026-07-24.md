@@ -1,3 +1,10 @@
+> **Naming note (added after the fact, 2026-08-16).** This document is the dated
+> record of the v0.1 architecture spec and is left verbatim. One name has since
+> changed in the implementation: the rig root prim type **`RigExecRig` is now
+> `RigExecRoot`**. Every occurrence of `RigExecRig` below refers to it. No
+> compatibility alias exists -- a stage still authoring `RigExecRig` has an
+> unknown prim type and no rig is discovered on it.
+
 Character Rig Execution Engine — Architecture Spec & Implementation Plan (v0.1)
 
 **Codename:** RigExec  

@@ -36,7 +36,7 @@
 
 def Xform "TailAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "TailAsset"
 

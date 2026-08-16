@@ -142,7 +142,7 @@ def testUsdviewInputFunction(appController):
     # Toggling the checkbox HIDES rather than removes, and must not raise.
     #
     # Removing was the original design and it was wrong twice over: on a
-    # stage carrying a RigExecRig every prim add/remove resyncs and
+    # stage carrying a RigExecRoot every prim add/remove resyncs and
     # re-evaluates the whole rig, and that re-evaluation posts a Tf error
     # which Python then raises out of whatever call comes next -- here, out
     # of the checkbox handler itself.

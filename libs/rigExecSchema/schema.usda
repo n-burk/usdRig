@@ -71,10 +71,10 @@ class "RigExecMoverAPI" (
 # Rig root
 ################################################################
 
-class RigExecRig "RigExecRig" (
+class RigExecRoot "RigExecRoot" (
     inherits = </Typed>
     customData = {
-        string className = "Rig"
+        string className = "Root"
     }
     doc = """Character root: partition and namespace root for control,
     joint, and mover discovery (spec section 4.1). Publishes

@@ -134,7 +134,7 @@ Delete it with this item; it is what drags in `framePolicy` / `zeroSidePolicy`
 
 Zero examples, zero code references. `RigExecTapAPI` describes a tap
 alias/role feature the tap set does not consult; `RigExecPartitionAPI`
-duplicates `RigExecRig.rigExec:partition`, which every example does author.
+duplicates `RigExecRoot.rigExec:partition`, which every example does author.
 
 **Remove:** both classes.
 

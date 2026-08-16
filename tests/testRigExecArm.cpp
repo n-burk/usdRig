@@ -740,7 +740,7 @@ TestBlendDeltasUseBase()
                           SdfValueTypeNames->Point3fArray).Set(shapePoints);
 
     // Rig: one joint posed as a pure +2Y translation.
-    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRig"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
     UsdPrim joint = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/J"),
                                       TfToken("RigExecJoint"));
     // Ir contract: rest defaults to identity; an authored non-identity
@@ -952,7 +952,7 @@ TestImplicitJointDiscovery(const std::string &examplesDir)
     // empty output set (which would publish nothing and look like success).
     {
         UsdStageRefPtr stage = UsdStage::CreateInMemory();
-        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRig"));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
         std::vector<std::string> errors;
         CHECK(!evaluator.Compile(&errors));
@@ -962,7 +962,7 @@ TestImplicitJointDiscovery(const std::string &examplesDir)
     // Defining the joint is sufficient -- no manifest relationship anywhere.
     {
         UsdStageRefPtr stage = UsdStage::CreateInMemory();
-        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRig"));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
         stage->DefinePrim(SdfPath("/Asset/Rig/Joints/J"),
                           TfToken("RigExecJoint"));
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
@@ -1037,7 +1037,7 @@ TestMoverGraphParity(const std::string &examplesDir)
         }
         SdfPath rigPath;
         for (const UsdPrim &p : stage->Traverse()) {
-            if (p.GetTypeName() == TfToken("RigExecRig")) {
+            if (p.GetTypeName() == TfToken("RigExecRoot")) {
                 rigPath = p.GetPath();
                 break;
             }
@@ -1716,7 +1716,7 @@ static const char *kOrderFixture = R"USDA(#usda 1.0
 
 def Xform "Asset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         def Scope "Channels"
         {

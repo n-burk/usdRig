@@ -499,7 +499,7 @@ bounds, then the bound mesh's extent, then the stage's.
 
 **The viewport aids are defined once and thereafter only edited.** Adding
 or removing a prim resyncs the stage, and on a stage carrying a
-`RigExecRig` every resync re-evaluates the rig — so create/destroy per
+`RigExecRoot` every resync re-evaluates the rig — so create/destroy per
 redraw meant a full rig evaluation per knot placed. They are authored
 into the session layer with `purpose = "default"` and hidden with
 `visibility`, never removed.

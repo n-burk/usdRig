@@ -51,7 +51,7 @@ The coupling is entirely in the activation/publication path:
 
 | # | Site | Stage use | Replacement |
 |---|------|-----------|-------------|
-| 1 | `registry.cpp:187-207` `RigExecImaging_Activate` | `UsdUtilsStageCache::Find(id)`, then `stage->Traverse()` to find the first `RigExecRig` | Adapter-driven discovery: `PrimsAdded` of imaging prim type `rigExecRig` |
+| 1 | `registry.cpp:187-207` `RigExecImaging_Activate` | `UsdUtilsStageCache::Find(id)`, then `stage->Traverse()` to find the first `RigExecRoot` | Adapter-driven discovery: `PrimsAdded` of imaging prim type `rigExecRig` |
 | 2 | `registry.cpp:51` `Activate` | constructs `RigExecImagingBridge(stage, rigPath, store)` | Session created adapter-side, handed downstream in a data source |
 | 3 | `registry.cpp:66-70` | `TfNotice::Register(UsdNotice::ObjectsChanged, stage)` for edit-driven re-eval | `_PrimsDirtied` on the rig's data-source locators |
 | 4 | `registry.h:111` `RigExecImaging_SetTime` | app pushes the frame in | Time-varying `rigExec/time` leaf; `UsdImagingStageSceneIndex::SetTime` dirties it |
@@ -84,7 +84,7 @@ stage; `UsdSkelImagingPointsResolvingSceneIndex` does not.
 
 ```
 UsdImagingStageSceneIndex
-  ├─ RigExecImagingRigAdapter        (RigExecRig)      ── owns UsdStage
+  ├─ RigExecImagingRigAdapter        (RigExecRoot)      ── owns UsdStage
   │     emits  rigExec/session       opaque session handle
   │            rigExec/rigPath, assetRoot, generatedScope
   │            rigExec/time          time-varying trigger leaf
@@ -206,7 +206,7 @@ push-side API.
 ### 3.5 Free wins
 
 - **Multi-rig.** The registry holds one `_bridge`; adapter-driven discovery
-  gives one session per `RigExecRig` prim with no extra work.
+  gives one session per `RigExecRoot` prim with no extra work.
 - **Instancing (deferred task #16, `instancedBy`).** Discovery currently happens
   by stage traversal while the filter chain sits *downstream* of
   `UsdImagingNiPrototypePropagatingSceneIndex`, so a rig inside a native
@@ -217,7 +217,7 @@ push-side API.
   `InstanceDataSourceNames()` / `ProxyPathTranslationDataSourceNames()`.
 - **No application glue.** `rigExecUsdview.py`, the ctypes C API, the
   `UsdUtils.StageCache` handoff, and `RIGEXEC_IMAGING_DLL` all go away. Opening
-  a stage with a `RigExecRig` in stock usdview just works — including in
+  a stage with a `RigExecRoot` in stock usdview just works — including in
   `usdrecord` and any other UsdImaging host, which the ctypes plugin never
   covered.
 
@@ -264,7 +264,7 @@ and diagnoses.
 
 **Phase 0 — schemas and adapter skeleton.**
 Add `rigExecUsdImaging` with `hdSchemaDefs.py`-generated
-`RigExecImagingRigSchema` / `RigExecImagingGuideSchema`, a `RigExecRig` adapter
+`RigExecImagingRigSchema` / `RigExecImagingGuideSchema`, a `RigExecRoot` adapter
 returning imaging prim type `rigExecRig` and a rig data source, and a
 `RigExecJoint`/`RigExecControl` adapter returning an empty subprim type (so the
 prim stays typeless downstream) plus a `rigExecGuide` container. Register both
@@ -431,7 +431,7 @@ The adapter has a `UsdPrim` but uses it only to *name* a value key. The stage
 lives in `UsdExecImaging_Request`, handed over by the engine
 (`engine.cpp:536-543`), and nothing else in the imaging chain sees it.
 
-**Versus this plan.** §3.1 has the `RigExecRig` adapter call `prim.GetStage()`
+**Versus this plan.** §3.1 has the `RigExecRoot` adapter call `prim.GetStage()`
 to construct the session. That is a real deviation from the waddler pattern, and
 it is forced: usdExecImaging gets its stage from `UsdImagingGLEngine`, which
 hard-binds its own append callback with no registry to hook
@@ -651,7 +651,7 @@ larger reduction than §3 claimed.
 | Output | Lives on | Adapter-publishable |
 |---|---|---|
 | guide sphere/cone geometry + styling | the `RigExecJoint` prim itself | **yes** — the usdIrImaging pattern exactly |
-| rig identity, generated scope, session handle, time | the `RigExecRig` prim itself | **yes** |
+| rig identity, generated scope, session handle, time | the `RigExecRoot` prim itself | **yes** |
 | driven xform on a Joint/Control | `RigExecXformable`-derived, so typed | **yes** |
 | driven xform on a plain `UsdGeomXformable` provider | remote, named by a constraint | no |
 | points / normals / extent | remote gprim, named by `rigExec:moves` | **no** |
@@ -705,7 +705,7 @@ cannot arrive through the scene. Two paths, and the codebase already frames them
   `engine.cpp:536-543` does for the exec SI. Requires a host we control, since
   `UsdImagingGLEngine` hard-binds its own append callback with no registry
   (`hydra-integration-notes.md` §6.2).
-- **(b) Compatibility transport.** One `prim.GetStage()` in the `RigExecRig`
+- **(b) Compatibility transport.** One `prim.GetStage()` in the `RigExecRoot`
   adapter, feeding the same request object. Works in stock usdview with no
   application code at all.
 

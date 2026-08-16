@@ -20,7 +20,7 @@
 
 def Xform "BlendArmAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "BlendArmAsset"
 

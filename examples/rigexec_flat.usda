@@ -45,7 +45,7 @@ def Xform "World"
         }
     }
 
-    def RigExecRig "RigRoot"
+    def RigExecRoot "RigRoot"
     {
         float2 ui:nodegraph:node:pos = (0.3312006, -0.2729119)
 

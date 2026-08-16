@@ -42,7 +42,7 @@ def Xform "TurretAsset"
     matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (100, 0, 0, 1) )
     uniform token[] xformOpOrder = ["xformOp:transform"]
 
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "TurretAsset"
 

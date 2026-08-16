@@ -2,7 +2,7 @@
 // rigExecPose -- evaluate a rig and print what came out.
 //
 // The test suites assert against fixtures they own. This is the tool for the
-// other case: an arbitrary stage carrying a RigExecRig, evaluated at chosen
+// other case: an arbitrary stage carrying a RigExecRoot, evaluated at chosen
 // frames so an author can see whether the rig they just wrote compiles, what
 // the compiler objected to, where the joints ended up, and how far each moved
 // property actually travelled.
@@ -67,7 +67,7 @@ SdfPath
 FindRig(const UsdStageRefPtr &stage)
 {
     for (const UsdPrim &prim : stage->TraverseAll()) {
-        if (prim.GetTypeName() == TfToken("RigExecRig")) {
+        if (prim.GetTypeName() == TfToken("RigExecRoot")) {
             return prim.GetPath();
         }
     }
@@ -293,7 +293,7 @@ main(int argc, char **argv)
     const SdfPath rigPath =
         rigArg.empty() ? FindRig(stage) : SdfPath(rigArg);
     if (rigPath.IsEmpty() || !stage->GetPrimAtPath(rigPath)) {
-        std::printf("FATAL: no RigExecRig in %s\n", stagePath.c_str());
+        std::printf("FATAL: no RigExecRoot in %s\n", stagePath.c_str());
         return 2;
     }
     std::printf("stage %s\n  rig %s\n", stagePath.c_str(),

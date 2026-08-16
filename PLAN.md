@@ -8,7 +8,7 @@ extracted verbatim to `C:\Users\nburk\AppData\Local\Temp\claude\D--work-usdRig\a
 A rigging object model + character-computation layer **on top of OpenExec** (OpenUSD 26.08, unchanged).
 - Canonical pose value: **RigExecPointFrame** — 4 points [O, X, Y, Z] (origin + transformed basis endpoints);
   round-trips exactly to nonsingular affine matrix (incl. scale/shear).
-- All durable authoring is USD. Schemas: RigExecRig, RigExecControl, RigExecJoint, RigExecFkChain,
+- All durable authoring is USD. Schemas: RigExecRoot, RigExecControl, RigExecJoint, RigExecFkChain,
   RigExecTwoBoneIk, RigExecBlendPointFrames, RigExecAimConstraint, math movers, RigExecTwistDistribution,
   RigExecRibbon, RigExecPointFrameView, blend shape mover/input/sample, RigExecMatrixMover,
   weight objects (static/dynamic), lattice/curve/surface/post movers, applied APIs

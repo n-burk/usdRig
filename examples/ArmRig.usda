@@ -12,7 +12,7 @@ def Xform "ArmAsset" (
     prepend variantSets = "rigComplexity"
 )
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "ArmAsset"
 

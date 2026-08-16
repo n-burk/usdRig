@@ -47,7 +47,7 @@
 
 def Xform "PropMathAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "PropMathAsset"
 

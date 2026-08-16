@@ -186,7 +186,7 @@ copy of the same character.
 
 - **Abstract bases** — `RigExecXformable` (a property-exact IrXformable
   mirror), `RigExecWeightObject`, `RigExecVolumeWeight`
-- **Core** — `RigExecRig`, `RigExecControl`, `RigExecJoint`
+- **Core** — `RigExecRoot`, `RigExecControl`, `RigExecJoint`
 - **Solvers** — `RigExecFkChain`, `RigExecTwoBoneIk`, `RigExecBlendPointFrames`,
   `RigExecTwistDistribution`, `RigExecRibbon`, `RigExecAimConstraint`
 - **Movers** — `RigExecMatrixMover`, `RigExecBlendShapeMover` (+ `BlendInput`,
@@ -429,7 +429,7 @@ long long RigExecImaging_GetGeneration(void);   // 0 before first publication
 `stageCacheId` is a `UsdUtilsStageCache` id, so any language that can put a
 stage in the cache can activate — that is exactly how the Python usdview
 plugin does it via `ctypes`. An empty/null `rigPath` activates every
-`RigExecRig` on the stage and publishes them as one atomic generation; an
+`RigExecRoot` on the stage and publishes them as one atomic generation; an
 explicit path remains available for a single-rig host. Activation is
 transactional, so compile or initial-evaluation failure does not replace the
 current coherent generation. Order does not matter: chains and activation
@@ -443,7 +443,7 @@ timeline changes.
 
 **(c) In stock usdview.** Set the three variables above and launch usdview
 normally. The `RigExecUsdviewContainer` `PluginContainer` activates for any
-stage carrying a `RigExecRig` prim and feeds stage + timeline into evaluation.
+stage carrying a `RigExecRoot` prim and feeds stage + timeline into evaluation.
 
 ```
 bin\launch_usdview.bat examples\ArmShotAnim.usda          # interactive, Storm

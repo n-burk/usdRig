@@ -205,7 +205,7 @@ RigExecImagingRegistry::Activate(
         rigPaths.push_back(rigPath);
     } else {
         for (const UsdPrim &prim : stage->Traverse()) {
-            if (prim.GetTypeName() == "RigExecRig") {
+            if (prim.GetTypeName() == "RigExecRoot") {
                 rigPaths.push_back(prim.GetPath());
             }
         }
@@ -215,7 +215,7 @@ RigExecImagingRegistry::Activate(
                    rigPaths.end());
     if (rigPaths.empty()) {
         if (errors) {
-            errors->push_back("no RigExecRig prim found");
+            errors->push_back("no RigExecRoot prim found");
         }
         return false;
     }
@@ -282,10 +282,10 @@ RigExecImagingRegistry::Activate(
     candidate.reserve(rigPaths.size());
     for (const SdfPath &path : rigPaths) {
         const UsdPrim rig = stage->GetPrimAtPath(path);
-        if (!rig || rig.GetTypeName() != "RigExecRig") {
+        if (!rig || rig.GetTypeName() != "RigExecRoot") {
             if (errors) {
                 errors->push_back(
-                    "activation path is not a RigExecRig: " +
+                    "activation path is not a RigExecRoot: " +
                     path.GetString());
             }
             abandon();
@@ -972,7 +972,7 @@ RigExecImaging_Activate(
         return 3;
     }
     if (path.IsEmpty()) {
-        std::printf("rigExecImaging: activated all RigExecRig prims\n");
+        std::printf("rigExecImaging: activated all RigExecRoot prims\n");
     } else {
         std::printf("rigExecImaging: activated %s\n", path.GetText());
     }

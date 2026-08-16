@@ -153,7 +153,7 @@ class RigExecUsdviewContainer(PluginContainer):
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring
-        # panel can be opened on a stage that carries no RigExecRig yet
+        # panel can be opened on a stage that carries no RigExecRoot yet
         # (that is how a rig gets built), so it must be able to force
         # the load itself. Returns the library or None.
         if self._lib is not None:
@@ -305,11 +305,11 @@ class RigExecUsdviewContainer(PluginContainer):
         self._ReleaseCachedStage()
         if not stage:
             return
-        # An empty path passed to the C surface means every RigExecRig on the
+        # An empty path passed to the C surface means every RigExecRoot on the
         # stage.  Keep the paths here for diagnostics/UI rather than silently
         # selecting the first character.
         for prim in stage.Traverse():
-            if prim.GetTypeName() == "RigExecRig":
+            if prim.GetTypeName() == "RigExecRoot":
                 self._rigPaths.append(prim.GetPath())
         if not self._rigPaths:
             return
@@ -324,7 +324,7 @@ class RigExecUsdviewContainer(PluginContainer):
             self._active = True
             # RigExec controls/joints/guides are purpose=guide — Storm only draws
             # them when the viewer has guide purpose enabled.  Auto-enable it
-            # the moment a RigExecRig is found so a fresh launch shows the rig.
+            # the moment a RigExecRoot is found so a fresh launch shows the rig.
             try:
                 vs = self._api.dataModel.viewSettings
                 if not vs.displayGuide:

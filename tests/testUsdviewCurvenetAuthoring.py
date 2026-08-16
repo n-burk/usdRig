@@ -61,7 +61,7 @@ def _MakeStage():
     stage = Usd.Stage.CreateInMemory()
     asset = UsdGeom.Xform.Define(stage, "/Asset")
     stage.SetDefaultPrim(asset.GetPrim())
-    stage.DefinePrim("/Asset/Rig", "RigExecRig")
+    stage.DefinePrim("/Asset/Rig", "RigExecRoot")
 
     mesh = UsdGeom.Mesh.Define(stage, "/Asset/Geom/Grid")
     points, counts, indices = [], [], []

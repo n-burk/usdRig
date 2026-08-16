@@ -79,7 +79,7 @@ struct Fixture {
         UsdPrim mesh = stage->DefinePrim(_kMeshPath, TfToken("Points"));
         mesh.CreateAttribute(TfToken("points"),
                              SdfValueTypeNames->Point3fArray).Set(base);
-        stage->DefinePrim(_kRigPath, TfToken("RigExecRig"));
+        stage->DefinePrim(_kRigPath, TfToken("RigExecRoot"));
         UsdPrim joint = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/J"),
                                           TfToken("RigExecJoint"));
         GfMatrix4d posed(1.0);

@@ -59,7 +59,7 @@ def _RegisterSchema():
 def _MakeStage():
     """
     A minimal rig: a body mesh spanning 8 x 4 x 4 units and a
-    RigExecRig with one joint, which is enough to drive every branch of
+    RigExecRoot with one joint, which is enough to drive every branch of
     the creation rules.
     """
     stage = Usd.Stage.CreateInMemory()
@@ -71,7 +71,7 @@ def _MakeStage():
     mesh.CreateExtentAttr([
         Gf.Vec3f(-4.0, -2.0, -2.0), Gf.Vec3f(4.0, 2.0, 2.0)])
 
-    stage.DefinePrim("/Asset/Rig", "RigExecRig")
+    stage.DefinePrim("/Asset/Rig", "RigExecRoot")
     stage.DefinePrim("/Asset/Rig/Joints/Shoulder", "RigExecJoint")
 
     return stage, mesh.GetPrim()
@@ -101,7 +101,7 @@ def TestPrimCreation(ui):
         created[typeName] = prim
         print("  created %-24s at %s" % (typeName, prim.GetPath()))
 
-    # Rule: the parent scope is a Weights scope under the RigExecRig
+    # Rule: the parent scope is a Weights scope under the RigExecRoot
     # when nothing rig-ish is selected.
     for typeName, prim in created.items():
         _Check(str(prim.GetPath()).startswith("/Asset/Rig/Weights/"),
@@ -625,7 +625,7 @@ def TestScrubScale(ui):
         Gf.Vec3f(-40.0, -20.0, -20.0), Gf.Vec3f(40.0, 20.0, 20.0)])
     mesh.CreateExtentAttr([
         Gf.Vec3f(-40.0, -20.0, -20.0), Gf.Vec3f(40.0, 20.0, 20.0)])
-    stage.DefinePrim("/Asset/Rig", "RigExecRig")
+    stage.DefinePrim("/Asset/Rig", "RigExecRoot")
     meshPrim = mesh.GetPrim()
 
     bound = ui.CreateVolumeWeightPrim(

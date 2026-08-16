@@ -40,7 +40,7 @@ public:
         const RigExecBindingResolvingSceneIndexRefPtr &binding,
         const RigExecResultsSceneIndexRefPtr &results);
 
-    /// Activates evaluation for one rig, or every RigExecRig when rigPath is
+    /// Activates evaluation for one rig, or every RigExecRoot when rigPath is
     /// empty.  Compilation and the first evaluation complete off to the side;
     /// the active stage and Hydra generation change only after every rig has
     /// succeeded.

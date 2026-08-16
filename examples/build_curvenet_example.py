@@ -190,7 +190,7 @@ def main():
 
 def Xform "CurvenetAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "CurvenetAsset"
 

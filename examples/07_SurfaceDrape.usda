@@ -21,7 +21,7 @@
 
 def Xform "DrapeAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "DrapeAsset"
 

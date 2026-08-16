@@ -3209,7 +3209,7 @@ TestGuideBoundsExport()
     CHECK(RigExecImaging_GetGuideBoundsAssetSpace("not a path", b) == 0);
     CHECK(RigExecImaging_GetGuideBoundsAssetSpace(nullptr, b) == 0);
 
-    // The whole-rig union, which is what framing the RigExecRig uses.
+    // The whole-rig union, which is what framing the RigExecRoot uses.
     CHECK(RigExecImaging_GetAllGuideBoundsAssetSpace(b) == 1);
     CHECK(matches(GfVec3d(-3, -2, -4), GfVec3d(16, 8, 4)));
 

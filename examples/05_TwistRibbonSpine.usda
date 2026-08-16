@@ -25,7 +25,7 @@
 
 def Xform "SpineAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "SpineAsset"
 

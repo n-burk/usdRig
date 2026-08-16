@@ -39,7 +39,7 @@ def FindRigPrim(stage):
     if not stage:
         return None
     for prim in stage.Traverse():
-        if prim.GetTypeName() == "RigExecRig":
+        if prim.GetTypeName() == "RigExecRoot":
             return prim
     return None
 
@@ -1282,7 +1282,7 @@ class CurvenetPanel(QtWidgets.QWidget):
         mesh = meshes[0]
         rig = FindRigPrim(stage)
         if not rig:
-            self._SetStatus("No RigExecRig on this stage.")
+            self._SetStatus("No RigExecRoot on this stage.")
             return
         BindCurvenet(stage, prim, mesh, rig)
         warnings = CheckBindPreconditions(stage, mesh, rig)
@@ -1314,7 +1314,7 @@ class CurvenetPanel(QtWidgets.QWidget):
         Shows or hides a display prim, rather than creating and destroying it.
 
         Adding or removing a prim RESYNCS the stage, and on a stage carrying
-        a RigExecRig every resync re-evaluates the rig -- so a create/destroy
+        a RigExecRoot every resync re-evaluates the rig -- so a create/destroy
         per redraw meant a full rig re-evaluation on every knot placed, and
         (worse) surfaced a Tf coding error out of that re-evaluation, which
         Python then raised from whatever unrelated call came next.

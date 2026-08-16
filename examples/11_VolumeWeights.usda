@@ -90,7 +90,7 @@ def Xform "VolumeAsset"
         }
     }
 
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "VolumeAsset"
 

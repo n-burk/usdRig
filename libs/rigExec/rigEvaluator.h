@@ -177,7 +177,7 @@ struct RigExecRigPose {
     bool solverOverridesConverged = true;
 };
 
-/// Compiles and evaluates one RigExecRig prim.
+/// Compiles and evaluates one RigExecRoot prim.
 class RigExecRigEvaluator {
 public:
     RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath);

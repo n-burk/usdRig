@@ -1,14 +1,14 @@
 # RigExec examples
 
 Every file is a self-contained, animated stage (frames 1001-1048) with one
-`RigExecRig`. View any of them live with:
+`RigExecRoot`. View any of them live with:
 
 ```
 bin/launch_usdview.bat examples\<file>.usda
 ```
 
 The rigExecUsdview plugin activates automatically for stages carrying a
-`RigExecRig` prim and republishes OpenExec-evaluated results on every
+`RigExecRoot` prim and republishes OpenExec-evaluated results on every
 timeline change.
 
 Joints and aggregate solvers draw as **guide geometry** (a sphere at each
@@ -127,7 +127,7 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
 
 ## Authoring conventions the engine expects
 
-- One `RigExecRig` per stage (the usdview plugin and imaging bridge
+- One `RigExecRoot` per stage (the usdview plugin and imaging bridge
   activate the first one found). The rig declares no membership lists:
   controls, joints, and movers are discovered from the namespace beneath
   it. At least one `RigExecJoint` must exist under the rig — that is what

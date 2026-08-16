@@ -371,7 +371,7 @@ def DeleteSplineKnot(attr, x, minimumKnots=2):
 
 def FindRigPrim(stage):
     """
-    Returns the first RigExecRig prim on the stage, or None.
+    Returns the first RigExecRoot prim on the stage, or None.
 
     Traversal by typeName rather than by schema type mirrors what
     rigExecUsdview.py already does to decide whether to engage: the
@@ -381,7 +381,7 @@ def FindRigPrim(stage):
     if stage is None:
         return None
     for prim in stage.Traverse():
-        if prim.GetTypeName() == "RigExecRig":
+        if prim.GetTypeName() == "RigExecRoot":
             return prim
     return None
 
@@ -422,7 +422,7 @@ def ChooseWeightParentPrim(stage, selectedPrims):
          there means the joint's transform carries the volume;
       2. a selected prim already inside a .../Rig/Weights scope -- reuse
          the scope the artist is clearly working in;
-      3. a Weights scope under the stage's RigExecRig, created on
+      3. a Weights scope under the stage's RigExecRoot, created on
          demand;
       4. /Weights as a last resort on a stage with no rig at all.
     """

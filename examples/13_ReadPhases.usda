@@ -65,7 +65,7 @@
 
 def Xform "ReadPhaseAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "ReadPhaseAsset"
 

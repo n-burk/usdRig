@@ -21,7 +21,7 @@
 
 def Xform "FaceAsset"
 {
-    def RigExecRig "Rig"
+    def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "FaceAsset"
 

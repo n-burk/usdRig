@@ -626,7 +626,7 @@ def _capture_viewport_pixmap(api):
 def _EnsureGuideVisibleForRig(api):
     """
     RigExec controls/joints are purpose=guide.  Storm only draws them when
-    viewSettings.displayGuide is True.  If any RigExecRig exists on the stage
+    viewSettings.displayGuide is True.  If any RigExecRoot exists on the stage
     and guide is off, turn it on.  Headless-safe.
     """
     try:
@@ -639,7 +639,7 @@ def _EnsureGuideVisibleForRig(api):
         if stage is not None:
             has_rig = False
             for prim in stage.Traverse():
-                if prim.GetTypeName() == "RigExecRig":
+                if prim.GetTypeName() == "RigExecRoot":
                     has_rig = True
                     break
             if has_rig:
