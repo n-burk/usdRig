@@ -23,6 +23,10 @@ def Xform "ArmAsset" (
             )
             {
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
+                uniform token guide:shape = "diamond"
+                double guide:scaleX = 1.6
+                double guide:scaleY = 1.6
+                double guide:scaleZ = 1.6
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -39,6 +43,10 @@ def Xform "ArmAsset" (
             )
             {
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (8, 10, 0, 1) )
+                uniform token guide:shape = "sphere"
+                double guide:scaleX = 1.8
+                double guide:scaleY = 0.6
+                double guide:scaleZ = 1.8
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -47,6 +55,10 @@ def Xform "ArmAsset" (
             )
             {
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (8, 10, 0, 1) )
+                uniform token guide:shape = "cube"
+                double guide:scaleX = 1.5
+                double guide:scaleY = 1.5
+                double guide:scaleZ = 1.5
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -55,6 +67,10 @@ def Xform "ArmAsset" (
             )
             {
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 10, -4, 1) )
+                uniform token guide:shape = "pyramid"
+                double guide:scaleX = 1.5
+                double guide:scaleY = 1.5
+                double guide:scaleZ = 1.5
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
         }

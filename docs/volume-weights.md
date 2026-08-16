@@ -256,7 +256,7 @@ missing tail.
 | Authoring UI | `plugin/rigExecUsdview/volumeWeightUI.py` |
 | Influence overlay + guides | `libs/rigExecImaging/` (`RigExecImaging_SetWeightOverlay`) |
 | Example | `examples/11_VolumeWeights.usda` |
-| Tests | `tests/testRigExecWeightFields.cpp`, `tests/testRigExecVolumeWeights.cpp`, `tests/testRigExecWeightOverlay.cpp`, `run_testusdview_overlay.bat` |
+| Tests | `tests/testRigExecWeightFields.cpp`, `tests/testRigExecVolumeWeights.cpp`, `tests/testRigExecWeightOverlay.cpp`, `bin/run_testusdview_overlay.bat` |
 
 ## Registering computations on an abstract base
 
@@ -310,9 +310,20 @@ correct and the fault was purely invalidation. The fix re-announces the
 prim with its upstream type on the on/off transition
 (`sceneIndices.cpp`, the structural arm of `NotifyGenerationPublished`).
 
-`run_testusdview_overlay.bat` now asserts on **pixels**, not just on the
-scene index, and that assertion is mutation-verified: disabling the
-resync makes it fail while every other test in the suite still passes.
+`bin/run_testusdview_overlay.bat` (and `bin/run_testusdview_overlay.sh`) now
+asserts on **pixels**, not just on the scene index, and that assertion is
+mutation-verified: disabling the resync makes it fail while every other test in
+the suite still passes.
+
+It asserts on the *difference* between the overlay-off and overlay-on frames,
+not on how much red is in either one. RigExec draws its own guide geometry, the
+volume rings and bars are red, and they cover far more of the viewport than the
+strip does — so an absolute red-pixel count is mostly guides, and it shifts
+whenever guide drawing changes. Differencing cancels them, since they are
+identical in both frames. The measurement is a fraction of the frame rather
+than a pixel count so that window size and HiDPI do not enter into it: the
+overlay moves 2.8% of the frame, a disabled resync moves 0.0%, and the
+threshold sits at 0.5%.
 
 ## The second invalidation trap: who hears an edit first
 
@@ -402,7 +413,7 @@ through `currentFrame` and through `RigExecImaging_SetTime`, which is
 unambiguous by construction -- and compares the published points.
 Mutation-verified: restoring the property read fails that comparison
 (`(0.0, 9.5, 0.0)` vs `(0.06, 10.13, 0.48)`) while
-`run_testusdview_overlay.bat` and all nine ctest binaries still pass,
+`bin/run_testusdview_overlay.bat` and all nine ctest binaries still pass,
 which is exactly the blindness that let it ship.
 
 ## What the epoch digest is and is not tested for

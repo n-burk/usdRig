@@ -2128,10 +2128,16 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             // for the descriptors it already has. A primvar that was not
             // there at sync time is therefore never asked for, and the
             // mesh renders grey with a perfectly correct red displayColor
-            // sitting in the scene index one hop upstream. Measured in a
-            // real usdview: dirty-notice path leaves 1003 red-ish pixels
-            // (i.e. none, just the yellow control guide), a cold renderer
-            // rebuild gives 3456.
+            // sitting in the scene index one hop upstream.
+            //
+            // Measured in a real usdview by differencing the framebuffer
+            // across the on/off transition: with this re-announcement, 2.8%
+            // of the frame gets redder; without it, 0.0% does, while every
+            // scene-index assertion still passes. tests/
+            // testUsdviewVolumeWeightOverlay.py is that measurement, and it
+            // compares the two frames rather than counting red in one --
+            // RigExec's own guide geometry is red and much larger on screen
+            // than the mesh, so an absolute count says almost nothing.
             //
             // Re-announcing the prim with its upstream type is the same
             // move _SyncGuideChildren already makes for a synthesized

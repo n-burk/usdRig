@@ -21,12 +21,29 @@ from pxr.Usdviewq.qt import QtWidgets
 VOLUME = "/VolumeAsset/Rig/Joints/Shoulder/ShoulderVolume"
 MESH = "/VolumeAsset/Geom/Strip"
 
+# How much redder a pixel must get before it counts as changed by the overlay,
+# and how much of the frame must change. See the pixel comparison at the end of
+# testUsdviewInputFunction for how both were calibrated.
+_REDDER_BY = 20.0
+_MIN_CHANGED_FRACTION = 0.005
+
+
+def _Redness(color):
+    """How red a pixel is relative to its other channels.
+
+    The overlay tints the strip red over a grey mesh, so the red channel alone
+    would also count anything merely bright.
+    """
+    return color.red() - 0.5 * (color.green() + color.blue())
+
 
 def _LoadDll():
-    dllPath = os.environ.get(
-        "RIGEXEC_IMAGING_DLL",
-        r"D:\work\usdRig\usdRig\build\rigExecImaging.dll")
-    dll = ctypes.CDLL(dllPath)
+    # The plugin owns the platform naming (.dll/.dylib/.so) and the
+    # installed-vs-build search order; asking it keeps this script working on
+    # every platform without repeating either rule.
+    from rigExecUsdview import ImagingLibraryPath
+
+    dll = ctypes.CDLL(ImagingLibraryPath())
     dll.RigExecImaging_GetGeneration.restype = ctypes.c_longlong
     dll.RigExecImaging_SetWeightOverlay.argtypes = [ctypes.c_char_p]
     dll.RigExecImaging_SetWeightOverlay.restype = ctypes.c_int
@@ -149,37 +166,60 @@ def testUsdviewInputFunction(appController):
     # cannot see that; only the framebuffer can.
     sv = appController._stageView
 
-    def redPixels():
+    # The HUD reports frame timings, so its text differs between two captures
+    # of an otherwise identical scene. Turning it off leaves only geometry.
+    appController._dataModel.viewSettings.showHUD = False
+
+    def capture():
         sv.updateGL()
         QtWidgets.QApplication.processEvents()
         img = sv.grabFrameBuffer()
-        count = 0
-        for y in range(0, img.height(), 2):
-            for x in range(0, img.width(), 2):
-                c = img.pixelColor(x, y)
-                if c.red() - (c.green() + c.blue()) / 2.0 > 12:
-                    count += 1
-        return count
+        return [[_Redness(img.pixelColor(x, y))
+                 for x in range(0, img.width(), 2)]
+                for y in range(0, img.height(), 2)]
 
     dll.RigExecImaging_SetWeightOverlay(b"")
-    greyPixels = redPixels()
+    grey = capture()
     dll.RigExecImaging_SetWeightOverlay(VOLUME.encode("utf-8"))
-    litPixels = redPixels()
+    lit = capture()
 
-    # The example draws a yellow control guide, which is red-ish enough to
-    # register, so this compares against the overlay-off baseline rather
-    # than against zero. The gradient covers a large fraction of the
-    # strip, so the jump is not marginal.
+    # Compare the two frames pixel for pixel rather than counting red in each.
+    #
+    # An absolute count cannot work here: RigExec draws its own guide geometry
+    # -- the volume rings and bars are red, and they are far larger on screen
+    # than the strip -- so most of the red in either frame was never the
+    # overlay's. That baseline also moves whenever guide drawing changes,
+    # which is exactly how the earlier `lit > grey * 2` threshold silently
+    # stopped being satisfiable.
+    #
+    # The guides are identical in both captures, so differencing cancels them
+    # and leaves only what the overlay changed. Measured as a FRACTION of the
+    # frame so the result does not depend on window size or on whether the
+    # display is HiDPI.
+    sampled = sum(len(row) for row in grey)
+    redder = sum(1
+                 for rowLit, rowGrey in zip(lit, grey)
+                 for a, b in zip(rowLit, rowGrey)
+                 if a - b > _REDDER_BY)
+    fraction = float(redder) / max(sampled, 1)
+
+    # Signal and noise are three orders of magnitude apart: the strip turning
+    # red moves ~2.8% of the frame, while an unchanged scene moves ~0.03%
+    # (antialiasing on the guide edges). 0.5% sits well clear of both.
     #
     # Mutation-verified: with the resync in NotifyGenerationPublished
-    # disabled, this reads 1009 -> 997 and fails, while every scene-index
-    # assertion above still passes. That asymmetry is the whole reason
-    # this block exists.
-    if litPixels < greyPixels * 2:
+    # disabled, nothing the overlay produces reaches the framebuffer, this
+    # falls to the antialiasing floor and fails, while every scene-index
+    # assertion above still passes. That asymmetry is the whole reason this
+    # block exists.
+    if fraction < _MIN_CHANGED_FRACTION:
         raise AssertionError(
-            "the overlay did not reach the renderer: red-ish pixels "
-            "%d -> %d (a resync, not a dirty, is what makes a NEW primvar "
-            "visible to Storm)" % (greyPixels, litPixels))
+            "the overlay did not reach the renderer: only %d of %d sampled "
+            "pixels (%.3f%%) got redder when it was turned on, expected at "
+            "least %.1f%% (a resync, not a dirty, is what makes a NEW "
+            "primvar visible to Storm)"
+            % (redder, sampled, 100.0 * fraction,
+               100.0 * _MIN_CHANGED_FRACTION))
 
     # Optional visual artefact. Set RIGEXEC_OVERLAY_SCREENSHOT to a path
     # to write what the viewport actually drew -- the assertions above
