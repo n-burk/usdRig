@@ -1023,6 +1023,9 @@ if _HAS_QT:
                 museAgent.OLLAMA_DEFAULT_BASE_URL
             self._reload_btn.setEnabled(False)
             try:
+                # Refresh is the explicit "go and look again", so it bypasses
+                # the per-session cache the send path relies on.
+                museAgent.clear_ollama_model_cache()
                 self._ollama_models = museAgent.fetch_ollama_models(url)
             finally:
                 self._reload_btn.setEnabled(True)
@@ -1096,7 +1099,14 @@ if _HAS_QT:
                 base = museAgent.META_BASE_URL
                 why = "Meta Muse key"
             else:
-                base, why = museAgent.resolve_base_url()
+                # The ENVIRONMENT's endpoint, not resolve_base_url(): that
+                # applies provider inference, so with MUSE_PROVIDER=ollama
+                # saved from a previous session it answers with the local
+                # server no matter which back end this dialog has selected --
+                # and the panel would show an Ollama endpoint next to an
+                # Anthropic key. What the hosted branch wants is an explicit
+                # gateway if one is set, and Anthropic otherwise.
+                base, why = museAgent._env_base_url()
                 if not base:
                     base, why = "https://api.anthropic.com", "Anthropic default"
             style = museAgent.resolve_auth_style(base)

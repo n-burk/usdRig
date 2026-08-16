@@ -707,7 +707,22 @@ def describe_key_problem(api_key, base_url, provider=None):
             "that is %s." % META_BASE_URL)
 
 
-def fetch_ollama_models(base_url=None, timeout=None):
+# Model lists, keyed by server address.
+#
+# fetch_ollama_models costs a round trip per model, and run_agent checks the
+# chosen model on EVERY send -- so without this, every message the user types
+# waits on ~11 HTTP requests before the first token. An installed model set
+# does not change mid-session in any way that matters here, and the settings
+# dialog's Refresh button is the explicit way to re-read it.
+_OLLAMA_MODEL_CACHE = {}
+
+
+def clear_ollama_model_cache():
+    """Forget the cached model lists (the dialog's Refresh calls this)."""
+    _OLLAMA_MODEL_CACHE.clear()
+
+
+def fetch_ollama_models(base_url=None, timeout=None, use_cache=True):
     """The models an Ollama server has, with their capabilities.
 
     Returns a list of dicts: name, tools, vision, thinking. An unreachable
@@ -729,12 +744,18 @@ def fetch_ollama_models(base_url=None, timeout=None):
     import urllib.request
 
     root = (base_url or resolve_ollama_base_url()).rstrip("/")
+    if use_cache and root in _OLLAMA_MODEL_CACHE:
+        return _OLLAMA_MODEL_CACHE[root]
     budget = timeout or OLLAMA_LIST_TIMEOUT
     try:
         with urllib.request.urlopen(root + "/api/tags",
                                     timeout=budget) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception:
+        # Cached too. A server that is off stays off for the session as far as
+        # this is concerned, and re-probing it on every send would put the
+        # connection timeout in front of every message.
+        _OLLAMA_MODEL_CACHE[root] = []
         return []
 
     models = []
@@ -761,6 +782,7 @@ def fetch_ollama_models(base_url=None, timeout=None):
             "vision": "vision" in caps,
             "thinking": "thinking" in caps,
         })
+    _OLLAMA_MODEL_CACHE[root] = models
     return models
 
 

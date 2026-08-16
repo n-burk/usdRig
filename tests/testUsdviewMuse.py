@@ -261,6 +261,17 @@ def testUsdviewInputFunction(appController):
 
     # The settings dialog must build against the live api.
     dialog = museAssistant.MuseSettingsDialog(api, parent=api.qMainWindow)
+    # Pin the back end before asserting key routing.
+    #
+    # The dialog opens on whatever provider is saved in ~/.config/muse, so a
+    # developer who has selected Ollama makes this step assert Meta routing
+    # against an Ollama panel -- a test that depends on the machine it runs
+    # on. Selecting the hosted back end here is what makes the assertion about
+    # the KEY, which is what this step is named for.
+    _hosted = dialog._provider.findData(museAgent.PROVIDER_ANTHROPIC)
+    if _hosted < 0:
+        raise AssertionError("settings has no hosted back-end entry")
+    dialog._provider.setCurrentIndex(_hosted)
     dialog._key_edit.setText("LLM_probe_example")
     routing = dialog._routing.text()
     if "api.meta.ai" not in routing or "Bearer" not in routing:
