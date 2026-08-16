@@ -2325,6 +2325,227 @@ TestEditTriggeredReevaluation(const std::string &examplesDir)
 // hasXform was plumbed to HdXformSchema and had no writer at all, so the
 // failure mode here is a published-once-then-frozen transform, which looks
 // exactly like a static prop in the viewer.
+// A rig with no joints publishes through the bridge like any other.
+//
+// The evaluator gate is only half of it: the bridge's guide fills all iterate
+// joint frames, the binding epoch is built from the published prim set, and a
+// rig whose entire output is one driven Xform exercises every one of those
+// with an empty joint set.
+// Disconnecting a constraint's target must un-drive the subtree.
+//
+// The user-visible report: remove the Xform from the aim constraint and the
+// mesh parented under it stays exactly where the constraint had put it. The
+// scene index handles a driven transform DISAPPEARING (see the
+// _announcedDrivenXforms path), and the store diffs a prim that left the
+// generation as structural -- so if the stale pose survives, the failure is
+// upstream of both: nothing was published at all.
+static void
+TestDisconnectingAConstraintClearsTheDrivenXform(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/10_AimXformTurret.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath turret("/TurretAsset/Geom/Turret");
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    RigExecImagingBridge bridge(stage, SdfPath("/TurretAsset/Rig"), store);
+    CHECK(bridge.Compile(nullptr));
+    CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(1024)).ok);
+
+    RigExecImagingSnapshotConstPtr snap = store->Get();
+    CHECK(snap != nullptr);
+    if (!snap) return;
+    const auto driven = snap->prims.find(turret);
+    CHECK(driven != snap->prims.end());
+    if (driven == snap->prims.end()) return;
+    CHECK(driven->second.hasXform);
+
+    // Disconnect: exactly what removing the link in the node editor does.
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim mover =
+        stage->GetPrimAtPath(SdfPath("/TurretAsset/Rig/Movers/AimBarrel"));
+    CHECK(mover);
+    if (!mover) return;
+    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({});
+
+    const RigExecImagingBridge::PublishResult after =
+        bridge.EvaluateAndPublishResult(UsdTimeCode(1024));
+
+    // Whatever the rig now thinks of itself, the previously driven prim must
+    // not still be published as driven -- and the change must be announced,
+    // or a cached renderer keeps the last delta it was given.
+    snap = store->Get();
+    const bool stillDriven =
+        snap && snap->prims.count(turret) && snap->prims.at(turret).hasXform;
+    if (stillDriven) {
+        std::printf("  the turret is STILL published as driven after its "
+                    "target was disconnected (publish ok=%d, %zu dirtied) -- "
+                    "the stale pose survives\n",
+                    int(after.ok), after.dirtied.size());
+    }
+    CHECK(!stillDriven);
+
+    bool announced = false;
+    for (const auto &entry : after.dirtied) {
+        if (entry.path == turret) {
+            announced = true;
+        }
+    }
+    if (!announced) {
+        std::printf("  nothing dirtied the turret; the mesh under it keeps "
+                    "the transform it was last given\n");
+    }
+    CHECK(announced);
+}
+
+static void
+TestJointFreeRigPublishes(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/rigexec_flat.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    RigExecImagingBridge bridge(stage, SdfPath("/World/RigRoot"), store);
+    std::vector<std::string> errors;
+    const bool compiled = bridge.Compile(&errors);
+    for (const std::string &e : errors) {
+        std::printf("  compile error: %s\n", e.c_str());
+    }
+    CHECK(compiled);
+    if (!compiled) return;
+
+    const SdfPath sphere("/World/Geom/Sphere");
+    CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(0)).ok);
+    RigExecImagingSnapshotConstPtr snap = store->Get();
+    CHECK(snap != nullptr);
+    if (!snap) return;
+    const auto it = snap->prims.find(sphere);
+    CHECK(it != snap->prims.end());
+    if (it == snap->prims.end()) {
+        std::printf("  joint-free rig published nothing for its target\n");
+        return;
+    }
+    CHECK(it->second.hasXform);
+    const GfMatrix4d first = it->second.xform;
+
+    // The aim target swings a half turn across the shot, so a frozen
+    // publication is distinguishable from a live one.
+    CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode(50)).ok);
+    snap = store->Get();
+    CHECK(snap != nullptr);
+    if (!snap) return;
+    const auto later = snap->prims.find(sphere);
+    CHECK(later != snap->prims.end());
+    if (later != snap->prims.end()) {
+        CHECK(later->second.hasXform);
+        CHECK(later->second.xform != first);
+    }
+}
+
+// Property-domain results stay out of the imaging snapshot.
+//
+// They share movedProperties with the point chains, and the publish loop used
+// to index snapshot->prims before deciding whether it had anything to store —
+// so a float dial on a Scope MINTED an empty published prim for that Scope,
+// which then entered the binding epoch and made the scene index resolve a
+// prim RigExec publishes nothing for.
+static void
+TestPropertyResultsDoNotPublishPrims(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/09_PropertyMathMovers.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    RigExecImagingBridge bridge(stage, SdfPath("/PropMathAsset/Rig"), store);
+    CHECK(bridge.Compile(nullptr));
+    CHECK(bridge.EvaluateAndPublishResult(UsdTimeCode::Default()).ok);
+    RigExecImagingSnapshotConstPtr snap = store->Get();
+    CHECK(snap != nullptr);
+    if (!snap) return;
+
+    // The Scope owning the three dials owns no geometry and no guide.
+    const SdfPath dials("/PropMathAsset/Rig/Channels/Dials");
+    if (snap->prims.count(dials)) {
+        std::printf("  the dial Scope was published as a prim; a property "
+                    "result minted an empty entry\n");
+    }
+    CHECK(snap->prims.count(dials) == 0);
+
+    // ...while the rig's actual geometry still is.
+    CHECK(snap->prims.count(SdfPath("/PropMathAsset/Geom/Card")) == 1);
+}
+
+// Removing a rigExec:moves RELATIONSHIP re-evaluates, through the same
+// notice path usdview uses.
+//
+// The bridge-level test above drives EvaluateAndPublishResult by hand. This
+// one edits the stage and touches nothing else, so it covers the half that
+// test cannot: that a relationship edit is noticed at all. Attribute edits
+// were already covered (TestEditTriggeredReevaluation); a relationship edit
+// arrives as a RESYNC rather than as changed-info, which is a different arm
+// of _OnObjectsChanged.
+static void
+TestRelationshipEditTriggersReevaluation(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/10_AimXformTurret.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath turret("/TurretAsset/Geom/Turret");
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    const bool activated = registry.Activate(
+        stage, SdfPath("/TurretAsset/Rig"), UsdTimeCode(1024), &errors);
+    for (const std::string &e : errors) {
+        std::printf("  activate error: %s\n", e.c_str());
+    }
+    CHECK(activated);
+    if (!activated) return;
+
+    RigExecImagingSnapshotConstPtr snapshot = registry.GetStore()->Get();
+    CHECK(snapshot != nullptr);
+    CHECK(snapshot && snapshot->prims.count(turret) &&
+          snapshot->prims.at(turret).hasXform);
+
+    // The edit, and nothing else: no SetTime, no manual republish.
+    stage->SetEditTarget(stage->GetSessionLayer());
+    stage->GetPrimAtPath(SdfPath("/TurretAsset/Rig/Movers/AimBarrel"))
+        .GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({});
+
+    snapshot = registry.GetStore()->Get();
+    const bool stillDriven = snapshot && snapshot->prims.count(turret) &&
+                             snapshot->prims.at(turret).hasXform;
+    if (stillDriven) {
+        std::printf("  removing the moves relationship did not re-evaluate; "
+                    "the turret is still driven\n");
+    }
+    CHECK(!stillDriven);
+
+    // Reconnecting brings it back, so the clear is a state the rig recovers
+    // from rather than a one-way trip.
+    stage->GetPrimAtPath(SdfPath("/TurretAsset/Rig/Movers/AimBarrel"))
+        .GetRelationship(TfToken("rigExec:moves"))
+        .SetTargets({turret});
+
+    snapshot = registry.GetStore()->Get();
+    const bool drivenAgain = snapshot && snapshot->prims.count(turret) &&
+                             snapshot->prims.at(turret).hasXform;
+    if (!drivenAgain) {
+        std::printf("  reconnecting the moves relationship did not restore "
+                    "the driven transform\n");
+    }
+    CHECK(drivenAgain);
+
+    registry.Deactivate();
+}
+
 static void
 TestConstraintDrivenXformPublishes(const std::string &examplesDir)
 {
@@ -3436,6 +3657,10 @@ main(int argc, char **argv)
     TestMultiRigAtomicActivation(examplesDir);
     TestEditTriggeredReevaluation(examplesDir);
     TestConstraintDrivenXformPublishes(examplesDir);
+    TestJointFreeRigPublishes(examplesDir);
+    TestDisconnectingAConstraintClearsTheDrivenXform(examplesDir);
+    TestRelationshipEditTriggersReevaluation(examplesDir);
+    TestPropertyResultsDoNotPublishPrims(examplesDir);
     // Last: it publishes a fixture into the process-global registry store.
     TestGuideBoundsExport();
     TestTransformAuthorityWarnings(examplesDir);

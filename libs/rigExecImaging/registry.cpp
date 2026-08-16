@@ -347,6 +347,26 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     RigExecBindingResolvingSceneIndex::BindingEpochConstPtr epoch;
     if (!_EvaluateSessions(
             &_sessions, _stage, time, &snapshot, &epoch, nullptr)) {
+        // A rig that can no longer evaluate stops driving the scene.
+        //
+        // The per-session bridge already cleared its own store on the way
+        // out, but this COMBINED generation is the one the scene indices
+        // read, and returning here left the last good one current: remove a
+        // mover's rigExec:moves and the recompile fails, so the mesh under
+        // the driven Xform stayed where the constraint had put it through
+        // every later edit and frame change.
+        //
+        // Cleared exactly the way Deactivate does, and broadcast for the
+        // same reason: the store being right is worth nothing if the
+        // observers are never told.
+        _lastTime = time;
+        RigExecImagingBridge::PublishResult cleared;
+        cleared.ok = true;
+        cleared.dirtied = _store->Publish(nullptr);
+        // The next good generation must re-announce its epoch; the one the
+        // binding index holds names prims this clear just removed.
+        _publishedEpochId = 0;
+        _Broadcast(cleared);
         return false;
     }
     _lastTime = time;

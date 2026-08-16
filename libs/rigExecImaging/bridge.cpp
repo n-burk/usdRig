@@ -876,16 +876,18 @@ bool
 RigExecImagingBridge::EvaluateAndPublish(UsdTimeCode time)
 {
     const PublishResult result = EvaluateAndPublishResult(time);
-    if (!result.ok) {
-        return false;
-    }
+    // Deliver the notices even when evaluation failed. A failed generation
+    // still CLEARS the previous one, and that clearing is only worth
+    // anything if it reaches the observers -- returning early here was the
+    // second half of the stale-pose bug: the store had been corrected and
+    // nobody was told.
     if (_binding && result.epoch) {
         _binding->SetBindingEpoch(result.epoch);
     }
-    if (_results) {
+    if (_results && !result.dirtied.empty()) {
         _results->NotifyGenerationPublished(result.dirtied);
     }
-    return true;
+    return result.ok;
 }
 
 RigExecImagingBridge::PublishResult
@@ -895,6 +897,30 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     // 1. Evaluation always completes before publication (spec §8.2).
     const RigExecRigPose pose = _evaluator->Evaluate(time);
     if (!pose.valid) {
+        // A rig that cannot evaluate STOPS DRIVING THE SCENE.
+        //
+        // Returning here without publishing used to leave the last good
+        // generation current, and every consumer kept serving it: disconnect
+        // a constraint's rigExec:moves and the recompile fails ("Mover has no
+        // moves targets"), so the mesh under the driven Xform stayed exactly
+        // where the constraint had put it -- forever, through frame changes
+        // and further edits.
+        //
+        // Nothing downstream could correct that. The results scene index
+        // handles a driven transform disappearing, and the store diffs a prim
+        // that left the generation as structural -- but neither runs, because
+        // there was no publication for them to run on.
+        //
+        // Clearing is the rule the evaluator already applies to a
+        // non-converged generation: an unevaluated result is recoverable, a
+        // plausible wrong one is not. The scene falls back to what the stage
+        // authors, which reads as "the rig is not running" instead of being
+        // invisibly stale.
+        result.dirtied = _store->Publish(nullptr);
+        // The next good generation has to re-announce its epoch: the binding
+        // index is still holding one whose published prim set no longer
+        // exists, and an unchanged digest would suppress the replacement.
+        _publishedEpochDigest = 0;
         return result;
     }
 
@@ -907,15 +933,29 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     for (const auto &[propertyPath, value] : pose.movedProperties) {
         const SdfPath primPath = propertyPath.GetPrimPath();
         const TfToken property = propertyPath.GetNameToken();
+        // Only geometry crosses into imaging. movedProperties also carries
+        // the property-domain math mover results (a float dial, a vector
+        // offset, a matrix), which have no Hydra representation -- and
+        // indexing snapshot->prims for one of those would MINT an empty
+        // published prim for its owner, which then enters the binding epoch
+        // below and makes the scene index resolve a prim RigExec publishes
+        // nothing for. Look the entry up only once there is something to
+        // put in it.
+        const bool isGeometry =
+            value.IsHolding<VtVec3fArray>() &&
+            (property == "points" || property == "normals" ||
+             property == "extent");
+        if (!isGeometry) {
+            continue;
+        }
         RigExecPublishedPrim &published = snapshot->prims[primPath];
-        if (property == "points" && value.IsHolding<VtVec3fArray>()) {
+        if (property == "points") {
             published.hasPoints = true;
             published.points = value.UncheckedGet<VtVec3fArray>();
-        } else if (property == "normals" &&
-                   value.IsHolding<VtVec3fArray>()) {
+        } else if (property == "normals") {
             published.hasNormals = true;
             published.normals = value.UncheckedGet<VtVec3fArray>();
-        } else if (property == "extent" && value.IsHolding<VtVec3fArray>()) {
+        } else {
             const auto extent = value.UncheckedGet<VtVec3fArray>();
             if (extent.size() == 2) {
                 published.hasExtent = true;
@@ -1023,22 +1063,29 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
         for (const auto &[propertyPath, value] : pose.movedProperties) {
             const SdfPath primPath = propertyPath.GetPrimPath();
             const TfToken property = propertyPath.GetNameToken();
-            if (property == "points" && value.IsHolding<VtVec3fArray>()) {
+            // Geometry only, and checked before snapshot->prims is indexed:
+            // see EvaluateAndPublishResult for why minting an entry for a
+            // property-domain result is wrong.
+            const bool isGeometry =
+                value.IsHolding<VtVec3fArray>() &&
+                (property == "points" || property == "normals" ||
+                 property == "extent");
+            if (!isGeometry) {
+                continue;
+            }
+            if (property == "points") {
                 pointsPerPrim[primPath].push_back(
                     value.UncheckedGet<VtVec3fArray>());
             }
             if (i == baseIndex) {
                 RigExecPublishedPrim &published = snapshot->prims[primPath];
-                if (property == "points" &&
-                    value.IsHolding<VtVec3fArray>()) {
+                if (property == "points") {
                     published.hasPoints = true;
                     published.points = value.UncheckedGet<VtVec3fArray>();
-                } else if (property == "normals" &&
-                           value.IsHolding<VtVec3fArray>()) {
+                } else if (property == "normals") {
                     published.hasNormals = true;
                     published.normals = value.UncheckedGet<VtVec3fArray>();
-                } else if (property == "extent" &&
-                           value.IsHolding<VtVec3fArray>()) {
+                } else {
                     const auto extent =
                         value.UncheckedGet<VtVec3fArray>();
                     if (extent.size() == 2) {
