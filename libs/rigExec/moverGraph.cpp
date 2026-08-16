@@ -435,7 +435,8 @@ RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
            bindCoords == o.bindCoords && driverFrames == o.driverFrames &&
            widths == o.widths && curvenet == o.curvenet &&
            curvenetPoints == o.curvenetPoints &&
-           blendInputs == o.blendInputs;
+           blendInputs == o.blendInputs &&
+           phases == o.phases && transformPhase == o.transformPhase;
 }
 
 std::optional<RigExecRevisionOp>
@@ -530,6 +531,183 @@ RigExecCurvenetBindCache::TakeDiagnostics()
     return out;
 }
 
+const char *const RigExecReadPhaseMetadataName = "rigExecReadPhase";
+
+std::string
+RigExecReadPhase::GetAsString() const
+{
+    switch (kind) {
+    case RigExecReadPhaseKind::Base:      return "base";
+    case RigExecReadPhaseKind::Preceding: return "preceding";
+    case RigExecReadPhaseKind::Final:     return "final";
+    case RigExecReadPhaseKind::AtPrim:    return prim.GetString();
+    }
+    return "base";
+}
+
+bool
+RigExecParseReadPhase(
+    const std::string &authored, RigExecReadPhase *phase, std::string *error)
+{
+    if (!phase) {
+        return false;
+    }
+    if (authored.empty() || authored == "base") {
+        *phase = RigExecReadPhase{RigExecReadPhaseKind::Base, SdfPath()};
+        return true;
+    }
+    if (authored == "preceding") {
+        *phase = RigExecReadPhase{RigExecReadPhaseKind::Preceding, SdfPath()};
+        return true;
+    }
+    if (authored == "final") {
+        *phase = RigExecReadPhase{RigExecReadPhaseKind::Final, SdfPath()};
+        return true;
+    }
+    // Anything else must be an absolute prim path. A relative path would have
+    // to be resolved against something, and there are two equally plausible
+    // somethings here (the mover, the target), so it is rejected rather than
+    // guessed.
+    if (!SdfPath::IsValidPathString(authored)) {
+        if (error) {
+            *error = "'" + authored +
+                     "' is not base, preceding, final, or a valid prim path";
+        }
+        return false;
+    }
+    const SdfPath path(authored);
+    if (!path.IsAbsolutePath() || !path.IsPrimPath()) {
+        if (error) {
+            *error = "'" + authored +
+                     "' must be an ABSOLUTE prim path (or base, preceding, "
+                     "final)";
+        }
+        return false;
+    }
+    *phase = RigExecReadPhase{RigExecReadPhaseKind::AtPrim, path};
+    return true;
+}
+
+bool
+RigExecResolveReadPhase(
+    const UsdObject &property,
+    const char *legacyAttribute,
+    RigExecReadPhase *phase,
+    std::string *error)
+{
+    if (!phase) {
+        return false;
+    }
+    *phase = RigExecReadPhase();
+    if (!property.IsValid()) {
+        return true;
+    }
+
+    // Metadata on the property itself wins: it is the most specific place the
+    // phase can be said, and the only one that works for an input with no
+    // schema attribute of its own.
+    std::string authored;
+    if (property.GetMetadata(TfToken(RigExecReadPhaseMetadataName),
+                             &authored) &&
+        !authored.empty()) {
+        std::string why;
+        if (!RigExecParseReadPhase(authored, phase, &why)) {
+            if (error) {
+                *error = property.GetPath().GetString() + ": " +
+                         RigExecReadPhaseMetadataName + " " + why;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // Then the role-named schema attribute, so every asset authored before the
+    // metadata existed keeps meaning exactly what it meant.
+    if (legacyAttribute) {
+        const UsdPrim owner = property.GetPrim();
+        if (const UsdAttribute a =
+                owner.GetAttribute(TfToken(legacyAttribute))) {
+            TfToken value;
+            if (a.Get(&value) && !value.IsEmpty()) {
+                std::string why;
+                if (!RigExecParseReadPhase(value.GetString(), phase, &why)) {
+                    if (error) {
+                        *error = owner.GetPath().GetString() + ": " +
+                                 legacyAttribute + " " + why;
+                    }
+                    return false;
+                }
+                return true;
+            }
+        }
+    }
+    return true;
+}
+
+void
+RigExecChainSnapshots::Record(
+    const SdfPath &target, const SdfPath &afterMover, const VtValue &value)
+{
+    _chains[target].revisions.emplace_back(afterMover, value);
+}
+
+void
+RigExecChainSnapshots::RecordFinal(const SdfPath &target, const VtValue &value)
+{
+    _Chain &chain = _chains[target];
+    chain.final = value;
+    chain.hasFinal = true;
+}
+
+const VtValue *
+RigExecChainSnapshots::Lookup(
+    const SdfPath &target, const RigExecReadPhase &phase,
+    const SdfPath &readerMover) const
+{
+    const auto it = _chains.find(target);
+    if (it == _chains.end()) {
+        return nullptr;
+    }
+    const _Chain &chain = it->second;
+
+    switch (phase.kind) {
+    case RigExecReadPhaseKind::Base:
+        // The stage answers this one; nothing is recorded for it.
+        return nullptr;
+
+    case RigExecReadPhaseKind::Final:
+        return chain.hasFinal ? &chain.final : nullptr;
+
+    case RigExecReadPhaseKind::Preceding: {
+        // The value going INTO the reader. Absent when the reader is the
+        // chain's first revision, which is the authored base -- so returning
+        // null correctly sends the caller to the stage.
+        for (size_t i = 0; i < chain.revisions.size(); ++i) {
+            if (chain.revisions[i].first == readerMover) {
+                return i == 0 ? nullptr : &chain.revisions[i - 1].second;
+            }
+        }
+        // The reader does not write this chain at all, so "preceding" has no
+        // position to be relative to.
+        return nullptr;
+    }
+
+    case RigExecReadPhaseKind::AtPrim: {
+        // The LAST revision at or beneath the named prim. For a mover that is
+        // the mover itself; for a Scope it is whatever ran last inside it,
+        // which is what post-order makes that Scope mean.
+        const VtValue *found = nullptr;
+        for (const auto &[mover, value] : chain.revisions) {
+            if (mover == phase.prim || mover.HasPrefix(phase.prim)) {
+                found = &value;
+            }
+        }
+        return found;
+    }
+    }
+    return nullptr;
+}
+
 namespace {
 
 SdfPathVector
@@ -578,12 +756,32 @@ RigExecResolveRevisionBinding(
     const TfToken schemaType = moverPrim.GetTypeName();
     const SdfPath ownerPath = target.GetPrimPath();
 
+    // A phase declared on the relationship that NAMES an input governs that
+    // input. Recorded against the exact property path the phase applies to,
+    // so the assembler's read of that path is what consults it.
+    auto phaseFor = [&moverPrim](const char *rel, const char *legacyAttr) {
+        RigExecReadPhase phase;
+        if (const UsdRelationship r = moverPrim.GetRelationship(TfToken(rel))) {
+            RigExecResolveReadPhase(r, legacyAttr, &phase, nullptr);
+        } else if (legacyAttr) {
+            // No relationship to hang metadata on, but the legacy attribute
+            // may still be authored.
+            if (const UsdAttribute a =
+                    moverPrim.GetAttribute(TfToken(legacyAttr))) {
+                RigExecResolveReadPhase(a, legacyAttr, &phase, nullptr);
+            }
+        }
+        return phase;
+    };
+
     if (schemaType == "RigExecMatrixMover") {
         // "final" binds the provider's frame-chain head instead of the
         // provider itself; every other phase binds the provider (spec §12.1).
         const SdfPathVector transforms = _Targets(moverPrim, "rigExec:transform");
         SdfPath provider = transforms.empty() ? SdfPath() : transforms[0];
-        if (_Token(moverPrim, "rigExec:transformReadPhase", "base") == "final") {
+        binding.transformPhase =
+            phaseFor("rigExec:transform", "rigExec:transformReadPhase");
+        if (binding.transformPhase.kind == RigExecReadPhaseKind::Final) {
             const auto it = frameChainHeads.find(provider);
             if (it != frameChainHeads.end()) {
                 provider = it->second;
@@ -606,6 +804,11 @@ RigExecResolveRevisionBinding(
         const SdfPathVector cages = _Targets(moverPrim, "rigExec:cage");
         if (!cages.empty()) {
             binding.cagePoints = _PointsOf(cages[0]);
+            const RigExecReadPhase phase =
+                phaseFor("rigExec:cage", "rigExec:cageReadPhase");
+            if (!phase.IsBase()) {
+                binding.phases[binding.cagePoints] = phase;
+            }
         }
     } else if (schemaType == "RigExecSurfaceMover") {
         const SdfPathVector surfaces = _Targets(moverPrim, "rigExec:surface");
@@ -613,6 +816,11 @@ RigExecResolveRevisionBinding(
             const SdfPath surfacePrim = surfaces[0].GetPrimPath();
             binding.surfacePoints =
                 surfacePrim.AppendProperty(TfToken("points"));
+            const RigExecReadPhase phase =
+                phaseFor("rigExec:surface", "rigExec:surfaceReadPhase");
+            if (!phase.IsBase()) {
+                binding.phases[binding.surfacePoints] = phase;
+            }
             binding.topologyCounts =
                 surfacePrim.AppendProperty(TfToken("faceVertexCounts"));
             binding.topologyIndices =
@@ -632,6 +840,11 @@ RigExecResolveRevisionBinding(
             binding.curvenet = nets[0].GetPrimPath();
             binding.curvenetPoints =
                 binding.curvenet.AppendProperty(TfToken("points"));
+            const RigExecReadPhase phase =
+                phaseFor("rigExec:curvenet", nullptr);
+            if (!phase.IsBase()) {
+                binding.phases[binding.curvenetPoints] = phase;
+            }
         }
     } else if (schemaType == "RigExecCurveMover") {
         const SdfPathVector binds = _Targets(moverPrim, "rigExec:bindCoordinates");
@@ -641,6 +854,13 @@ RigExecResolveRevisionBinding(
         const SdfPathVector frames = _Targets(moverPrim, "rigExec:driverFrames");
         if (!frames.empty()) {
             binding.driverFrames = frames[0];
+        }
+        if (!binding.bindCoords.IsEmpty()) {
+            const RigExecReadPhase phase =
+                phaseFor("rigExec:bindCoordinates", nullptr);
+            if (!phase.IsBase()) {
+                binding.phases[binding.bindCoords] = phase;
+            }
         }
     }
 
@@ -658,7 +878,8 @@ RigExecAssembleMatrixParameters(
     const UsdPrim &moverPrim,
     const GfMatrix4d *transform,
     const RigExecWeightPacket *weights,
-    UsdTimeCode time)
+    UsdTimeCode time,
+    const RigExecResolvedInputs *resolved)
 {
     RigExecMoverParameters params;
     params.kind = TfToken("matrix");
@@ -667,7 +888,11 @@ RigExecAssembleMatrixParameters(
     if (moverPrim) {
         if (const UsdAttribute a =
                 moverPrim.GetAttribute(TfToken("inputs:enabled"))) {
-            a.Get(&enabled, time);
+            if (!resolved ||
+                !resolved->Get(moverPrim.GetPath().AppendProperty(
+                                   TfToken("inputs:enabled")), &enabled)) {
+                a.Get(&enabled, time);
+            }
         }
     }
     params.enabled = enabled;
@@ -717,27 +942,48 @@ RigExecStatusForParameters(
 
 namespace {
 
+// Every static scalar read goes through here, and every one of them consults
+// the resolved set first. A property mover that revised inputs:strength is
+// then indistinguishable, from the kernel's side, from an author who typed
+// the revised number -- which is the whole point: the two paths must not
+// disagree about what the mover's input is.
 float
 _Float(const UsdPrim &prim, const char *attr, float fallback,
-       UsdTimeCode time)
+       UsdTimeCode time, const RigExecResolvedInputs *resolved)
 {
     float value = fallback;
     if (const UsdAttribute a = prim.GetAttribute(TfToken(attr))) {
+        if (resolved &&
+            resolved->Get(prim.GetPath().AppendProperty(TfToken(attr)),
+                          &value)) {
+            return value;
+        }
         a.Get(&value, time);
     }
     return value;
 }
 
 // Reads a typed array from an exact property path on the mover's stage.
+//
+// \p resolved is null for BIND-TIME reads and only for those. A rest cage, a
+// rest curvenet, a bind-time topology: those are the authored neutral pose the
+// deformation is measured against, so a read phase has nothing to say about
+// them -- and serving one the same phased value as the live read makes the two
+// operands equal and the whole deformation an identity.
 template <typename T>
 std::vector<T>
-_Array(const UsdPrim &moverPrim, const SdfPath &path, UsdTimeCode time)
+_Array(const UsdPrim &moverPrim, const SdfPath &path, UsdTimeCode time,
+       const RigExecResolvedInputs *resolved = nullptr)
 {
     std::vector<T> out;
     if (path.IsEmpty() || !moverPrim) {
         return out;
     }
     VtArray<T> value;
+    if (resolved && resolved->Get(path, &value)) {
+        out.assign(value.begin(), value.end());
+        return out;
+    }
     if (const UsdAttribute a =
             moverPrim.GetStage()->GetAttributeAtPath(path)) {
         // At the EVALUATED time, not Default: the kernels read these same
@@ -750,12 +996,18 @@ _Array(const UsdPrim &moverPrim, const SdfPath &path, UsdTimeCode time)
 }
 
 bool
-_Enabled(const UsdPrim &prim, UsdTimeCode time)
+_Enabled(const UsdPrim &prim, UsdTimeCode time,
+         const RigExecResolvedInputs *resolved)
 {
     bool enabled = true;
     if (prim) {
         if (const UsdAttribute a =
                 prim.GetAttribute(TfToken("inputs:enabled"))) {
+            if (resolved &&
+                resolved->Get(prim.GetPath().AppendProperty(
+                                  TfToken("inputs:enabled")), &enabled)) {
+                return enabled;
+            }
             a.Get(&enabled, time);
         }
     }
@@ -833,7 +1085,7 @@ RigExecAssembleParameters(
     }
 
     RigExecMoverParameters params;
-    params.enabled = _Enabled(moverPrim, time);
+    params.enabled = _Enabled(moverPrim, time, values.resolved);
 
     switch (op) {
     case RigExecRevisionOp::BlendShape:
@@ -890,7 +1142,7 @@ RigExecAssembleParameters(
         break;
 
     case RigExecRevisionOp::VolumeCorrect:
-        params.strength = _Float(moverPrim, "inputs:strength", 0.0f, time);
+        params.strength = _Float(moverPrim, "inputs:strength", 0.0f, time, values.resolved);
         if (!std::isfinite(params.strength)) {
             break;  // MoverFailed, as in _BuildVolumeCorrectMoverParameters
         }
@@ -903,18 +1155,18 @@ RigExecAssembleParameters(
         break;
 
     case RigExecRevisionOp::Smooth:
-        params.strength = _Float(moverPrim, "inputs:strength", 0.5f, time);
+        params.strength = _Float(moverPrim, "inputs:strength", 0.5f, time, values.resolved);
         if (!std::isfinite(params.strength)) {
             break;  // MoverFailed, as in _BuildSmoothMoverParameters
         }
-        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time);
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, time);
+            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
         params.valid = !params.topologyCounts.empty();
         break;
 
     case RigExecRevisionOp::Curvenet: {
-        params.strength = _Float(moverPrim, "inputs:strength", 1.0f, time);
+        params.strength = _Float(moverPrim, "inputs:strength", 1.0f, time, values.resolved);
         if (!std::isfinite(params.strength)) {
             break;  // MoverFailed rather than a NaN surface
         }
@@ -929,8 +1181,7 @@ RigExecAssembleParameters(
         // The projection pose is the curvenet and the surface as AUTHORED --
         // Default time on both. Everything the cut depends on is read here,
         // and its digest is what decides whether the cache still applies.
-        const std::vector<GfVec3f> restNet = _Array<GfVec3f>(
-            moverPrim, binding.curvenetPoints, UsdTimeCode::Default());
+        const std::vector<GfVec3f> restNet = _Array<GfVec3f>(moverPrim, binding.curvenetPoints, UsdTimeCode::Default(), /*resolved=*/nullptr);
         std::vector<int> splineIndices;
         if (const UsdAttribute a =
                 netPrim.GetAttribute(TfToken("rigExec:splineIndices"))) {
@@ -945,18 +1196,16 @@ RigExecAssembleParameters(
         }
         const TfToken basisToken = _Token(netPrim, "rigExec:basis", "bezier");
         params.topologyCounts =
-            _Array<int>(moverPrim, binding.topologyCounts, UsdTimeCode::Default());
+            _Array<int>(moverPrim, binding.topologyCounts, UsdTimeCode::Default(), /*resolved=*/nullptr);
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices,
-                        UsdTimeCode::Default());
+            _Array<int>(moverPrim, binding.topologyIndices, UsdTimeCode::Default(), /*resolved=*/nullptr);
         // The projection surface is the target's points at DEFAULT, not at
         // the evaluated time. It is a fixed neutral pose by definition (§4.1
         // cuts against it once), and reading the animated value instead would
         // put a per-frame quantity in the bind digest -- re-cutting the mesh
         // and re-factorizing its Laplacian on every frame, while also making
         // the cut mean something different at each one.
-        params.restPoints = _Array<GfVec3f>(moverPrim, binding.base,
-                                            UsdTimeCode::Default());
+        params.restPoints = _Array<GfVec3f>(moverPrim, binding.base, UsdTimeCode::Default(), /*resolved=*/nullptr);
         if (restNet.empty() || splineIndices.empty() ||
             params.topologyCounts.empty() || params.restPoints.empty()) {
             break;
@@ -1035,9 +1284,8 @@ RigExecAssembleParameters(
         // capture was itself only `a.Get(&v, UsdTimeCode::Default())` on this
         // same attribute -- so reading it here is identical and needs nothing
         // authored. The live cage is the same attribute at the evaluated time.
-        params.auxPoints = _Array<GfVec3f>(
-            moverPrim, binding.cagePoints, UsdTimeCode::Default());
-        params.auxPointsB = _Array<GfVec3f>(moverPrim, binding.cagePoints, time);
+        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.cagePoints, UsdTimeCode::Default(), /*resolved=*/nullptr);
+        params.auxPointsB = _Array<GfVec3f>(moverPrim, binding.cagePoints, time, values.resolved);
         if (const UsdAttribute a =
                 moverPrim.GetAttribute(TfToken("rigExec:divisions"))) {
             a.Get(&params.divisions, time);
@@ -1062,10 +1310,10 @@ RigExecAssembleParameters(
         // inputs:strength, so reading one here silently applied a 0.5
         // default and projected half way.
         params.strength = 1.0f;
-        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.surfacePoints, time);
-        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time);
+        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.surfacePoints, time, values.resolved);
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, time);
+            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
         params.valid =
             !params.auxPoints.empty() && !params.topologyCounts.empty();
         break;
@@ -1080,7 +1328,7 @@ RigExecAssembleParameters(
         params.frames = *frames;
         if (op == RigExecRevisionOp::Ribbon) {
             params.bindCoords =
-                _Array<GfVec2f>(moverPrim, binding.bindCoords, time);
+                _Array<GfVec2f>(moverPrim, binding.bindCoords, time, values.resolved);
             params.valid = !params.bindCoords.empty();
         } else {
             params.valid = true;
@@ -1093,13 +1341,13 @@ RigExecAssembleParameters(
         // Derived maintenance reads the final same-generation points, which
         // the caller supplies as the base value for this revision.
         params.auxPoints = values.basePoints;
-        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time);
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, time);
+            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
         // Authored widths widen the extent bounds; omitting them silently
         // under-reports the bound of a curves/points gprim.
         if (op == RigExecRevisionOp::RecomputeExtent) {
-            params.widths = _Array<float>(moverPrim, binding.widths, time);
+            params.widths = _Array<float>(moverPrim, binding.widths, time, values.resolved);
         }
         // Vertex normals need the adjacency; without it the kernel reports
         // MoverFailed rather than emitting garbage normals. Extent needs only

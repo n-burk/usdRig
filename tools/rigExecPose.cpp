@@ -87,6 +87,29 @@ void
 ReportPoints(const std::string &label, const VtValue &value,
              const VtVec3fArray &rest)
 {
+    // Property-domain results share this map with the point chains, and for
+    // those the VALUE is the whole report -- a clamped dial that printed only
+    // its type name would say nothing about whether the clamp happened.
+    if (value.IsHolding<float>()) {
+        std::printf("      %-52s %.5f\n", label.c_str(),
+                    double(value.UncheckedGet<float>()));
+        return;
+    }
+    if (value.IsHolding<GfVec3f>()) {
+        std::printf("      %-52s %s\n", label.c_str(),
+                    FormatVec(GfVec3d(value.UncheckedGet<GfVec3f>())).c_str());
+        return;
+    }
+    if (value.IsHolding<GfMatrix4d>()) {
+        const GfMatrix4d m = value.UncheckedGet<GfMatrix4d>();
+        std::printf("      %-52s t%s\n", label.c_str(),
+                    FormatVec(m.ExtractTranslation()).c_str());
+        std::printf("        x%s y%s z%s\n",
+                    FormatVec(m.GetRow3(0)).c_str(),
+                    FormatVec(m.GetRow3(1)).c_str(),
+                    FormatVec(m.GetRow3(2)).c_str());
+        return;
+    }
     if (!value.IsHolding<VtVec3fArray>()) {
         std::printf("      %-52s <%s>\n", label.c_str(),
                     value.GetTypeName().c_str());
@@ -340,8 +363,16 @@ main(int argc, char **argv)
                             frameValue.IsValid() ? "" : "  INVALID");
             }
             for (const auto &[path, matrix] : pose.providerXforms) {
-                std::printf("    xform %-40s %s\n", path.GetText(),
+                // The basis, not just the origin. A constraint's whole job is
+                // usually orientation -- the default preserve set pins the
+                // origin -- so a translation-only report is blank exactly
+                // where the interesting answer is.
+                std::printf("    xform %-40s t%s\n", path.GetText(),
                             FormatVec(matrix.ExtractTranslation()).c_str());
+                std::printf("      x%s y%s z%s\n",
+                            FormatVec(matrix.GetRow3(0)).c_str(),
+                            FormatVec(matrix.GetRow3(1)).c_str(),
+                            FormatVec(matrix.GetRow3(2)).c_str());
             }
         }
         for (const auto &[path, value] : pose.movedProperties) {

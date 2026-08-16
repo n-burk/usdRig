@@ -24,10 +24,12 @@
 #include "rigExecMath/profileMover.h"
 
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/value.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/exec/vdf/maskedOutput.h"
 #include "pxr/exec/vdf/network.h"
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/object.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
 
@@ -59,6 +61,162 @@ enum class RigExecRevisionOp {
     RecomputeExtent,
 };
 
+/// When in the walk a side input takes its value from.
+///
+/// A mover reads things other movers write. Which REVISION of those things it
+/// gets is a separate authored choice from which path it reads, and the two
+/// were never expressible together: a read phase had to be a schema attribute
+/// named for one specific role (rigExec:cageReadPhase, rigExec:surfaceRead-
+/// Phase, ...), so every new input needed a new attribute and an input with no
+/// attribute of its own had no way to say anything at all.
+///
+/// Declaring it as metadata ON the relationship or attribute that names the
+/// input puts the phase where the binding is, so any input can carry one and
+/// nothing has to be added to a schema to introduce another.
+enum class RigExecReadPhaseKind {
+    Base,       ///< the authored value: what the stage resolves at this time
+    Preceding,  ///< the value immediately before the reading mover
+    Final,      ///< the value after every mover that writes it has run
+    AtPrim,     ///< the value as of when the walk finished with a named prim
+};
+
+/// A resolved read phase. \p prim is meaningful only for AtPrim.
+///
+/// AtPrim is the general form the other three are shorthands for: the walk is
+/// a post-order over the composed Movers namespace, so "as of this prim" means
+/// the moment that prim was finished with -- for a mover, immediately after it
+/// applied; for a grouping Scope, after everything beneath it applied, because
+/// post-order visits a parent last. Naming a Scope is therefore how an author
+/// says "after that whole rigging stage", without listing its contents.
+struct RigExecReadPhase {
+    RigExecReadPhaseKind kind = RigExecReadPhaseKind::Base;
+    SdfPath prim;
+
+    bool IsBase() const { return kind == RigExecReadPhaseKind::Base; }
+    bool operator==(const RigExecReadPhase &o) const {
+        return kind == o.kind && prim == o.prim;
+    }
+    bool operator!=(const RigExecReadPhase &o) const { return !(*this == o); }
+    /// Stable text for digests and diagnostics.
+    std::string GetAsString() const;
+};
+
+/// The metadata field an input's read phase is authored in.
+///
+/// Not namespaced: USD metadata field names are plain identifiers, and
+/// `rigExec:readPhase` does not parse in a metadata position.
+extern const char *const RigExecReadPhaseMetadataName;
+
+/// Parses an authored phase string.
+///
+/// Accepts `base`, `preceding`, `final`, or an absolute prim path. Returns
+/// false for anything else -- including a relative path, which has no
+/// unambiguous meaning here -- and fills \p error.
+bool RigExecParseReadPhase(
+    const std::string &authored, RigExecReadPhase *phase, std::string *error);
+
+/// The read phase declared for \p property, if any.
+///
+/// Metadata first, then \p legacyAttribute on the property's own prim (the
+/// rigExec:<role>ReadPhase attributes, still honored so existing assets keep
+/// working), then Base. Returns false and fills \p error on an unparseable
+/// authored value; an absent declaration is Base and true.
+bool RigExecResolveReadPhase(
+    const UsdObject &property,
+    const char *legacyAttribute,
+    RigExecReadPhase *phase,
+    std::string *error);
+
+/// Values evaluation has already computed that a static read must prefer over
+/// the authored stage value.
+///
+/// Packet assembly reads most of its inputs straight off the stage -- a
+/// strength, a lattice cage, a topology array. Those reads do not go through
+/// exec, so nothing the engine computes reaches them by default, and a
+/// property mover that revised one of them would be silently ignored while
+/// the same revision reached every exec consumer through a value override.
+/// This is the other half of that path: one lookup, consulted first, holding
+/// whatever the current generation has already resolved.
+class RigExecResolvedInputs
+{
+public:
+    /// Records a property chain's result for \p path.
+    void SetProperty(const SdfPath &path, const VtValue &value) {
+        _values[path] = value;
+    }
+
+    /// The resolved value for \p path, or null to read the stage.
+    const VtValue *Find(const SdfPath &path) const {
+        const auto it = _values.find(path);
+        return it == _values.end() ? nullptr : &it->second;
+    }
+
+    /// Typed convenience: true when \p path resolved to a \p T.
+    template <class T>
+    bool Get(const SdfPath &path, T *out) const {
+        const VtValue *v = Find(path);
+        if (!v || !v->IsHolding<T>()) {
+            return false;
+        }
+        *out = v->UncheckedGet<T>();
+        return true;
+    }
+
+    bool IsEmpty() const { return _values.empty(); }
+    size_t GetSize() const { return _values.size(); }
+    void Clear() { _values.clear(); }
+
+private:
+    std::map<SdfPath, VtValue> _values;
+};
+
+/// What each chain held at each point in the walk.
+///
+/// A chain is a sequence of revisions, and until now only its two ends were
+/// nameable -- the authored base going in and the final value coming out.
+/// Everything between them existed for a moment inside the evaluation loop
+/// and was dropped. A read phase that names a prim needs exactly one of those
+/// intermediate values, so they are kept: one entry per (target, mover) as
+/// the chain is built, plus the final.
+///
+/// Cheap by construction. Chains are short, the values are already
+/// materialized to publish the result anyway, and VtValue's array backing is
+/// copy-on-write -- so recording a revision costs a refcount, not a copy of
+/// the geometry.
+class RigExecChainSnapshots
+{
+public:
+    /// Records \p value as \p target stood immediately after \p afterMover.
+    void Record(const SdfPath &target, const SdfPath &afterMover,
+                const VtValue &value);
+
+    /// Records \p target's value after its whole chain.
+    void RecordFinal(const SdfPath &target, const VtValue &value);
+
+    /// The value of \p target at \p phase, or null when nothing was recorded.
+    ///
+    /// \p readerMover is the mover doing the reading, needed by Preceding.
+    /// An AtPrim phase naming a grouping Scope resolves to the LAST recorded
+    /// revision at or beneath it, which is what post-order makes that Scope
+    /// mean.
+    const VtValue *Lookup(
+        const SdfPath &target, const RigExecReadPhase &phase,
+        const SdfPath &readerMover) const;
+
+    void Clear() { _chains.clear(); }
+    bool IsEmpty() const { return _chains.empty(); }
+
+private:
+    struct _Chain {
+        /// (mover, value) in walk order. A vector, not a map: Preceding and
+        /// the Scope rule are both positional questions.
+        std::vector<std::pair<SdfPath, VtValue>> revisions;
+        VtValue final;
+        bool hasFinal = false;
+    };
+    std::map<SdfPath, _Chain> _chains;
+};
+
 /// Where one revision reads its side inputs from.
 ///
 /// These are the bindings the compiler used to author onto the mover prim as
@@ -83,6 +241,16 @@ struct RigExecRevisionBinding {
     SdfPath curvenet;         ///< RigExecCurvenet prim (Profile Mover)
     SdfPath curvenetPoints;   ///< that curvenet's points property
     std::vector<SdfPath> blendInputs;  ///< sorted blend channels
+
+    /// Declared read phase per side input, keyed by the exact property path
+    /// the phase governs. Absent means Base, which is what an unannotated
+    /// input has always meant.
+    std::map<SdfPath, RigExecReadPhase> phases;
+
+    /// The phase declared for the transform provider. Kept apart from
+    /// `phases` because it is answered from the FRAME chains rather than the
+    /// point chains -- a different store with a different value type.
+    RigExecReadPhase transformPhase;
 
     bool operator==(const RigExecRevisionBinding &o) const;
 };
@@ -158,7 +326,8 @@ RigExecMoverParameters RigExecAssembleMatrixParameters(
     const UsdPrim &moverPrim,
     const GfMatrix4d *transform,
     const RigExecWeightPacket *weights,
-    UsdTimeCode time = UsdTimeCode::Default());
+    UsdTimeCode time = UsdTimeCode::Default(),
+    const RigExecResolvedInputs *resolved = nullptr);
 
 /// Derives a mover's status from its packet (spec §6.6): disabled and failed
 /// movers both pass their preceding revision through, and a failure records the
@@ -187,6 +356,10 @@ struct RigExecProviderValues {
     /// Cache for the expensive half of the Profile Mover. Null binds fresh
     /// every call, which is correct but only sane in a test.
     RigExecCurvenetBindCache *curvenetCache = nullptr;
+    /// Values already resolved this generation, preferred by every static
+    /// read the assembler makes. Null reads the stage throughout, which is
+    /// what a rig with no property chains wants and what a test may pass.
+    const RigExecResolvedInputs *resolved = nullptr;
 };
 
 /// Sums blend channels into dense per-point deltas against \p base

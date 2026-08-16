@@ -617,7 +617,15 @@ class RigExecFloatMathMover "RigExecFloatMathMover" (
         string className = "FloatMathMover"
     }
     doc = """Statically typed add, multiply, clamp, remap, or blend over an
-    exact float property target."""
+    exact float property target (spec section 4.1).
+
+    The revision is r = op(incoming), mixed back as
+    incoming + inputs:weight * (r - incoming), so weight 0 is a pass-through
+    and weight 1 (the default) is the operation applied outright -- the same
+    uniform weight rule the point-domain matrix mover follows.
+
+    remap normalizes from [inputs:min, inputs:max] to [0, 1] and does NOT
+    clamp; compose a clamp mover after it to bound the result."""
 )
 {
     uniform token rigExec:operation = "clamp" (
@@ -626,6 +634,7 @@ class RigExecFloatMathMover "RigExecFloatMathMover" (
     float inputs:value = 0
     float inputs:min = 0
     float inputs:max = 1
+    float inputs:weight = 1
 }
 
 ################################################################
@@ -1143,7 +1152,11 @@ class RigExecVec3fMathMover "RigExecVec3fMathMover" (
         string className = "Vec3fMathMover"
     }
     doc = """Statically typed add, multiply, clamp, remap, or blend over an
-    exact float3/vector-valued property target (spec section 4.1)."""
+    exact float3/vector-valued property target (spec section 4.1).
+
+    Every operation is component-wise, which is why the bounds are float3
+    rather than float. Weight and remap semantics match
+    RigExecFloatMathMover."""
 )
 {
     uniform token rigExec:operation = "add" (
@@ -1152,6 +1165,7 @@ class RigExecVec3fMathMover "RigExecVec3fMathMover" (
     float3 inputs:value = (0, 0, 0)
     float3 inputs:min = (0, 0, 0)
     float3 inputs:max = (1, 1, 1)
+    float inputs:weight = 1
 }
 
 class RigExecMatrixMathMover "RigExecMatrixMathMover" (
@@ -1161,7 +1175,11 @@ class RigExecMatrixMathMover "RigExecMatrixMathMover" (
     }
     doc = """Statically typed multiply or blend over an exact matrix4d
     property target (spec section 4.1). Distinct from the point-moving
-    RigExecMatrixMover."""
+    RigExecMatrixMover.
+
+    multiply post-multiplies (inputs:value applied AFTER the incoming
+    matrix, in GfMatrix4d's row-vector convention); blend replaces. The
+    inputs:weight mix is component-wise, exact at both endpoints."""
 )
 {
     uniform token rigExec:operation = "multiply" (

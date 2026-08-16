@@ -45,6 +45,21 @@ RigExecTapSet::AddResolved(
 bool
 RigExecTapSet::Prepare()
 {
+    // A tap set with nothing in it is a legitimate epoch, not a failure.
+    //
+    // It arrives whenever a rig's whole output set is derived without exec:
+    // a constraint aiming a plain UsdGeomXformable at another plain
+    // UsdGeomXformable reads both frames from their USD transforms, and a
+    // rig with no joints and no exec-backed provider has no value keys at
+    // all. Building an empty ExecUsdRequest and asking whether it is valid
+    // conflates "nothing to compute" with "could not be compiled", and the
+    // caller treats the second as a compile failure.
+    if (_addresses.empty()) {
+        _request.reset();
+        _prepared = true;
+        return true;
+    }
+
     std::vector<ExecUsdValueKey> keys;
     keys.reserve(_addresses.size());
     for (size_t i = 0; i < _addresses.size(); ++i) {
@@ -96,6 +111,14 @@ RigExecTapSet::Evaluate(
 
     RigExecSnapshot snapshot;
     snapshot._time = time;
+    // The empty set evaluates trivially: valid, complete, and holding no
+    // values. Every caller checks IsComplete() before reading, and "no taps
+    // were requested" satisfies "every requested tap produced a value".
+    if (_addresses.empty()) {
+        snapshot._valid = true;
+        snapshot._complete = true;
+        return snapshot;
+    }
     if (!_request || !_request->IsValid()) {
         return snapshot;
     }

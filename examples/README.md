@@ -4,7 +4,7 @@ Every file is a self-contained, animated stage (frames 1001-1048) with one
 `RigExecRig`. View any of them live with:
 
 ```
-launch_usdview.bat examples\<file>.usda
+bin/launch_usdview.bat examples\<file>.usda
 ```
 
 The rigExecUsdview plugin activates automatically for stages carrying a
@@ -72,6 +72,20 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
   constraints re-aim the eye joints' z-axes at an animated look-at
   control with ramped weights; geometry-phase matrix movers read the
   posed joints at the `final` phase to carry the eye cards.
+- **09_PropertyMathMovers.usda** — the property output domain:
+  `RigExecFloatMathMover`, `RigExecVec3fMathMover`, and
+  `RigExecMatrixMathMover` each revise an exact scalar/vector/matrix
+  attribute instead of a `point3f[]` array. A property chain resolves off
+  the authored stage before exec runs, so its result is handed back to
+  exec as the attribute's value — which is how `03`'s clamped weight
+  reaches `RigExecBlendPointFrames`. A witness card skinned by a matrix
+  mover sits alongside, so one rig shows both domains.
+- **10_AimXformTurret.usda** — a `RigExecAimConstraint` driving a plain
+  `UsdGeomXform`, with the barrel mesh parented underneath: one matrix
+  for a rigid object instead of point-deforming every vertex at constant
+  weight 1 (the counterpart to `08`'s skinning model). The engine
+  publishes world-space transforms and dirties the driven subtree itself,
+  because RigExec installs downstream of the chain's flattening index.
 - **11_VolumeWeights.usda** — volumetric weight objects: nothing is
   painted. A `RigExecSphereWeight` authored *inside* the shoulder joint
   rides it with nothing wired (a volume weight is a `RigExecXformable`,
@@ -98,6 +112,18 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
   tube and the same net still articulates it. **Generated** by
   `build_curvenet_example.py`; edit that, not the `.usda`. See
   [`docs/curvenet.md`](../docs/curvenet.md).
+- **13_ReadPhases.usda** — read phases as property metadata. A Slab is
+  deformed through a cage that is itself deformed by two movers, and the
+  lattice declares which cage it wants. `base` leaves the slab alone,
+  `/…/Movers/Cage/CageLift` gives the lifted-but-not-twisted cage, and
+  `final` gives both — three different results from one rig with no other
+  edit. Cyclic phase reads are rejected at compile.
+- **rigexec_flat.usda** — the smallest rig that exists, and a flattened
+  capture of the shape an interactive session produces: one aim
+  constraint, no joints at all, and both ends plain `UsdGeomXformable`s.
+  A rig's outputs are joint frames, driven transforms, and revised
+  properties in any combination — a joint is one of them, not a
+  precondition.
 
 ## Authoring conventions the engine expects
 
@@ -129,6 +155,42 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
   lattice, surface, curve) write native `UsdGeomPointBased` `point3f[]`
   `points` attributes only; smooth/volumeCorrect/lattice (like blend
   shape and matrix movers) take exactly one canonical target in v0.1.
+- A mover's output is not restricted to a joint frame. Three domains
+  exist and a rig may publish any combination of them, including a rig
+  with no `RigExecJoint` at all: **geometry** (the point chains above),
+  **transforms** (`RigExecAimConstraint` on any `UsdGeomXformable` — its
+  revised matrix is published and the subtree rides along), and
+  **properties** (the three math movers, over an exact `float`,
+  `float3`/`vector3f`/`point3f`/`normal3f`/`color3f`, or `matrix4d`
+  attribute — exactly one target each, and the target's value type must
+  match the mover's static type). A rig with neither joints nor movers is
+  still rejected: it publishes nothing.
+- Property-chain results reach every consumer. A computation reading the
+  attribute gets an exec value override; packet assembly, which never touches
+  exec, gets the same value through the evaluator's resolved-input set. Both
+  are filled from the one chain result before any input is read.
+- **Read phases** decide *which revision* of an input a mover consumes, and
+  are authored as metadata on the relationship (or attribute) that names it:
+
+  ```
+  rel rigExec:cage = </Asset/Geom/Cage> (
+      rigExecReadPhase = "final"
+  )
+  ```
+
+  `base` (the authored value, and the default), `preceding` (the value just
+  before this mover, in its own chain), `final` (after every writer), or an
+  absolute prim path — the value as of when the composed post-order walk
+  finished with that prim. A mover path means "right after it applied"; a
+  grouping `Scope` means "after everything beneath it", because post-order
+  visits a parent last. The field is `rigExecReadPhase`, not
+  `rigExec:readPhase`: USD metadata names take no namespace, and metadata
+  follows the target assignment rather than preceding it. The older
+  role-named attributes (`rigExec:cageReadPhase`, …) still work; metadata
+  wins when both are authored. Editing a phase is structural. Chains are
+  evaluated in dependency order and a cyclic phase read fails the compile.
+  Bind-time (rest) reads always take the authored value — a phase has no
+  meaning for the neutral pose a deformation is measured against.
 - Normals and extent are never authored as movers: the compiler
   synthesizes derived-maintenance applications for every written points
   target whose gprim authors the property, reading the final

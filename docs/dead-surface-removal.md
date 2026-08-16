@@ -189,15 +189,38 @@ All were inputs to the ten application host schemas or to
 
 **Remove:** all seventeen.
 
-### 6. Declared-but-unevaluated movers (track, do not delete)
+### 6. Declared-but-unevaluated movers — RESOLVED: implemented
 
-`RigExecFloatMathMover`, `RigExecVec3fMathMover`, `RigExecMatrixMathMover`.
-Declared, compile-validated, never evaluated. `09_PropertyMathMovers.usda`
-documents them and `TestPropertyMathMoversAreNotEvaluated` enforces the
-documented state — it fails the day they are implemented.
+`RigExecFloatMathMover`, `RigExecVec3fMathMover`, `RigExecMatrixMathMover`
+were declared, compile-validated, and never evaluated. The product call went
+the way this item recommended: they are implemented, not dropped.
 
-**Do not delete.** Removing them discards a designed feature. They need
-implementing or an explicit decision to drop them, which is a product call.
+`RigExecRigEvaluator::_EvaluatePropertyChains` runs each target's revisions in
+composed post-order over the attribute's authored base, with the kernels in
+`rigExecMath/propertyMath.{h,cpp}`. Results land in
+`RigExecRigPose::movedProperties` in the property's own type, alongside the
+point chains.
+
+The half that mattered is the feedback: a property chain's inputs are all
+authored on the mover, so it resolves **before** exec runs and its result is
+handed back as an `ExecUsdValueOverride` on the target attribute. `03`'s
+`ClampBlendWeight` therefore drives `RigExecBlendPointFrames` for real,
+instead of that kernel reimplementing the author's clamp internally.
+
+`TestPropertyMathMoversAreNotEvaluated` is gone, replaced by
+`TestPropertyMathMoversAreEvaluated` (asserts the three published *values*),
+`TestPropertyMoverFeedsConsumingComputation` (drives the mover somewhere the
+consuming kernel's own bound cannot reach, so a change in the joint frames is
+proof the override landed), `TestDisabledPropertyMoverPassesThrough`, and
+`TestPropertyMoverTypeMismatchRejected`.
+
+Both kinds of consumer see it. A computation reading the attribute gets the
+exec value override; packet assembly, which never touches exec, gets the same
+value through `RigExecResolvedInputs` — filled from the one chain result before
+any input is read. `TestPropertyMoverReachesStaticPacketReads` drives a smooth
+mover's `inputs:strength` to 0 from a property mover and asserts the smoothing
+actually stops, with graph/CPU parity proving both routes carry the same
+number.
 
 ## What is dead but should be FILLED, not removed
 
@@ -242,14 +265,14 @@ Each step ends green: `cmake --build`, `ctest` (4 suites), 5 probe suites.
 
 ```
 cmake --build build && ctest --test-dir build
-run_probe.bat <scratch>/verify_rigs.py
-run_probe.bat <scratch>/verify_variants.py
-run_probe.bat <scratch>/verify_surface.py
-run_probe.bat <scratch>/verify_edges.py
-run_probe.bat <scratch>/verify_no_joint_authoring.py
+bin/run_probe.bat <scratch>/verify_rigs.py
+bin/run_probe.bat <scratch>/verify_variants.py
+bin/run_probe.bat <scratch>/verify_surface.py
+bin/run_probe.bat <scratch>/verify_edges.py
+bin/run_probe.bat <scratch>/verify_no_joint_authoring.py
 ```
 
-Schema edits additionally require `gen_schema.bat` before building, and a
+Schema edits additionally require `bin/gen_schema.bat` before building, and a
 usdview launch on at least one example — the plugin is loaded at runtime, so a
 malformed schema passes the build and fails at stage open.
 

@@ -1,0 +1,72 @@
+#usda 1.0
+(
+    doc = """Generated from Composed Stage of root layer /var/folders/n1/3jdrkcb53gx0bzrffj2l0g2w0000gn/T/rigexec-blank.usda
+"""
+    endTimeCode = 100
+    startTimeCode = 0
+)
+
+def Xform "World"
+{
+    custom float2 ui:nodegraph:node:pos = (0, 0)
+
+    def Scope "Geom"
+    {
+        float2 ui:nodegraph:node:pos = (0.17509955, 0.11353689)
+
+        def Sphere "Sphere"
+        {
+            float3[] extent = [(-1, -1, -1), (1, 1, 1)]
+            color3f[] primvars:displayColor = [(1, 0.85, 0.2)]
+            double radius = 1
+            custom float2 ui:nodegraph:node:pos = (1.4836155, 0.22573748)
+        }
+
+        def Xform "pivot"
+        {
+            custom float2 ui:nodegraph:node:pos = (1.9593376, -0.7221055)
+            float xformOp:rotateY.timeSamples = {
+                0: 0,
+                100: 180,
+            }
+            uniform token[] xformOpOrder = ["xformOp:rotateY"]
+
+            def Plane "Plane"
+            {
+                uniform bool doubleSided = 1
+                float3[] extent = [(-1, -1, 0), (1, 1, 0)]
+                double length = 2
+                color3f[] primvars:displayColor = [(0.2, 0.6, 1)]
+                custom float2 ui:nodegraph:node:pos = (0.47224194, 1.4120394)
+                double width = 2
+                double3 xformOp:translate = (0, 0, 1)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+        }
+    }
+
+    def RigExecRig "RigRoot"
+    {
+        float2 ui:nodegraph:node:pos = (0.3312006, -0.2729119)
+
+        def Scope "Movers"
+        {
+            float2 ui:nodegraph:node:pos = (0.19421032, -0.83628076)
+
+            def RigExecAimConstraint "RigExecAimConstraint1" (
+                apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:aimTarget = </World/Geom/pivot/Plane>
+                rel rigExec:moves = </World/Geom/Sphere>
+                float2 ui:nodegraph:node:pos = (-2.0616157, -1.4974167)
+            }
+        }
+
+        def Scope "Weights"
+        {
+            float2 ui:nodegraph:node:pos = (0.205776, -1.179396)
+        }
+    }
+}
+

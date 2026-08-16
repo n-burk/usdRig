@@ -1,28 +1,38 @@
 #usda 1.0
 (
     """
-    RigExec example 09 - property-domain math movers (AUTHORING ONLY).
+    RigExec example 09 - property-domain math movers.
 
     Covers the three statically typed property movers that no other example
     exercises: RigExecFloatMathMover, RigExecVec3fMathMover, and
     RigExecMatrixMathMover. Each moves an exact scalar/vector/matrix property
-    rather than a point3f[] array, so none of them is a point-chain revision.
+    rather than a point3f[] array, so none of them is a point-chain revision -
+    they are the THIRD output domain, alongside joint frames and geometry.
 
-    ** These three movers are NOT EVALUATED in v0.1-alpha. **
+    A property chain works exactly like a point chain: the base is the
+    target attribute's own authored value, one revision per mover in composed
+    post-order, last writer wins. What differs is that every input a math
+    mover needs is authored on the mover itself, so the chain owes exec
+    nothing and resolves before exec runs - which is what lets its result be
+    handed BACK to exec as the attribute's value. 03_IkFkBlendClamp is where
+    that matters: its clamped weight is what RigExecBlendPointFrames reads.
 
-    They are declared in the schema and validated by the compiler, but there
-    is no kernel behind any of them: RigExecFloatMathMover only emits a trace
-    diagnostic ("float property mover lowered into consumer" - the consuming
-    RigExecBlendPointFrames hardcodes its own weight clamp), and the Vec3f and
-    Matrix variants have no evaluator handling at all. A rig that opens this
-    file will compile and publish, and the three targets below will hold their
-    authored values unchanged.
+    Each operation is r = op(incoming), mixed as
+    incoming + inputs:weight * (r - incoming); weight defaults to 1.
+    remap normalizes [min, max] to [0, 1] and does not clamp - compose a
+    clamp mover after it if you want the result bounded.
 
-    This file therefore documents the authoring surface and serves as the
-    fixture for whoever implements them - it is deliberately NOT a
-    demonstration of working deformation. Every other example in this
-    directory shows a mover that actually computes; this one is the exception
-    and says so.
+    A revised property reaches BOTH kinds of consumer. One reads the
+    attribute through exec and gets a value override; packet assembly reads
+    it straight off the stage and never touches exec, so it gets the same
+    value through RigExecResolvedInputs. Both are filled from the one chain
+    result before anything reads an input, so a mover that revises another
+    mover's inputs:strength actually changes the deformation.
+
+    Results at Default time, asserted by TestPropertyMathMoversAreEvaluated:
+      rigExec:gain         2.5   -> 1.0             (clamp into [0, 1])
+      rigExec:offset       (0,3,0) -> (0,5,0)       (add (0,2,0))
+      rigExec:localOffset  identity -> translate(0,5,0)  (post-multiply)
 
     Structure: a single joint driven by an FK chain, plus three property
     targets that the math movers name via rigExec:moves.
@@ -89,8 +99,7 @@ def Xform "PropMathAsset"
 
         def Scope "Movers"
         {
-            # Clamp a float dial into [0, 1]. With the operation unevaluated,
-            # rigExec:gain stays at its authored 2.5 rather than clamping to 1.
+            # Clamp a float dial into [0, 1]: the authored 2.5 publishes as 1.
             def RigExecFloatMathMover "ClampGain" (
                 prepend apiSchemas = ["RigExecMoverAPI"]
             )
@@ -122,9 +131,9 @@ def Xform "PropMathAsset"
                 rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:localOffset>
             }
 
-            # A working point chain, so the file is a live rig rather than a
-            # collection of inert declarations: the witness card follows the
-            # posed joint. This is the part that actually deforms.
+            # A point chain alongside the property chains, so the file shows
+            # both output domains in one rig: the witness card follows the
+            # posed joint. This is the part that deforms geometry.
             def RigExecMatrixMover "CardSkin" (
                 prepend apiSchemas = ["RigExecMoverAPI"]
             )
@@ -151,7 +160,7 @@ def Xform "PropMathAsset"
     def Scope "Geom"
     {
         # A witness mesh carried by the joint, so the file is viewable and the
-        # rig has a real point chain. This part DOES evaluate.
+        # rig has a point chain next to its property chains.
         def Mesh "Card"
         {
             float3[] extent = [(-1, -0.5, 0), (1, 0.5, 0)]

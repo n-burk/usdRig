@@ -538,8 +538,14 @@ _ComputeBlendPointFrames(const VdfContext &ctx)
 
     const float *weightPtr =
         ctx.GetInputValuePtr<float>(_tokens->inputsWeight);
-    // Clamp to [0, 1]: the composed ClampIKFKWeight property mover in the
-    // reference asset lowers to exactly this bound.
+    // Clamp to [0, 1]: a blend weight outside the unit interval extrapolates
+    // past both inputs, which is never what a blend means.
+    //
+    // This is a BOUND, not the author's clamp. RigExecFloatMathMover is
+    // evaluated now, and the reference assets' ClampIKFKWeight /
+    // ClampBlendWeight movers reach this computation as a value override on
+    // inputs:weight -- so the authored clamp is what shapes the weight, and
+    // this line only catches a raw authored weight that no mover bounds.
     const double w =
         std::min(std::max(weightPtr ? double(*weightPtr) : 0.0, 0.0), 1.0);
 

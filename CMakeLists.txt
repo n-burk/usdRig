@@ -266,6 +266,14 @@ endforeach()
 set(_rigexec_schema_resources
     "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 set(_rigexec_schema_pluginfo "${_rigexec_schema_resources}/plugInfo.json")
+# The generated copy is produced at CONFIGURE time by reading the checked-in
+# one, so editing the checked-in one has to re-run configure. Without this a
+# schema edit (a new SdfMetadata field, say) builds clean and then fails at
+# stage open, because the plugInfo the runtime loads is the stale generated
+# copy and nothing rebuilt it.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/plugInfo.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/generatedSchema.usda")
 file(READ
     "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecSchema/resources/plugInfo.json"
     _rigexec_schema_pluginfo_content)

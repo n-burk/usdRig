@@ -99,9 +99,20 @@ struct RigExecRigPose {
     /// solver's computePointFrameArray (guide drawing and inspection).
     std::map<SdfPath, std::vector<RigExecPointFrame>> solverFrames;
 
-    /// Exact property path -> final computed native value
-    /// (points/normals/extent as VtVec3fArray). Point chains evaluate
-    /// through the generated OpenExec applications (spec §7.2).
+    /// Exact property path -> final computed native value, in the
+    /// property's own type.
+    ///
+    /// Two kinds of chain land here, and a consumer tells them apart by the
+    /// held type rather than by a flag:
+    ///   - point chains (points/normals/extent) as VtVec3fArray, computed by
+    ///     the compiled mover graph (spec §7.2);
+    ///   - property chains (float, GfVec3f, GfMatrix4d) from the statically
+    ///     typed math movers, computed off the authored stage and also
+    ///     supplied to exec as value overrides so consumers see them.
+    ///
+    /// Movers are not joint-only and never were: this map, providerXforms,
+    /// and jointFramesFinal are three peer output domains, and a rig may
+    /// publish any combination of them.
     std::map<SdfPath, VtValue> movedProperties;
 
     /// CPU reference-kernel results for the same chains, filled only when
@@ -314,6 +325,41 @@ private:
     };
     /// Exact points target -> its revisions, in composed post-order.
     std::map<SdfPath, std::vector<_GraphRevision>> _graphChains;
+    /// What this generation's property chains resolved, consulted by every
+    /// static input read the evaluator and the packet assemblers make.
+    ///
+    /// Rebuilt at the top of each Evaluate, before anything reads an input:
+    /// a property chain owes exec nothing, so it can always be resolved
+    /// first, and every later read -- exec override, packet assembly, CPU
+    /// oracle -- then sees one consistent value for the attribute.
+    RigExecResolvedInputs _resolvedInputs;
+
+    /// What every chain held at every point in the walk this generation.
+    ///
+    /// Only a phased read consults it, but it is filled unconditionally: the
+    /// entries are copy-on-write handles to arrays the chain materialized
+    /// anyway, so the cost of always having them is far below the cost of
+    /// deciding per chain whether anyone will ask.
+    RigExecChainSnapshots _chainSnapshots;
+
+    /// Chain evaluation order: targets sorted so a chain that another chain
+    /// reads at a non-base phase runs first.
+    ///
+    /// Compile-time state, because the dependencies come from the bindings
+    /// and the bindings are epoch state. Replaces the "curvenets first, then
+    /// everything else" pass that stood in for this while the only
+    /// cross-chain dependency was the Profile Mover's.
+    std::vector<SdfPath> _chainOrder;
+
+    /// Exactly the intermediate values some phased read asks for:
+    /// target -> the movers after which that chain must be snapshotted.
+    ///
+    /// Evaluating an intermediate head re-runs the chain prefix, so taking
+    /// one after every revision would make a long chain quadratic for a
+    /// feature almost no rig uses. Every phase is resolvable at compile to
+    /// the single revision it names, so only those are taken.
+    std::map<SdfPath, std::set<SdfPath>> _snapshotPoints;
+
     /// Profile Mover cut-meshes and factorizations, kept across frames.
     ///
     /// Lives on the evaluator rather than in the parameter packet because it
@@ -332,7 +378,41 @@ private:
     struct _FrameRevision {
         SdfPath moverPath;
         RigExecTapId aimTargetFrameTap = -1;  ///< aim target computePointFrame
+        /// Set instead of the tap when the aim target is a plain
+        /// UsdGeomXformable, which publishes no computePointFrame: its frame
+        /// is derived from its own USD transform, asset-relative, exactly the
+        /// way an xform-derived PROVIDER's base frame is. Requesting the
+        /// computation on such a prim is a hard exec failure rather than a
+        /// missing value, so the choice has to be made at compile.
+        SdfPath aimTargetXform;
     };
+
+    /// One property-domain revision: a float/vec3f/matrix math mover's
+    /// operation over the preceding value of an exact scalar property.
+    ///
+    /// No tap and no binding. Every input is authored on the mover itself and
+    /// the chain's base is the target attribute's own authored value, so the
+    /// whole chain resolves off the stage before exec runs -- which is what
+    /// lets the result be handed to exec as a value override rather than
+    /// computed from it.
+    struct _PropertyRevision {
+        SdfPath moverPath;
+        TfToken schemaType;
+    };
+    /// Exact scalar property target -> its revisions, in composed post-order.
+    std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;
+
+    /// Evaluates every property chain at \p time.
+    ///
+    /// Fills \p results with the final value per target and appends one
+    /// attribute override per target to \p overrides, so a consuming
+    /// computation reads the revised value with nothing authored anywhere.
+    /// Diagnostics record pass-throughs and failures (spec §6.6).
+    void _EvaluatePropertyChains(
+        UsdTimeCode time,
+        std::map<SdfPath, VtValue> *results,
+        std::vector<RigExecValueOverride> *overrides,
+        std::vector<std::string> *diagnostics) const;
     /// Providers whose base frame comes from their own USD transform rather
     /// than a computePointFrame tap: a plain Xform has no such computation.
     std::set<SdfPath> _xformDerivedProviders;

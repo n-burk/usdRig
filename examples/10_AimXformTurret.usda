@@ -62,9 +62,12 @@ def Xform "TurretAsset"
             }
         }
 
-        # A joint is still required: the rig root discovers joint outputs, and
-        # a rig with none is rejected. This one anchors the turret base and is
-        # not what the constraint drives.
+        # This joint anchors the turret base and is not what the constraint
+        # drives. It used to be mandatory - the compile gate rejected a rig
+        # with no RigExecJoint - and it no longer is; see rigexec_flat.usda
+        # for the same constraint with no joint at all. Kept here because a
+        # turret base is a real thing to anchor and because its guide makes
+        # the asset's placement visible in the viewport.
         def Scope "Joints"
         {
             def RigExecJoint "Base"

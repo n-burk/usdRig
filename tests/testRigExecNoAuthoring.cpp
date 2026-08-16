@@ -17,10 +17,12 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/usd/sdf/layer.h"
+#include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -198,6 +200,166 @@ TestImagingPublicationAuthorsNothing(const std::string &examplesDir)
     Compare("after imaging Deactivate", before, Capture(stage));
 }
 
+// EVERY example, not one.
+//
+// ArmShotAnim above is the deepest rig, but depth is not the axis that
+// matters here: a write-back is introduced by a KIND of output, and the
+// examples are exactly the per-kind fixtures. The property-domain movers are
+// the case that motivated this -- a mover that computes a float, a vector, or
+// a matrix for an attribute that already exists on the stage is one careless
+// `attr.Set()` away from becoming an authoring engine, and nothing about the
+// point-chain fixtures would notice.
+void
+TestEveryExampleAuthorsNothing(const std::string &examplesDir)
+{
+    // Rig paths discovered by type, so a new example cannot silently skip.
+    const char *files[] = {
+        "/01_FkChainTail.usda",   "/02_TwoBoneIkLeg.usda",
+        "/03_IkFkBlendClamp.usda", "/04_BlendShapeFace.usda",
+        "/05_TwistRibbonSpine.usda", "/06_LatticeBulge.usda",
+        "/07_SurfaceDrape.usda",  "/08_AimEyes.usda",
+        "/09_PropertyMathMovers.usda", "/10_AimXformTurret.usda",
+        "/11_VolumeWeights.usda", "/12_CurvenetProfile.usda",
+        "/13_ReadPhases.usda",
+        "/ArmRig.usda",           "/rigexec_flat.usda",
+    };
+
+    for (const char *file : files) {
+        const UsdStageRefPtr stage = UsdStage::Open(examplesDir + file);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        SdfPath rigPath;
+        for (const UsdPrim &p : stage->Traverse()) {
+            if (p.GetTypeName() == TfToken("RigExecRig")) {
+                rigPath = p.GetPath();
+                break;
+            }
+        }
+        CHECK(!rigPath.IsEmpty());
+        if (rigPath.IsEmpty()) {
+            continue;
+        }
+
+        const StageSnapshot before = Capture(stage);
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        std::vector<std::string> errors;
+        const bool compiled = evaluator.Compile(&errors);
+        CHECK(compiled);
+        if (!compiled) {
+            for (const std::string &e : errors) {
+                std::printf("  %s compile error: %s\n", file, e.c_str());
+            }
+            continue;
+        }
+        Compare((std::string(file) + " after Compile").c_str(), before,
+                Capture(stage));
+
+        // Default plus each file's own animated range, so a stage whose
+        // frames differ from ArmShotAnim's is still exercised where it moves.
+        std::vector<UsdTimeCode> times = {UsdTimeCode::Default()};
+        if (stage->HasAuthoredTimeCodeRange()) {
+            const double start = stage->GetStartTimeCode();
+            const double end = stage->GetEndTimeCode();
+            times.push_back(UsdTimeCode(start));
+            times.push_back(UsdTimeCode((start + end) * 0.5));
+            times.push_back(UsdTimeCode(end));
+        }
+        for (const UsdTimeCode &t : times) {
+            const RigExecRigPose pose = evaluator.Evaluate(t);
+            CHECK(pose.valid);
+        }
+        Compare((std::string(file) + " after Evaluate").c_str(), before,
+                Capture(stage));
+        CHECK(evaluator.GetEvaluationStage() == stage);
+    }
+}
+
+// The specific temptation the property movers create: a mover's result is a
+// value OF THE SAME TYPE as the attribute it targets, so writing it back is
+// one line and would look correct from every consumer's side.
+//
+// Assert against the attribute itself rather than the whole scene, so the
+// failure names the property instead of "the composed scene changed": the
+// authored opinion must survive an evaluation that published a different
+// value, at Default AND at an animated time.
+void
+TestPropertyMoverDoesNotWriteBack(const std::string &examplesDir)
+{
+    const UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/09_PropertyMathMovers.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath gainPath("/PropMathAsset/Rig/Channels/Dials.rigExec:gain");
+    const UsdAttribute gain = stage->GetAttributeAtPath(gainPath);
+    CHECK(gain);
+    if (!gain) {
+        return;
+    }
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/PropMathAsset/Rig"));
+    CHECK(evaluator.Compile(nullptr));
+
+    for (const UsdTimeCode &t :
+         {UsdTimeCode::Default(), UsdTimeCode(1001.0), UsdTimeCode(1024.0)}) {
+        const RigExecRigPose pose = evaluator.Evaluate(t);
+        CHECK(pose.valid);
+
+        // The rig published the clamped value...
+        const auto it = pose.movedProperties.find(gainPath);
+        CHECK(it != pose.movedProperties.end());
+        if (it != pose.movedProperties.end()) {
+            CHECK(std::abs(it->second.Get<float>() - 1.0f) < 1e-6f);
+        }
+
+        // ...and the stage still holds the author's 2.5.
+        float authored = 0;
+        CHECK(gain.Get(&authored, t));
+        if (std::abs(authored - 2.5f) > 1e-6f) {
+            std::printf("  rigExec:gain is %f on the stage; evaluation wrote "
+                        "its result back\n", double(authored));
+        }
+        CHECK(std::abs(authored - 2.5f) < 1e-6f);
+        // No opinion appeared anywhere, in any layer.
+        CHECK(!gain.GetNumTimeSamples());
+        CHECK(gain.GetPropertyStack(t).size() == 1);
+    }
+
+    // Same for the exec-overridden weight in 03: the override is an
+    // evaluation-time value, not an authored one.
+    const UsdStageRefPtr blend =
+        UsdStage::Open(examplesDir + "/03_IkFkBlendClamp.usda");
+    CHECK(blend);
+    if (!blend) {
+        return;
+    }
+    const UsdAttribute weight = blend->GetAttributeAtPath(
+        SdfPath("/BlendArmAsset/Rig/Solvers/IKFKBlend.inputs:weight"));
+    CHECK(weight);
+    if (!weight) {
+        return;
+    }
+    const size_t stackBefore = weight.GetPropertyStack(UsdTimeCode(1001)).size();
+    RigExecRigEvaluator blendEval(blend, SdfPath("/BlendArmAsset/Rig"));
+    CHECK(blendEval.Compile(nullptr));
+    for (double t : {1001.0, 1024.0, 1030.0}) {
+        CHECK(blendEval.Evaluate(UsdTimeCode(t)).valid);
+    }
+    // The overdriven authored value is untouched: -0.25 at 1001, NOT the 0
+    // the clamp published and handed to the blend.
+    float authoredWeight = 99;
+    CHECK(weight.Get(&authoredWeight, UsdTimeCode(1001)));
+    if (std::abs(authoredWeight + 0.25f) > 1e-6f) {
+        std::printf("  inputs:weight is %f at 1001; the exec override leaked "
+                    "into the stage\n", double(authoredWeight));
+    }
+    CHECK(std::abs(authoredWeight + 0.25f) < 1e-6f);
+    CHECK(weight.GetPropertyStack(UsdTimeCode(1001)).size() == stackBefore);
+}
+
 }  // namespace
 
 // The codeless schema's resource directory.
@@ -234,6 +396,8 @@ main(int argc, char **argv)
     }
 
     TestEvaluatorAuthorsNothing(examplesDir);
+    TestEveryExampleAuthorsNothing(examplesDir);
+    TestPropertyMoverDoesNotWriteBack(examplesDir);
     TestImagingPublicationAuthorsNothing(examplesDir);
 
     if (failures) {

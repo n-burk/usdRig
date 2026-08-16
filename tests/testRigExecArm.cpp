@@ -17,6 +17,7 @@
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -1014,6 +1015,7 @@ TestMoverGraphParity(const std::string &examplesDir)
         {"/08_AimEyes.usda", 0, false},
         {"/ArmRig.usda", 0, false},
         {"/09_PropertyMathMovers.usda", 0, false},
+        {"/13_ReadPhases.usda", 1024, true},
         // At an ANIMATED time, not just the rest pose. Default-time parity is
         // structurally blind to two whole classes of bug: operands that are
         // equal at rest (the lattice rest cage vs the live cage) and static
@@ -1339,15 +1341,16 @@ TestAimConstraintRevisesJointFrame(const std::string &examplesDir)
     }
 }
 
-// 09 documents three property-domain math movers that v0.1-alpha does NOT
-// evaluate. Assert that, so the file's claim is enforced rather than asserted
-// in prose -- and so this test flips to a failure the day someone implements
-// them, which is exactly when the docstring needs rewriting.
+// 09 exercises the three property-domain math movers: the output domain that
+// is neither a joint frame nor a points array.
 //
-// The rig must still compile, publish, and deform its witness card: an
-// unevaluated mover is a documented gap, not a broken rig.
+// Each target is an ordinary authored attribute of a different type, and each
+// mover revises it with the operation it authors. Asserting the VALUES, not
+// just presence: a chain that published its own authored base unchanged would
+// pass an existence check while doing nothing, which is precisely the state
+// this file used to document.
 static void
-TestPropertyMathMoversAreNotEvaluated(const std::string &examplesDir)
+TestPropertyMathMoversAreEvaluated(const std::string &examplesDir)
 {
     UsdStageRefPtr stage =
         UsdStage::Open(examplesDir + "/09_PropertyMathMovers.usda");
@@ -1361,16 +1364,38 @@ TestPropertyMathMoversAreNotEvaluated(const std::string &examplesDir)
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
 
-    // All three targets are absent from the published set.
-    for (const char *prop : {"rigExec:gain", "rigExec:offset",
-                             "rigExec:localOffset"}) {
-        const SdfPath target(
-            std::string("/PropMathAsset/Rig/Channels/Dials.") + prop);
-        if (pose.movedProperties.count(target) != 0) {
-            std::printf("  %s is now published -- the math movers are "
-                        "implemented; update 09's docstring\n", prop);
+    const std::string dials = "/PropMathAsset/Rig/Channels/Dials.";
+
+    // clamp: authored 2.5 into [0, 1].
+    {
+        const auto it = pose.movedProperties.find(SdfPath(dials + "rigExec:gain"));
+        CHECK(it != pose.movedProperties.end());
+        if (it != pose.movedProperties.end()) {
+            CHECK(it->second.IsHolding<float>());
+            CHECK(std::abs(it->second.Get<float>() - 1.0f) < 1e-6f);
         }
-        CHECK(pose.movedProperties.count(target) == 0);
+    }
+    // add: authored (0, 3, 0) plus (0, 2, 0).
+    {
+        const auto it =
+            pose.movedProperties.find(SdfPath(dials + "rigExec:offset"));
+        CHECK(it != pose.movedProperties.end());
+        if (it != pose.movedProperties.end()) {
+            CHECK(it->second.IsHolding<GfVec3f>());
+            CHECK(Near(GfVec3d(it->second.Get<GfVec3f>()),
+                       GfVec3d(0, 5, 0)));
+        }
+    }
+    // multiply: authored identity post-multiplied by translate(0, 5, 0).
+    {
+        const auto it =
+            pose.movedProperties.find(SdfPath(dials + "rigExec:localOffset"));
+        CHECK(it != pose.movedProperties.end());
+        if (it != pose.movedProperties.end()) {
+            CHECK(it->second.IsHolding<GfMatrix4d>());
+            CHECK(Near(it->second.Get<GfMatrix4d>().ExtractTranslation(),
+                       GfVec3d(0, 5, 0)));
+        }
     }
 
     // ...while the rig itself is live: the witness card follows its joint.
@@ -1378,6 +1403,163 @@ TestPropertyMathMoversAreNotEvaluated(const std::string &examplesDir)
     const auto it = pose.movedProperties.find(card);
     CHECK(it != pose.movedProperties.end());
     CHECK(pose.moverGraphParityMismatches == 0);
+}
+
+// A property mover's result reaches the computation that reads the attribute.
+//
+// This is the half that publication alone cannot demonstrate. 03 authors an
+// IK/FK blend weight overdriven to -0.25..1.3 and a ClampBlendWeight mover to
+// bound it, and RigExecBlendPointFrames ALSO clamps internally -- so a clamp
+// that never reached exec and one that did produce identical frames, and the
+// authored mover would be decoration.
+//
+// So the test drives the mover somewhere the kernel's own bound cannot reach:
+// overridden to `blend` toward 0, it must force pure FK at a frame whose
+// clamped weight is 0.525. Different joint frames are the proof the override
+// landed.
+static void
+TestPropertyMoverFeedsConsumingComputation(const std::string &examplesDir)
+{
+    const SdfPath rigPath("/BlendArmAsset/Rig");
+    const SdfPath weightTarget(
+        "/BlendArmAsset/Rig/Solvers/IKFKBlend.inputs:weight");
+    const SdfPath wrist("/BlendArmAsset/Rig/Joints/Shoulder/Elbow/Wrist");
+    const UsdTimeCode when(1024);
+
+    // As authored: the clamp passes 0.525 through untouched.
+    UsdStageRefPtr authored =
+        UsdStage::Open(examplesDir + "/03_IkFkBlendClamp.usda");
+    CHECK(authored);
+    if (!authored) {
+        return;
+    }
+    RigExecRigEvaluator authoredEval(authored, rigPath);
+    CHECK(authoredEval.Compile(nullptr));
+    const RigExecRigPose authoredPose = authoredEval.Evaluate(when);
+    CHECK(authoredPose.valid);
+    const auto authoredWeight = authoredPose.movedProperties.find(weightTarget);
+    CHECK(authoredWeight != authoredPose.movedProperties.end());
+    if (authoredWeight == authoredPose.movedProperties.end()) {
+        return;
+    }
+    const float w = authoredWeight->second.Get<float>();
+    // Strictly interior, or the test proves nothing: at 0 or 1 the blend is
+    // already one of its inputs and forcing it there changes nothing.
+    CHECK(w > 0.01f && w < 0.99f);
+
+    // Session-layer edit only -- the source file is untouched.
+    UsdStageRefPtr forced =
+        UsdStage::Open(examplesDir + "/03_IkFkBlendClamp.usda");
+    CHECK(forced);
+    if (!forced) {
+        return;
+    }
+    forced->SetEditTarget(forced->GetSessionLayer());
+    const UsdPrim mover = forced->GetPrimAtPath(
+        SdfPath("/BlendArmAsset/Rig/Movers/Pose/ClampBlendWeight"));
+    CHECK(mover);
+    if (!mover) {
+        return;
+    }
+    mover.CreateAttribute(TfToken("rigExec:operation"),
+                          SdfValueTypeNames->Token, /*custom=*/false)
+        .Set(TfToken("blend"));
+    mover.CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float,
+                          /*custom=*/false)
+        .Set(0.0f);
+
+    RigExecRigEvaluator forcedEval(forced, rigPath);
+    std::vector<std::string> errors;
+    CHECK(forcedEval.Compile(&errors));
+    const RigExecRigPose forcedPose = forcedEval.Evaluate(when);
+    CHECK(forcedPose.valid);
+    const auto forcedWeight = forcedPose.movedProperties.find(weightTarget);
+    CHECK(forcedWeight != forcedPose.movedProperties.end());
+    if (forcedWeight != forcedPose.movedProperties.end()) {
+        CHECK(std::abs(forcedWeight->second.Get<float>()) < 1e-6f);
+    }
+
+    // The blend consumed it: the wrist is somewhere else.
+    const auto a = authoredPose.jointFramesFinal.find(wrist);
+    const auto b = forcedPose.jointFramesFinal.find(wrist);
+    CHECK(a != authoredPose.jointFramesFinal.end());
+    CHECK(b != forcedPose.jointFramesFinal.end());
+    if (a != authoredPose.jointFramesFinal.end() &&
+        b != forcedPose.jointFramesFinal.end()) {
+        const double moved =
+            (a->second.points[0] - b->second.points[0]).GetLength();
+        if (moved <= 1e-4) {
+            std::printf("  forcing the blend weight to 0 did not move the "
+                        "wrist: the property mover's value is not reaching "
+                        "the solver\n");
+        }
+        CHECK(moved > 1e-4);
+    }
+}
+
+// A disabled property mover passes its revision through (spec §6.6): the
+// chain still publishes, holding the value the preceding revision produced.
+static void
+TestDisabledPropertyMoverPassesThrough(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/09_PropertyMathMovers.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim mover = stage->GetPrimAtPath(
+        SdfPath("/PropMathAsset/Rig/Movers/ClampGain"));
+    CHECK(mover);
+    if (!mover) {
+        return;
+    }
+    mover.CreateAttribute(TfToken("inputs:enabled"), SdfValueTypeNames->Bool,
+                          /*custom=*/false)
+        .Set(false);
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/PropMathAsset/Rig"));
+    CHECK(evaluator.Compile(nullptr));
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    const auto it = pose.movedProperties.find(
+        SdfPath("/PropMathAsset/Rig/Channels/Dials.rigExec:gain"));
+    CHECK(it != pose.movedProperties.end());
+    if (it != pose.movedProperties.end()) {
+        // The authored 2.5, unclamped.
+        CHECK(std::abs(it->second.Get<float>() - 2.5f) < 1e-6f);
+    }
+}
+
+// A property mover whose target type does not match its static type fails
+// the compile rather than silently publishing nothing.
+static void
+TestPropertyMoverTypeMismatchRejected(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/09_PropertyMathMovers.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    // Point the float mover at the float3 dial.
+    const UsdPrim mover = stage->GetPrimAtPath(
+        SdfPath("/PropMathAsset/Rig/Movers/ClampGain"));
+    CHECK(mover);
+    if (!mover) {
+        return;
+    }
+    UsdRelationship moves = mover.CreateRelationship(TfToken("rigExec:moves"),
+                                                    /*custom=*/false);
+    moves.SetTargets({SdfPath(
+        "/PropMathAsset/Rig/Channels/Dials.rigExec:offset")});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/PropMathAsset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(!evaluator.Compile(&errors));
+    CHECK(!errors.empty());
 }
 
 // A constraint driving a plain UsdGeomXform publishes a transform, and the
@@ -1454,6 +1636,643 @@ TestAimConstraintDrivesXform(const std::string &examplesDir)
     }
 }
 
+// The smallest rig that exists: one constraint, no joints, both ends plain
+// UsdGeomXformables.
+//
+// Two rules used to reject this and neither was about the rig being wrong. A
+// joint was required because the compile gate read "a rig publishes joints",
+// when in fact a mover publishes whatever its target is; and an aim target
+// was always tapped for computePointFrame, which a plain Xformable does not
+// publish -- a HARD exec failure that took the whole snapshot down rather
+// than leaving one value missing.
+//
+// rigexec_flat.usda is a flattened stage of the shape an interactive session
+// produces, so it is the exact case a user hits first.
+static void
+TestJointFreeRigPublishesXform(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/rigexec_flat.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath("/World/RigRoot"));
+    std::vector<std::string> errors;
+    if (!evaluator.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("    %s\n", e.c_str());
+        }
+    }
+    CHECK(errors.empty());
+
+    // No joints at all, and the rig is still a valid generation.
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(0));
+    CHECK(pose.valid);
+    CHECK(pose.jointFramesFinal.empty());
+
+    const SdfPath sphere("/World/Geom/Sphere");
+    const auto it = pose.providerXforms.find(sphere);
+    CHECK(it != pose.providerXforms.end());
+    if (it == pose.providerXforms.end()) {
+        std::printf("  no xform published for the joint-free rig\n");
+        return;
+    }
+
+    // The aim target is /World/Geom/pivot/Plane at local (0, 0, 1) under a
+    // pivot that rotates 0 -> 180 about Y across the shot. At frame 0 it sits
+    // at +z, at 50 at +x, at 100 at -z, and the default aim axis is x -- so
+    // the published x-axis has to follow it round.
+    auto aimedX = [](const GfMatrix4d &m) {
+        const GfVec3d origin = m.TransformAffine(GfVec3d(0, 0, 0));
+        return (m.TransformAffine(GfVec3d(1, 0, 0)) - origin).GetNormalized();
+    };
+    CHECK(Near(aimedX(it->second), GfVec3d(0, 0, 1), 1e-5));
+
+    const RigExecRigPose mid = evaluator.Evaluate(UsdTimeCode(50));
+    CHECK(mid.valid);
+    const auto midIt = mid.providerXforms.find(sphere);
+    CHECK(midIt != mid.providerXforms.end());
+    if (midIt != mid.providerXforms.end()) {
+        CHECK(Near(aimedX(midIt->second), GfVec3d(1, 0, 0), 1e-5));
+    }
+
+    const RigExecRigPose end = evaluator.Evaluate(UsdTimeCode(100));
+    CHECK(end.valid);
+    const auto endIt = end.providerXforms.find(sphere);
+    CHECK(endIt != end.providerXforms.end());
+    if (endIt != end.providerXforms.end()) {
+        CHECK(Near(aimedX(endIt->second), GfVec3d(0, 0, -1), 1e-5));
+    }
+}
+
+// A rig whose entire content is two property movers competing for one dial.
+//
+// Authored TimesTen-then-AddOne, but REORDERED AddOne-then-TimesTen, so the
+// composed order and the file order disagree on purpose: whichever one the
+// engine actually walks is the one the answer reveals. (A rig with no joints
+// and no geometry is legal now, which is what lets the fixture be this small.)
+static const char *kOrderFixture = R"USDA(#usda 1.0
+
+def Xform "Asset"
+{
+    def RigExecRig "Rig"
+    {
+        def Scope "Channels"
+        {
+            float rigExec:dial = 2
+        }
+
+        def Scope "Movers"
+        {
+            reorder nameChildren = ["AddOne", "TimesTen"]
+
+            def RigExecFloatMathMover "TimesTen" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "multiply"
+                float inputs:value = 10
+                rel rigExec:moves = </Asset/Rig/Channels.rigExec:dial>
+            }
+
+            def RigExecFloatMathMover "AddOne" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float inputs:value = 1
+                rel rigExec:moves = </Asset/Rig/Channels.rigExec:dial>
+            }
+        }
+    }
+}
+)USDA";
+
+// Each revision reads the PRECEDING revision, and the order is the composed
+// namespace order -- not the authoring order, and not a fixed one.
+//
+// The arithmetic is chosen so the three candidate behaviours are three
+// different numbers, and no assertion can pass by accident:
+//
+//   30  add-then-multiply over the chain   ((2 + 1) * 10)   <- correct
+//   21  multiply-then-add over the chain   ((2 * 10) + 1)   <- wrong order
+//   20  no chaining, last writer wins      (2 * 10)         <- no chain
+//
+// Then the reorder is flipped through the SESSION layer and Evaluate is
+// called with no intervening Compile: the composed mover topology is part of
+// the binding-epoch digest, so the evaluator has to notice and rebuild. That
+// is what "the order is dynamic" means operationally -- a caller never
+// recompiles by hand, and never gets a stale order.
+static void
+TestMoverOrderIsComposedAndDynamic()
+{
+    const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    CHECK(layer);
+    if (!layer || !layer->ImportFromString(kOrderFixture)) {
+        std::printf("  could not build the ordering fixture\n");
+        ++failures;
+        return;
+    }
+    UsdStageRefPtr stage = UsdStage::Open(layer);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath dial("/Asset/Rig/Channels.rigExec:dial");
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    if (!evaluator.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("    %s\n", e.c_str());
+        }
+    }
+    CHECK(errors.empty());
+
+    auto dialValue = [&](const RigExecRigPose &pose, float *out) {
+        const auto it = pose.movedProperties.find(dial);
+        if (it == pose.movedProperties.end() ||
+            !it->second.IsHolding<float>()) {
+            return false;
+        }
+        *out = it->second.Get<float>();
+        return true;
+    };
+
+    const RigExecRigPose first = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(first.valid);
+    float value = 0;
+    CHECK(dialValue(first, &value));
+    if (std::abs(value - 30.0f) > 1e-6f) {
+        std::printf("  dial = %f; expected 30 ((2+1)*10). 20 means the "
+                    "revisions did not chain; 21 means the walk ignored the "
+                    "authored reorder\n", double(value));
+    }
+    CHECK(std::abs(value - 30.0f) < 1e-6f);
+    const size_t firstDigest = evaluator.GetBindingEpochDigest();
+
+    // Flip the composed order in the session layer. Nothing else changes --
+    // same movers, same operands, same targets.
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdPrim movers = stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"));
+    CHECK(movers);
+    if (!movers) {
+        return;
+    }
+    movers.SetChildrenReorder({TfToken("TimesTen"), TfToken("AddOne")});
+
+    // No Compile() call: Evaluate must detect the structural edit itself.
+    const RigExecRigPose second = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(second.valid);
+    CHECK(dialValue(second, &value));
+    if (std::abs(value - 21.0f) > 1e-6f) {
+        std::printf("  after reordering, dial = %f; expected 21 ((2*10)+1). "
+                    "30 means the compiled order went stale\n",
+                    double(value));
+    }
+    CHECK(std::abs(value - 21.0f) < 1e-6f);
+
+    // The epoch identity moved with it, and the rebuild was reported.
+    CHECK(evaluator.GetBindingEpochDigest() != firstDigest);
+    bool rebuilt = false;
+    for (const std::string &d : second.diagnostics) {
+        rebuilt |= d.find("structural edit: epoch rebuilt") != std::string::npos;
+    }
+    CHECK(rebuilt);
+
+    // A mover ADDED mid-session joins the chain, at the position the reorder
+    // gives it, still with no Compile call. Order being dynamic has to mean
+    // the membership of the chain too, not only the permutation of a fixed
+    // set.
+    const UsdPrim added = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/MinusFive"),
+        TfToken("RigExecFloatMathMover"));
+    CHECK(added);
+    if (added) {
+        added.CreateAttribute(TfToken("rigExec:operation"),
+                              SdfValueTypeNames->Token, /*custom=*/false)
+            .Set(TfToken("add"));
+        added.CreateAttribute(TfToken("inputs:value"),
+                              SdfValueTypeNames->Float, /*custom=*/false)
+            .Set(-5.0f);
+        added.CreateRelationship(TfToken("rigExec:moves"), /*custom=*/false)
+            .SetTargets({dial});
+        movers.SetChildrenReorder(
+            {TfToken("TimesTen"), TfToken("AddOne"), TfToken("MinusFive")});
+
+        const RigExecRigPose third = evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(third.valid);
+        CHECK(dialValue(third, &value));
+        if (std::abs(value - 16.0f) > 1e-6f) {
+            std::printf("  after adding a third mover, dial = %f; expected 16 "
+                        "((2*10)+1-5)\n", double(value));
+        }
+        CHECK(std::abs(value - 16.0f) < 1e-6f);
+    }
+
+    // The authored dial is still 2 on the stage: 30, 21 and 16 were
+    // published, never written.
+    float authored = 0;
+    CHECK(stage->GetAttributeAtPath(dial).Get(&authored,
+                                              UsdTimeCode::Default()));
+    CHECK(std::abs(authored - 2.0f) < 1e-6f);
+}
+
+// The same chaining property for a POINT chain, on a real rig.
+//
+// 06 nests CageDeform inside Smooth inside VolumeCorrect, so post-order makes
+// the lattice first and the volume correction last. Disabling the lattice
+// must change the PUBLISHED points: if each mover read the authored base
+// independently and the last writer simply won, the final value would be
+// VolumeCorrect(base) either way and the two runs would be identical.
+static void
+TestPointChainConsumesPrecedingRevision(const std::string &examplesDir)
+{
+    const SdfPath rigPath("/LatticeAsset/Rig");
+    const SdfPath slab("/LatticeAsset/Geom/Slab.points");
+    const UsdTimeCode when(1024);
+
+    auto evaluateSlab = [&](bool latticeEnabled, VtVec3fArray *out) {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/06_LatticeBulge.usda");
+        CHECK(stage);
+        if (!stage) {
+            return false;
+        }
+        if (!latticeEnabled) {
+            stage->SetEditTarget(stage->GetSessionLayer());
+            const UsdPrim lattice = stage->GetPrimAtPath(SdfPath(
+                "/LatticeAsset/Rig/Movers/Geometry/VolumeCorrect/Smooth/"
+                "CageDeform"));
+            CHECK(lattice);
+            if (!lattice) {
+                return false;
+            }
+            lattice
+                .CreateAttribute(TfToken("inputs:enabled"),
+                                 SdfValueTypeNames->Bool, /*custom=*/false)
+                .Set(false);
+        }
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        CHECK(evaluator.Compile(nullptr));
+        const RigExecRigPose pose = evaluator.Evaluate(when);
+        CHECK(pose.valid);
+        CHECK(pose.moverGraphParityMismatches == 0);
+        const auto it = pose.movedProperties.find(slab);
+        CHECK(it != pose.movedProperties.end());
+        if (it == pose.movedProperties.end()) {
+            return false;
+        }
+        *out = it->second.Get<VtVec3fArray>();
+        return true;
+    };
+
+    VtVec3fArray withLattice, withoutLattice;
+    if (!evaluateSlab(true, &withLattice) ||
+        !evaluateSlab(false, &withoutLattice)) {
+        return;
+    }
+    CHECK(!withLattice.empty());
+    CHECK(withLattice.size() == withoutLattice.size());
+
+    double worst = 0;
+    for (size_t i = 0; i < withLattice.size() &&
+                       i < withoutLattice.size(); ++i) {
+        worst = std::max(
+            worst,
+            double((withLattice[i] - withoutLattice[i]).GetLength()));
+    }
+    if (worst <= 1e-5) {
+        std::printf("  disabling the first mover in the chain did not change "
+                    "the published points: the later movers are not reading "
+                    "the preceding revision\n");
+    }
+    CHECK(worst > 1e-5);
+}
+
+// "The next mover picks up the modified value" with NO carve-out: a property
+// mover's result reaches a later mover's static parameter read too.
+//
+// Two delivery routes exist for one revised value, because there are two
+// kinds of consumer. A COMPUTATION reads the attribute through exec and gets
+// the value override (03's clamped blend weight). Packet assembly reads it
+// straight off the stage and never touches exec, so it gets the same value
+// through RigExecResolvedInputs instead. Both routes are filled from the one
+// property-chain result, before anything reads an input.
+//
+// Here a float mover drives the smooth mover's inputs:strength from 0.6 to 0,
+// and the smoothing has to actually stop. The CPU oracle resolves its own
+// inputs independently, so parity is what proves the two routes agree rather
+// than both being wrong together.
+static void
+TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
+{
+    const SdfPath rigPath("/LatticeAsset/Rig");
+    const SdfPath slab("/LatticeAsset/Geom/Slab.points");
+    const SdfPath strength(
+        "/LatticeAsset/Rig/Movers/Geometry/VolumeCorrect/Smooth"
+        ".inputs:strength");
+    const UsdTimeCode when(1024);
+
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/06_LatticeBulge.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator baseline(stage, rigPath);
+    CHECK(baseline.Compile(nullptr));
+    const RigExecRigPose basePose = baseline.Evaluate(when);
+    CHECK(basePose.valid);
+    const auto baseIt = basePose.movedProperties.find(slab);
+    CHECK(baseIt != basePose.movedProperties.end());
+    if (baseIt == basePose.movedProperties.end()) {
+        return;
+    }
+    const VtVec3fArray before = baseIt->second.Get<VtVec3fArray>();
+
+    // A property mover that drives the smooth mover's strength from the
+    // authored 0.6 to 0. It is a sibling of VolumeCorrect with an authored
+    // reorder, so the competing-writer rule is satisfied and the walk order
+    // is unambiguous.
+    UsdStageRefPtr edited =
+        UsdStage::Open(examplesDir + "/06_LatticeBulge.usda");
+    CHECK(edited);
+    if (!edited) {
+        return;
+    }
+    edited->SetEditTarget(edited->GetSessionLayer());
+    const UsdPrim mover = edited->DefinePrim(
+        SdfPath("/LatticeAsset/Rig/Movers/Geometry/KillSmoothing"),
+        TfToken("RigExecFloatMathMover"));
+    CHECK(mover);
+    if (!mover) {
+        return;
+    }
+    mover.CreateAttribute(TfToken("rigExec:operation"),
+                          SdfValueTypeNames->Token, /*custom=*/false)
+        .Set(TfToken("blend"));
+    mover.CreateAttribute(TfToken("inputs:value"), SdfValueTypeNames->Float,
+                          /*custom=*/false)
+        .Set(0.0f);
+    mover.CreateRelationship(TfToken("rigExec:moves"), /*custom=*/false)
+        .SetTargets({strength});
+
+    RigExecRigEvaluator evaluator(edited, rigPath);
+    std::vector<std::string> errors;
+    if (!evaluator.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("    %s\n", e.c_str());
+        }
+    }
+    CHECK(errors.empty());
+    const RigExecRigPose pose = evaluator.Evaluate(when);
+    CHECK(pose.valid);
+
+    // The property chain ran and published 0...
+    const auto strengthIt = pose.movedProperties.find(strength);
+    CHECK(strengthIt != pose.movedProperties.end());
+    if (strengthIt != pose.movedProperties.end()) {
+        CHECK(std::abs(strengthIt->second.Get<float>()) < 1e-6f);
+    }
+
+    // ...and the smoothing CHANGED, because the smooth mover's packet read
+    // the revised strength rather than the authored 0.6.
+    const auto afterIt = pose.movedProperties.find(slab);
+    CHECK(afterIt != pose.movedProperties.end());
+    if (afterIt == pose.movedProperties.end()) {
+        return;
+    }
+    const VtVec3fArray after = afterIt->second.Get<VtVec3fArray>();
+    CHECK(before.size() == after.size());
+    double worst = 0;
+    for (size_t i = 0; i < before.size() && i < after.size(); ++i) {
+        worst = std::max(worst, double((before[i] - after[i]).GetLength()));
+    }
+    if (worst <= 1e-5) {
+        std::printf("  driving inputs:strength to 0 did not change the "
+                    "smoothing: the property mover's value is not reaching "
+                    "the packet assembler\n");
+    }
+    CHECK(worst > 1e-5);
+
+    // The graph and the CPU oracle resolve their inputs independently, so an
+    // agreement here is what says both routes carry the SAME revised value.
+    CHECK(pose.moverGraphParityMismatches == 0);
+    CHECK(pose.moverGraphParityAgreements > 0);
+}
+
+// A read phase authored as property metadata selects WHICH revision of an
+// input a mover consumes.
+//
+// 13 deforms a Slab through a cage that is itself deformed by two movers, so
+// the three phases are three different slabs from one rig with no other edit:
+//   base                 the authored cage -- the slab does not move at all;
+//   <CageLift>           the cage as of that mover -- lifted, not twisted;
+//   final                the cage after both -- lifted and twisted.
+//
+// Asserting the DISPLACEMENTS, not just that they differ: the controls put
+// ty=2 on the lift and tx=1.5 on the twist at 1024, so the three answers have
+// to be 0, 2, and sqrt(1.5^2 + 2^2) = 2.5. Anything else means the phase
+// selected a revision, but not the one it names.
+static void
+TestReadPhaseSelectsRevision(const std::string &examplesDir)
+{
+    const SdfPath rigPath("/ReadPhaseAsset/Rig");
+    const SdfPath slab("/ReadPhaseAsset/Geom/Slab.points");
+    const SdfPath cageRel(
+        "/ReadPhaseAsset/Rig/Movers/Geometry/SlabLattice.rigExec:cage");
+    const UsdTimeCode when(1024);
+
+    auto slabDisplacement = [&](const char *phase, double *out) {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/13_ReadPhases.usda");
+        CHECK(stage);
+        if (!stage) {
+            return false;
+        }
+        stage->SetEditTarget(stage->GetSessionLayer());
+        const UsdRelationship rel = stage->GetRelationshipAtPath(cageRel);
+        CHECK(rel);
+        if (!rel) {
+            return false;
+        }
+        rel.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+
+        RigExecRigEvaluator evaluator(stage, rigPath);
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            for (const std::string &e : errors) {
+                std::printf("    %s\n", e.c_str());
+            }
+            return false;
+        }
+        const RigExecRigPose pose = evaluator.Evaluate(when);
+        CHECK(pose.valid);
+        // The graph and the CPU oracle resolve the phase independently, so
+        // an agreement is what says they selected the SAME revision.
+        CHECK(pose.moverGraphParityMismatches == 0);
+        CHECK(pose.moverGraphParityAgreements > 0);
+
+        const auto it = pose.movedProperties.find(slab);
+        CHECK(it != pose.movedProperties.end());
+        if (it == pose.movedProperties.end()) {
+            return false;
+        }
+        const VtVec3fArray moved = it->second.Get<VtVec3fArray>();
+        VtVec3fArray authored;
+        stage->GetAttributeAtPath(slab).Get(&authored, when);
+        CHECK(moved.size() == authored.size());
+        double worst = 0;
+        for (size_t i = 0; i < moved.size() && i < authored.size(); ++i) {
+            worst = std::max(worst,
+                             double((moved[i] - authored[i]).GetLength()));
+        }
+        *out = worst;
+        return true;
+    };
+
+    double atBase = -1, atLift = -1, atFinal = -1;
+    CHECK(slabDisplacement("base", &atBase));
+    CHECK(slabDisplacement("/ReadPhaseAsset/Rig/Movers/Cage/CageLift",
+                           &atLift));
+    CHECK(slabDisplacement("final", &atFinal));
+
+    if (std::abs(atBase) > 1e-4) {
+        std::printf("  base phase moved the slab by %g; the authored cage "
+                    "should deform nothing\n", atBase);
+    }
+    CHECK(std::abs(atBase) < 1e-4);
+
+    if (std::abs(atLift - 2.0) > 1e-3) {
+        std::printf("  phase at CageLift gave %g; expected 2 (ty only)\n",
+                    atLift);
+    }
+    CHECK(std::abs(atLift - 2.0) < 1e-3);
+
+    if (std::abs(atFinal - 2.5) > 1e-3) {
+        std::printf("  final phase gave %g; expected 2.5 "
+                    "(sqrt(1.5^2 + 2^2))\n", atFinal);
+    }
+    CHECK(std::abs(atFinal - 2.5) < 1e-3);
+}
+
+// A phase is compiled wiring, so editing one begins a new epoch and the next
+// Evaluate rebuilds -- exactly like retargeting the relationship it sits on.
+static void
+TestReadPhaseIsStructural(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/13_ReadPhases.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath("/ReadPhaseAsset/Rig"));
+    CHECK(evaluator.Compile(nullptr));
+    CHECK(evaluator.Evaluate(UsdTimeCode(1024)).valid);
+    const size_t before = evaluator.GetBindingEpochDigest();
+
+    stage->SetEditTarget(stage->GetSessionLayer());
+    const UsdRelationship rel = stage->GetRelationshipAtPath(SdfPath(
+        "/ReadPhaseAsset/Rig/Movers/Geometry/SlabLattice.rigExec:cage"));
+    CHECK(rel);
+    if (!rel) {
+        return;
+    }
+    rel.SetMetadata(TfToken("rigExecReadPhase"), std::string("base"));
+
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(1024));
+    CHECK(pose.valid);
+    if (evaluator.GetBindingEpochDigest() == before) {
+        std::printf("  editing a read phase did not change the epoch "
+                    "digest; the compiled binding will go stale\n");
+    }
+    CHECK(evaluator.GetBindingEpochDigest() != before);
+}
+
+// Phases that cannot be satisfied are rejected at compile rather than
+// silently reading something else.
+static void
+TestBadReadPhasesRejected(const std::string &examplesDir)
+{
+    const SdfPath cageRel(
+        "/ReadPhaseAsset/Rig/Movers/Geometry/SlabLattice.rigExec:cage");
+
+    auto compileWith = [&](const char *phase, std::vector<std::string> *errors) {
+        UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/13_ReadPhases.usda");
+        if (!stage) {
+            return true;
+        }
+        stage->SetEditTarget(stage->GetSessionLayer());
+        const UsdRelationship rel = stage->GetRelationshipAtPath(cageRel);
+        if (!rel) {
+            return true;
+        }
+        rel.SetMetadata(TfToken("rigExecReadPhase"), std::string(phase));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/ReadPhaseAsset/Rig"));
+        return evaluator.Compile(errors);
+    };
+
+    // Not a phase keyword and not a path.
+    std::vector<std::string> errors;
+    CHECK(!compileWith("halfway", &errors));
+    CHECK(!errors.empty());
+
+    // A relative path: there are two plausible things to resolve it against,
+    // so it is rejected rather than guessed.
+    errors.clear();
+    CHECK(!compileWith("Movers/Cage/CageLift", &errors));
+
+    // A well-formed path that writes nothing to the cage.
+    errors.clear();
+    CHECK(!compileWith("/ReadPhaseAsset/Rig/Movers/Geometry", &errors));
+    bool sawWritesNothing = false;
+    for (const std::string &e : errors) {
+        sawWritesNothing |= e.find("writes nothing") != std::string::npos;
+    }
+    CHECK(sawWritesNothing);
+
+    // Naming a Scope that DOES contain writers is legal: post-order means
+    // "after everything beneath it".
+    errors.clear();
+    CHECK(compileWith("/ReadPhaseAsset/Rig/Movers/Cage", &errors));
+}
+
+// Lifting the joint requirement is not the same as removing the gate: a rig
+// with neither joints nor movers publishes nothing at all, which is an
+// authoring mistake and must still be reported as one.
+static void
+TestRigWithNoOutputsRejected(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/rigexec_flat.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    stage->SetEditTarget(stage->GetSessionLayer());
+    // Deactivating the only mover leaves the rig with no outputs of any kind.
+    const UsdPrim mover = stage->GetPrimAtPath(
+        SdfPath("/World/RigRoot/Movers/RigExecAimConstraint1"));
+    CHECK(mover);
+    if (!mover) {
+        return;
+    }
+    mover.SetActive(false);
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/World/RigRoot"));
+    std::vector<std::string> errors;
+    CHECK(!evaluator.Compile(&errors));
+    bool sawOutputsError = false;
+    for (const std::string &e : errors) {
+        sawOutputsError |= e.find("publishes no outputs") != std::string::npos;
+    }
+    CHECK(sawOutputsError);
+}
+
 // The codeless schema's resource directory.
 //
 // The GENERATED one when the build supplied it: only that copy carries the
@@ -1504,8 +2323,19 @@ main(int argc, char **argv)
     TestSolverCycleRejected(examplesDir);
     TestPureSolverToSolverCycleRejected(examplesDir);
     TestAimConstraintRevisesJointFrame(examplesDir);
-    TestPropertyMathMoversAreNotEvaluated(examplesDir);
+    TestPropertyMathMoversAreEvaluated(examplesDir);
+    TestPropertyMoverFeedsConsumingComputation(examplesDir);
+    TestDisabledPropertyMoverPassesThrough(examplesDir);
+    TestPropertyMoverTypeMismatchRejected(examplesDir);
     TestAimConstraintDrivesXform(examplesDir);
+    TestJointFreeRigPublishesXform(examplesDir);
+    TestRigWithNoOutputsRejected(examplesDir);
+    TestMoverOrderIsComposedAndDynamic();
+    TestReadPhaseSelectsRevision(examplesDir);
+    TestReadPhaseIsStructural(examplesDir);
+    TestBadReadPhasesRejected(examplesDir);
+    TestPointChainConsumesPrecedingRevision(examplesDir);
+    TestPropertyMoverReachesStaticPacketReads(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

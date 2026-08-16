@@ -5,6 +5,7 @@
 
 #include "frameExtraction.h"
 #include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/propertyMath.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/weightFields.h"
 
@@ -33,6 +34,38 @@
 #include <set>
 
 namespace rigExec {
+
+namespace {
+
+// A static input read that prefers what the current generation already
+// resolved.
+//
+// The evaluator and the packet assemblers both read a mover's authored
+// inputs directly off the stage; neither goes through exec, so neither sees
+// a value override. Routing both through this is what makes a property
+// mover's result reach them -- and, just as importantly, what keeps the
+// graph path and the CPU oracle reading the SAME number, so parity stays a
+// real check rather than two copies of the same mistake.
+template <class T>
+T
+_ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
+              const char *name, T fallback, UsdTimeCode time)
+{
+    T value = fallback;
+    if (!prim) {
+        return value;
+    }
+    const TfToken token(name);
+    if (const UsdAttribute a = prim.GetAttribute(token)) {
+        if (resolved.Get(prim.GetPath().AppendProperty(token), &value)) {
+            return value;
+        }
+        a.Get(&value, time);
+    }
+    return value;
+}
+
+}  // namespace
 
 namespace {
 
@@ -289,6 +322,23 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
         }
         digest += '|';
         return targets;
+    };
+    // A read phase decides WHICH revision of an input a mover consumes, which
+    // is compiled wiring, not a value -- so editing one has to re-epoch
+    // exactly the way retargeting the relationship does. Authored on the
+    // property, so it is hashed alongside that property's targets rather than
+    // as another prim-level token.
+    auto appendPhase = [&digest](const UsdPrim &prim, const char *name) {
+        std::string authored;
+        if (const UsdRelationship rel = prim.GetRelationship(TfToken(name))) {
+            rel.GetMetadata(TfToken(RigExecReadPhaseMetadataName), &authored);
+        } else if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+            a.GetMetadata(TfToken(RigExecReadPhaseMetadataName), &authored);
+        }
+        digest += name;
+        digest += "@phase=";
+        digest += authored;
+        digest += '|';
     };
     auto appendToken = [&digest](const UsdPrim &prim, const char *name) {
         TfToken value;
@@ -623,6 +673,12 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             appendRelTargets(prim, "rigExec:cage", false);
             appendRelTargets(prim, "rigExec:surface", false);
             appendRelTargets(prim, "rigExec:bindCoordinates", false);
+            for (const char *phased : {"rigExec:transform", "rigExec:cage",
+                                       "rigExec:surface", "rigExec:curvenet",
+                                       "rigExec:bindCoordinates",
+                                       "rigExec:driverCurve"}) {
+                appendPhase(prim, phased);
+            }
             appendRelTargets(prim, "rigExec:driverFrames", false);
             appendRelTargets(prim, "rigExec:driverCurve", false);
             // Authored order, not sorted: the binding takes targets[0], so
@@ -696,11 +752,20 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // the previous epoch publishable (spec §4.1 atomic transactions).
     std::vector<SdfPath> newJointPaths =
         _DiscoverJointOutputs(_stage, _rigPath);
-    if (newJointPaths.empty()) {
-        reportError("Rig has no RigExecJoint prims to publish: " +
-                    _rigPath.GetString());
-        return false;
-    }
+    // A rig with no joints is legal.
+    //
+    // It used to be rejected here, on the reading that a joint is what a rig
+    // publishes. That was never true of the evaluator, only of this check: a
+    // mover writes an exact target, and a target is a points array, a plain
+    // UsdGeomXformable's transform, or a scalar property just as readily as
+    // it is a joint frame -- three output domains that all reach a consumer
+    // through RigExecRigPose. Requiring a joint forced authors to add a
+    // vestigial one to rigs that pose none (10_AimXformTurret says so in a
+    // comment), and rejected outright the simplest rig there is: a constraint
+    // aiming one Xform at another.
+    //
+    // What the rig DOES need is at least one output, and that cannot be known
+    // until the mover walk below has run. The check moved there.
     // Controls are discovered alongside the joints but never gate the
     // compile: zero controls is an ordinary rig, not a broken one.
     std::vector<SdfPath> newControlPaths =
@@ -1068,6 +1133,143 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                             "alias mover-level parameters)");
                 return false;
             }
+            // Property-domain movers: exactly one exact scalar target, and
+            // its value type must be the one the mover is statically typed
+            // for. These are the third output domain -- a mover revises a
+            // float, a vector, or a matrix the same way another revises a
+            // points array -- so the target rules are the mirror image of the
+            // pointsMoverTypes block above.
+            {
+                const TfToken &type = record.schemaType;
+                const bool isProperty =
+                    type == "RigExecFloatMathMover" ||
+                    type == "RigExecVec3fMathMover" ||
+                    type == "RigExecMatrixMathMover";
+                if (isProperty) {
+                    if (record.targets.size() != 1) {
+                        reportError(
+                            type.GetString() + " " +
+                            prim.GetPath().GetString() +
+                            " must have exactly one target (its parameters "
+                            "are mover-level, so a fan-out would alias them "
+                            "across targets)");
+                        return false;
+                    }
+                    const SdfPath &t = record.targets[0];
+                    // A prim path canonicalizes to .points, which is never
+                    // what a property mover means; require the exact
+                    // property the author wrote.
+                    const UsdAttribute attr = t.IsPropertyPath()
+                        ? _stage->GetAttributeAtPath(t)
+                        : UsdAttribute();
+                    if (!attr) {
+                        reportError(
+                            type.GetString() + " " +
+                            prim.GetPath().GetString() + " target " +
+                            t.GetString() +
+                            " is not an exact property path");
+                        return false;
+                    }
+                    const SdfValueTypeName valueType = attr.GetTypeName();
+                    bool typeOk = false;
+                    const char *expected = "";
+                    if (type == "RigExecFloatMathMover") {
+                        expected = "float";
+                        typeOk = valueType == SdfValueTypeNames->Float;
+                    } else if (type == "RigExecVec3fMathMover") {
+                        // Every GfVec3f-backed scalar role, not just float3:
+                        // a mover offsetting a vector3f or a color3f is doing
+                        // the identical arithmetic, and refusing it would be
+                        // a distinction the kernel does not make.
+                        expected = "float3/vector3f/point3f/normal3f/color3f";
+                        typeOk =
+                            valueType == SdfValueTypeNames->Float3 ||
+                            valueType == SdfValueTypeNames->Vector3f ||
+                            valueType == SdfValueTypeNames->Point3f ||
+                            valueType == SdfValueTypeNames->Normal3f ||
+                            valueType == SdfValueTypeNames->Color3f;
+                    } else {
+                        expected = "matrix4d";
+                        typeOk = valueType == SdfValueTypeNames->Matrix4d;
+                    }
+                    if (!typeOk) {
+                        reportError(
+                            type.GetString() + " " +
+                            prim.GetPath().GetString() + " target " +
+                            t.GetString() + " has type " +
+                            valueType.GetAsToken().GetString() +
+                            "; expected " + expected);
+                        return false;
+                    }
+                    // allowedTokens is advisory in USD, and an unparsed
+                    // operation would otherwise fall through to a silent
+                    // pass-through every frame.
+                    TfToken operation;
+                    if (const UsdAttribute a = prim.GetAttribute(
+                            TfToken("rigExec:operation"))) {
+                        a.Get(&operation);
+                    }
+                    RigExecPropertyOp op;
+                    if (!RigExecParsePropertyOp(operation, &op)) {
+                        reportError(
+                            type.GetString() + " " +
+                            prim.GetPath().GetString() +
+                            ": unknown rigExec:operation '" +
+                            operation.GetString() + "'");
+                        return false;
+                    }
+                    if (type == "RigExecMatrixMathMover" &&
+                        op != RigExecPropertyOp::Multiply &&
+                        op != RigExecPropertyOp::Blend) {
+                        reportError(
+                            type.GetString() + " " +
+                            prim.GetPath().GetString() +
+                            ": rigExec:operation '" + operation.GetString() +
+                            "' has no matrix meaning (multiply or blend)");
+                        return false;
+                    }
+                }
+            }
+            // Read phases, validated from the AUTHORED stage.
+            //
+            // Binding resolution parses these too, but it has to be total --
+            // it returns a binding, not a verdict -- so an unparseable phase
+            // there degrades to `base`. That is the wrong answer delivered
+            // silently: the author asked for a specific revision and got the
+            // authored value. The parse verdict belongs here, in Phase A,
+            // where it can reject the compile before any epoch state moves.
+            {
+                static const std::pair<const char *, const char *> kPhased[] = {
+                    {"rigExec:transform", "rigExec:transformReadPhase"},
+                    {"rigExec:cage", "rigExec:cageReadPhase"},
+                    {"rigExec:surface", "rigExec:surfaceReadPhase"},
+                    {"rigExec:curvenet", nullptr},
+                    {"rigExec:bindCoordinates", nullptr},
+                    {"rigExec:driverCurve", "rigExec:driverCurveReadPhase"},
+                };
+                for (const auto &[relName, legacyAttr] : kPhased) {
+                    RigExecReadPhase phase;
+                    std::string phaseError;
+                    bool ok = true;
+                    if (const UsdRelationship rel =
+                            prim.GetRelationship(TfToken(relName))) {
+                        ok = RigExecResolveReadPhase(rel, legacyAttr, &phase,
+                                                     &phaseError);
+                    } else if (legacyAttr) {
+                        if (const UsdAttribute a =
+                                prim.GetAttribute(TfToken(legacyAttr))) {
+                            ok = RigExecResolveReadPhase(a, legacyAttr, &phase,
+                                                         &phaseError);
+                        }
+                    }
+                    if (!ok) {
+                        reportError(record.schemaType.GetString() + " " +
+                                    prim.GetPath().GetString() + ": " +
+                                    phaseError);
+                        return false;
+                    }
+                }
+            }
             // Structure-determining tokens must be static. `uniform` is a
             // convention, not an enforcement: USD permits time samples on a
             // uniform attribute, and these tokens select the compiled
@@ -1077,6 +1279,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // resolving them at evaluation time (codex round-3). Same rule
             // the aggregate cardinality attributes already follow.
             for (const char *name : {"rigExec:mode",
+                                     "rigExec:operation",
                                      "rigExec:transformReadPhase",
                                      "rigExec:cageReadPhase",
                                      "rigExec:surfaceReadPhase"}) {
@@ -1091,6 +1294,21 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             }
             newMovers.push_back(std::move(record));
         }
+    }
+
+    // A rig has to publish SOMETHING (the check the joint requirement used
+    // to stand in for).
+    //
+    // Joints and movers are the two ways it can: a joint publishes a frame
+    // whether or not anything moves it, and a mover publishes whatever its
+    // targets are. Zero of both is a rig that evaluates to an empty
+    // generation every frame, which is far likelier to be an authoring
+    // mistake -- a Movers scope whose contents were renamed out from under
+    // it, a rig root pointed at the wrong prim -- than an intent.
+    if (newJointPaths.empty() && newMovers.empty()) {
+        reportError("Rig publishes no outputs: " + _rigPath.GetString() +
+                    " has no RigExecJoint prims and no movers");
+        return false;
     }
 
     // Same-target writers that are not nested (neither is a namespace
@@ -1732,16 +1950,44 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 moverPrim.GetRelationship(TfToken("rigExec:aimTarget"))) {
             rel.GetTargets(&aims);
         }
+        // The aim target supplies a frame, and how it does so depends on what
+        // it is -- the same fork the PROVIDER side already makes below, and
+        // for the same reason: a plain UsdGeomXformable publishes no
+        // computePointFrame, and requesting one is a hard exec failure that
+        // takes the whole snapshot down rather than leaving one value
+        // missing. Resolved once here, not per target.
+        SdfPath aimFrameProvider, aimXform;
+        if (!aims.empty()) {
+            const SdfPath aimPath = aims[0].GetPrimPath();
+            const UsdPrim aimPrim = _stage->GetPrimAtPath(aimPath);
+            const TfToken aimType =
+                aimPrim ? aimPrim.GetTypeName() : TfToken();
+            if (aimType == "RigExecControl" || aimType == "RigExecJoint") {
+                aimFrameProvider = aimPath;
+            } else if (aimPrim && UsdGeomXformable(aimPrim)) {
+                aimXform = aimPath;
+            } else {
+                reportError(
+                    "aim constraint " + mover.moverPath.GetString() +
+                    " targets " + aimPath.GetString() +
+                    ", which is neither a RigExec transform provider nor a "
+                    "UsdGeomXformable; it can supply no aim frame");
+                restorePreviousEpoch();
+                return false;
+            }
+        }
         for (const SdfPath &target : mover.targets) {
             if (!target.IsPrimPath()) {
                 continue;
             }
             _FrameRevision revision;
             revision.moverPath = mover.moverPath;
-            if (!aims.empty()) {
+            if (!aimFrameProvider.IsEmpty()) {
                 revision.aimTargetFrameTap = newTaps->Add(
-                    RigExecValueAddress::Prim(aims[0].GetPrimPath(),
+                    RigExecValueAddress::Prim(aimFrameProvider,
                                               _computePointFrame, basePhase));
+            } else {
+                revision.aimTargetXform = aimXform;
             }
             newFrameChains[target].push_back(revision);
         }
@@ -1814,6 +2060,30 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     for (const SdfPath &controlPath : newControlPaths) {
         newControlFrameTaps.push_back(newTaps->Add(RigExecValueAddress::Prim(
             controlPath, _computePointFrame, basePhase)));
+    }
+
+    // Property-domain chains, from the same composed post-order walk.
+    //
+    // Nothing to bind and nothing to tap: a math mover's inputs are all
+    // authored on itself, and the chain's base is the target attribute's own
+    // authored value. That is exactly what makes the chain evaluable BEFORE
+    // exec runs, and therefore what lets its result be supplied to exec as a
+    // value override -- which is how a clamped weight actually reaches the
+    // solver that reads it instead of being reimplemented inside that
+    // solver's kernel.
+    std::map<SdfPath, std::vector<_PropertyRevision>> newPropertyChains;
+    for (const RigExecMoverRecord &mover : newMovers) {
+        if (mover.schemaType != "RigExecFloatMathMover" &&
+            mover.schemaType != "RigExecVec3fMathMover" &&
+            mover.schemaType != "RigExecMatrixMathMover") {
+            continue;
+        }
+        // Validation above guarantees exactly one exact property target of
+        // the matching type.
+        for (const SdfPath &target : mover.targets) {
+            newPropertyChains[target].push_back(
+                _PropertyRevision{mover.moverPath, mover.schemaType});
+        }
     }
 
     // The compiled mover graph, built from the same composed post-order walk
@@ -2004,6 +2274,221 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _solverArrayTaps = std::move(newSolverArrayTaps);
     _graphChains = std::move(newGraphChains);
     _graphDerivedChains = std::move(newGraphDerivedChains);
+    _propertyChains = std::move(newPropertyChains);
+
+    // Chain evaluation order.
+    //
+    // A chain that reads another chain's target at a non-base phase cannot
+    // run until that chain has. Collect those edges and sort; a cycle is a
+    // compile error, because there is no order that satisfies it and the
+    // alternative -- picking one and reading a stale or authored value -- is
+    // the silent-wrong-answer failure this engine refuses everywhere else.
+    {
+        std::map<SdfPath, std::set<SdfPath>> dependsOn;  // target -> producers
+        for (const auto &[target, revisions] : _graphChains) {
+            dependsOn[target];  // every chain is a node, even with no edges
+        }
+        for (const auto &[target, revisions] : _graphChains) {
+            for (const _GraphRevision &revision : revisions) {
+                auto addEdge = [&](const SdfPath &producer) {
+                    if (producer.IsEmpty() || producer == target ||
+                        !_graphChains.count(producer)) {
+                        return;
+                    }
+                    dependsOn[target].insert(producer);
+                };
+                for (const auto &[inputPath, phase] : revision.binding.phases) {
+                    addEdge(inputPath);
+                }
+                // The Profile Mover's implicit dependency: its net's knots
+                // are posed by ordinary movers and it must see them posed.
+                // Stated as an edge now rather than as a pass ordering, so
+                // one mechanism carries both kinds.
+                addEdge(revision.binding.curvenetPoints);
+            }
+        }
+
+        std::vector<SdfPath> order;
+        order.reserve(dependsOn.size());
+        std::set<SdfPath> emitted;
+        // Kahn over a map: deterministic because the map iterates in path
+        // order, so an unconstrained pair always comes out the same way.
+        bool progress = true;
+        while (progress && emitted.size() < dependsOn.size()) {
+            progress = false;
+            for (const auto &[target, producers] : dependsOn) {
+                if (emitted.count(target)) {
+                    continue;
+                }
+                bool ready = true;
+                for (const SdfPath &producer : producers) {
+                    if (!emitted.count(producer)) {
+                        ready = false;
+                        break;
+                    }
+                }
+                if (ready) {
+                    order.push_back(target);
+                    emitted.insert(target);
+                    progress = true;
+                }
+            }
+        }
+        if (emitted.size() != dependsOn.size()) {
+            std::string cycle;
+            for (const auto &[target, producers] : dependsOn) {
+                if (!emitted.count(target)) {
+                    if (!cycle.empty()) {
+                        cycle += ", ";
+                    }
+                    cycle += target.GetString();
+                }
+            }
+            reportError("Cyclic read-phase dependency between chains: " +
+                        cycle + " (a phased read cannot be satisfied in any "
+                        "evaluation order)");
+            restorePreviousEpoch();
+            return false;
+        }
+        _chainOrder = std::move(order);
+    }
+
+    // Validate every declared phase, and reduce it to the one revision it
+    // names.
+    {
+        std::map<SdfPath, std::vector<SdfPath>> chainMovers;
+        for (const auto &[target, revisions] : _graphChains) {
+            for (const _GraphRevision &revision : revisions) {
+                chainMovers[target].push_back(revision.moverPath);
+            }
+        }
+        std::map<SdfPath, int> ordinalOf;
+        for (const RigExecMoverRecord &m : _movers) {
+            ordinalOf[m.moverPath] = m.ordinal;
+        }
+
+        _snapshotPoints.clear();
+        for (const auto &[target, revisions] : _graphChains) {
+            for (const _GraphRevision &revision : revisions) {
+                for (const auto &[inputPath, phase] : revision.binding.phases) {
+                    const std::string who =
+                        revision.moverPath.GetString() + ": read phase '" +
+                        phase.GetAsString() + "' on " + inputPath.GetString();
+
+                    // A phase on an input nothing writes is a no-op that
+                    // reads as intent. Reject it: the author asked for a
+                    // revision of something that has none, and silently
+                    // handing back the authored value is how a rig ends up
+                    // deforming against the wrong pose with no signal.
+                    const auto moversIt = chainMovers.find(inputPath);
+                    if (moversIt == chainMovers.end()) {
+                        reportError(who + " names a property no mover writes; "
+                                          "only `base` is meaningful there");
+                        restorePreviousEpoch();
+                        return false;
+                    }
+                    const std::vector<SdfPath> &movers = moversIt->second;
+
+                    if (phase.kind == RigExecReadPhaseKind::Final) {
+                        continue;  // the chain's published result
+                    }
+                    if (phase.kind == RigExecReadPhaseKind::Preceding) {
+                        // Only meaningful when the reader is itself in that
+                        // chain; otherwise there is no position to precede.
+                        const auto at = std::find(movers.begin(), movers.end(),
+                                                  revision.moverPath);
+                        if (at == movers.end()) {
+                            reportError(
+                                who + " is `preceding`, but " +
+                                revision.moverPath.GetString() +
+                                " does not write " + inputPath.GetString() +
+                                "; there is no preceding revision to name");
+                            restorePreviousEpoch();
+                            return false;
+                        }
+                        if (at != movers.begin()) {
+                            _snapshotPoints[inputPath].insert(*(at - 1));
+                        }
+                        continue;
+                    }
+
+                    // AtPrim: the last revision at or beneath the named prim.
+                    SdfPath found;
+                    for (const SdfPath &mover : movers) {
+                        if (mover == phase.prim || mover.HasPrefix(phase.prim)) {
+                            found = mover;
+                        }
+                    }
+                    if (found.IsEmpty()) {
+                        reportError(who + " names " + phase.prim.GetString() +
+                                    ", which writes nothing to " +
+                                    inputPath.GetString());
+                        restorePreviousEpoch();
+                        return false;
+                    }
+                    // Within one chain the named revision must already have
+                    // run when the reader runs. Across chains the topological
+                    // order above guarantees it, so only the self-read case
+                    // can be unsatisfiable.
+                    if (inputPath == target) {
+                        const auto namedOrdinal = ordinalOf.find(found);
+                        const auto readerOrdinal =
+                            ordinalOf.find(revision.moverPath);
+                        if (namedOrdinal != ordinalOf.end() &&
+                            readerOrdinal != ordinalOf.end() &&
+                            namedOrdinal->second >= readerOrdinal->second) {
+                            reportError(
+                                who + " names " + found.GetString() +
+                                ", which runs at or after the reader in the "
+                                "composed walk (spec §4.2)");
+                            restorePreviousEpoch();
+                            return false;
+                        }
+                    }
+                    _snapshotPoints[inputPath].insert(found);
+                }
+            }
+        }
+
+        // The transform provider's phase is answered from the FRAME chains,
+        // so it validates against those rather than against chainMovers.
+        for (const auto &[target, revisions] : _graphChains) {
+            for (const _GraphRevision &revision : revisions) {
+                const RigExecReadPhase &phase = revision.binding.transformPhase;
+                if (phase.kind != RigExecReadPhaseKind::AtPrim) {
+                    continue;
+                }
+                const std::string who =
+                    revision.moverPath.GetString() + ": read phase '" +
+                    phase.GetAsString() + "' on rigExec:transform";
+                const auto frameIt =
+                    _frameChains.find(revision.binding.transform);
+                if (frameIt == _frameChains.end()) {
+                    reportError(who + " names a point in the pose walk, but " +
+                                revision.binding.transform.GetString() +
+                                " is revised by no pose mover");
+                    restorePreviousEpoch();
+                    return false;
+                }
+                SdfPath found;
+                for (const _FrameRevision &frameRevision : frameIt->second) {
+                    if (frameRevision.moverPath == phase.prim ||
+                        frameRevision.moverPath.HasPrefix(phase.prim)) {
+                        found = frameRevision.moverPath;
+                    }
+                }
+                if (found.IsEmpty()) {
+                    reportError(who + " names " + phase.prim.GetString() +
+                                ", which revises nothing on " +
+                                revision.binding.transform.GetString());
+                    restorePreviousEpoch();
+                    return false;
+                }
+                _snapshotPoints[revision.binding.transform].insert(found);
+            }
+        }
+    }
+
     _compiled = true;
     return true;
 }
@@ -2668,6 +3153,33 @@ RigExecRigEvaluator::_EvaluateChain(
     UsdTimeCode time,
     std::vector<std::string> *diagnostics) const
 {
+    // The oracle resolves a read phase ITSELF, from the authored metadata,
+    // and reads the same recorded snapshots. That keeps it independent of
+    // RigExecResolveRevisionBinding and RigExecAssembleParameters -- which is
+    // what makes parity a real check -- while sharing the authored INTENT,
+    // which it must, or the two paths are evaluating different rigs.
+    auto phasedPoints = [this, time](
+        const UsdPrim &prim, const char *relName, const char *legacyAttr,
+        const SdfPath &pointsPath, const SdfPath &readerMover,
+        VtVec3fArray *out) {
+        RigExecReadPhase phase;
+        if (const UsdRelationship r = prim.GetRelationship(TfToken(relName))) {
+            RigExecResolveReadPhase(r, legacyAttr, &phase, nullptr);
+        }
+        if (!phase.IsBase()) {
+            if (const VtValue *v = _chainSnapshots.Lookup(
+                    pointsPath, phase, readerMover)) {
+                if (v->IsHolding<VtVec3fArray>()) {
+                    *out = v->UncheckedGet<VtVec3fArray>();
+                    return;
+                }
+            }
+        }
+        if (const UsdAttribute a = _stage->GetAttributeAtPath(pointsPath)) {
+            a.Get(out, time);
+        }
+    };
+
     // Base: the stock resolved value of the exact native property
     // (spec §7.2). The base revision is retained: blend-shape deltas
     // derive against base points, not the preceding revision (spec §7.3).
@@ -3020,11 +3532,9 @@ RigExecRigEvaluator::_EvaluateChain(
         } else if (type == "RigExecVolumeCorrectMover" ||
                    type == "RigExecSmoothMover") {
             const bool isVolume = type == "RigExecVolumeCorrectMover";
-            float strength = isVolume ? 0.0f : 0.5f;
-            if (UsdAttribute a =
-                    prim.GetAttribute(TfToken("inputs:strength"))) {
-                a.Get(&strength, time);
-            }
+            const float strength = _ResolvedRead(
+                _resolvedInputs, prim, "inputs:strength",
+                isVolume ? 0.0f : 0.5f, time);
             std::vector<GfVec3f> scratch(points.begin(), points.end());
             if (isVolume) {
                 VtVec3fArray base;
@@ -3090,10 +3600,13 @@ RigExecRigEvaluator::_EvaluateChain(
                 cagePoints = cagePoints.AppendProperty(TfToken("points"));
             }
             VtVec3fArray restCage, posedCage, base;
+            // Rest is the BIND pose and always the authored value; only the
+            // live cage carries a phase.
             if (UsdAttribute a = _stage->GetAttributeAtPath(cagePoints)) {
                 a.Get(&restCage, UsdTimeCode::Default());
-                a.Get(&posedCage, time);
             }
+            phasedPoints(prim, "rigExec:cage", "rigExec:cageReadPhase",
+                         cagePoints, mover->moverPath, &posedCage);
             if (UsdAttribute a = _stage->GetAttributeAtPath(target)) {
                 a.Get(&base, time);
             }
@@ -3132,10 +3645,9 @@ RigExecRigEvaluator::_EvaluateChain(
             const SdfPath surfacePrim = surfaces[0].GetPrimPath();
             VtVec3fArray surfacePoints;
             VtIntArray counts, indices;
-            if (UsdAttribute a = _stage->GetAttributeAtPath(
-                    surfacePrim.AppendProperty(TfToken("points")))) {
-                a.Get(&surfacePoints, time);
-            }
+            phasedPoints(prim, "rigExec:surface", "rigExec:surfaceReadPhase",
+                         surfacePrim.AppendProperty(TfToken("points")),
+                         mover->moverPath, &surfacePoints);
             if (const UsdPrim s = _stage->GetPrimAtPath(surfacePrim)) {
                 s.GetAttribute(TfToken("faceVertexCounts")).Get(&counts, time);
                 s.GetAttribute(TfToken("faceVertexIndices"))
@@ -3160,6 +3672,216 @@ RigExecRigEvaluator::_EvaluateChain(
         }
     }
     return points;
+}
+
+namespace {
+
+// Reads the authored inputs of one float/vec3f math mover at \p time.
+//
+// Every field is read even though the operation uses only some of them: the
+// packet is the mover's whole authored state, and branching on the operation
+// while reading would put the same switch in two places.
+template <class T>
+bool
+_ReadPropertyMathParams(
+    const UsdPrim &moverPrim, UsdTimeCode time,
+    RigExecPropertyMathParams<T> *params)
+{
+    TfToken operation;
+    if (const UsdAttribute a =
+            moverPrim.GetAttribute(TfToken("rigExec:operation"))) {
+        a.Get(&operation);
+    }
+    if (!RigExecParsePropertyOp(operation, &params->op)) {
+        return false;
+    }
+    if (const UsdAttribute a =
+            moverPrim.GetAttribute(TfToken("inputs:value"))) {
+        a.Get(&params->value, time);
+    }
+    if (const UsdAttribute a = moverPrim.GetAttribute(TfToken("inputs:min"))) {
+        a.Get(&params->min, time);
+    }
+    if (const UsdAttribute a = moverPrim.GetAttribute(TfToken("inputs:max"))) {
+        a.Get(&params->max, time);
+    }
+    if (const UsdAttribute a =
+            moverPrim.GetAttribute(TfToken("inputs:weight"))) {
+        a.Get(&params->weight, time);
+    }
+    return true;
+}
+
+bool
+_IsFinite(float v)
+{
+    return std::isfinite(v);
+}
+
+bool
+_IsFinite(const GfVec3f &v)
+{
+    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+
+bool
+_IsFinite(const GfMatrix4d &m)
+{
+    for (size_t r = 0; r < 4; ++r) {
+        for (size_t c = 0; c < 4; ++c) {
+            if (!std::isfinite(m[r][c])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+void
+RigExecRigEvaluator::_EvaluatePropertyChains(
+    UsdTimeCode time,
+    std::map<SdfPath, VtValue> *results,
+    std::vector<RigExecValueOverride> *overrides,
+    std::vector<std::string> *diagnostics) const
+{
+    auto diag = [diagnostics](const std::string &message) {
+        if (diagnostics) {
+            diagnostics->push_back(message);
+        }
+    };
+
+    for (const auto &chain : _propertyChains) {
+        // Named locals rather than a structured binding: the lambdas below
+        // capture both, and capturing a structured binding is C++20.
+        const SdfPath &target = chain.first;
+        const std::vector<_PropertyRevision> &revisions = chain.second;
+        const UsdAttribute attr = _stage->GetAttributeAtPath(target);
+        if (!attr) {
+            diag("property chain " + target.GetString() +
+                 ": target attribute disappeared; chain skipped");
+            continue;
+        }
+        const SdfValueTypeName valueType = attr.GetTypeName();
+
+        // One shared revision loop over the three value domains. Each
+        // iteration reads the mover's own authored state and applies it to
+        // the preceding revision -- the base being the target's AUTHORED
+        // value, exactly as a point chain's base is the target's authored
+        // points.
+        auto runChain = [&](auto value, auto apply) {
+            using ValueT = decltype(value);
+            if (!attr.Get(&value, time)) {
+                diag("property chain " + target.GetString() +
+                     ": target has no authored value; chain skipped");
+                return false;
+            }
+            if (!_IsFinite(value)) {
+                diag("property chain " + target.GetString() +
+                     ": authored base is not finite; chain skipped");
+                return false;
+            }
+            for (const _PropertyRevision &revision : revisions) {
+                const UsdPrim moverPrim =
+                    _stage->GetPrimAtPath(revision.moverPath);
+                if (!moverPrim) {
+                    continue;
+                }
+                bool enabled = true;
+                if (const UsdAttribute a =
+                        moverPrim.GetAttribute(TfToken("inputs:enabled"))) {
+                    a.Get(&enabled, time);
+                }
+                if (!enabled) {
+                    diag("diag " + revision.moverPath.GetString() +
+                         ": disabled; revision passed through");
+                    continue;  // ordinary pass-through (spec §6.6)
+                }
+                ValueT next = value;
+                if (!apply(moverPrim, value, &next)) {
+                    diag("diag " + revision.moverPath.GetString() +
+                         ": inputs unusable; revision passed through");
+                    continue;
+                }
+                if (!_IsFinite(next)) {
+                    // A NaN reaching an exec override propagates into every
+                    // consumer of the attribute with no way to report it
+                    // back, so the mover fails and passes through instead
+                    // (spec §6.6).
+                    diag("diag " + revision.moverPath.GetString() +
+                         ": produced a non-finite value; revision passed "
+                         "through");
+                    continue;
+                }
+                value = next;
+            }
+            if (results) {
+                (*results)[target] = VtValue(value);
+            }
+            if (overrides) {
+                overrides->push_back(RigExecValueOverride{
+                    target.GetPrimPath(), TfToken(), target.GetNameToken(),
+                    VtValue(value)});
+            }
+            return true;
+        };
+
+        if (valueType == SdfValueTypeNames->Float) {
+            runChain(float(0), [&](const UsdPrim &mover, float in,
+                                   float *out) {
+                RigExecPropertyMathParams<float> params;
+                if (!_ReadPropertyMathParams(mover, time, &params) ||
+                    !_IsFinite(params.value) || !_IsFinite(params.min) ||
+                    !_IsFinite(params.max) || !_IsFinite(params.weight)) {
+                    return false;
+                }
+                *out = RigExecApplyFloatMath(in, params);
+                return true;
+            });
+        } else if (valueType == SdfValueTypeNames->Matrix4d) {
+            runChain(GfMatrix4d(1.0), [&](const UsdPrim &mover,
+                                          const GfMatrix4d &in,
+                                          GfMatrix4d *out) {
+                TfToken operation;
+                if (const UsdAttribute a =
+                        mover.GetAttribute(TfToken("rigExec:operation"))) {
+                    a.Get(&operation);
+                }
+                RigExecPropertyOp op;
+                if (!RigExecParsePropertyOp(operation, &op)) {
+                    return false;
+                }
+                GfMatrix4d opValue(1.0);
+                if (const UsdAttribute a =
+                        mover.GetAttribute(TfToken("inputs:value"))) {
+                    a.Get(&opValue, time);
+                }
+                float weight = 1.0f;
+                if (const UsdAttribute a =
+                        mover.GetAttribute(TfToken("inputs:weight"))) {
+                    a.Get(&weight, time);
+                }
+                if (!_IsFinite(opValue) || !_IsFinite(weight)) {
+                    return false;
+                }
+                return RigExecApplyMatrixMath(in, op, opValue, weight, out);
+            });
+        } else {
+            // Every remaining type the compiler admits is GfVec3f-backed.
+            runChain(GfVec3f(0), [&](const UsdPrim &mover, const GfVec3f &in,
+                                     GfVec3f *out) {
+                RigExecPropertyMathParams<GfVec3f> params;
+                if (!_ReadPropertyMathParams(mover, time, &params) ||
+                    !_IsFinite(params.value) || !_IsFinite(params.min) ||
+                    !_IsFinite(params.max) || !_IsFinite(params.weight)) {
+                    return false;
+                }
+                *out = RigExecApplyVec3fMath(in, params);
+                return true;
+            });
+        }
+    }
 }
 
 RigExecRigPose
@@ -3193,6 +3915,34 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // Bind-time values read at Default(), which is exactly what the deleted
     // compiler pass captured.
     std::vector<RigExecValueOverride> baseOverrides;
+
+    // Property chains resolve FIRST, and their results ride in as attribute
+    // overrides on every request below.
+    //
+    // This is the whole point of evaluating them off the authored stage: a
+    // math mover's inputs are all authored on itself, so its chain owes exec
+    // nothing and can be computed before exec runs -- which means the value
+    // it produces can be handed to exec as the attribute's value. A clamped
+    // IK/FK weight then reaches RigExecBlendPointFrames as the weight it
+    // reads, instead of that kernel reimplementing the author's clamp
+    // internally and the authored mover meaning nothing.
+    //
+    // No cycle is possible: nothing in a property chain reads a computation.
+    std::map<SdfPath, VtValue> propertyResults;
+    _resolvedInputs.Clear();
+    _chainSnapshots.Clear();
+    if (!_propertyChains.empty()) {
+        _EvaluatePropertyChains(time, &propertyResults, &baseOverrides,
+                                &pose.diagnostics);
+        // Two delivery routes for one value, and they must not disagree.
+        // baseOverrides carries it to every exec consumer; _resolvedInputs
+        // carries it to the static reads exec never touches -- packet
+        // assembly and the CPU oracle.
+        for (const auto &[path, value] : propertyResults) {
+            _resolvedInputs.SetProperty(path, value);
+        }
+    }
+
     for (const auto &[ribbonPath, pointsPath] : _ribbonDriverPoints) {
         const UsdAttribute a = _stage->GetAttributeAtPath(pointsPath);
         if (!a) {
@@ -3410,33 +4160,74 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             continue;
         }
 
+        // The rest frame, needed BEFORE the revisions rather than after them:
+        // a phase naming a prim mid-chain wants that step's rest->pose map,
+        // and that is the same computation the final one uses.
+        RigExecPointFrame restFrame;
+        const auto restTapIt = _providerRestFrameTaps.find(provider);
+        if (restTapIt != _providerRestFrameTaps.end()) {
+            restFrame = snapshot.Get<RigExecPointFrame>(restTapIt->second);
+        }
+        const auto frameWanted = _snapshotPoints.find(provider);
+        auto recordFrame = [&](const SdfPath &afterMover,
+                               const RigExecPointFrame &f) {
+            if (frameWanted == _snapshotPoints.end() ||
+                !frameWanted->second.count(afterMover) || !f.IsValid()) {
+                return;
+            }
+            GfMatrix4d m(1.0);
+            const bool ok =
+                restFrame.IsValid()
+                    ? RigExecPointsToMatrix(restFrame.points, f.points, &m)
+                    : RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                            f.points, &m);
+            if (ok) {
+                _chainSnapshots.Record(provider, afterMover, VtValue(m));
+            }
+        };
+
         for (const _FrameRevision &revision : revisions) {
             const UsdPrim moverPrim =
                 _stage->GetPrimAtPath(revision.moverPath);
             if (!moverPrim) {
                 continue;
             }
-            bool enabled = true;
-            if (const UsdAttribute a =
-                    moverPrim.GetAttribute(TfToken("inputs:enabled"))) {
-                a.Get(&enabled, time);
-            }
-            if (!enabled) {
+            // Resolved-aware like every other input read: a property mover
+            // can drive a constraint's enable or weight.
+            if (!_ResolvedRead(_resolvedInputs, moverPrim, "inputs:enabled",
+                               true, time)) {
                 continue;  // ordinary pass-through (spec §6.6)
             }
-            if (revision.aimTargetFrameTap < 0) {
+            RigExecPointFrame aimTarget;
+            if (revision.aimTargetFrameTap >= 0) {
+                aimTarget =
+                    snapshot.Get<RigExecPointFrame>(revision.aimTargetFrameTap);
+            } else if (!revision.aimTargetXform.IsEmpty()) {
+                // A plain UsdGeomXformable aim target, read the same way an
+                // xform-derived PROVIDER's base frame is read: relative to
+                // the asset root, so the constraint subtracts two origins
+                // that live in the same space. Joint and control frames
+                // never carry the asset's stage placement, and neither may
+                // this one.
+                const UsdPrim aimPrim =
+                    _stage->GetPrimAtPath(revision.aimTargetXform);
+                const UsdPrim assetRoot =
+                    _stage->GetPrimAtPath(_rigPath.GetParentPath());
+                if (aimPrim && assetRoot && UsdGeomXformable(aimPrim)) {
+                    UsdGeomXformCache cache(time);
+                    bool resetsBelowAsset = false;
+                    aimTarget = RigExecFrameFromMatrix(
+                        cache.ComputeRelativeTransform(aimPrim, assetRoot,
+                                                       &resetsBelowAsset));
+                }
+            } else {
                 continue;
             }
-            const RigExecPointFrame aimTarget =
-                snapshot.Get<RigExecPointFrame>(revision.aimTargetFrameTap);
             if (!aimTarget.IsValid()) {
                 continue;  // an unresolvable aim leaves the frame unrevised
             }
-            float weight = 1.0f;
-            if (const UsdAttribute a =
-                    moverPrim.GetAttribute(TfToken("inputs:weight"))) {
-                a.Get(&weight, time);
-            }
+            const float weight = _ResolvedRead(
+                _resolvedInputs, moverPrim, "inputs:weight", 1.0f, time);
             TfToken aimAxis("x");
             if (const UsdAttribute a =
                     moverPrim.GetAttribute(TfToken("rigExec:aimAxis"))) {
@@ -3446,6 +4237,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 static_cast<int>(RigExecParseAxis(aimAxis, RigExecAxis::X)) + 1;
             frame = RigExecApplyAimConstraint(
                 frame, aimTarget.Origin(), weight, aimIdx);
+            recordFrame(revision.moverPath, frame);
         }
         finalFrames[provider] = frame;
 
@@ -3466,14 +4258,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 
         // The paired matrix is the provider's rest->final map, exactly as
         // _EvaluateFrameApplicationMatrix computed it.
-        const auto restIt = _providerRestFrameTaps.find(provider);
-        if (restIt != _providerRestFrameTaps.end() && frame.IsValid()) {
-            const RigExecPointFrame rest =
-                snapshot.Get<RigExecPointFrame>(restIt->second);
+        if (restFrame.IsValid() && frame.IsValid()) {
             GfMatrix4d m(1.0);
-            if (rest.IsValid() &&
-                RigExecPointsToMatrix(rest.points, frame.points, &m)) {
+            if (RigExecPointsToMatrix(restFrame.points, frame.points, &m)) {
                 finalMatrices[provider] = m;
+                _chainSnapshots.RecordFinal(provider, VtValue(m));
             }
         }
     }
@@ -3539,15 +4328,12 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         }
     }
 
-    for (const RigExecMoverRecord &mover : _movers) {
-        if (mover.schemaType == "RigExecFloatMathMover") {
-            // Property movers over solver inputs are lowered into the
-            // consuming computation in v0.1-alpha (the blend clamps its
-            // weight); recorded for the trace.
-            pose.diagnostics.push_back(
-                "diag " + mover.moverPath.GetString() +
-                ": float property mover lowered into consumer");
-        }
+    // Property-domain results, computed above and already consumed by exec
+    // as overrides. Published in the same map as the point chains: a
+    // consumer distinguishes them by the type the VtValue holds, not by
+    // which mover domain produced them.
+    for (const auto &[target, value] : propertyResults) {
+        pose.movedProperties[target] = value;
     }
 
     // The independent CPU parity path must consume the same declared
@@ -3594,34 +4380,20 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     size_t graphChainsBuilt = 0;
     size_t graphRevisionsBuilt = 0;
 
-    // Curvenet chains run FIRST.
+    // Chains run in dependency order, computed at compile (_chainOrder).
     //
-    // A curvenet is a UsdGeomPointBased, so its knots are posed by ordinary
-    // movers -- which is the paper's whole rigging model, and the reason no
-    // curvenet-specific articulation code exists. For a Profile Mover to see
-    // an articulated net, that net's own chain has to have been evaluated
-    // already, and _graphChains is keyed by SdfPath, so its natural order is
-    // alphabetical and says nothing about this dependency. Two passes give
-    // the ordering; a curvenet driven by another curvenet is not supported
-    // and falls back to the authored points, which is why pass 0 does not
-    // recurse.
-    std::vector<SdfPath> chainOrder;
-    chainOrder.reserve(_graphChains.size());
-    std::vector<SdfPath> laterChains;
-    for (const auto &[target, revisions] : _graphChains) {
-        const UsdPrim owner = _stage->GetPrimAtPath(target.GetPrimPath());
-        if (owner && owner.GetTypeName() == "RigExecCurvenet") {
-            chainOrder.push_back(target);
-        } else {
-            laterChains.push_back(target);
+    // This used to be "curvenets first, then everything else", which was the
+    // only cross-chain dependency that existed: a Profile Mover needs its
+    // net's own chain already evaluated. A phased read is the same shape of
+    // dependency stated in general -- a cage read at `final` needs the cage's
+    // chain first, exactly as the net does -- so the special case became one
+    // edge in a topological sort and the heuristic went away.
+    for (const SdfPath &target : _chainOrder) {
+        const auto chainIt = _graphChains.find(target);
+        if (chainIt == _graphChains.end()) {
+            continue;
         }
-    }
-    chainOrder.insert(chainOrder.end(), laterChains.begin(),
-                      laterChains.end());
-
-    for (const SdfPath &target : chainOrder) {
-        const std::vector<_GraphRevision> &revisions =
-            _graphChains.find(target)->second;
+        const std::vector<_GraphRevision> &revisions = chainIt->second;
         VtVec3fArray basePoints;
         const UsdAttribute baseAttr = _stage->GetAttributeAtPath(target);
         if (!baseAttr || !baseAttr.Get(&basePoints, time)) {
@@ -3639,6 +4411,29 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 break;
             }
             RigExecProviderValues values;
+            // One overlay per revision: the generation-wide property results,
+            // plus whatever THIS revision's declared phases resolve to. The
+            // assembler reads inputs by path and never learns a phase exists
+            // -- which is what lets a phase apply to any input, including
+            // ones added later, without touching the assembler.
+            RigExecResolvedInputs revisionInputs = _resolvedInputs;
+            for (const auto &[inputPath, phase] : revision.binding.phases) {
+                if (const VtValue *v = _chainSnapshots.Lookup(
+                        inputPath, phase, revision.moverPath)) {
+                    revisionInputs.SetProperty(inputPath, *v);
+                } else if (phase.kind != RigExecReadPhaseKind::Preceding) {
+                    // Preceding falling through to the stage is correct (the
+                    // reader is the chain's first revision, so its preceding
+                    // value IS the base). Anything else means the phase named
+                    // something that produced nothing.
+                    pose.diagnostics.push_back(
+                        "diag " + revision.moverPath.GetString() +
+                        ": read phase '" + phase.GetAsString() + "' for " +
+                        inputPath.GetString() +
+                        " resolved to nothing; read the authored base");
+                }
+            }
+            values.resolved = &revisionInputs;
             GfMatrix4d transform(1.0);
             RigExecWeightPacket weights;
             RigExecPointFrameArray driverFrames;
@@ -3661,6 +4456,20 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 if (revisedIt != finalMatrices.end()) {
                     transform = revisedIt->second;
                     values.transform = &transform;
+                }
+            } else if (revision.binding.transformPhase.kind ==
+                       RigExecReadPhaseKind::AtPrim) {
+                // The provider's frame as of a named point in the pose walk,
+                // rather than its base or its final. Same store the point
+                // chains use; the value here is a matrix instead of an array.
+                if (const VtValue *v = _chainSnapshots.Lookup(
+                        revision.binding.transform,
+                        revision.binding.transformPhase,
+                        revision.moverPath)) {
+                    if (v->IsHolding<GfMatrix4d>()) {
+                        transform = v->UncheckedGet<GfMatrix4d>();
+                        values.transform = &transform;
+                    }
                 }
             }
             if (revision.weightTap >= 0) {
@@ -3762,6 +4571,17 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 revision.op, head, parameters,
                 RigExecStatusForParameters(parameters, revision.moverPath));
             ++graphRevisionsBuilt;
+
+            // Snapshot only where a phased read named this revision. The
+            // compile pass reduced every phase to one revision, so this is
+            // the whole cost of the feature for a rig that uses it, and
+            // nothing at all for one that does not.
+            const auto wanted = _snapshotPoints.find(target);
+            if (wanted != _snapshotPoints.end() &&
+                wanted->second.count(revision.moverPath)) {
+                _chainSnapshots.Record(target, revision.moverPath,
+                                       VtValue(graph.Evaluate(head)));
+            }
         }
         if (!built) {
             continue;
@@ -3769,6 +4589,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 
         const VtVec3fArray graphPoints = graph.Evaluate(head);
         pose.movedProperties[target] = VtValue(graphPoints);
+        // `final` costs nothing extra: this is the value the chain publishes.
+        _chainSnapshots.RecordFinal(target, VtValue(graphPoints));
         ++graphChainsBuilt;
 
         // Derived maintenance reads this chain's final points, which is why it
@@ -3785,6 +4607,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 continue;
             }
             RigExecProviderValues values;
+            values.resolved = &_resolvedInputs;
             values.basePoints.assign(graphPoints.begin(), graphPoints.end());
 
             RigExecMoverGraph derivedGraph;

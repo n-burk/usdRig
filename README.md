@@ -61,7 +61,7 @@ recomputeNormals,
 recomputeExtent — execute through the mover graph, with chained and mixed-op
 composition, weighting, cardinality guards, and every pass-through path
 (failed status, invalid packet, kind mismatch) under test. Hydra publication
-(spec §10) drives **stock usdview** live: `launch_usdview.bat
+(spec §10) drives **stock usdview** live: `bin/launch_usdview.bat
 examples\ArmShotAnim.usda` shows the arm deforming from OpenExec evaluation
 per frame.
 
@@ -132,12 +132,12 @@ part of this repository.
 
 `ctest --test-dir build` runs all of them. Two probes
 (`probeCodingError`, `probeImagingPipeline`) need the scene-index plugin
-discoverable through `Plug`, so they run from a `run_probe.bat`-style
-environment rather than bare ctest. `run_testusdview.bat [renderer]` verifies
+discoverable through `Plug`, so they run from a `bin/run_probe.bat`-style
+environment rather than bare ctest. `bin/run_testusdview.bat [renderer]` verifies
 live activation and per-frame publication headlessly; both Storm and Embree
 produce identical publications.
 
-`run_testusdview_overlay.bat [renderer]` closes the one gap the C++ suites
+`bin/run_testusdview_overlay.bat [renderer]` closes the one gap the C++ suites
 cannot: they drive a synthetic scene index upstream, which proves the filter
 publishes a `displayColor` but not that usdview's *own* chain carries it. That
 script turns the influence overlay on inside a real usdview, reads the terminal
@@ -172,7 +172,7 @@ copy of the same character.
 | Path | Spec library | Contents |
 |---|---|---|
 | `libs/rigExecMath` | rigExecMath | `RigExecPointFrame` (four-point affine pose value, §5.1), reconstruction policies affine/orthogonal/axial/rigid (§5.2), degeneracy ladder (§5.3), Points↔Matrix round trip and SVD-based SRT interop with pinned reflection axis (§5.4), FK chain, analytic two-bone IK with pole/softness/uniform stretch, shortest-arc/log frame blend, swing-twist distribution, weighted-matrix point kernel (§7.4). Pure — no USD deps beyond `gf`/`vt`. Static library, folded into `rigExec` |
-| `libs/rigExecSchema` | rigExecSchema | `schema.usda` — the RigExec schema domain (§4.1). Generated as a **codeless** schema plugin (`gen_schema.bat` → `plugin/rigExecSchema/resources`) |
+| `libs/rigExecSchema` | rigExecSchema | `schema.usda` — the RigExec schema domain (§4.1). Generated as a **codeless** schema plugin (`bin/gen_schema.bat` → `plugin/rigExecSchema/resources`) |
 | `libs/rigExec` | rigExecCompute + rigExecUsd | `ExecTypeRegistry` registrations (`RigExecPointFrame`, `RigExecPointFrameArray`), `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA` computations publishing paired `computePointFrame`/`computeMatrix` on every transform provider and aggregate `computePointFrameArray` on solvers (§5.7, §12.1), the typed tap/snapshot extraction facade over `ExecUsdSystem` (§9), and `RigExecRigEvaluator` with composed post-order mover discovery. `moverGraph` builds a target's revision chain as an in-memory `VdfNetwork`; `moverKernels` holds the operation callbacks |
 | `libs/rigExecImaging` | — | Hydra 2.0 publication (§10): the three filtering scene indices over an atomic `RigExecSnapshotStore`, the `UsdImagingSceneIndexPlugin`, and the C activation surface |
 | `examples/` | — | `ArmRig.usda` / `ArmShotAnim.usda` (the spec §4.5/§4.6 reference assets) plus ten self-contained animated demo stages — see `examples/README.md` |
@@ -265,7 +265,7 @@ The codeless schema plugin is already generated and checked in at
 `libs/rigExecSchema/schema.usda`:
 
 ```
-gen_schema.bat
+bin/gen_schema.bat
 ```
 
 Codeless means no compilation and no generated C++ — the domain is registered
@@ -348,7 +348,7 @@ PXR_PLUGINPATH_NAME = %RIG%\build\usd\rigExecSchema\resources    <-- generated
 PATH               += %RIG%\build;%USD%\bin;%USD%\lib
 ```
 
-`launch_usdview.bat`, `run_probe.bat`, and `run_testusdview.bat` are working
+`bin/launch_usdview.bat`, `bin/run_probe.bat`, and `bin/run_testusdview.bat` are working
 examples of exactly that environment.
 
 ### 5. Choose an integration level
@@ -366,9 +366,28 @@ construct a `RigExecRigEvaluator` over your stage:
 
 ```cpp
 RigExecRigPose pose = evaluator.Evaluate(time); // one complete generation
-// pose.movedProperties: exact property path -> final native value
+// pose.movedProperties: exact property path -> final native value.
+//   VtVec3fArray for a point chain (points/normals/extent), and float /
+//   GfVec3f / GfMatrix4d for a property chain (the math movers).
+// pose.providerXforms:  driven UsdGeomXformable -> revised asset-space
+//   matrix, paired with providerBaseXforms (consumers downstream of
+//   Hydra's flatten need both to build the delta).
+// pose.jointFramesFinal / jointMatricesFinal: posed joints.
 // pose.diagnostics:     pass-through / failure / unimplemented reports
 ```
+
+Those three are **peer output domains**, not a hierarchy: geometry,
+transforms, and properties. A rig publishes any combination of them and needs
+no `RigExecJoint` at all — `examples/rigexec_flat.usda` is one aim constraint
+between two plain `UsdGeomXformable`s and nothing else. A rig with neither
+joints nor movers is still rejected, because it publishes nothing.
+
+**Read phases.** Which *revision* of an input a mover consumes is authored as
+metadata on the relationship (or attribute) naming it — `rigExecReadPhase`,
+one of `base`, `preceding`, `final`, or an absolute prim path meaning "the
+value as of when the composed post-order walk finished with that prim".
+Chains evaluate in dependency order; a cyclic phase read fails the compile.
+See `examples/13_ReadPhases.usda`.
 
 `Evaluate` compiles on first use and **recompiles itself** whenever the
 composed mover topology digest changes, so structural edits need no call from
@@ -427,9 +446,15 @@ normally. The `RigExecUsdviewContainer` `PluginContainer` activates for any
 stage carrying a `RigExecRig` prim and feeds stage + timeline into evaluation.
 
 ```
-launch_usdview.bat examples\ArmShotAnim.usda          # interactive, Storm
-launch_usdview.bat examples\ArmShotAnim.usda Embree   # interactive, Embree
-run_testusdview.bat                                   # headless verification
+bin\launch_usdview.bat examples\ArmShotAnim.usda          # interactive, Storm
+bin\launch_usdview.bat examples\ArmShotAnim.usda Embree   # interactive, Embree
+bin\run_testusdview.bat                                   # headless verification
+
+bin/usdview.sh examples/ArmShotAnim.usda                  # same three, POSIX
+bin/usdview.sh examples/ArmShotAnim.usda Embree
+bin/run_testusdview.sh
+
+bin/usdview.sh                                            # empty stage to build on
 ```
 
 Joints and aggregate solvers draw as **guide geometry** — a sphere at each
@@ -441,10 +466,12 @@ off.
 
 ### Authoring a rig
 
-`examples/` has ten self-contained animated stages, one per feature area (FK
+`examples/` has self-contained animated stages, one per feature area (FK
 chain, two-bone IK, IK/FK blend, blend shapes, twist ribbon spine, lattice,
-surface drape, aim, property math movers, aim xform). Each is a complete
-worked example; `examples/README.md` indexes them.
+surface drape, aim, property math movers, aim xform, volume weights,
+curvenet profile, read phases), plus `rigexec_flat.usda` — the smallest rig
+there is. Each is a complete worked example; `examples/README.md` indexes
+them.
 
 ### Platform support
 
@@ -484,10 +511,15 @@ What was made portable:
 - The tests are host command-line executables driven by ctest, so they are off
   by default when `CMAKE_CROSSCOMPILING`; `RIGEXEC_BUILD_TESTS` overrides.
 
-Still Windows-only: the `.bat` helpers, which additionally carry absolute
-`D:\work\usdRig\...` paths. There is no shell-script equivalent yet — on
-Linux/macOS set `PXR_PLUGINPATH_NAME` (`:`-separated there), `PYTHONPATH`, and
-`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH` by hand from the tables above.
+The helper scripts in `bin/` come in both flavours: a `.bat` for Windows and a
+`.sh` twin for Linux/macOS, each pair driving the same tool with the same
+arguments. Neither carries an absolute path — every one resolves `RIG` from the
+script's own location and expects `usd-install` as a sibling of the checkout, so
+setting `RIG`, `USD`, or (POSIX only) `VENV` in the environment overrides that
+for a non-standard layout. `bin/_env.bat` and `bin/_env.sh` hold the shared
+environment; the per-platform differences — `;` versus `:` separators,
+`Lib\site-packages` versus `lib/python3.11/site-packages`, `PATH` versus
+`DYLD_LIBRARY_PATH` — are settled there rather than in each script.
 
 #### iOS
 
@@ -527,7 +559,7 @@ The scripts here assume the sibling layout this project was developed in —
    ```
    (drop `--embree` if you do not need the Embree renderer, and add
    `--no-usdview` if you do not need the usdview integration)
-2. `gen_schema.bat` — only if you edited `schema.usda`.
+2. `bin/gen_schema.bat` — only if you edited `schema.usda`.
 3. ```
    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
    cmake --build build
@@ -536,11 +568,12 @@ The scripts here assume the sibling layout this project was developed in —
    (run inside a VS2022 x64 dev prompt; `PATH` must include
    `usd-install\lib` and `usd-install\bin` to run tests)
 
-`build_rigexec.bat` does step 3 plus the environment setup in one shot. The
-helper scripts (`build_rigexec.bat`, `launch_usdview.bat`, `gen_schema.bat`,
-`run_probe.bat`, `run_testusdview.bat`) carry absolute `D:\work\usdRig\...`
-paths — edit the `USD` and `RIG` variables at the top of each for your own
-location.
+`bin/build_rigexec.bat` does step 3 plus the environment setup in one shot, and
+`bin/build_rigexec.sh` is its POSIX twin (`--no-test` skips the ctest run). The
+helper scripts resolve their own paths from `bin/`, so there is nothing to edit
+for your own location — see [Platform support](#platform-support) for the
+`RIG` / `USD` / `VENV` overrides if `usd-install` is not a sibling of the
+checkout.
 
 ## Deviations from the spec
 
