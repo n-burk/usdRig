@@ -754,6 +754,40 @@ TestTransformProviderPredicate()
     }
 }
 
+// With write-path inference gone, a point-domain mover handed a bare mesh
+// prim is an error -- and it must carry the fix, because the old behaviour
+// silently rewrote it and that silence is what this change removes. Both
+// validator families must say so: the typed geometry movers and MatrixMover,
+// which validates separately.
+static void
+TestPointDomainMoverNamesTheFix()
+{
+    for (const char *moverType : {"RigExecSmoothMover", "RigExecMatrixMover"}) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M"), TfToken(moverType));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({SdfPath("/Asset/Geom/M")});
+
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        CHECK(std::any_of(errors.begin(), errors.end(),
+                          [](const std::string &error) {
+                              return error.find("Did you mean") !=
+                                     std::string::npos &&
+                                     error.find("/Asset/Geom/M.points") !=
+                                     std::string::npos;
+                          }));
+    }
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -838,6 +872,7 @@ main()
     TestModeAndFailureContracts();
     TestXformableTargetsCompile();
     TestTransformProviderPredicate();
+    TestPointDomainMoverNamesTheFix();
     TestInvalidContractsFailClosed();
 
     if (failures) {

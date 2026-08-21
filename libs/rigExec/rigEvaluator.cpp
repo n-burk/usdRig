@@ -263,6 +263,23 @@ _ResolveGeometryInput(const UsdStageRefPtr &stage, const SdfPath &target)
     return target;
 }
 
+// The write path no longer infers <prim> -> <prim>.points, so a point-domain
+// mover handed a bare PointBased prim gets the spelling it needed. Empty for
+// any other target, so callers can append unconditionally.
+std::string
+_PointsTargetHint(const UsdStageRefPtr &stage, const SdfPath &target)
+{
+    if (!target.IsPrimPath()) {
+        return std::string();
+    }
+    const UsdPrim prim = stage->GetPrimAtPath(target);
+    if (!prim || !prim.IsA<UsdGeomPointBased>()) {
+        return std::string();
+    }
+    return ". Did you mean " +
+           target.AppendProperty(TfToken("points")).GetString() + "?";
+}
+
 // Discovers the rig's joint output set implicitly (spec §4.1: the rig is a
 // namespace root, not a manifest). Movers are already found this way -- a
 // post-order walk where carrying rigExec:moves is what makes a prim a mover --
@@ -1321,7 +1338,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                                 prim.GetPath().GetString() +
                                 " target " + t.GetString() +
                                 " is not a native UsdGeomPointBased "
-                                "point3f[] points attribute");
+                                "point3f[] points attribute" +
+                                _PointsTargetHint(_stage, t));
                             return false;
                         }
                     }
@@ -2937,7 +2955,10 @@ RigExecRigEvaluator::_ValidateMatrixMover(
         !record.targets[0].IsPropertyPath() ||
         record.targets[0].GetNameToken() != "points") {
         *error = who + ": moves must resolve to exactly one native "
-                       "PointBased points property";
+                       "PointBased points property" +
+                 (record.targets.size() == 1
+                      ? _PointsTargetHint(_stage, record.targets[0])
+                      : std::string());
         return false;
     }
     const UsdPrim owner =
