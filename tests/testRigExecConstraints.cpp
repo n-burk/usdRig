@@ -696,6 +696,64 @@ TestXformableTargetsCompile()
     }
 }
 
+// The gate must test what it means. A non-Xformable prim cannot carry a
+// revised transform, and a .points target names the geometry domain, which
+// phase 1 does not implement -- both are hard errors with distinct wording.
+static void
+TestTransformProviderPredicate()
+{
+    // A non-Xformable target is rejected as such.
+    {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+        stage->DefinePrim(SdfPath("/Asset/Geom/NotXformable"),
+                          TfToken("Scope"));
+        MakeXform(stage, SdfPath("/Asset/Source"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim rotation = MakeConstraint(
+            stage, "Rot", "RigExecRotationConstraint",
+            {SdfPath("/Asset/Geom/NotXformable")});
+        rotation.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/Source")});
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        CHECK(std::any_of(errors.begin(), errors.end(),
+                          [](const std::string &error) {
+                              return error.find("is not a transform provider") !=
+                                     std::string::npos;
+                          }));
+    }
+
+    // A .points target is the geometry domain: recognised, and explicitly
+    // deferred rather than misreported as a bad transform provider.
+    {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+        MakeXform(stage, SdfPath("/Asset/Source"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim rotation = MakeConstraint(
+            stage, "Rot", "RigExecRotationConstraint",
+            {SdfPath("/Asset/Geom/M").AppendProperty(TfToken("points"))});
+        rotation.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/Source")});
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        CHECK(std::any_of(
+            errors.begin(), errors.end(), [](const std::string &error) {
+                return error.find(
+                           "geometry-domain constraint targets are not "
+                           "supported yet") != std::string::npos;
+            }));
+    }
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -779,6 +837,7 @@ main()
     TestConstraintCompositionAndHierarchy();
     TestModeAndFailureContracts();
     TestXformableTargetsCompile();
+    TestTransformProviderPredicate();
     TestInvalidContractsFailClosed();
 
     if (failures) {

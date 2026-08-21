@@ -1200,12 +1200,44 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // multi-output exception: its write set is the complete inferred
             // joint chain and is validated during constraint compilation.
             if (_IsSourceFrameConstraintType(record.schemaType)) {
-                if (record.targets.size() != 1 ||
-                    !record.targets[0].IsPrimPath()) {
+                if (record.targets.size() != 1) {
                     reportError(
                         record.schemaType.GetString() + " " +
                         prim.GetPath().GetString() +
                         " must move exactly one transform-provider prim");
+                    return false;
+                }
+                const SdfPath &constraintTarget = record.targets[0];
+                // <prim>.points names the geometry domain. It is a legal
+                // spelling the compiler must recognise, not a malformed
+                // transform target; the implementation lands in phase 4.
+                if (constraintTarget.IsPropertyPath() &&
+                    constraintTarget.GetNameToken() == "points") {
+                    reportError(
+                        record.schemaType.GetString() + " " +
+                        prim.GetPath().GetString() +
+                        " targets " + constraintTarget.GetString() +
+                        ": geometry-domain constraint targets are not "
+                        "supported yet; name the prim " +
+                        constraintTarget.GetPrimPath().GetString() +
+                        " to revise its transform");
+                    return false;
+                }
+                // A constraint revises a transform, so the target must be
+                // able to carry one. This is the predicate bindFrameSource
+                // already applies to sources, and it admits any
+                // UsdGeomXformable -- Mesh and BasisCurves included.
+                const UsdPrim targetPrim =
+                    constraintTarget.IsPrimPath()
+                        ? _stage->GetPrimAtPath(constraintTarget)
+                        : UsdPrim();
+                if (!targetPrim || !UsdGeomXformable(targetPrim)) {
+                    reportError(
+                        record.schemaType.GetString() + " " +
+                        prim.GetPath().GetString() + " targets " +
+                        constraintTarget.GetString() +
+                        ", which is not a transform provider; a constraint "
+                        "target must be a UsdGeomXformable");
                     return false;
                 }
             } else if (record.schemaType ==
