@@ -788,6 +788,50 @@ TestPointDomainMoverNamesTheFix()
     }
 }
 
+// The transform a Mesh target receives must equal the one an Xform target
+// receives from the same constraint. This is the property that made the
+// original bug invisible to every existing test: they all used Xform targets.
+static void
+TestMeshAndXformTargetsAgree()
+{
+    GfMatrix4d meshResult(1.0);
+    GfMatrix4d xformResult(1.0);
+    for (const char *targetType : {"Mesh", "Xform"}) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+        stage->DefinePrim(SdfPath("/Asset/Geom/Target"), TfToken(targetType));
+        MakeXform(stage, SdfPath("/Asset/Source"),
+                  Matrix(GfVec3d(0, 0, 0),
+                         GfRotation(GfVec3d(0, 1, 0), 37.5)));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim rotation = MakeConstraint(
+            stage, "Rot", "RigExecRotationConstraint",
+            {SdfPath("/Asset/Geom/Target")});
+        rotation.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/Source")});
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+        const auto revised =
+            pose.providerXforms.find(SdfPath("/Asset/Geom/Target"));
+        CHECK(revised != pose.providerXforms.end());
+        if (revised != pose.providerXforms.end()) {
+            (std::string(targetType) == "Mesh" ? meshResult : xformResult) =
+                revised->second;
+        }
+    }
+    // Guard against a vacuous pass: if the constraint drove nothing, both
+    // results would be the identity and would trivially agree.
+    CHECK(!GfIsClose(meshResult, GfMatrix4d(1.0), 1e-9));
+    CHECK(Near(meshResult.TransformDir(GfVec3d(1, 0, 0)),
+               GfVec3d(std::cos(GfDegreesToRadians(37.5)), 0,
+                       -std::sin(GfDegreesToRadians(37.5)))));
+    CHECK(GfIsClose(meshResult, xformResult, 1e-12));
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -873,6 +917,7 @@ main()
     TestXformableTargetsCompile();
     TestTransformProviderPredicate();
     TestPointDomainMoverNamesTheFix();
+    TestMeshAndXformTargetsAgree();
     TestInvalidContractsFailClosed();
 
     if (failures) {
