@@ -6,6 +6,7 @@
 #include "frameExtraction.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/propertyMath.h"
+#include "rigExecMath/singleChainIk.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/weightFields.h"
 
@@ -22,6 +23,7 @@
 #include "pxr/usd/usdGeom/gprim.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/mesh.h"
+#include "pxr/usd/usdGeom/metrics.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/pointBased.h"
@@ -105,6 +107,73 @@ _IsWeightObjectType(const TfToken &typeName)
            _IsVolumeWeightType(typeName);
 }
 
+/// Source-blending constraints that revise one transform provider.
+bool
+_IsSourceFrameConstraintType(const TfToken &typeName)
+{
+    return typeName == "RigExecAimConstraint" ||
+           typeName == "RigExecPositionConstraint" ||
+           typeName == "RigExecRotationConstraint" ||
+           typeName == "RigExecScaleConstraint" ||
+           typeName == "RigExecParentConstraint";
+}
+
+/// Every built-in constraint with fixed evaluator semantics.
+bool
+_IsFrameConstraintType(const TfToken &typeName)
+{
+    return _IsSourceFrameConstraintType(typeName) ||
+           typeName == "RigExecSingleChainIkConstraint";
+}
+
+RigExecEulerOrder
+_ParseConstraintEulerOrder(const TfToken &token)
+{
+    if (token == "XZY") return RigExecEulerOrder::XZY;
+    if (token == "YXZ") return RigExecEulerOrder::YXZ;
+    if (token == "YZX") return RigExecEulerOrder::YZX;
+    if (token == "ZXY") return RigExecEulerOrder::ZXY;
+    if (token == "ZYX") return RigExecEulerOrder::ZYX;
+    return RigExecEulerOrder::XYZ;
+}
+
+bool
+_IsUsableConstraintFrame(const RigExecPointFrame &frame)
+{
+    if (!frame.IsValid() || frame.IsDegenerate()) {
+        return false;
+    }
+    for (const GfVec3d &point : frame.points) {
+        if (!std::isfinite(point[0]) || !std::isfinite(point[1]) ||
+            !std::isfinite(point[2])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
+_TokenIsOneOf(const TfToken &value,
+              std::initializer_list<const char *> allowed)
+{
+    return std::any_of(
+        allowed.begin(), allowed.end(),
+        [&value](const char *candidate) { return value == candidate; });
+}
+
+RigExecConstraintAxisMask
+_ReadConstraintAxisMask(
+    const RigExecResolvedInputs &resolved, const UsdPrim &prim,
+    const char *x, const char *y, const char *z, UsdTimeCode time,
+    bool fallback = true)
+{
+    RigExecConstraintAxisMask mask;
+    mask.x = _ResolvedRead(resolved, prim, x, fallback, time);
+    mask.y = _ResolvedRead(resolved, prim, y, fallback, time);
+    mask.z = _ResolvedRead(resolved, prim, z, fallback, time);
+    return mask;
+}
+
 /// Bakes a volumetric weight's distance-to-weight remap into the lookup
 /// table its exec kernel consumes.
 ///
@@ -174,12 +243,16 @@ _GetLandmarks(
     return true;
 }
 
-// Canonicalizes a moves target: a PointBased prim maps to its .points
-// property by the standard UsdGeomPointBased rule; a RigExec transform
-// provider prim keeps the prim path (its writable value is the point frame);
-// property paths stay exact (spec §4.2).
+// Resolves a READ-side geometry input: naming a PointBased prim means its
+// .points property, because a geometry input has exactly one thing to read.
+// Property paths stay exact (spec §4.2).
+//
+// This rule is deliberately NOT applied to write targets. On the write side a
+// bare prim path names the transform domain and <prim>.points names the
+// geometry domain -- two different write sets on the same prim -- so inferring
+// between them is what made a constraint unable to target a Mesh at all.
 SdfPath
-_CanonicalizeTarget(const UsdStageRefPtr &stage, const SdfPath &target)
+_ResolveGeometryInput(const UsdStageRefPtr &stage, const SdfPath &target)
 {
     if (target.IsPrimPath()) {
         const UsdPrim prim = stage->GetPrimAtPath(target);
@@ -344,10 +417,42 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
         TfToken value;
         if (UsdAttribute a = prim.GetAttribute(TfToken(name))) {
             a.Get(&value);
+            digest += name;
+            digest += "#samples=";
+            digest += std::to_string(a.GetNumTimeSamples());
+            digest += '|';
         }
         digest += name;
         digest += '=';
         digest += value.GetString();
+        digest += '|';
+    };
+    auto appendFrameBindingIdentity =
+        [this, &digest](const UsdPrim &prim, const char *name) {
+        SdfPathVector targets;
+        if (const UsdRelationship rel =
+                prim.GetRelationship(TfToken(name))) {
+            rel.GetTargets(&targets);
+        }
+        digest += name;
+        digest += "@bindings=";
+        for (const SdfPath &target : targets) {
+            const UsdPrim provider =
+                _stage->GetPrimAtPath(target.GetPrimPath());
+            const TfToken type = provider ? provider.GetTypeName() : TfToken();
+            digest += target.GetString();
+            digest += ':';
+            digest += type.GetString();
+            digest += ':';
+            if (type == "RigExecControl" || type == "RigExecJoint") {
+                digest += "frameTap";
+            } else if (provider && UsdGeomXformable(provider)) {
+                digest += "nativeXform";
+            } else {
+                digest += "invalid";
+            }
+            digest += ',';
+        }
         digest += '|';
     };
 
@@ -623,7 +728,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             // hashing so a permutation does not change the epoch.
             std::sort(targets.begin(), targets.end());
             for (const SdfPath &t : targets) {
-                const SdfPath canonical = _CanonicalizeTarget(_stage, t);
+                const SdfPath canonical = t;
                 digest += canonical.GetString();
                 digest += ',';
                 // Derived synthesis identity (spec §7.6 revised): whether
@@ -657,10 +762,35 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             appendToken(prim, "rigExec:transformReadPhase");
             appendToken(prim, "rigExec:operation");
             appendToken(prim, "rigExec:mode");
-            // Authored order: aim compilation consumes aims[0] and there is no
-            // exactly-one aimTarget validation, so a reorder that changes
-            // the selected provider must change the digest (codex round-9).
+            // Pose-constraint wiring. Source order is semantic because every
+            // source has a parallel weight (and Parent has parallel offsets),
+            // so it must never be sorted. aimTarget remains the legacy
+            // single-source spelling and is hashed for existing assets.
             appendRelTargets(prim, "rigExec:aimTarget", false);
+            appendRelTargets(prim, "rigExec:sources", false);
+            appendRelTargets(prim, "rigExec:worldUpObject", false);
+            appendRelTargets(prim, "rigExec:firstJoint", false);
+            appendRelTargets(prim, "rigExec:endJoint", false);
+            appendRelTargets(prim, "rigExec:effector", false);
+            appendRelTargets(prim, "rigExec:poleVectorObjects", false);
+            if (_IsFrameConstraintType(prim.GetTypeName())) {
+                appendFrameBindingIdentity(prim, "rigExec:moves");
+                appendFrameBindingIdentity(prim, "rigExec:aimTarget");
+                appendFrameBindingIdentity(prim, "rigExec:sources");
+                appendFrameBindingIdentity(prim, "rigExec:worldUpObject");
+                appendFrameBindingIdentity(prim, "rigExec:firstJoint");
+                appendFrameBindingIdentity(prim, "rigExec:endJoint");
+                appendFrameBindingIdentity(prim, "rigExec:effector");
+                appendFrameBindingIdentity(
+                    prim, "rigExec:poleVectorObjects");
+                appendToken(prim, "rigExec:rotationOrder");
+                appendToken(prim, "rigExec:worldUpType");
+                appendToken(prim, "rigExec:aimAxis");
+                appendToken(prim, "rigExec:upPolicy");
+                appendToken(prim, "rigExec:solverMode");
+                appendToken(prim, "rigExec:poleVectorMode");
+                appendToken(prim, "rigExec:evaluationMode");
+            }
             // Static-input relationships captured at compile into generated
             // resolved*/rest* wiring (lattice cage, surface, curve bind/
             // driver): retargeting any of these must recompile so the
@@ -971,6 +1101,14 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             const UsdPrim prim = *it;
             const UsdRelationship moves = prim.GetRelationship(_movesRel);
             if (!moves) {
+                if (_IsFrameConstraintType(prim.GetTypeName())) {
+                    reportError(
+                        prim.GetTypeName().GetString() + " " +
+                        prim.GetPath().GetString() +
+                        " has executable constraint semantics but no "
+                        "rigExec:moves relationship");
+                    return false;
+                }
                 continue;  // grouping scope
             }
             SdfPathVector targets;
@@ -999,7 +1137,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             const SdfPath assetRoot = _rigPath.GetParentPath();
 
             for (const SdfPath &t : targets) {
-                const SdfPath canonical = _CanonicalizeTarget(_stage, t);
+                const SdfPath canonical = t;
                 const SdfPath primPath = canonical.GetPrimPath();
                 // Reject dangling targets (spec §4.2).
                 if (!_stage->GetPrimAtPath(primPath)) {
@@ -1053,6 +1191,47 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     return false;
                 }
                 record.targets.push_back(canonical);
+            }
+
+            // FBX-style transform constraints use rigExec:moves as the
+            // composition-native replacement for FBX's singleton
+            // ConstrainedObject connection. Source constraints therefore
+            // write exactly one transform provider. SingleChainIK is the one
+            // multi-output exception: its write set is the complete inferred
+            // joint chain and is validated during constraint compilation.
+            if (_IsSourceFrameConstraintType(record.schemaType)) {
+                if (record.targets.size() != 1 ||
+                    !record.targets[0].IsPrimPath()) {
+                    reportError(
+                        record.schemaType.GetString() + " " +
+                        prim.GetPath().GetString() +
+                        " must move exactly one transform-provider prim");
+                    return false;
+                }
+            } else if (record.schemaType ==
+                       "RigExecSingleChainIkConstraint") {
+                if (record.targets.size() < 2 ||
+                    std::any_of(record.targets.begin(), record.targets.end(),
+                                [](const SdfPath &p) {
+                                    return !p.IsPrimPath();
+                                })) {
+                    reportError(
+                        "RigExecSingleChainIkConstraint " +
+                        prim.GetPath().GetString() +
+                        " must move every joint in a chain of at least two "
+                        "prim targets");
+                    return false;
+                }
+            } else if (record.schemaType == "RigExecCustomConstraint") {
+                // FBX Custom has no standardized evaluation semantics. A
+                // carrier prim is legal, but attaching a write set without a
+                // registered handler would otherwise compile and silently do
+                // nothing -- the most dangerous possible behavior.
+                reportError(
+                    "RigExecCustomConstraint " +
+                    prim.GetPath().GetString() +
+                    " has rigExec:moves but no registered evaluator");
+                return false;
             }
 
             // Matrix movers narrow the general rule (spec §4.2): moves,
@@ -1278,11 +1457,27 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // the binding-epoch digest, so reject samples here rather than
             // resolving them at evaluation time (codex round-3). Same rule
             // the aggregate cardinality attributes already follow.
-            for (const char *name : {"rigExec:mode",
-                                     "rigExec:operation",
-                                     "rigExec:transformReadPhase",
-                                     "rigExec:cageReadPhase",
-                                     "rigExec:surfaceReadPhase"}) {
+            std::vector<const char *> structuralTokens = {
+                "rigExec:mode", "rigExec:operation",
+                "rigExec:transformReadPhase", "rigExec:cageReadPhase",
+                "rigExec:surfaceReadPhase"};
+            if (record.schemaType == "RigExecAimConstraint") {
+                structuralTokens.insert(
+                    structuralTokens.end(),
+                    {"rigExec:rotationOrder", "rigExec:worldUpType",
+                     "rigExec:aimAxis", "rigExec:upPolicy"});
+            } else if (record.schemaType ==
+                           "RigExecRotationConstraint" ||
+                       record.schemaType == "RigExecParentConstraint") {
+                structuralTokens.push_back("rigExec:rotationOrder");
+            } else if (record.schemaType ==
+                       "RigExecSingleChainIkConstraint") {
+                structuralTokens.insert(
+                    structuralTokens.end(),
+                    {"rigExec:solverMode", "rigExec:poleVectorMode",
+                     "rigExec:evaluationMode"});
+            }
+            for (const char *name : structuralTokens) {
                 const UsdAttribute a = prim.GetAttribute(TfToken(name));
                 if (a && a.GetNumTimeSamples() > 0) {
                     reportError(record.schemaType.GetString() + " " +
@@ -1291,6 +1486,51 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                                 "compiled operation/read phase)");
                     return false;
                 }
+            }
+
+            auto validateToken = [&](const char *name,
+                                     std::initializer_list<const char *> allowed) {
+                const UsdAttribute attr = prim.GetAttribute(TfToken(name));
+                if (!attr) {
+                    return true;
+                }
+                TfToken value;
+                if (!attr.Get(&value) || !_TokenIsOneOf(value, allowed)) {
+                    reportError(record.schemaType.GetString() + " " +
+                                prim.GetPath().GetString() + ": " + name +
+                                " has unsupported value '" +
+                                value.GetString() + "'");
+                    return false;
+                }
+                return true;
+            };
+            static const std::initializer_list<const char *> eulerOrders = {
+                "XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"};
+            if ((record.schemaType == "RigExecAimConstraint" ||
+                 record.schemaType == "RigExecRotationConstraint" ||
+                 record.schemaType == "RigExecParentConstraint") &&
+                !validateToken("rigExec:rotationOrder", eulerOrders)) {
+                return false;
+            }
+            if (record.schemaType == "RigExecAimConstraint" &&
+                (!validateToken(
+                     "rigExec:worldUpType",
+                     {"sceneUp", "objectUp", "objectRotationUp", "vector",
+                      "none"}) ||
+                 !validateToken("rigExec:aimAxis", {"x", "y", "z"}) ||
+                 !validateToken(
+                     "rigExec:upPolicy", {"preserveInputUp"}))) {
+                return false;
+            }
+            if (record.schemaType == "RigExecSingleChainIkConstraint" &&
+                (!validateToken(
+                     "rigExec:solverMode", {"rotatePlane", "singleChain"}) ||
+                 !validateToken(
+                     "rigExec:poleVectorMode", {"vector", "object"}) ||
+                 !validateToken(
+                     "rigExec:evaluationMode",
+                     {"neverTS", "autoDetect", "alwaysTS"}))) {
+                return false;
             }
             newMovers.push_back(std::move(record));
         }
@@ -1372,7 +1612,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     {
         std::map<SdfPath, int> lastFrameWriterOrdinal;
         for (const RigExecMoverRecord &m : newMovers) {
-            if (m.schemaType != "RigExecAimConstraint") {
+            if (!_IsFrameConstraintType(m.schemaType)) {
                 continue;
             }
             for (const SdfPath &t : m.targets) {
@@ -1929,70 +2169,228 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         return false;
     }
 
-    // Pose-domain frame revisions (aim constraints), in memory. These used to
-    // become generated RigExecPointFrameMoverApplication prims whose chain
-    // head the taps below resolved to; now the revision is applied
-    // evaluator-side from the mover's own authored inputs, so nothing needs
-    // to be authored to express it.
-    std::map<SdfPath, std::vector<_FrameRevision>> newFrameChains;
+    // Pose-domain constraints, compiled to in-memory structural wiring. Aim,
+    // Position, Rotation, Scale, and Parent revise one transform provider;
+    // SingleChainIK revises its inferred joint chain atomically. Values stay
+    // authored on the mover and are sampled during Evaluate().
+    std::vector<_FrameConstraint> newFrameConstraints;
+    std::map<SdfPath, std::vector<SdfPath>> newFrameChains;
     std::map<SdfPath, RigExecTapId> newProviderRestFrameTaps;
     std::map<SdfPath, RigExecTapId> newProviderBaseFrameTaps;
+
+    auto getTargets = [](const UsdPrim &prim, const char *name) {
+        SdfPathVector paths;
+        if (const UsdRelationship rel =
+                prim.GetRelationship(TfToken(name))) {
+            rel.GetTargets(&paths);
+        }
+        return paths;
+    };
+
+    auto bindFrameSource = [&](const SdfPath &authored,
+                               const std::string &role,
+                               _FrameSourceBinding *binding) {
+        if (!authored.IsPrimPath()) {
+            reportError(role + " must target a prim, got " +
+                        authored.GetString());
+            return false;
+        }
+        const UsdPrim sourcePrim = _stage->GetPrimAtPath(authored);
+        if (!sourcePrim) {
+            reportError(role + " targets missing prim " +
+                        authored.GetString());
+            return false;
+        }
+        binding->sourcePath = authored;
+        const TfToken sourceType = sourcePrim.GetTypeName();
+        if (sourceType == "RigExecControl" ||
+            sourceType == "RigExecJoint") {
+            binding->frameTap = newTaps->Add(
+                RigExecValueAddress::Prim(authored, _computePointFrame,
+                                          basePhase));
+            return true;
+        }
+        if (UsdGeomXformable(sourcePrim)) {
+            binding->xformPath = authored;
+            return true;
+        }
+        reportError(role + " targets " + authored.GetString() +
+                    ", which is neither a RigExec transform provider nor "
+                    "a UsdGeomXformable");
+        return false;
+    };
+
     for (const RigExecMoverRecord &mover : newMovers) {
-        if (mover.schemaType != "RigExecAimConstraint") {
+        if (!_IsFrameConstraintType(mover.schemaType)) {
             continue;
         }
         const UsdPrim moverPrim = _stage->GetPrimAtPath(mover.moverPath);
         if (!moverPrim) {
             continue;
         }
-        SdfPathVector aims;
-        if (const UsdRelationship rel =
-                moverPrim.GetRelationship(TfToken("rigExec:aimTarget"))) {
-            rel.GetTargets(&aims);
-        }
-        // The aim target supplies a frame, and how it does so depends on what
-        // it is -- the same fork the PROVIDER side already makes below, and
-        // for the same reason: a plain UsdGeomXformable publishes no
-        // computePointFrame, and requesting one is a hard exec failure that
-        // takes the whole snapshot down rather than leaving one value
-        // missing. Resolved once here, not per target.
-        SdfPath aimFrameProvider, aimXform;
-        if (!aims.empty()) {
-            const SdfPath aimPath = aims[0].GetPrimPath();
-            const UsdPrim aimPrim = _stage->GetPrimAtPath(aimPath);
-            const TfToken aimType =
-                aimPrim ? aimPrim.GetTypeName() : TfToken();
-            if (aimType == "RigExecControl" || aimType == "RigExecJoint") {
-                aimFrameProvider = aimPath;
-            } else if (aimPrim && UsdGeomXformable(aimPrim)) {
-                aimXform = aimPath;
-            } else {
-                reportError(
-                    "aim constraint " + mover.moverPath.GetString() +
-                    " targets " + aimPath.GetString() +
-                    ", which is neither a RigExec transform provider nor a "
-                    "UsdGeomXformable; it can supply no aim frame");
+        _FrameConstraint constraint;
+        constraint.moverPath = mover.moverPath;
+        constraint.schemaType = mover.schemaType;
+
+        if (_IsSourceFrameConstraintType(mover.schemaType)) {
+            constraint.targets = mover.targets;
+            SdfPathVector sources = getTargets(moverPrim, "rigExec:sources");
+            if (sources.empty() && mover.schemaType ==
+                                       "RigExecAimConstraint") {
+                // Backward-compatible spelling used by every existing Aim
+                // asset. New assets use the ordered FBX-style sources list.
+                sources = getTargets(moverPrim, "rigExec:aimTarget");
+            }
+            if (sources.empty()) {
+                reportError(mover.schemaType.GetString() + " " +
+                            mover.moverPath.GetString() +
+                            " has no constraint sources");
                 restorePreviousEpoch();
                 return false;
             }
-        }
-        for (const SdfPath &target : mover.targets) {
-            if (!target.IsPrimPath()) {
-                continue;
+            for (const SdfPath &source : sources) {
+                _FrameSourceBinding binding;
+                if (!bindFrameSource(
+                        source,
+                        mover.schemaType.GetString() + " " +
+                            mover.moverPath.GetString() + " source",
+                        &binding)) {
+                    restorePreviousEpoch();
+                    return false;
+                }
+                constraint.sources.push_back(binding);
             }
-            _FrameRevision revision;
-            revision.moverPath = mover.moverPath;
-            if (!aimFrameProvider.IsEmpty()) {
-                revision.aimTargetFrameTap = newTaps->Add(
-                    RigExecValueAddress::Prim(aimFrameProvider,
-                                              _computePointFrame, basePhase));
-            } else {
-                revision.aimTargetXform = aimXform;
+
+            if (mover.schemaType == "RigExecAimConstraint") {
+                const SdfPathVector upObjects =
+                    getTargets(moverPrim, "rigExec:worldUpObject");
+                if (upObjects.size() > 1) {
+                    reportError("RigExecAimConstraint " +
+                                mover.moverPath.GetString() +
+                                " has more than one world-up object");
+                    restorePreviousEpoch();
+                    return false;
+                }
+                if (!upObjects.empty() &&
+                    !bindFrameSource(
+                        upObjects[0],
+                        "RigExecAimConstraint " +
+                            mover.moverPath.GetString() + " world-up object",
+                        &constraint.worldUpObject)) {
+                    restorePreviousEpoch();
+                    return false;
+                }
             }
-            newFrameChains[target].push_back(revision);
+        } else {
+            // FBX SingleChainIK names endpoints, not an ordered output list.
+            // RigExec joint hierarchy is namespace nesting, so the exact
+            // chain is inferred by walking End Joint's ancestors to First
+            // Joint. rigExec:moves must declare that complete set.
+            const SdfPathVector first =
+                getTargets(moverPrim, "rigExec:firstJoint");
+            const SdfPathVector end =
+                getTargets(moverPrim, "rigExec:endJoint");
+            const SdfPathVector effector =
+                getTargets(moverPrim, "rigExec:effector");
+            if (first.size() != 1 || end.size() != 1 ||
+                effector.size() != 1 || !first[0].IsPrimPath() ||
+                !end[0].IsPrimPath()) {
+                reportError("RigExecSingleChainIkConstraint " +
+                            mover.moverPath.GetString() +
+                            " requires exactly one firstJoint, endJoint, "
+                            "and effector prim");
+                restorePreviousEpoch();
+                return false;
+            }
+            SdfPath cursor = end[0];
+            while (!cursor.IsEmpty() && cursor != SdfPath::AbsoluteRootPath()) {
+                const UsdPrim joint = _stage->GetPrimAtPath(cursor);
+                if (!joint || joint.GetTypeName() != "RigExecJoint") {
+                    reportError("RigExecSingleChainIkConstraint " +
+                                mover.moverPath.GetString() +
+                                " endpoint ancestry contains non-joint " +
+                                cursor.GetString());
+                    restorePreviousEpoch();
+                    return false;
+                }
+                constraint.ikChain.push_back(cursor);
+                if (cursor == first[0]) {
+                    break;
+                }
+                cursor = cursor.GetParentPath();
+            }
+            if (constraint.ikChain.empty() ||
+                constraint.ikChain.back() != first[0]) {
+                reportError("RigExecSingleChainIkConstraint " +
+                            mover.moverPath.GetString() + ": endJoint " +
+                            end[0].GetString() +
+                            " is not a namespace descendant of firstJoint " +
+                            first[0].GetString());
+                restorePreviousEpoch();
+                return false;
+            }
+            std::reverse(constraint.ikChain.begin(),
+                         constraint.ikChain.end());
+            if (constraint.ikChain.size() < 2) {
+                reportError("RigExecSingleChainIkConstraint " +
+                            mover.moverPath.GetString() +
+                            " needs at least two joints");
+                restorePreviousEpoch();
+                return false;
+            }
+            std::set<SdfPath> declared(mover.targets.begin(),
+                                       mover.targets.end());
+            std::set<SdfPath> inferred(constraint.ikChain.begin(),
+                                       constraint.ikChain.end());
+            if (declared != inferred) {
+                reportError("RigExecSingleChainIkConstraint " +
+                            mover.moverPath.GetString() +
+                            " rigExec:moves must equal the complete inferred "
+                            "firstJoint-to-endJoint chain");
+                restorePreviousEpoch();
+                return false;
+            }
+            constraint.targets = constraint.ikChain;
+            if (!bindFrameSource(
+                    effector[0],
+                    "RigExecSingleChainIkConstraint " +
+                        mover.moverPath.GetString() + " effector",
+                    &constraint.effector)) {
+                restorePreviousEpoch();
+                return false;
+            }
+            // SingleChain deliberately ignores every pole input. Do not even
+            // bind these relationships: an otherwise malformed dormant pole
+            // must not make the selected solver mode fail to compile.
+            TfToken solverMode("rotatePlane");
+            if (const UsdAttribute a = moverPrim.GetAttribute(
+                    TfToken("rigExec:solverMode"))) {
+                a.Get(&solverMode);
+            }
+            if (solverMode == "rotatePlane") {
+                for (const SdfPath &pole :
+                     getTargets(moverPrim, "rigExec:poleVectorObjects")) {
+                    _FrameSourceBinding binding;
+                    if (!bindFrameSource(
+                            pole,
+                            "RigExecSingleChainIkConstraint " +
+                                mover.moverPath.GetString() +
+                                " pole-vector object",
+                            &binding)) {
+                        restorePreviousEpoch();
+                        return false;
+                    }
+                    constraint.poleObjects.push_back(binding);
+                }
+            }
         }
+
+        for (const SdfPath &target : constraint.targets) {
+            newFrameChains[target].push_back(mover.moverPath);
+        }
+        newFrameConstraints.push_back(std::move(constraint));
     }
-    // A provider carrying aim revisions that is not a joint needs a base
+    // A provider carrying pose revisions that is not a joint needs a base
     // frame from somewhere. A Control has computePointFrame like a joint; a
     // plain UsdGeomXformable has no exec computation at all, so its frame
     // comes from its own USD transform and its revised matrix is published
@@ -2014,7 +2412,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             newXformDerivedProviders.insert(provider);
         } else {
             reportError(
-                "aim constraint target " + provider.GetString() +
+                "constraint target " + provider.GetString() +
                 " is neither a RigExec transform provider nor a "
                 "UsdGeomXformable; nothing can carry the revised frame");
                 restorePreviousEpoch();
@@ -2247,6 +2645,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _jointPaths = std::move(newJointPaths);
     _controlPaths = std::move(newControlPaths);
     _controlFrameTaps = std::move(newControlFrameTaps);
+    _frameConstraints = std::move(newFrameConstraints);
     _frameChains = std::move(newFrameChains);
     _providerRestFrameTaps = std::move(newProviderRestFrameTaps);
     _providerBaseFrameTaps = std::move(newProviderBaseFrameTaps);
@@ -2288,7 +2687,9 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         for (const auto &[target, revisions] : _graphChains) {
             dependsOn[target];  // every chain is a node, even with no edges
         }
-        for (const auto &[target, revisions] : _graphChains) {
+        for (const auto &chain : _graphChains) {
+            const SdfPath &target = chain.first;
+            const std::vector<_GraphRevision> &revisions = chain.second;
             for (const _GraphRevision &revision : revisions) {
                 auto addEdge = [&](const SdfPath &producer) {
                     if (producer.IsEmpty() || producer == target ||
@@ -2471,10 +2872,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     return false;
                 }
                 SdfPath found;
-                for (const _FrameRevision &frameRevision : frameIt->second) {
-                    if (frameRevision.moverPath == phase.prim ||
-                        frameRevision.moverPath.HasPrefix(phase.prim)) {
-                        found = frameRevision.moverPath;
+                for (const SdfPath &frameMover : frameIt->second) {
+                    if (frameMover == phase.prim ||
+                        frameMover.HasPrefix(phase.prim)) {
+                        found = frameMover;
                     }
                 }
                 if (found.IsEmpty()) {
@@ -2581,7 +2982,7 @@ RigExecRigEvaluator::_ValidateMatrixMover(
         rel.GetTargets(&weightTargets);
     }
     if (weightTargets.size() != 1 ||
-        _CanonicalizeTarget(_stage, weightTargets[0]) != record.targets[0]) {
+        _ResolveGeometryInput(_stage, weightTargets[0]) != record.targets[0]) {
         *error = who + ": weight object target does not canonicalize to "
                        "the mover's points target";
         return false;
@@ -2602,7 +3003,7 @@ RigExecRigEvaluator::_ReadTargetPoints(
     if (targets.size() != 1) {
         return false;
     }
-    const SdfPath canonical = _CanonicalizeTarget(_stage, targets[0]);
+    const SdfPath canonical = _ResolveGeometryInput(_stage, targets[0]);
     const UsdAttribute attr = _stage->GetAttributeAtPath(canonical);
     VtVec3fArray value;
     if (!attr || !attr.Get(&value, time)) {
@@ -2956,7 +3357,7 @@ RigExecRigEvaluator::_ResolveWeights(
                         TfToken("rigExec:weightTarget"))) {
                     rel.GetTargets(&t);
                 }
-                return t.size() == 1 ? _CanonicalizeTarget(_stage, t[0])
+                return t.size() == 1 ? _ResolveGeometryInput(_stage, t[0])
                                      : SdfPath();
             };
             if (canonicalWeightTarget(prim) !=
@@ -4089,180 +4490,864 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // Published as-is: the imaging bridge draws each volume's falloff
     // iso-surfaces in exactly the space its field was measured in.
     pose.weightFrames = _volumeWeightMatrices;
-    // 2. Pose-domain frame revisions (aim constraints), applied in memory.
-    //
-    // These used to be generated RigExecPointFrameMoverApplication prims that
-    // the final-phase taps resolved to. The revision is two lines of math over
-    // the preceding frame, and every input is authored on the mover itself, so
-    // the generated prim was carrying only the wiring that named those inputs
-    // -- wiring the evaluator can resolve directly.
+    // 2. Pose-domain FBX-style constraints, applied in the single composed
+    // mover walk. A global walk is essential for SingleChainIK: all joints in
+    // its write set must be solved and committed atomically, while ordinary
+    // one-provider constraints still chain in exactly the same order as every
+    // points/property revision.
+    std::map<SdfPath, RigExecPointFrame> baseFrames;
     std::map<SdfPath, RigExecPointFrame> finalFrames;
+    std::map<SdfPath, RigExecPointFrame> restFrames;
+    std::map<SdfPath, GfMatrix4d> xformDerivedBases;
     std::map<SdfPath, GfMatrix4d> finalMatrices;
+    const UsdPrim assetRoot =
+        _stage->GetPrimAtPath(_rigPath.GetParentPath());
+    UsdGeomXformCache constraintXformCache(time);
+
+    auto frameFromXform = [&](const SdfPath &path,
+                              RigExecPointFrame *out,
+                              GfMatrix4d *matrix) {
+        const UsdPrim prim = _stage->GetPrimAtPath(path);
+        if (!prim || !assetRoot || !UsdGeomXformable(prim)) {
+            return false;
+        }
+        bool resetsBelowAsset = false;
+        const GfMatrix4d relative =
+            constraintXformCache.ComputeRelativeTransform(
+                prim, assetRoot, &resetsBelowAsset);
+        if (out) {
+            *out = RigExecFrameFromMatrix(relative);
+        }
+        if (matrix) {
+            *matrix = relative;
+        }
+        return true;
+    };
+
+    // Resolve every written provider's base/rest state before any revision
+    // runs, so a multi-output operation never observes a half-updated chain.
     for (const auto &[provider, revisions] : _frameChains) {
-        RigExecPointFrame frame;
-        const bool xformDerived = _xformDerivedProviders.count(provider) != 0;
-        const auto baseTapIt = _providerBaseFrameTaps.find(provider);
-        // Kept for the publication below: the revision is only meaningful to a
-        // downstream consumer alongside the matrix it revised.
-        GfMatrix4d xformDerivedBase(1.0);
-        bool xformDerivedValid = false;
-        if (xformDerived) {
-            // The prim's own composed transform IS its base frame, expressed
-            // RELATIVE TO THE ASSET ROOT -- not local-to-parent, and not
-            // local-to-world either.
-            //
-            // The constraint solves this frame against an aim target frame,
-            // and the solver subtracts the two origins directly, so both must
-            // live in the same space. Joint and control frames come from
-            // authored rest:space composed with avars (_JointRestSpace in
-            // computations.cpp) and never acquire the asset's placement on
-            // the stage: they are asset-common space. So:
-            //
-            //   local-to-parent  -- wrong. Omits every transform between the
-            //     provider and the asset root. With Geom at (6,1,-3) and the
-            //     provider at local (0,2,0), the aim is computed from (0,2,0)
-            //     instead of (6,3,-3).
-            //   local-to-world   -- also wrong, in the other direction. Adds
-            //     the asset's own placement to one side of the subtraction
-            //     only. Place the asset at x=+100 and the turret aims at -X
-            //     while the target is physically at +X.
-            //
-            // Identity ancestors collapse all three, which is how the first
-            // error hid and how the over-correction hid after it.
-            const UsdPrim providerPrim = _stage->GetPrimAtPath(provider);
-            const UsdPrim assetRoot =
-                _stage->GetPrimAtPath(_rigPath.GetParentPath());
-            const UsdGeomXformable xformable(providerPrim);
-            if (xformable && assetRoot) {
-                UsdGeomXformCache cache(time);
-                // The resetXformStack out-param is documented as required to
-                // be valid -- it is not optional and must not be null.
-                bool resetsBelowAsset = false;
-                xformDerivedBase = cache.ComputeRelativeTransform(
-                    providerPrim, assetRoot, &resetsBelowAsset);
-                xformDerivedValid = true;
+        RigExecPointFrame base;
+        if (_xformDerivedProviders.count(provider)) {
+            GfMatrix4d matrix(1.0);
+            if (!frameFromXform(provider, &base, &matrix)) {
+                pose.diagnostics.push_back(
+                    "could not resolve constraint target " +
+                    provider.GetString() + " relative to the asset root");
+                return pose;
             }
-            // A provider we cannot read is skipped below rather than
-            // published as an identity-derived revision.
-            frame = RigExecFrameFromMatrix(xformDerivedBase);
-        } else if (baseTapIt != _providerBaseFrameTaps.end()) {
-            frame = snapshot.Get<RigExecPointFrame>(baseTapIt->second);
+            xformDerivedBases[provider] = matrix;
+            restFrames[provider] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
+        } else if (const auto it = _providerBaseFrameTaps.find(provider);
+                   it != _providerBaseFrameTaps.end()) {
+            base = snapshot.Get<RigExecPointFrame>(it->second);
         } else {
-            const auto jointIt = std::find(_jointPaths.begin(),
-                                           _jointPaths.end(), provider);
-            if (jointIt == _jointPaths.end()) {
+            const auto joint =
+                std::find(_jointPaths.begin(), _jointPaths.end(), provider);
+            if (joint == _jointPaths.end()) {
+                pose.diagnostics.push_back(
+                    "constraint target has no base frame: " +
+                    provider.GetString());
+                return pose;
+            }
+            base = snapshot.Get<RigExecPointFrame>(
+                _jointFrameTaps[joint - _jointPaths.begin()]);
+        }
+        if (!_xformDerivedProviders.count(provider)) {
+            const auto rest = _providerRestFrameTaps.find(provider);
+            if (rest != _providerRestFrameTaps.end()) {
+                restFrames[provider] =
+                    snapshot.Get<RigExecPointFrame>(rest->second);
+            }
+        }
+        baseFrames[provider] = base;
+        finalFrames[provider] = base;
+    }
+
+    // Constraints execute after the OpenExec snapshot, so a revised parent
+    // joint cannot make exec recompute its namespace descendants this
+    // generation. Keep every discovered joint/control in the in-memory pose
+    // map so an ancestor revision can carry untouched branches with it and a
+    // later constraint can consume that revised provider.
+    for (size_t i = 0; i < _jointPaths.size(); ++i) {
+        const SdfPath &path = _jointPaths[i];
+        if (!finalFrames.count(path)) {
+            const RigExecPointFrame frame =
+                snapshot.Get<RigExecPointFrame>(_jointFrameTaps[i]);
+            baseFrames[path] = frame;
+            finalFrames[path] = frame;
+        }
+    }
+    for (size_t i = 0; i < _controlPaths.size(); ++i) {
+        const SdfPath &path = _controlPaths[i];
+        if (!finalFrames.count(path)) {
+            const RigExecPointFrame frame =
+                snapshot.Get<RigExecPointFrame>(_controlFrameTaps[i]);
+            baseFrames[path] = frame;
+            finalFrames[path] = frame;
+        }
+    }
+
+    auto resolveBinding = [&](const _FrameSourceBinding &binding,
+                              RigExecPointFrame *out) {
+        // Constraint relationships have implicit `preceding` semantics: the
+        // single composed mover walk is the authority, so a later constraint
+        // observes every earlier revision of the provider while a reference to
+        // a provider written later still sees its current (normally base)
+        // value. This is deterministic and cannot create an evaluation cycle.
+        if (const auto revised = finalFrames.find(binding.sourcePath);
+            revised != finalFrames.end()) {
+            *out = revised->second;
+            return out->IsValid();
+        }
+        if (binding.frameTap >= 0) {
+            *out = snapshot.Get<RigExecPointFrame>(binding.frameTap);
+            return out->IsValid();
+        }
+        if (!binding.xformPath.IsEmpty()) {
+            if (!frameFromXform(binding.xformPath, out, nullptr) ||
+                !out->IsValid()) {
+                return false;
+            }
+            // A native source that is not itself a written provider may still
+            // sit beneath a constrained transform provider. The closest
+            // revised ancestor contains all higher ancestor deltas, so apply
+            // it once to the stage-derived source frame.
+            SdfPath closest;
+            for (const auto &[provider, current] : finalFrames) {
+                const auto base = baseFrames.find(provider);
+                if (provider == binding.xformPath ||
+                    !binding.xformPath.HasPrefix(provider) ||
+                    base == baseFrames.end() ||
+                    current.points == base->second.points) {
+                    continue;
+                }
+                if (closest.IsEmpty() ||
+                    provider.GetPathElementCount() >
+                        closest.GetPathElementCount()) {
+                    closest = provider;
+                }
+            }
+            if (!closest.IsEmpty()) {
+                GfMatrix4d delta(1.0);
+                if (!RigExecPointsToMatrix(
+                        baseFrames[closest].points,
+                        finalFrames[closest].points, &delta)) {
+                    return false;
+                }
+                *out = RigExecMatrixToPoints(out->points, delta);
+            }
+            return out->IsValid();
+        }
+        return false;
+    };
+
+    auto readWeights = [&](const UsdPrim &prim, const char *name,
+                           size_t count, std::vector<double> *weights) {
+        VtFloatArray authored;
+        if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+            a.Get(&authored, time);
+        }
+        if (!authored.empty() && authored.size() != count) {
+            pose.diagnostics.push_back(
+                prim.GetPath().GetString() + " " + name + " has " +
+                std::to_string(authored.size()) + " entries for " +
+                std::to_string(count) + " sources");
+            return false;
+        }
+        weights->assign(count, 1.0);
+        for (size_t i = 0; i < authored.size(); ++i) {
+            (*weights)[i] = authored[i];
+        }
+        return true;
+    };
+
+    auto readOffsets = [&](const UsdPrim &prim, const char *name,
+                           size_t count, std::vector<GfVec3d> *offsets) {
+        VtVec3dArray authored;
+        if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+            a.Get(&authored, time);
+        }
+        if (!authored.empty() && authored.size() != count) {
+            pose.diagnostics.push_back(
+                prim.GetPath().GetString() + " " + name + " has " +
+                std::to_string(authored.size()) + " entries for " +
+                std::to_string(count) + " sources");
+            return false;
+        }
+        offsets->assign(count, GfVec3d(0));
+        for (size_t i = 0; i < authored.size(); ++i) {
+            (*offsets)[i] = authored[i];
+        }
+        return true;
+    };
+
+    auto buildSources = [&](const _FrameConstraint &constraint,
+                            const UsdPrim &prim,
+                            std::vector<RigExecConstraintSource> *sources) {
+        std::vector<double> weights;
+        if (!readWeights(prim, "inputs:sourceWeights",
+                         constraint.sources.size(), &weights)) {
+            return false;
+        }
+        std::vector<GfVec3d> translationOffsets, rotationOffsets;
+        if (constraint.schemaType == "RigExecParentConstraint") {
+            if (!readOffsets(prim, "inputs:translationOffsets",
+                             constraint.sources.size(),
+                             &translationOffsets) ||
+                !readOffsets(prim, "inputs:rotationOffsets",
+                             constraint.sources.size(), &rotationOffsets)) {
+                return false;
+            }
+        } else {
+            translationOffsets.assign(constraint.sources.size(), GfVec3d(0));
+            rotationOffsets.assign(constraint.sources.size(), GfVec3d(0));
+        }
+        sources->clear();
+        sources->reserve(constraint.sources.size());
+        for (size_t i = 0; i < constraint.sources.size(); ++i) {
+            RigExecPointFrame sourceFrame;
+            if (!resolveBinding(constraint.sources[i], &sourceFrame)) {
+                pose.diagnostics.push_back(
+                    prim.GetPath().GetString() +
+                    " could not resolve source " +
+                    constraint.sources[i].sourcePath.GetString());
+                return false;
+            }
+            RigExecConstraintSource source;
+            source.frame = sourceFrame;
+            source.normalizedWeight = weights[i];
+            source.translationOffset = translationOffsets[i];
+            source.rotationOffsetDegrees = rotationOffsets[i];
+            sources->push_back(source);
+        }
+        return true;
+    };
+
+    auto recordFrame = [&](const SdfPath &provider,
+                           const SdfPath &afterMover) {
+        const auto wanted = _snapshotPoints.find(provider);
+        const auto frame = finalFrames.find(provider);
+        if (wanted == _snapshotPoints.end() ||
+            !wanted->second.count(afterMover) || frame == finalFrames.end() ||
+            !frame->second.IsValid()) {
+            return;
+        }
+        const auto rest = restFrames.find(provider);
+        const auto &landmarks =
+            rest != restFrames.end() && rest->second.IsValid()
+                ? rest->second.points
+                : RigExecIdentityLandmarks();
+        GfMatrix4d matrix(1.0);
+        if (RigExecPointsToMatrix(landmarks, frame->second.points, &matrix)) {
+            _chainSnapshots.Record(provider, afterMover, VtValue(matrix));
+        }
+    };
+
+    const std::set<SdfPath> hierarchicalProviders(
+        [&]() {
+            std::set<SdfPath> result(_jointPaths.begin(), _jointPaths.end());
+            result.insert(_controlPaths.begin(), _controlPaths.end());
+            return result;
+        }());
+
+    // Validate and commit one constraint's complete write bundle. Descendant
+    // RigExec providers are updated from the nearest changed ancestor in the
+    // same transaction; native Xform descendants ride the published ancestor
+    // delta in Hydra and therefore must not be duplicated here.
+    auto commitConstraintFrames =
+        [&](const SdfPath &moverPath,
+            const std::map<SdfPath, RigExecPointFrame> &candidates) {
+        for (const auto &[path, frame] : candidates) {
+            if (!_IsUsableConstraintFrame(frame)) {
+                pose.diagnostics.push_back(
+                    moverPath.GetString() +
+                    " produced an invalid or degenerate frame for " +
+                    path.GetString() + "; constraint passed through");
+                return false;
+            }
+        }
+
+        std::map<SdfPath, RigExecPointFrame> propagated;
+        for (const auto &[provider, current] : finalFrames) {
+            if (candidates.count(provider) ||
+                !hierarchicalProviders.count(provider)) {
                 continue;
             }
-            frame = snapshot.Get<RigExecPointFrame>(
-                _jointFrameTaps[jointIt - _jointPaths.begin()]);
+            SdfPath closest;
+            for (const auto &[target, candidate] : candidates) {
+                if (provider != target && provider.HasPrefix(target) &&
+                    (closest.IsEmpty() ||
+                     target.GetPathElementCount() >
+                         closest.GetPathElementCount())) {
+                    closest = target;
+                }
+            }
+            if (closest.IsEmpty()) {
+                continue;
+            }
+            const auto before = finalFrames.find(closest);
+            if (before == finalFrames.end() ||
+                !_IsUsableConstraintFrame(current)) {
+                pose.diagnostics.push_back(
+                    moverPath.GetString() +
+                    " could not propagate its pose revision through " +
+                    provider.GetString() + "; constraint passed through");
+                return false;
+            }
+            GfMatrix4d delta(1.0);
+            if (!RigExecPointsToMatrix(
+                    before->second.points, candidates.at(closest).points,
+                    &delta)) {
+                pose.diagnostics.push_back(
+                    moverPath.GetString() +
+                    " produced a singular hierarchy delta; constraint passed "
+                    "through");
+                return false;
+            }
+            RigExecPointFrame frame =
+                RigExecMatrixToPoints(current.points, delta);
+            if (!_IsUsableConstraintFrame(frame)) {
+                pose.diagnostics.push_back(
+                    moverPath.GetString() +
+                    " produced an invalid descendant frame for " +
+                    provider.GetString() + "; constraint passed through");
+                return false;
+            }
+            propagated[provider] = frame;
         }
-        if (!frame.IsValid()) {
+
+        for (const auto &[path, frame] : candidates) {
+            finalFrames[path] = frame;
+        }
+        for (const auto &[path, frame] : propagated) {
+            finalFrames[path] = frame;
+        }
+        return true;
+    };
+
+    auto ikUsesAnimatedTs = [&](const std::vector<SdfPath> &chain) {
+        for (const SdfPath &path : chain) {
+            if (_jointSolverBinding.count(path)) {
+                return true;
+            }
+            const UsdPrim joint = _stage->GetPrimAtPath(path);
+            for (const char *name : {"posed:space", "avars:tx", "avars:ty",
+                                     "avars:tz"}) {
+                const UsdAttribute attr = joint.GetAttribute(TfToken(name));
+                SdfPathVector connections;
+                if (attr &&
+                    (attr.GetNumTimeSamples() > 0 ||
+                     (attr.GetConnections(&connections) &&
+                      !connections.empty()))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    // `neverTS` retains current rotations/root placement while rebuilding
+    // child placement and handle lengths from rest frames. A joint without
+    // any authored rest transform has the schema's identity fallback, which
+    // is not an actual chain rest layout; use its current static layout in
+    // that case. The public math solver can therefore keep measuring its
+    // input chain; evaluator-side preparation decides whether those
+    // measurements are rest- or animation-derived.
+    auto ikWithoutAnimatedTs =
+        [&](const std::vector<RigExecPointFrame> &current,
+            const std::vector<RigExecPointFrame> &rest,
+            std::vector<RigExecPointFrame> *prepared) {
+        if (current.size() != rest.size() || current.empty()) {
+            return false;
+        }
+        bool usableRestLayout = true;
+        for (size_t i = 1; i < rest.size(); ++i) {
+            const double segmentLength =
+                (rest[i].Origin() - rest[i - 1].Origin()).GetLength();
+            if (!std::isfinite(segmentLength) || segmentLength <= 0.0) {
+                usableRestLayout = false;
+                break;
+            }
+        }
+        const std::vector<RigExecPointFrame> &lengthReference =
+            usableRestLayout ? rest : current;
+        prepared->clear();
+        prepared->reserve(current.size());
+        for (size_t i = 0; i < current.size(); ++i) {
+            if (!_IsUsableConstraintFrame(current[i]) ||
+                !_IsUsableConstraintFrame(rest[i])) {
+                return false;
+            }
+            GfVec3d origin = current[i].Origin();
+            if (i > 0) {
+                GfMatrix4d parentRest(1.0), parentPrepared(1.0);
+                if (!RigExecPointsToMatrix(
+                        RigExecIdentityLandmarks(),
+                        lengthReference[i - 1].points,
+                        &parentRest) ||
+                    !RigExecPointsToMatrix(
+                        RigExecIdentityLandmarks(), prepared->back().points,
+                        &parentPrepared)) {
+                    return false;
+                }
+                origin = parentPrepared.TransformAffine(
+                    parentRest.GetInverse().TransformAffine(
+                        lengthReference[i].Origin()));
+            }
+
+            RigExecPointFrame frame = current[i];
+            frame.points[0] = origin;
+            for (size_t axis = 1; axis < frame.points.size(); ++axis) {
+                GfVec3d direction =
+                    current[i].points[axis] - current[i].Origin();
+                const double directionLength = direction.GetLength();
+                const double length =
+                    (lengthReference[i].points[axis] -
+                     lengthReference[i].Origin()).GetLength();
+                if (!std::isfinite(length) || length <= 0.0 ||
+                    !std::isfinite(directionLength) ||
+                    directionLength <= 0.0) {
+                    return false;
+                }
+                direction /= directionLength;
+                frame.points[axis] = origin + direction * length;
+            }
+            if (!_IsUsableConstraintFrame(frame)) {
+                return false;
+            }
+            prepared->push_back(frame);
+        }
+        return true;
+    };
+
+    for (const _FrameConstraint &constraint : _frameConstraints) {
+        const UsdPrim prim = _stage->GetPrimAtPath(constraint.moverPath);
+        if (!prim) {
+            continue;
+        }
+        const bool enabled = _ResolvedRead(
+            _resolvedInputs, prim, "inputs:enabled", true, time);
+        if (!enabled) {
+            for (const SdfPath &target : constraint.targets) {
+                recordFrame(target, constraint.moverPath);
+            }
+            continue;
+        }
+        const double weight = _ResolvedRead(
+            _resolvedInputs, prim, "inputs:weight", 1.0f, time);
+        if (!std::isfinite(weight)) {
+            pose.diagnostics.push_back(
+                constraint.moverPath.GetString() +
+                " has a non-finite constraint weight; constraint passed "
+                "through");
+            for (const SdfPath &target : constraint.targets) {
+                recordFrame(target, constraint.moverPath);
+            }
+            continue;
+        }
+        // A zero/negative global weight is an exact dormant pass-through.
+        // Do this before resolving sources, effectors, or poles so malformed
+        // disconnected inputs cannot make a disabled constraint fail.
+        if (weight <= 0.0) {
+            for (const SdfPath &target : constraint.targets) {
+                recordFrame(target, constraint.moverPath);
+            }
             continue;
         }
 
-        // The rest frame, needed BEFORE the revisions rather than after them:
-        // a phase naming a prim mid-chain wants that step's rest->pose map,
-        // and that is the same computation the final one uses.
-        RigExecPointFrame restFrame;
-        const auto restTapIt = _providerRestFrameTaps.find(provider);
-        if (restTapIt != _providerRestFrameTaps.end()) {
-            restFrame = snapshot.Get<RigExecPointFrame>(restTapIt->second);
-        }
-        const auto frameWanted = _snapshotPoints.find(provider);
-        auto recordFrame = [&](const SdfPath &afterMover,
-                               const RigExecPointFrame &f) {
-            if (frameWanted == _snapshotPoints.end() ||
-                !frameWanted->second.count(afterMover) || !f.IsValid()) {
-                return;
-            }
-            GfMatrix4d m(1.0);
-            const bool ok =
-                restFrame.IsValid()
-                    ? RigExecPointsToMatrix(restFrame.points, f.points, &m)
-                    : RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                            f.points, &m);
-            if (ok) {
-                _chainSnapshots.Record(provider, afterMover, VtValue(m));
-            }
-        };
-
-        for (const _FrameRevision &revision : revisions) {
-            const UsdPrim moverPrim =
-                _stage->GetPrimAtPath(revision.moverPath);
-            if (!moverPrim) {
-                continue;
-            }
-            // Resolved-aware like every other input read: a property mover
-            // can drive a constraint's enable or weight.
-            if (!_ResolvedRead(_resolvedInputs, moverPrim, "inputs:enabled",
-                               true, time)) {
-                continue;  // ordinary pass-through (spec §6.6)
-            }
-            RigExecPointFrame aimTarget;
-            if (revision.aimTargetFrameTap >= 0) {
-                aimTarget =
-                    snapshot.Get<RigExecPointFrame>(revision.aimTargetFrameTap);
-            } else if (!revision.aimTargetXform.IsEmpty()) {
-                // A plain UsdGeomXformable aim target, read the same way an
-                // xform-derived PROVIDER's base frame is read: relative to
-                // the asset root, so the constraint subtracts two origins
-                // that live in the same space. Joint and control frames
-                // never carry the asset's stage placement, and neither may
-                // this one.
-                const UsdPrim aimPrim =
-                    _stage->GetPrimAtPath(revision.aimTargetXform);
-                const UsdPrim assetRoot =
-                    _stage->GetPrimAtPath(_rigPath.GetParentPath());
-                if (aimPrim && assetRoot && UsdGeomXformable(aimPrim)) {
-                    UsdGeomXformCache cache(time);
-                    bool resetsBelowAsset = false;
-                    aimTarget = RigExecFrameFromMatrix(
-                        cache.ComputeRelativeTransform(aimPrim, assetRoot,
-                                                       &resetsBelowAsset));
+        if (constraint.schemaType == "RigExecSingleChainIkConstraint") {
+            std::vector<RigExecPointFrame> chain;
+            chain.reserve(constraint.ikChain.size());
+            bool inputsValid = true;
+            for (const SdfPath &joint : constraint.ikChain) {
+                const auto frame = finalFrames.find(joint);
+                if (frame == finalFrames.end()) {
+                    pose.diagnostics.push_back(
+                        constraint.moverPath.GetString() +
+                        " has no current frame for " + joint.GetString());
+                    inputsValid = false;
+                    break;
                 }
-            } else {
+                chain.push_back(frame->second);
+            }
+            RigExecPointFrame effector;
+            if (inputsValid &&
+                !resolveBinding(constraint.effector, &effector)) {
+                pose.diagnostics.push_back(
+                    constraint.moverPath.GetString() +
+                    " could not resolve its effector; constraint passed "
+                    "through");
+                inputsValid = false;
+            }
+
+            RigExecSingleChainIkParams params;
+            TfToken solverMode("rotatePlane");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:solverMode"))) {
+                a.Get(&solverMode);
+            }
+            params.mode = solverMode == "singleChain"
+                ? RigExecSingleChainIkMode::SingleChain
+                : RigExecSingleChainIkMode::RotatePlane;
+            TfToken poleMode("vector");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:poleVectorMode"))) {
+                a.Get(&poleMode);
+            }
+            params.weight = weight;
+            if (params.mode == RigExecSingleChainIkMode::RotatePlane) {
+                params.pole = _ResolvedRead(
+                    _resolvedInputs, prim, "inputs:poleVector",
+                    GfVec3d(0, 1, 0), time);
+                params.twistDegrees = _ResolvedRead(
+                    _resolvedInputs, prim, "inputs:twistDegrees", 0.0,
+                    time);
+            }
+            if (inputsValid &&
+                params.mode == RigExecSingleChainIkMode::RotatePlane &&
+                poleMode == "object") {
+                if (constraint.poleObjects.empty()) {
+                    pose.diagnostics.push_back(
+                        constraint.moverPath.GetString() +
+                        " uses object pole mode with no pole-vector objects; "
+                        "constraint passed through");
+                    inputsValid = false;
+                }
+                std::vector<double> poleWeights;
+                if (inputsValid &&
+                    !readWeights(prim, "inputs:poleVectorWeights",
+                                 constraint.poleObjects.size(), &poleWeights)) {
+                    inputsValid = false;
+                }
+                GfVec3d polePoint(0);
+                double total = 0;
+                for (size_t i = 0;
+                     inputsValid && i < constraint.poleObjects.size(); ++i) {
+                    RigExecPointFrame poleFrame;
+                    if (!resolveBinding(constraint.poleObjects[i],
+                                        &poleFrame) ||
+                        !std::isfinite(poleWeights[i]) ||
+                        poleWeights[i] < 0) {
+                        pose.diagnostics.push_back(
+                            constraint.moverPath.GetString() +
+                            " has an invalid pole-vector source or weight; "
+                            "constraint passed through");
+                        inputsValid = false;
+                        break;
+                    }
+                    polePoint += poleFrame.Origin() * poleWeights[i];
+                    total += poleWeights[i];
+                }
+                if (inputsValid && total <= 0) {
+                    pose.diagnostics.push_back(
+                        constraint.moverPath.GetString() +
+                        " has zero total pole-vector weight; constraint passed "
+                        "through");
+                    inputsValid = false;
+                }
+                if (inputsValid) {
+                    params.pole = polePoint / total;
+                }
+            }
+
+            TfToken evaluationMode("neverTS");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:evaluationMode"))) {
+                a.Get(&evaluationMode);
+            }
+            std::vector<RigExecPointFrame> solveChain = chain;
+            const bool useAnimatedTs =
+                evaluationMode == "alwaysTS" ||
+                (evaluationMode == "autoDetect" &&
+                 ikUsesAnimatedTs(constraint.ikChain));
+            if (inputsValid && !useAnimatedTs) {
+                std::vector<RigExecPointFrame> rest;
+                rest.reserve(constraint.ikChain.size());
+                for (const SdfPath &joint : constraint.ikChain) {
+                    const auto frame = restFrames.find(joint);
+                    if (frame == restFrames.end()) {
+                        inputsValid = false;
+                        break;
+                    }
+                    rest.push_back(frame->second);
+                }
+                if (!inputsValid ||
+                    !ikWithoutAnimatedTs(chain, rest, &solveChain)) {
+                    pose.diagnostics.push_back(
+                        constraint.moverPath.GetString() +
+                        " could not prepare rest-derived IK inputs; "
+                        "constraint passed through");
+                    inputsValid = false;
+                }
+            }
+
+            std::vector<RigExecPointFrame> solved;
+            if (inputsValid) {
+                solved = RigExecSolveSingleChainIk(
+                    solveChain, effector, params);
+            }
+            if (inputsValid &&
+                (solved.size() != constraint.ikChain.size() ||
+                 std::any_of(
+                     solved.begin(), solved.end(),
+                     [](const RigExecPointFrame &frame) {
+                         return !_IsUsableConstraintFrame(frame);
+                     }))) {
+                pose.diagnostics.push_back(
+                    constraint.moverPath.GetString() +
+                    " failed to solve its joint chain; constraint passed "
+                    "through atomically");
+                inputsValid = false;
+            }
+            if (inputsValid) {
+                std::map<SdfPath, RigExecPointFrame> candidates;
+                for (size_t i = 0; i < solved.size(); ++i) {
+                    candidates[constraint.ikChain[i]] = solved[i];
+                }
+                commitConstraintFrames(constraint.moverPath, candidates);
+            }
+            for (size_t i = 0; i < constraint.ikChain.size(); ++i) {
+                recordFrame(constraint.ikChain[i], constraint.moverPath);
+            }
+            continue;
+        }
+
+        std::vector<RigExecConstraintSource> sources;
+        if (!buildSources(constraint, prim, &sources)) {
+            pose.diagnostics.push_back(
+                constraint.moverPath.GetString() +
+                " has unusable constraint inputs; constraint passed through");
+            recordFrame(constraint.targets[0], constraint.moverPath);
+            continue;
+        }
+        const RigExecPointFrame inputFrame =
+            finalFrames[constraint.targets[0]];
+        RigExecPointFrame candidate = inputFrame;
+        bool candidateReady = true;
+        const RigExecConstraintAxisMask affect = _ReadConstraintAxisMask(
+            _resolvedInputs, prim, "inputs:affectX", "inputs:affectY",
+            "inputs:affectZ", time);
+        TfToken orderToken("XYZ");
+        if (const UsdAttribute a =
+                prim.GetAttribute(TfToken("rigExec:rotationOrder"))) {
+            a.Get(&orderToken);
+        }
+        const RigExecEulerOrder order =
+            _ParseConstraintEulerOrder(orderToken);
+
+        if (constraint.schemaType == "RigExecPositionConstraint") {
+            RigExecPositionConstraintParams params;
+            params.offset = _ResolvedRead(
+                _resolvedInputs, prim, "inputs:translationOffset",
+                GfVec3d(0), time);
+            params.affect = affect;
+            params.weight = weight;
+            candidate = RigExecApplyPositionConstraint(
+                inputFrame, sources, params);
+        } else if (constraint.schemaType == "RigExecRotationConstraint") {
+            RigExecRotationConstraintParams params;
+            params.offsetDegrees = _ResolvedRead(
+                _resolvedInputs, prim, "inputs:rotationOffset",
+                GfVec3d(0), time);
+            params.affect = affect;
+            params.rotationOrder = order;
+            params.weight = weight;
+            candidate = RigExecApplyRotationConstraint(
+                inputFrame, sources, params);
+        } else if (constraint.schemaType == "RigExecScaleConstraint") {
+            RigExecScaleConstraintParams params;
+            params.offset = _ResolvedRead(
+                _resolvedInputs, prim, "inputs:scaleOffset",
+                GfVec3d(0), time);
+            params.affect = affect;
+            params.weight = weight;
+            candidate = RigExecApplyScaleConstraint(
+                inputFrame, sources, params);
+        } else if (constraint.schemaType == "RigExecParentConstraint") {
+            RigExecParentConstraintParams params;
+            params.translationAxes = _ReadConstraintAxisMask(
+                _resolvedInputs, prim, "inputs:affectTranslationX",
+                "inputs:affectTranslationY",
+                "inputs:affectTranslationZ", time);
+            params.rotationAxes = _ReadConstraintAxisMask(
+                _resolvedInputs, prim, "inputs:affectRotationX",
+                "inputs:affectRotationY", "inputs:affectRotationZ", time);
+            params.scaleAxes = _ReadConstraintAxisMask(
+                _resolvedInputs, prim, "inputs:affectScaleX",
+                "inputs:affectScaleY", "inputs:affectScaleZ", time,
+                false);
+            params.rotationOrder = order;
+            params.weight = weight;
+            candidate = RigExecApplyParentConstraint(
+                inputFrame, sources, params);
+        } else {
+            // Aim uses the same weighted source set, reduced to the target
+            // point specified by FBX's AimAtObjects contract.
+            GfVec3d target(0);
+            double total = 0;
+            for (const RigExecConstraintSource &source : sources) {
+                if (!std::isfinite(source.normalizedWeight) ||
+                    source.normalizedWeight < 0) {
+                    pose.diagnostics.push_back(
+                        constraint.moverPath.GetString() +
+                        " has an invalid source weight; constraint passed "
+                        "through");
+                    candidateReady = false;
+                    break;
+                }
+                target += source.frame.Origin() * source.normalizedWeight;
+                total += source.normalizedWeight;
+            }
+            if (candidateReady && total > 0) {
+                target /= total;
+                RigExecAimConstraintParams params;
+                const UsdAttribute aimVectorAttr =
+                    prim.GetAttribute(TfToken("inputs:aimVector"));
+                params.localAimVector = _ResolvedRead(
+                    _resolvedInputs, prim, "inputs:aimVector",
+                    GfVec3d(1, 0, 0), time);
+                // Existing assets author aimAxis but predate aimVector. Keep
+                // that authored meaning until they opt into the vector form.
+                if (!aimVectorAttr ||
+                    !aimVectorAttr.HasAuthoredValueOpinion()) {
+                    TfToken axis("x");
+                    if (const UsdAttribute a = prim.GetAttribute(
+                            TfToken("rigExec:aimAxis"))) {
+                        a.Get(&axis);
+                    }
+                    params.localAimVector =
+                        axis == "y" ? GfVec3d(0, 1, 0)
+                                    : axis == "z" ? GfVec3d(0, 0, 1)
+                                                  : GfVec3d(1, 0, 0);
+                }
+                params.localUpVector = _ResolvedRead(
+                    _resolvedInputs, prim, "inputs:upVector",
+                    GfVec3d(0, 1, 0), time);
+                params.rotationOffsetDegrees = _ResolvedRead(
+                    _resolvedInputs, prim, "inputs:rotationOffset",
+                    GfVec3d(0), time);
+                params.affectRotation = affect;
+                params.rotationOrder = order;
+                params.weight = weight;
+
+                TfToken worldUpType("none");
+                if (const UsdAttribute a = prim.GetAttribute(
+                        TfToken("rigExec:worldUpType"))) {
+                    a.Get(&worldUpType);
+                }
+                SdfPathVector authoredSources;
+                if (const UsdRelationship rel = prim.GetRelationship(
+                        TfToken("rigExec:sources"))) {
+                    rel.GetTargets(&authoredSources);
+                }
+                // The legacy aimTarget/aimAxis contract preserves input up.
+                // FBX WorldUpType=None is the distinct minimum-swing mode.
+                params.preserveInputUp = authoredSources.empty();
+                const GfVec3d authoredWorldUp = _ResolvedRead(
+                    _resolvedInputs, prim, "inputs:worldUpVector",
+                    GfVec3d(0, 1, 0), time);
+                if (worldUpType == "sceneUp") {
+                    const std::string up =
+                        UsdGeomGetStageUpAxis(_stage).GetString();
+                    params.worldUpDirection =
+                        (up == "Z" || up == "z")
+                            ? GfVec3d(0, 0, 1)
+                            : GfVec3d(0, 1, 0);
+                } else if (worldUpType == "vector") {
+                    params.worldUpDirection = authoredWorldUp;
+                } else if (worldUpType == "objectUp") {
+                    // FBX ObjectUp without a reference object uses the
+                    // world origin as the object point.
+                    if (constraint.worldUpObject.sourcePath.IsEmpty()) {
+                        params.worldUpDirection = -inputFrame.Origin();
+                    } else {
+                        RigExecPointFrame upObject;
+                        if (!resolveBinding(constraint.worldUpObject,
+                                            &upObject)) {
+                            pose.diagnostics.push_back(
+                                constraint.moverPath.GetString() +
+                                " could not resolve its world-up object; "
+                                "constraint passed through");
+                            candidateReady = false;
+                        } else {
+                            params.worldUpDirection =
+                                upObject.Origin() - inputFrame.Origin();
+                        }
+                    }
+                } else if (worldUpType == "objectRotationUp") {
+                    // With no object, FBX applies WorldUpVector directly in
+                    // world space rather than treating a missing binding as
+                    // a failed constraint.
+                    if (constraint.worldUpObject.sourcePath.IsEmpty()) {
+                        params.worldUpDirection = authoredWorldUp;
+                    } else {
+                        RigExecPointFrame upObject;
+                        if (!resolveBinding(constraint.worldUpObject,
+                                            &upObject)) {
+                            pose.diagnostics.push_back(
+                                constraint.moverPath.GetString() +
+                                " could not resolve its world-up object; "
+                                "constraint passed through");
+                            candidateReady = false;
+                        }
+                        if (candidateReady) {
+                            GfMatrix4d upMatrix(1.0);
+                            if (!RigExecPointsToMatrix(
+                                    RigExecIdentityLandmarks(),
+                                    upObject.points, &upMatrix)) {
+                                pose.diagnostics.push_back(
+                                    constraint.moverPath.GetString() +
+                                    " has a degenerate world-up object");
+                                candidateReady = false;
+                            } else {
+                                params.worldUpDirection =
+                                    upMatrix.ExtractRotation().TransformDir(
+                                        authoredWorldUp);
+                            }
+                        }
+                    }
+                }
+                if (candidateReady) {
+                    candidate = RigExecApplyAimConstraint(
+                        inputFrame, target, params);
+                }
+            }
+        }
+        if (candidateReady) {
+            commitConstraintFrames(
+                constraint.moverPath,
+                {{constraint.targets[0], candidate}});
+        }
+        recordFrame(constraint.targets[0], constraint.moverPath);
+    }
+
+    // Publish final provider matrices after the atomic pose walk.
+    for (const auto &[provider, frame] : finalFrames) {
+        if (_xformDerivedProviders.count(provider)) {
+            if (!_IsUsableConstraintFrame(frame)) {
+                pose.diagnostics.push_back(
+                    "constraint target " + provider.GetString() +
+                    " has an invalid final frame; transform omitted");
                 continue;
             }
-            if (!aimTarget.IsValid()) {
-                continue;  // an unresolvable aim leaves the frame unrevised
-            }
-            const float weight = _ResolvedRead(
-                _resolvedInputs, moverPrim, "inputs:weight", 1.0f, time);
-            TfToken aimAxis("x");
-            if (const UsdAttribute a =
-                    moverPrim.GetAttribute(TfToken("rigExec:aimAxis"))) {
-                a.Get(&aimAxis);
-            }
-            const int aimIdx =
-                static_cast<int>(RigExecParseAxis(aimAxis, RigExecAxis::X)) + 1;
-            frame = RigExecApplyAimConstraint(
-                frame, aimTarget.Origin(), weight, aimIdx);
-            recordFrame(revision.moverPath, frame);
-        }
-        finalFrames[provider] = frame;
-
-        // An xform-derived provider publishes its revised transform back onto
-        // the prim, so geometry parented underneath rides along -- one matrix,
-        // no point deformation. Base and revision are published together;
-        // consumers downstream of Hydra's flatten need both to build the
-        // world-space delta (see RigExecRigPose::providerBaseXforms).
-        if (xformDerived && xformDerivedValid) {
             GfMatrix4d revised(1.0);
-            const std::array<GfVec3d, 4> &identity =
-                RigExecIdentityLandmarks();
-            if (RigExecPointsToMatrix(identity, frame.points, &revised)) {
+            if (RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                      frame.points, &revised)) {
                 pose.providerXforms[provider] = revised;
-                pose.providerBaseXforms[provider] = xformDerivedBase;
+                pose.providerBaseXforms[provider] =
+                    xformDerivedBases[provider];
             }
         }
-
-        // The paired matrix is the provider's rest->final map, exactly as
-        // _EvaluateFrameApplicationMatrix computed it.
-        if (restFrame.IsValid() && frame.IsValid()) {
-            GfMatrix4d m(1.0);
-            if (RigExecPointsToMatrix(restFrame.points, frame.points, &m)) {
-                finalMatrices[provider] = m;
-                _chainSnapshots.RecordFinal(provider, VtValue(m));
+        const auto rest = restFrames.find(provider);
+        if (rest != restFrames.end() &&
+            _IsUsableConstraintFrame(rest->second) &&
+            _IsUsableConstraintFrame(frame)) {
+            GfMatrix4d matrix(1.0);
+            if (RigExecPointsToMatrix(rest->second.points, frame.points,
+                                      &matrix)) {
+                finalMatrices[provider] = matrix;
+                _chainSnapshots.RecordFinal(provider, VtValue(matrix));
             }
         }
     }
@@ -4291,7 +5376,21 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         // missing jointMatricesFinal entry. The degenerate frame is still
         // published so imaging can omit its guide.
         if (finalFrame.IsValid() && !finalFrame.IsDegenerate()) {
-            const auto revisedMatrix = finalMatrices.find(_jointPaths[i]);
+            auto revisedMatrix = finalMatrices.find(_jointPaths[i]);
+            if (revisedMatrix == finalMatrices.end()) {
+                // Untargeted descendants carried by a constrained ancestor do
+                // not have a dedicated rest-frame tap. Compose their
+                // base->revised delta onto the authoritative pre-constraint
+                // rest->base matrix from the snapshot.
+                GfMatrix4d delta(1.0);
+                if (RigExecPointsToMatrix(
+                        baseFrame.points, finalFrame.points, &delta)) {
+                    finalMatrices[_jointPaths[i]] =
+                        snapshot.Get<GfMatrix4d>(
+                            _jointFinalMatrixTaps[i]) * delta;
+                    revisedMatrix = finalMatrices.find(_jointPaths[i]);
+                }
+            }
             pose.jointMatricesFinal[_jointPaths[i]] =
                 revisedMatrix != finalMatrices.end()
                     ? revisedMatrix->second
@@ -4302,13 +5401,17 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 " has a degenerate final frame; matrix omitted");
         }
     }
-    // 3a. Control frames, straight from the base taps. A degenerate or
-    // invalid frame is published as it stands, exactly like a joint's: the
-    // imaging bridge is what decides a guide cannot be drawn from it, and it
-    // already makes that judgement for every joint frame it sees.
+    // 3a. Control frames. Most are animator-authored inputs and therefore
+    // publish their base tap directly; a control explicitly named as a
+    // constraint write target publishes the revised frame, matching FBX's
+    // ability to constrain any transform object. A degenerate/invalid frame
+    // remains the status bearer and lets imaging omit the guide.
     for (size_t i = 0; i < _controlPaths.size(); ++i) {
+        const auto revised = finalFrames.find(_controlPaths[i]);
         pose.controlFrames[_controlPaths[i]] =
-            snapshot.Get<RigExecPointFrame>(_controlFrameTaps[i]);
+            revised != finalFrames.end()
+                ? revised->second
+                : snapshot.Get<RigExecPointFrame>(_controlFrameTaps[i]);
     }
 
     // Observational solver guides never gate the rig snapshot: an
