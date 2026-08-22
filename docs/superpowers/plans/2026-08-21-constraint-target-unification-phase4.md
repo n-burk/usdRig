@@ -29,7 +29,7 @@
 **Interfaces:**
 - Produces: `_FrameConstraint::pointsTarget` (empty for a transform-domain constraint) and `_FrameConstraint::weightObject`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/testRigExecConstraints.cpp` before `TestInvalidContractsFailClosed`:
 
@@ -69,7 +69,7 @@ TestGeometryDomainTargetCompiles()
 
 Register it in `main()` after `TestMeshAndXformTargetsAgree();`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 cmake --build build 2>&1 | grep -E "error" | head -3
@@ -79,7 +79,7 @@ PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages \
 
 Expected: FAIL on `CHECK(evaluator.Compile(&errors))` with the phase-1 message *"geometry-domain constraint targets are not supported yet"*.
 
-- [ ] **Step 3: Carry the domain on the constraint record**
+- [x] **Step 3: Carry the domain on the constraint record**
 
 In `libs/rigExec/rigEvaluator.h`, add to `_FrameConstraint`:
 
@@ -93,7 +93,7 @@ In `libs/rigExec/rigEvaluator.h`, add to `_FrameConstraint`:
         SdfPath weightObject;
 ```
 
-- [ ] **Step 4: Replace the deferral with a binding**
+- [x] **Step 4: Replace the deferral with a binding**
 
 In `libs/rigExec/rigEvaluator.cpp`, in the source-frame gate, replace the `geometry-domain constraint targets are not supported yet` error block with an acceptance that keeps the prim path as the frame key:
 
@@ -156,7 +156,7 @@ Then, where `_FrameConstraint` is built (`constraint.targets = mover.targets;`),
             }
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 ```bash
 cmake --build build 2>&1 | grep -E "error" | head -3
@@ -166,7 +166,7 @@ PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages \
 
 Expected: the compile assertion passes. The `movedProperties` assertion still FAILS — nothing publishes points yet. That is Task 2.
 
-- [ ] **Step 6: Commit the binding only**
+- [x] **Step 6: Commit the binding only**
 
 Comment out the two publish assertions with a `// Task 2:` marker so the suite is green, then:
 
@@ -187,7 +187,7 @@ git commit -m "rigExec: a .points constraint target binds to the geometry domain
 - Consumes: `_FrameConstraint::pointsTarget`, `::weightObject`.
 - Produces: entries in `pose.movedProperties` keyed by the points property.
 
-- [ ] **Step 1: Solve at weight 1 for the geometry domain**
+- [x] **Step 1: Solve at weight 1 for the geometry domain**
 
 In the constraint solve loop, the envelope must not reach the kernel for a geometry-domain constraint. Where `solveContext.weight` is set:
 
@@ -202,7 +202,7 @@ In the constraint solve loop, the envelope must not reach the kernel for a geome
 
 Apply the same substitution to the inline Aim branch's `params.weight`.
 
-- [ ] **Step 2: Stash the delta**
+- [x] **Step 2: Stash the delta**
 
 Declare next to `finalMatrices` (`:4863`):
 
@@ -230,7 +230,7 @@ After `commitConstraintFrames` for a geometry-domain constraint, compute and sto
                 }
 ```
 
-- [ ] **Step 3: Apply it per point**
+- [x] **Step 3: Apply it per point**
 
 After the geometry chains run, for each entry in `constraintDeltas`, read the target's current points, apply the weighted matrix, and write `pose.movedProperties`:
 
@@ -270,7 +270,7 @@ After the geometry chains run, for each entry in `constraintDeltas`, read the ta
 
 `envelopeFor` is a `std::map<SdfPath, double>` filled alongside `constraintDeltas` with the constraint's `inputs:defaultWeight`.
 
-- [ ] **Step 4: Restore the assertions and run**
+- [x] **Step 4: Restore the assertions and run**
 
 Un-comment the Task 1 publish assertions.
 
@@ -282,7 +282,7 @@ PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages \
 
 Expected: `100% tests passed, 0 tests failed out of 12`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add libs/rigExec/rigEvaluator.cpp tests/testRigExecConstraints.cpp
@@ -296,7 +296,7 @@ git commit -m "rigExec: a geometry-domain constraint bakes its delta per point"
 **Files:**
 - Test: `tests/testRigExecConstraints.cpp`
 
-- [ ] **Step 1: Write the invariant test**
+- [x] **Step 1: Write the invariant test**
 
 ```cpp
 // The design's defining property: the spelling picks WHERE the answer lands,
@@ -367,7 +367,7 @@ TestTransformAndGeometrySpellingsAgree()
 
 Register it in `main()`.
 
-- [ ] **Step 2: Run**
+- [x] **Step 2: Run**
 
 ```bash
 PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages \
@@ -376,7 +376,7 @@ PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages \
 
 Expected: PASS at both envelopes. A failure at 0.5 with a pass at 1.0 means the envelope is applied twice — recheck Task 2 Step 1.
 
-- [ ] **Step 3: Verify the deferred example now works**
+- [x] **Step 3: Verify the deferred example now works**
 
 ```bash
 export PXR_PLUGINPATH_NAME="$PWD/build/usd/rigExecSchema/resources:$PWD/build/usd/rigExecImaging/resources:$PWD/plugin/rigExecUsdview"
@@ -385,7 +385,7 @@ export PXR_PLUGINPATH_NAME="$PWD/build/usd/rigExecSchema/resources:$PWD/build/us
 
 Expected: `compile: ok`, and a moved-properties count of 1.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/testRigExecConstraints.cpp
@@ -399,15 +399,15 @@ git commit -m "rigExec: the two target spellings agree, weighted and unweighted"
 **Files:**
 - Modify: `libs/rigExec/rigEvaluator.cpp:5736-5800` (oracle), `:1557-1559` and `:1615` (writer keying)
 
-- [ ] **Step 1: Mirror the delta in the CPU oracle**
+- [x] **Step 1: Mirror the delta in the CPU oracle**
 
 The oracle re-derives every points chain independently. Add the constraint delta to its derivation so a geometry-domain constraint is checked rather than skipped — the same `RigExecApplyWeightedMatrix` over the same `constraintDeltas` entry, computed from the oracle's own frame values.
 
-- [ ] **Step 2: Key competing writers by prim**
+- [x] **Step 2: Key competing writers by prim**
 
 `byTarget` currently keys on the raw path, so `/M` and `/M.points` never meet. Key on `t.GetPrimPath()` instead so a constraint on `/M` and a deformer on `/M.points` are ordered rather than invisible to each other. Carry the authored path per writer for the diagnostic text.
 
-- [ ] **Step 3: Test both**
+- [x] **Step 3: Test both**
 
 ```cpp
 // A transform-domain constraint on /M and a deformer on /M.points are both
@@ -416,7 +416,7 @@ The oracle re-derives every points chain independently. Add the constraint delta
 
 Assert the pair produces an ordering diagnostic rather than compiling silently, and that the parity oracle agrees on a geometry-domain constraint (no "mover graph parity" mismatch in `pose.diagnostics`).
 
-- [ ] **Step 4: Full suite plus the example baseline**
+- [x] **Step 4: Full suite plus the example baseline**
 
 ```bash
 PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages \
@@ -425,7 +425,7 @@ PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages \
 
 Compare all 19 examples against the captured baseline; only `aimtest_points.usda` may differ.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ---
 

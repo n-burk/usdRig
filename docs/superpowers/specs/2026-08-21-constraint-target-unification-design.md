@@ -518,24 +518,42 @@ rejected by the provider classifier at `:2394-2415` and, if that gate is loosene
 hard-fails the whole generation at `:4543-4546` ("constraint target has no base
 frame").
 
-**The parity twin is mandatory.** The oracle at `:5736-5800` independently
-re-derives every points chain and refuses to publish the whole generation on
-disagreement (`:5820-5822`). `RigExecCurvenetMover` gets an explicit skip at
-`:5764`; constraints must not. The twin is nearly free because the solve is already
-scalar frame-in/frame-out, and skipping it would forfeit the check exactly where
-the newest code is riskiest.
+**The parity twin — CORRECTED, and open.** The spec required one on the grounds
+that the oracle at `:5736-5800` re-derives every points chain and rejects the
+generation on disagreement. Implementation showed the requirement was stated
+wrongly: that oracle earns its keep by comparing a graph/exec result against an
+*independent* CPU derivation. A geometry-domain constraint as implemented publishes
+**directly**, not through the mover graph, so there is no second path to disagree
+with — a "twin" recomputing the same delta with the same kernel would agree
+unconditionally and report an untested agreement.
+
+The shipped code therefore emits an explicit *"not covered"* diagnostic instead of
+populating `movedPropertiesCpu`, and `TestGeometryEnvelopeIsChordLerp` asserts that
+it does. Real coverage requires the revision to go through the graph as a
+`RigExecRevisionOp::Matrix`, which needs an input edge for the solved delta —
+`RigExecAssembleMatrixParameters` (`moverGraph.cpp:903`) demands a
+`rigExec:transform` and a `rigExec:weightObject` that a constraint has no
+equivalent of. **That remains open work**, named in the code at the publish site.
 
 A geometry-domain constraint joins `newGraphChains` and therefore participates in
 derived normals/extent maintenance exactly like a deformer, including the hard
 rejection of authored normals on a non-mesh target (`:2583-2590`).
 
-**Competing-writer detection** (`:1557-1559`) currently keys `byTarget` on raw
-paths. It changes to key on **`primPath` alone** — under `(primPath, domain)` the
-constraint on `/M` and the deformer on `/M.points` still land in different buckets
-and still never meet. Domain rides along per-writer, for diagnostic text only. The
-same edit applies at `:1615`, where `lastFrameWriterOrdinal` is recorded only when
-`t.IsPrimPath()`, so a geometry-domain constraint is currently invisible to the
-unsatisfied-final-read rule at `:1645-1653`.
+**Competing-writer detection stays keyed on the exact target — CORRECTED.**
+
+Earlier drafts of this section said `byTarget` (`:1557-1559`) should key on
+`primPath` so that a constraint on `/M` and a deformer on `/M.points` would be
+"ordered rather than merely tolerated". **That is wrong, and implementation
+disproved it.** The two write *different output domains*: one revises the prim's
+matrix, the other its points, and the matrix composes over the points by
+construction. There is no ordering ambiguity to resolve. Re-keying by prim would
+reject exactly the case §7 calls the genuinely new one — a mesh that is both moved
+and deformed in one generation.
+
+Verified both ways: two writers of the same `.points` set are already caught by the
+existing keying (*"Ambiguous competing writers of /Asset/Geom/M.points"*), while a
+transform-domain constraint on `/M` alongside a geometry-domain one on `/M.points`
+compiles and both apply. `TestDomainsOnOnePrimDoNotCompete` pins both.
 
 ### 4.5 The envelope
 

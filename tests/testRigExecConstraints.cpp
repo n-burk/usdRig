@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace rigExec;
@@ -1218,6 +1219,73 @@ TestGeometryEnvelopeIsChordLerp()
                       }));
 }
 
+// Competing writers are keyed by the exact target, and that is correct.
+//
+// Two writers of the SAME points set are ambiguous and rejected. But a
+// transform-domain constraint on /M and a geometry-domain one on /M.points
+// are NOT competing: they write different output domains, and the prim's
+// matrix composes over its points by construction. Keying them together --
+// which an earlier draft of this design proposed -- would reject the very
+// case of a mesh that is both moved and deformed.
+static void
+TestDomainsOnOnePrimDoNotCompete()
+{
+    const auto build = [](const char *firstTarget, const char *secondTarget) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+        const UsdPrim mesh =
+            stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+        mesh.CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray)
+            .Set(VtVec3fArray{{1, 0, 0}, {0, 2, 0}, {0, 0, 3}});
+        MakeXform(stage, SdfPath("/Asset/Source"),
+                  Matrix(GfVec3d(0, 0, 0),
+                         GfRotation(GfVec3d(0, 1, 0), 90.0)));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        for (const auto &entry : {std::make_pair("A", firstTarget),
+                                  std::make_pair("B", secondTarget)}) {
+            const UsdPrim c = MakeConstraint(
+                stage, entry.first, "RigExecRotationConstraint",
+                {SdfPath(entry.second)});
+            c.CreateRelationship(TfToken("rigExec:sources"))
+                .SetTargets({SdfPath("/Asset/Source")});
+        }
+        return stage;
+    };
+
+    // Same points set twice: ambiguous.
+    {
+        const UsdStageRefPtr stage =
+            build("/Asset/Geom/M.points", "/Asset/Geom/M.points");
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        CHECK(std::any_of(errors.begin(), errors.end(),
+                          [](const std::string &error) {
+                              return error.find("competing writers") !=
+                                     std::string::npos;
+                          }));
+    }
+
+    // Different domains on one prim: legal, and both apply.
+    {
+        const UsdStageRefPtr stage =
+            build("/Asset/Geom/M", "/Asset/Geom/M.points");
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        CHECK(pose.providerXforms.count(SdfPath("/Asset/Geom/M")) == 1);
+        CHECK(pose.movedProperties.count(
+                  SdfPath("/Asset/Geom/M").AppendProperty(
+                      TfToken("points"))) == 1);
+    }
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -1307,6 +1375,7 @@ main()
     TestGeometryDomainTargetCompiles();
     TestTransformAndGeometrySpellingsAgree();
     TestGeometryEnvelopeIsChordLerp();
+    TestDomainsOnOnePrimDoNotCompete();
     TestConstraintRegistryCoversTheSchema();
     TestRotationOrderCapabilityIsRecorded();
     TestLegacyWeightSpellingIsRejected();
