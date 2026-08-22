@@ -854,10 +854,10 @@ TestConstraintRegistryCoversTheSchema()
     CHECK(RigExecConstraintHandlerTotal() == 7);
 }
 
-// Phase 2 records which operators honor rigExec:rotationOrder; it does not
-// yet reject the others. This pins the current behavior so that phase 3's
-// change -- making it a compile error on Position and Scale -- shows up as a
-// deliberate edit to this test rather than as silent drift.
+// No authored constraint property is silently ignored. rigExec:rotationOrder
+// on a Position constraint used to compile and do nothing; it is now
+// rejected, and so is any mask or offset naming a channel group the operator
+// does not write.
 static void
 TestRotationOrderCapabilityIsRecorded()
 {
@@ -872,24 +872,100 @@ TestRotationOrderCapabilityIsRecorded()
         TfToken("RigExecScaleConstraint")));
     CHECK(!RigExecConstraintUsesRotationOrder(TfToken("RigExecSmoothMover")));
 
-    // Phase 2 is behavior-neutral: authoring it where it is ignored still
-    // compiles. Phase 3 turns this CHECK around.
-    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
-    MakeXform(stage, SdfPath("/Asset"), Matrix());
-    MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
-    MakeXform(stage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
-    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
-    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
-    const UsdPrim position = MakeConstraint(
-        stage, "Pos", "RigExecPositionConstraint", {SdfPath("/Asset/Target")});
-    position.CreateRelationship(TfToken("rigExec:sources"))
-        .SetTargets({SdfPath("/Asset/Source")});
-    position.CreateAttribute(TfToken("rigExec:rotationOrder"),
-                             SdfValueTypeNames->Token, /*custom=*/false)
-        .Set(TfToken("ZYX"));
-    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-    std::vector<std::string> errors;
-    CHECK(evaluator.Compile(&errors));
+    // Every authored channel property is checked against what the operator
+    // actually honors. Each case names the property, the constraint type it
+    // is authored on, and the substring the diagnostic must carry.
+    enum class Kind { Token, Vector, Flag };
+    struct RejectionCase {
+        const char *type;
+        const char *property;
+        Kind kind;
+        const char *expect;
+    };
+    const RejectionCase cases[] = {
+        // Position writes translation: a rotation order and a rotation or
+        // scale mask are all meaningless on it.
+        {"RigExecPositionConstraint", "rigExec:rotationOrder", Kind::Token,
+         "does not honor"},
+        {"RigExecPositionConstraint", "inputs:affectRotationX", Kind::Flag,
+         "different channel group"},
+        {"RigExecPositionConstraint", "inputs:scaleOffset", Kind::Vector,
+         "different channel group"},
+        // Scale writes scale.
+        {"RigExecScaleConstraint", "rigExec:rotationOrder", Kind::Token,
+         "does not honor"},
+        {"RigExecScaleConstraint", "inputs:translationOffset", Kind::Vector,
+         "different channel group"},
+        // Parent composes PER-SOURCE offset arrays, so the inherited scalar
+        // offsets would be silently dropped on it.
+        {"RigExecParentConstraint", "inputs:translationOffset", Kind::Vector,
+         "per-source offset arrays"},
+        // The legacy spelling that meant a different channel per operator.
+        {"RigExecRotationConstraint", "inputs:affectX", Kind::Flag,
+         "different channel on every operator"},
+    };
+    for (const RejectionCase &entry : cases) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim constraint = MakeConstraint(
+            stage, "C", entry.type, {SdfPath("/Asset/Target")});
+        constraint.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/Source")});
+        switch (entry.kind) {
+        case Kind::Token:
+            constraint
+                .CreateAttribute(TfToken(entry.property),
+                                 SdfValueTypeNames->Token, /*custom=*/true)
+                .Set(TfToken("ZYX"));
+            break;
+        case Kind::Vector:
+            constraint
+                .CreateAttribute(TfToken(entry.property),
+                                 SdfValueTypeNames->Double3, /*custom=*/true)
+                .Set(GfVec3d(0, 0, 0));
+            break;
+        case Kind::Flag:
+            constraint
+                .CreateAttribute(TfToken(entry.property),
+                                 SdfValueTypeNames->Bool, /*custom=*/true)
+                .Set(false);
+            break;
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        const std::string expect = entry.expect;
+        CHECK(std::any_of(errors.begin(), errors.end(),
+                          [&expect](const std::string &error) {
+                              return error.find(expect) != std::string::npos;
+                          }));
+    }
+
+    // And the honored ones still compile: Rotation reads a rotation order and
+    // a rotation mask, Parent reads all three mask groups.
+    for (const char *type :
+         {"RigExecRotationConstraint", "RigExecParentConstraint"}) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim constraint =
+            MakeConstraint(stage, "C", type, {SdfPath("/Asset/Target")});
+        constraint.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/Source")});
+        constraint.GetAttribute(TfToken("rigExec:rotationOrder"))
+            .Set(TfToken("ZYX"));
+        constraint.GetAttribute(TfToken("inputs:affectRotationX")).Set(false);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+    }
 }
 
 // inputs:weight became inputs:defaultWeight. The old name is no longer part

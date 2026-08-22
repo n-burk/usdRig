@@ -158,6 +158,10 @@ struct _ConstraintHandler {
     bool usesRotationOrder;
     bool dispatchesInline;
     _ChannelGroup maskGroup;
+    /// Which scalar offset the operator honors. Parent is None: it composes
+    /// PER-SOURCE offset ARRAYS instead, so the inherited scalar offsets
+    /// would be silently ignored on it.
+    _ChannelGroup offsetGroup;
     _ConstraintSolveFn solve;
 };
 
@@ -166,19 +170,23 @@ _ConstraintHandlers()
 {
     static const std::vector<_ConstraintHandler> handlers = {
         {"RigExecAimConstraint", true, true, true, true,
-         _ChannelGroup::Rotation, nullptr},
+         _ChannelGroup::Rotation, _ChannelGroup::Rotation, nullptr},
         {"RigExecPositionConstraint", true, true, false, false,
-         _ChannelGroup::Translation, _SolvePositionConstraint},
+         _ChannelGroup::Translation, _ChannelGroup::Translation,
+         _SolvePositionConstraint},
         {"RigExecRotationConstraint", true, true, true, false,
-         _ChannelGroup::Rotation, _SolveRotationConstraint},
+         _ChannelGroup::Rotation, _ChannelGroup::Rotation,
+         _SolveRotationConstraint},
         {"RigExecScaleConstraint", true, true, false, false,
-         _ChannelGroup::Scale, _SolveScaleConstraint},
+         _ChannelGroup::Scale, _ChannelGroup::Scale,
+         _SolveScaleConstraint},
         {"RigExecParentConstraint", true, true, true, false,
-         _ChannelGroup::All, _SolveParentConstraint},
+         _ChannelGroup::All, _ChannelGroup::None,
+         _SolveParentConstraint},
         {"RigExecSingleChainIkConstraint", false, true, false, true,
-         _ChannelGroup::None, nullptr},
+         _ChannelGroup::None, _ChannelGroup::None, nullptr},
         {"RigExecCustomConstraint", false, false, false, false,
-         _ChannelGroup::None, nullptr},
+         _ChannelGroup::None, _ChannelGroup::None, nullptr},
     };
     return handlers;
 }
@@ -1690,23 +1698,95 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             const _ConstraintHandler *orderHandler =
                 _FindConstraintHandler(record.schemaType);
 
-            // inputs:weight became inputs:defaultWeight when the envelope
-            // and the per-element weight field collapsed into one concept.
-            // The old name is no longer part of the schema, so an authored
-            // opinion would compose as a custom property and be ignored --
-            // exactly the silent no-op this family is being cleaned of.
+            // No authored constraint property is ever silently ignored. The
+            // family's recurring defect was the opposite: rigExec:rotationOrder
+            // on a Position constraint compiled and did nothing, and
+            // inputs:affectX meant a different channel on each operator. Every
+            // channel property is now checked against what the operator
+            // actually honors.
             if (orderHandler) {
-                if (const UsdAttribute legacy =
-                        prim.GetAttribute(TfToken("inputs:weight"))) {
-                    if (legacy.HasAuthoredValue()) {
+                const std::string who = record.schemaType.GetString() + " " +
+                                        prim.GetPath().GetString();
+                const auto authored = [&prim](const char *name) {
+                    const UsdAttribute a = prim.GetAttribute(TfToken(name));
+                    return a && a.HasAuthoredValue();
+                };
+
+                // Renamed when the envelope and the per-element weight field
+                // collapsed into one concept. The old name is no longer part
+                // of the schema, so an authored opinion would compose as a
+                // custom property and be ignored.
+                if (authored("inputs:weight")) {
+                    reportError(who +
+                                " authors inputs:weight, which a constraint no"
+                                " longer has; the envelope is now"
+                                " inputs:defaultWeight");
+                    return false;
+                }
+
+                // Replaced by the group-qualified spelling, because it named
+                // a different channel on every operator that had it.
+                for (const char *legacyMask :
+                     {"inputs:affectX", "inputs:affectY", "inputs:affectZ"}) {
+                    if (authored(legacyMask)) {
                         reportError(
-                            record.schemaType.GetString() + " " +
-                            prim.GetPath().GetString() +
-                            " authors inputs:weight, which a constraint no "
-                            "longer has; the envelope is now "
-                            "inputs:defaultWeight");
+                            who + " authors " + legacyMask +
+                            ", which named a different channel on every"
+                            " operator; use the group-qualified spelling"
+                            " (inputs:affectTranslation*, affectRotation* or"
+                            " affectScale*)");
                         return false;
                     }
+                }
+
+                struct _ChannelProperty {
+                    const char *name;
+                    _ChannelGroup group;
+                    bool isMask;
+                };
+                static const _ChannelProperty kChannelProperties[] = {
+                    {"inputs:affectTranslationX", _ChannelGroup::Translation, true},
+                    {"inputs:affectTranslationY", _ChannelGroup::Translation, true},
+                    {"inputs:affectTranslationZ", _ChannelGroup::Translation, true},
+                    {"inputs:affectRotationX", _ChannelGroup::Rotation, true},
+                    {"inputs:affectRotationY", _ChannelGroup::Rotation, true},
+                    {"inputs:affectRotationZ", _ChannelGroup::Rotation, true},
+                    {"inputs:affectScaleX", _ChannelGroup::Scale, true},
+                    {"inputs:affectScaleY", _ChannelGroup::Scale, true},
+                    {"inputs:affectScaleZ", _ChannelGroup::Scale, true},
+                    {"inputs:translationOffset", _ChannelGroup::Translation, false},
+                    {"inputs:rotationOffset", _ChannelGroup::Rotation, false},
+                    {"inputs:scaleOffset", _ChannelGroup::Scale, false},
+                };
+                for (const _ChannelProperty &channel : kChannelProperties) {
+                    if (!authored(channel.name)) {
+                        continue;
+                    }
+                    const _ChannelGroup honored = channel.isMask
+                        ? orderHandler->maskGroup
+                        : orderHandler->offsetGroup;
+                    if (honored == channel.group ||
+                        (channel.isMask && honored == _ChannelGroup::All)) {
+                        continue;
+                    }
+                    reportError(
+                        who + " authors " + channel.name + ", which it does "
+                        "not honor; the operator writes a different channel "
+                        "group" +
+                        (orderHandler->offsetGroup == _ChannelGroup::None &&
+                         !channel.isMask
+                             ? " and composes per-source offset arrays instead"
+                             : ""));
+                    return false;
+                }
+
+                if (authored("rigExec:rotationOrder") &&
+                    !orderHandler->usesRotationOrder) {
+                    reportError(who +
+                                " authors rigExec:rotationOrder, which it does"
+                                " not honor; only the operators that compose a"
+                                " rotation read it");
+                    return false;
                 }
             }
             if (orderHandler && orderHandler->usesRotationOrder) {
