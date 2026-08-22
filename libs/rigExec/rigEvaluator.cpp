@@ -1399,13 +1399,19 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                         "prim targets");
                     return false;
                 }
-            } else if (record.schemaType == "RigExecCustomConstraint") {
-                // FBX Custom has no standardized evaluation semantics. A
-                // carrier prim is legal, but attaching a write set without a
-                // registered handler would otherwise compile and silently do
-                // nothing -- the most dangerous possible behavior.
+            } else if (const _ConstraintHandler *unevaluated =
+                           _FindConstraintHandler(record.schemaType);
+                       unevaluated && !unevaluated->solve &&
+                       !unevaluated->dispatchesInline) {
+                // A registered operator with neither a solve nor an inline
+                // branch has no evaluator at all. FBX Custom is the case:
+                // a carrier prim is legal, but attaching a write set to one
+                // would otherwise compile and silently do nothing -- the most
+                // dangerous possible behavior. Reading this off the table
+                // rather than the type name means a future operator cannot be
+                // registered without an evaluator and quietly pass.
                 reportError(
-                    "RigExecCustomConstraint " +
+                    record.schemaType.GetString() + " " +
                     prim.GetPath().GetString() +
                     " has rigExec:moves but no registered evaluator");
                 return false;
