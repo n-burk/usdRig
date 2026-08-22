@@ -854,6 +854,44 @@ TestConstraintRegistryCoversTheSchema()
     CHECK(RigExecConstraintHandlerTotal() == 7);
 }
 
+// Phase 2 records which operators honor rigExec:rotationOrder; it does not
+// yet reject the others. This pins the current behavior so that phase 3's
+// change -- making it a compile error on Position and Scale -- shows up as a
+// deliberate edit to this test rather than as silent drift.
+static void
+TestRotationOrderCapabilityIsRecorded()
+{
+    CHECK(RigExecConstraintUsesRotationOrder(
+        TfToken("RigExecRotationConstraint")));
+    CHECK(RigExecConstraintUsesRotationOrder(TfToken("RigExecAimConstraint")));
+    CHECK(RigExecConstraintUsesRotationOrder(
+        TfToken("RigExecParentConstraint")));
+    CHECK(!RigExecConstraintUsesRotationOrder(
+        TfToken("RigExecPositionConstraint")));
+    CHECK(!RigExecConstraintUsesRotationOrder(
+        TfToken("RigExecScaleConstraint")));
+    CHECK(!RigExecConstraintUsesRotationOrder(TfToken("RigExecSmoothMover")));
+
+    // Phase 2 is behavior-neutral: authoring it where it is ignored still
+    // compiles. Phase 3 turns this CHECK around.
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim position = MakeConstraint(
+        stage, "Pos", "RigExecPositionConstraint", {SdfPath("/Asset/Target")});
+    position.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+    position.CreateAttribute(TfToken("rigExec:rotationOrder"),
+                             SdfValueTypeNames->Token, /*custom=*/false)
+        .Set(TfToken("ZYX"));
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -941,6 +979,7 @@ main()
     TestPointDomainMoverNamesTheFix();
     TestMeshAndXformTargetsAgree();
     TestConstraintRegistryCoversTheSchema();
+    TestRotationOrderCapabilityIsRecorded();
     TestInvalidContractsFailClosed();
 
     if (failures) {

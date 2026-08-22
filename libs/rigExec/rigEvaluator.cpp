@@ -1639,15 +1639,18 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 "rigExec:mode", "rigExec:operation",
                 "rigExec:transformReadPhase", "rigExec:cageReadPhase",
                 "rigExec:surfaceReadPhase"};
+            // Which operators carry a rotation order is a table column, not
+            // a list of type names repeated at each site that asks.
+            const _ConstraintHandler *orderHandler =
+                _FindConstraintHandler(record.schemaType);
+            if (orderHandler && orderHandler->usesRotationOrder) {
+                structuralTokens.push_back("rigExec:rotationOrder");
+            }
             if (record.schemaType == "RigExecAimConstraint") {
                 structuralTokens.insert(
                     structuralTokens.end(),
-                    {"rigExec:rotationOrder", "rigExec:worldUpType",
+                    {"rigExec:worldUpType",
                      "rigExec:aimAxis", "rigExec:upPolicy"});
-            } else if (record.schemaType ==
-                           "RigExecRotationConstraint" ||
-                       record.schemaType == "RigExecParentConstraint") {
-                structuralTokens.push_back("rigExec:rotationOrder");
             } else if (record.schemaType ==
                        "RigExecSingleChainIkConstraint") {
                 structuralTokens.insert(
@@ -1684,9 +1687,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             };
             static const std::initializer_list<const char *> eulerOrders = {
                 "XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"};
-            if ((record.schemaType == "RigExecAimConstraint" ||
-                 record.schemaType == "RigExecRotationConstraint" ||
-                 record.schemaType == "RigExecParentConstraint") &&
+            if (orderHandler && orderHandler->usesRotationOrder &&
                 !validateToken("rigExec:rotationOrder", eulerOrders)) {
                 return false;
             }
