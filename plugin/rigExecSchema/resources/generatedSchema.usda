@@ -742,15 +742,59 @@ class "RigExecConstraint" (
     }
 )
 {
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
         customData = {
             string userDocBrief = """The constraint's envelope: the normalized blend from the
         incoming pose to the constrained pose, in [0, 1]."""
         }
     )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
+        }
+    )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
+        }
+    )
     uniform bool rigExec:locked = 0 (
         customData = {
             string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:weightObject (
@@ -768,10 +812,43 @@ class "RigExecSourceConstraint" (
     }
 )
 {
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
         customData = {
             string userDocBrief = """The constraint's envelope: the normalized blend from the
         incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
         }
     )
     float[] inputs:sourceWeights = [] (
@@ -779,9 +856,20 @@ class "RigExecSourceConstraint" (
             string userDocBrief = "Per-source weights parallel to rigExec:sources."
         }
     )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
+        }
+    )
     uniform bool rigExec:locked = 0 (
         customData = {
             string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -803,9 +891,27 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     }
 )
 {
-    bool inputs:affectX = 1
-    bool inputs:affectY = 1
-    bool inputs:affectZ = 1
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     double3 inputs:aimVector = (1, 0, 0) (
         customData = {
             string userDocBrief = "Local-space vector that points toward the constrained aim direction."
@@ -819,12 +925,24 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     )
     double3 inputs:rotationOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = "Euler rotation offset in degrees."
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
         }
     )
     float[] inputs:sourceWeights = [] (
         customData = {
             string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
         }
     )
     double3 inputs:upVector = (0, 1, 0) (
@@ -860,6 +978,9 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     )
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
+        }
     )
     rel rigExec:sources (
         customData = {
@@ -894,13 +1015,43 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
     }
 )
 {
-    bool inputs:affectX = 1
-    bool inputs:affectY = 1
-    bool inputs:affectZ = 1
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
         customData = {
             string userDocBrief = """The constraint's envelope: the normalized blend from the
         incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
         }
     )
     float[] inputs:sourceWeights = [] (
@@ -908,10 +1059,20 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
             string userDocBrief = "Per-source weights parallel to rigExec:sources."
         }
     )
-    double3 inputs:translationOffset = (0, 0, 0)
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
+        }
+    )
     uniform bool rigExec:locked = 0 (
         customData = {
             string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -933,19 +1094,53 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
     }
 )
 {
-    bool inputs:affectX = 1
-    bool inputs:affectY = 1
-    bool inputs:affectZ = 1
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
         customData = {
             string userDocBrief = """The constraint's envelope: the normalized blend from the
         incoming pose to the constrained pose, in [0, 1]."""
         }
     )
-    double3 inputs:rotationOffset = (0, 0, 0)
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
+        }
+    )
     float[] inputs:sourceWeights = [] (
         customData = {
             string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
         }
     )
     uniform bool rigExec:locked = 0 (
@@ -955,6 +1150,9 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
     )
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
+        }
     )
     rel rigExec:sources (
         customData = {
@@ -975,24 +1173,64 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
     }
 )
 {
-    bool inputs:affectX = 1
-    bool inputs:affectY = 1
-    bool inputs:affectZ = 1
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
         customData = {
             string userDocBrief = """The constraint's envelope: the normalized blend from the
         incoming pose to the constrained pose, in [0, 1]."""
         }
     )
-    double3 inputs:scaleOffset = (0, 0, 0)
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
+        }
+    )
     float[] inputs:sourceWeights = [] (
         customData = {
             string userDocBrief = "Per-source weights parallel to rigExec:sources."
         }
     )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
+        }
+    )
     uniform bool rigExec:locked = 0 (
         customData = {
             string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -1014,13 +1252,25 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     }
 )
 {
-    bool inputs:affectRotationX = 1
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
     bool inputs:affectRotationY = 1
     bool inputs:affectRotationZ = 1
-    bool inputs:affectScaleX = 0
+    bool inputs:affectScaleX = 0 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
     bool inputs:affectScaleY = 0
     bool inputs:affectScaleZ = 0
-    bool inputs:affectTranslationX = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
     bool inputs:affectTranslationY = 1
     bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
@@ -1029,14 +1279,31 @@ class RigExecParentConstraint "RigExecParentConstraint" (
         incoming pose to the constrained pose, in [0, 1]."""
         }
     )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
     double3[] inputs:rotationOffsets = [] (
         customData = {
             string userDocBrief = "Per-source Euler rotation offsets parallel to rigExec:sources."
         }
     )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
+        }
+    )
     float[] inputs:sourceWeights = [] (
         customData = {
             string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
         }
     )
     double3[] inputs:translationOffsets = [] (
@@ -1051,6 +1318,9 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     )
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
+        }
     )
     rel rigExec:sources (
         customData = {
@@ -1071,6 +1341,27 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     }
 )
 {
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
         customData = {
             string userDocBrief = """The constraint's envelope: the normalized blend from the
@@ -1085,6 +1376,23 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     float[] inputs:poleVectorWeights = [] (
         customData = {
             string userDocBrief = "Weights parallel to rigExec:poleVectorObjects."
+        }
+    )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
+        }
+    )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
         }
     )
     double inputs:twistDegrees = 0
@@ -1126,6 +1434,12 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
             string userDocBrief = "Ordered pole-vector transform providers used in object mode."
         }
     )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
+        }
+    )
     uniform token rigExec:solverMode = "rotatePlane" (
         allowedTokens = ["rotatePlane", "singleChain"]
     )
@@ -1149,15 +1463,59 @@ class RigExecCustomConstraint "RigExecCustomConstraint" (
     }
 )
 {
+    bool inputs:affectRotationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis rotation mask."
+        }
+    )
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis scale mask."
+        }
+    )
+    bool inputs:affectScaleY = 1
+    bool inputs:affectScaleZ = 1
+    bool inputs:affectTranslationX = 1 (
+        customData = {
+            string userDocBrief = "Per-axis translation mask."
+        }
+    )
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
     float inputs:defaultWeight = 1 (
         customData = {
             string userDocBrief = """The constraint's envelope: the normalized blend from the
         incoming pose to the constrained pose, in [0, 1]."""
         }
     )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive Euler rotation offset in degrees, applied after the blend."
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset."""
+        }
+    )
+    double3 inputs:translationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Additive translation offset applied after the source blend."
+        }
+    )
     uniform bool rigExec:locked = 0 (
         customData = {
             string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:weightObject (

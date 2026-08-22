@@ -633,6 +633,48 @@ class "RigExecConstraint" (
         remains active while locked; use RigExecMoverAPI inputs:enabled or
         inputs:defaultWeight to disable or blend the operation."""
     )
+
+    # The channel model, addressed by (group, axis). Every constraint writes
+    # some subset of the translation/rotation/scale groups, so masks and
+    # offsets are spelled the same way on all of them rather than each
+    # operator inventing a name for "its" channel. An operator that does not
+    # write a group -- or does not honor a mask or offset on one it does
+    # write -- rejects the authoring rather than ignoring it.
+    bool inputs:affectTranslationX = true (
+        doc = "Per-axis translation mask. Ignored groups are a compile error."
+    )
+    bool inputs:affectTranslationY = true
+    bool inputs:affectTranslationZ = true
+    bool inputs:affectRotationX = true (
+        doc = "Per-axis rotation mask. Ignored groups are a compile error."
+    )
+    bool inputs:affectRotationY = true
+    bool inputs:affectRotationZ = true
+    bool inputs:affectScaleX = true (
+        doc = """Per-axis scale mask. Ignored groups are a compile error.
+        RigExecParentConstraint overrides the default to false to match the
+        FBX runtime, which leaves scale off unless it is asked for."""
+    )
+    bool inputs:affectScaleY = true
+    bool inputs:affectScaleZ = true
+
+    double3 inputs:translationOffset = (0, 0, 0) (
+        doc = "Additive translation offset applied after the source blend."
+    )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        doc = "Additive Euler rotation offset in degrees, applied after the blend."
+    )
+    double3 inputs:scaleOffset = (0, 0, 0) (
+        doc = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
+        blendedScale + offset. A multiplicative offset would be a different
+        operator, not a different default."""
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        doc = """Euler order for the operators that compose a rotation.
+        Authoring it on one that does not is a compile error."""
+    )
 }
 
 class "RigExecSourceConstraint" (
@@ -673,12 +715,7 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     ordered rigExec:sources relationship and the FBX-style inputs below."""
 )
 {
-    double3 inputs:rotationOffset = (0, 0, 0) (
-        doc = "Euler rotation offset in degrees."
-    )
-    uniform token rigExec:rotationOrder = "XYZ" (
-        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
-    )
+    # inputs:rotationOffset and rigExec:rotationOrder are inherited.
     double3 inputs:aimVector = (1, 0, 0) (
         doc = "Local-space vector that points toward the constrained aim direction."
     )
@@ -694,9 +731,8 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     uniform token rigExec:worldUpType = "none" (
         allowedTokens = ["sceneUp", "objectUp", "objectRotationUp", "vector", "none"]
     )
-    bool inputs:affectX = true
-    bool inputs:affectY = true
-    bool inputs:affectZ = true
+    # Aim writes rotation, so it masks with the inherited
+    # inputs:affectRotation* rather than a channel name of its own.
 
     # Legacy RigExecAimConstraint contract, preserved for existing assets.
     rel rigExec:aimTarget (
@@ -725,10 +761,7 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
     axis, and blends it over the incoming pose by inputs:defaultWeight."""
 )
 {
-    bool inputs:affectX = true
-    bool inputs:affectY = true
-    bool inputs:affectZ = true
-    double3 inputs:translationOffset = (0, 0, 0)
+    # inputs:affectTranslation* and inputs:translationOffset are inherited.
 }
 
 class RigExecRotationConstraint "RigExecRotationConstraint" (
@@ -741,13 +774,8 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
     blends the result over the incoming pose by inputs:defaultWeight."""
 )
 {
-    bool inputs:affectX = true
-    bool inputs:affectY = true
-    bool inputs:affectZ = true
-    double3 inputs:rotationOffset = (0, 0, 0)
-    uniform token rigExec:rotationOrder = "XYZ" (
-        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
-    )
+    # inputs:affectRotation*, inputs:rotationOffset and rigExec:rotationOrder
+    # are inherited.
 }
 
 class RigExecScaleConstraint "RigExecScaleConstraint" (
@@ -760,10 +788,7 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
     over the incoming pose by inputs:defaultWeight."""
 )
 {
-    bool inputs:affectX = true
-    bool inputs:affectY = true
-    bool inputs:affectZ = true
-    double3 inputs:scaleOffset = (0, 0, 0)
+    # inputs:affectScale* and inputs:scaleOffset are inherited.
 }
 
 class RigExecParentConstraint "RigExecParentConstraint" (
@@ -777,12 +802,12 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     the inherited ordered rigExec:sources relationship."""
 )
 {
-    bool inputs:affectTranslationX = true
-    bool inputs:affectTranslationY = true
-    bool inputs:affectTranslationZ = true
-    bool inputs:affectRotationX = true
-    bool inputs:affectRotationY = true
-    bool inputs:affectRotationZ = true
+    # Parent is the one operator that writes all three groups, and the one
+    # that leaves scale OFF unless asked -- the FBX runtime default. The base
+    # class defaults scale on, so the override is restated here. It must be
+    # authored in this block: generatedSchema.usda is flattened, so an
+    # inherited default is re-emitted per concrete class and there is no
+    # other place for the override to live.
     bool inputs:affectScaleX = false
     bool inputs:affectScaleY = false
     bool inputs:affectScaleZ = false
@@ -792,9 +817,7 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     double3[] inputs:rotationOffsets = [] (
         doc = "Per-source Euler rotation offsets parallel to rigExec:sources."
     )
-    uniform token rigExec:rotationOrder = "XYZ" (
-        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
-    )
+    # rigExec:rotationOrder is inherited.
 }
 
 class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (

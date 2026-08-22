@@ -144,12 +144,20 @@ RigExecPointFrame _SolveParentConstraint(const _ConstraintSolveContext &);
 /// solve == nullptr with dispatchesInline == false means the operator has no
 /// evaluator at all -- a legal carrier prim that must not silently do
 /// nothing, which is what RigExecCustomConstraint is.
+/// The channel group an operator's per-axis mask addresses. Masks and offsets
+/// are spelled by (group, axis) on the base class, so an operator declares
+/// which group is "its" channel rather than each inventing a name.
+/// Parent writes all three and reads them itself; None means the operator
+/// honors no mask at all.
+enum class _ChannelGroup { None, Translation, Rotation, Scale, All };
+
 struct _ConstraintHandler {
     const char *schemaType;
     bool sourceFrame;      ///< blends rigExec:sources into one revision
     bool frameConstraint;  ///< compiles to frame wiring at all
     bool usesRotationOrder;
     bool dispatchesInline;
+    _ChannelGroup maskGroup;
     _ConstraintSolveFn solve;
 };
 
@@ -157,17 +165,20 @@ const std::vector<_ConstraintHandler> &
 _ConstraintHandlers()
 {
     static const std::vector<_ConstraintHandler> handlers = {
-        {"RigExecAimConstraint", true, true, true, true, nullptr},
+        {"RigExecAimConstraint", true, true, true, true,
+         _ChannelGroup::Rotation, nullptr},
         {"RigExecPositionConstraint", true, true, false, false,
-         _SolvePositionConstraint},
+         _ChannelGroup::Translation, _SolvePositionConstraint},
         {"RigExecRotationConstraint", true, true, true, false,
-         _SolveRotationConstraint},
+         _ChannelGroup::Rotation, _SolveRotationConstraint},
         {"RigExecScaleConstraint", true, true, false, false,
-         _SolveScaleConstraint},
+         _ChannelGroup::Scale, _SolveScaleConstraint},
         {"RigExecParentConstraint", true, true, true, false,
-         _SolveParentConstraint},
-        {"RigExecSingleChainIkConstraint", false, true, false, true, nullptr},
-        {"RigExecCustomConstraint", false, false, false, false, nullptr},
+         _ChannelGroup::All, _SolveParentConstraint},
+        {"RigExecSingleChainIkConstraint", false, true, false, true,
+         _ChannelGroup::None, nullptr},
+        {"RigExecCustomConstraint", false, false, false, false,
+         _ChannelGroup::None, nullptr},
     };
     return handlers;
 }
@@ -245,6 +256,35 @@ _ReadConstraintAxisMask(
     mask.y = _ResolvedRead(resolved, prim, y, fallback, time);
     mask.z = _ResolvedRead(resolved, prim, z, fallback, time);
     return mask;
+}
+
+/// Reads the per-axis mask for an operator's own channel group. The masks
+/// are spelled by (group, axis) on the base class, so which triple to read is
+/// a property of the operator, not of the call site.
+RigExecConstraintAxisMask
+_ReadGroupMask(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
+               _ChannelGroup group, UsdTimeCode time)
+{
+    switch (group) {
+    case _ChannelGroup::Translation:
+        return _ReadConstraintAxisMask(
+            resolved, prim, "inputs:affectTranslationX",
+            "inputs:affectTranslationY", "inputs:affectTranslationZ", time);
+    case _ChannelGroup::Rotation:
+        return _ReadConstraintAxisMask(
+            resolved, prim, "inputs:affectRotationX", "inputs:affectRotationY",
+            "inputs:affectRotationZ", time);
+    case _ChannelGroup::Scale:
+        return _ReadConstraintAxisMask(
+            resolved, prim, "inputs:affectScaleX", "inputs:affectScaleY",
+            "inputs:affectScaleZ", time);
+    case _ChannelGroup::All:
+    case _ChannelGroup::None:
+        break;
+    }
+    // Parent reads all three groups itself; the operators that honor no mask
+    // are unmasked. Both want the all-true identity.
+    return RigExecConstraintAxisMask();
 }
 
 RigExecPointFrame
@@ -5341,9 +5381,17 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             finalFrames[constraint.targets[0]];
         RigExecPointFrame candidate = inputFrame;
         bool candidateReady = true;
-        const RigExecConstraintAxisMask affect = _ReadConstraintAxisMask(
-            _resolvedInputs, prim, "inputs:affectX", "inputs:affectY",
-            "inputs:affectZ", time);
+        // Which mask triple this operator reads is a table property: masks
+        // are addressed by (group, axis), so Position reads the translation
+        // triple and Rotation and Aim read the rotation one, rather than all
+        // three sharing an inputs:affectX that means something different in
+        // each.
+        const _ConstraintHandler *solveHandler =
+            _FindConstraintHandler(constraint.schemaType);
+        const RigExecConstraintAxisMask affect = _ReadGroupMask(
+            _resolvedInputs, prim,
+            solveHandler ? solveHandler->maskGroup : _ChannelGroup::None,
+            time);
         TfToken orderToken("XYZ");
         if (const UsdAttribute a =
                 prim.GetAttribute(TfToken("rigExec:rotationOrder"))) {
@@ -5356,8 +5404,6 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         // per operator, so adding a seventh is a table entry rather than
         // another arm here. Aim falls through to the inline branch below,
         // which resolves a world-up binding the uniform context cannot carry.
-        const _ConstraintHandler *solveHandler =
-            _FindConstraintHandler(constraint.schemaType);
         if (solveHandler && solveHandler->solve) {
             _ConstraintSolveContext solveContext;
             solveContext.resolved = &_resolvedInputs;

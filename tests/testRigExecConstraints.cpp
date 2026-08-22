@@ -247,7 +247,7 @@ BuildConstraintStage(UsdPrim *positionOut)
     position.CreateAttribute(TfToken("inputs:translationOffset"),
                              SdfValueTypeNames->Double3)
         .Set(GfVec3d(1, 2, 3));
-    position.CreateAttribute(TfToken("inputs:affectZ"),
+    position.CreateAttribute(TfToken("inputs:affectTranslationZ"),
                              SdfValueTypeNames->Bool)
         .Set(false);
 
@@ -265,7 +265,7 @@ BuildConstraintStage(UsdPrim *positionOut)
     scale.CreateAttribute(TfToken("inputs:scaleOffset"),
                           SdfValueTypeNames->Double3)
         .Set(GfVec3d(1, 0, -1));
-    scale.CreateAttribute(TfToken("inputs:affectY"),
+    scale.CreateAttribute(TfToken("inputs:affectScaleY"),
                           SdfValueTypeNames->Bool)
         .Set(false);
 
