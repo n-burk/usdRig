@@ -1406,32 +1406,45 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 // transform target; the implementation lands in phase 4.
                 if (constraintTarget.IsPropertyPath() &&
                     constraintTarget.GetNameToken() == "points") {
-                    reportError(
-                        record.schemaType.GetString() + " " +
-                        prim.GetPath().GetString() +
-                        " targets " + constraintTarget.GetString() +
-                        ": geometry-domain constraint targets are not "
-                        "supported yet; name the prim " +
-                        constraintTarget.GetPrimPath().GetString() +
-                        " to revise its transform");
-                    return false;
-                }
-                // A constraint revises a transform, so the target must be
-                // able to carry one. This is the predicate bindFrameSource
-                // already applies to sources, and it admits any
-                // UsdGeomXformable -- Mesh and BasisCurves included.
-                const UsdPrim targetPrim =
-                    constraintTarget.IsPrimPath()
-                        ? _stage->GetPrimAtPath(constraintTarget)
-                        : UsdPrim();
-                if (!targetPrim || !UsdGeomXformable(targetPrim)) {
-                    reportError(
-                        record.schemaType.GetString() + " " +
-                        prim.GetPath().GetString() + " targets " +
-                        constraintTarget.GetString() +
-                        ", which is not a transform provider; a constraint "
-                        "target must be a UsdGeomXformable");
-                    return false;
+                    const UsdPrim owner =
+                        _stage->GetPrimAtPath(constraintTarget.GetPrimPath());
+                    if (!owner || !owner.IsA<UsdGeomPointBased>()) {
+                        reportError(
+                            record.schemaType.GetString() + " " +
+                            prim.GetPath().GetString() + " targets " +
+                            constraintTarget.GetString() +
+                            ", whose owner is not a UsdGeomPointBased prim");
+                        return false;
+                    }
+                    // Legal: the geometry domain. The prim must still be able
+                    // to supply a base frame, because the delta is measured
+                    // against it exactly as in the transform domain.
+                    if (!UsdGeomXformable(owner)) {
+                        reportError(
+                            record.schemaType.GetString() + " " +
+                            prim.GetPath().GetString() + " targets " +
+                            constraintTarget.GetString() +
+                            ", whose owner cannot supply a base frame");
+                        return false;
+                    }
+                } else {
+                    // The transform domain: the target must be able to carry
+                    // a transform. This is the predicate bindFrameSource
+                    // already applies to sources, and it admits any
+                    // UsdGeomXformable -- Mesh and BasisCurves included.
+                    const UsdPrim targetPrim =
+                        constraintTarget.IsPrimPath()
+                            ? _stage->GetPrimAtPath(constraintTarget)
+                            : UsdPrim();
+                    if (!targetPrim || !UsdGeomXformable(targetPrim)) {
+                        reportError(
+                            record.schemaType.GetString() + " " +
+                            prim.GetPath().GetString() + " targets " +
+                            constraintTarget.GetString() +
+                            ", which is not a transform provider; a "
+                            "constraint target must be a UsdGeomXformable");
+                        return false;
+                    }
                 }
             } else if (record.schemaType ==
                        "RigExecSingleChainIkConstraint") {
@@ -2592,6 +2605,43 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 
         if (_IsSourceFrameConstraintType(mover.schemaType)) {
             constraint.targets = mover.targets;
+
+            // Domain selection, by the authored spelling alone. A bare prim
+            // path is the transform domain; <prim>.points is the geometry
+            // domain. Either way the frame key is the PRIM -- the solve is
+            // identical and only the publish differs -- so the points
+            // property is carried aside and targets[0] is normalized.
+            SdfPathVector weightTargets;
+            if (const UsdRelationship rel =
+                    moverPrim.GetRelationship(TfToken("rigExec:weightObject"))) {
+                rel.GetTargets(&weightTargets);
+            }
+            if (!constraint.targets.empty() &&
+                constraint.targets[0].IsPropertyPath() &&
+                constraint.targets[0].GetNameToken() == "points") {
+                constraint.pointsTarget = constraint.targets[0];
+                constraint.targets[0] = constraint.targets[0].GetPrimPath();
+                if (weightTargets.size() > 1) {
+                    reportError(mover.schemaType.GetString() + " " +
+                                mover.moverPath.GetString() +
+                                " binds more than one rigExec:weightObject");
+                    restorePreviousEpoch();
+                    return false;
+                }
+                if (!weightTargets.empty()) {
+                    constraint.weightObject = weightTargets[0];
+                }
+            } else if (!weightTargets.empty()) {
+                reportError(
+                    mover.schemaType.GetString() + " " +
+                    mover.moverPath.GetString() +
+                    " binds rigExec:weightObject on a transform-domain "
+                    "constraint; a transform is a single element with "
+                    "nothing to vary over. Use inputs:defaultWeight");
+                restorePreviousEpoch();
+                return false;
+            }
+
             SdfPathVector sources = getTargets(moverPrim, "rigExec:sources");
             if (sources.empty() && mover.schemaType ==
                                        "RigExecAimConstraint") {

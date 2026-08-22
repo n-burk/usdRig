@@ -393,6 +393,16 @@ private:
         _FrameSourceBinding effector;
         std::vector<_FrameSourceBinding> poleObjects;
         std::vector<SdfPath> ikChain;
+        /// Non-empty when the constraint writes the GEOMETRY domain: the
+        /// <prim>.points property it revises. targets[0] stays the owning
+        /// PRIM path either way, because every frame-domain map -- base and
+        /// rest frames, the provider classifier, the frame chains -- is keyed
+        /// by prim. The domain decides where the answer is published, not how
+        /// it is solved.
+        SdfPath pointsTarget;
+        /// Optional per-element weight field for the geometry domain. Empty
+        /// means the constant packet synthesized from inputs:defaultWeight.
+        SdfPath weightObject;
     };
 
     /// One property-domain revision: a float/vec3f/matrix math mover's

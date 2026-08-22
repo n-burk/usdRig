@@ -727,30 +727,27 @@ TestTransformProviderPredicate()
                           }));
     }
 
-    // A .points target is the geometry domain: recognised, and explicitly
-    // deferred rather than misreported as a bad transform provider.
+    // A .points target on a prim that has no point set is not the geometry
+    // domain, it is a mistake -- and must be reported as that rather than as
+    // a bad transform provider. (A .points target on a real PointBased prim
+    // is legal; see TestGeometryDomainTargetCompiles.)
     {
         const UsdStageRefPtr stage = UsdStage::CreateInMemory();
         MakeXform(stage, SdfPath("/Asset"), Matrix());
         stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
-        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+        MakeXform(stage, SdfPath("/Asset/Geom/NotPointBased"), Matrix());
         MakeXform(stage, SdfPath("/Asset/Source"), Matrix());
         stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
         stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
         const UsdPrim rotation = MakeConstraint(
             stage, "Rot", "RigExecRotationConstraint",
-            {SdfPath("/Asset/Geom/M").AppendProperty(TfToken("points"))});
+            {SdfPath("/Asset/Geom/NotPointBased")
+                 .AppendProperty(TfToken("points"))});
         rotation.CreateRelationship(TfToken("rigExec:sources"))
             .SetTargets({SdfPath("/Asset/Source")});
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
         std::vector<std::string> errors;
         CHECK(!evaluator.Compile(&errors));
-        CHECK(std::any_of(
-            errors.begin(), errors.end(), [](const std::string &error) {
-                return error.find(
-                           "geometry-domain constraint targets are not "
-                           "supported yet") != std::string::npos;
-            }));
     }
 }
 
@@ -1026,6 +1023,59 @@ TestLegacyWeightSpellingIsRejected()
     }
 }
 
+// A .points target names the geometry domain: the constraint deforms the
+// point set instead of revising the prim's transform.
+static void
+TestGeometryDomainTargetCompiles()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{{1, 0, 0}, {0, 2, 0}, {0, 0, 3}});
+    MakeXform(stage, SdfPath("/Asset/Source"),
+              Matrix(GfVec3d(0, 0, 0), GfRotation(GfVec3d(0, 1, 0), 90.0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const SdfPath pointsTarget =
+        SdfPath("/Asset/Geom/M").AppendProperty(TfToken("points"));
+    const UsdPrim rotation = MakeConstraint(
+        stage, "Rot", "RigExecRotationConstraint", {pointsTarget});
+    rotation.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+
+    // A transform-domain constraint cannot carry a per-element weight field.
+    const UsdStageRefPtr xformStage = UsdStage::CreateInMemory();
+    MakeXform(xformStage, SdfPath("/Asset"), Matrix());
+    MakeXform(xformStage, SdfPath("/Asset/Target"), Matrix());
+    MakeXform(xformStage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
+    xformStage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    xformStage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim rot2 = MakeConstraint(
+        xformStage, "Rot", "RigExecRotationConstraint",
+        {SdfPath("/Asset/Target")});
+    rot2.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+    rot2.CreateRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({SdfPath("/Asset/Rig/Weights/W")});
+    RigExecRigEvaluator xformEvaluator(xformStage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> xformErrors;
+    CHECK(!xformEvaluator.Compile(&xformErrors));
+    CHECK(std::any_of(xformErrors.begin(), xformErrors.end(),
+                      [](const std::string &error) {
+                          return error.find("nothing to vary over") !=
+                                 std::string::npos;
+                      }));
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -1112,6 +1162,7 @@ main()
     TestTransformProviderPredicate();
     TestPointDomainMoverNamesTheFix();
     TestMeshAndXformTargetsAgree();
+    TestGeometryDomainTargetCompiles();
     TestConstraintRegistryCoversTheSchema();
     TestRotationOrderCapabilityIsRecorded();
     TestLegacyWeightSpellingIsRejected();
