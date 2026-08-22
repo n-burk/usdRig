@@ -4911,6 +4911,13 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     std::map<SdfPath, RigExecPointFrame> restFrames;
     std::map<SdfPath, GfMatrix4d> xformDerivedBases;
     std::map<SdfPath, GfMatrix4d> finalMatrices;
+    /// Geometry-domain constraint results: the delta each one produced, the
+    /// envelope it carries, and its optional per-element weight field.
+    /// Produced by the pose walk below and consumed after it, the same
+    /// in-memory hand-off finalMatrices performs for a "final" read phase.
+    std::map<SdfPath, GfMatrix4d> constraintDeltas;
+    std::map<SdfPath, double> constraintEnvelopes;
+    std::map<SdfPath, SdfPath> constraintWeightObjects;
     const UsdPrim assetRoot =
         _stage->GetPrimAtPath(_rigPath.GetParentPath());
     UsdGeomXformCache constraintXformCache(time);
@@ -5361,19 +5368,25 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         // before resolving sources, effectors, or poles so malformed
         // disconnected inputs cannot make a disabled constraint fail.
         //
-        // Unconditional only because every constraint target is currently a
-        // transform, which has exactly one element and so can never carry a
-        // rigExec:weightObject. When the geometry domain lands this must
-        // become conditional on no weight object being bound: a bound field
-        // supersedes inputs:defaultWeight, so a zero envelope with a map that
+        // Conditional on no weight object being bound: a bound field
+        // SUPERSEDES inputs:defaultWeight, so a zero envelope with a map that
         // resolves to one must still deform, and short-circuiting the solve
-        // here would make that unreachable.
-        if (weight <= 0.0) {
+        // here would make that unreachable. A transform-domain constraint can
+        // never carry one, so for it this stays unconditional.
+        if (weight <= 0.0 && constraint.weightObject.IsEmpty()) {
             for (const SdfPath &target : constraint.targets) {
                 recordFrame(target, constraint.moverPath);
             }
             continue;
         }
+
+        // The envelope is applied exactly ONCE. In the transform domain the
+        // kernel's per-channel blend carries it. In the geometry domain the
+        // per-point lerp does, so the solve must run UNWEIGHTED and hand back
+        // the full-strength delta -- passing the envelope to both would
+        // square it, and 0.5 would come out as 0.25 on points.
+        const double solveWeight =
+            constraint.pointsTarget.IsEmpty() ? weight : 1.0;
 
         if (constraint.schemaType == "RigExecSingleChainIkConstraint") {
             std::vector<RigExecPointFrame> chain;
@@ -5576,7 +5589,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             solveContext.sources = &sources;
             solveContext.affect = affect;
             solveContext.order = order;
-            solveContext.weight = weight;
+            solveContext.weight = solveWeight;
             candidate = solveHandler->solve(solveContext);
         } else {
             // Aim uses the same weighted source set, reduced to the target
@@ -5626,7 +5639,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                     GfVec3d(0), time);
                 params.affectRotation = affect;
                 params.rotationOrder = order;
-                params.weight = weight;
+                params.weight = solveWeight;
 
                 TfToken worldUpType("none");
                 if (const UsdAttribute a = prim.GetAttribute(
@@ -5711,12 +5724,42 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 }
             }
         }
-        if (candidateReady) {
+        if (candidateReady && !constraint.pointsTarget.IsEmpty()) {
+            // The GEOMETRY domain. The solve produced the same full-strength
+            // frame the transform domain would publish; the delta against the
+            // prim's own base frame is what the points ride.
+            //
+            //     D = F_solved * F_base^-1
+            //
+            // Stashed here and consumed after the pose walk, the same
+            // in-memory hand-off finalMatrices performs for a "final" read
+            // phase. The prim's transform is NOT revised: a geometry-domain
+            // constraint writes points and nothing else.
+            GfMatrix4d baseMatrix(1.0);
+            GfMatrix4d solvedMatrix(1.0);
+            if (frameFromXform(constraint.targets[0], nullptr, &baseMatrix) &&
+                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                      candidate.points, &solvedMatrix)) {
+                constraintDeltas[constraint.pointsTarget] =
+                    baseMatrix.GetInverse() * solvedMatrix;
+                constraintEnvelopes[constraint.pointsTarget] = weight;
+                constraintWeightObjects[constraint.pointsTarget] =
+                    constraint.weightObject;
+            } else {
+                pose.diagnostics.push_back(
+                    constraint.moverPath.GetString() +
+                    " could not measure its delta against " +
+                    constraint.targets[0].GetString() +
+                    "; constraint passed through");
+            }
+        } else if (candidateReady) {
             commitConstraintFrames(
                 constraint.moverPath,
                 {{constraint.targets[0], candidate}});
         }
-        recordFrame(constraint.targets[0], constraint.moverPath);
+        if (constraint.pointsTarget.IsEmpty()) {
+            recordFrame(constraint.targets[0], constraint.moverPath);
+        }
     }
 
     // Publish final provider matrices after the atomic pose walk.
@@ -6253,10 +6296,99 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                     " skipped, its chain contains a RigExecCurvenetMover");
                 continue;
             }
+            if (constraintDeltas.count(target)) {
+                // A geometry-domain constraint is not a graph chain; it is
+                // published below from its own delta, and its parity twin
+                // runs there.
+                continue;
+            }
             pose.movedPropertiesCpu[target] = VtValue(_EvaluateChain(
                 target, chain, pose, baseProviderMatrices,
                 finalProviderMatrices, time, &pose.diagnostics));
         }
+    }
+
+    // Geometry-domain constraints. The delta is the same one the transform
+    // domain would have published; here it rides the points instead, under
+    // the constraint's per-element weight field.
+    //
+    //     P'[i] = lerp(P[i], D.TransformAffine(P[i]), w[i])
+    //
+    // w[i] comes from a bound rigExec:weightObject, or from a constant
+    // synthesized from inputs:defaultWeight when none is bound. The envelope
+    // is applied HERE and only here: the solve above ran unweighted.
+    for (const auto &[pointsTarget, delta] : constraintDeltas) {
+        const UsdAttribute attr = _stage->GetAttributeAtPath(pointsTarget);
+        VtVec3fArray authored;
+        if (!attr || !attr.Get(&authored, time)) {
+            pose.diagnostics.push_back(
+                pointsTarget.GetString() +
+                " has no readable points; constraint passed through");
+            continue;
+        }
+        const double envelope = constraintEnvelopes[pointsTarget];
+        const SdfPath weightObject = constraintWeightObjects[pointsTarget];
+
+        std::vector<float> weights(authored.size(),
+                                   static_cast<float>(envelope));
+        if (!weightObject.IsEmpty()) {
+            // A bound field SUPERSEDES the envelope: it is the weight, not a
+            // multiplier on it. Its cardinality must match the point set --
+            // a mismatch is MoverFailed for the whole target, never a
+            // silently truncated deformation.
+            std::string error;
+            std::vector<GfVec3f> currentPoints(authored.begin(),
+                                               authored.end());
+            if (!_ResolveWeights(weightObject, authored.size(), time,
+                                 &weights, &error, &currentPoints)) {
+                pose.diagnostics.push_back(
+                    pointsTarget.GetString() + ": " + error +
+                    "; constraint passed through");
+                continue;
+            }
+        }
+
+        VtVec3fArray moved(authored.size());
+        for (size_t i = 0; i < authored.size(); ++i) {
+            const float w = weights[i];
+            if (!std::isfinite(w)) {
+                moved = VtVec3fArray();
+                break;
+            }
+            moved[i] = GfVec3f(RigExecApplyWeightedMatrix(
+                GfVec3d(authored[i]), delta, w));
+        }
+        if (moved.empty() && !authored.empty()) {
+            pose.diagnostics.push_back(
+                pointsTarget.GetString() +
+                " has a non-finite constraint weight; constraint passed "
+                "through");
+            continue;
+        }
+        pose.movedProperties[pointsTarget] = VtValue(moved);
+        _chainSnapshots.RecordFinal(pointsTarget, VtValue(moved));
+
+        // NOT covered by the scalar point-chain oracle, and deliberately not
+        // given a fake twin.
+        //
+        // That oracle earns its keep by re-deriving a graph/exec result along
+        // an independent CPU path; a mismatch means one of the two is wrong.
+        // This publish has no graph path to disagree with -- it is a single
+        // direct computation -- so a "twin" recomputing it with the same
+        // inputs and the same kernel would agree unconditionally and prove
+        // nothing. Populating movedPropertiesCpu here would report an
+        // agreement that was never tested.
+        //
+        // Routing a geometry-domain constraint through the mover graph as a
+        // RigExecRevisionOp::Matrix revision is what would restore real
+        // coverage: it needs an input edge for the solved delta, because
+        // RigExecAssembleMatrixParameters demands a rigExec:transform and a
+        // rigExec:weightObject that a constraint has no equivalent of. That
+        // is the remaining work, and it is named rather than hidden.
+        pose.diagnostics.push_back(
+            "cpu reference parity: " + pointsTarget.GetString() +
+            " not covered; a geometry-domain constraint publishes directly "
+            "rather than through the mover graph");
     }
 
     pose.valid = true;

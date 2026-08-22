@@ -1076,6 +1076,148 @@ TestGeometryDomainTargetCompiles()
                       }));
 }
 
+// The design's defining property: the target spelling picks WHERE the answer
+// lands, not what it is.
+//
+// It is EXACT at full envelope, which is the case the design is really about
+// -- </Geom/M> and </Geom/M.points> are then two spellings of one result.
+//
+// At an intermediate envelope the two domains blend in different spaces and
+// deliberately diverge: the transform domain lerps DECOMPOSED CHANNELS (half
+// of a 90-degree rotation is a 45-degree rotation), while the geometry domain
+// lerps POSITIONS, which is the chord rather than the arc. That is not a
+// defect to fix here -- it is the same weighting RigExecApplyWeightedMatrix
+// gives every matrix mover, so a constraint deforms points exactly like the
+// deformers it sits beside. TestGeometryEnvelopeIsChordLerp below pins it.
+static void
+TestTransformAndGeometrySpellingsAgree()
+{
+    const VtVec3fArray rest{{1, 0, 0}, {0, 2, 0}, {0, 0, 3}, {1, 1, 1}};
+    for (const float envelope : {1.0f}) {
+        std::vector<GfVec3d> viaTransform;
+        std::vector<GfVec3d> viaPoints;
+        for (const bool geometry : {false, true}) {
+            const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+            MakeXform(stage, SdfPath("/Asset"), Matrix());
+            stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+            const UsdPrim mesh = stage->DefinePrim(
+                SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+            mesh.CreateAttribute(TfToken("points"),
+                                 SdfValueTypeNames->Point3fArray)
+                .Set(rest);
+            MakeXform(stage, SdfPath("/Asset/Source"),
+                      Matrix(GfVec3d(0, 0, 0),
+                             GfRotation(GfVec3d(0, 1, 0), 90.0)));
+            stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+            stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+            const SdfPath pointsPath =
+                SdfPath("/Asset/Geom/M").AppendProperty(TfToken("points"));
+            const UsdPrim rot = MakeConstraint(
+                stage, "Rot", "RigExecRotationConstraint",
+                {geometry ? pointsPath : SdfPath("/Asset/Geom/M")});
+            rot.CreateRelationship(TfToken("rigExec:sources"))
+                .SetTargets({SdfPath("/Asset/Source")});
+            rot.GetAttribute(TfToken("inputs:defaultWeight")).Set(envelope);
+
+            RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+            std::vector<std::string> errors;
+            CHECK(evaluator.Compile(&errors));
+            const RigExecRigPose pose =
+                evaluator.Evaluate(UsdTimeCode::Default());
+            CHECK(pose.valid);
+            if (geometry) {
+                const auto it = pose.movedProperties.find(pointsPath);
+                CHECK(it != pose.movedProperties.end());
+                if (it != pose.movedProperties.end()) {
+                    const VtVec3fArray moved =
+                        it->second.Get<VtVec3fArray>();
+                    for (const GfVec3f &p : moved) {
+                        viaPoints.push_back(GfVec3d(p));
+                    }
+                }
+            } else {
+                const auto it =
+                    pose.providerXforms.find(SdfPath("/Asset/Geom/M"));
+                CHECK(it != pose.providerXforms.end());
+                if (it != pose.providerXforms.end()) {
+                    for (const GfVec3f &p : rest) {
+                        viaTransform.push_back(
+                            it->second.TransformAffine(GfVec3d(p)));
+                    }
+                }
+            }
+        }
+        CHECK(viaTransform.size() == rest.size());
+        CHECK(viaPoints.size() == rest.size());
+        // Not vacuous: the constraint must actually have moved the points.
+        CHECK(!Near(viaPoints.empty() ? GfVec3d(0) : viaPoints[0],
+                    GfVec3d(rest[0])));
+        for (size_t i = 0;
+             i < viaTransform.size() && i < viaPoints.size(); ++i) {
+            CHECK(Near(viaTransform[i], viaPoints[i], 1e-4));
+        }
+    }
+}
+
+// The geometry domain's envelope is a per-point lerp toward the fully-solved
+// position -- the same weighting every matrix mover applies. Pinned exactly
+// so it is a specified behavior rather than an accident, and so that a change
+// to channel-space blending has to edit this assertion deliberately.
+static void
+TestGeometryEnvelopeIsChordLerp()
+{
+    const VtVec3fArray rest{{1, 0, 0}, {0, 0, 3}};
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(rest);
+    MakeXform(stage, SdfPath("/Asset/Source"),
+              Matrix(GfVec3d(0, 0, 0), GfRotation(GfVec3d(0, 1, 0), 90.0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const SdfPath pointsPath =
+        SdfPath("/Asset/Geom/M").AppendProperty(TfToken("points"));
+    const UsdPrim rot = MakeConstraint(
+        stage, "Rot", "RigExecRotationConstraint", {pointsPath});
+    rot.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+    rot.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f);
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    const auto it = pose.movedProperties.find(pointsPath);
+    CHECK(it != pose.movedProperties.end());
+    if (it == pose.movedProperties.end()) {
+        return;
+    }
+    const VtVec3fArray moved = it->second.Get<VtVec3fArray>();
+    CHECK(moved.size() == rest.size());
+    if (moved.size() != rest.size()) {
+        return;
+    }
+    // rotY(90) sends (1,0,0) -> (0,0,-1) and (0,0,3) -> (3,0,0). At envelope
+    // 0.5 each point sits halfway along the straight line between the two.
+    CHECK(Near(GfVec3d(moved[0]), GfVec3d(0.5, 0, -0.5), 1e-4));
+    CHECK(Near(GfVec3d(moved[1]), GfVec3d(1.5, 0, 1.5), 1e-4));
+
+    // The scalar oracle does not cover this publish, and says so rather
+    // than reporting an untested agreement. Pinned so that routing the
+    // geometry domain through the mover graph -- which is what would restore
+    // real coverage -- has to remove this assertion deliberately.
+    CHECK(pose.movedPropertiesCpu.find(pointsPath) ==
+          pose.movedPropertiesCpu.end());
+    CHECK(std::any_of(pose.diagnostics.begin(), pose.diagnostics.end(),
+                      [](const std::string &d) {
+                          return d.find("not covered") != std::string::npos;
+                      }));
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -1163,6 +1305,8 @@ main()
     TestPointDomainMoverNamesTheFix();
     TestMeshAndXformTargetsAgree();
     TestGeometryDomainTargetCompiles();
+    TestTransformAndGeometrySpellingsAgree();
+    TestGeometryEnvelopeIsChordLerp();
     TestConstraintRegistryCoversTheSchema();
     TestRotationOrderCapabilityIsRecorded();
     TestLegacyWeightSpellingIsRejected();
