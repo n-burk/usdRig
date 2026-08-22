@@ -105,8 +105,8 @@ def Xform "EyesAsset"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
-                    float inputs:weight = 1
-                    float inputs:weight.spline = {
+                    float inputs:defaultWeight = 1
+                    float inputs:defaultWeight.spline = {
                         bezier,
                         1001: 0; pre (0, 0); post curve (4, 0),
                         1012: 1; pre (4, 0); post held,
@@ -124,8 +124,8 @@ def Xform "EyesAsset"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
-                    float inputs:weight = 1
-                    float inputs:weight.spline = {
+                    float inputs:defaultWeight = 1
+                    float inputs:defaultWeight.spline = {
                         bezier,
                         1001: 0; pre (0, 0); post curve (4, 0),
                         1012: 1; pre (4, 0); post held,

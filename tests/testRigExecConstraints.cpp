@@ -94,7 +94,7 @@ TestSchemaSurface()
         const UsdPrimDefinition *definition =
             registry.FindConcretePrimDefinition(TfToken(type));
         CHECK(definition);
-        CHECK(HasProperty(definition, "inputs:weight"));
+        CHECK(HasProperty(definition, "inputs:defaultWeight"));
         CHECK(HasProperty(definition, "rigExec:locked"));
         if (std::string(type) != "RigExecSingleChainIkConstraint" &&
             std::string(type) != "RigExecCustomConstraint") {
@@ -103,7 +103,7 @@ TestSchemaSurface()
         }
         float weight = 0;
         CHECK(definition && definition->GetAttributeFallbackValue(
-                                TfToken("inputs:weight"), &weight));
+                                TfToken("inputs:defaultWeight"), &weight));
         CHECK(std::abs(weight - 1.0f) < 1e-7f);
     }
     const UsdPrimDefinition *custom = registry.FindConcretePrimDefinition(
@@ -368,7 +368,7 @@ TestEvaluatorSemantics()
     CHECK(before == after);  // evaluation authors nothing
 
     // Global weight is value-only and blends after the source aggregate.
-    position.GetAttribute(TfToken("inputs:weight")).Set(0.5f);
+    position.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f);
     const RigExecRigPose half = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(half.valid);
     const auto halfPosition =
@@ -381,7 +381,7 @@ TestEvaluatorSemantics()
 
     // A dormant zero-weight constraint does not inspect malformed value-only
     // source data; it is an exact pass-through just like inputs:enabled=false.
-    position.GetAttribute(TfToken("inputs:weight")).Set(0.0f);
+    position.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.0f);
     position.GetAttribute(TfToken("inputs:sourceWeights"))
         .Set(VtFloatArray{1, 2, 3});
     const RigExecRigPose dormant =
@@ -892,6 +892,64 @@ TestRotationOrderCapabilityIsRecorded()
     CHECK(evaluator.Compile(&errors));
 }
 
+// inputs:weight became inputs:defaultWeight. The old name is no longer part
+// of the constraint schema, so an authored opinion would compose as a custom
+// property and be silently ignored -- which is exactly the class of defect
+// this family is being cleaned of. It must fail closed and name the new
+// spelling.
+static void
+TestLegacyWeightSpellingIsRejected()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim position = MakeConstraint(
+        stage, "Pos", "RigExecPositionConstraint", {SdfPath("/Asset/Target")});
+    position.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+    position.CreateAttribute(TfToken("inputs:weight"),
+                             SdfValueTypeNames->Float, /*custom=*/true)
+        .Set(0.5f);
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(!evaluator.Compile(&errors));
+    CHECK(std::any_of(errors.begin(), errors.end(),
+                      [](const std::string &error) {
+                          return error.find("inputs:defaultWeight") !=
+                                 std::string::npos;
+                      }));
+
+    // The envelope itself still drives: zero is a dormant pass-through and
+    // one applies in full, under the new spelling.
+    const UsdStageRefPtr clean = UsdStage::CreateInMemory();
+    MakeXform(clean, SdfPath("/Asset"), Matrix());
+    MakeXform(clean, SdfPath("/Asset/Target"), Matrix());
+    MakeXform(clean, SdfPath("/Asset/Source"), Matrix(GfVec3d(10, 0, 0)));
+    clean->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    clean->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    const UsdPrim pos2 = MakeConstraint(
+        clean, "Pos", "RigExecPositionConstraint", {SdfPath("/Asset/Target")});
+    pos2.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+    for (const float envelope : {0.0f, 0.5f, 1.0f}) {
+        pos2.GetAttribute(TfToken("inputs:defaultWeight")).Set(envelope);
+        RigExecRigEvaluator e(clean, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errs;
+        CHECK(e.Compile(&errs));
+        const RigExecRigPose pose = e.Evaluate(UsdTimeCode::Default());
+        const auto it = pose.providerXforms.find(SdfPath("/Asset/Target"));
+        CHECK(it != pose.providerXforms.end());
+        if (it != pose.providerXforms.end()) {
+            CHECK(Near(it->second.ExtractTranslation(),
+                       GfVec3d(10.0 * envelope, 0, 0)));
+        }
+    }
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -980,6 +1038,7 @@ main()
     TestMeshAndXformTargetsAgree();
     TestConstraintRegistryCoversTheSchema();
     TestRotationOrderCapabilityIsRecorded();
+    TestLegacyWeightSpellingIsRejected();
     TestInvalidContractsFailClosed();
 
     if (failures) {

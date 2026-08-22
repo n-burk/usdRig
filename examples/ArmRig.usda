@@ -277,7 +277,7 @@ def Xform "ArmAsset" (
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
-                    float inputs:weight = 0.2
+                    float inputs:defaultWeight = 0.2
                     uniform token rigExec:aimAxis = "x"
                     rel rigExec:aimTarget = </ArmAsset/Rig/Controls/ElbowPole>
                     rel rigExec:moves = </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>

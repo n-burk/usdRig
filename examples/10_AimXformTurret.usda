@@ -87,7 +87,7 @@ def Xform "TurretAsset"
                 prepend apiSchemas = ["RigExecMoverAPI"]
             )
             {
-                float inputs:weight = 1
+                float inputs:defaultWeight = 1
                 uniform token rigExec:aimAxis = "z"
                 rel rigExec:aimTarget = </TurretAsset/Rig/Controls/TrackTarget>
                 rel rigExec:moves = </TurretAsset/Geom/Turret>

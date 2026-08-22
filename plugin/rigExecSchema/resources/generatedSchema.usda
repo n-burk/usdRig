@@ -736,21 +736,435 @@ class RigExecRibbon "RigExecRibbon" (
     )
 }
 
-class RigExecAimConstraint "RigExecAimConstraint" (
+class "RigExecConstraint" (
     customData = {
-        string userDocBrief = """Moves a transform target by replacing aim/up orientation while
-    preserving declared position/scale components (spec section 4.1)."""
+        string userDocBrief = "Abstract common contract for FBX-style pose constraints."
     }
 )
 {
-    float inputs:weight = 1
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+}
+
+class "RigExecSourceConstraint" (
+    customData = {
+        string userDocBrief = """Abstract base for constraints that blend an ordered set of
+    transform sources."""
+    }
+)
+{
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    float[] inputs:sourceWeights = [] (
+        customData = {
+            string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    rel rigExec:sources (
+        customData = {
+            string userDocBrief = "Ordered transform sources."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+}
+
+class RigExecAimConstraint "RigExecAimConstraint" (
+    customData = {
+        string userDocBrief = "FBX-style aim constraint."
+    }
+)
+{
+    bool inputs:affectX = 1
+    bool inputs:affectY = 1
+    bool inputs:affectZ = 1
+    double3 inputs:aimVector = (1, 0, 0) (
+        customData = {
+            string userDocBrief = "Local-space vector that points toward the constrained aim direction."
+        }
+    )
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    double3 inputs:rotationOffset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = "Euler rotation offset in degrees."
+        }
+    )
+    float[] inputs:sourceWeights = [] (
+        customData = {
+            string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    double3 inputs:upVector = (0, 1, 0) (
+        customData = {
+            string userDocBrief = "Local-space vector used to stabilize roll around the aim direction."
+        }
+    )
+    double3 inputs:worldUpVector = (0, 1, 0) (
+        customData = {
+            string userDocBrief = "World-space up vector used by vector world-up modes."
+        }
+    )
     uniform token rigExec:aimAxis = "x" (
         allowedTokens = ["x", "y", "z"]
+        customData = {
+            string userDocBrief = "Legacy positive-axis selector retained for existing assets."
+        }
     )
-    rel rigExec:aimTarget
-    uniform token[] rigExec:preserve = ["origin", "scale"]
+    rel rigExec:aimTarget (
+        customData = {
+            string userDocBrief = "Legacy single aim source; retained for backward compatibility."
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token[] rigExec:preserve = ["origin", "scale"] (
+        customData = {
+            string userDocBrief = "Legacy component-preservation declaration retained for existing assets."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    rel rigExec:sources (
+        customData = {
+            string userDocBrief = "Ordered transform sources."
+        }
+    )
     uniform token rigExec:upPolicy = "preserveInputUp" (
         allowedTokens = ["preserveInputUp"]
+        customData = {
+            string userDocBrief = "Legacy up policy retained for existing assets."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+    rel rigExec:worldUpObject (
+        customData = {
+            string userDocBrief = "Optional single transform provider used by object world-up modes."
+        }
+    )
+    uniform token rigExec:worldUpType = "none" (
+        allowedTokens = ["sceneUp", "objectUp", "objectRotationUp", "vector", "none"]
+    )
+}
+
+class RigExecPositionConstraint "RigExecPositionConstraint" (
+    customData = {
+        string userDocBrief = "FBX-style position constraint."
+    }
+)
+{
+    bool inputs:affectX = 1
+    bool inputs:affectY = 1
+    bool inputs:affectZ = 1
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    float[] inputs:sourceWeights = [] (
+        customData = {
+            string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    double3 inputs:translationOffset = (0, 0, 0)
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    rel rigExec:sources (
+        customData = {
+            string userDocBrief = "Ordered transform sources."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+}
+
+class RigExecRotationConstraint "RigExecRotationConstraint" (
+    customData = {
+        string userDocBrief = "FBX-style rotation constraint."
+    }
+)
+{
+    bool inputs:affectX = 1
+    bool inputs:affectY = 1
+    bool inputs:affectZ = 1
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    double3 inputs:rotationOffset = (0, 0, 0)
+    float[] inputs:sourceWeights = [] (
+        customData = {
+            string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    rel rigExec:sources (
+        customData = {
+            string userDocBrief = "Ordered transform sources."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+}
+
+class RigExecScaleConstraint "RigExecScaleConstraint" (
+    customData = {
+        string userDocBrief = "FBX-style scale constraint."
+    }
+)
+{
+    bool inputs:affectX = 1
+    bool inputs:affectY = 1
+    bool inputs:affectZ = 1
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    double3 inputs:scaleOffset = (0, 0, 0)
+    float[] inputs:sourceWeights = [] (
+        customData = {
+            string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    rel rigExec:sources (
+        customData = {
+            string userDocBrief = "Ordered transform sources."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+}
+
+class RigExecParentConstraint "RigExecParentConstraint" (
+    customData = {
+        string userDocBrief = "FBX-style parent constraint."
+    }
+)
+{
+    bool inputs:affectRotationX = 1
+    bool inputs:affectRotationY = 1
+    bool inputs:affectRotationZ = 1
+    bool inputs:affectScaleX = 0
+    bool inputs:affectScaleY = 0
+    bool inputs:affectScaleZ = 0
+    bool inputs:affectTranslationX = 1
+    bool inputs:affectTranslationY = 1
+    bool inputs:affectTranslationZ = 1
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    double3[] inputs:rotationOffsets = [] (
+        customData = {
+            string userDocBrief = "Per-source Euler rotation offsets parallel to rigExec:sources."
+        }
+    )
+    float[] inputs:sourceWeights = [] (
+        customData = {
+            string userDocBrief = "Per-source weights parallel to rigExec:sources."
+        }
+    )
+    double3[] inputs:translationOffsets = [] (
+        customData = {
+            string userDocBrief = "Per-source translation offsets parallel to rigExec:sources."
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:rotationOrder = "XYZ" (
+        allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+    )
+    rel rigExec:sources (
+        customData = {
+            string userDocBrief = "Ordered transform sources."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+}
+
+class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
+    customData = {
+        string userDocBrief = "FBX-style single-chain IK constraint."
+    }
+)
+{
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    double3 inputs:poleVector = (0, 1, 0) (
+        customData = {
+            string userDocBrief = "Absolute asset-space pole point used in vector mode."
+        }
+    )
+    float[] inputs:poleVectorWeights = [] (
+        customData = {
+            string userDocBrief = "Weights parallel to rigExec:poleVectorObjects."
+        }
+    )
+    double inputs:twistDegrees = 0
+    rel rigExec:effector (
+        customData = {
+            string userDocBrief = "Single transform provider supplying the IK goal."
+        }
+    )
+    rel rigExec:endJoint (
+        customData = {
+            string userDocBrief = "Single final joint of the inclusive IK chain."
+        }
+    )
+    uniform token rigExec:evaluationMode = "neverTS" (
+        allowedTokens = ["neverTS", "autoDetect", "alwaysTS"]
+        customData = {
+            string userDocBrief = """Controls whether animated per-chain translation and scale
+        contribute to IK solve lengths, following Autodesk EvaluateTSAnim:
+        neverTS ignores animated T/S and uses rest-derived lengths, autoDetect
+        uses current T/S when animation is detected, and alwaysTS always uses
+        the current T/S."""
+        }
+    )
+    rel rigExec:firstJoint (
+        customData = {
+            string userDocBrief = "Single first joint of the inclusive IK chain."
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    uniform token rigExec:poleVectorMode = "vector" (
+        allowedTokens = ["vector", "object"]
+    )
+    rel rigExec:poleVectorObjects (
+        customData = {
+            string userDocBrief = "Ordered pole-vector transform providers used in object mode."
+        }
+    )
+    uniform token rigExec:solverMode = "rotatePlane" (
+        allowedTokens = ["rotatePlane", "singleChain"]
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
+    )
+}
+
+class RigExecCustomConstraint "RigExecCustomConstraint" (
+    customData = {
+        string userDocBrief = """Non-evaluating extensibility carrier for DCC-specific constraint
+    metadata: RigExec intentionally assigns no source relationship or built-in
+    solve semantics to this type, the built-in evaluator rejects a Custom prim
+    carrying a rigExec:moves write set and exposes no handler registry, and an
+    external integration must evaluate any Custom behavior outside the
+    built-in RigExecRigEvaluator path while retaining the common weight/lock
+    contract."""
+    }
+)
+{
+    float inputs:defaultWeight = 1 (
+        customData = {
+            string userDocBrief = """The constraint's envelope: the normalized blend from the
+        incoming pose to the constrained pose, in [0, 1]."""
+        }
+    )
+    uniform bool rigExec:locked = 0 (
+        customData = {
+            string userDocBrief = "Authoring lock metadata for DCC interchange."
+        }
+    )
+    rel rigExec:weightObject (
+        customData = {
+            string userDocBrief = """Optional per-element weight field refining
+        inputs:defaultWeight, at most one."""
+        }
     )
 }
 

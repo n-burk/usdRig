@@ -1649,6 +1649,26 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // a list of type names repeated at each site that asks.
             const _ConstraintHandler *orderHandler =
                 _FindConstraintHandler(record.schemaType);
+
+            // inputs:weight became inputs:defaultWeight when the envelope
+            // and the per-element weight field collapsed into one concept.
+            // The old name is no longer part of the schema, so an authored
+            // opinion would compose as a custom property and be ignored --
+            // exactly the silent no-op this family is being cleaned of.
+            if (orderHandler) {
+                if (const UsdAttribute legacy =
+                        prim.GetAttribute(TfToken("inputs:weight"))) {
+                    if (legacy.HasAuthoredValue()) {
+                        reportError(
+                            record.schemaType.GetString() + " " +
+                            prim.GetPath().GetString() +
+                            " authors inputs:weight, which a constraint no "
+                            "longer has; the envelope is now "
+                            "inputs:defaultWeight");
+                        return false;
+                    }
+                }
+            }
             if (orderHandler && orderHandler->usesRotationOrder) {
                 structuralTokens.push_back("rigExec:rotationOrder");
             }
@@ -5123,7 +5143,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             continue;
         }
         const double weight = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:weight", 1.0f, time);
+            _resolvedInputs, prim, "inputs:defaultWeight", 1.0f, time);
         if (!std::isfinite(weight)) {
             pose.diagnostics.push_back(
                 constraint.moverPath.GetString() +
@@ -5134,9 +5154,17 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             }
             continue;
         }
-        // A zero/negative global weight is an exact dormant pass-through.
-        // Do this before resolving sources, effectors, or poles so malformed
+        // A zero/negative envelope is an exact dormant pass-through. Do this
+        // before resolving sources, effectors, or poles so malformed
         // disconnected inputs cannot make a disabled constraint fail.
+        //
+        // Unconditional only because every constraint target is currently a
+        // transform, which has exactly one element and so can never carry a
+        // rigExec:weightObject. When the geometry domain lands this must
+        // become conditional on no weight object being bound: a bound field
+        // supersedes inputs:defaultWeight, so a zero envelope with a map that
+        // resolves to one must still deform, and short-circuiting the solve
+        // here would make that unreachable.
         if (weight <= 0.0) {
             for (const SdfPath &target : constraint.targets) {
                 recordFrame(target, constraint.moverPath);
