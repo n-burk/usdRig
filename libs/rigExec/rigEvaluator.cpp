@@ -1788,6 +1788,39 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                                 " rotation read it");
                     return false;
                 }
+
+                // rigExec:preserve is the legacy channel mask at opposite
+                // polarity: it names the components the solve must leave
+                // alone, where inputs:affect* names the ones it writes. Its
+                // default ["origin", "scale"] says an aim writes orientation
+                // only, which is exactly what the kernel does -- it modifies
+                // the decomposed rotation and reconstructs, leaving
+                // translation and scale untouched. So the default needs no
+                // implementation; it is already the behavior.
+                //
+                // Any OTHER value does not. ["scale"] alone would ask an aim
+                // to move the origin too, which requires writing the
+                // translation group that Aim does not write. That is the
+                // dangerous case today: accepted and silently ignored.
+                if (const UsdAttribute preserve =
+                        prim.GetAttribute(TfToken("rigExec:preserve"))) {
+                    VtTokenArray value;
+                    if (preserve.HasAuthoredValue() && preserve.Get(&value)) {
+                        const VtTokenArray expected{TfToken("origin"),
+                                                    TfToken("scale")};
+                        if (value != expected) {
+                            reportError(
+                                who +
+                                " authors a non-default rigExec:preserve;"
+                                " only [\"origin\", \"scale\"] is"
+                                " implemented, which is the orientation-only"
+                                " solve the kernel already performs. Use the"
+                                " inputs:affect* masks to vary which channels"
+                                " are written");
+                            return false;
+                        }
+                    }
+                }
             }
             if (orderHandler && orderHandler->usesRotationOrder) {
                 structuralTokens.push_back("rigExec:rotationOrder");
