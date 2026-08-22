@@ -107,23 +107,96 @@ _IsWeightObjectType(const TfToken &typeName)
            _IsVolumeWeightType(typeName);
 }
 
+/// Everything a constraint solve needs that is common to every operator. The
+/// per-operator reads -- offsets, masks -- happen inside the solve, because
+/// that is exactly what differs between operators.
+struct _ConstraintSolveContext {
+    const RigExecResolvedInputs *resolved = nullptr;
+    UsdPrim prim;
+    UsdTimeCode time;
+    RigExecPointFrame inputFrame;
+    const std::vector<RigExecConstraintSource> *sources = nullptr;
+    RigExecConstraintAxisMask affect;
+    RigExecEulerOrder order = RigExecEulerOrder::XYZ;
+    double weight = 1.0;
+};
+
+using _ConstraintSolveFn =
+    RigExecPointFrame (*)(const _ConstraintSolveContext &);
+
+// Bodies sit next to the dispatch they replaced.
+RigExecPointFrame _SolvePositionConstraint(const _ConstraintSolveContext &);
+RigExecPointFrame _SolveRotationConstraint(const _ConstraintSolveContext &);
+RigExecPointFrame _SolveScaleConstraint(const _ConstraintSolveContext &);
+RigExecPointFrame _SolveParentConstraint(const _ConstraintSolveContext &);
+
+/// One row per constraint operator. This table is the single source of truth
+/// about which operators exist and what each one honors; adding an operator
+/// is a row here plus its solve, not an edit at every dispatch site.
+///
+/// solve == nullptr with dispatchesInline == true means the operator is
+/// evaluated by a bespoke branch in Evaluate() because it consumes evaluator
+/// state a uniform context cannot carry: Aim resolves a world-up binding
+/// against other providers, SingleChainIk writes an inferred joint chain
+/// atomically. They are still registered, so the table remains the complete
+/// answer to "which operators exist".
+///
+/// solve == nullptr with dispatchesInline == false means the operator has no
+/// evaluator at all -- a legal carrier prim that must not silently do
+/// nothing, which is what RigExecCustomConstraint is.
+struct _ConstraintHandler {
+    const char *schemaType;
+    bool sourceFrame;      ///< blends rigExec:sources into one revision
+    bool frameConstraint;  ///< compiles to frame wiring at all
+    bool usesRotationOrder;
+    bool dispatchesInline;
+    _ConstraintSolveFn solve;
+};
+
+const std::vector<_ConstraintHandler> &
+_ConstraintHandlers()
+{
+    static const std::vector<_ConstraintHandler> handlers = {
+        {"RigExecAimConstraint", true, true, true, true, nullptr},
+        {"RigExecPositionConstraint", true, true, false, false,
+         _SolvePositionConstraint},
+        {"RigExecRotationConstraint", true, true, true, false,
+         _SolveRotationConstraint},
+        {"RigExecScaleConstraint", true, true, false, false,
+         _SolveScaleConstraint},
+        {"RigExecParentConstraint", true, true, true, false,
+         _SolveParentConstraint},
+        {"RigExecSingleChainIkConstraint", false, true, false, true, nullptr},
+        {"RigExecCustomConstraint", false, false, false, false, nullptr},
+    };
+    return handlers;
+}
+
+const _ConstraintHandler *
+_FindConstraintHandler(const TfToken &typeName)
+{
+    for (const _ConstraintHandler &handler : _ConstraintHandlers()) {
+        if (typeName == handler.schemaType) {
+            return &handler;
+        }
+    }
+    return nullptr;
+}
+
 /// Source-blending constraints that revise one transform provider.
 bool
 _IsSourceFrameConstraintType(const TfToken &typeName)
 {
-    return typeName == "RigExecAimConstraint" ||
-           typeName == "RigExecPositionConstraint" ||
-           typeName == "RigExecRotationConstraint" ||
-           typeName == "RigExecScaleConstraint" ||
-           typeName == "RigExecParentConstraint";
+    const _ConstraintHandler *handler = _FindConstraintHandler(typeName);
+    return handler && handler->sourceFrame;
 }
 
 /// Every built-in constraint with fixed evaluator semantics.
 bool
 _IsFrameConstraintType(const TfToken &typeName)
 {
-    return _IsSourceFrameConstraintType(typeName) ||
-           typeName == "RigExecSingleChainIkConstraint";
+    const _ConstraintHandler *handler = _FindConstraintHandler(typeName);
+    return handler && handler->frameConstraint;
 }
 
 RigExecEulerOrder
@@ -173,6 +246,61 @@ _ReadConstraintAxisMask(
     mask.z = _ResolvedRead(resolved, prim, z, fallback, time);
     return mask;
 }
+
+RigExecPointFrame
+_SolvePositionConstraint(const _ConstraintSolveContext &c)
+{
+    RigExecPositionConstraintParams params;
+    params.offset = _ResolvedRead(
+        *c.resolved, c.prim, "inputs:translationOffset", GfVec3d(0), c.time);
+    params.affect = c.affect;
+    params.weight = c.weight;
+    return RigExecApplyPositionConstraint(c.inputFrame, *c.sources, params);
+}
+
+RigExecPointFrame
+_SolveRotationConstraint(const _ConstraintSolveContext &c)
+{
+    RigExecRotationConstraintParams params;
+    params.offsetDegrees = _ResolvedRead(
+        *c.resolved, c.prim, "inputs:rotationOffset", GfVec3d(0), c.time);
+    params.affect = c.affect;
+    params.rotationOrder = c.order;
+    params.weight = c.weight;
+    return RigExecApplyRotationConstraint(c.inputFrame, *c.sources, params);
+}
+
+RigExecPointFrame
+_SolveScaleConstraint(const _ConstraintSolveContext &c)
+{
+    RigExecScaleConstraintParams params;
+    params.offset = _ResolvedRead(
+        *c.resolved, c.prim, "inputs:scaleOffset", GfVec3d(0), c.time);
+    params.affect = c.affect;
+    params.weight = c.weight;
+    return RigExecApplyScaleConstraint(c.inputFrame, *c.sources, params);
+}
+
+RigExecPointFrame
+_SolveParentConstraint(const _ConstraintSolveContext &c)
+{
+    RigExecParentConstraintParams params;
+    params.translationAxes = _ReadConstraintAxisMask(
+        *c.resolved, c.prim, "inputs:affectTranslationX",
+        "inputs:affectTranslationY", "inputs:affectTranslationZ", c.time);
+    params.rotationAxes = _ReadConstraintAxisMask(
+        *c.resolved, c.prim, "inputs:affectRotationX",
+        "inputs:affectRotationY", "inputs:affectRotationZ", c.time);
+    // FBX disables scale by default; the explicit false fallback is the
+    // authored contract, not an oversight (schema.usda:769-771).
+    params.scaleAxes = _ReadConstraintAxisMask(
+        *c.resolved, c.prim, "inputs:affectScaleX", "inputs:affectScaleY",
+        "inputs:affectScaleZ", c.time, false);
+    params.rotationOrder = c.order;
+    params.weight = c.weight;
+    return RigExecApplyParentConstraint(c.inputFrame, *c.sources, params);
+}
+
 
 /// Bakes a volumetric weight's distance-to-weight remap into the lookup
 /// table its exec kernel consumes.
@@ -5189,51 +5317,23 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         const RigExecEulerOrder order =
             _ParseConstraintEulerOrder(orderToken);
 
-        if (constraint.schemaType == "RigExecPositionConstraint") {
-            RigExecPositionConstraintParams params;
-            params.offset = _ResolvedRead(
-                _resolvedInputs, prim, "inputs:translationOffset",
-                GfVec3d(0), time);
-            params.affect = affect;
-            params.weight = weight;
-            candidate = RigExecApplyPositionConstraint(
-                inputFrame, sources, params);
-        } else if (constraint.schemaType == "RigExecRotationConstraint") {
-            RigExecRotationConstraintParams params;
-            params.offsetDegrees = _ResolvedRead(
-                _resolvedInputs, prim, "inputs:rotationOffset",
-                GfVec3d(0), time);
-            params.affect = affect;
-            params.rotationOrder = order;
-            params.weight = weight;
-            candidate = RigExecApplyRotationConstraint(
-                inputFrame, sources, params);
-        } else if (constraint.schemaType == "RigExecScaleConstraint") {
-            RigExecScaleConstraintParams params;
-            params.offset = _ResolvedRead(
-                _resolvedInputs, prim, "inputs:scaleOffset",
-                GfVec3d(0), time);
-            params.affect = affect;
-            params.weight = weight;
-            candidate = RigExecApplyScaleConstraint(
-                inputFrame, sources, params);
-        } else if (constraint.schemaType == "RigExecParentConstraint") {
-            RigExecParentConstraintParams params;
-            params.translationAxes = _ReadConstraintAxisMask(
-                _resolvedInputs, prim, "inputs:affectTranslationX",
-                "inputs:affectTranslationY",
-                "inputs:affectTranslationZ", time);
-            params.rotationAxes = _ReadConstraintAxisMask(
-                _resolvedInputs, prim, "inputs:affectRotationX",
-                "inputs:affectRotationY", "inputs:affectRotationZ", time);
-            params.scaleAxes = _ReadConstraintAxisMask(
-                _resolvedInputs, prim, "inputs:affectScaleX",
-                "inputs:affectScaleY", "inputs:affectScaleZ", time,
-                false);
-            params.rotationOrder = order;
-            params.weight = weight;
-            candidate = RigExecApplyParentConstraint(
-                inputFrame, sources, params);
+        // The kernel-backed operators solve through the registry: one row
+        // per operator, so adding a seventh is a table entry rather than
+        // another arm here. Aim falls through to the inline branch below,
+        // which resolves a world-up binding the uniform context cannot carry.
+        const _ConstraintHandler *solveHandler =
+            _FindConstraintHandler(constraint.schemaType);
+        if (solveHandler && solveHandler->solve) {
+            _ConstraintSolveContext solveContext;
+            solveContext.resolved = &_resolvedInputs;
+            solveContext.prim = prim;
+            solveContext.time = time;
+            solveContext.inputFrame = inputFrame;
+            solveContext.sources = &sources;
+            solveContext.affect = affect;
+            solveContext.order = order;
+            solveContext.weight = weight;
+            candidate = solveHandler->solve(solveContext);
         } else {
             // Aim uses the same weighted source set, reduced to the target
             // point specified by FBX's AimAtObjects contract.
@@ -5917,6 +6017,25 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 
     pose.valid = true;
     return pose;
+}
+
+size_t
+RigExecConstraintHandlerCount(const TfToken &schemaType)
+{
+    return _FindConstraintHandler(schemaType) ? 1 : 0;
+}
+
+size_t
+RigExecConstraintHandlerTotal()
+{
+    return _ConstraintHandlers().size();
+}
+
+bool
+RigExecConstraintUsesRotationOrder(const TfToken &schemaType)
+{
+    const _ConstraintHandler *handler = _FindConstraintHandler(schemaType);
+    return handler && handler->usesRotationOrder;
 }
 
 }  // namespace rigExec

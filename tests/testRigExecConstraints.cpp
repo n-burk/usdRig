@@ -832,6 +832,28 @@ TestMeshAndXformTargetsAgree()
     CHECK(GfIsClose(meshResult, xformResult, 1e-12));
 }
 
+// The registry is the single source of truth about which operators exist.
+// Every concrete constraint in the schema must have exactly one row, and the
+// membership predicates must agree with it -- otherwise a seventh operator
+// can be added to one and forgotten in the other, which is the failure mode
+// the table exists to remove.
+static void
+TestConstraintRegistryCoversTheSchema()
+{
+    const UsdSchemaRegistry &registry = UsdSchemaRegistry::GetInstance();
+    for (const char *typeName :
+         {"RigExecAimConstraint", "RigExecPositionConstraint",
+          "RigExecRotationConstraint", "RigExecScaleConstraint",
+          "RigExecParentConstraint", "RigExecSingleChainIkConstraint",
+          "RigExecCustomConstraint"}) {
+        CHECK(registry.FindConcretePrimDefinition(TfToken(typeName)));
+        CHECK(RigExecConstraintHandlerCount(TfToken(typeName)) == 1);
+    }
+    // Seven rows, no more: an unregistered type must not resolve.
+    CHECK(RigExecConstraintHandlerCount(TfToken("RigExecSmoothMover")) == 0);
+    CHECK(RigExecConstraintHandlerTotal() == 7);
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -918,6 +940,7 @@ main()
     TestTransformProviderPredicate();
     TestPointDomainMoverNamesTheFix();
     TestMeshAndXformTargetsAgree();
+    TestConstraintRegistryCoversTheSchema();
     TestInvalidContractsFailClosed();
 
     if (failures) {

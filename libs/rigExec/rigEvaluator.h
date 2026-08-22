@@ -63,12 +63,11 @@ struct RigExecRigPose {
 
     /// Control path -> posed frame, ASSET-space like the joint frames.
     ///
-    /// The BASE phase is the whole story for a control: controls are rig
-    /// inputs, not outputs. Nothing in the pose domain writes them (a mover
-    /// that did would make the animator's channel disagree with the thing
-    /// they are dragging), so base and final are the same frame and only
-    /// one is published. Consumed by the imaging bridge to place the
-    /// synthesized control guides (spec §10.3 extension).
+    /// Normally this is the BASE phase because controls are animator inputs.
+    /// If a pose constraint explicitly names a control in rigExec:moves, the
+    /// revised frame is published instead, matching FBX's ability to
+    /// constrain any transform object. Consumed by the imaging bridge to
+    /// place synthesized control guides (spec §10.3 extension).
     std::map<SdfPath, RigExecPointFrame> controlFrames;
 
     /// Transform provider -> revised ASSET-SPACE matrix for the prim.
@@ -367,24 +366,33 @@ private:
     /// layout is what an epoch IS. Keyed and digest-checked internally, so a
     /// curvenet edit rebinds and an unchanged one does not.
     mutable RigExecCurvenetBindCache _curvenetBindings;
-    /// One pose-domain frame revision: an aim constraint on a transform
-    /// provider, evaluated in memory instead of through a generated
-    /// RigExecPointFrameMoverApplication.
+    /// One transform-valued input to a pose-domain constraint.
     ///
-    /// The kernel it replaces is two lines of math
-    /// (RigExecApplyAimConstraint over the preceding frame), so the generated
-    /// prim was carrying almost nothing except the wiring that named its
-    /// inputs -- and that wiring is all resolvable from the mover itself.
-    struct _FrameRevision {
+    /// RigExec providers publish computePointFrame and are therefore tapped;
+    /// plain UsdGeomXformables have no such computation and are sampled from
+    /// their native transform, asset-relative, during Evaluate(). Exactly one
+    /// of frameTap/xformPath is populated by Compile().
+    struct _FrameSourceBinding {
+        SdfPath sourcePath;
+        RigExecTapId frameTap = -1;
+        SdfPath xformPath;
+    };
+
+    /// One compiled FBX-style pose constraint, in composed mover order.
+    ///
+    /// Position, Rotation, Scale, Parent, and Aim revise one provider;
+    /// SingleChainIK revises an inferred namespace chain atomically. The
+    /// authored values remain on the mover prim and are read per evaluation;
+    /// this record holds only structural wiring.
+    struct _FrameConstraint {
         SdfPath moverPath;
-        RigExecTapId aimTargetFrameTap = -1;  ///< aim target computePointFrame
-        /// Set instead of the tap when the aim target is a plain
-        /// UsdGeomXformable, which publishes no computePointFrame: its frame
-        /// is derived from its own USD transform, asset-relative, exactly the
-        /// way an xform-derived PROVIDER's base frame is. Requesting the
-        /// computation on such a prim is a hard exec failure rather than a
-        /// missing value, so the choice has to be made at compile.
-        SdfPath aimTargetXform;
+        TfToken schemaType;
+        std::vector<SdfPath> targets;
+        std::vector<_FrameSourceBinding> sources;
+        _FrameSourceBinding worldUpObject;
+        _FrameSourceBinding effector;
+        std::vector<_FrameSourceBinding> poleObjects;
+        std::vector<SdfPath> ikChain;
     };
 
     /// One property-domain revision: a float/vec3f/matrix math mover's
@@ -425,8 +433,12 @@ private:
     /// relationship accessor can request computations on its targets but not
     /// a named attribute of them.
     std::map<SdfPath, SdfPath> _ribbonDriverPoints;
-    /// Transform provider -> its aim revisions, in composed post-order.
-    std::map<SdfPath, std::vector<_FrameRevision>> _frameChains;
+    /// All pose constraints, in the same composed post-order as _movers.
+    std::vector<_FrameConstraint> _frameConstraints;
+    /// Transform provider -> constraint mover paths that revise it, in
+    /// composed post-order. This is the pose-domain counterpart of a points
+    /// revision chain and supplies read-phase validation/snapshots.
+    std::map<SdfPath, std::vector<SdfPath>> _frameChains;
     /// Provider -> computeRestFrame tap, for the paired final matrix.
     std::map<SdfPath, RigExecTapId> _providerRestFrameTaps;
     /// Provider -> base computePointFrame tap, for providers that are not
@@ -469,6 +481,20 @@ private:
     size_t _structureDigest = 0;
     bool _compiled = false;
 };
+
+/// Test and diagnostic access to the constraint handler registry -- the one
+/// table that says which constraint operators exist and what each honors.
+/// Exposed so a test can assert the table and the schema agree, which is the
+/// property that keeps a newly added operator from being registered in one
+/// and forgotten in the other.
+///
+/// Count is 0 or 1: a type has at most one row.
+size_t RigExecConstraintHandlerCount(const TfToken &schemaType);
+size_t RigExecConstraintHandlerTotal();
+
+/// Whether \p schemaType's operator honors rigExec:rotationOrder. False for a
+/// type with no registry row.
+bool RigExecConstraintUsesRotationOrder(const TfToken &schemaType);
 
 }  // namespace rigExec
 
