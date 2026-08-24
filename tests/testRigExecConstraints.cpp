@@ -1255,18 +1255,44 @@ TestDomainsOnOnePrimDoNotCompete()
         return stage;
     };
 
-    // Same points set twice: ambiguous.
+    // Same points set twice: legal, and ordered by the composed hierarchy.
+    // Two movers writing one target is an ordinary stack; the order is the
+    // post-order walk of the final composed namespace, so nothing has to be
+    // declared for it to be well defined.
     {
         const UsdStageRefPtr stage =
             build("/Asset/Geom/M.points", "/Asset/Geom/M.points");
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
-        CHECK(std::any_of(errors.begin(), errors.end(),
-                          [](const std::string &error) {
-                              return error.find("competing writers") !=
-                                     std::string::npos;
-                          }));
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+    }
+
+    // A parent child-order instruction is a convenience that redirects that
+    // order, not a precondition for having one. Authoring it reverses which
+    // constraint applies last, and the compiler reads the result off the
+    // composed namespace exactly as before -- it never inspects HOW the
+    // order came to be.
+    {
+        const UsdStageRefPtr stage =
+            build("/Asset/Geom/M.points", "/Asset/Geom/M.points");
+        const UsdPrim movers =
+            stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"));
+        CHECK(movers);
+        const TfTokenVector natural = movers.GetChildrenNames();
+        CHECK(natural.size() == 2);
+        movers.SetChildrenReorder({TfToken("B"), TfToken("A")});
+        const TfTokenVector reordered = movers.GetChildrenNames();
+        CHECK(reordered.size() == 2);
+        if (natural.size() == 2 && reordered.size() == 2) {
+            CHECK(reordered[0] == natural[1]);
+            CHECK(reordered[1] == natural[0]);
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
     }
 
     // Different domains on one prim: legal, and both apply.

@@ -1922,59 +1922,23 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         return false;
     }
 
-    // Same-target writers that are not nested (neither is a namespace
-    // ancestor of the other) compete through composed child order at
-    // their common ancestor; release validation requires an authored
-    // child-reorder opinion there covering both branches (spec §4.2).
-    {
-        std::map<SdfPath, std::vector<const RigExecMoverRecord *>> byTarget;
-        for (const RigExecMoverRecord &m : newMovers) {
-            for (const SdfPath &t : m.targets) {
-                byTarget[t].push_back(&m);
-            }
-        }
-        for (const auto &[target, writers] : byTarget) {
-            for (size_t i = 0; i < writers.size(); ++i) {
-                for (size_t j = i + 1; j < writers.size(); ++j) {
-                    const SdfPath &a = writers[i]->moverPath;
-                    const SdfPath &b = writers[j]->moverPath;
-                    if (a.HasPrefix(b) || b.HasPrefix(a)) {
-                        continue;  // nested: hierarchy order rules
-                    }
-                    const SdfPath ancestor =
-                        a.GetCommonPrefix(b);
-                    // The two competing direct-child branch names at the
-                    // common ancestor.
-                    SdfPath branchA = a, branchB = b;
-                    while (branchA.GetParentPath() != ancestor) {
-                        branchA = branchA.GetParentPath();
-                    }
-                    while (branchB.GetParentPath() != ancestor) {
-                        branchB = branchB.GetParentPath();
-                    }
-                    const UsdPrim parent = _stage->GetPrimAtPath(ancestor);
-                    const TfTokenVector reorder =
-                        parent ? parent.GetChildrenReorder()
-                               : TfTokenVector();
-                    const bool covered =
-                        std::find(reorder.begin(), reorder.end(),
-                                  branchA.GetNameToken()) != reorder.end() &&
-                        std::find(reorder.begin(), reorder.end(),
-                                  branchB.GetNameToken()) != reorder.end();
-                    if (!covered) {
-                        reportError(
-                            "Ambiguous competing writers of " +
-                            target.GetString() + ": " + a.GetString() +
-                            " and " + b.GetString() +
-                            " need nesting or an authored child reorder "
-                            "at " + ancestor.GetString() +
-                            " covering both branches (spec §4.2)");
-                        return false;
-                    }
-                }
-            }
-        }
-    }
+    // Multiple writers of one target are an ordinary stack, not an error.
+    //
+    // Their order is the post-order walk of the FINAL COMPOSED hierarchy
+    // above, which is already the complete answer: UsdPrim::GetChildrenNames()
+    // returns the composed order with any parent child-order instruction
+    // (reorder nameChildren) already folded in. So a reorder is a convenience
+    // for redirecting that order, never a precondition for having one.
+    //
+    // This deliberately does not reason about HOW the composed order arose --
+    // which layer authored a sibling, which arc contributed it, whether a
+    // reorder opinion exists. The compiler reads the final stage and nothing
+    // else. An earlier revision rejected non-nested same-target writers that
+    // lacked an authored reorder covering both branches; it demanded ceremony
+    // (examples/13_ReadPhases.usda restated its own file order to satisfy it)
+    // while not actually preventing the precedence surprises it cited, which
+    // come from arc order and weak-side insertion rather than from a missing
+    // reorder opinion.
 
     // final transform reads are legal only when every writer of that
     // provider precedes the reader in logical order (spec §4.2): a
