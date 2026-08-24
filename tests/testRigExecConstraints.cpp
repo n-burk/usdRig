@@ -39,9 +39,15 @@ Near(const GfVec3d &a, const GfVec3d &b, double tolerance = 1e-5)
     return (a - b).GetLength() <= tolerance;
 }
 
+// GfRotation's default constructor has an EMPTY body and its members are
+// uninitialized (gf/rotation.h:42, GfVec3d() = default), so `GfRotation()` is
+// whatever was on the stack. Defaulting the parameter to it made every
+// Matrix() call that omits a rotation inherit the previous call's leftovers --
+// silently, and only when a caller happened to look at the rotation.
+// Identity has to be spelled out.
 static GfMatrix4d
 Matrix(const GfVec3d &translation = GfVec3d(0),
-       const GfRotation &rotation = GfRotation(),
+       const GfRotation &rotation = GfRotation(GfVec3d(0, 0, 1), 0.0),
        const GfVec3d &scale = GfVec3d(1))
 {
     GfMatrix4d scaling(1.0);
@@ -1312,6 +1318,120 @@ TestDomainsOnOnePrimDoNotCompete()
     }
 }
 
+// The stack is dynamic: unwiring one mover takes that mover out of it and
+// leaves the rest running. Disconnecting rigExec:moves is the ordinary
+// interactive edit -- pulling a wire in a node graph -- and it must not take
+// down every other constraint in the rig with it.
+static void
+TestUnwiringOneMoverLeavesTheRestRunning()
+{
+    // Rotation applies first, Parent stacks on top; each writes a channel the
+    // other can be checked by. Unwire one at a time and confirm the survivor
+    // still drives.
+    const auto build = [](const char *unwire) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/RotSource"),
+                  Matrix(GfVec3d(0, 0, 0),
+                         GfRotation(GfVec3d(0, 1, 0), 90.0)));
+        MakeXform(stage, SdfPath("/Asset/ParSource"),
+                  Matrix(GfVec3d(7, 0, 0)));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        const UsdPrim par = MakeConstraint(
+            stage, "Par", "RigExecParentConstraint",
+            {SdfPath("/Asset/Target")});
+        par.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/ParSource")});
+        const UsdPrim rot = MakeConstraint(
+            stage, "Rot", "RigExecRotationConstraint",
+            {SdfPath("/Asset/Target")});
+        rot.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/RotSource")});
+        if (std::string(unwire) == "Par") {
+            par.GetRelationship(TfToken("rigExec:moves")).SetTargets({});
+        } else if (std::string(unwire) == "Rot") {
+            rot.GetRelationship(TfToken("rigExec:moves")).SetTargets({});
+        }
+        return stage;
+    };
+
+    // Both wired: Parent supplies the translation, Rotation the orientation.
+    {
+        const UsdStageRefPtr stage = build("");
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        const auto it = pose.providerXforms.find(SdfPath("/Asset/Target"));
+        CHECK(it != pose.providerXforms.end());
+        if (it != pose.providerXforms.end()) {
+            CHECK(Near(it->second.ExtractTranslation(), GfVec3d(7, 0, 0)));
+            CHECK(Near(it->second.TransformDir(GfVec3d(1, 0, 0)),
+                       GfVec3d(0, 0, -1)));
+        }
+    }
+
+    // Unwire the Rotation constraint: the rig still compiles and the Parent
+    // constraint still drives the translation.
+    {
+        const UsdStageRefPtr stage = build("Rot");
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        const auto it = pose.providerXforms.find(SdfPath("/Asset/Target"));
+        CHECK(it != pose.providerXforms.end());
+        if (it != pose.providerXforms.end()) {
+            CHECK(Near(it->second.ExtractTranslation(), GfVec3d(7, 0, 0)));
+            // ...and the unwired one contributes nothing.
+            CHECK(Near(it->second.TransformDir(GfVec3d(1, 0, 0)),
+                       GfVec3d(1, 0, 0)));
+        }
+        // Inert, but never silent.
+        CHECK(std::any_of(errors.begin(), errors.end(),
+                          [](const std::string &m) {
+                              return m.find("/Asset/Rig/Movers/Rot") !=
+                                         std::string::npos &&
+                                     m.find("no moves targets") !=
+                                         std::string::npos;
+                          }));
+    }
+
+    // Unwire the Parent constraint instead: Rotation still drives.
+    {
+        const UsdStageRefPtr stage = build("Par");
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        const auto it = pose.providerXforms.find(SdfPath("/Asset/Target"));
+        CHECK(it != pose.providerXforms.end());
+        if (it != pose.providerXforms.end()) {
+            CHECK(Near(it->second.TransformDir(GfVec3d(1, 0, 0)),
+                       GfVec3d(0, 0, -1)));
+            CHECK(Near(it->second.ExtractTranslation(), GfVec3d(0, 0, 0)));
+        }
+    }
+
+    // Unwire BOTH: still a legal rig, just one that publishes nothing.
+    {
+        const UsdStageRefPtr stage = build("Rot");
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Par"))
+            .GetRelationship(TfToken("rigExec:moves"))
+            .SetTargets({});
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+    }
+}
+
 static void
 TestInvalidContractsFailClosed()
 {
@@ -1331,10 +1451,37 @@ TestInvalidContractsFailClosed()
             .SetTargets({SdfPath("/Asset/Source")});
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
         std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
+        // An unwired constraint is INERT, not fatal -- the stack is dynamic,
+        // and one disconnected mover must not take the rig down. What the
+        // original contract was really protecting is preserved: it does not
+        // become a grouping prim SILENTLY.
+        CHECK(evaluator.Compile(&errors));
         CHECK(std::any_of(errors.begin(), errors.end(),
                           [](const std::string &error) {
                               return error.find("no moves targets") !=
+                                     std::string::npos &&
+                                     error.find("inert") != std::string::npos;
+                          }));
+        // Inert means it publishes nothing.
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.providerXforms.empty());
+        CHECK(pose.movedProperties.empty());
+    }
+
+    // A rig that found NO mover prims at all is still the misconfiguration
+    // that error describes -- a rig root pointed at the wrong prim.
+    {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        CHECK(std::any_of(errors.begin(), errors.end(),
+                          [](const std::string &error) {
+                              return error.find("publishes no outputs") !=
                                      std::string::npos;
                           }));
     }
@@ -1402,6 +1549,7 @@ main()
     TestTransformAndGeometrySpellingsAgree();
     TestGeometryEnvelopeIsChordLerp();
     TestDomainsOnOnePrimDoNotCompete();
+    TestUnwiringOneMoverLeavesTheRestRunning();
     TestConstraintRegistryCoversTheSchema();
     TestRotationOrderCapabilityIsRecorded();
     TestLegacyWeightSpellingIsRejected();

@@ -1052,6 +1052,17 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     };
 
+    // Same channel, different verdict: a notice is reported to the author and
+    // the compile CONTINUES. It exists so that "this is not wired up" can be
+    // said out loud without being fatal -- an incomplete mover is inert, not a
+    // reason to refuse the whole rig. Every caller of reportError still
+    // returns false; nothing that calls this one does.
+    auto reportNotice = [errors](const std::string &message) {
+        if (errors) {
+            errors->push_back(message);
+        }
+    };
+
     if (!_stage) {
         reportError("no stage; nothing to compile");
         return false;
@@ -1282,6 +1293,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // namespace, descendants first, branches in composed child order
     // (spec §4.2, UsdPrimRange::PreAndPostVisit).
     std::vector<RigExecMoverRecord> newMovers;
+    /// Mover-bearing prims discovered but skipped because nothing is wired to
+    /// their rigExec:moves yet. They are not outputs, but they ARE evidence
+    /// that the rig root points somewhere real.
+    size_t inertMovers = 0;
     const UsdPrim movers =
         _stage->GetPrimAtPath(_rigPath.AppendChild(TfToken("Movers")));
     int ordinal = 0;
@@ -1307,9 +1322,23 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             SdfPathVector targets;
             moves.GetTargets(&targets);
             if (targets.empty()) {
-                reportError("Mover has no moves targets: " +
-                            prim.GetPath().GetString());
-                return false;
+                // An unwired mover writes nothing, so it is INERT -- not a
+                // reason to fail the rig. The stack is dynamic: disconnecting
+                // rigExec:moves is the ordinary interactive edit, and taking
+                // every other mover down with it makes a node graph unusable
+                // the moment a wire is pulled.
+                //
+                // This is the same treatment a prim with no rigExec:moves at
+                // all already gets just above (grouping scope), with one
+                // difference: that case is silent because every Scope under
+                // Movers would otherwise announce itself, while an authored
+                // but empty write set is a wire the author meant to connect.
+                // So it is skipped and SAID, never skipped silently.
+                ++inertMovers;
+                reportNotice("Mover has no moves targets: " +
+                             prim.GetPath().GetString() +
+                             "; it is inert this generation");
+                continue;
             }
 
             RigExecMoverRecord record;
@@ -1916,7 +1945,12 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // generation every frame, which is far likelier to be an authoring
     // mistake -- a Movers scope whose contents were renamed out from under
     // it, a rig root pointed at the wrong prim -- than an intent.
-    if (newJointPaths.empty() && newMovers.empty()) {
+    // An inert mover is not an output, but it is evidence of intent: the rig
+    // root found mover prims, they simply are not wired yet. Failing that is
+    // the same mistake as failing the whole rig for one disconnected mover --
+    // it makes the last wire you pull take the rig down. The error is for a
+    // rig that found NOTHING, which is the misconfiguration it describes.
+    if (newJointPaths.empty() && newMovers.empty() && inertMovers == 0) {
         reportError("Rig publishes no outputs: " + _rigPath.GetString() +
                     " has no RigExecJoint prims and no movers");
         return false;
