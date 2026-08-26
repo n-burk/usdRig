@@ -92,42 +92,80 @@ echo "Muse Assistant: $RIG/plugin/museAssistant (tool loop + drawover + /goal)"
 echo "Launch: $PY $USDVIEW ${STAGE} ${EXTRA[*]:-}"
 echo ""
 
-# Muse needs an Anthropic key and the anthropic SDK in THIS interpreter.
-# Both are inherited from the environment; say plainly when one is missing,
-# because the panel is inert without them.
+# Report the selected back end before opening the window. Apple FM and Ollama
+# are local/no-key providers; hosted providers retain the existing credential
+# and SDK checks.
+_MUSE_PROVIDER="${MUSE_PROVIDER:-}"
+_MUSE_SETTINGS_FILE="$HOME/.config/muse/credentials.json"
+_muse_saved_setting() {
+  "$PY" -c 'import json,sys; p,k=sys.argv[1:3];
+try: v=json.load(open(p)).get(k, "")
+except (OSError, ValueError): v=""
+print(v if isinstance(v, str) else "")' "$1" "$2" 2>/dev/null
+}
+if [ -z "$_MUSE_PROVIDER" ] && [ -r "$_MUSE_SETTINGS_FILE" ]; then
+  _MUSE_PROVIDER="$(_muse_saved_setting "$_MUSE_SETTINGS_FILE" MUSE_PROVIDER)"
+fi
+_MUSE_PROVIDER="$(printf '%s' "$_MUSE_PROVIDER" | tr '[:upper:]' '[:lower:]')"
 _MUSE_KEY="${MUSE_API_KEY:-${ANTHROPIC_API_KEY:-}}"
 _MUSE_KEY_NAME="MUSE_API_KEY"
 [ -z "${MUSE_API_KEY:-}" ] && [ -n "${ANTHROPIC_API_KEY:-}" ] && _MUSE_KEY_NAME="ANTHROPIC_API_KEY"
 _MUSE_BASE="${MUSE_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
 
-if [ -z "$_MUSE_KEY" ]; then
-  echo "Muse key: NOT SET — the assistant cannot talk to a model."
-  echo "          export MUSE_API_KEY=...   then relaunch."
-else
-  echo "Muse key: $_MUSE_KEY_NAME (set, ${#_MUSE_KEY} chars)"
-  if [ -n "$_MUSE_BASE" ]; then
-    echo "Muse endpoint: $_MUSE_BASE (MUSE_BASE_URL)"
-    echo "Muse model: ${MUSE_MODEL:-<endpoint default>}"
-  elif [ -z "${_MUSE_KEY##LLM_*}" ]; then
-    # A Meta Muse key. api.anthropic.com answers this shape with 401, so the
-    # plugin routes it to Meta's Messages API automatically.
-    echo "Muse endpoint: https://api.meta.ai (Meta Muse key detected)"
-    echo "Muse model: ${MUSE_MODEL:-muse-spark-1.2}"
-  else
-    echo "Muse endpoint: https://api.anthropic.com"
-    echo "Muse model: ${MUSE_MODEL:-claude-opus-5}"
-    case "$_MUSE_KEY" in
-      sk-ant-*) ;;
-      *) echo "          WARNING: this does not look like an Anthropic key"
-         echo "                   (sk-ant-…). Set MUSE_BASE_URL to the endpoint"
-         echo "                   that issued it, or expect a 401." ;;
-    esac
+if [ "$_MUSE_PROVIDER" = "apple" ]; then
+  _MUSE_APPLE_URL="${MUSE_APPLE_URL:-}"
+  if [ -z "$_MUSE_APPLE_URL" ] && [ -r "$_MUSE_SETTINGS_FILE" ]; then
+    _MUSE_APPLE_URL="$(_muse_saved_setting "$_MUSE_SETTINGS_FILE" MUSE_APPLE_URL)"
   fi
-fi
-if ! "$PY" -c "import anthropic" 2>/dev/null; then
-  echo "Muse SDK: MISSING — run:  $PY -m pip install anthropic"
+  _MUSE_APPLE_URL="${_MUSE_APPLE_URL:-http://127.0.0.1:1976}"
+  _MUSE_APPLE_URL="${_MUSE_APPLE_URL%/}"
+  echo "Muse provider: Apple Foundation Models"
+  echo "Muse endpoint: $_MUSE_APPLE_URL/v1/chat/completions"
+  echo "Muse model: system (on-device; PCC is never selected)"
+  echo "Muse key/SDK: not needed"
+  if MUSE_APPLE_PROBE_URL="$_MUSE_APPLE_URL" "$PY" -c \
+      'import json, os, sys, urllib.request; o=urllib.request.build_opener(urllib.request.ProxyHandler({})); p=json.load(o.open(os.environ["MUSE_APPLE_PROBE_URL"]+"/health", timeout=4)); sys.exit(0 if any(m.get("name")=="system" and m.get("available") is True for m in p.get("models", [])) else 1)' \
+      >/dev/null 2>&1; then
+    echo "Muse server: ready"
+  else
+    echo "Muse server: NOT READY — start it in another Terminal:"
+    echo "             fm serve --host 127.0.0.1 --port 1976"
+  fi
+elif [ "$_MUSE_PROVIDER" = "ollama" ]; then
+  echo "Muse provider: Ollama"
+  echo "Muse endpoint: ${MUSE_OLLAMA_URL:-http://192.168.68.75:11434}/v1/messages"
+  echo "Muse model: ${MUSE_MODEL:-qwen3.5:9b}"
+  echo "Muse key: not needed"
 else
-  echo "Muse SDK: anthropic $("$PY" -c 'import anthropic;print(anthropic.__version__)')"
+  if [ -z "$_MUSE_KEY" ]; then
+    echo "Muse key: NOT SET — the assistant cannot talk to a hosted model."
+    echo "          export MUSE_API_KEY=...   then relaunch."
+  else
+    echo "Muse key: $_MUSE_KEY_NAME (set, ${#_MUSE_KEY} chars)"
+    if [ -n "$_MUSE_BASE" ]; then
+      echo "Muse endpoint: $_MUSE_BASE (MUSE_BASE_URL)"
+      echo "Muse model: ${MUSE_MODEL:-<endpoint default>}"
+    elif [ -z "${_MUSE_KEY##LLM_*}" ]; then
+      # A Meta Muse key. api.anthropic.com answers this shape with 401, so the
+      # plugin routes it to Meta's Messages API automatically.
+      echo "Muse endpoint: https://api.meta.ai (Meta Muse key detected)"
+      echo "Muse model: ${MUSE_MODEL:-muse-spark-1.2-contributor}"
+    else
+      echo "Muse endpoint: https://api.anthropic.com"
+      echo "Muse model: ${MUSE_MODEL:-claude-opus-5}"
+      case "$_MUSE_KEY" in
+        sk-ant-*) ;;
+        *) echo "          WARNING: this does not look like an Anthropic key"
+           echo "                   (sk-ant-…). Set MUSE_BASE_URL to the endpoint"
+           echo "                   that issued it, or expect a 401." ;;
+      esac
+    fi
+  fi
+  if ! "$PY" -c "import anthropic" 2>/dev/null; then
+    echo "Muse SDK: MISSING — run:  $PY -m pip install anthropic"
+  else
+    echo "Muse SDK: anthropic $("$PY" -c 'import anthropic;print(anthropic.__version__)')"
+  fi
 fi
 echo ""
 echo "In usdview: Muse → Open Muse Assistant"

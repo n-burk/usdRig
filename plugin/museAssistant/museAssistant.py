@@ -13,10 +13,9 @@
 #   * execute arbitrary Python with stage/api in scope and read the output
 #   * capture the viewport and look at its own results
 #
-# Stage edits are always allowed; undo is the brake. There is no offline
-# fallback — without a key the window says so and stays inert, because a
-# fabricated answer that looks real is worse than a clear refusal. See
-# museAgent for the back ends and their auth.
+# Stage edits are always allowed; undo is the brake. There is no fabricated
+# fallback: hosted providers require a key, while local providers must have a
+# healthy server and a tool-capable model. See museAgent for the back ends.
 #
 # Loaded as a Python PluginContainer via plugin/museAssistant/plugInfo.json.
 # PXR_PLUGINPATH_NAME must contain the containing directory.
@@ -139,7 +138,8 @@ CREDENTIALS_PATH = os.path.join(
 # The back-end settings the dialog persists alongside the key. Stored under
 # their environment-variable names so there is exactly one vocabulary: what
 # you would export in a shell is what appears in the file.
-SAVED_SETTING_NAMES = ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_MODEL")
+SAVED_SETTING_NAMES = (
+    "MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL", "MUSE_MODEL")
 
 
 def _read_settings_file(path=None):
@@ -208,7 +208,7 @@ def load_saved_settings(path=None):
 def save_settings(values, path=None):
     """Merge *values* into the saved settings. An empty value clears its key.
 
-    Merging matters: provider, Ollama address and model are edited
+    Merging matters: provider, local-server addresses and model are edited
     independently, and the API key sits in the same file.
     """
     data = _read_settings_file(path)
@@ -912,20 +912,22 @@ if _HAS_QT:
 
             form = QtWidgets.QFormLayout()
 
-            # Which back end. Explicit rather than inferred, because an Ollama
-            # server has no recognisable address to infer from.
+            # Which back end. Local servers are explicit; only hosted
+            # Anthropic/Meta routing is inferred from its credential.
             self._provider = QtWidgets.QComboBox()
             for label, value in (
                     ("Anthropic / Meta Muse (from the key)",
                      museAgent.PROVIDER_ANTHROPIC),
-                    ("Ollama (local server)", museAgent.PROVIDER_OLLAMA)):
+                    ("Ollama (local server)", museAgent.PROVIDER_OLLAMA),
+                    ("Apple Foundation Models (on-device)",
+                     museAgent.PROVIDER_APPLE)):
                 self._provider.addItem(label, value)
             saved_provider = (os.environ.get("MUSE_PROVIDER", "").strip().lower()
                               or museAgent.resolve_provider())
-            index = self._provider.findData(
-                museAgent.PROVIDER_OLLAMA
-                if saved_provider == museAgent.PROVIDER_OLLAMA
-                else museAgent.PROVIDER_ANTHROPIC)
+            selected = (saved_provider if saved_provider in
+                        (museAgent.PROVIDER_OLLAMA, museAgent.PROVIDER_APPLE)
+                        else museAgent.PROVIDER_ANTHROPIC)
+            index = self._provider.findData(selected)
             self._provider.setCurrentIndex(max(index, 0))
             self._provider.currentIndexChanged.connect(self._on_provider_changed)
             form.addRow("Back end", self._provider)
@@ -944,6 +946,14 @@ if _HAS_QT:
             self._ollama_url.editingFinished.connect(self._reload_models)
             self._ollama_url_label = QtWidgets.QLabel("Ollama server")
             form.addRow(self._ollama_url_label, self._ollama_url)
+
+            self._apple_url = QtWidgets.QLineEdit()
+            self._apple_url.setText(museAgent.resolve_apple_base_url())
+            self._apple_url.setPlaceholderText(
+                museAgent.APPLE_DEFAULT_BASE_URL)
+            self._apple_url.textChanged.connect(self._refresh_routing)
+            self._apple_url_label = QtWidgets.QLabel("fm serve")
+            form.addRow(self._apple_url_label, self._apple_url)
 
             modelRow = QtWidgets.QHBoxLayout()
             self._model = QtWidgets.QComboBox()
@@ -1000,12 +1010,16 @@ if _HAS_QT:
 
         def _on_provider_changed(self):
             """Show only the fields the chosen back end actually uses."""
-            isOllama = self._selected_provider() == museAgent.PROVIDER_OLLAMA
+            provider = self._selected_provider()
+            isOllama = provider == museAgent.PROVIDER_OLLAMA
+            isApple = provider == museAgent.PROVIDER_APPLE
             for widget in (self._key_edit, self._key_row_label):
-                widget.setVisible(not isOllama)
+                widget.setVisible(not (isOllama or isApple))
             for widget in (self._ollama_url, self._ollama_url_label,
                            self._model_row, self._model_label):
                 widget.setVisible(isOllama)
+            for widget in (self._apple_url, self._apple_url_label):
+                widget.setVisible(isApple)
             if isOllama and not self._ollama_models:
                 self._reload_models()
             else:
@@ -1052,7 +1066,19 @@ if _HAS_QT:
             self._refresh_routing()
 
         def _describe_current(self):
-            if self._selected_provider() == museAgent.PROVIDER_OLLAMA:
+            provider = self._selected_provider()
+            if provider == museAgent.PROVIDER_APPLE:
+                url = (self._apple_url.text().strip()
+                       or museAgent.APPLE_DEFAULT_BASE_URL)
+                try:
+                    health = museAgent.fetch_apple_health(url, timeout=1.0)
+                    problem = museAgent.describe_apple_health_problem(health)
+                except museAgent.AgentError as error:
+                    problem = str(error)
+                self._current.setText(
+                    problem or "Ready — system model available on-device.")
+                return
+            if provider == museAgent.PROVIDER_OLLAMA:
                 count = len(self._ollama_models)
                 capable = sum(1 for e in self._ollama_models if e["tools"])
                 self._current.setText(
@@ -1071,6 +1097,17 @@ if _HAS_QT:
 
         def _refresh_routing(self):
             """Show where the request in this dialog would actually go."""
+            if self._selected_provider() == museAgent.PROVIDER_APPLE:
+                base = (self._apple_url.text().strip().rstrip("/")
+                        or museAgent.APPLE_DEFAULT_BASE_URL)
+                self._routing.setText(
+                    "Endpoint &nbsp;<b>%s/v1/chat/completions</b><br>"
+                    "Header &nbsp;&nbsp;&nbsp;<span style='color:#858585'>"
+                    "none — loopback only</span><br>"
+                    "Model &nbsp;&nbsp;&nbsp;&nbsp;<b>system</b> "
+                    "<span style='color:#858585'>(on-device)</span>"
+                    % _escape_html(base))
+                return
             if self._selected_provider() == museAgent.PROVIDER_OLLAMA:
                 base = (self._ollama_url.text().strip()
                         or museAgent.OLLAMA_DEFAULT_BASE_URL)
@@ -1133,7 +1170,24 @@ if _HAS_QT:
 
         def _on_save(self):
             provider = self._selected_provider()
-            if provider == museAgent.PROVIDER_OLLAMA:
+            if provider == museAgent.PROVIDER_APPLE:
+                url = (self._apple_url.text().strip().rstrip("/")
+                       or museAgent.APPLE_DEFAULT_BASE_URL)
+                try:
+                    problem = museAgent.describe_apple_health_problem(
+                        museAgent.fetch_apple_health(url))
+                except museAgent.AgentError as error:
+                    problem = str(error)
+                if problem:
+                    QtWidgets.QMessageBox.warning(self, "Muse", problem)
+                    return
+                settings = {
+                    "MUSE_PROVIDER": museAgent.PROVIDER_APPLE,
+                    "MUSE_APPLE_URL": url,
+                    "MUSE_OLLAMA_URL": "",
+                    "MUSE_MODEL": "",
+                }
+            elif provider == museAgent.PROVIDER_OLLAMA:
                 url = (self._ollama_url.text().strip()
                        or museAgent.OLLAMA_DEFAULT_BASE_URL)
                 model = self._model.currentData() or ""
@@ -1148,6 +1202,7 @@ if _HAS_QT:
                 settings = {
                     "MUSE_PROVIDER": museAgent.PROVIDER_OLLAMA,
                     "MUSE_OLLAMA_URL": url,
+                    "MUSE_APPLE_URL": "",
                     "MUSE_MODEL": model,
                 }
             else:
@@ -1156,6 +1211,7 @@ if _HAS_QT:
                 settings = {
                     "MUSE_PROVIDER": "",
                     "MUSE_OLLAMA_URL": "",
+                    "MUSE_APPLE_URL": "",
                     "MUSE_MODEL": "",
                 }
             for name, value in settings.items():
@@ -1177,7 +1233,9 @@ if _HAS_QT:
                 except OSError:
                     pass
 
-            typed = self._key_edit.text().strip()
+            typed = (self._key_edit.text().strip()
+                     if provider not in (museAgent.PROVIDER_OLLAMA,
+                                         museAgent.PROVIDER_APPLE) else "")
             if typed:
                 os.environ["MUSE_API_KEY"] = typed
                 if self._remember.isChecked():
@@ -1366,7 +1424,7 @@ if _HAS_QT:
             """
             if self._agent_thread is not None and self._agent_thread.is_alive():
                 self._agent_thread.stop()
-                self._status.setText("Stopping after the current step…")
+                self._status.setText("Stopping after the current model response…")
                 return
             self.hide()
 
@@ -1475,7 +1533,7 @@ if _HAS_QT:
             return None
 
         def _report_backend_readiness(self):
-            """Say once per session when there is no key.
+            """Say once per session whether the selected back end is usable.
 
             Without this the window looks alive and answers nothing, which is
             the failure mode the whole plugin was written to avoid.
@@ -1486,6 +1544,21 @@ if _HAS_QT:
 
             provider = museAgent.resolve_provider()
             base_url, _base = museAgent.resolve_base_url()
+            if provider == museAgent.PROVIDER_APPLE:
+                try:
+                    health = museAgent.fetch_apple_health(base_url)
+                    problem = museAgent.describe_apple_health_problem(health)
+                except museAgent.AgentError as error:
+                    problem = str(error)
+                if problem:
+                    self._log_system(
+                        "%s Start it with `fm serve --host 127.0.0.1 --port "
+                        "1976`, or choose another back end in Muse ▸ Settings…."
+                        % problem)
+                else:
+                    self._log_system(
+                        "Ready — Apple system model on-device at %s." % base_url)
+                return
             if provider == museAgent.PROVIDER_OLLAMA:
                 # No key to check. What CAN be wrong is the server being off
                 # or the chosen model not supporting tools, and both of those
@@ -1543,7 +1616,9 @@ if _HAS_QT:
 
         def _set_busy(self, busy):
             self._camera_btn.setEnabled(not busy)
-            self._status.setText("Working… esc stops" if busy else self._idle_hint())
+            self._status.setText(
+                "Working… esc stops after this response" if busy
+                else self._idle_hint())
 
         def _on_input_edited(self):
             self._history_index = None

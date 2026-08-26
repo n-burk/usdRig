@@ -118,6 +118,10 @@ def _assertValidRequests(captured):
 def testUsdviewInputFunction(appController):
     from pxr.Usdviewq.qt import QtWidgets
 
+    # This test scripts the Anthropic Messages transport. Pin it explicitly so
+    # a saved/local Apple selection cannot redirect the fake SDK turns to the
+    # real fm server. The opt-in live test exercises the selected provider.
+    os.environ["MUSE_PROVIDER"] = "anthropic"
     import museAgent
     import museAssistant
 
@@ -280,6 +284,28 @@ def testUsdviewInputFunction(appController):
     routing = dialog._routing.text()
     if "api.anthropic.com" not in routing or "x-api-key" not in routing:
         raise AssertionError("settings did not resolve an Anthropic key: %r" % routing)
+
+    # Apple is a first-class local choice: URL visible, credential/model picker
+    # hidden, fixed on-device model and Chat Completions route. Stub health so
+    # this default transport test remains network-independent.
+    _fetch_apple_health = museAgent.fetch_apple_health
+    museAgent.fetch_apple_health = lambda *args, **kwargs: {
+        "status": "fm serve is running",
+        "models": [{"name": "system", "available": True}],
+    }
+    try:
+        _apple = dialog._provider.findData(museAgent.PROVIDER_APPLE)
+        if _apple < 0:
+            raise AssertionError("settings has no Apple on-device entry")
+        dialog._provider.setCurrentIndex(_apple)
+        if dialog._apple_url.isHidden() or not dialog._key_edit.isHidden():
+            raise AssertionError("Apple settings showed the wrong controls")
+        routing = dialog._routing.text()
+        if "/v1/chat/completions" not in routing or \
+                "system" not in routing or "on-device" not in routing:
+            raise AssertionError("Apple routing was not explicit: %r" % routing)
+    finally:
+        museAgent.fetch_apple_health = _fetch_apple_health
     dialog.reject()
     # Destroy it, do not merely hide it.
     #

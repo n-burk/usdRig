@@ -4,8 +4,8 @@
 # Everything else in the suite scripts the SDK, which proves the plumbing but
 # cannot prove the thing the user actually cares about — that asking for a
 # change in English results in the stage changing. This one makes real API
-# calls with whatever key is configured (MUSE_API_KEY / ANTHROPIC_API_KEY) and
-# asserts the outcome by reading the stage back.
+# calls through the configured provider (including local Apple FM or Ollama)
+# and asserts the outcome by reading the stage back.
 #
 # Run:  MUSE_LIVE=1 bin/test_muse.sh
 #
@@ -39,9 +39,10 @@ def testUsdviewInputFunction(appController):
 
     provider = museAgent.resolve_provider()
     key, key_name = museAgent.resolve_api_key()
-    # Ollama authenticates nothing, so a missing key is only fatal for the
-    # hosted back ends.
-    if not key and provider != museAgent.PROVIDER_OLLAMA:
+    # Local Apple FM and Ollama authenticate nothing, so a missing key is only
+    # fatal for the hosted back ends.
+    if not key and provider not in (museAgent.PROVIDER_OLLAMA,
+                                    museAgent.PROVIDER_APPLE):
         raise AssertionError("MUSE_API_KEY is not set — nothing to test live")
     base_url, base_source = museAgent.resolve_base_url()
     model = museAgent.resolve_model(base_url, provider)

@@ -8,8 +8,9 @@
 #                                viewport capture must be a real image, and an
 #                                attached screenshot's camera must reach it
 #
-# Neither test talks to a model — both script the SDK — so no API key is used
-# or needed. Passing prints MUSE_AGENT_OK and MUSE_USDVIEW_OK.
+# Neither default test talks to a model — both script their transport — so no
+# API key or local server is needed. Passing prints MUSE_AGENT_OK and
+# MUSE_USDVIEW_OK. MUSE_LIVE=1 uses the selected real provider.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
@@ -29,14 +30,19 @@ export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant:$USD/lib
 export PXR_PLUGINPATH_NAME="$RIG/build/usd/rigExecSchema/resources:$RIG/build/usd/rigExecImaging/resources:$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant"
 
 echo "== headless: agent core =="
-"$PY" "$RIG/tests/testMuseAgent.py"
+# The unit suite scripts each transport itself. Do not let the provider selected
+# for the opt-in live leg redirect earlier fake-Anthropic cases to a real local
+# server; the Apple cases set their own fake fm endpoint explicitly.
+env -u MUSE_PROVIDER -u MUSE_APPLE_URL \
+  "$PY" "$RIG/tests/testMuseAgent.py"
 
 echo ""
 echo "== in usdview: panel against a live stage =="
 "$PY" "$USD/bin/testusdview" --testScript "$RIG/tests/testUsdviewMuse.py" "$STAGE"
 
 # Opt-in: the only test that proves asking in English changes the stage.
-# Makes real API calls with the configured key, so it is not run by default.
+# Makes real model calls through the configured provider, so it is not run by
+# default.
 if [ "${MUSE_LIVE:-0}" = "1" ]; then
   echo ""
   echo "== LIVE: real model, real stage (MUSE_LIVE=1) =="

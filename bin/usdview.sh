@@ -18,9 +18,9 @@ set -euo pipefail
 # interactive launchers: the headless testusdview runners share that env and
 # must not load an extra panel into the app they are asserting against.
 #
-# The panel needs MUSE_API_KEY (or ANTHROPIC_API_KEY) in this environment and
-# is inert without one. bin/launch.sh reports on the key, the endpoint, and the
-# SDK before launching; this script stays quiet.
+# Hosted providers need MUSE_API_KEY (or ANTHROPIC_API_KEY). Local Apple FM and
+# Ollama do not. bin/launch.sh reports provider-specific readiness before
+# launching; this lower-level helper stays quiet.
 export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/museAssistant"
 
 rigexec_require_python

@@ -19,23 +19,50 @@ broke silently are testable without a display.
 
 ## Setup
 
-Two things are required, both in **the interpreter that launches usdview**:
+Four back ends are supported. The two hosted providers require the Anthropic
+SDK and a key in **the interpreter that launches usdview**:
 
 ```bash
-python -m pip install anthropic       # the SDK (used by every back end)
-export MUSE_API_KEY=...               # or ANTHROPIC_API_KEY; not needed for Ollama
+python -m pip install anthropic
+export MUSE_API_KEY=...               # or ANTHROPIC_API_KEY
 ```
 
-Three back ends are supported. All speak the Anthropic Messages API, so one
-client and one tool loop serve them all — only the endpoint, credential and
-model id differ. **The two hosted ones are chosen from the key, so there is
-nothing else to configure:**
+Apple Foundation Models and Ollama are local, keyless providers selected in
+**Muse ▸ Settings…** or with `MUSE_PROVIDER`. Apple uses the Chat Completions
+endpoint built into `fm serve`; the other three use the Anthropic Messages
+protocol.
 
 | Key looks like | Endpoint | Auth header | Default model |
 |---|---|---|---|
 | `LLM_…` (Meta Muse) | `https://api.meta.ai` | `Authorization: Bearer` | `muse-spark-1.2-contributor` |
 | `sk-ant-…` (Anthropic) | `https://api.anthropic.com` | `x-api-key` | `claude-opus-5` |
 | *(none)* — **Ollama** | your server, e.g. `http://192.168.68.75:11434` | none | `qwen3.5:9b` |
+| *(none)* — **Apple FM** | `http://127.0.0.1:1976` | none | `system` (on-device) |
+
+### Apple Foundation Models (local, on-device)
+
+Accept the Apple Foundation Models license once, start the system server in a
+separate Terminal, then select Apple in Muse:
+
+```bash
+fm serve --host 127.0.0.1 --port 1976
+
+export MUSE_PROVIDER=apple
+export MUSE_APPLE_URL=http://127.0.0.1:1976   # optional; this is the default
+```
+
+Muse checks `/health` and requires `system` to report `available: true`. It
+always sends `model: "system"`: `MUSE_MODEL=pcc` and an explicit `model="pcc"`
+are ignored, so this route never silently leaves the device.
+
+On the current FoundationModels 2.0.68 server, text and inline viewport images
+work, but the model does not emit usable first-step OpenAI `tool_calls`; forced
+tool choice returns HTTP 500 and streamed tool use can hang. Muse therefore
+uses two small JSON-schema calls: one selects the next tool, and the second
+fills only that tool's arguments. It executes the existing `run_python` /
+`inspect_stage` / `capture_viewport` tool, feeds the real result back, and
+repeats. Calls are non-streaming with a bounded timeout (`MUSE_APPLE_TIMEOUT`,
+default 120 seconds).
 
 ### Ollama (local, no key)
 
@@ -109,12 +136,15 @@ its transcript when no key is set. Optional overrides:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MUSE_MODEL` | `claude-opus-5`, or `muse-spark-1.2-contributor` on Meta | Model id. On Meta, only other `-contributor` ids are honoured |
+| `MUSE_MODEL` | `claude-opus-5`, or `muse-spark-1.2-contributor` on Meta | Model id. Ignored by Apple, which is fixed to on-device `system` |
 | `MUSE_EFFORT` | `xhigh` | `low` / `medium` / `high` / `xhigh` / `max` |
 | `MUSE_MAX_TOKENS` | `32000` | Output cap per turn |
-| `MUSE_BASE_URL` | — | An Anthropic-compatible endpoint other than `api.anthropic.com` (a gateway, proxy, or local relay). Outranks everything below |
-| `MUSE_PROVIDER` | inferred from the key | `anthropic`, `meta`, or `ollama`. The only way to select Ollama |
+| `MUSE_BASE_URL` | — | An Anthropic-compatible endpoint other than `api.anthropic.com` (a gateway, proxy, or local relay). Ignored by the explicit Apple provider |
+| `MUSE_PROVIDER` | inferred from the key | `anthropic`, `meta`, `ollama`, or `apple`. Local providers are selected explicitly |
 | `MUSE_OLLAMA_URL` | `http://192.168.68.75:11434` | Ollama server address, used when `MUSE_PROVIDER=ollama` |
+| `MUSE_APPLE_URL` | `http://127.0.0.1:1976` | `fm serve` address, used when `MUSE_PROVIDER=apple` |
+| `MUSE_APPLE_TIMEOUT` | `120` | Seconds allowed for one local Apple completion |
+| `MUSE_APPLE_MAX_ITERATIONS` | `12` | Maximum Apple action rounds per send |
 
 ### On keys and endpoints
 
@@ -136,9 +166,8 @@ An earlier build handled `LLM_…` keys with `_call_custom_muse()`, a stub that
 returned canned text **without contacting any model** — Muse replied fluently
 and changed nothing. That stub is gone.
 
-If no key is set the window is inert, deliberately: there is no offline
-fallback, because a fabricated answer that looks real is worse than a clear
-refusal.
+If a hosted provider has no key, or a local provider is not ready, the window
+reports that state and does not fabricate a fallback answer.
 
 ## The window
 
@@ -217,6 +246,19 @@ Header    none — Ollama authenticates nothing
 Model     qwen3.5:9b
 ```
 
+Choosing **Apple Foundation Models (on-device)** shows only the local server.
+The model is fixed and there is no credential or model picker:
+
+```
+Back end  [ Apple Foundation Models (on-device) ▾ ]
+fm serve  http://127.0.0.1:1976
+          Ready — system model available on-device.
+
+Endpoint  http://127.0.0.1:1976/v1/chat/completions
+Header    none — loopback only
+Model     system (on-device)
+```
+
 Everything here is stored beside the key in `~/.config/muse/credentials.json`
 (0600) under its environment-variable name, so what you would export in a shell
 is what appears in the file. The shell still wins: an export is the more
@@ -266,22 +308,29 @@ are lifted into the system prompt, consecutive same-role turns are merged, and
 a leading assistant turn is dropped. This is not cosmetic — the Messages API
 rejects all three, and a chat panel produces all three naturally.
 
+The canonical history stays in that Messages-shaped form for every provider.
+The Apple adapter translates it at the boundary: system prompt to a `system`
+message, `tool_use` to synthetic OpenAI `tool_calls`, results to `role: tool`,
+and image blocks to inline `image_url` data URLs.
+
 ## Verification
 
 ```
 bin/test_muse.sh
 ```
 
-Neither test contacts a model — both script the SDK — so no API key is used.
+Neither default test contacts a model — both script their transport — so no
+API key or local server is used.
 
-* `tests/testMuseAgent.py` — headless: message shaping against the API's own
-  rules, the tool loop, tool-error propagation, graceful degrade when a model
-  rejects adaptive thinking, and PNG camera-metadata round-trips.
+* `tests/testMuseAgent.py` — headless: message shaping against both API forms,
+  the tool loop, Apple health/model enforcement, tool and inline-image
+  conversion, tool-error propagation, graceful degrade when a model rejects
+  adaptive thinking, and PNG camera-metadata round-trips.
 `MUSE_LIVE=1 bin/test_muse.sh` additionally runs
 `tests/testUsdviewMuseLive.py`, which makes **real** API calls with the
-configured key: it asks in English for a sphere at a given path and radius,
-then asserts the prim exists on the stage with that radius. It is the only
-test that proves the whole chain, so it is opt-in rather than default.
+configured provider: it asks in English for a sphere at a given path and
+radius, then asserts the prim exists on the stage with that radius. It is the
+only test that proves the whole chain, so it is opt-in rather than default.
 
 * `tests/testUsdviewMuse.py` — inside a real usdview: the window constructs, the
   assistant's edits actually land on the stage (asserted by reading the prims

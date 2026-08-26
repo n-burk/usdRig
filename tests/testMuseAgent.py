@@ -13,10 +13,12 @@
 #   PYTHONPATH=<usd site-packages>:plugin/museAssistant python tests/testMuseAgent.py
 #
 import base64
+import http.server
 import json
 import os
 import pathlib
 import sys
+import threading
 import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -171,6 +173,344 @@ def installFakeAnthropic(scripted_turns, captured_requests):
     module = types.ModuleType("anthropic")
     module.Anthropic = _Client
     sys.modules["anthropic"] = module
+
+
+class FakeFmServer(object):
+    """Small HTTP double for ``fm serve``'s health and completions routes."""
+
+    def __init__(self, completions=None, system_available=True,
+                 unavailable_reason="system model unavailable for test"):
+        self.completions = list(completions or [])
+        self.system_available = system_available
+        self.unavailable_reason = unavailable_reason
+        self.requests = []
+        self.get_requests = []
+        owner = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, _format, *args):
+                pass
+
+            def _send(self, status, payload):
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_GET(self):
+                owner.get_requests.append(self.path)
+                if self.path != "/health":
+                    self._send(404, {"error": "not found"})
+                    return
+                model = {"name": "system", "available": owner.system_available}
+                if not owner.system_available:
+                    model["reason"] = owner.unavailable_reason
+                self._send(200, {
+                    "status": "fm serve is running",
+                    "models": [model, {"name": "pcc", "available": False}],
+                })
+
+            def do_POST(self):
+                if self.path != "/v1/chat/completions":
+                    self._send(404, {"error": "not found"})
+                    return
+                length = int(self.headers.get("Content-Length", "0"))
+                owner.requests.append(json.loads(self.rfile.read(length)))
+                if not owner.completions:
+                    self._send(500, {"error": {"message": "no scripted turn"}})
+                    return
+                content = json.dumps(owner.completions.pop(0))
+                self._send(200, {
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": "system",
+                    "choices": [{
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": content},
+                    }],
+                })
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.url = "http://127.0.0.1:%d" % self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever)
+        self._thread.daemon = True
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=2.0)
+
+
+def _appleDecision(action, tool="", message=""):
+    """The small first phase; selected-tool arguments are a second phase."""
+    return {"action": action, "tool": tool, "message": message}
+
+
+def testAppleFmLoopNeedsNoAnthropicAndConvertsToolsAndImages():
+    """The Apple route is local, pinned to system, and runs Muse's real tools."""
+    scripted = [
+        _appleDecision("tool", "run_python", "Editing the stage."),
+        {"code": "print('apple edit')"},
+        _appleDecision("tool", "capture_viewport", "Checking the result."),
+        {"note": "verify apple edit"},
+        _appleDecision("respond", message="Edited and verified with Apple FM."),
+    ]
+    saved_anthropic = sys.modules.get("anthropic")
+    had_anthropic = "anthropic" in sys.modules
+    with FakeFmServer(scripted) as server:
+        for name in ("MUSE_API_KEY", "ANTHROPIC_API_KEY", "MUSE_BASE_URL",
+                     "ANTHROPIC_BASE_URL", "MUSE_MODEL"):
+            os.environ.pop(name, None)
+        os.environ["MUSE_PROVIDER"] = "apple"
+        os.environ["MUSE_APPLE_URL"] = server.url + "/"
+        os.environ["MUSE_BASE_URL"] = "https://must-not-receive-apple-data.example"
+        os.environ["MUSE_MODEL"] = "pcc"
+        # ``None`` makes an accidental ``import anthropic`` fail immediately.
+        sys.modules["anthropic"] = None
+        try:
+            executor = FakeExecutor()
+            events = []
+            result = ma.run_agent(
+                messages=[{"role": "user", "content": "edit and verify"}],
+                executor=executor,
+                system_prompt=ma.build_system_prompt(stage_context="Stage: /tmp/x.usda"),
+                on_event=lambda kind, payload: events.append((kind, payload)),
+                model="pcc",
+            )
+        finally:
+            if had_anthropic:
+                sys.modules["anthropic"] = saved_anthropic
+            else:
+                sys.modules.pop("anthropic", None)
+
+    if ma.resolve_provider() != ma.PROVIDER_APPLE:
+        raise AssertionError("MUSE_PROVIDER=apple was not honoured")
+    if executor.python_calls != ["print('apple edit')"]:
+        raise AssertionError("Apple action did not execute run_python: %r"
+                             % executor.python_calls)
+    if executor.capture_calls != ["verify apple edit"]:
+        raise AssertionError("Apple action did not capture the viewport: %r"
+                             % executor.capture_calls)
+    if len(server.requests) != 5:
+        raise AssertionError("expected 5 two-phase Apple round trips, got %d"
+                             % len(server.requests))
+    if any(request.get("model") != "system" for request in server.requests):
+        raise AssertionError("Apple request escaped to a non-system model: %r"
+                             % [r.get("model") for r in server.requests])
+
+    first = server.requests[0]
+    schema = ((first.get("response_format") or {}).get("json_schema") or {}).get("schema") or {}
+    properties = schema.get("properties") or {}
+    if set(properties) != {"action", "tool", "message"}:
+        raise AssertionError("Apple decision schema is not compact: %r"
+                             % set(properties))
+    required = set(schema.get("required") or [])
+    if required != set(properties):
+        raise AssertionError("fm schema fields must all be required: %r vs %r"
+                             % (required, set(properties)))
+    if schema.get("x-order") != schema.get("required"):
+        raise AssertionError("fm schema x-order must match required")
+    argument_schema = (((server.requests[1].get("response_format") or {})
+                       .get("json_schema") or {}).get("schema") or {})
+    if set((argument_schema.get("properties") or {})) != {"code"}:
+        raise AssertionError("run_python did not get its own small schema: %r"
+                             % argument_schema)
+
+    second_messages = server.requests[2].get("messages") or []
+    if not second_messages or second_messages[0].get("role") != "system":
+        raise AssertionError("Apple prompt was not carried as a system message")
+    tool_call_messages = [message for message in second_messages
+                          if message.get("tool_calls")]
+    tool_results = [message for message in second_messages
+                    if message.get("role") == "tool"]
+    if len(tool_call_messages) != 1 or len(tool_results) != 1:
+        raise AssertionError("tool call/result were not converted: %r"
+                             % second_messages)
+    tool_call = tool_call_messages[0]["tool_calls"][0]
+    if tool_call.get("function", {}).get("name") != "run_python":
+        raise AssertionError("wrong OpenAI tool call: %r" % tool_call)
+    arguments = json.loads(tool_call["function"]["arguments"])
+    if arguments != {"code": "print('apple edit')"}:
+        raise AssertionError("tool arguments changed in conversion: %r" % arguments)
+    if tool_results[0].get("tool_call_id") != tool_call.get("id"):
+        raise AssertionError("tool result lost its call id")
+    if "Created /World/Ball" not in tool_results[0].get("content", ""):
+        raise AssertionError("tool output did not reach Apple FM: %r"
+                             % tool_results[0])
+
+    # The capture result cannot be put into an OpenAI role=tool message as an
+    # Anthropic image block. It must become an inline data URL on the next turn.
+    last_messages = server.requests[-1].get("messages") or []
+    image_urls = [
+        part.get("image_url", {}).get("url", "")
+        for message in last_messages
+        for part in (message.get("content") if isinstance(message.get("content"), list) else [])
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    if not image_urls or not image_urls[0].startswith("data:image/png;base64,"):
+        raise AssertionError("viewport image was not converted for fm serve: %r"
+                             % image_urls)
+    if not any(kind == "text" and payload.get("text") ==
+               "Edited and verified with Apple FM." for kind, payload in events):
+        raise AssertionError("Apple final response was not emitted: %r" % events)
+    if result[-1].get("role") != "assistant":
+        raise AssertionError("Apple conversation did not end with assistant")
+    os.environ.pop("MUSE_PROVIDER", None)
+    os.environ.pop("MUSE_APPLE_URL", None)
+    os.environ.pop("MUSE_BASE_URL", None)
+    os.environ.pop("MUSE_MODEL", None)
+
+
+def testAppleFmHealthFailsClosedWhenSystemIsUnavailable():
+    """A running server is not enough: the on-device model must be available."""
+    reason = "Apple Intelligence is unavailable in this login session"
+    with FakeFmServer(system_available=False, unavailable_reason=reason) as server:
+        for name in ("MUSE_API_KEY", "ANTHROPIC_API_KEY", "MUSE_BASE_URL",
+                     "ANTHROPIC_BASE_URL", "MUSE_MODEL"):
+            os.environ.pop(name, None)
+        os.environ["MUSE_PROVIDER"] = "apple"
+        os.environ["MUSE_APPLE_URL"] = server.url
+        try:
+            ma.run_agent(
+                messages=[{"role": "user", "content": "hello"}],
+                executor=FakeExecutor(),
+                system_prompt=ma.build_system_prompt(),
+                on_event=lambda kind, payload: None,
+            )
+        except ma.AgentError as error:
+            if reason not in str(error):
+                raise AssertionError("health failure hid fm's reason: %s" % error)
+        else:
+            raise AssertionError("unavailable system model was accepted")
+    if server.requests:
+        raise AssertionError("completion was sent after failed health preflight")
+    os.environ.pop("MUSE_PROVIDER", None)
+    os.environ.pop("MUSE_APPLE_URL", None)
+
+
+def testAppleLoopbackRequestsIgnoreHttpProxies():
+    names = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+             "no_proxy", "NO_PROXY")
+    saved = {name: os.environ.get(name) for name in names}
+    with FakeFmServer() as real_server, FakeFmServer() as proxy_trap:
+        try:
+            os.environ["http_proxy"] = proxy_trap.url
+            os.environ["HTTP_PROXY"] = proxy_trap.url
+            os.environ["https_proxy"] = proxy_trap.url
+            os.environ["HTTPS_PROXY"] = proxy_trap.url
+            os.environ["no_proxy"] = ""
+            os.environ["NO_PROXY"] = ""
+            health = ma.fetch_apple_health(real_server.url)
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+    if ma.describe_apple_health_problem(health):
+        raise AssertionError("direct loopback health request failed: %r" % health)
+    if proxy_trap.get_requests:
+        raise AssertionError("Apple loopback data reached HTTP proxy: %r"
+                             % proxy_trap.get_requests)
+
+
+def testAppleContextCompactionKeepsTheActiveToolChain():
+    old = "old exchange " + ("x" * 1800)
+    history = [
+        {"role": "user", "content": old},
+        {"role": "assistant", "content": [{"type": "text", "text": "old answer"}]},
+        {"role": "user", "content": "current edit"},
+        {"role": "assistant", "content": [{
+            "type": "tool_use", "id": "active", "name": "run_python",
+            "input": {"code": "print(3)"}}]},
+        {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "active", "is_error": False,
+            "content": [{"type": "text", "text": "3"}]}]},
+    ]
+    os.environ["MUSE_APPLE_CONTEXT_CHARS"] = "1000"
+    try:
+        compacted = ma._compact_apple_conversation(history)
+    finally:
+        os.environ.pop("MUSE_APPLE_CONTEXT_CHARS", None)
+    if any(entry.get("content") == old for entry in compacted):
+        raise AssertionError("old Apple exchange survived the context budget")
+    if len(compacted) != 3 or compacted[0].get("content") != "current edit":
+        raise AssertionError("active Apple exchange was split: %r" % compacted)
+
+
+def testAppleContinuationAfterToolLimitIsNotDroppedOrOrphaned():
+    raw = [
+        {"role": "user", "content": "old task " + ("x" * 1800)},
+        {"role": "assistant", "content": [{
+            "type": "tool_use", "id": "last-call", "name": "run_python",
+            "input": {"code": "print(1)"}}]},
+        {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "last-call",
+            "content": [{"type": "text", "text": "1"}],
+            "is_error": False}]},
+        {"role": "user", "content": "continue please"},
+    ]
+    _extras, normalized = ma.normalize_messages(raw)
+    full_chat = ma._apple_chat_messages(normalized, "system")
+    if not any(message.get("role") == "user" and
+               message.get("content") == [{"type": "text",
+                                             "text": "continue please"}]
+               for message in full_chat):
+        raise AssertionError("merged Apple continuation text was dropped: %r"
+                             % full_chat)
+
+    os.environ["MUSE_APPLE_CONTEXT_CHARS"] = "1000"
+    try:
+        compacted = ma._compact_apple_conversation(normalized)
+    finally:
+        os.environ.pop("MUSE_APPLE_CONTEXT_CHARS", None)
+    compact_chat = ma._apple_chat_messages(compacted, "system")
+    if any(message.get("role") == "tool" for message in compact_chat):
+        raise AssertionError("compaction orphaned a tool result: %r" % compact_chat)
+    if compact_chat[-1].get("content") != [{"type": "text",
+                                             "text": "continue please"}]:
+        raise AssertionError("compaction lost the continuation: %r" % compact_chat)
+
+
+def testAppleSingleTurnCompactionDropsOlderViewportPairs():
+    history = [{"role": "user", "content": "compare viewport iterations"}]
+    for index in range(3):
+        call_id = "capture-%d" % index
+        history.extend([
+            {"role": "assistant", "content": [{
+                "type": "tool_use", "id": call_id,
+                "name": "capture_viewport", "input": {"note": call_id}}]},
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": call_id,
+                "is_error": False,
+                "content": [
+                    {"type": "text", "text": call_id},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png",
+                        "data": str(index) * 2000}},
+                ]}]},
+        ])
+    os.environ["MUSE_APPLE_CONTEXT_CHARS"] = "1000"
+    try:
+        compacted = ma._compact_apple_conversation(history)
+    finally:
+        os.environ.pop("MUSE_APPLE_CONTEXT_CHARS", None)
+    encoded = json.dumps(compacted)
+    if "capture-2" not in encoded or "capture-0" in encoded or "capture-1" in encoded:
+        raise AssertionError("single-turn viewport history was not bounded")
+    chat = ma._apple_chat_messages(compacted, "system")
+    calls = [call["id"] for message in chat for call in message.get("tool_calls", [])]
+    results = [message.get("tool_call_id") for message in chat
+               if message.get("role") == "tool"]
+    if calls != ["capture-2"] or results != calls:
+        raise AssertionError("bounded viewport pair became invalid: %r" % chat)
 
 
 def testToolLoopRunsToolsAndFeedsResultsBack():
@@ -640,7 +980,8 @@ def testBackEndSettingsRoundTripBesideTheKey(tmpdir):
     if mu.load_saved_settings(path).get("MUSE_PROVIDER") != "ollama":
         raise AssertionError("forgetting the key also forgot the back end")
 
-    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_MODEL"):
+    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL",
+                 "MUSE_MODEL"):
         os.environ.pop(name, None)
     applied = mu.apply_saved_settings(path)
     if applied.get("MUSE_PROVIDER") != "ollama":
@@ -654,13 +995,24 @@ def testBackEndSettingsRoundTripBesideTheKey(tmpdir):
     if os.environ.get("MUSE_MODEL") != "from-the-shell":
         raise AssertionError("a saved setting overrode the environment")
 
+    # Apple has its own persisted endpoint, clears stale Ollama/model pins, and
+    # still leaves the hosted credential alongside it.
+    mu.save_settings({"MUSE_PROVIDER": "apple",
+                      "MUSE_APPLE_URL": "http://127.0.0.1:1976",
+                      "MUSE_OLLAMA_URL": "", "MUSE_MODEL": ""}, path)
+    saved = mu.load_saved_settings(path)
+    if saved != {"MUSE_PROVIDER": "apple",
+                 "MUSE_APPLE_URL": "http://127.0.0.1:1976"}:
+        raise AssertionError("Apple settings did not round-trip cleanly: %r" % saved)
+
     # Clearing removes the pin rather than storing an empty string.
     mu.save_settings({"MUSE_PROVIDER": "", "MUSE_OLLAMA_URL": "",
-                      "MUSE_MODEL": ""}, path)
+                      "MUSE_APPLE_URL": "", "MUSE_MODEL": ""}, path)
     if mu.load_saved_settings(path):
         raise AssertionError("cleared settings were still saved")
 
-    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_MODEL"):
+    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL",
+                 "MUSE_MODEL"):
         os.environ.pop(name, None)
 
 
@@ -1015,7 +1367,7 @@ def main():
     saved_env = {name: os.environ.get(name) for name in
                  ("MUSE_API_KEY", "ANTHROPIC_API_KEY",
                   "MUSE_BASE_URL", "ANTHROPIC_BASE_URL", "MUSE_MODEL",
-                  "MUSE_PROVIDER", "MUSE_OLLAMA_URL")}
+                  "MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL")}
     tmpdir = tempfile.mkdtemp(prefix="museAgentTest")
     try:
         testMessagesSurviveARealisticSession()
@@ -1023,6 +1375,12 @@ def main():
         testLeadingAssistantTurnIsDropped()
         testToolLoopRunsToolsAndFeedsResultsBack()
         testToolErrorsAreReportedNotSwallowed()
+        testAppleFmLoopNeedsNoAnthropicAndConvertsToolsAndImages()
+        testAppleFmHealthFailsClosedWhenSystemIsUnavailable()
+        testAppleLoopbackRequestsIgnoreHttpProxies()
+        testAppleContextCompactionKeepsTheActiveToolChain()
+        testAppleContinuationAfterToolLimitIsNotDroppedOrOrphaned()
+        testAppleSingleTurnCompactionDropsOlderViewportPairs()
         testThinkingRejectionDegradesInsteadOfFailingTheSession()
         testMissingKeyIsAClearMessageNotACrash()
         testMetaMuseKeyRoutesToMetaWithTheRightModel()
