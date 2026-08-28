@@ -20,12 +20,12 @@
                   default, and what every unannotated input has always meant.
       preceding   the value immediately before THIS mover, in its own chain.
       final       the value after every mover that writes it has run.
-      <prim path> the value as of when the composed post-order walk finished
-                  with that prim. For a mover, immediately after it applied;
-                  for a grouping Scope, after everything beneath it applied --
-                  because post-order visits a parent last. Naming a Scope is
-                  how you say "after that whole rigging stage" without listing
-                  its contents.
+      <prim path> the value as of when the reverse-sibling post-order walk
+                  finished with that prim. For a mover, immediately after it
+                  applied; for a grouping Scope, after everything beneath it
+                  applied -- because post-order visits a parent last. Naming a
+                  Scope is how you say "after that whole rigging stage" without
+                  listing its contents.
 
     The metadata name is `rigExecReadPhase`, not `rigExec:readPhase`: USD
     metadata field names are plain identifiers and do not take a namespace.
@@ -130,12 +130,14 @@ def Xform "ReadPhaseAsset"
 
         def Scope "Movers"
         {
-            reorder nameChildren = ["Cage", "Geometry"]
+            # Geometry is above Cage, so the bottom Cage branch executes first
+            # and its final points are available to SlabLattice.
+            reorder nameChildren = ["Geometry", "Cage"]
 
-            # The cage's own chain: two movers, in namespace order.
+            # The cage's own stack: bottom-to-top Lift, then Twist.
             def Scope "Cage"
             {
-                reorder nameChildren = ["CageLift", "CageTwist"]
+                reorder nameChildren = ["CageTwist", "CageLift"]
 
                 def RigExecMatrixMover "CageLift" (
                     prepend apiSchemas = ["RigExecMoverAPI"]

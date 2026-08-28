@@ -81,6 +81,32 @@ const TfToken _falloffProfileAttr("rigExec:falloffProfile");
 const TfToken _falloffCurveAttr("rigExec:falloffCurve");
 const TfToken _samplePhaseAttr("rigExec:samplePhase");
 
+// usdview presents a prim's composed children from top to bottom. Movers use
+// that namespace as a stack, so the bottom branch executes first, each mover
+// parent executes after all of its descendants, and the top branch executes
+// last. This is therefore post-order within a branch and REVERSE composed
+// child order between sibling branches.
+//
+// Keep this as the one traversal primitive for both the structural digest and
+// compilation. If those walks ever disagree, an order edit can retain the old
+// epoch digest while executing a different chain.
+std::vector<UsdPrim>
+_GetMoverExecutionOrder(const UsdPrim &movers)
+{
+    std::vector<UsdPrim> ordered;
+    if (movers) {
+        // Reversing an ordinary composed pre-order yields exactly the stack
+        // walk: reversed sibling branches, recursively, with each parent
+        // after its descendants. Using UsdPrimRange here also preserves its
+        // standard traversal predicate and instance behavior.
+        for (const UsdPrim &prim : UsdPrimRange(movers)) {
+            ordered.push_back(prim);
+        }
+        std::reverse(ordered.begin(), ordered.end());
+    }
+    return ordered;
+}
+
 /// True for the schema types that GENERATE a weight field from a placed
 /// volume, as opposed to storing or modulating one.
 bool
@@ -458,11 +484,11 @@ _PointsTargetHint(const UsdStageRefPtr &stage, const SdfPath &target)
 
 // Discovers the rig's joint output set implicitly (spec §4.1: the rig is a
 // namespace root, not a manifest). Movers are already found this way -- a
-// post-order walk where carrying rigExec:moves is what makes a prim a mover --
-// and joints now follow the same rule: being a RigExecJoint under the rig is
-// what makes a prim a joint output. Returned in namespace pre-order, which
-// reproduces the parent-before-child ordering the authored lists used and keeps
-// the binding-epoch digest stable against unrelated edits.
+// reverse-sibling post-order walk where carrying rigExec:moves is what makes a
+// prim a mover -- and joints now follow the same rule: being a RigExecJoint
+// under the rig is what makes a prim a joint output. Returned in namespace
+// pre-order, which reproduces the parent-before-child ordering the authored
+// lists used and keeps the binding-epoch digest stable against unrelated edits.
 //
 // Operator-declared joints are unioned in afterwards. Solver rigExec:joints
 // targets are validated to be RigExecJoint prims later in Compile, so in a
@@ -563,7 +589,7 @@ size_t
 RigExecRigEvaluator::_ComputeStructureDigest() const
 {
     // The v0.1 binding-epoch identity: canonical mover paths, schema
-    // types, targets, post-order ordinals, and the structural dependency
+    // types, targets, mover execution ordinals, and the structural dependency
     // wiring each operation declares — relationship identities, read
     // phases, weight-descriptor shape, and blend membership/activations
     // (spec §4.2, §6.3). Structural edits change it; numeric values and
@@ -901,12 +927,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     const UsdPrim movers =
         _stage->GetPrimAtPath(_rigPath.AppendChild(TfToken("Movers")));
     if (movers) {
-        UsdPrimRange range = UsdPrimRange::PreAndPostVisit(movers);
-        for (auto it = range.begin(); it != range.end(); ++it) {
-            if (!it.IsPostVisit()) {
-                continue;
-            }
-            const UsdPrim prim = *it;
+        for (const UsdPrim &prim : _GetMoverExecutionOrder(movers)) {
             const UsdRelationship moves = prim.GetRelationship(_movesRel);
             if (!moves) {
                 continue;
@@ -1289,9 +1310,9 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
-    // Mover discovery: post-order depth-first walk of the composed Movers
-    // namespace, descendants first, branches in composed child order
-    // (spec §4.2, UsdPrimRange::PreAndPostVisit).
+    // Mover discovery: reverse-sibling post-order walk of the composed Movers
+    // namespace. Descendants run before their mover parent; sibling branches
+    // run bottom-to-top in usdview (reverse composed child order, spec §4.2).
     std::vector<RigExecMoverRecord> newMovers;
     /// Mover-bearing prims discovered but skipped because nothing is wired to
     /// their rigExec:moves yet. They are not outputs, but they ARE evidence
@@ -1301,12 +1322,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         _stage->GetPrimAtPath(_rigPath.AppendChild(TfToken("Movers")));
     int ordinal = 0;
     if (movers) {
-        UsdPrimRange range = UsdPrimRange::PreAndPostVisit(movers);
-        for (auto it = range.begin(); it != range.end(); ++it) {
-            if (!it.IsPostVisit()) {
-                continue;
-            }
-            const UsdPrim prim = *it;
+        for (const UsdPrim &prim : _GetMoverExecutionOrder(movers)) {
             const UsdRelationship moves = prim.GetRelationship(_movesRel);
             if (!moves) {
                 if (_IsFrameConstraintType(prim.GetTypeName())) {
@@ -1958,11 +1974,12 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 
     // Multiple writers of one target are an ordinary stack, not an error.
     //
-    // Their order is the post-order walk of the FINAL COMPOSED hierarchy
-    // above, which is already the complete answer: UsdPrim::GetChildrenNames()
-    // returns the composed order with any parent child-order instruction
-    // (reorder nameChildren) already folded in. So a reorder is a convenience
-    // for redirecting that order, never a precondition for having one.
+    // Their order is the reverse-sibling post-order walk of the FINAL COMPOSED
+    // hierarchy above. UsdPrim::GetChildrenNames() returns the displayed
+    // top-to-bottom order with any parent child-order instruction (reorder
+    // nameChildren) already folded in; the stack consumes that order in
+    // reverse so the bottom branch runs first. A reorder is a convenience for
+    // redirecting that order, never a precondition for having one.
     //
     // This deliberately does not reason about HOW the composed order arose --
     // which layer authored a sibling, which arc contributed it, whether a
@@ -2866,7 +2883,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             controlPath, _computePointFrame, basePhase)));
     }
 
-    // Property-domain chains, from the same composed post-order walk.
+    // Property-domain chains, from the same mover execution walk.
     //
     // Nothing to bind and nothing to tap: a math mover's inputs are all
     // authored on itself, and the chain's base is the target attribute's own
@@ -2890,7 +2907,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
-    // The compiled mover graph, built from the same composed post-order walk
+    // The compiled mover graph, built from the same mover execution walk
     // the generated prims come from. It runs alongside them for now: Evaluate
     // compares the two and diagnoses any disagreement, so the graph can be
     // proven equal before it becomes what publishes (see

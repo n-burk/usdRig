@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 using namespace rigExec;
 
@@ -35,6 +36,85 @@ Near(const GfVec3d &a, const GfVec3d &b, double tol = 1e-10)
 
 static const std::array<GfVec3d, 4> kUnitRest = {
     GfVec3d(0, 0, 0), GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+
+static std::array<int, 3>
+EulerOrderIndices(RigExecEulerOrder order)
+{
+    switch (order) {
+    case RigExecEulerOrder::XYZ: return {0, 1, 2};
+    case RigExecEulerOrder::XZY: return {0, 2, 1};
+    case RigExecEulerOrder::YXZ: return {1, 0, 2};
+    case RigExecEulerOrder::YZX: return {1, 2, 0};
+    case RigExecEulerOrder::ZXY: return {2, 0, 1};
+    case RigExecEulerOrder::ZYX: return {2, 1, 0};
+    }
+    return {0, 1, 2};
+}
+
+static GfMatrix4d
+EulerMatrix(const GfVec3d &degrees, RigExecEulerOrder order)
+{
+    static const GfVec3d axes[3] = {
+        GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+    GfMatrix4d result(1.0);
+    for (const int axis : EulerOrderIndices(order)) {
+        result = result * GfMatrix4d(
+            GfRotation(axes[axis], degrees[axis]), GfVec3d(0));
+    }
+    return result;
+}
+
+static RigExecPointFrame
+ConstraintFrame(
+    const GfVec3d &translation = GfVec3d(0),
+    const GfVec3d &rotationDegrees = GfVec3d(0),
+    const GfVec3d &scale = GfVec3d(1),
+    const GfVec3d &shear = GfVec3d(0),
+    RigExecEulerOrder order = RigExecEulerOrder::XYZ)
+{
+    RigExecTransformParams params;
+    params.translation = translation;
+    params.rotation = EulerMatrix(rotationDegrees, order)
+                          .ExtractRotation().GetQuat().GetNormalized();
+    params.scale = scale;
+    params.shear = shear;
+    return RigExecMatrixToPoints(kUnitRest, RigExecParamsToMatrix(params));
+}
+
+static bool
+ConstraintParams(
+    const RigExecPointFrame &frame, RigExecTransformParams *params)
+{
+    return RigExecPointsToParams(
+        kUnitRest, frame.points, RigExecAxis::Z, params);
+}
+
+static bool
+SameLinearPart(
+    const RigExecPointFrame &a, const RigExecPointFrame &b,
+    double tolerance = 1e-10)
+{
+    for (int i = 1; i < 4; ++i) {
+        if (!Near(a.points[i] - a.Origin(),
+                  b.points[i] - b.Origin(), tolerance)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool
+AllFinite(const RigExecPointFrame &frame)
+{
+    for (const GfVec3d &point : frame.points) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(point[axis])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 // Spec §4.5 shoulder rest landmarks (bone length 4).
 static const std::array<GfVec3d, 4> kShoulderRest = {
@@ -548,6 +628,407 @@ TestAimConstraintKernel()
 }
 
 static void
+TestFbxPositionConstraintKernel()
+{
+    const RigExecPointFrame input = ConstraintFrame(
+        GfVec3d(2, 3, 4), GfVec3d(12, -8, 23),
+        GfVec3d(2, 3, 4), GfVec3d(0.1, -0.05, 0.07));
+    RigExecConstraintSource a, b;
+    a.frame = ConstraintFrame(GfVec3d(10, 20, 30));
+    a.normalizedWeight = 1.0;
+    // Per-source offsets belong to Parent and are deliberately ignored by
+    // Position, which has one FBX Translation offset.
+    a.translationOffset = GfVec3d(1000);
+    b.frame = ConstraintFrame(GfVec3d(30, 40, 50));
+    b.normalizedWeight = 3.0;
+
+    RigExecPositionConstraintParams params;
+    params.offset = GfVec3d(1, 2, 3);
+    params.affect = {true, false, true};
+    params.weight = 0.25;
+    const RigExecPointFrame output =
+        RigExecApplyPositionConstraint(input, {a, b}, params);
+
+    // Relative source weights first give (25,35,45), the global offset gives
+    // (26,37,48), then the independent global weight blends selected axes.
+    CHECK(Near(output.Origin(), GfVec3d(8, 3, 15), 1e-9));
+    CHECK(SameLinearPart(output, input, 1e-9));
+
+    // An inert source is not inspected and zero total influence is exact.
+    RigExecConstraintSource inert;
+    inert.normalizedWeight = 0.0;
+    inert.frame.points[0][0] = std::nan("");
+    CHECK(RigExecApplyPositionConstraint(input, {inert}, params) == input);
+    params.weight = 0.0;
+    CHECK(RigExecApplyPositionConstraint(input, {a, b}, params) == input);
+}
+
+static void
+TestFbxRotationConstraintKernel()
+{
+    const RigExecPointFrame input = ConstraintFrame(
+        GfVec3d(3, 4, 5), GfVec3d(0, 0, 170));
+    RigExecConstraintSource a, b;
+    a.frame = ConstraintFrame(GfVec3d(0), GfVec3d(0, 0, -170));
+    a.normalizedWeight = 1.0;
+    // RotationConstraint uses its one global offset, not Parent offsets.
+    a.rotationOffsetDegrees = GfVec3d(0, 0, 1000);
+    b.frame = ConstraintFrame(GfVec3d(0), GfVec3d(0, 0, 150));
+    b.normalizedWeight = 3.0;
+
+    RigExecRotationConstraintParams params;
+    params.offsetDegrees = GfVec3d(0, 0, 20);
+    params.affect = {false, false, true};
+    params.weight = 0.5;
+    const RigExecPointFrame output =
+        RigExecApplyRotationConstraint(input, {a, b}, params);
+
+    // From 170 degrees the shortest deltas are +20 and -20.  Their 1:3
+    // weighted mean is -10; the global +20 offset makes +10, and global
+    // weight 0.5 lands at 175 degrees rather than crossing the long arc.
+    const double radians = 175.0 * M_PI / 180.0;
+    const GfVec3d outputX =
+        (output.X() - output.Origin()).GetNormalized();
+    CHECK(Near(outputX, GfVec3d(std::cos(radians), std::sin(radians), 0),
+               1e-8));
+    RigExecTransformParams before, after;
+    CHECK(ConstraintParams(input, &before));
+    CHECK(ConstraintParams(output, &after));
+    CHECK(Near(after.translation, before.translation, 1e-8));
+    CHECK(Near(after.scale, before.scale, 1e-8));
+    CHECK(Near(after.shear, before.shear, 1e-8));
+
+    // At full global weight, source aggregation must not depend on the
+    // constrained object's prior rotation. The source-anchored average of
+    // +170 and -170 degrees is the shared half-turn, not zero degrees.
+    RigExecConstraintSource branchA, branchB;
+    branchA.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0, 0, 170));
+    branchB.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0, 0, -170));
+    RigExecRotationConstraintParams branchParams;
+    const RigExecPointFrame fromZero = RigExecApplyRotationConstraint(
+        ConstraintFrame(), {branchA, branchB}, branchParams);
+    const RigExecPointFrame fromNearBranch = RigExecApplyRotationConstraint(
+        ConstraintFrame(GfVec3d(0), GfVec3d(0, 0, 170)),
+        {branchA, branchB}, branchParams);
+    CHECK(SameLinearPart(fromZero, fromNearBranch, 1e-8));
+    CHECK(Near(
+        (fromZero.X() - fromZero.Origin()).GetNormalized(),
+        GfVec3d(-1, 0, 0), 1e-8));
+
+    const RigExecPointFrame affineInput = ConstraintFrame(
+        GfVec3d(-2, 7, 1), GfVec3d(12, -8, 23),
+        GfVec3d(2, 3, 4), GfVec3d(0.08, -0.03, 0.04));
+    const RigExecPointFrame affineOutput = RigExecApplyRotationConstraint(
+        affineInput, {a, b}, params);
+    CHECK(ConstraintParams(affineInput, &before));
+    CHECK(ConstraintParams(affineOutput, &after));
+    CHECK(Near(after.translation, before.translation, 1e-8));
+    CHECK(Near(after.scale, before.scale, 1e-8));
+    CHECK(Near(after.shear, before.shear, 1e-8));
+
+    // Every FBX Euler order round-trips a nontrivial source orientation.
+    const RigExecEulerOrder orders[] = {
+        RigExecEulerOrder::XYZ, RigExecEulerOrder::XZY,
+        RigExecEulerOrder::YXZ, RigExecEulerOrder::YZX,
+        RigExecEulerOrder::ZXY, RigExecEulerOrder::ZYX};
+    for (const RigExecEulerOrder order : orders) {
+        RigExecConstraintSource source;
+        source.frame = ConstraintFrame(
+            GfVec3d(0), GfVec3d(20, -30, 40), GfVec3d(1),
+            GfVec3d(0), order);
+        RigExecRotationConstraintParams orderParams;
+        orderParams.rotationOrder = order;
+        const RigExecPointFrame ordered = RigExecApplyRotationConstraint(
+            ConstraintFrame(), {source}, orderParams);
+        CHECK(SameLinearPart(ordered, source.frame, 1e-8));
+    }
+
+    // Axis masks operate on Euler components in the selected order.
+    RigExecConstraintSource maskedSource;
+    maskedSource.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(35, 45, 55));
+    RigExecRotationConstraintParams maskedParams;
+    maskedParams.affect = {false, true, false};
+    const RigExecPointFrame masked = RigExecApplyRotationConstraint(
+        ConstraintFrame(), {maskedSource}, maskedParams);
+    CHECK(SameLinearPart(
+        masked, ConstraintFrame(GfVec3d(0), GfVec3d(0, 45, 0)), 1e-8));
+}
+
+static void
+TestFbxScaleConstraintKernel()
+{
+    const RigExecPointFrame input = ConstraintFrame(
+        GfVec3d(2, -3, 4), GfVec3d(10, 20, -15),
+        GfVec3d(2, 3, 4), GfVec3d(0.1, -0.04, 0.06));
+    RigExecConstraintSource a, b;
+    a.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0), GfVec3d(4, 6, 8));
+    a.normalizedWeight = 1.0;
+    b.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0), GfVec3d(8, 10, 12));
+    b.normalizedWeight = 3.0;
+
+    RigExecScaleConstraintParams params;
+    params.offset = GfVec3d(1, -1, 2);  // additive; FBX default is zero
+    params.affect = {true, false, true};
+    params.weight = 0.5;
+    const RigExecPointFrame output =
+        RigExecApplyScaleConstraint(input, {a, b}, params);
+
+    RigExecTransformParams before, after;
+    CHECK(ConstraintParams(input, &before));
+    CHECK(ConstraintParams(output, &after));
+    // Weighted source scale (7,9,11), plus offset (1,-1,2), then global
+    // half-weight.  Y is masked and remains the input scale.
+    CHECK(Near(after.scale, GfVec3d(5, 3, 8.5), 1e-8));
+    CHECK(Near(after.translation, before.translation, 1e-8));
+    CHECK(Near(after.shear, before.shear, 1e-8));
+    CHECK(Near(after.rotation.Transform(GfVec3d(1, 0, 0)),
+               before.rotation.Transform(GfVec3d(1, 0, 0)), 1e-8));
+
+    RigExecScaleConstraintParams defaults;
+    RigExecConstraintSource four;
+    four.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0), GfVec3d(4));
+    const RigExecPointFrame defaultOffset =
+        RigExecApplyScaleConstraint(ConstraintFrame(), {four}, defaults);
+    CHECK(std::abs((defaultOffset.X() - defaultOffset.Origin()).GetLength() -
+                   4.0) < 1e-9);
+}
+
+static void
+TestFbxParentConstraintKernel()
+{
+    const RigExecPointFrame input = ConstraintFrame(
+        GfVec3d(2, 4, 6), GfVec3d(0), GfVec3d(2, 3, 4),
+        GfVec3d(0.09, -0.03, 0.05));
+    RigExecConstraintSource a, b;
+    a.frame = ConstraintFrame(
+        GfVec3d(10, 20, 30), GfVec3d(0, 0, 10),
+        GfVec3d(4, 5, 6));
+    a.normalizedWeight = 1.0;
+    b.frame = ConstraintFrame(
+        GfVec3d(20, 30, 40), GfVec3d(0, 0, 30),
+        GfVec3d(8, 9, 10));
+    b.normalizedWeight = 3.0;
+
+    RigExecParentConstraintParams params;
+    params.translationAxes = {true, false, true};
+    params.rotationAxes = {false, false, true};
+    params.scaleAxes = {true, false, true};
+    params.weight = 0.5;
+    const RigExecPointFrame output =
+        RigExecApplyParentConstraint(input, {a, b}, params);
+
+    RigExecTransformParams before, after;
+    CHECK(ConstraintParams(input, &before));
+    CHECK(ConstraintParams(output, &after));
+    CHECK(Near(after.translation, GfVec3d(9.75, 4, 21.75), 1e-8));
+    CHECK(Near(after.scale, GfVec3d(4.5, 3, 6.5), 1e-8));
+    CHECK(Near(after.shear, before.shear, 1e-8));
+    const double radians = 12.5 * M_PI / 180.0;
+    CHECK(Near(after.rotation.Transform(GfVec3d(1, 0, 0)),
+               GfVec3d(std::cos(radians), std::sin(radians), 0), 1e-8));
+
+    // A Parent offset is local to its source. In row-vector convention a
+    // +X translation under a +90-degree Z source lands on world +Y, and the
+    // non-commuting rotations compose as offset * source.
+    RigExecConstraintSource localOffset;
+    localOffset.frame = ConstraintFrame(
+        GfVec3d(10, 0, 0), GfVec3d(0, 0, 90));
+    localOffset.translationOffset = GfVec3d(2, 0, 0);
+    localOffset.rotationOffsetDegrees = GfVec3d(30, 0, 0);
+    RigExecParentConstraintParams localParams;
+    const RigExecPointFrame locallyComposed = RigExecApplyParentConstraint(
+        ConstraintFrame(), {localOffset}, localParams);
+    CHECK(Near(locallyComposed.Origin(), GfVec3d(10, 2, 0), 1e-8));
+    const GfMatrix4d expectedLocal =
+        EulerMatrix(GfVec3d(30, 0, 0), RigExecEulerOrder::XYZ) *
+        GfMatrix4d(
+            GfRotation(GfVec3d(0, 0, 1), 90), GfVec3d(10, 0, 0));
+    CHECK(SameLinearPart(
+        locallyComposed,
+        RigExecMatrixToPoints(kUnitRest, expectedLocal), 1e-8));
+
+    // Parent rotation aggregation has the same full-weight independence from
+    // the constrained input as RotationConstraint.
+    RigExecConstraintSource branchA, branchB;
+    branchA.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0, 0, 170));
+    branchB.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0, 0, -170));
+    RigExecParentConstraintParams branchParams;
+    const RigExecPointFrame fromZero = RigExecApplyParentConstraint(
+        ConstraintFrame(), {branchA, branchB}, branchParams);
+    const RigExecPointFrame fromNearBranch = RigExecApplyParentConstraint(
+        ConstraintFrame(GfVec3d(0), GfVec3d(0, 0, 170)),
+        {branchA, branchB}, branchParams);
+    CHECK(SameLinearPart(fromZero, fromNearBranch, 1e-8));
+}
+
+static void
+TestFbxAimConstraintKernel()
+{
+    // Arbitrary local axes: local +Y aims to world +X while local +Z is
+    // pinned to the supplied world-up direction.
+    RigExecAimConstraintParams params;
+    params.localAimVector = GfVec3d(0, 1, 0);
+    params.localUpVector = GfVec3d(0, 0, 1);
+    params.worldUpDirection = GfVec3d(0, 0, 1);
+    const RigExecPointFrame aimed = RigExecApplyAimConstraint(
+        ConstraintFrame(), GfVec3d(5, 0, 0), params);
+    CHECK(Near(aimed.Y() - aimed.Origin(), GfVec3d(1, 0, 0), 1e-8));
+    CHECK(Near(aimed.Z() - aimed.Origin(), GfVec3d(0, 0, 1), 1e-8));
+    CHECK(Near(aimed.X() - aimed.Origin(), GfVec3d(0, -1, 0), 1e-8));
+
+    // With no explicit world up, the input up is preserved; global weight
+    // is independent and yields the halfway orientation.
+    params = RigExecAimConstraintParams{};
+    params.weight = 0.5;
+    const RigExecPointFrame half = RigExecApplyAimConstraint(
+        ConstraintFrame(), GfVec3d(0, 5, 0), params);
+    CHECK(Near(half.X() - half.Origin(),
+               GfVec3d(std::sqrt(0.5), std::sqrt(0.5), 0), 1e-8));
+
+    // FBX worldUpType=None is minimum swing and performs no roll correction.
+    // It is intentionally distinct from the legacy preserveInputUp behavior,
+    // and does not consume localUpVector at all.
+    const GfVec3d diagonalTarget(4, 3, 2);
+    params = RigExecAimConstraintParams{};
+    params.preserveInputUp = false;
+    params.localUpVector = params.localAimVector;  // dormant for None
+    const RigExecPointFrame minimumSwing = RigExecApplyAimConstraint(
+        ConstraintFrame(), diagonalTarget, params);
+    const GfRotation expectedSwing(
+        GfVec3d(1, 0, 0), diagonalTarget.GetNormalized());
+    CHECK(Near(
+        (minimumSwing.X() - minimumSwing.Origin()).GetNormalized(),
+        diagonalTarget.GetNormalized(), 1e-8));
+    CHECK(Near(
+        (minimumSwing.Y() - minimumSwing.Origin()).GetNormalized(),
+        expectedSwing.TransformDir(GfVec3d(0, 1, 0)), 1e-8));
+    params = RigExecAimConstraintParams{};
+    const RigExecPointFrame preservedUp = RigExecApplyAimConstraint(
+        ConstraintFrame(), diagonalTarget, params);
+    CHECK(!Near(
+        (minimumSwing.Y() - minimumSwing.Origin()).GetNormalized(),
+        (preservedUp.Y() - preservedUp.Origin()).GetNormalized(), 1e-4));
+
+    // Rotation offset is applied after aiming and respects the Euler mask.
+    params = RigExecAimConstraintParams{};
+    params.rotationOffsetDegrees = GfVec3d(0, 0, 90);
+    const RigExecPointFrame offset = RigExecApplyAimConstraint(
+        ConstraintFrame(), GfVec3d(5, 0, 0), params);
+    CHECK(Near(offset.X() - offset.Origin(), GfVec3d(0, 1, 0), 1e-8));
+    params.affectRotation = {true, true, false};
+    const RigExecPointFrame masked = RigExecApplyAimConstraint(
+        ConstraintFrame(), GfVec3d(5, 0, 0), params);
+    CHECK(SameLinearPart(masked, ConstraintFrame(), 1e-8));
+
+    // Changing rotation preserves all other decomposed components, including
+    // input shear, and works in a non-default Euler order.
+    const RigExecPointFrame affineInput = ConstraintFrame(
+        GfVec3d(2, 3, 4), GfVec3d(15, -10, 20), GfVec3d(2, 3, 4),
+        GfVec3d(0.08, -0.03, 0.05), RigExecEulerOrder::ZYX);
+    params = RigExecAimConstraintParams{};
+    params.rotationOrder = RigExecEulerOrder::ZYX;
+    const RigExecPointFrame affineOutput = RigExecApplyAimConstraint(
+        affineInput, GfVec3d(2, 8, 4), params);
+    RigExecTransformParams before, after;
+    CHECK(ConstraintParams(affineInput, &before));
+    CHECK(ConstraintParams(affineOutput, &after));
+    CHECK(Near(after.translation, before.translation, 1e-8));
+    CHECK(Near(after.scale, before.scale, 1e-8));
+    CHECK(Near(after.shear, before.shear, 1e-8));
+}
+
+static void
+TestFbxConstraintFailures()
+{
+    const RigExecPointFrame input = ConstraintFrame();
+    RigExecConstraintSource source;
+    source.frame = ConstraintFrame(GfVec3d(5), GfVec3d(10, 20, 30),
+                                   GfVec3d(2));
+
+    RigExecPositionConstraintParams position;
+    source.normalizedWeight = std::nan("");
+    RigExecPointFrame failed =
+        RigExecApplyPositionConstraint(input, {source}, position);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    source.normalizedWeight = 1.0;
+    source.frame.points[2][0] = std::numeric_limits<double>::infinity();
+    failed = RigExecApplyPositionConstraint(input, {source}, position);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+
+    source.frame = ConstraintFrame(GfVec3d(5), GfVec3d(10, 20, 30),
+                                   GfVec3d(2));
+    source.frame.flags |= RigExecPointFrameDegenerate;
+    RigExecRotationConstraintParams rotation;
+    failed = RigExecApplyRotationConstraint(input, {source}, rotation);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    source.frame = ConstraintFrame(GfVec3d(5), GfVec3d(10, 20, 30),
+                                   GfVec3d(2));
+    rotation.weight = std::nan("");
+    failed = RigExecApplyRotationConstraint(input, {source}, rotation);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    rotation.weight = 1.0;
+
+    source.frame = ConstraintFrame(GfVec3d(0), GfVec3d(0), GfVec3d(2));
+    RigExecScaleConstraintParams scale;
+    scale.offset[1] = std::numeric_limits<double>::infinity();
+    failed = RigExecApplyScaleConstraint(input, {source}, scale);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+
+    RigExecParentConstraintParams parent;
+    source.normalizedWeight = -1.0;
+    failed = RigExecApplyParentConstraint(input, {source}, parent);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    source.normalizedWeight = 1.0;
+    parent.rotationOrder = static_cast<RigExecEulerOrder>(99);
+    failed = RigExecApplyParentConstraint(input, {source}, parent);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+
+    RigExecAimConstraintParams aim;
+    aim.localAimVector = GfVec3d(0);
+    failed = RigExecApplyAimConstraint(input, GfVec3d(1, 0, 0), aim);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    aim = RigExecAimConstraintParams{};
+    aim.localUpVector = aim.localAimVector;
+    failed = RigExecApplyAimConstraint(input, GfVec3d(1, 0, 0), aim);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    aim = RigExecAimConstraintParams{};
+    failed = RigExecApplyAimConstraint(input, input.Origin(), aim);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    aim.worldUpDirection = GfVec3d(1, 0, 0);
+    failed = RigExecApplyAimConstraint(input, GfVec3d(1, 0, 0), aim);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+    aim = RigExecAimConstraintParams{};
+    failed = RigExecApplyAimConstraint(
+        input, GfVec3d(std::nan(""), 0, 0), aim);
+    CHECK(failed.IsDegenerate() && AllFinite(failed));
+
+    // Enable is intentionally evaluator-side: the pure kernels have no
+    // enabled switch.  Global weight zero is independently an exact
+    // pass-through, even if dormant source data is malformed.
+    source.frame.points[0][0] = std::nan("");
+    position.weight = 0.0;
+    CHECK(RigExecApplyPositionConstraint(input, {source}, position) == input);
+    rotation.weight = 0.0;
+    CHECK(RigExecApplyRotationConstraint(input, {source}, rotation) == input);
+    scale.weight = 0.0;
+    CHECK(RigExecApplyScaleConstraint(input, {source}, scale) == input);
+    parent.weight = 0.0;
+    CHECK(RigExecApplyParentConstraint(input, {source}, parent) == input);
+    aim = RigExecAimConstraintParams{};
+    aim.weight = 0.0;
+    CHECK(RigExecApplyAimConstraint(
+              input, GfVec3d(std::nan(""), 0, 0), aim) == input);
+}
+
+static void
 TestGeometryKernels()
 {
     // Volume correction: doubling a unit cube's bound restores it fully
@@ -831,6 +1312,12 @@ main()
     TestIkDegeneracies();
     TestSvdPerturbationStability();
     TestAimConstraintKernel();
+    TestFbxPositionConstraintKernel();
+    TestFbxRotationConstraintKernel();
+    TestFbxScaleConstraintKernel();
+    TestFbxParentConstraintKernel();
+    TestFbxAimConstraintKernel();
+    TestFbxConstraintFailures();
     TestGeometryKernels();
     TestSimdParity();
     TestWeightedMatrix();

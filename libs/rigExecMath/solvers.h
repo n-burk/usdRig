@@ -9,6 +9,7 @@
 
 #include "pointFrame.h"
 
+#include <optional>
 #include <vector>
 
 namespace rigExec {
@@ -102,6 +103,110 @@ std::vector<RigExecPointFrame> RigExecDistributeTwist(
 /// applied per point of an exact native points value.
 GfVec3d RigExecApplyWeightedMatrix(
     const GfVec3d &point, const GfMatrix4d &transform, double weight);
+
+/// Euler application/decomposition order used by the FBX-equivalent
+/// constraints.  The named axes are applied from left to right in the same
+/// row-vector convention as UsdGeom's rotate-order xform ops.
+enum class RigExecEulerOrder { XYZ, XZY, YXZ, YZX, ZXY, ZYX };
+
+/// Independent component selection.  Disabled components are copied from
+/// the input frame; constraint enable/disable remains evaluator-side.
+struct RigExecConstraintAxisMask {
+    bool x = true;
+    bool y = true;
+    bool z = true;
+};
+
+/// One FBX-equivalent constraint source in asset space.  Sources use the
+/// identity landmark frame.  normalizedWeight is a non-negative relative
+/// source weight; kernels normalize the usable set independently of the
+/// constraint's global weight.  Parent constraints apply the per-source
+/// translation/rotation offsets; the other kernels use their global offsets.
+struct RigExecConstraintSource {
+    RigExecPointFrame frame;
+    double normalizedWeight = 1.0;
+    GfVec3d translationOffset{0, 0, 0};
+    GfVec3d rotationOffsetDegrees{0, 0, 0};
+};
+
+struct RigExecPositionConstraintParams {
+    GfVec3d offset{0, 0, 0};
+    RigExecConstraintAxisMask affect;
+    double weight = 1.0;
+};
+
+struct RigExecRotationConstraintParams {
+    GfVec3d offsetDegrees{0, 0, 0};
+    RigExecConstraintAxisMask affect;
+    RigExecEulerOrder rotationOrder = RigExecEulerOrder::XYZ;
+    double weight = 1.0;
+};
+
+struct RigExecScaleConstraintParams {
+    /// FBX scale-constraint offset is additive and defaults to zero.
+    GfVec3d offset{0, 0, 0};
+    RigExecConstraintAxisMask affect;
+    double weight = 1.0;
+};
+
+struct RigExecParentConstraintParams {
+    RigExecConstraintAxisMask translationAxes;
+    RigExecConstraintAxisMask rotationAxes;
+    /// FBX Parent constraints do not affect scale unless explicitly enabled.
+    RigExecConstraintAxisMask scaleAxes{false, false, false};
+    RigExecEulerOrder rotationOrder = RigExecEulerOrder::XYZ;
+    double weight = 1.0;
+};
+
+/// Deterministic multi-source FBX-equivalent constraints over asset-space
+/// frames whose reference landmarks are [O, X, Y, Z].  A zero global weight
+/// or zero total source weight is an exact pass-through.  Non-finite inputs,
+/// invalid Euler orders, and singular source frames fail atomically by
+/// returning the input with RigExecPointFrameDegenerate set.  Rotation uses
+/// shortest per-Euler-component deltas from the first positive-weight source,
+/// so the fully constrained result depends only on the sources while retaining
+/// deterministic FBX source order. Input shear is retained by every kernel.
+RigExecPointFrame RigExecApplyPositionConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecPositionConstraintParams &params);
+
+RigExecPointFrame RigExecApplyRotationConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecRotationConstraintParams &params);
+
+RigExecPointFrame RigExecApplyScaleConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecScaleConstraintParams &params);
+
+RigExecPointFrame RigExecApplyParentConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecParentConstraintParams &params);
+
+/// General FBX-equivalent aim parameters.  localAimVector/localUpVector are
+/// arbitrary non-collinear directions in the constrained object's local
+/// orientation.  When worldUpDirection is present it pins roll by projection
+/// around the solved aim direction.  Without a direction, preserveInputUp
+/// selects the legacy roll-preserving behavior; false implements FBX
+/// worldUpType=None as the minimum swing with no roll correction.  The final
+/// orientation offset and masked/global-weight blend use rotationOrder.
+struct RigExecAimConstraintParams {
+    GfVec3d localAimVector{1, 0, 0};
+    GfVec3d localUpVector{0, 1, 0};
+    std::optional<GfVec3d> worldUpDirection;
+    bool preserveInputUp = true;
+    GfVec3d rotationOffsetDegrees{0, 0, 0};
+    RigExecConstraintAxisMask affectRotation;
+    RigExecEulerOrder rotationOrder = RigExecEulerOrder::XYZ;
+    double weight = 1.0;
+};
+
+RigExecPointFrame RigExecApplyAimConstraint(
+    const RigExecPointFrame &input, const GfVec3d &targetPoint,
+    const RigExecAimConstraintParams &params);
 
 /// Aim-constraint kernel (RigExecAimConstraint): blends the authored aim
 /// landmark's direction toward the target while preserving the origin,

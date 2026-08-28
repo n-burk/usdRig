@@ -6,6 +6,7 @@
 #include "pxr/base/gf/matrix3d.h"
 #include "pxr/base/gf/rotation.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace rigExec {
@@ -374,6 +375,619 @@ RigExecApplyWeightedMatrix(
         return moved;
     }
     return point + (moved - point) * weight;
+}
+
+namespace {
+
+const std::array<GfVec3d, 4> &
+_IdentityLandmarks()
+{
+    static const std::array<GfVec3d, 4> points = {
+        GfVec3d(0, 0, 0), GfVec3d(1, 0, 0),
+        GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+    return points;
+}
+
+bool
+_IsFinite(const GfVec3d &v)
+{
+    return std::isfinite(v[0]) && std::isfinite(v[1]) &&
+           std::isfinite(v[2]);
+}
+
+bool
+_HasFinitePoints(const RigExecPointFrame &frame)
+{
+    for (const GfVec3d &point : frame.points) {
+        if (!_IsFinite(point)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
+_IsUsableFrame(const RigExecPointFrame &frame)
+{
+    return frame.IsValid() && !frame.IsDegenerate() &&
+           _HasFinitePoints(frame);
+}
+
+RigExecPointFrame
+_ConstraintFailure(const RigExecPointFrame &input)
+{
+    RigExecPointFrame failed = input;
+    failed.flags |= RigExecPointFrameDegenerate;
+    return failed;
+}
+
+bool
+_IsValidOrder(RigExecEulerOrder order)
+{
+    switch (order) {
+    case RigExecEulerOrder::XYZ:
+    case RigExecEulerOrder::XZY:
+    case RigExecEulerOrder::YXZ:
+    case RigExecEulerOrder::YZX:
+    case RigExecEulerOrder::ZXY:
+    case RigExecEulerOrder::ZYX:
+        return true;
+    }
+    return false;
+}
+
+bool
+_NormalizeDirection(GfVec3d *direction, double eps = 1e-12)
+{
+    if (!_IsFinite(*direction)) {
+        return false;
+    }
+    const double largest = std::max(
+        {std::abs((*direction)[0]), std::abs((*direction)[1]),
+         std::abs((*direction)[2])});
+    if (largest < eps) {
+        return false;
+    }
+    *direction /= largest;
+    const double length = direction->GetLength();
+    if (!std::isfinite(length) || length < eps) {
+        return false;
+    }
+    *direction /= length;
+    return _IsFinite(*direction);
+}
+
+std::array<int, 3>
+_OrderIndices(RigExecEulerOrder order)
+{
+    switch (order) {
+    case RigExecEulerOrder::XYZ: return {0, 1, 2};
+    case RigExecEulerOrder::XZY: return {0, 2, 1};
+    case RigExecEulerOrder::YXZ: return {1, 0, 2};
+    case RigExecEulerOrder::YZX: return {1, 2, 0};
+    case RigExecEulerOrder::ZXY: return {2, 0, 1};
+    case RigExecEulerOrder::ZYX: return {2, 1, 0};
+    }
+    return {0, 1, 2};
+}
+
+GfQuatd
+_QuatFromEulerDegrees(const GfVec3d &degrees, RigExecEulerOrder order)
+{
+    static const GfVec3d axes[3] = {
+        GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+    GfMatrix4d matrix(1.0);
+    const std::array<int, 3> indices = _OrderIndices(order);
+    for (const int axis : indices) {
+        matrix = matrix * GfMatrix4d(
+            GfRotation(axes[axis], degrees[axis]), GfVec3d(0));
+    }
+    return matrix.ExtractRotation().GetQuat().GetNormalized();
+}
+
+GfVec3d
+_EulerDegreesFromQuat(const GfQuatd &rotation, RigExecEulerOrder order)
+{
+    static const GfVec3d axes[3] = {
+        GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
+    const std::array<int, 3> indices = _OrderIndices(order);
+    // GfRotation::Decompose(a,b,c) describes row-matrix factors in the
+    // reverse order Rc * Rb * Ra.  Pass the authored application sequence
+    // reversed so returned components invert _QuatFromEulerDegrees exactly.
+    const GfVec3d ordered = GfRotation(rotation).Decompose(
+        axes[indices[2]], axes[indices[1]], axes[indices[0]]);
+    GfVec3d result(0);
+    result[indices[2]] = ordered[0];
+    result[indices[1]] = ordered[1];
+    result[indices[0]] = ordered[2];
+    return result;
+}
+
+double
+_ShortestDegrees(double degrees)
+{
+    double wrapped = std::fmod(degrees + 180.0, 360.0);
+    if (wrapped < 0.0) {
+        wrapped += 360.0;
+    }
+    wrapped -= 180.0;
+    // Resolve the exact half-turn tie without depending on fmod's sign.
+    return (wrapped == -180.0 && degrees > 0.0) ? 180.0 : wrapped;
+}
+
+bool
+_Affects(const RigExecConstraintAxisMask &mask, int axis)
+{
+    return axis == 0 ? mask.x : axis == 1 ? mask.y : mask.z;
+}
+
+bool
+_DecomposeConstraintFrame(
+    const RigExecPointFrame &frame, RigExecTransformParams *params)
+{
+    if (!_IsUsableFrame(frame) ||
+        !RigExecPointsToParams(
+            _IdentityLandmarks(), frame.points, RigExecAxis::Z, params)) {
+        return false;
+    }
+    return _IsFinite(params->translation) && _IsFinite(params->scale) &&
+           _IsFinite(params->shear) &&
+           std::isfinite(params->rotation.GetReal()) &&
+           _IsFinite(params->rotation.GetImaginary());
+}
+
+RigExecPointFrame
+_FrameFromConstraintParams(
+    const RigExecPointFrame &input, const RigExecTransformParams &params)
+{
+    RigExecPointFrame result = RigExecMatrixToPoints(
+        _IdentityLandmarks(), RigExecParamsToMatrix(params));
+    if (!_HasFinitePoints(result)) {
+        return _ConstraintFailure(input);
+    }
+    // Affine is descriptive rather than required for reconstruction, but an
+    // input explicitly classified affine remains classified affine when its
+    // shear is carried through the constraint.
+    result.flags |= input.flags & RigExecPointFrameAffine;
+    return result;
+}
+
+bool
+_ValidateGlobalWeight(double weight, double *clamped)
+{
+    if (!std::isfinite(weight)) {
+        return false;
+    }
+    *clamped = std::min(std::max(weight, 0.0), 1.0);
+    return true;
+}
+
+bool
+_ValidateSourceWeight(const RigExecConstraintSource &source)
+{
+    return std::isfinite(source.normalizedWeight) &&
+           source.normalizedWeight >= 0.0;
+}
+
+GfVec3d
+_ApplyEulerDelta(
+    const GfVec3d &inputEuler, const GfVec3d &targetEuler,
+    const RigExecConstraintAxisMask &affect, double weight)
+{
+    GfVec3d output = inputEuler;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (_Affects(affect, axis)) {
+            output[axis] += weight * _ShortestDegrees(
+                targetEuler[axis] - inputEuler[axis]);
+        }
+    }
+    return output;
+}
+
+}  // namespace
+
+RigExecPointFrame
+RigExecApplyPositionConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecPositionConstraintParams &params)
+{
+    double globalWeight = 0.0;
+    if (!_ValidateGlobalWeight(params.weight, &globalWeight)) {
+        return _ConstraintFailure(input);
+    }
+    if (globalWeight <= 0.0) {
+        return input;
+    }
+    if (!_IsUsableFrame(input) || !_IsFinite(params.offset)) {
+        return _ConstraintFailure(input);
+    }
+
+    GfVec3d target(0);
+    double totalWeight = 0.0;
+    for (const RigExecConstraintSource &source : sources) {
+        if (!_ValidateSourceWeight(source)) {
+            return _ConstraintFailure(input);
+        }
+        if (source.normalizedWeight == 0.0) {
+            continue;
+        }
+        if (!_IsUsableFrame(source.frame)) {
+            return _ConstraintFailure(input);
+        }
+        target += source.frame.Origin() * source.normalizedWeight;
+        totalWeight += source.normalizedWeight;
+    }
+    if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
+        return totalWeight == 0.0 ? input : _ConstraintFailure(input);
+    }
+    target = target / totalWeight + params.offset;
+    if (!_IsFinite(target)) {
+        return _ConstraintFailure(input);
+    }
+
+    GfVec3d constrainedOrigin = input.Origin();
+    for (int axis = 0; axis < 3; ++axis) {
+        if (_Affects(params.affect, axis)) {
+            constrainedOrigin[axis] += globalWeight *
+                (target[axis] - constrainedOrigin[axis]);
+        }
+    }
+    if (!_IsFinite(constrainedOrigin)) {
+        return _ConstraintFailure(input);
+    }
+    const GfVec3d translation = constrainedOrigin - input.Origin();
+    RigExecPointFrame output = input;
+    for (GfVec3d &point : output.points) {
+        point += translation;
+    }
+    return output;
+}
+
+RigExecPointFrame
+RigExecApplyRotationConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecRotationConstraintParams &params)
+{
+    double globalWeight = 0.0;
+    if (!_ValidateGlobalWeight(params.weight, &globalWeight)) {
+        return _ConstraintFailure(input);
+    }
+    if (globalWeight <= 0.0) {
+        return input;
+    }
+    if (!_IsValidOrder(params.rotationOrder) ||
+        !_IsFinite(params.offsetDegrees)) {
+        return _ConstraintFailure(input);
+    }
+
+    RigExecTransformParams inputParams;
+    if (!_DecomposeConstraintFrame(input, &inputParams)) {
+        return _ConstraintFailure(input);
+    }
+    const GfVec3d inputEuler =
+        _EulerDegreesFromQuat(inputParams.rotation, params.rotationOrder);
+    if (!_IsFinite(inputEuler)) {
+        return _ConstraintFailure(input);
+    }
+    GfVec3d sourceAnchor(0), weightedDelta(0);
+    bool hasSourceAnchor = false;
+    double totalWeight = 0.0;
+    for (const RigExecConstraintSource &source : sources) {
+        if (!_ValidateSourceWeight(source)) {
+            return _ConstraintFailure(input);
+        }
+        if (source.normalizedWeight == 0.0) {
+            continue;
+        }
+        RigExecTransformParams sourceParams;
+        if (!_DecomposeConstraintFrame(source.frame, &sourceParams)) {
+            return _ConstraintFailure(input);
+        }
+        const GfVec3d sourceEuler =
+            _EulerDegreesFromQuat(sourceParams.rotation, params.rotationOrder);
+        if (!_IsFinite(sourceEuler)) {
+            return _ConstraintFailure(input);
+        }
+        if (!hasSourceAnchor) {
+            sourceAnchor = sourceEuler;
+            hasSourceAnchor = true;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            weightedDelta[axis] += source.normalizedWeight *
+                _ShortestDegrees(sourceEuler[axis] - sourceAnchor[axis]);
+        }
+        totalWeight += source.normalizedWeight;
+    }
+    if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
+        return totalWeight == 0.0 ? input : _ConstraintFailure(input);
+    }
+    const GfVec3d targetEuler =
+        sourceAnchor + weightedDelta / totalWeight + params.offsetDegrees;
+    if (!_IsFinite(weightedDelta) || !_IsFinite(targetEuler)) {
+        return _ConstraintFailure(input);
+    }
+    const GfVec3d outputEuler = _ApplyEulerDelta(
+        inputEuler, targetEuler, params.affect, globalWeight);
+    inputParams.rotation =
+        _QuatFromEulerDegrees(outputEuler, params.rotationOrder);
+    return _FrameFromConstraintParams(input, inputParams);
+}
+
+RigExecPointFrame
+RigExecApplyScaleConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecScaleConstraintParams &params)
+{
+    double globalWeight = 0.0;
+    if (!_ValidateGlobalWeight(params.weight, &globalWeight)) {
+        return _ConstraintFailure(input);
+    }
+    if (globalWeight <= 0.0) {
+        return input;
+    }
+    if (!_IsFinite(params.offset)) {
+        return _ConstraintFailure(input);
+    }
+
+    RigExecTransformParams inputParams;
+    if (!_DecomposeConstraintFrame(input, &inputParams)) {
+        return _ConstraintFailure(input);
+    }
+    GfVec3d targetScale(0);
+    double totalWeight = 0.0;
+    for (const RigExecConstraintSource &source : sources) {
+        if (!_ValidateSourceWeight(source)) {
+            return _ConstraintFailure(input);
+        }
+        if (source.normalizedWeight == 0.0) {
+            continue;
+        }
+        RigExecTransformParams sourceParams;
+        if (!_DecomposeConstraintFrame(source.frame, &sourceParams)) {
+            return _ConstraintFailure(input);
+        }
+        targetScale += sourceParams.scale * source.normalizedWeight;
+        totalWeight += source.normalizedWeight;
+    }
+    if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
+        return totalWeight == 0.0 ? input : _ConstraintFailure(input);
+    }
+    targetScale = targetScale / totalWeight + params.offset;
+    if (!_IsFinite(targetScale)) {
+        return _ConstraintFailure(input);
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        if (_Affects(params.affect, axis)) {
+            inputParams.scale[axis] += globalWeight *
+                (targetScale[axis] - inputParams.scale[axis]);
+        }
+    }
+    return _FrameFromConstraintParams(input, inputParams);
+}
+
+RigExecPointFrame
+RigExecApplyParentConstraint(
+    const RigExecPointFrame &input,
+    const std::vector<RigExecConstraintSource> &sources,
+    const RigExecParentConstraintParams &params)
+{
+    double globalWeight = 0.0;
+    if (!_ValidateGlobalWeight(params.weight, &globalWeight)) {
+        return _ConstraintFailure(input);
+    }
+    if (globalWeight <= 0.0) {
+        return input;
+    }
+    if (!_IsValidOrder(params.rotationOrder)) {
+        return _ConstraintFailure(input);
+    }
+
+    RigExecTransformParams inputParams;
+    if (!_DecomposeConstraintFrame(input, &inputParams)) {
+        return _ConstraintFailure(input);
+    }
+    const GfVec3d inputEuler =
+        _EulerDegreesFromQuat(inputParams.rotation, params.rotationOrder);
+    if (!_IsFinite(inputEuler)) {
+        return _ConstraintFailure(input);
+    }
+    GfVec3d targetTranslation(0), targetScale(0);
+    GfVec3d sourceAnchor(0), weightedRotationDelta(0);
+    bool hasSourceAnchor = false;
+    double totalWeight = 0.0;
+    for (const RigExecConstraintSource &source : sources) {
+        if (!_ValidateSourceWeight(source)) {
+            return _ConstraintFailure(input);
+        }
+        if (source.normalizedWeight == 0.0) {
+            continue;
+        }
+        if (!_IsFinite(source.translationOffset) ||
+            !_IsFinite(source.rotationOffsetDegrees)) {
+            return _ConstraintFailure(input);
+        }
+        if (!_IsUsableFrame(source.frame)) {
+            return _ConstraintFailure(input);
+        }
+        GfMatrix4d sourceMatrix(1.0);
+        if (!RigExecPointsToMatrix(
+                _IdentityLandmarks(), source.frame, &sourceMatrix)) {
+            return _ConstraintFailure(input);
+        }
+
+        // FBX Parent offsets describe the constrained object's local
+        // transform relative to each source. In row-vector convention the
+        // local offset is therefore applied before the source transform.
+        RigExecTransformParams offsetParams;
+        offsetParams.translation = source.translationOffset;
+        offsetParams.rotation = _QuatFromEulerDegrees(
+            source.rotationOffsetDegrees, params.rotationOrder);
+        const GfMatrix4d targetMatrix =
+            RigExecParamsToMatrix(offsetParams) * sourceMatrix;
+        const RigExecPointFrame targetFrame = RigExecMatrixToPoints(
+            _IdentityLandmarks(), targetMatrix);
+        RigExecTransformParams targetParams;
+        if (!_DecomposeConstraintFrame(targetFrame, &targetParams)) {
+            return _ConstraintFailure(input);
+        }
+        targetTranslation +=
+            targetParams.translation * source.normalizedWeight;
+        targetScale += targetParams.scale * source.normalizedWeight;
+
+        const GfVec3d sourceEuler =
+            _EulerDegreesFromQuat(targetParams.rotation, params.rotationOrder);
+        if (!_IsFinite(sourceEuler)) {
+            return _ConstraintFailure(input);
+        }
+        if (!hasSourceAnchor) {
+            sourceAnchor = sourceEuler;
+            hasSourceAnchor = true;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            weightedRotationDelta[axis] += source.normalizedWeight *
+                _ShortestDegrees(sourceEuler[axis] - sourceAnchor[axis]);
+        }
+        totalWeight += source.normalizedWeight;
+    }
+    if (totalWeight <= 0.0 || !std::isfinite(totalWeight)) {
+        return totalWeight == 0.0 ? input : _ConstraintFailure(input);
+    }
+    targetTranslation /= totalWeight;
+    targetScale /= totalWeight;
+    const GfVec3d targetEuler =
+        sourceAnchor + weightedRotationDelta / totalWeight;
+    if (!_IsFinite(targetTranslation) || !_IsFinite(targetScale) ||
+        !_IsFinite(weightedRotationDelta) || !_IsFinite(targetEuler)) {
+        return _ConstraintFailure(input);
+    }
+
+    for (int axis = 0; axis < 3; ++axis) {
+        if (_Affects(params.translationAxes, axis)) {
+            inputParams.translation[axis] += globalWeight *
+                (targetTranslation[axis] - inputParams.translation[axis]);
+        }
+        if (_Affects(params.scaleAxes, axis)) {
+            inputParams.scale[axis] += globalWeight *
+                (targetScale[axis] - inputParams.scale[axis]);
+        }
+    }
+    const GfVec3d outputEuler = _ApplyEulerDelta(
+        inputEuler, targetEuler, params.rotationAxes, globalWeight);
+    inputParams.rotation =
+        _QuatFromEulerDegrees(outputEuler, params.rotationOrder);
+    return _FrameFromConstraintParams(input, inputParams);
+}
+
+RigExecPointFrame
+RigExecApplyAimConstraint(
+    const RigExecPointFrame &input, const GfVec3d &targetPoint,
+    const RigExecAimConstraintParams &params)
+{
+    double globalWeight = 0.0;
+    if (!_ValidateGlobalWeight(params.weight, &globalWeight)) {
+        return _ConstraintFailure(input);
+    }
+    if (globalWeight <= 0.0) {
+        return input;
+    }
+    const bool needsRollCorrection =
+        params.worldUpDirection.has_value() || params.preserveInputUp;
+    if (!_IsValidOrder(params.rotationOrder) ||
+        !_IsFinite(targetPoint) || !_IsFinite(params.localAimVector) ||
+        (needsRollCorrection && !_IsFinite(params.localUpVector)) ||
+        !_IsFinite(params.rotationOffsetDegrees) ||
+        (params.worldUpDirection &&
+         !_IsFinite(*params.worldUpDirection))) {
+        return _ConstraintFailure(input);
+    }
+
+    RigExecTransformParams inputParams;
+    if (!_DecomposeConstraintFrame(input, &inputParams)) {
+        return _ConstraintFailure(input);
+    }
+    GfVec3d localAim = params.localAimVector;
+    if (!_NormalizeDirection(&localAim)) {
+        return _ConstraintFailure(input);
+    }
+    GfVec3d targetAim = targetPoint - inputParams.translation;
+    if (!_NormalizeDirection(&targetAim)) {
+        return _ConstraintFailure(input);
+    }
+
+    const GfQuatd inputRotation = inputParams.rotation.GetNormalized();
+    GfVec3d currentAim = inputRotation.Transform(localAim);
+    if (!_NormalizeDirection(&currentAim)) {
+        return _ConstraintFailure(input);
+    }
+    const GfRotation swing(currentAim, targetAim);
+    GfRotation twist(GfVec3d(1, 0, 0), 0.0);
+    if (needsRollCorrection) {
+        GfVec3d localUp = params.localUpVector;
+        if (!_NormalizeDirection(&localUp)) {
+            return _ConstraintFailure(input);
+        }
+        localUp -= localAim * GfDot(localAim, localUp);
+        if (!_NormalizeDirection(&localUp)) {
+            return _ConstraintFailure(input);
+        }
+
+        GfVec3d currentUp = inputRotation.Transform(localUp);
+        if (!_NormalizeDirection(&currentUp)) {
+            return _ConstraintFailure(input);
+        }
+        GfVec3d swungUp = swing.TransformDir(currentUp);
+        swungUp -= targetAim * GfDot(targetAim, swungUp);
+        if (!_NormalizeDirection(&swungUp)) {
+            return _ConstraintFailure(input);
+        }
+
+        GfVec3d desiredUp;
+        if (params.worldUpDirection) {
+            desiredUp = *params.worldUpDirection;
+            if (!_NormalizeDirection(&desiredUp)) {
+                return _ConstraintFailure(input);
+            }
+            desiredUp -= targetAim * GfDot(targetAim, desiredUp);
+            if (!_NormalizeDirection(&desiredUp)) {
+                return _ConstraintFailure(input);
+            }
+        } else {
+            // Legacy preserveInputUp: preserve the previous world up
+            // direction rather than FBX worldUpType=None's minimum swing.
+            desiredUp = currentUp - targetAim * GfDot(targetAim, currentUp);
+            if (!_NormalizeDirection(&desiredUp)) {
+                desiredUp = swungUp;
+            }
+        }
+        twist = GfRotation::RotateOntoProjected(
+            swungUp, desiredUp, targetAim);
+    }
+
+    GfMatrix4d aimedMatrix(1.0);
+    aimedMatrix.SetRotate(inputRotation);
+    GfMatrix4d swingMatrix(1.0), twistMatrix(1.0);
+    swingMatrix.SetRotate(swing);
+    twistMatrix.SetRotate(twist);
+    aimedMatrix = aimedMatrix * swingMatrix * twistMatrix;
+    const GfQuatd aimedRotation =
+        aimedMatrix.ExtractRotation().GetQuat().GetNormalized();
+
+    const GfVec3d inputEuler =
+        _EulerDegreesFromQuat(inputRotation, params.rotationOrder);
+    const GfVec3d targetEuler =
+        _EulerDegreesFromQuat(aimedRotation, params.rotationOrder) +
+        params.rotationOffsetDegrees;
+    if (!_IsFinite(inputEuler) || !_IsFinite(targetEuler)) {
+        return _ConstraintFailure(input);
+    }
+    const GfVec3d outputEuler = _ApplyEulerDelta(
+        inputEuler, targetEuler, params.affectRotation, globalWeight);
+    inputParams.rotation =
+        _QuatFromEulerDegrees(outputEuler, params.rotationOrder);
+    return _FrameFromConstraintParams(input, inputParams);
 }
 
 RigExecPointFrame

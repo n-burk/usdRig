@@ -122,6 +122,8 @@ part of this repository.
 | Suite | What it covers |
 |---|---|
 | `testRigExecMath` | §5 math conformance: reconstruction policies, degeneracy ladder, Points↔Matrix round trip, SVD/SRT with pinned reflection axis, IK, blend, twist |
+| `testRigExecSingleChainIk` | arbitrary-length FBX-style single-chain IK: reachable and unreachable goals, solver and pole modes, twist, constraint-weight endpoints, scale/length preservation, determinism, and degenerate-input failures |
+| `testRigExecConstraints` | the complete FBX-style constraint schema surface plus end-to-end Aim, Position, Rotation, Scale, Parent, and SingleChainIK evaluation, composed chaining and hierarchy propagation, IK T/S modes, enable/weight pass-through, invalid contracts, and no-authoring preservation |
 | `testRigExecArm` | end-to-end exec/animation/geometry against the `examples/` reference assets |
 | `testRigExecMoverGraph` | every revision op, chained and mixed composition, weighting, cardinality guards, all pass-through paths |
 | `testRigExecNoAuthoring` | that the engine authors nothing: the whole composed scene is byte-identical before and after compile, evaluation over six frames, and the full Hydra activate/publish/teardown cycle |
@@ -173,7 +175,7 @@ copy of the same character.
 |---|---|---|
 | `libs/rigExecMath` | rigExecMath | `RigExecPointFrame` (four-point affine pose value, §5.1), reconstruction policies affine/orthogonal/axial/rigid (§5.2), degeneracy ladder (§5.3), Points↔Matrix round trip and SVD-based SRT interop with pinned reflection axis (§5.4), FK chain, analytic two-bone IK with pole/softness/uniform stretch, shortest-arc/log frame blend, swing-twist distribution, weighted-matrix point kernel (§7.4). Pure — no USD deps beyond `gf`/`vt`. Static library, folded into `rigExec` |
 | `libs/rigExecSchema` | rigExecSchema | `schema.usda` — the RigExec schema domain (§4.1). Generated as a **codeless** schema plugin (`bin/gen_schema.bat` → `plugin/rigExecSchema/resources`) |
-| `libs/rigExec` | rigExecCompute + rigExecUsd | `ExecTypeRegistry` registrations (`RigExecPointFrame`, `RigExecPointFrameArray`), `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA` computations publishing paired `computePointFrame`/`computeMatrix` on every transform provider and aggregate `computePointFrameArray` on solvers (§5.7, §12.1), the typed tap/snapshot extraction facade over `ExecUsdSystem` (§9), and `RigExecRigEvaluator` with composed post-order mover discovery. `moverGraph` builds a target's revision chain as an in-memory `VdfNetwork`; `moverKernels` holds the operation callbacks |
+| `libs/rigExec` | rigExecCompute + rigExecUsd | `ExecTypeRegistry` registrations (`RigExecPointFrame`, `RigExecPointFrameArray`), `EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA` computations publishing paired `computePointFrame`/`computeMatrix` on every transform provider and aggregate `computePointFrameArray` on solvers (§5.7, §12.1), the typed tap/snapshot extraction facade over `ExecUsdSystem` (§9), and `RigExecRigEvaluator` with reverse-sibling post-order mover discovery. `moverGraph` builds a target's revision chain as an in-memory `VdfNetwork`; `moverKernels` holds the operation callbacks |
 | `libs/rigExecImaging` | — | Hydra 2.0 publication (§10): the three filtering scene indices over an atomic `RigExecSnapshotStore`, the `UsdImagingSceneIndexPlugin`, and the C activation surface |
 | `examples/` | — | `ArmRig.usda` / `ArmShotAnim.usda` (the spec §4.5/§4.6 reference assets) plus ten self-contained animated demo stages — see `examples/README.md` |
 | `tests/` | rigExecValidation (seed) | the four ctest suites and the two probes |
@@ -182,18 +184,37 @@ copy of the same character.
 
 ### Schema domain
 
-32 classes, codeless (`skipCodeGeneration = true`), prefix `RigExec`:
+42 classes, codeless (`skipCodeGeneration = true`), prefix `RigExec`:
 
 - **Abstract bases** — `RigExecXformable` (a property-exact IrXformable
-  mirror), `RigExecWeightObject`, `RigExecVolumeWeight`
+  mirror), `RigExecConstraint`, `RigExecSourceConstraint`,
+  `RigExecWeightObject`, `RigExecVolumeWeight`
 - **Core** — `RigExecRoot`, `RigExecControl`, `RigExecJoint`
 - **Solvers** — `RigExecFkChain`, `RigExecTwoBoneIk`, `RigExecBlendPointFrames`,
-  `RigExecTwistDistribution`, `RigExecRibbon`, `RigExecAimConstraint`
+  `RigExecTwistDistribution`, `RigExecRibbon`
+- **FBX-style constraints** — the fixed-semantics `RigExecAimConstraint`,
+  `RigExecPositionConstraint`, `RigExecRotationConstraint`,
+  `RigExecScaleConstraint`, `RigExecParentConstraint`, and
+  `RigExecSingleChainIkConstraint`, plus `RigExecCustomConstraint`, which is
+  intentionally a non-evaluating extensibility carrier with no generic source
+  relationship. The built-in evaluator rejects a Custom constraint carrying a
+  `rigExec:moves` write set: there is no handler registry, so an external
+  integration must evaluate Custom metadata outside the built-in
+  `RigExecRigEvaluator` path. All constraints inherit normalized
+  `inputs:weight` and authoring-only `rigExec:locked`; the five source-blending
+  types inherit an ordered `rigExec:sources`/`inputs:sourceWeights` contract.
+  SingleChainIK's `rigExec:evaluationMode` follows Autodesk's TS modes:
+  `neverTS` ignores animated per-chain translation/scale when choosing solve
+  lengths, `autoDetect` uses it when detected, and `alwaysTS` uses the current
+  translation/scale. Parent scale axes default off to match the constructed
+  FBX runtime. The legacy Aim fields remain available for existing assets.
+  `FbxCharacter` has no RigExec schema equivalent.
 - **Movers** — `RigExecMatrixMover`, `RigExecBlendShapeMover` (+ `BlendInput`,
   `BlendSample`), `RigExecCurveMover`, `RigExecLatticeMover`,
-  `RigExecSurfaceMover`, `RigExecSmoothMover`, `RigExecVolumeCorrectMover`,
-  and the math movers `RigExecFloatMathMover`, `RigExecVec3fMathMover`,
-  `RigExecMatrixMathMover`
+  `RigExecSurfaceMover`, `RigExecSmoothMover`, `RigExecCurvenetMover`,
+  `RigExecVolumeCorrectMover`, and the math movers `RigExecFloatMathMover`,
+  `RigExecVec3fMathMover`, `RigExecMatrixMathMover`
+- **Curvenet geometry** — `RigExecCurvenet`
 - **Weights** — `RigExecStaticWeight`, `RigExecDynamicWeight`, and the
   volumetric field generators `RigExecSphereWeight`, `RigExecPlaneWeight`,
   `RigExecCurveWeight` plus `RigExecCombineWeight`, which folds any of
@@ -385,7 +406,7 @@ joints nor movers is still rejected, because it publishes nothing.
 **Read phases.** Which *revision* of an input a mover consumes is authored as
 metadata on the relationship (or attribute) naming it — `rigExecReadPhase`,
 one of `base`, `preceding`, `final`, or an absolute prim path meaning "the
-value as of when the composed post-order walk finished with that prim".
+value as of when the reverse-sibling post-order walk finished with that prim".
 Chains evaluate in dependency order; a cyclic phase read fails the compile.
 See `examples/13_ReadPhases.usda`.
 

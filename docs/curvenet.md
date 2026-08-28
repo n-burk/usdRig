@@ -331,7 +331,8 @@ RigExec already has the two things the technique needs and that a
 from-scratch implementation would have to invent:
 
 - a **revision chain per target** (`moverGraph.h`): movers write a
-  target in namespace order, each reading the previous value. §5's
+  target in reverse-sibling mover-stack order, each reading the previous
+  value. §5's
   "rest pose = the result of any surface deformation performed before
   the curvenet articulation" *is* the incoming chain value. No new
   concept.

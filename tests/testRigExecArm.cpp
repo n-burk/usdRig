@@ -545,8 +545,8 @@ TestGeometryMovers(const std::string &examplesDir)
     CHECK(compiled);
     if (!compiled) return;
 
-    // Composed post-order: the parent-authored reorder makes Pose precede
-    // Geometry, and descendants precede ancestors (spec §4.5 narrative).
+    // Reverse-sibling post-order: Geometry is displayed above Pose, so Pose
+    // executes first; descendants still precede ancestors (spec §4.5).
     const auto &movers = evaluator.GetMoverOrder();
     CHECK(movers.size() >= 9);
     auto indexOf = [&](const char *name) -> int {
@@ -1708,10 +1708,11 @@ TestJointFreeRigPublishesXform(const std::string &examplesDir)
 
 // A rig whose entire content is two property movers competing for one dial.
 //
-// Authored TimesTen-then-AddOne, but REORDERED AddOne-then-TimesTen, so the
-// composed order and the file order disagree on purpose: whichever one the
-// engine actually walks is the one the answer reveals. (A rig with no joints
-// and no geometry is legal now, which is what lets the fixture be this small.)
+// Authored TimesTen-then-AddOne, but DISPLAYED AddOne above TimesTen by the
+// reorder below. The stack must execute bottom-to-top, so TimesTen runs before
+// AddOne. The file order and composed display order disagree on purpose:
+// whichever one the engine actually walks is the one the answer reveals. (A
+// rig with no joints and no geometry is legal, keeping this fixture small.)
 static const char *kOrderFixture = R"USDA(#usda 1.0
 
 def Xform "Asset"
@@ -1749,15 +1750,16 @@ def Xform "Asset"
 }
 )USDA";
 
-// Each revision reads the PRECEDING revision, and the order is the composed
-// namespace order -- not the authoring order, and not a fixed one.
+// Each revision reads the PRECEDING revision, and execution reverses the
+// composed top-to-bottom sibling order -- it is neither authoring order nor a
+// fixed order.
 //
 // The arithmetic is chosen so the three candidate behaviours are three
 // different numbers, and no assertion can pass by accident:
 //
-//   30  add-then-multiply over the chain   ((2 + 1) * 10)   <- correct
-//   21  multiply-then-add over the chain   ((2 * 10) + 1)   <- wrong order
-//   20  no chaining, last writer wins      (2 * 10)         <- no chain
+//   21  multiply-then-add over the chain   ((2 * 10) + 1)   <- correct
+//   30  add-then-multiply over the chain   ((2 + 1) * 10)   <- forward order
+//    3  no chaining, last writer wins      (2 + 1)          <- no chain
 //
 // Then the reorder is flipped through the SESSION layer and Evaluate is
 // called with no intervening Compile: the composed mover topology is part of
@@ -1804,12 +1806,12 @@ TestMoverOrderIsComposedAndDynamic()
     CHECK(first.valid);
     float value = 0;
     CHECK(dialValue(first, &value));
-    if (std::abs(value - 30.0f) > 1e-6f) {
-        std::printf("  dial = %f; expected 30 ((2+1)*10). 20 means the "
-                    "revisions did not chain; 21 means the walk ignored the "
-                    "authored reorder\n", double(value));
+    if (std::abs(value - 21.0f) > 1e-6f) {
+        std::printf("  dial = %f; expected 21 ((2*10)+1). 3 means the "
+                    "revisions did not chain; 30 means sibling execution "
+                    "was top-to-bottom\n", double(value));
     }
-    CHECK(std::abs(value - 30.0f) < 1e-6f);
+    CHECK(std::abs(value - 21.0f) < 1e-6f);
     const size_t firstDigest = evaluator.GetBindingEpochDigest();
 
     // Flip the composed order in the session layer. Nothing else changes --
@@ -1826,12 +1828,12 @@ TestMoverOrderIsComposedAndDynamic()
     const RigExecRigPose second = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(second.valid);
     CHECK(dialValue(second, &value));
-    if (std::abs(value - 21.0f) > 1e-6f) {
-        std::printf("  after reordering, dial = %f; expected 21 ((2*10)+1). "
-                    "30 means the compiled order went stale\n",
+    if (std::abs(value - 30.0f) > 1e-6f) {
+        std::printf("  after reordering, dial = %f; expected 30 ((2+1)*10). "
+                    "21 means the compiled order went stale\n",
                     double(value));
     }
-    CHECK(std::abs(value - 21.0f) < 1e-6f);
+    CHECK(std::abs(value - 30.0f) < 1e-6f);
 
     // The epoch identity moved with it, and the rebuild was reported.
     CHECK(evaluator.GetBindingEpochDigest() != firstDigest);
@@ -1864,14 +1866,14 @@ TestMoverOrderIsComposedAndDynamic()
         const RigExecRigPose third = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(third.valid);
         CHECK(dialValue(third, &value));
-        if (std::abs(value - 16.0f) > 1e-6f) {
-            std::printf("  after adding a third mover, dial = %f; expected 16 "
-                        "((2*10)+1-5)\n", double(value));
+        if (std::abs(value + 20.0f) > 1e-6f) {
+            std::printf("  after adding a third mover, dial = %f; expected -20 "
+                        "((2-5+1)*10)\n", double(value));
         }
-        CHECK(std::abs(value - 16.0f) < 1e-6f);
+        CHECK(std::abs(value + 20.0f) < 1e-6f);
     }
 
-    // The authored dial is still 2 on the stage: 30, 21 and 16 were
+    // The authored dial is still 2 on the stage: 21, 30 and -20 were
     // published, never written.
     float authored = 0;
     CHECK(stage->GetAttributeAtPath(dial).Get(&authored,

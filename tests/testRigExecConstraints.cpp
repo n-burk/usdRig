@@ -495,6 +495,105 @@ TestConstraintCompositionAndHierarchy()
     }
 }
 
+// The usdview hierarchy is also the mover stack UI. Sibling rows therefore
+// execute bottom-to-top, while a mover that contains other movers executes
+// after every descendant in its own subtree. At every depth this is reverse
+// composed sibling order plus post-order parent emission.
+static void
+TestReverseSiblingPostOrder()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Sources"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim movers =
+        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+
+    auto make = [&](const char *relativePath, double sourceX) {
+        const SdfPath moverPath =
+            SdfPath("/Asset/Rig/Movers").AppendPath(
+                SdfPath(relativePath));
+        const SdfPath sourcePath =
+            SdfPath("/Asset/Sources").AppendChild(
+                moverPath.GetNameToken());
+        MakeXform(stage, sourcePath, Matrix(GfVec3d(sourceX, 0, 0)));
+        const UsdPrim mover = stage->DefinePrim(
+            moverPath, TfToken("RigExecPositionConstraint"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({SdfPath("/Asset/Target")});
+        mover.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({sourcePath});
+        return mover;
+    };
+
+    const UsdPrim siblingAbove = make("SiblingAbove", 50);
+    const UsdPrim moverParent = make("MoverParent", 40);
+    const UsdPrim childAbove = make("MoverParent/ChildAbove", 30);
+    const UsdPrim childBelow = make("MoverParent/ChildBelow", 20);
+    const UsdPrim siblingBelow = make("SiblingBelow", 10);
+    CHECK(siblingAbove && moverParent && childAbove && childBelow &&
+          siblingBelow);
+
+    auto checkOrder = [](const RigExecRigEvaluator &evaluator,
+                         const std::vector<SdfPath> &expected) {
+        const auto &actual = evaluator.GetMoverOrder();
+        CHECK(actual.size() == expected.size());
+        for (size_t i = 0; i < std::min(actual.size(), expected.size()); ++i) {
+            CHECK(actual[i].moverPath == expected[i]);
+            CHECK(actual[i].ordinal == static_cast<int>(i));
+        }
+    };
+
+    const SdfPath root("/Asset/Rig/Movers");
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    checkOrder(
+        evaluator,
+        {root.AppendChild(TfToken("SiblingBelow")),
+         root.AppendPath(SdfPath("MoverParent/ChildBelow")),
+         root.AppendPath(SdfPath("MoverParent/ChildAbove")),
+         root.AppendChild(TfToken("MoverParent")),
+         root.AppendChild(TfToken("SiblingAbove"))});
+    const size_t naturalDigest = evaluator.GetBindingEpochDigest();
+    const RigExecRigPose natural = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(natural.valid);
+    CHECK(Near(natural.providerXforms.at(SdfPath("/Asset/Target"))
+                   .ExtractTranslation(),
+               GfVec3d(50, 0, 0)));
+
+    // Reorder changes the displayed top-to-bottom order. Execution consumes
+    // that final composed order in reverse at BOTH levels.
+    movers.SetChildrenReorder(
+        {TfToken("SiblingBelow"), TfToken("MoverParent"),
+         TfToken("SiblingAbove")});
+    moverParent.SetChildrenReorder(
+        {TfToken("ChildBelow"), TfToken("ChildAbove")});
+    CHECK(movers.GetChildrenNames() ==
+          TfTokenVector({TfToken("SiblingBelow"), TfToken("MoverParent"),
+                         TfToken("SiblingAbove")}));
+    CHECK(moverParent.GetChildrenNames() ==
+          TfTokenVector({TfToken("ChildBelow"), TfToken("ChildAbove")}));
+    errors.clear();
+    CHECK(evaluator.Compile(&errors));
+    checkOrder(
+        evaluator,
+        {root.AppendChild(TfToken("SiblingAbove")),
+         root.AppendPath(SdfPath("MoverParent/ChildAbove")),
+         root.AppendPath(SdfPath("MoverParent/ChildBelow")),
+         root.AppendChild(TfToken("MoverParent")),
+         root.AppendChild(TfToken("SiblingBelow"))});
+    CHECK(evaluator.GetBindingEpochDigest() != naturalDigest);
+    const RigExecRigPose reordered =
+        evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(reordered.valid);
+    CHECK(Near(reordered.providerXforms.at(SdfPath("/Asset/Target"))
+                   .ExtractTranslation(),
+               GfVec3d(10, 0, 0)));
+}
+
 static void
 TestModeAndFailureContracts()
 {
@@ -1263,8 +1362,8 @@ TestDomainsOnOnePrimDoNotCompete()
 
     // Same points set twice: legal, and ordered by the composed hierarchy.
     // Two movers writing one target is an ordinary stack; the order is the
-    // post-order walk of the final composed namespace, so nothing has to be
-    // declared for it to be well defined.
+    // reverse-sibling post-order walk of the final composed namespace, so
+    // nothing has to be declared for it to be well defined.
     {
         const UsdStageRefPtr stage =
             build("/Asset/Geom/M.points", "/Asset/Geom/M.points");
@@ -1344,6 +1443,16 @@ TestUnwiringOneMoverLeavesTheRestRunning()
             {SdfPath("/Asset/Target")});
         par.CreateRelationship(TfToken("rigExec:sources"))
             .SetTargets({SdfPath("/Asset/ParSource")});
+        // This test composes Parent translation with a later Rotation writer.
+        // Parent is the top row and therefore executes last; make its intended
+        // translation-only channel ownership explicit so it does not replace
+        // the Rotation result with its identity source orientation.
+        for (const char *axis : {"X", "Y", "Z"}) {
+            par.CreateAttribute(
+                   TfToken(std::string("inputs:affectRotation") + axis),
+                   SdfValueTypeNames->Bool)
+                .Set(false);
+        }
         const UsdPrim rot = MakeConstraint(
             stage, "Rot", "RigExecRotationConstraint",
             {SdfPath("/Asset/Target")});
@@ -1540,6 +1649,7 @@ main()
     TestSchemaSurface();
     TestEvaluatorSemantics();
     TestConstraintCompositionAndHierarchy();
+    TestReverseSiblingPostOrder();
     TestModeAndFailureContracts();
     TestXformableTargetsCompile();
     TestTransformProviderPredicate();

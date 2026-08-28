@@ -83,11 +83,12 @@ enum class RigExecReadPhaseKind {
 /// A resolved read phase. \p prim is meaningful only for AtPrim.
 ///
 /// AtPrim is the general form the other three are shorthands for: the walk is
-/// a post-order over the composed Movers namespace, so "as of this prim" means
-/// the moment that prim was finished with -- for a mover, immediately after it
-/// applied; for a grouping Scope, after everything beneath it applied, because
-/// post-order visits a parent last. Naming a Scope is therefore how an author
-/// says "after that whole rigging stage", without listing its contents.
+/// reverse-sibling post-order over the composed Movers namespace, so "as of
+/// this prim" means the moment that prim was finished with -- for a mover,
+/// immediately after it applied; for a grouping Scope, after everything
+/// beneath it applied, because post-order visits a parent last. Naming a Scope
+/// is therefore how an author says "after that whole rigging stage", without
+/// listing its contents.
 struct RigExecReadPhase {
     RigExecReadPhaseKind kind = RigExecReadPhaseKind::Base;
     SdfPath prim;
@@ -398,10 +399,11 @@ RigExecMoverParameters RigExecAssembleParameters(
 
 /// A compiled mover graph.
 ///
-/// Build order mirrors the composed post-order mover walk: seed a target's
-/// chain with its authored base points, then append one revision per mover that
-/// writes it. Each append returns the new chain head, which is the input to the
-/// next revision and, at the end, the published result.
+/// Build order mirrors the composed mover-stack walk: descendants before their
+/// mover parent, sibling branches bottom-to-top (reverse composed child order).
+/// Seed a target's chain with its authored base points, then append one revision
+/// per mover that writes it. Each append returns the new chain head, which is
+/// the input to the next revision and, at the end, the published result.
 class RigExecMoverGraph
 {
 public:

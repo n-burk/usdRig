@@ -59,6 +59,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 add_library(rigExecMath STATIC
     libs/rigExecMath/pointFrame.cpp
     libs/rigExecMath/solvers.cpp
+    libs/rigExecMath/singleChainIk.cpp
     libs/rigExecMath/propertyMath.cpp
     libs/rigExecMath/geometryKernels.cpp
     libs/rigExecMath/weightFields.cpp
@@ -155,6 +156,16 @@ set(_rigexec_schema_resource_define
 add_executable(testRigExecMath tests/testRigExecMath.cpp)
 target_link_libraries(testRigExecMath PRIVATE rigExecMath)
 add_test(NAME testRigExecMath COMMAND testRigExecMath)
+
+add_executable(testRigExecSingleChainIk tests/testRigExecSingleChainIk.cpp)
+target_link_libraries(testRigExecSingleChainIk PRIVATE rigExecMath)
+add_test(NAME testRigExecSingleChainIk COMMAND testRigExecSingleChainIk)
+
+add_executable(testRigExecConstraints tests/testRigExecConstraints.cpp)
+target_link_libraries(testRigExecConstraints PRIVATE rigExec)
+target_compile_definitions(testRigExecConstraints PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 
 add_executable(testRigExecCurvenet tests/testRigExecCurvenet.cpp)
 target_link_libraries(testRigExecCurvenet PRIVATE rigExecMath)

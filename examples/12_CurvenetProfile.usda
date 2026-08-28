@@ -93,6 +93,10 @@ def Xform "CurvenetAsset"
         {
             def Scope "Geometry"
             {
+                # Display ProfileMover above PoseNet. The mover stack executes
+                # bottom-to-top, so the net is posed before it drives Tube.
+                reorder nameChildren = ["ProfileMover", "PoseNet"]
+
                 # 1. Pose the curvenet's knots, exactly as any other geometry
                 #    would be posed.
                 def RigExecMatrixMover "PoseNet" (

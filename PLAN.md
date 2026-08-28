@@ -14,7 +14,7 @@ A rigging object model + character-computation layer **on top of OpenExec** (Ope
   weight objects (static/dynamic), lattice/curve/surface/post movers, applied APIs
   (RigExecMoverAPI, RigExecPointTransformAPI, RigExecControlAPI, RigExecPartitionAPI, RigExecTapAPI).
 - Movers author `rel rigExec:moves` → exact prim/property they modify. Compiler walks composed `Movers`
-  namespace post-order (descendants first, composed child order) → SSA chain of immutable revisions
+  namespace in reverse-sibling post-order (descendants first, bottom sibling branch first) → SSA chain of immutable revisions
   base → afterMover(i) → final. Last writer in logical order wins.
 - Geometry stays native UsdGeom (points point3f[], normals, extent, widths, primvars). No parallel geometry schema.
 - Extraction: RigExecValueAddress / RigExecTapSet / RigExecSnapshot (§9). Every semantic transform publishes

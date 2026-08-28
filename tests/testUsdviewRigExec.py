@@ -39,6 +39,51 @@ def _Points(observer):
             for p in value.GetValue(0.0)]
 
 
+def _AssertActivationFailureKeepsStageAlive():
+    """A failed RigExec activation must not invalidate usdview's stage."""
+    from rigExecUsdview import RigExecUsdviewContainer
+
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/Rig", "RigExecRoot")
+
+    class _FailureLibrary:
+        def __init__(self):
+            self.activations = 0
+
+        def RigExecImaging_Deactivate(self):
+            pass
+
+        def RigExecImaging_Activate(self, cacheId, rigPath, frame):
+            self.activations += 1
+            return 3
+
+    dataModel = type("DataModel", (), {})()
+    dataModel.stage = stage
+    dataModel.currentFrame = Usd.TimeCode.Default()
+    api = type("UsdviewApi", (), {})()
+    api.dataModel = dataModel
+
+    container = RigExecUsdviewContainer.__new__(RigExecUsdviewContainer)
+    container._api = api
+    container._lib = _FailureLibrary()
+    container._active = False
+    container._rigPaths = []
+    container._cachedStage = None
+
+    try:
+        container._OnStageReplaced()
+        if container._lib.activations != 1:
+            raise AssertionError("activation-failure branch was not reached")
+        if container._active:
+            raise AssertionError("failed activation remained active")
+        if container._cachedStage is not stage:
+            raise AssertionError("failed activation released the live stage")
+        if not stage or not stage.GetPrimAtPath("/Rig"):
+            raise AssertionError("failed activation invalidated usdview's stage")
+    finally:
+        container._Shutdown()
+
+
 def testUsdviewInputFunction(appController):
     # The plugin owns the platform naming (.dll/.dylib/.so) and the
     # installed-vs-build search order; asking it keeps this script working on
@@ -98,6 +143,8 @@ def testUsdviewInputFunction(appController):
             "gives %s (use the frame the signal carries, never "
             "dataModel.currentFrame, inside currentFrameChanged)"
             % (viaSignal[0], viaDirect[0]))
+
+    _AssertActivationFailureKeepsStageAlive()
 
     print("RIGEXEC_USDVIEW_OK generations %d -> %d, frame 1024 published "
           "the frame 1024 pose" % (generation0, generation1))

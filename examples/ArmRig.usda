@@ -270,7 +270,9 @@ def Xform "ArmAsset" (
 
         def Scope "Movers"
         {
-            reorder nameChildren = ["Pose", "Geometry"]
+            # The hierarchy is the displayed stack: bottom executes first.
+            # Keep Pose below Geometry so final pose is available to skinning.
+            reorder nameChildren = ["Geometry", "Pose"]
             def Scope "Pose"
             {
                 def RigExecAimConstraint "WristAim" (
@@ -501,4 +503,3 @@ def Xform "ArmAsset" (
         }
     }
 }
-

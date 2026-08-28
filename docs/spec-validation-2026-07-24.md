@@ -307,7 +307,7 @@ An IK, aim, constraint, math, or geometry computation without moves is only a va
 
 **Status:** **BUILD**. OpenUSD supplies relationships and a composed child order; RigExec defines their execution meaning. A [UsdRelationship](https://openusd.org/release/api/class_usd_relationship.html) can target prims, attributes, or relationships and is uniform over time. RigExec narrows moves to existing prims or non-structural, computation-catalogued attributes. Relationship-valued and topology properties plus undeclared or dangling paths are rejected; child-order metadata is not a targetable scenegraph property.
 
-Every RigExecRig discovers mover-bearing prims beneath its composed Movers child. The compiler iterates [UsdPrimRange::PreAndPostVisit()](https://openusd.org/release/api/class_usd_prim_range.html) and processes only IsPostVisit() entries, yielding a deterministic post-order depth-first walk for a fixed composed stage: descendants before ancestors and branches in the composed order returned by [UsdPrim::GetChildrenNames()](https://openusd.org/release/api/class_usd_prim.html). v0.1 uses active, loaded, defined, non-abstract prims on deinstanced rig roots and never traverses instance proxies; load, activation, population, or instancing-policy changes are structural. GetChildrenReorder() alone is not the final composed order. Same-target movers should be nested; release validation otherwise requires a parent-authored child-reorder opinion—reorder nameChildren = \[...\] in USDA, authored through SetChildrenReorder()—listing every competing direct-child name, then still reads effective order from GetChildrenNames(). No stack list, relationship-target order, plugin order, request order, or worker completion time participates.
+Every RigExecRig discovers mover-bearing prims beneath its composed Movers child. The compiler recursively walks the final composed namespace in **reverse-sibling post-order**: descendants execute before their mover parent, and sibling branches execute in reverse of the composed order returned by [UsdPrim::GetChildrenNames()](https://openusd.org/release/api/class_usd_prim.html). This matches the usdview stack presentation: the bottom sibling executes first and the top sibling executes last. v0.1 uses active, loaded, defined, non-abstract prims on deinstanced rig roots and never traverses instance proxies; load, activation, population, or instancing-policy changes are structural. GetChildrenReorder() alone is not the final composed order. Multiple movers writing one target are an ordinary stack whose order is always well defined; nesting and reorder nameChildren = \[...\] are conveniences for arranging that order, not validity preconditions. RigExec reads the effective order from GetChildrenNames() and reverses it for execution. No relationship-target order, plugin order, request order, or worker completion time participates.
 
 Target resolution is exact:
 
@@ -631,7 +631,8 @@ def Xform "ArmAsset" (
   
         def Scope "Movers"  
         {  
-            reorder nameChildren = \["Pose", "Geometry"\]  
+            # Display Geometry above Pose; the stack executes bottom-to-top.
+            reorder nameChildren = \["Geometry", "Pose"\]
   
             def Scope "Pose"  
             {  
@@ -875,7 +876,7 @@ def Xform "ArmAsset" (
     }  
 }
 
-The parent-authored child reorder makes Pose precede Geometry; inside geometry, post-order gives BicepFlex → WristMatrix → ElbowMatrix → ShoulderMatrix → RibbonWrap → VolumeCorrect → RecomputeNormals. Each matrix mover consumes one transform and one total weight field; no operation owns a transform list. Normals always publish, while preview keeps RibbonGuides targetable and hides it with zero widths. ClampIKFKWeight is a typed property mover before ancestor WristAim. Selecting these variants starts a new epoch; direct shape-preserving enable or weight-value edits need not. The compiler generates scalar views for all twist/ribbon frames; no stack or authored stage links exist.
+The parent-authored child reorder displays Geometry above Pose, so reverse-sibling stack execution makes Pose precede Geometry. Inside geometry, the lower GuideFromRibbon branch executes before the upper ArmBody branch, whose post-order chain is BicepFlex → WristMatrix → ElbowMatrix → ShoulderMatrix → RibbonWrap → VolumeCorrect → RecomputeNormals. Each matrix mover consumes one transform and one total weight field; no operation owns a transform list. Normals always publish, while preview keeps RibbonGuides targetable and hides it with zero widths. ClampIKFKWeight is a typed property mover before ancestor WristAim. Selecting these variants starts a new epoch; direct shape-preserving enable or weight-value edits need not. The compiler generates scalar views for all twist/ribbon frames; no separate authored stack list or stage links exist.
 
 ## 4.6 Animation/reference example: ArmShotAnim.usda
 
@@ -959,7 +960,7 @@ def Xform "Shot"
 
 **Relationships versus multi-connections.** Multi-connection attributes would look graph-like, but current OpenExec supports only one valid connection for computed value flow. Relationships plus named computation provider resolution are chosen for variable-arity frame/geometry inputs. The schema can migrate to richer upstream connection semantics later without changing solver results.
 
-**Explicit list versus composed hierarchy.** A stack list is locally obvious but duplicates namespace intent. The chosen post-order moves hierarchy works through composition; same-target movers are nested or fully covered by a parent child-reorder opinion. The compiler records/diffs ordinals and chain digests.
+**Explicit list versus composed hierarchy.** A stack list is locally obvious but duplicates namespace intent. The chosen reverse-sibling post-order moves hierarchy works through composition; same-target movers are ordered by that hierarchy, arranged by nesting or by a parent child-order instruction when the authored order is not the wanted one. The compiler records/diffs ordinals and chain digests.
 
 # 5\. Point-based transform system
 
@@ -2191,7 +2192,7 @@ The v0.1 implementation must work against the qualified unchanged OpenUSD 26.08 
 | Point landmarks become coincident or nearly collinear. | High: orientation, scale, or solver results can become discontinuous. | Character-scaled thresholds, deterministic parent/rest/world fallback, solve-status taps, and headless asset validation. Release assets may not contain unresolved degeneracy; hidden previous-frame state is prohibited. |
 | Solver/mover packing hides useful intermediate values. | Medium: correctness and invalidation defects become hard to isolate. | The compiler enforces a named computePointFrame for every transform-semantic stage and an address for every (mover,target) result. Packing may remove scalar plumbing, never semantic taps or golden-test visibility. |
 | A weight object silently targets the wrong value or changes shape during evaluation. | High: a plausible mask could move the wrong points or corrupt a later mover chain. | The compiler canonicalizes and hashes each weight target against its consuming mover, freezes domain/representation/cardinality/source bindings in the epoch, and rejects target mismatch or dynamic descriptor drift. Layer/reference/variant, static↔dynamic, sparse/default, and non-commuting-order goldens are mandatory. |
-| Namespace composition silently changes mover precedence. | High: a reference, variant, reparent, or child reorder could change the final pose or geometry. | Validate after composition; record/hash every chain; require nesting or an authored composed sibling order for overlapping writers; diff chain ordinals on publish; rebuild atomically; run reference/variant/layer golden tests. |
+| Namespace composition silently changes mover precedence. | High: a reference, variant, reparent, or child reorder could change the final pose or geometry. | Validate after composition; record/hash every chain; diff chain ordinals on publish; rebuild atomically; run reference/variant/layer golden tests. The final composed hierarchy always supplies a deterministic order; nesting and child reorder only arrange that order. |
 | Geometry evaluation becomes memory-bandwidth bound. | High: parallel nodes alone will not meet film or tablet budgets. | Immutable shared buffers, SoA layout, dirty regions, LOD profiles, fused kernels only after reference parity, allocation/copy counters, and benchmark-driven CPU/GPU partitioning. |
 | Hydra pulls race execution or trigger hidden work. | High: deadlock, tearing, or unpredictable renderer latency. | Workers publish immutable snapshots first; one notice owner sends coalesced dirties; GetPrim() only reads an atomic snapshot pointer and never computes or waits. |
 | Native animation source precedence or type limits are misunderstood. | High: scalar splines, ordinary samples, clips, or standalone packs may evaluate differently. | Pin stock OpenUSD 26.08 and compare timed UsdAttribute::Get() with OpenExec for knots, in-betweens, extrapolation, paired exact/PreTime keys, held/linear modes, layer strength, clips, blocks, and time-sample-versus-spline precedence. Packs contain only export-key resolved value-or-no-value states and fail unexported-key requests; no RigExec curve sampler exists. |
@@ -2234,7 +2235,7 @@ The v0.1 implementation must work against the qualified unchanged OpenUSD 26.08 
   - Move target: canonical prim or property result named by rel rigExec:moves, with distinct base and final values.
   - Mover: a geometry or rig operation that writes one or more move targets through the common RigExecMoverAPI.
   - Mover application: compiler-generated pure computation for one (mover,target) pair and one logical post-order ordinal.
-  - Bottom-up order: post-order traversal of the composed Movers namespace: descendants before ancestors and composed child order for branches.
+  - Bottom-up order: reverse-sibling post-order traversal of the composed Movers namespace: descendants before ancestors, with the bottom composed sibling branch first and the top branch last.
   - Binding epoch: immutable compiled interval containing exact mover chains, matrix-provider/read-phase bindings, weight and blend descriptors, output manifests, reverse dependency routes, and snapshot-compatible Hydra publication metadata.
   - Weight object: independently composable static or dynamic prim that publishes one total scalar field over the logical elements of one canonical prim/property target.
   - Point frame: four points (o, x, y, z) representing an affine transform as origin plus transformed basis endpoints.
@@ -2253,7 +2254,7 @@ The v0.1 implementation must work against the qualified unchanged OpenUSD 26.08 
   - OpenUSD 26.08 Time and Animated Values guide — native sparse time samples, scalar spline types, timed attribute evaluation through Ts, interpolation, value clips, and precedence.
   - UsdAttribute spline API and UsdAttributeQuery — native authored-spline access and resolved timed-value queries.
   - UsdRelationship — composed prim/property targets, list editing, forwarding, and reference/prototype restrictions.
-  - UsdPrim child-order API and UsdPrimRange — true composed child order and depth-first pre/post traversal used by mover lowering.
+  - UsdPrim child-order API — true composed child order consumed in reverse by RigExec's recursive post-order mover lowering.
   - Computing values with ExecUsd — batching, cache views, and time.
   - OpenExec computation registration tutorial — schema-bound C++ registration and typed input patterns.
   - Esf README and Esf stage interface — proof of the scene seam and its current non-public warning.

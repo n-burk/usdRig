@@ -264,9 +264,9 @@ class RigExecUsdviewContainer(PluginContainer):
         except Exception:
             pass
 
-    def _ReleaseCachedStage(self):
+    def _ReleaseCachedStage(self, liveStage=None):
         """
-        Drops our StageCache reference to the previously activated stage.
+        Drops our StageCache reference unless usdview is still using it.
 
         Insert() takes a reference the cache holds for the life of the
         PROCESS unless someone erases it, and the cache outlives usdview's
@@ -276,10 +276,16 @@ class RigExecUsdviewContainer(PluginContainer):
         state after the GIL is gone -- a fatal PyThreadState_Get on exit
         rather than anything visible while the app runs.
 
-        Erasing is safe even if usdview still holds the stage: the cache
-        reference is ours, not theirs.
+        In this OpenUSD Python binding, StageCache.Insert transfers the strong
+        stage ownership into the cache and leaves Python holding a weak stage
+        wrapper. Erasing the entry while usdview still exposes that wrapper
+        turns its current stage into an invalid null stage. Keep the current
+        live stage cached through activation failures and manual reactivation;
+        an actual stage replacement or _Shutdown releases it safely.
         """
         if self._cachedStage is None:
+            return
+        if self._cachedStage is liveStage:
             return
         try:
             UsdUtils.StageCache.Get().Erase(self._cachedStage)
@@ -302,7 +308,7 @@ class RigExecUsdviewContainer(PluginContainer):
         # registry holding a handle to something it can no longer look up.
         if self._lib:
             self._lib.RigExecImaging_Deactivate()
-        self._ReleaseCachedStage()
+        self._ReleaseCachedStage(stage)
         if not stage:
             return
         # An empty path passed to the C surface means every RigExecRoot on the
@@ -333,7 +339,9 @@ class RigExecUsdviewContainer(PluginContainer):
                 pass
         else:
             Tf.Warn("rigExecUsdview: activation failed (%d)" % status)
-            self._ReleaseCachedStage()
+            # The cache is the current stage's strong owner. Retain it so a
+            # malformed rig disables RigExec without invalidating usdview's
+            # stage; replacement or _Shutdown performs the eventual erase.
 
     def _OnFrameChanged(self, frame):
         # The SIGNAL's frame, never dataModel.currentFrame -- see

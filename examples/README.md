@@ -133,10 +133,12 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
   it. At least one `RigExecJoint` must exist under the rig — that is what
   the rig publishes.
 - Solvers live under `<rig>/Solvers`, movers under `<rig>/Movers`; mover
-  order is the post-order namespace walk (deepest child applies first),
-  with `reorder nameChildren = ["Pose", "Geometry"]` keeping pose movers
-  ahead of geometry movers.
-- Two movers writing the same target must be nested, never siblings.
+  order is a reverse-sibling post-order walk: descendants apply before their
+  mover parent and sibling rows apply bottom-to-top. For example,
+  `reorder nameChildren = ["Geometry", "Pose"]` displays Pose below Geometry,
+  so pose movers execute first and geometry movers can consume final pose.
+- Two movers writing the same target may be siblings or nested; the final
+  composed hierarchy always supplies their deterministic stack order.
 - Joints and controls follow OpenExec's Ir contract exactly (no
   deviations): both are `RigExecXformable`s with orthonormal
   local-to-world `matrix4d rest:space`, avars for animation (rotations
@@ -180,9 +182,9 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
 
   `base` (the authored value, and the default), `preceding` (the value just
   before this mover, in its own chain), `final` (after every writer), or an
-  absolute prim path — the value as of when the composed post-order walk
-  finished with that prim. A mover path means "right after it applied"; a
-  grouping `Scope` means "after everything beneath it", because post-order
+  absolute prim path — the value as of when the reverse-sibling post-order
+  walk finished with that prim. A mover path means "right after it applied";
+  a grouping `Scope` means "after everything beneath it", because post-order
   visits a parent last. The field is `rigExecReadPhase`, not
   `rigExec:readPhase`: USD metadata names take no namespace, and metadata
   follows the target assignment rather than preceding it. The older

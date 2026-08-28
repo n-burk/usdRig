@@ -6,8 +6,8 @@
 // authored: the engine has no compiler, no generated prims, and no derived
 // evaluation stage (spec §7.2 revised — the source stage is never written).
 // A staged CPU implementation of the same kernels over the same composed
-// post-order walk (spec §4.2) is retained behind cpuParityMode as the
-// scalar parity reference.
+// reverse-sibling post-order walk (spec §4.2) is retained behind
+// cpuParityMode as the scalar parity reference.
 //
 #ifndef RIGEXEC_RIG_EVALUATOR_H
 #define RIGEXEC_RIG_EVALUATOR_H
@@ -28,8 +28,8 @@
 
 namespace rigExec {
 
-/// One discovered mover application (spec §4.2): the composed post-order
-/// ordinal plus canonicalized targets.
+/// One discovered mover application (spec §4.2): the reverse-sibling
+/// post-order ordinal plus canonicalized targets.
 struct RigExecMoverRecord {
     SdfPath moverPath;
     TfToken schemaType;
@@ -189,8 +189,9 @@ public:
     /// Evaluates one complete generation at an explicit time.
     RigExecRigPose Evaluate(UsdTimeCode time);
 
-    /// Composed post-order mover applications (descendants first,
-    /// composed child order; spec §4.2).
+    /// Composed mover-stack applications: descendants before their mover
+    /// parent, sibling branches in reverse composed child order (the bottom
+    /// usdview row executes first; spec §4.2).
     const std::vector<RigExecMoverRecord> &GetMoverOrder() const {
         return _movers;
     }
@@ -322,7 +323,7 @@ private:
         /// sorted input order the packet is accumulated in (spec §7.3).
         std::vector<RigExecTapId> blendChannelTaps;
     };
-    /// Exact points target -> its revisions, in composed post-order.
+    /// Exact points target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_GraphRevision>> _graphChains;
     /// What this generation's property chains resolved, consulted by every
     /// static input read the evaluator and the packet assemblers make.
@@ -417,7 +418,7 @@ private:
         SdfPath moverPath;
         TfToken schemaType;
     };
-    /// Exact scalar property target -> its revisions, in composed post-order.
+    /// Exact scalar property target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;
 
     /// Evaluates every property chain at \p time.
@@ -443,10 +444,10 @@ private:
     /// relationship accessor can request computations on its targets but not
     /// a named attribute of them.
     std::map<SdfPath, SdfPath> _ribbonDriverPoints;
-    /// All pose constraints, in the same composed post-order as _movers.
+    /// All pose constraints, in the same execution order as _movers.
     std::vector<_FrameConstraint> _frameConstraints;
     /// Transform provider -> constraint mover paths that revise it, in
-    /// composed post-order. This is the pose-domain counterpart of a points
+    /// mover execution order. This is the pose-domain counterpart of a points
     /// revision chain and supplies read-phase validation/snapshots.
     std::map<SdfPath, std::vector<SdfPath>> _frameChains;
     /// Provider -> computeRestFrame tap, for the paired final matrix.
