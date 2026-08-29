@@ -36,7 +36,9 @@ def _bootstrap():
     """Make this script runnable with a bare python.exe (no env setup)."""
     here = pathlib.Path(__file__).resolve()
     repo_root = here.parents[2]            # .../usdRig/usdRig
-    usd_install = repo_root.parent / "usd-install"
+    usd_install = pathlib.Path(
+        os.environ.get("RIGEXEC_USD_INSTALL")
+        or (repo_root.parent / "usd-install"))
     build_dir = repo_root / "build"
 
     # pxr must resolve from the USD install, never a global copy. The layout
