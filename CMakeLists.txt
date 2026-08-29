@@ -97,6 +97,22 @@ target_link_libraries(rigExec PUBLIC
 )
 
 # ---------------------------------------------------------------------------
+# rigExecRigging: the authoring side of spec section 4 -- a fluent C++ API
+# that creates and wires controls, joints, solvers, constraints, weight
+# objects, and mover chains on a UsdStage. The engine itself authors
+# nothing; this library is what tools (and the Python bindings) use to build
+# rigs programmatically.
+# ---------------------------------------------------------------------------
+add_library(rigExecRigging SHARED
+    libs/rigExecRigging/rigBuilder.cpp)
+target_include_directories(rigExecRigging PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecRigging PUBLIC
+    rigExecMath
+    sdf tf gf vt usd)
+
+# ---------------------------------------------------------------------------
 # rigExecImaging: Hydra 2.0 scene-index publication (spec §10).
 # ---------------------------------------------------------------------------
 add_library(rigExecImaging SHARED
@@ -235,11 +251,77 @@ target_compile_definitions(probeImagingPipeline PRIVATE ${_rigexec_schema_resour
 endif()  # RIGEXEC_BUILD_TESTS
 
 # ---------------------------------------------------------------------------
+# Python bindings: the _rigexec pybind11 module and the rigexec package.
+#
+# Requires a CPython with development headers plus pybind11 in that
+# interpreter (pip install pybind11). The default is ON only when both are
+# actually available, so a plain configure works on machines without Python
+# dev dependencies; an explicit -DRIGEXEC_BUILD_PYTHON=ON still fails loudly
+# inside python/ with installation guidance.
+# ---------------------------------------------------------------------------
+if (CMAKE_CROSSCOMPILING)
+    set(_rigexec_python_default OFF)
+else()
+    # Probe quietly: the interpreter must be found with dev headers, and the
+    # pip-installed pybind11 package must report its CMake directory.
+    find_package(Python3 COMPONENTS Interpreter Development.Module QUIET)
+    if (Python3_FOUND AND Python3_Development.Module_FOUND)
+        execute_process(
+            COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+            OUTPUT_VARIABLE _rigexec_pybind11_probe
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _rigexec_pybind11_probe_result)
+        if (_rigexec_pybind11_probe_result EQUAL 0 AND EXISTS "${_rigexec_pybind11_probe}")
+            set(_rigexec_python_default ON)
+        else()
+            set(_rigexec_python_default OFF)
+        endif()
+    else()
+        set(_rigexec_python_default OFF)
+    endif()
+endif()
+option(RIGEXEC_BUILD_PYTHON "Build the RigExec Python bindings (_rigexec + rigexec)"
+       ${_rigexec_python_default})
+
+if (RIGEXEC_BUILD_PYTHON)
+    add_subdirectory(python)
+endif()
+
+# End-to-end Python binding test: authors a rig through the package and
+# evaluates it in-process. The interpreter was already located by the probe
+# above (the python/ subdirectory's find_package result does not propagate to
+# this scope).
+if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
+    add_test(NAME testRigExecPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_python.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+
+    # set_tests_properties takes exactly ONE value per property, so extra
+    # assignments go through APPEND; ctest then splits the resulting list on
+    # ';' into individual name=value entries (each entry below is itself
+    # semicolon-free). pxr resolution and the native DLL directories are
+    # handled by the test itself (_setup_environment); RIGEXEC_USD_INSTALL
+    # pins the configured USD install so it does not have to guess.
+    set_tests_properties(testRigExecPython PROPERTIES ENVIRONMENT
+        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
+    if (WIN32)
+        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
+            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+    else()
+        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
+            "LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
+        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
+            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecImaging
+install(TARGETS rigExecMath rigExec rigExecRigging rigExecImaging
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
@@ -247,7 +329,7 @@ install(TARGETS rigExecMath rigExec rigExecImaging
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
 # through, so dot-directories and local tooling state are excluded explicitly.
-foreach(_lib rigExecMath rigExec rigExecImaging)
+foreach(_lib rigExecMath rigExec rigExecRigging rigExecImaging)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING
