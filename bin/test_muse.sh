@@ -14,10 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-RIG="$(cd "$SCRIPT_DIR/.." && pwd)"
-USD="${USD:-/Users/burkard/work/usd-install}"
-VENV="${VENV:-/Users/burkard/work/usd-pr4156-venv}"
-PY="$VENV/bin/python"
+. "$SCRIPT_DIR/_env.sh"
 STAGE="${1:-$RIG/examples/ArmShotAnim.usda}"
 
 if [ ! -x "$PY" ]; then

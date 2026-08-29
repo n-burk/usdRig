@@ -808,11 +808,11 @@ already treats as the dangerous one (cf. `moverGraphParityMismatches`). Any
 against `EsfUsdSceneAdapter` over the same stage and assert identical journals
 and identical computed values.
 
-**Re-sequencing.** `PLAN.md` has the standalone Esf backend at Phase 0/4 with a
-"stop-gate if Esf unusable". This assessment closes that gate open: the
-interface is small, well-shaped, installed, and explicitly designed for non-USD
-backends. It does mean §11 moves ahead of the imaging phases in §5, because it
-changes what the session in §3.1 is built on.
+**Re-sequencing.** The earlier roadmap placed the standalone Esf backend at
+Phase 0/4 with a "stop-gate if Esf unusable". This assessment closes that gate
+open: the interface is small, well-shaped, installed, and explicitly designed
+for non-USD backends. It does mean §11 moves ahead of the imaging phases in §5,
+because it changes what the session in §3.1 is built on.
 
 ---
 

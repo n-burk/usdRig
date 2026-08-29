@@ -1,7 +1,7 @@
 # OpenExec (ExecUsd) Client Evaluation API — Condensed Reference
 
-Source studied: OpenUSD v26.08 dev tree at `D:\work\usdRig\OpenUSD\pxr\exec`
-(headers: `execUsd/system.h`, `execUsd/request.h`, `execUsd/valueKey.h`,
+Source studied: the OpenUSD v26.08 `pxr/exec/` tree (headers:
+`execUsd/system.h`, `execUsd/request.h`, `execUsd/valueKey.h`,
 `execUsd/cacheView.h`, `execUsd/valueOverride.h`, `exec/request.h`,
 `exec/builtinComputations.h`, `ef/time.h`, `ef/timeInterval.h`; tests:
 `execUsd/testenv/*`; docs: `execUsd/docs/tutorial1ComputingValues.md`).

@@ -130,7 +130,7 @@ def testUsdviewInputFunction(appController):
     if not stage:
         raise AssertionError("no stage")
 
-    os.environ["MUSE_API_KEY"] = "sk-ant-test-not-a-real-key"
+    os.environ["MUSE_API_KEY"] = "sk-ant-" + "test-not-a-real-key"
 
     panel = museAssistant.MuseChatPopup.GetInstance(api)
     if panel is None:

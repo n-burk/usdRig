@@ -3516,7 +3516,7 @@ TestExtentIsPureFunctionOfStageAndTime(const std::string &examplesDir)
     registry.Deactivate();
 }
 
-// One extent carries ONE purpose (codex P1): a descendant whose resolved
+// One extent carries ONE purpose: a descendant whose resolved
 // purpose differs from the boundable's is excluded from its bounds, and
 // the compiler says so rather than leaving it a silent hole.
 static void

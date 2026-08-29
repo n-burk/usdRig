@@ -834,8 +834,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             // Emit for joint-bearing prims (their bindings) AND for every
             // aggregate solver even without joints: its cardinality feeds
             // Phase A element checks, possibly indirectly through a Blend
-            // input, so a cardinality edit must begin a new epoch
-            // (codex round-4).
+            // input, so a cardinality edit must begin a new epoch.
             const bool isAggregate =
                 kAggregateSolverTypes.count(solver.GetTypeName()) > 0;
             if (joints.empty() && !isAggregate) {
@@ -869,7 +868,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                                 jeAttr ? jeAttr.GetNumTimeSamples() : 0);
             // Cardinality-determining inputs: an edit that changes how many
             // frames the solver produces must recompile so Phase A
-            // re-validates every element binding (codex round-3). Value-only
+            // re-validates every element binding. Value-only
             // edits that don't change frame count stay value-only.
             digest += "|card=";
             const TfToken stype = solver.GetTypeName();
@@ -888,12 +887,12 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                 if (wa) {
                     wa.Get(&w);
                 }
-                // Effective cardinality (weights wins; ignored count value
-                // does not churn the epoch, codex round-5 LOW) plus the
+                // Effective cardinality (weights wins, so an ignored count
+                // value does not churn the epoch) plus the
                 // time-sample presence of BOTH attrs so that ADDING a
                 // sample without changing the default still changes the
                 // digest, forcing the recompile that re-runs the pre-pass
-                // sample rejection (codex round-5 MAJOR).
+                // sample rejection.
                 const size_t effective =
                     !w.empty() ? w.size()
                                : static_cast<size_t>(std::max(cnt, 1));
@@ -914,7 +913,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                 // The driver curve lowers (Pass 1.5) to generated
                 // resolvedDriverPoints + a bind-time restDriverPoints
                 // capture, so rewiring it (or a layer-mute/variant switch
-                // that retargets it) is structural (codex round-6).
+                // that retargets it) is structural.
                 appendRelTargets(solver, "rigExec:driverCurve", false);
             } else if (stype == "RigExecBlendPointFrames") {
                 appendRelTargets(solver, "rigExec:inputA", false);
@@ -1008,11 +1007,10 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             // Static-input relationships captured at compile into generated
             // resolved*/rest* wiring (lattice cage, surface, curve bind/
             // driver): retargeting any of these must recompile so the
-            // captured bind-time values are refreshed (codex round-7,
-            // pre-existing general mover-digest gap). Hashed in AUTHORED
+            // captured bind-time values are refreshed. Hashed in AUTHORED
             // order (sorted=false) because the compiler consumes targets[0], so
             // a reorder that changes the selected input must change the
-            // digest (codex round-8). An absent rel appends a constant
+            // digest. An absent rel appends a constant
             // empty marker (harmless, invariant per mover type).
             appendRelTargets(prim, "rigExec:cage", false);
             appendRelTargets(prim, "rigExec:surface", false);
@@ -1027,8 +1025,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             appendRelTargets(prim, "rigExec:driverCurve", false);
             // Authored order, not sorted: the binding takes targets[0], so
             // reordering a multi-target relationship changes the wiring and
-            // must therefore change the digest (the ordering class audited in
-            // codex rounds 8-9).
+            // must therefore change the digest.
             appendRelTargets(prim, "rigExec:curvenet", false);
             for (const SdfPath &w :
                  appendRelTargets(prim, "rigExec:weightObject", true)) {
@@ -1745,7 +1742,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // operation and read phase. Sampling them per-frame would let the
             // op or binding change under a compiled epoch without changing
             // the binding-epoch digest, so reject samples here rather than
-            // resolving them at evaluation time (codex round-3). Same rule
+            // resolving them at evaluation time. The same rule
             // the aggregate cardinality attributes already follow.
             std::vector<const char *> structuralTokens = {
                 "rigExec:mode", "rigExec:operation",
@@ -2047,7 +2044,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
-    // View-free solver->joint binding validation (codex round-2). This
+    // View-free solver->joint binding validation. This
     // runs in Phase A, BEFORE any epoch teardown, so an invalid binding
     // rejects the compile while the previous epoch stays publishable (the
     // BLOCKER fix: compile Pass 0 must never be the first place a bad
@@ -2073,7 +2070,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // only joint-bearing ones: a non-joint Twist/Ribbon feeding a
             // joint-bearing Blend still determines that Blend's element
             // count, so a time-sampled cardinality would silently shift a
-            // blend-bound joint's frame (codex round-4). `uniform` is only
+            // blend-bound joint's frame. `uniform` is only
             // a hint; reject samples explicitly.
             for (const UsdPrim &solver : UsdPrimRange(solverRoot)) {
                 const TfToken t = solver.GetTypeName();
@@ -2280,7 +2277,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 
     // Solver->solver acyclicity. Unique joint ownership does NOT imply this:
     // two solvers can each uniquely pose their own joints while reading each
-    // other's, which is a genuine cycle (codex round-3). Evaluate resolves the
+    // other's, which is a genuine cycle. Evaluate resolves the
     // solver->joint overrides by iterating to a fixed point, and a cycle has
     // no fixed point to reach -- so reject it here, where the author gets a
     // path, instead of discovering it as a non-converging generation.
@@ -5825,8 +5822,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         // The point frame is the status bearer; the matrix result carries
         // no status and _ComputeJointMatrix returns identity for a
         // degenerate/invalid frame. Publishing that identity would let a
-        // matrix-only consumer deform with a plausible-but-wrong transform
-        // (codex round-2). Omit the matrix and diagnose so absence — not a
+        // matrix-only consumer deform with a plausible-but-wrong transform.
+        // Omit the matrix and diagnose so absence — not a
         // false identity — signals the failure; consumers already handle a
         // missing jointMatricesFinal entry. The degenerate frame is still
         // published so imaging can omit its guide.

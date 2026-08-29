@@ -36,7 +36,7 @@ protocol.
 |---|---|---|---|
 | `LLM_…` (Meta Muse) | `https://api.meta.ai` | `Authorization: Bearer` | `muse-spark-1.2-contributor` |
 | `sk-ant-…` (Anthropic) | `https://api.anthropic.com` | `x-api-key` | `claude-opus-5` |
-| *(none)* — **Ollama** | your server, e.g. `http://192.168.68.75:11434` | none | `qwen3.5:9b` |
+| *(none)* — **Ollama** | `http://127.0.0.1:11434` by default | none | `qwen3.5:9b` |
 | *(none)* — **Apple FM** | `http://127.0.0.1:1976` | none | `system` (on-device) |
 
 ### Apple Foundation Models (local, on-device)
@@ -80,7 +80,7 @@ guess that sends an Anthropic key somewhere it should never go. Pick it in
 
 ```bash
 export MUSE_PROVIDER=ollama
-export MUSE_OLLAMA_URL=http://192.168.68.75:11434   # optional; this is the default
+export MUSE_OLLAMA_URL=http://127.0.0.1:11434   # optional; this is the default
 export MUSE_MODEL=qwen3.5:9b                        # optional
 ```
 
@@ -141,7 +141,7 @@ its transcript when no key is set. Optional overrides:
 | `MUSE_MAX_TOKENS` | `32000` | Output cap per turn |
 | `MUSE_BASE_URL` | — | An Anthropic-compatible endpoint other than `api.anthropic.com` (a gateway, proxy, or local relay). Ignored by the explicit Apple provider |
 | `MUSE_PROVIDER` | inferred from the key | `anthropic`, `meta`, `ollama`, or `apple`. Local providers are selected explicitly |
-| `MUSE_OLLAMA_URL` | `http://192.168.68.75:11434` | Ollama server address, used when `MUSE_PROVIDER=ollama` |
+| `MUSE_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server address, used when `MUSE_PROVIDER=ollama` |
 | `MUSE_APPLE_URL` | `http://127.0.0.1:1976` | `fm serve` address, used when `MUSE_PROVIDER=apple` |
 | `MUSE_APPLE_TIMEOUT` | `120` | Seconds allowed for one local Apple completion |
 | `MUSE_APPLE_MAX_ITERATIONS` | `12` | Maximum Apple action rounds per send |
@@ -219,7 +219,7 @@ back end and shows where requests will be sent:
 ```
 Back end  [ Anthropic / Meta Muse (from the key) ▾ ]
 API key   ••••••••••••••••••••
-          In use: MUSE_API_KEY, 48 chars, ends pCVI
+          In use: MUSE_API_KEY, 48 chars, ends T3ST
 ☐ Remember on this machine (~/.config/muse/credentials.json, readable only by you)
 
 Endpoint  https://api.meta.ai        (Meta Muse key)
@@ -237,11 +237,11 @@ can do:
 
 ```
 Back end  [ Ollama (local server) ▾ ]
-Ollama server  http://192.168.68.75:11434
+Ollama server  http://127.0.0.1:11434
 Model     [ qwen3.5:9b   [tools, vision] ▾ ]  [Refresh]
           10 model(s) on this server, 6 can call tools.
 
-Endpoint  http://192.168.68.75:11434/v1/messages
+Endpoint  http://127.0.0.1:11434/v1/messages
 Header    none — Ollama authenticates nothing
 Model     qwen3.5:9b
 ```

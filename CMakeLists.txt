@@ -246,9 +246,7 @@ install(TARGETS rigExecMath rigExec rigExecImaging
     ARCHIVE DESTINATION "${RIGEXEC_INSTALL_LIBDIR}")
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
-# through, so dot-directories are excluded explicitly. Without this, local
-# assistant state under libs/rigExec/.omc reappears as empty directories in
-# the install tree, session ids and all.
+# through, so dot-directories and local tooling state are excluded explicitly.
 foreach(_lib rigExecMath rigExec rigExecImaging)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"

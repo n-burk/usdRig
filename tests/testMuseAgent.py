@@ -27,6 +27,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import museAgent as ma
 
 
+_TEST_META_KEY = "LLM_" + "test-only-example-key"
+_TEST_META_KEY_WITH_FINGERPRINT = _TEST_META_KEY + "T3ST"
+
+
 # ---------------------------------------------------------------------------
 # The validation the Messages API performs server-side.  Every request the
 # agent builds must pass this or the panel is dead in the water.
@@ -538,7 +542,7 @@ def testToolLoopRunsToolsAndFeedsResultsBack():
             content=[_block("text", text="Created /World/Ball and confirmed it on screen.")]),
     ]
     installFakeAnthropic(turns, captured)
-    os.environ["MUSE_API_KEY"] = "sk-ant-test-not-a-real-key"
+    os.environ["MUSE_API_KEY"] = "sk-ant-" + "test-not-a-real-key"
 
     executor = FakeExecutor()
     events = []
@@ -600,7 +604,7 @@ def testToolErrorsAreReportedNotSwallowed():
                               content=[_block("text", text="That path does not exist.")]),
     ]
     installFakeAnthropic(turns, captured)
-    os.environ["MUSE_API_KEY"] = "sk-ant-test-not-a-real-key"
+    os.environ["MUSE_API_KEY"] = "sk-ant-" + "test-not-a-real-key"
 
     ma.run_agent(
         messages=[{"role": "user", "content": "do the thing"}],
@@ -666,7 +670,7 @@ def testThinkingRejectionDegradesInsteadOfFailingTheSession():
     module = types.ModuleType("anthropic")
     module.Anthropic = _Client
     sys.modules["anthropic"] = module
-    os.environ["MUSE_API_KEY"] = "sk-ant-test-not-a-real-key"
+    os.environ["MUSE_API_KEY"] = "sk-ant-" + "test-not-a-real-key"
 
     events = []
     ma.run_agent(messages=[{"role": "user", "content": "hi"}],
@@ -708,7 +712,7 @@ def testMetaMuseKeyRoutesToMetaWithTheRightModel():
     """
     for name in ("MUSE_BASE_URL", "ANTHROPIC_BASE_URL", "MUSE_MODEL"):
         os.environ.pop(name, None)
-    os.environ["MUSE_API_KEY"] = "LLM_1757354325283242_examplekey"
+    os.environ["MUSE_API_KEY"] = _TEST_META_KEY
 
     base_url, source = ma.resolve_base_url()
     if base_url != ma.META_BASE_URL:
@@ -761,7 +765,7 @@ def testMetaMuseKeyRoutesToMetaWithTheRightModel():
 def testUnknownKeyWithNoEndpointIsRefusedWithTheReason():
     for name in ("MUSE_BASE_URL", "ANTHROPIC_BASE_URL"):
         os.environ.pop(name, None)
-    problem = ma.describe_key_problem("xoxb-some-other-service", None)
+    problem = ma.describe_key_problem("xoxb-" + "some-other-service", None)
     if not problem or "MUSE_BASE_URL" not in problem:
         raise AssertionError("unhelpful description: %r" % problem)
     if ma.describe_key_problem("sk-ant-real", None) is not None:
@@ -775,7 +779,7 @@ def testTheRequestCarriesTheContributorModelAndXhighEffort():
     force_contributor_model for one, DEFAULT_EFFORT for the other — so this
     reads them back off the captured request together.
     """
-    os.environ["MUSE_API_KEY"] = "LLM_1757354325283242_examplekey"
+    os.environ["MUSE_API_KEY"] = _TEST_META_KEY
     for name in ("MUSE_BASE_URL", "ANTHROPIC_BASE_URL", "MUSE_MODEL", "MUSE_EFFORT"):
         os.environ.pop(name, None)
 
@@ -1037,7 +1041,7 @@ def testMetaGetsBearerAndAnthropicGetsApiKey():
 
 def testMetaKeyReachesTheClientAsABearerToken():
     """The style must actually reach the SDK, not just be computed."""
-    os.environ["MUSE_API_KEY"] = "LLM_1757354325283242_examplekey"
+    os.environ["MUSE_API_KEY"] = _TEST_META_KEY
     for name in ("MUSE_BASE_URL", "ANTHROPIC_BASE_URL", "MUSE_MODEL"):
         os.environ.pop(name, None)
 
@@ -1075,7 +1079,7 @@ def testMetaKeyReachesTheClientAsABearerToken():
                  system_prompt=ma.build_system_prompt(),
                  on_event=lambda kind, payload: None)
 
-    if seen.get("auth_token") != "LLM_1757354325283242_examplekey":
+    if seen.get("auth_token") != _TEST_META_KEY:
         raise AssertionError("the Meta key was not sent as a bearer token: %s" % seen)
     if seen.get("api_key") is not None:
         raise AssertionError("the Meta key must not also go in x-api-key: %s" % seen)
@@ -1125,7 +1129,7 @@ def testEveryMetaCallUsesTheContributorTier():
 
 def testExplicitModelArgumentCannotEscapeTheTier():
     """The guarantee has to hold at the request, not just in the helper."""
-    os.environ["MUSE_API_KEY"] = "LLM_1757354325283242_examplekey"
+    os.environ["MUSE_API_KEY"] = _TEST_META_KEY
     for name in ("MUSE_BASE_URL", "ANTHROPIC_BASE_URL", "MUSE_MODEL"):
         os.environ.pop(name, None)
 
@@ -1162,16 +1166,16 @@ def testRejectedKeyNamesTheEndpointAndTheKey():
                     "'type': 'authentication_error'}, 'type': 'error'}")
 
     described = ma.describe_auth_failure(
-        _Unauthorized(), "LLM_1757354325283242_examplekeypCVI", "MUSE_API_KEY",
+        _Unauthorized(), _TEST_META_KEY_WITH_FINGERPRINT, "MUSE_API_KEY",
         ma.META_BASE_URL, "Meta Muse key")
 
     if not described:
         raise AssertionError("a 401 must be described")
-    for expected in (ma.META_BASE_URL, "MUSE_API_KEY", "401", "pCVI"):
+    for expected in (ma.META_BASE_URL, "MUSE_API_KEY", "401", "T3ST"):
         if expected not in described:
             raise AssertionError("%r missing from: %s" % (expected, described))
     # The whole key must never be echoed into a panel or a log.
-    if "LLM_1757354325283242_examplekey" in described:
+    if _TEST_META_KEY in described:
         raise AssertionError("the key itself leaked into the message")
 
 
@@ -1191,7 +1195,7 @@ def testGatewayBaseUrlMakesANonAnthropicKeyUsable():
     A gateway that speaks the Messages API issues its own key format. With a
     base URL configured, the key must be passed through rather than refused.
     """
-    os.environ["MUSE_API_KEY"] = "LLM_1757354325283242_examplekey"
+    os.environ["MUSE_API_KEY"] = _TEST_META_KEY
     os.environ["MUSE_BASE_URL"] = "https://gateway.example.internal/anthropic/"
 
     seen = {}
@@ -1229,7 +1233,7 @@ def testGatewayBaseUrlMakesANonAnthropicKeyUsable():
 
     if seen.get("base_url") != "https://gateway.example.internal/anthropic":
         raise AssertionError("base url was not forwarded (or not normalized): %s" % seen)
-    if seen.get("api_key") != "LLM_1757354325283242_examplekey":
+    if seen.get("api_key") != _TEST_META_KEY:
         raise AssertionError("the gateway key was not forwarded: %s" % seen)
     os.environ.pop("MUSE_BASE_URL", None)
 

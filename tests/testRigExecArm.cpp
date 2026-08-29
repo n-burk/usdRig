@@ -294,7 +294,7 @@ TestIkAndBlend(const std::string &examplesDir)
     // evaluator, so a RAW source-stage joint tap at this animated IK frame
     // returns the fallback pose, NOT the solved one.
     // Downstream consumers must read the compiled rig; this asserts the
-    // documented break so it cannot silently regress (codex round-2 #8).
+    // documented break so it cannot silently regress.
     RigExecTapSet rawTaps(stage);
     const RigExecTapId rawWristTap = rawTaps.Add(RigExecValueAddress::Prim(
         SdfPath("/ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist"),
@@ -307,7 +307,7 @@ TestIkAndBlend(const std::string &examplesDir)
 
 // View-free solver->joint binding validation is enforced in Phase A,
 // BEFORE any epoch teardown, so an invalid binding rejects the compile
-// without destroying a working epoch (codex round-2 findings 1, 4).
+// without destroying a working epoch.
 static void
 TestViewFreeValidation(const std::string &examplesDir)
 {
@@ -364,7 +364,7 @@ TestViewFreeValidation(const std::string &examplesDir)
 
     // A non-solver prim under /Solvers carrying rigExec:joints is rejected:
     // it cannot publish computePointFrameArray, so it must never become a
-    // joint's frame source (codex round-2 blocker).
+    // joint's frame source.
     {
         UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmRig.usda");
         CHECK(stage);
@@ -382,7 +382,7 @@ TestViewFreeValidation(const std::string &examplesDir)
 
     // A cardinality-shrinking edit (fewer FK controls than bound elements)
     // must change the structure digest so Evaluate() recompiles and Phase A
-    // rejects the now-out-of-range binding atomically (codex round-3): the
+    // rejects the now-out-of-range binding atomically: the
     // digest, not just rigExec:joints, must cover cardinality inputs.
     {
         UsdStageRefPtr stage =
@@ -415,7 +415,7 @@ TestViewFreeValidation(const std::string &examplesDir)
     // A time-sampled cardinality is rejected even on a NON-joint-bearing
     // aggregate solver: 05's SpineRibbon drives geometry (no rigExec:joints)
     // but its sampleCount can still feed a Blend, so it must be static
-    // (codex round-4 — enforcement must cover indirect aggregate solvers).
+    // even when it reaches a joint only through another aggregate solver.
     {
         UsdStageRefPtr stage =
             UsdStage::Open(examplesDir + "/05_TwistRibbonSpine.usda");
@@ -435,8 +435,7 @@ TestViewFreeValidation(const std::string &examplesDir)
                 // Add a time sample AFTER compile, EQUAL to the default so
                 // the default value is unchanged. The digest must still
                 // change (it records sample presence) so Evaluate()
-                // recompiles and the pre-pass rejects it -- this is the
-                // post-compilation bypass codex round-5 flagged.
+                // recompiles and the pre-pass rejects it.
                 UsdAttribute sc =
                     ribbon.GetAttribute(TfToken("rigExec:sampleCount"));
                 int deflt = 5;
@@ -1209,7 +1208,7 @@ TestSolverCycleRejected(const std::string &examplesDir)
 // has IKFKBlend.inputA = ArmFK, so pointing ArmFK's controls back at IKFKBlend
 // closes it with no joint in the path. Deriving only the joint-mediated edges
 // would miss this entirely, which is why the direct edge rule exists -- and
-// why it needs its own regression (codex round-4).
+// why it needs its own regression.
 static void
 TestPureSolverToSolverCycleRejected(const std::string &examplesDir)
 {
@@ -1241,7 +1240,7 @@ TestPureSolverToSolverCycleRejected(const std::string &examplesDir)
     // come from the indirect joint-mediated rule, so a rejection can ONLY come
     // from the direct solver->solver rule. The cycle error itself is generic
     // and cannot distinguish the two, which is what makes this check the thing
-    // that gives the test its meaning (codex round-5).
+    // that gives the test its meaning.
     //
     // ArmFK posing no joints means nothing reads a joint of ArmFK's, and
     // IKFKBlend not being a joint means ArmFK's new controls target cannot be

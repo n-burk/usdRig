@@ -1,7 +1,8 @@
 # OpenExec Plugin-Computation Registration — API Notes (OpenUSD v26.08)
 
-Source studied: `D:\work\usdRig\OpenUSD\pxr\exec\` (exec, execUsd, execGeom, execIr, vdf) and
-`extras/exec/examples/definingComputations/`. All signatures below are verbatim from source.
+Source studied: the OpenUSD v26.08 `pxr/exec/` tree (exec, execUsd, execGeom,
+execIr, vdf) and `extras/exec/examples/definingComputations/`. All signatures
+below are verbatim from source.
 
 ---
 

@@ -5,9 +5,9 @@ existing Hydra 2.0 results scene index, exactly parallel to the joint/solver
 sphere+cone guides (spec §10.3 extension), with authorable shape, draw mode,
 and per-axis scale.
 
-Build target: OpenUSD PR #4156 (usdNoodles branch) checkout at
-`/Users/burkard/work/usd-pr4156`, installed to `/Users/burkard/work/usd-install`
-(the `CMakeLists.txt` default `../usd-install`).
+Build target: OpenUSD PR #4156 (usdNoodles branch), installed to the
+`CMakeLists.txt` default `../usd-install` (or the path supplied through
+`USD_INSTALL_DIR`).
 
 ## Requirements
 

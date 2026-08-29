@@ -2,17 +2,16 @@
 
 Pixar's curve-based articulation, brought into RigExec. Added 2026-08-07.
 
-Source papers, downloaded to `docs/papers/`:
+Primary sources:
 
-| File | Paper |
+| Paper | Relevance |
 |---|---|
-| `2022-ProfileCurves-deGoes-Sheffler-Fleischer.pdf` | de Goes, Sheffler, Fleischer. *Character Articulation through Profile Curves*. ACM TOG 41(4), Article 139, SIGGRAPH 2022. **The** curvenet paper. |
-| `2023-Elemental-CurvenetAnimationControls.pdf` | Nguyen, Talbot, Sheffler, Hessler, Fleischer, de Goes. *Shaping the Elements: Curvenet Animation Controls in Pixar's Elemental*. SIGGRAPH 2023 Talks. |
-| `2024-InsideOut2-RigChallenges.pdf` | Hoffman, Nieves, Speirs, Zhang. *Pixar's Inside Out 2: Character Rig Challenges and Techniques*. SIGGRAPH 2024 Talks. §2 is curvenet usage. |
-| `2026-FaceRigging-CurvenetParametrization.pdf` | Talbot, Sheffler, de Goes. *Face Rigging through Curvenet Parametrization*. SIGGRAPH 2026 Talks. |
+| [*Character Articulation through Profile Curves*](https://doi.org/10.1145/3528223.3530060) (de Goes, Sheffler, Fleischer; SIGGRAPH 2022) | The foundational curvenet and Profile Mover paper |
+| [*Shaping the Elements: Curvenet Animation Controls in Pixar's Elemental*](https://doi.org/10.1145/3587421.3595415) (Nguyen et al.; SIGGRAPH 2023 Talks) | Animation-facing controls built on curvenets |
+| [*Pixar's Inside Out 2: Character Rig Challenges and Techniques*](https://doi.org/10.1145/3641233.3664342) (Hoffman et al.; SIGGRAPH 2024 Talks) | Production curvenet usage in section 2 |
+| [*Face Rigging through Curvenet Parametrization*](https://doi.org/10.1145/3799818.3812074) (Talbot, Sheffler, de Goes; SIGGRAPH 2026 Talks) | Facial-rig parameterization built on curvenets |
 
 Section numbers below in the form §3, §4.1 refer to the 2022 paper.
-`.txt` sidecars next to each PDF hold the extracted text.
 
 ## What the papers actually claim
 

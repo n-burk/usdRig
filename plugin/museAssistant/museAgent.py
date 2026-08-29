@@ -65,7 +65,7 @@ PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_META, PROVIDER_OLLAMA,
 
 # A starting point for the settings dialog, not a fallback the resolver
 # reaches for: nothing routes to Ollama unless the provider is set to it.
-OLLAMA_DEFAULT_BASE_URL = "http://192.168.68.75:11434"
+OLLAMA_DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 
 # Vision + tools + thinking. That combination is not incidental -- Muse sends
 # viewport screenshots as image blocks and drives the stage entirely through

@@ -7,8 +7,13 @@
 # produce them.
 # ---------------------------------------------------------------------------
 
+# Local research-paper cache. Public docs link to the publishers instead of
+# redistributing complete third-party papers and extracted full text.
+docs/papers/
+
 # CMake/Ninja build output
 build/
+build-*/
 *.obj
 *.pdb
 *.ilk
@@ -39,6 +44,14 @@ build/
 # ---------------------------------------------------------------------------
 .env
 .env.*
+.envrc
+credentials.json
+secrets.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
 
 # Python
 __pycache__/

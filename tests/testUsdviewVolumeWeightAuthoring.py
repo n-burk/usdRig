@@ -10,8 +10,8 @@
 # as an opaque traceback out of usdview.
 #
 # Run with:
-#   set PYTHONPATH=D:\work\usdRig\usd-install\lib\site-packages
-#   set PATH=D:\work\usdRig\usd-install\bin;D:\work\usdRig\usd-install\lib;%PATH%
+#   set PYTHONPATH=C:\path\to\usd-install\lib\site-packages
+#   set PATH=C:\path\to\usd-install\bin;C:\path\to\usd-install\lib;%PATH%
 #   python testUsdviewVolumeWeightAuthoring.py
 #
 import os

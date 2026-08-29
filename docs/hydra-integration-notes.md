@@ -1,8 +1,8 @@
 # How usdExecImaging integrates OpenExec into Hydra (OpenUSD v26.08)
 
 Reference notes for implementing **rigExecImaging**, based on a source study of
-`D:\work\usdRig\OpenUSD` (v26.08 dev). All paths below are relative to the
-OpenUSD source root unless absolute. Line numbers refer to that tree.
+OpenUSD v26.08. All source paths below are relative to the OpenUSD root, and
+line numbers refer to that release.
 
 ---
 

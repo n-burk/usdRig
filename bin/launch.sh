@@ -5,21 +5,12 @@
 # Requires: usd-install at $USD, rig build at $RIG/build, venv at $VENV
 set -euo pipefail
 
-# Resolve repo root (bin/ is one level down)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-RIG="$(cd "$SCRIPT_DIR/.." && pwd)"
-# Allow overrides via env
-USD="${USD:-/Users/burkard/work/usd-install}"
-VENV="${VENV:-/Users/burkard/work/usd-pr4156-venv}"
-PY="$VENV/bin/python"
-USDVIEW="$USD/bin/usdview"
+. "$SCRIPT_DIR/_env.sh"
 
 if [ ! -x "$PY" ]; then
   echo "ERROR: venv python not found at $PY (set VENV=...)" >&2
   exit 1
-fi
-if [ ! -x "$USDVIEW" ]; then
-  USDVIEW="/Users/burkard/work/Usd/bin/usdview"
 fi
 if [ ! -f "$USDVIEW" ]; then
   echo "ERROR: usdview not found at $USD/bin/usdview" >&2
@@ -133,7 +124,7 @@ if [ "$_MUSE_PROVIDER" = "apple" ]; then
   fi
 elif [ "$_MUSE_PROVIDER" = "ollama" ]; then
   echo "Muse provider: Ollama"
-  echo "Muse endpoint: ${MUSE_OLLAMA_URL:-http://192.168.68.75:11434}/v1/messages"
+  echo "Muse endpoint: ${MUSE_OLLAMA_URL:-http://127.0.0.1:11434}/v1/messages"
   echo "Muse model: ${MUSE_MODEL:-qwen3.5:9b}"
   echo "Muse key: not needed"
 else

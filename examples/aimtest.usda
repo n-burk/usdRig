@@ -1,7 +1,6 @@
 #usda 1.0
 (
-    doc = """Generated from Composed Stage of root layer /var/folders/n1/3jdrkcb53gx0bzrffj2l0g2w0000gn/T/rigexec-blank.usda
-"""
+    doc = "RigExec aim-constraint diagnostic stage."
     endTimeCode = 100
     startTimeCode = 1
 )
@@ -81,4 +80,3 @@ def Xform "World"
         }
     }
 }
-
