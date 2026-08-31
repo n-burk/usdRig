@@ -144,7 +144,8 @@ def _block(kind, **kwargs):
     return block
 
 
-def installFakeAnthropic(scripted_turns, captured_requests):
+def installFakeAnthropic(scripted_turns, captured_requests,
+                         captured_clients=None):
     """
     Replace the anthropic SDK with one that replays *scripted_turns* and
     records every request, so the loop can be exercised without a network or
@@ -172,6 +173,8 @@ def installFakeAnthropic(scripted_turns, captured_requests):
 
     class _Client(object):
         def __init__(self, api_key=None, **kwargs):
+            if captured_clients is not None:
+                captured_clients.append(dict(kwargs, api_key=api_key))
             self.messages = _Messages()
 
     module = types.ModuleType("anthropic")
@@ -236,6 +239,56 @@ class FakeFmServer(object):
                         "message": {"role": "assistant", "content": content},
                     }],
                 })
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.url = "http://127.0.0.1:%d" % self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever)
+        self._thread.daemon = True
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=2.0)
+
+
+class FakeLmStudioServer(object):
+    """Small HTTP double for LM Studio's native model-list endpoint."""
+
+    def __init__(self):
+        self.get_requests = []
+        owner = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, _format, *args):
+                pass
+
+            def _send(self, status, payload):
+                encoded = json.dumps(payload).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_GET(self):
+                owner.get_requests.append(self.path)
+                if self.path != "/api/v1/models":
+                    self._send(404, {"error": "not found"})
+                    return
+                self._send(200, {"models": [{
+                    "key": "openai/gpt-oss-20b",
+                    "display_name": "GPT OSS 20B",
+                    "type": "llm",
+                    "capabilities": {
+                        "trained_for_tool_use": True,
+                        "vision": True,
+                    },
+                    "loaded_instances": [{"id": "openai/gpt-oss-20b"}],
+                }]})
 
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.url = "http://127.0.0.1:%d" % self._server.server_address[1]
@@ -910,6 +963,131 @@ def testOllamaProviderRoutesLocallyWithNoKey():
         os.environ.pop(name, None)
 
 
+def testLmStudioProviderDiscoversModelsAndRunsToolsWithoutAKey():
+    """LM Studio on hivemind is explicit, keyless, and uses Muse's tool loop."""
+    for name in ("MUSE_PROVIDER", "MUSE_BASE_URL", "ANTHROPIC_BASE_URL",
+                 "MUSE_API_KEY", "ANTHROPIC_API_KEY", "MUSE_MODEL",
+                 "MUSE_LMSTUDIO_URL"):
+        os.environ.pop(name, None)
+
+    if ma.PROVIDER_LMSTUDIO != "lmstudio":
+        raise AssertionError("unexpected LM Studio provider id")
+    if ma.LMSTUDIO_DEFAULT_BASE_URL != "http://hivemind.local:1234":
+        raise AssertionError("LM Studio did not default to hivemind: %r"
+                             % ma.LMSTUDIO_DEFAULT_BASE_URL)
+
+    os.environ["MUSE_PROVIDER"] = "lmstudio"
+    if ma.resolve_provider() != ma.PROVIDER_LMSTUDIO:
+        raise AssertionError("MUSE_PROVIDER=lmstudio was not honoured")
+    base, source = ma.resolve_base_url()
+    if base != ma.LMSTUDIO_DEFAULT_BASE_URL \
+            or source != "LM Studio on Hivemind":
+        raise AssertionError("LM Studio did not resolve its default: %r"
+                             % ((base, source),))
+    if ma.describe_key_problem(None, base, ma.PROVIDER_LMSTUDIO) is not None:
+        raise AssertionError("LM Studio demanded an API key")
+
+    captured = []
+    clients = []
+    turns = [
+        types.SimpleNamespace(
+            stop_reason="tool_use",
+            content=[_block(
+                "tool_use", id="lmstudio-call", name="run_python",
+                input={"code": "print('lmstudio edit')"})]),
+        types.SimpleNamespace(
+            stop_reason="end_turn",
+            content=[_block("text", text="Edited through LM Studio.")]),
+    ]
+    installFakeAnthropic(turns, captured, clients)
+
+    with FakeLmStudioServer() as server:
+        os.environ["MUSE_LMSTUDIO_URL"] = server.url + "/"
+        # A hosted key may coexist in the process. The local provider must not
+        # leak it to LM Studio; the SDK gets only its inert placeholder.
+        hosted_key = "hosted-credential-must-not-leak"
+        os.environ["MUSE_API_KEY"] = hosted_key
+
+        routed_base, routed_source = ma.resolve_base_url()
+        if routed_base != server.url \
+                or routed_source != "LM Studio on Hivemind":
+            raise AssertionError("MUSE_LMSTUDIO_URL was not routed cleanly: %r"
+                                 % ((routed_base, routed_source),))
+
+        models = ma.fetch_lmstudio_models(server.url)
+        if server.get_requests != ["/api/v1/models"]:
+            raise AssertionError("wrong LM Studio discovery route: %r"
+                                 % server.get_requests)
+        entries = [entry for entry in models
+                   if entry.get("name") == "openai/gpt-oss-20b"]
+        if len(entries) != 1:
+            raise AssertionError("LM Studio model key was not discovered: %r"
+                                 % models)
+        entry = entries[0]
+        if not entry.get("tools") or not entry.get("native_tools") \
+                or not entry.get("vision") or not entry.get("loaded"):
+            raise AssertionError("LM Studio capabilities were lost: %r" % entry)
+        if ma.resolve_model(server.url, ma.PROVIDER_LMSTUDIO) != \
+                "openai/gpt-oss-20b":
+            raise AssertionError("Muse did not select the available LM Studio model")
+
+        executor = FakeExecutor()
+        events = []
+        result = ma.run_agent(
+            messages=[{"role": "user", "content": "edit through hivemind"}],
+            executor=executor,
+            system_prompt=ma.build_system_prompt(stage_context="Stage: /tmp/x.usda"),
+            on_event=lambda kind, payload: events.append((kind, payload)),
+        )
+
+    if len(clients) != 1:
+        raise AssertionError("expected one LM Studio client: %r" % clients)
+    if clients[0].get("base_url") != server.url:
+        raise AssertionError("LM Studio client reached the wrong host: %r"
+                             % clients[0])
+    if clients[0].get("api_key") != ma.LMSTUDIO_PLACEHOLDER_KEY:
+        raise AssertionError("LM Studio did not get its inert placeholder: %r"
+                             % clients[0])
+    if hosted_key in json.dumps(clients):
+        raise AssertionError("the hosted API key leaked to LM Studio")
+    if executor.python_calls != ["print('lmstudio edit')"]:
+        raise AssertionError("LM Studio did not execute run_python: %r"
+                             % executor.python_calls)
+    if len(captured) != 2:
+        raise AssertionError("expected a tool turn and final turn, got %d"
+                             % len(captured))
+    if any(request.get("model") != "openai/gpt-oss-20b"
+           for request in captured):
+        raise AssertionError("wrong LM Studio model on the wire: %r"
+                             % [request.get("model") for request in captured])
+    tool_names = [tool.get("name") for tool in captured[0].get("tools", [])]
+    if "run_python" not in tool_names:
+        raise AssertionError("Muse tools were not sent to LM Studio: %r"
+                             % tool_names)
+    tool_results = [
+        block
+        for message in captured[1].get("messages", [])
+        if message.get("role") == "user"
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    if len(tool_results) != 1 \
+            or tool_results[0].get("tool_use_id") != "lmstudio-call" \
+            or "Created /World/Ball" not in json.dumps(tool_results[0]):
+        raise AssertionError("run_python result did not return to LM Studio: %r"
+                             % tool_results)
+    if not any(kind == "text" and payload.get("text") ==
+               "Edited through LM Studio." for kind, payload in events):
+        raise AssertionError("LM Studio final response was not emitted: %r"
+                             % events)
+    if result[-1].get("role") != "assistant":
+        raise AssertionError("LM Studio conversation did not end with assistant")
+
+    for name in ("MUSE_PROVIDER", "MUSE_LMSTUDIO_URL", "MUSE_MODEL",
+                 "MUSE_API_KEY"):
+        os.environ.pop(name, None)
+
+
 def testOllamaModelWithoutToolsIsRefused():
     """A completion-only model must be refused, not quietly accepted.
 
@@ -984,8 +1162,8 @@ def testBackEndSettingsRoundTripBesideTheKey(tmpdir):
     if mu.load_saved_settings(path).get("MUSE_PROVIDER") != "ollama":
         raise AssertionError("forgetting the key also forgot the back end")
 
-    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL",
-                 "MUSE_MODEL"):
+    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_LMSTUDIO_URL",
+                 "MUSE_APPLE_URL", "MUSE_MODEL"):
         os.environ.pop(name, None)
     applied = mu.apply_saved_settings(path)
     if applied.get("MUSE_PROVIDER") != "ollama":
@@ -1009,14 +1187,28 @@ def testBackEndSettingsRoundTripBesideTheKey(tmpdir):
                  "MUSE_APPLE_URL": "http://127.0.0.1:1976"}:
         raise AssertionError("Apple settings did not round-trip cleanly: %r" % saved)
 
+    # LM Studio owns a separate LAN endpoint and model pin; switching to it
+    # clears stale local-provider addresses without touching the hosted key.
+    mu.save_settings({"MUSE_PROVIDER": "lmstudio",
+                      "MUSE_LMSTUDIO_URL": "http://hivemind.local:1234",
+                      "MUSE_OLLAMA_URL": "", "MUSE_APPLE_URL": "",
+                      "MUSE_MODEL": "openai/gpt-oss-20b"}, path)
+    saved = mu.load_saved_settings(path)
+    if saved != {"MUSE_PROVIDER": "lmstudio",
+                 "MUSE_LMSTUDIO_URL": "http://hivemind.local:1234",
+                 "MUSE_MODEL": "openai/gpt-oss-20b"}:
+        raise AssertionError(
+            "LM Studio settings did not round-trip cleanly: %r" % saved)
+
     # Clearing removes the pin rather than storing an empty string.
     mu.save_settings({"MUSE_PROVIDER": "", "MUSE_OLLAMA_URL": "",
-                      "MUSE_APPLE_URL": "", "MUSE_MODEL": ""}, path)
+                      "MUSE_LMSTUDIO_URL": "", "MUSE_APPLE_URL": "",
+                      "MUSE_MODEL": ""}, path)
     if mu.load_saved_settings(path):
         raise AssertionError("cleared settings were still saved")
 
-    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL",
-                 "MUSE_MODEL"):
+    for name in ("MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_LMSTUDIO_URL",
+                 "MUSE_APPLE_URL", "MUSE_MODEL"):
         os.environ.pop(name, None)
 
 
@@ -1371,7 +1563,8 @@ def main():
     saved_env = {name: os.environ.get(name) for name in
                  ("MUSE_API_KEY", "ANTHROPIC_API_KEY",
                   "MUSE_BASE_URL", "ANTHROPIC_BASE_URL", "MUSE_MODEL",
-                  "MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL")}
+                  "MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL",
+                  "MUSE_LMSTUDIO_URL")}
     tmpdir = tempfile.mkdtemp(prefix="museAgentTest")
     try:
         testMessagesSurviveARealisticSession()
@@ -1396,6 +1589,7 @@ def main():
         testImageWithoutMetadataStillSends(tmpdir)
         testMultipleImagesAreOrderedAndLabelled(tmpdir)
         testOllamaProviderRoutesLocallyWithNoKey()
+        testLmStudioProviderDiscoversModelsAndRunsToolsWithoutAKey()
         testOllamaModelWithoutToolsIsRefused()
         testBackEndSettingsRoundTripBesideTheKey(tmpdir)
     finally:

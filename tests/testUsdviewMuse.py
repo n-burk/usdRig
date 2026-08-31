@@ -285,6 +285,34 @@ def testUsdviewInputFunction(appController):
     if "api.anthropic.com" not in routing or "x-api-key" not in routing:
         raise AssertionError("settings did not resolve an Anthropic key: %r" % routing)
 
+    # LM Studio is a first-class keyless choice backed by the server on
+    # Hivemind. Stub model discovery so this UI test never needs that machine
+    # to be reachable.
+    _fetch_lmstudio_models = museAgent.fetch_lmstudio_models
+    museAgent.fetch_lmstudio_models = lambda *args, **kwargs: [{
+        "name": "hivemind-test-model",
+        "display_name": "Hivemind Test Model",
+        "tools": True,
+        "native_tools": True,
+        "vision": False,
+        "loaded": True,
+    }]
+    try:
+        dialog._lmstudio_url.setText(museAgent.LMSTUDIO_DEFAULT_BASE_URL)
+        _lmstudio = dialog._provider.findData(museAgent.PROVIDER_LMSTUDIO)
+        if _lmstudio < 0:
+            raise AssertionError("settings has no LM Studio entry")
+        dialog._provider.setCurrentIndex(_lmstudio)
+        if dialog._lmstudio_url.isHidden() or dialog._model_row.isHidden() \
+                or not dialog._key_edit.isHidden():
+            raise AssertionError("LM Studio settings showed the wrong controls")
+        routing = dialog._routing.text()
+        if "hivemind.local:1234/v1/messages" not in routing or \
+                "hivemind-test-model" not in routing:
+            raise AssertionError("LM Studio routing was not explicit: %r" % routing)
+    finally:
+        museAgent.fetch_lmstudio_models = _fetch_lmstudio_models
+
     # Apple is a first-class local choice: URL visible, credential/model picker
     # hidden, fixed on-device model and Chat Completions route. Stub health so
     # this default transport test remains network-independent.

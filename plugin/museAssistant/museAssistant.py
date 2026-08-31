@@ -139,7 +139,8 @@ CREDENTIALS_PATH = os.path.join(
 # their environment-variable names so there is exactly one vocabulary: what
 # you would export in a shell is what appears in the file.
 SAVED_SETTING_NAMES = (
-    "MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_APPLE_URL", "MUSE_MODEL")
+    "MUSE_PROVIDER", "MUSE_OLLAMA_URL", "MUSE_LMSTUDIO_URL",
+    "MUSE_APPLE_URL", "MUSE_MODEL")
 
 
 def _read_settings_file(path=None):
@@ -903,6 +904,8 @@ if _HAS_QT:
             self.setWindowTitle("Muse — Settings")
             self.setMinimumWidth(460)
             self._ollama_models = []
+            self._lmstudio_models = []
+            self._model_provider = None
             self._build_ui()
             self._on_provider_changed()
 
@@ -919,13 +922,17 @@ if _HAS_QT:
                     ("Anthropic / Meta Muse (from the key)",
                      museAgent.PROVIDER_ANTHROPIC),
                     ("Ollama (local server)", museAgent.PROVIDER_OLLAMA),
+                    ("LM Studio (Hivemind)",
+                     museAgent.PROVIDER_LMSTUDIO),
                     ("Apple Foundation Models (on-device)",
                      museAgent.PROVIDER_APPLE)):
                 self._provider.addItem(label, value)
             saved_provider = (os.environ.get("MUSE_PROVIDER", "").strip().lower()
                               or museAgent.resolve_provider())
             selected = (saved_provider if saved_provider in
-                        (museAgent.PROVIDER_OLLAMA, museAgent.PROVIDER_APPLE)
+                        (museAgent.PROVIDER_OLLAMA,
+                         museAgent.PROVIDER_LMSTUDIO,
+                         museAgent.PROVIDER_APPLE)
                         else museAgent.PROVIDER_ANTHROPIC)
             index = self._provider.findData(selected)
             self._provider.setCurrentIndex(max(index, 0))
@@ -946,6 +953,14 @@ if _HAS_QT:
             self._ollama_url.editingFinished.connect(self._reload_models)
             self._ollama_url_label = QtWidgets.QLabel("Ollama server")
             form.addRow(self._ollama_url_label, self._ollama_url)
+
+            self._lmstudio_url = QtWidgets.QLineEdit()
+            self._lmstudio_url.setText(museAgent.resolve_lmstudio_base_url())
+            self._lmstudio_url.setPlaceholderText(
+                museAgent.LMSTUDIO_DEFAULT_BASE_URL)
+            self._lmstudio_url.editingFinished.connect(self._reload_models)
+            self._lmstudio_url_label = QtWidgets.QLabel("LM Studio server")
+            form.addRow(self._lmstudio_url_label, self._lmstudio_url)
 
             self._apple_url = QtWidgets.QLineEdit()
             self._apple_url.setText(museAgent.resolve_apple_base_url())
@@ -1012,16 +1027,25 @@ if _HAS_QT:
             """Show only the fields the chosen back end actually uses."""
             provider = self._selected_provider()
             isOllama = provider == museAgent.PROVIDER_OLLAMA
+            isLmStudio = provider == museAgent.PROVIDER_LMSTUDIO
             isApple = provider == museAgent.PROVIDER_APPLE
             for widget in (self._key_edit, self._key_row_label):
-                widget.setVisible(not (isOllama or isApple))
-            for widget in (self._ollama_url, self._ollama_url_label,
-                           self._model_row, self._model_label):
+                widget.setVisible(not (isOllama or isLmStudio or isApple))
+            for widget in (self._ollama_url, self._ollama_url_label):
                 widget.setVisible(isOllama)
+            for widget in (self._lmstudio_url, self._lmstudio_url_label):
+                widget.setVisible(isLmStudio)
+            for widget in (self._model_row, self._model_label):
+                widget.setVisible(isOllama or isLmStudio)
             for widget in (self._apple_url, self._apple_url_label):
                 widget.setVisible(isApple)
-            if isOllama and not self._ollama_models:
-                self._reload_models()
+            if isOllama or isLmStudio:
+                models = (self._lmstudio_models if isLmStudio
+                          else self._ollama_models)
+                if models:
+                    self._populate_models(provider, models)
+                else:
+                    self._reload_models()
             else:
                 self._refresh_routing()
             self._describe_current()
@@ -1033,36 +1057,66 @@ if _HAS_QT:
             "the model I wanted is missing" and "the model I wanted cannot
             call tools" are different problems with different fixes.
             """
-            url = self._ollama_url.text().strip() or \
-                museAgent.OLLAMA_DEFAULT_BASE_URL
+            provider = self._selected_provider()
+            isLmStudio = provider == museAgent.PROVIDER_LMSTUDIO
+            if provider not in (museAgent.PROVIDER_OLLAMA,
+                                 museAgent.PROVIDER_LMSTUDIO):
+                return
+            if isLmStudio:
+                url = (self._lmstudio_url.text().strip()
+                       or museAgent.LMSTUDIO_DEFAULT_BASE_URL)
+            else:
+                url = (self._ollama_url.text().strip()
+                       or museAgent.OLLAMA_DEFAULT_BASE_URL)
             self._reload_btn.setEnabled(False)
             try:
                 # Refresh is the explicit "go and look again", so it bypasses
                 # the per-session cache the send path relies on.
-                museAgent.clear_ollama_model_cache()
-                self._ollama_models = museAgent.fetch_ollama_models(url)
+                if isLmStudio:
+                    museAgent.clear_lmstudio_model_cache()
+                    self._lmstudio_models = \
+                        museAgent.fetch_lmstudio_models(url)
+                    models = self._lmstudio_models
+                else:
+                    museAgent.clear_ollama_model_cache()
+                    self._ollama_models = museAgent.fetch_ollama_models(url)
+                    models = self._ollama_models
             finally:
                 self._reload_btn.setEnabled(True)
 
-            wanted = (self._model.currentData()
+            self._populate_models(provider, models)
+
+        def _populate_models(self, provider, models):
+            """Put one server's cached inventory into the shared model box."""
+            isLmStudio = provider == museAgent.PROVIDER_LMSTUDIO
+            current = (self._model.currentData()
+                       if self._model_provider == provider else "")
+            wanted = (current
                       or os.environ.get("MUSE_MODEL", "").strip()
-                      or museAgent.OLLAMA_DEFAULT_MODEL)
+                      or (museAgent.preferred_lmstudio_model(models)
+                          if isLmStudio else museAgent.OLLAMA_DEFAULT_MODEL))
             self._model.blockSignals(True)
             self._model.clear()
-            for entry in self._ollama_models:
+            for entry in models:
                 marks = []
-                if entry["tools"]:
+                if isLmStudio and entry.get("loaded"):
+                    marks.append("loaded")
+                if isLmStudio and entry.get("native_tools"):
+                    marks.append("native tools")
+                elif entry["tools"]:
                     marks.append("tools")
                 if entry["vision"]:
                     marks.append("vision")
                 label = "%s   [%s]" % (
-                    entry["name"], ", ".join(marks) or "no tools")
+                    entry.get("display_name") or entry["name"],
+                    ", ".join(marks) or "no tools")
                 self._model.addItem(label, entry["name"])
-            if not self._ollama_models:
+            if not models:
                 self._model.addItem("(server not reachable)", "")
             index = self._model.findData(wanted)
             self._model.setCurrentIndex(max(index, 0))
             self._model.blockSignals(False)
+            self._model_provider = provider
             self._refresh_routing()
 
         def _describe_current(self):
@@ -1085,6 +1139,16 @@ if _HAS_QT:
                     "%d model(s) on this server, %d can call tools."
                     % (count, capable) if count else
                     "No models listed — is the server running?")
+                return
+            if provider == museAgent.PROVIDER_LMSTUDIO:
+                count = len(self._lmstudio_models)
+                native = sum(
+                    1 for entry in self._lmstudio_models
+                    if entry.get("native_tools"))
+                self._current.setText(
+                    "%d model(s) on Hivemind, %d with native tool support."
+                    % (count, native) if count else
+                    "Hivemind is not answering on port 1234.")
                 return
             key, source = museAgent.resolve_api_key()
             if key:
@@ -1121,6 +1185,23 @@ if _HAS_QT:
                     "Model &nbsp;&nbsp;&nbsp;&nbsp;<b>%s</b>%s"
                     % (_escape_html(base),
                        _escape_html(model or "(none selected)"),
+                       ("<br><br><span style='color:#e0a030'>%s</span>"
+                        % _escape_html(problem)) if problem else ""))
+                return
+            if self._selected_provider() == museAgent.PROVIDER_LMSTUDIO:
+                base = (self._lmstudio_url.text().strip().rstrip("/")
+                        or museAgent.LMSTUDIO_DEFAULT_BASE_URL)
+                model = self._model.currentData() or ""
+                problem = museAgent.describe_model_problem(
+                    model, museAgent.PROVIDER_LMSTUDIO,
+                    self._lmstudio_models)
+                self._routing.setText(
+                    "Endpoint &nbsp;<b>%s/v1/messages</b><br>"
+                    "Header &nbsp;&nbsp;&nbsp;<span style='color:#858585'>"
+                    "LM Studio placeholder — hosted keys are never sent</span><br>"
+                    "Model &nbsp;&nbsp;&nbsp;&nbsp;<b>%s</b>%s"
+                    % (_escape_html(base),
+                       _escape_html(model or "(selected automatically when available)"),
                        ("<br><br><span style='color:#e0a030'>%s</span>"
                         % _escape_html(problem)) if problem else ""))
                 return
@@ -1185,6 +1266,7 @@ if _HAS_QT:
                     "MUSE_PROVIDER": museAgent.PROVIDER_APPLE,
                     "MUSE_APPLE_URL": url,
                     "MUSE_OLLAMA_URL": "",
+                    "MUSE_LMSTUDIO_URL": "",
                     "MUSE_MODEL": "",
                 }
             elif provider == museAgent.PROVIDER_OLLAMA:
@@ -1202,15 +1284,36 @@ if _HAS_QT:
                 settings = {
                     "MUSE_PROVIDER": museAgent.PROVIDER_OLLAMA,
                     "MUSE_OLLAMA_URL": url,
+                    "MUSE_LMSTUDIO_URL": "",
+                    "MUSE_APPLE_URL": "",
+                    "MUSE_MODEL": model,
+                }
+            elif provider == museAgent.PROVIDER_LMSTUDIO:
+                url = (self._lmstudio_url.text().strip().rstrip("/")
+                       or museAgent.LMSTUDIO_DEFAULT_BASE_URL)
+                model = (self._model.currentData()
+                         or museAgent.preferred_lmstudio_model(
+                             self._lmstudio_models))
+                problem = museAgent.describe_model_problem(
+                    model, museAgent.PROVIDER_LMSTUDIO,
+                    self._lmstudio_models)
+                if problem:
+                    QtWidgets.QMessageBox.warning(self, "Muse", problem)
+                    return
+                settings = {
+                    "MUSE_PROVIDER": museAgent.PROVIDER_LMSTUDIO,
+                    "MUSE_LMSTUDIO_URL": url,
+                    "MUSE_OLLAMA_URL": "",
                     "MUSE_APPLE_URL": "",
                     "MUSE_MODEL": model,
                 }
             else:
-                # Leaving Ollama clears its pins, or the next session inherits
-                # a local model id it will send to Anthropic.
+                # Leaving a local server clears its pins, or the next session
+                # inherits a local model id it will send to Anthropic.
                 settings = {
                     "MUSE_PROVIDER": "",
                     "MUSE_OLLAMA_URL": "",
+                    "MUSE_LMSTUDIO_URL": "",
                     "MUSE_APPLE_URL": "",
                     "MUSE_MODEL": "",
                 }
@@ -1235,6 +1338,7 @@ if _HAS_QT:
 
             typed = (self._key_edit.text().strip()
                      if provider not in (museAgent.PROVIDER_OLLAMA,
+                                         museAgent.PROVIDER_LMSTUDIO,
                                          museAgent.PROVIDER_APPLE) else "")
             if typed:
                 os.environ["MUSE_API_KEY"] = typed
@@ -1577,6 +1681,25 @@ if _HAS_QT:
                     self._log_system(problem)
                 else:
                     self._log_system("Ready — %s on %s." % (model, base_url))
+                return
+            if provider == museAgent.PROVIDER_LMSTUDIO:
+                models = museAgent.fetch_lmstudio_models(base_url)
+                if not models:
+                    self._log_system(
+                        "LM Studio at %s is not answering. On Hivemind, start "
+                        "the server on port 1234 and enable Serve on Local "
+                        "Network, or choose another back end in Muse ▸ "
+                        "Settings…." % base_url)
+                    return
+                model = museAgent.resolve_model(base_url, provider)
+                problem = museAgent.describe_model_problem(
+                    model, provider, models)
+                if problem:
+                    self._log_system(problem)
+                else:
+                    self._log_system(
+                        "Ready — %s through LM Studio on Hivemind (%s)."
+                        % (model, base_url))
                 return
 
             api_key, _name = museAgent.resolve_api_key()

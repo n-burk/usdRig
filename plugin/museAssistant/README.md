@@ -19,24 +19,27 @@ broke silently are testable without a display.
 
 ## Setup
 
-Four back ends are supported. The two hosted providers require the Anthropic
-SDK and a key in **the interpreter that launches usdview**:
+Five back ends are supported. The four Anthropic Messages providers require
+the Anthropic SDK in **the interpreter that launches usdview**; only the two
+hosted providers also require an API key:
 
 ```bash
 python -m pip install anthropic
 export MUSE_API_KEY=...               # or ANTHROPIC_API_KEY
 ```
 
-Apple Foundation Models and Ollama are local, keyless providers selected in
+Apple Foundation Models, Ollama and LM Studio are keyless providers selected in
 **Muse ▸ Settings…** or with `MUSE_PROVIDER`. Apple uses the Chat Completions
-endpoint built into `fm serve`; the other three use the Anthropic Messages
-protocol.
+endpoint built into `fm serve`; the other four use the Anthropic Messages
+protocol. LM Studio and Ollama still need the SDK even though they need no real
+credential.
 
 | Key looks like | Endpoint | Auth header | Default model |
 |---|---|---|---|
 | `LLM_…` (Meta Muse) | `https://api.meta.ai` | `Authorization: Bearer` | `muse-spark-1.2-contributor` |
 | `sk-ant-…` (Anthropic) | `https://api.anthropic.com` | `x-api-key` | `claude-opus-5` |
 | *(none)* — **Ollama** | `http://127.0.0.1:11434` by default | none | `qwen3.5:9b` |
+| *(none)* — **LM Studio** | `http://hivemind.local:1234` by default | inert `lmstudio` placeholder only | `MUSE_MODEL`, or selected from the server |
 | *(none)* — **Apple FM** | `http://127.0.0.1:1976` | none | `system` (on-device) |
 
 ### Apple Foundation Models (local, on-device)
@@ -63,6 +66,39 @@ fills only that tool's arguments. It executes the existing `run_python` /
 `inspect_stage` / `capture_viewport` tool, feeds the real result back, and
 repeats. Calls are non-streaming with a bounded timeout (`MUSE_APPLE_TIMEOUT`,
 default 120 seconds).
+
+### LM Studio on Hivemind (local network, no key)
+
+On the Hivemind machine, start LM Studio's local server on port 1234 and enable
+**Serve on Local Network** in LM Studio's server settings. Then select
+**LM Studio (Hivemind)** in Muse, or launch with:
+
+```bash
+export MUSE_PROVIDER=lmstudio
+export MUSE_LMSTUDIO_URL=http://hivemind.local:1234   # optional; this is the default
+export MUSE_MODEL=qwen3.8-27b@q4_k_m                  # optional
+```
+
+The bare `hivemind` alias does not resolve from this Mac. Use the default
+Bonjour name above; if Bonjour is unavailable, set
+`MUSE_LMSTUDIO_URL=http://192.168.68.54:1234` as the current direct-IP fallback.
+
+Muse discovers LLMs through LM Studio's native `/api/v1/models` inventory. If
+`MUSE_MODEL` is unset, it prefers an already-loaded model, then native tool
+support and vision; choosing a model in **Muse ▸ Settings…** saves the same
+value. Requests go to the Anthropic-compatible `/v1/messages` endpoint, so the
+`anthropic` Python package is still required.
+
+LM Studio itself requires no API key. Muse gives the SDK the inert local
+placeholder `lmstudio` and never forwards a hosted `MUSE_API_KEY` or
+`ANTHROPIC_API_KEY` to Hivemind.
+
+The default endpoint is currently live and has been verified with the loaded
+`qwen3.8-27b@q4_k_m` model, including native tool use and vision. Availability
+still depends on Hivemind being reachable, LM Studio's server running, and
+**Serve on Local Network** remaining enabled. `bin/launch.sh` probes it directly
+without using a configured HTTP proxy and reports that state before usdview
+opens.
 
 ### Ollama (local, no key)
 
@@ -131,17 +167,18 @@ synthesised `muse-spark-1.1-contributor` would fail at the API instead of
 here. Anthropic and `MUSE_BASE_URL` gateways are untouched — the tier is a
 Meta concept.
 
-`bin/launch.sh` prints the state of both at startup, and the window says so in
-its transcript when no key is set. Optional overrides:
+`bin/launch.sh` prints the selected provider's state at startup, and the window
+says so in its transcript when no key is set. Optional overrides:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MUSE_MODEL` | `claude-opus-5`, or `muse-spark-1.2-contributor` on Meta | Model id. Ignored by Apple, which is fixed to on-device `system` |
+| `MUSE_MODEL` | `claude-opus-5`, `muse-spark-1.2-contributor` on Meta, or server-selected on LM Studio | Model id. Ignored by Apple, which is fixed to on-device `system` |
 | `MUSE_EFFORT` | `xhigh` | `low` / `medium` / `high` / `xhigh` / `max` |
 | `MUSE_MAX_TOKENS` | `32000` | Output cap per turn |
-| `MUSE_BASE_URL` | — | An Anthropic-compatible endpoint other than `api.anthropic.com` (a gateway, proxy, or local relay). Ignored by the explicit Apple provider |
-| `MUSE_PROVIDER` | inferred from the key | `anthropic`, `meta`, `ollama`, or `apple`. Local providers are selected explicitly |
+| `MUSE_BASE_URL` | — | An Anthropic-compatible endpoint other than `api.anthropic.com` (a gateway, proxy, or local relay). Ignored by the explicit Apple and LM Studio providers |
+| `MUSE_PROVIDER` | inferred from the key | `anthropic`, `meta`, `ollama`, `lmstudio`, or `apple`. Local providers are selected explicitly |
 | `MUSE_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server address, used when `MUSE_PROVIDER=ollama` |
+| `MUSE_LMSTUDIO_URL` | `http://hivemind.local:1234` | LM Studio server address, used when `MUSE_PROVIDER=lmstudio` |
 | `MUSE_APPLE_URL` | `http://127.0.0.1:1976` | `fm serve` address, used when `MUSE_PROVIDER=apple` |
 | `MUSE_APPLE_TIMEOUT` | `120` | Seconds allowed for one local Apple completion |
 | `MUSE_APPLE_MAX_ITERATIONS` | `12` | Maximum Apple action rounds per send |
@@ -244,6 +281,21 @@ Model     [ qwen3.5:9b   [tools, vision] ▾ ]  [Refresh]
 Endpoint  http://127.0.0.1:11434/v1/messages
 Header    none — Ollama authenticates nothing
 Model     qwen3.5:9b
+```
+
+Choosing **LM Studio (Hivemind)** similarly shows Hivemind's server address and
+native model inventory. The model list marks loaded models, native tool support
+and vision; an explicit selection is saved as `MUSE_MODEL`:
+
+```
+Back end  [ LM Studio (Hivemind) ▾ ]
+LM Studio server  http://hivemind.local:1234
+Model     [ Qwen3.8 27B UD   [loaded, native tools, vision] ▾ ]  [Refresh]
+          4 model(s) on Hivemind, 4 with native tool support.
+
+Endpoint  http://hivemind.local:1234/v1/messages
+Header    LM Studio placeholder — hosted keys are never sent
+Model     qwen3.8-27b@q4_k_m
 ```
 
 Choosing **Apple Foundation Models (on-device)** shows only the local server.

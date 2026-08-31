@@ -17,13 +17,14 @@ import struct
 import sys
 import zlib
 
-# Back ends. Anthropic, Meta and Ollama speak the Anthropic Messages API. Apple
-# Foundation Models uses the OpenAI-shaped Chat Completions endpoint exposed by
-# ``fm serve`` and has a small translation layer below.
+# Back ends. Anthropic, Meta, Ollama and LM Studio speak the Anthropic Messages
+# API. Apple Foundation Models uses the OpenAI-shaped Chat Completions endpoint
+# exposed by ``fm serve`` and has a small translation layer below.
 #
 #   Anthropic   api.anthropic.com   sk-ant-…   x-api-key       claude-opus-5
 #   Meta Muse   api.meta.ai         LLM_…      Bearer token    muse-spark-1.2-contributor
 #   Ollama      <host>:11434        (none)     (ignored)       qwen3.5:9b
+#   LM Studio   hivemind.local:1234 (none)     (ignored)       selected from server
 #   Apple FM    localhost:1976      (none)     (none)          system
 #
 # Ollama is a local server and is the reason this list is worth keeping short:
@@ -59,9 +60,10 @@ META_KEY_PREFIX = "LLM_"
 PROVIDER_ANTHROPIC = "anthropic"
 PROVIDER_META = "meta"
 PROVIDER_OLLAMA = "ollama"
+PROVIDER_LMSTUDIO = "lmstudio"
 PROVIDER_APPLE = "apple"
 PROVIDERS = (PROVIDER_ANTHROPIC, PROVIDER_META, PROVIDER_OLLAMA,
-             PROVIDER_APPLE)
+             PROVIDER_LMSTUDIO, PROVIDER_APPLE)
 
 # A starting point for the settings dialog, not a fallback the resolver
 # reaches for: nothing routes to Ollama unless the provider is set to it.
@@ -81,6 +83,14 @@ OLLAMA_PLACEHOLDER_KEY = "ollama"
 # How long to wait on the model-list endpoint. Short: it is a local server
 # answering from memory, and the settings dialog blocks on it.
 OLLAMA_LIST_TIMEOUT = 4.0
+
+# Hivemind advertises its host name over Bonjour; the bare ``hivemind`` name
+# does not resolve on this Mac, while ``hivemind.local`` does. LM Studio's
+# Anthropic-compatible client base URL deliberately omits /v1 because the SDK
+# appends /v1/messages itself.
+LMSTUDIO_DEFAULT_BASE_URL = "http://hivemind.local:1234"
+LMSTUDIO_PLACEHOLDER_KEY = "lmstudio"
+LMSTUDIO_LIST_TIMEOUT = 4.0
 
 # ``fm serve`` is part of macOS and defaults to this loopback address. Muse is
 # deliberately pinned to the on-device ``system`` model: it never silently
@@ -677,10 +687,10 @@ def _env_base_url():
 def resolve_provider():
     """Which back end this session talks to.
 
-    MUSE_PROVIDER states it outright; that is the only way to select Ollama,
-    because an Ollama server has no recognisable address. Without it the
-    answer is inferred exactly the way it always was, so a session that never
-    heard of providers behaves identically.
+    MUSE_PROVIDER states it outright; that is the only way to select a local
+    server, because its address alone does not identify its protocol. Without
+    it the answer is inferred exactly the way it always was, so a session that
+    never heard of providers behaves identically.
     """
     explicit = os.environ.get("MUSE_PROVIDER", "").strip().lower()
     if explicit in PROVIDERS:
@@ -706,6 +716,14 @@ def resolve_ollama_base_url():
     return value or OLLAMA_DEFAULT_BASE_URL
 
 
+def resolve_lmstudio_base_url():
+    """The LM Studio address: MUSE_LMSTUDIO_URL, else Hivemind."""
+    value = os.environ.get("MUSE_LMSTUDIO_URL", "").strip().rstrip("/")
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip().rstrip("/")
+    return value or LMSTUDIO_DEFAULT_BASE_URL
+
+
 def resolve_apple_base_url():
     """The loopback ``fm serve`` address, never a hosted gateway."""
     value = os.environ.get("MUSE_APPLE_URL", "").strip().rstrip("/")
@@ -725,11 +743,13 @@ def resolve_base_url():
     server.
     """
     provider = resolve_provider()
-    # Apple is intentionally isolated from MUSE_BASE_URL. That variable names
-    # an Anthropic-compatible gateway and must never redirect an explicitly
-    # local Apple session (or its viewport images) off the machine.
+    # Apple and LM Studio have dedicated URL settings and are intentionally
+    # isolated from MUSE_BASE_URL. That variable names a generic gateway and
+    # must never redirect either session (or its viewport images) elsewhere.
     if provider == PROVIDER_APPLE:
         return resolve_apple_base_url(), "Apple Foundation Models"
+    if provider == PROVIDER_LMSTUDIO:
+        return resolve_lmstudio_base_url(), "LM Studio on Hivemind"
 
     value, name = _env_base_url()
     if value:
@@ -802,6 +822,8 @@ def resolve_model(base_url=None, provider=None):
     explicit = os.environ.get("MUSE_MODEL", "").strip()
     if explicit:
         return force_contributor_model(explicit, base_url)
+    if selected_provider == PROVIDER_LMSTUDIO:
+        return preferred_lmstudio_model(fetch_lmstudio_models(base_url))
     if base_url and META_HOST in base_url:
         return META_DEFAULT_MODEL
     if selected_provider == PROVIDER_OLLAMA:
@@ -817,7 +839,8 @@ def describe_key_problem(api_key, base_url, provider=None):
     # Ollama authenticates nothing. Demanding a key here would make a local
     # server the one back end you cannot use without signing up for a hosted
     # one, which is the opposite of the point.
-    if (provider or resolve_provider()) in (PROVIDER_OLLAMA, PROVIDER_APPLE):
+    if (provider or resolve_provider()) in (
+            PROVIDER_OLLAMA, PROVIDER_LMSTUDIO, PROVIDER_APPLE):
         return None
     if not api_key:
         return ("No API key found. Set MUSE_API_KEY (or ANTHROPIC_API_KEY) in the "
@@ -924,6 +947,107 @@ def describe_apple_health_problem(health):
     return None
 
 
+# LM Studio model lists, keyed by server address. Its native endpoint exposes
+# the capability data the OpenAI-compatible /v1/models response may omit.
+_LMSTUDIO_MODEL_CACHE = {}
+
+
+def clear_lmstudio_model_cache():
+    """Forget cached LM Studio model lists (the dialog's Refresh calls this)."""
+    _LMSTUDIO_MODEL_CACHE.clear()
+
+
+def fetch_lmstudio_models(base_url=None, timeout=None, use_cache=True):
+    """Return LM Studio LLMs with native-tool, vision and load-state metadata.
+
+    LM Studio gives every LLM a default prompted tool format; the
+    ``trained_for_tool_use`` capability means the stronger native tool path,
+    not that other LLMs cannot call tools at all. The native v1 endpoint is
+    preferred for that distinction, with /v1/models as a compatibility
+    fallback for an older server.
+    """
+    import urllib.parse
+    import urllib.request
+
+    root = (base_url or resolve_lmstudio_base_url()).rstrip("/")
+    if use_cache and root in _LMSTUDIO_MODEL_CACHE:
+        return _LMSTUDIO_MODEL_CACHE[root]
+    parsed = urllib.parse.urlsplit(root)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        _LMSTUDIO_MODEL_CACHE[root] = []
+        return []
+
+    budget = timeout or LMSTUDIO_LIST_TIMEOUT
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    payload = None
+    for path in ("/api/v1/models", "/v1/models"):
+        try:
+            with opener.open(root + path, timeout=budget) as response:
+                candidate = json.loads(response.read().decode("utf-8"))
+            if isinstance(candidate, dict):
+                payload = candidate
+                break
+        except Exception:
+            continue
+    if payload is None:
+        _LMSTUDIO_MODEL_CACHE[root] = []
+        return []
+
+    native_entries = payload.get("models")
+    entries = native_entries if isinstance(native_entries, list) \
+        else payload.get("data") or []
+    native_shape = isinstance(native_entries, list)
+    models = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        model_type = str(entry.get("type") or "").lower()
+        if model_type in ("embedding", "embeddings"):
+            continue
+        name = entry.get("key") if native_shape else entry.get("id")
+        name = name or entry.get("id") or entry.get("key")
+        if not name:
+            continue
+        capabilities = entry.get("capabilities") or {}
+        if isinstance(capabilities, dict):
+            native_tools = bool(
+                capabilities.get("trained_for_tool_use")
+                or capabilities.get("tool_use")
+                or capabilities.get("tools"))
+            vision = bool(capabilities.get("vision"))
+        else:
+            capability_names = set(capabilities or [])
+            native_tools = bool(
+                capability_names.intersection(("tool_use", "tools")))
+            vision = "vision" in capability_names
+        loaded_instances = entry.get("loaded_instances") or []
+        state = str(entry.get("state") or "").lower()
+        models.append({
+            "name": str(name),
+            "display_name": str(entry.get("display_name") or name),
+            # LM Studio supplies a default tool format even when this is not
+            # a model-native capability. Keep the distinction visible in UI.
+            "tools": True,
+            "native_tools": native_tools,
+            "vision": vision or model_type == "vlm",
+            "loaded": bool(loaded_instances) or state == "loaded",
+        })
+    _LMSTUDIO_MODEL_CACHE[root] = models
+    return models
+
+
+def preferred_lmstudio_model(models):
+    """Choose a useful default without hard-coding Hivemind's model names."""
+    if not models:
+        return ""
+    # Avoid an unnecessary load first, then prefer native tool syntax and
+    # vision. max() is stable for equal scores, preserving server order.
+    return max(models, key=lambda entry: (
+        4 if entry.get("loaded") else 0,
+        2 if entry.get("native_tools") else 0,
+        1 if entry.get("vision") else 0))["name"]
+
+
 # Model lists, keyed by server address.
 #
 # fetch_ollama_models costs a round trip per model, and run_agent checks the
@@ -1013,24 +1137,34 @@ def describe_model_problem(model, provider=None, models=None):
     the canned-reply stub used to produce and which this plugin has a standing
     rule against.
 
-    Judged from /api/show, never from the model name or the /api/tags summary
-    -- see fetch_ollama_models for why the latter cannot be trusted.
+    Ollama is judged from /api/show, never from its model name or /api/tags
+    summary. LM Studio is judged from its native /api/v1/models inventory;
+    models without native tool training still have LM Studio's prompted tool
+    format and remain selectable.
 
     Returns None for the hosted back ends: their model ids are fixed and their
     capabilities are not ours to enumerate.
     """
-    if (provider or resolve_provider()) != PROVIDER_OLLAMA:
-        return None
-    if not model:
+    selected_provider = provider or resolve_provider()
+    if selected_provider not in (PROVIDER_OLLAMA, PROVIDER_LMSTUDIO):
         return None
     if models is None:
-        models = fetch_ollama_models()
+        models = (fetch_lmstudio_models()
+                  if selected_provider == PROVIDER_LMSTUDIO
+                  else fetch_ollama_models())
     if not models:
         return None  # server unreachable; not the model's fault
+    if not model:
+        return ("No LM Studio model is selected. Choose one in Muse settings."
+                if selected_provider == PROVIDER_LMSTUDIO else None)
 
     known = {entry["name"]: entry for entry in models}
     entry = known.get(model)
     if entry is None:
+        if selected_provider == PROVIDER_LMSTUDIO:
+            return ("%s is not available on this LM Studio server. "
+                    "Available: %s"
+                    % (model, ", ".join(sorted(known)) or "none"))
         return ("%s is not installed on this Ollama server. Installed: %s"
                 % (model, ", ".join(sorted(known)) or "none"))
     if not entry["tools"]:
@@ -1684,9 +1818,15 @@ def run_agent(messages, executor, system_prompt, on_event,
     problem = describe_key_problem(api_key, base_url, provider)
     if problem:
         raise AgentError(problem)
-    if provider == PROVIDER_OLLAMA and not api_key:
-        # The server ignores it; the SDK insists on one.
+    if provider == PROVIDER_OLLAMA:
+        # Explicit local providers must never receive a hosted credential that
+        # happens to remain in the environment. The server ignores this; the
+        # Anthropic SDK insists on a non-empty value.
         api_key = OLLAMA_PLACEHOLDER_KEY
+        _key_name = "Ollama placeholder"
+    elif provider == PROVIDER_LMSTUDIO:
+        api_key = LMSTUDIO_PLACEHOLDER_KEY
+        _key_name = "LM Studio placeholder"
 
     # auth_token= and api_key= are how the SDK is told which header to send;
     # sending Meta a key in x-api-key answers 401 no matter how good the key is.
@@ -1701,6 +1841,11 @@ def run_agent(messages, executor, system_prompt, on_event,
     # explicit model= argument never passes through that function.
     model = force_contributor_model(
         model or resolve_model(base_url, provider), base_url)
+    if provider == PROVIDER_LMSTUDIO and not model:
+        raise AgentError(
+            "LM Studio at %s did not list an LLM. Start the server on "
+            "Hivemind with port 1234 exposed to the local network, then "
+            "select a model in Muse settings." % base_url)
     # A model that cannot call tools cannot do anything Muse asks of it, and
     # the symptom -- fluent answers, untouched stage -- looks like the
     # assistant working. Fail here instead, while the reason is still legible.
@@ -1751,6 +1896,13 @@ def run_agent(messages, executor, system_prompt, on_event,
             authFailure = describe_auth_failure(
                 exc, api_key, _key_name, base_url, _base_name)
             if authFailure:
+                if provider == PROVIDER_LMSTUDIO:
+                    raise AgentError(
+                        "LM Studio at %s requires authentication, but the "
+                        "Hivemind entry is configured as a keyless LAN "
+                        "service. Disable Require Authentication in LM Studio "
+                        "or configure a separate authenticated gateway."
+                        % base_url)
                 raise AgentError(authFailure)
             raise AgentError("%s: %s" % (type(exc).__name__, exc))
 

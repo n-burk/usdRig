@@ -83,9 +83,9 @@ echo "Muse Assistant: $RIG/plugin/museAssistant (tool loop + drawover + /goal)"
 echo "Launch: $PY $USDVIEW ${STAGE} ${EXTRA[*]:-}"
 echo ""
 
-# Report the selected back end before opening the window. Apple FM and Ollama
-# are local/no-key providers; hosted providers retain the existing credential
-# and SDK checks.
+# Report the selected back end before opening the window. Local providers need
+# no user credential. LM Studio and Ollama still use the Anthropic SDK; Apple
+# has its own HTTP adapter.
 _MUSE_PROVIDER="${MUSE_PROVIDER:-}"
 _MUSE_SETTINGS_FILE="$HOME/.config/muse/credentials.json"
 _muse_saved_setting() {
@@ -127,6 +127,82 @@ elif [ "$_MUSE_PROVIDER" = "ollama" ]; then
   echo "Muse endpoint: ${MUSE_OLLAMA_URL:-http://127.0.0.1:11434}/v1/messages"
   echo "Muse model: ${MUSE_MODEL:-qwen3.5:9b}"
   echo "Muse key: not needed"
+elif [ "$_MUSE_PROVIDER" = "lmstudio" ]; then
+  _MUSE_LMSTUDIO_URL="${MUSE_LMSTUDIO_URL:-}"
+  _MUSE_LMSTUDIO_URL_SOURCE="MUSE_LMSTUDIO_URL"
+  if [ -z "$_MUSE_LMSTUDIO_URL" ] && [ -r "$_MUSE_SETTINGS_FILE" ]; then
+    _MUSE_LMSTUDIO_URL="$(_muse_saved_setting "$_MUSE_SETTINGS_FILE" MUSE_LMSTUDIO_URL)"
+    _MUSE_LMSTUDIO_URL_SOURCE="saved settings"
+  fi
+  if [ -z "$_MUSE_LMSTUDIO_URL" ]; then
+    _MUSE_LMSTUDIO_URL="http://hivemind.local:1234"
+    _MUSE_LMSTUDIO_URL_SOURCE="default"
+  fi
+  _MUSE_LMSTUDIO_URL="${_MUSE_LMSTUDIO_URL%/}"
+
+  _MUSE_LMSTUDIO_MODEL="${MUSE_MODEL:-}"
+  _MUSE_LMSTUDIO_MODEL_SOURCE="MUSE_MODEL"
+  if [ -z "$_MUSE_LMSTUDIO_MODEL" ] && [ -r "$_MUSE_SETTINGS_FILE" ]; then
+    _MUSE_LMSTUDIO_MODEL="$(_muse_saved_setting "$_MUSE_SETTINGS_FILE" MUSE_MODEL)"
+    _MUSE_LMSTUDIO_MODEL_SOURCE="saved settings"
+  fi
+
+  echo "Muse provider: LM Studio on Hivemind"
+  echo "Muse endpoint: $_MUSE_LMSTUDIO_URL/v1/messages ($_MUSE_LMSTUDIO_URL_SOURCE)"
+  echo "Muse key: not needed — a local placeholder is used; hosted keys are not sent"
+  if ! "$PY" -c "import anthropic" 2>/dev/null; then
+    echo "Muse SDK: MISSING — run:  $PY -m pip install anthropic"
+  else
+    echo "Muse SDK: anthropic $("$PY" -c 'import anthropic;print(anthropic.__version__)')"
+  fi
+
+  # Probe the native inventory directly. Disabling proxy handling matters for
+  # this LAN address: a configured HTTP proxy can make a healthy server look
+  # unavailable. The second field mirrors Muse's server-selected model policy.
+  if _MUSE_LMSTUDIO_PROBE="$(MUSE_LMSTUDIO_PROBE_URL="$_MUSE_LMSTUDIO_URL" "$PY" -c \
+      'import json, os, urllib.request
+root = os.environ["MUSE_LMSTUDIO_PROBE_URL"]
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(root + "/api/v1/models", timeout=4) as response:
+    payload = json.load(response)
+entries = payload.get("models", []) if isinstance(payload, dict) else []
+models = []
+for entry in entries:
+    if not isinstance(entry, dict) or str(entry.get("type", "")).lower() in ("embedding", "embeddings"):
+        continue
+    name = entry.get("key") or entry.get("id")
+    if not name:
+        continue
+    capabilities = entry.get("capabilities") or {}
+    if isinstance(capabilities, dict):
+        tools = bool(capabilities.get("trained_for_tool_use") or capabilities.get("tool_use") or capabilities.get("tools"))
+        vision = bool(capabilities.get("vision"))
+    else:
+        names = set(capabilities)
+        tools = bool(names.intersection(("tool_use", "tools")))
+        vision = "vision" in names
+    loaded = bool(entry.get("loaded_instances")) or str(entry.get("state", "")).lower() == "loaded"
+    models.append((str(name), loaded, tools, vision))
+preferred = max(models, key=lambda item: (4 if item[1] else 0, 2 if item[2] else 0, 1 if item[3] else 0))[0] if models else ""
+print("%d\t%s" % (len(models), preferred))' 2>/dev/null)"; then
+    IFS=$'\t' read -r _MUSE_LMSTUDIO_MODEL_COUNT _MUSE_LMSTUDIO_SERVER_MODEL <<< "$_MUSE_LMSTUDIO_PROBE"
+    if [ -n "$_MUSE_LMSTUDIO_MODEL" ]; then
+      echo "Muse model: $_MUSE_LMSTUDIO_MODEL ($_MUSE_LMSTUDIO_MODEL_SOURCE)"
+    elif [ -n "$_MUSE_LMSTUDIO_SERVER_MODEL" ]; then
+      echo "Muse model: $_MUSE_LMSTUDIO_SERVER_MODEL (selected from server)"
+    else
+      echo "Muse model: none — LM Studio listed no LLMs"
+    fi
+    echo "Muse server: ready — $_MUSE_LMSTUDIO_MODEL_COUNT LLM(s) listed"
+  else
+    if [ -n "$_MUSE_LMSTUDIO_MODEL" ]; then
+      echo "Muse model: $_MUSE_LMSTUDIO_MODEL ($_MUSE_LMSTUDIO_MODEL_SOURCE)"
+    else
+      echo "Muse model: unavailable until the server lists one"
+    fi
+    echo "Muse server: NOT READY — on Hivemind, start LM Studio on port 1234"
+    echo "             and enable Serve on Local Network in its server settings."
+  fi
 else
   if [ -z "$_MUSE_KEY" ]; then
     echo "Muse key: NOT SET — the assistant cannot talk to a hosted model."

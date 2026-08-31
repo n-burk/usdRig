@@ -29,8 +29,8 @@ export PXR_PLUGINPATH_NAME="$RIG/build/usd/rigExecSchema/resources:$RIG/build/us
 echo "== headless: agent core =="
 # The unit suite scripts each transport itself. Do not let the provider selected
 # for the opt-in live leg redirect earlier fake-Anthropic cases to a real local
-# server; the Apple cases set their own fake fm endpoint explicitly.
-env -u MUSE_PROVIDER -u MUSE_APPLE_URL \
+# server; local-provider cases set their own fake endpoints explicitly.
+env -u MUSE_PROVIDER -u MUSE_APPLE_URL -u MUSE_LMSTUDIO_URL \
   "$PY" "$RIG/tests/testMuseAgent.py"
 
 echo ""
