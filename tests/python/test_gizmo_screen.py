@@ -73,7 +73,10 @@ def TestTranslateHandles():
     handles = gs.BuildHandles(gs.TOOL_TRANSLATE, Gf.Matrix4d(1.0), camera,
                               VIEWPORT, 1.0)
     byName = {h.name: h for h in handles}
-    _Check(set(byName) == {"x", "y", "z", "center"}, "four handles")
+    # Maya's Move manipulator: three axes, three planar handles and the
+    # view-plane centre (design section 8.2).
+    _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
+           "move handles: %s" % sorted(byName))
     x = byName["x"]
     _Check(x.kind == "axis" and x.axisIndex == 0
            and _Close(x.points[1][0], 400 + gs.GIZMO_PIXELS, 1e-3)
@@ -116,7 +119,10 @@ def TestRotateHandles():
     handles = gs.BuildHandles(gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera,
                               VIEWPORT, 1.0)
     byName = {h.name: h for h in handles}
-    _Check(set(byName) == {"x", "y", "z"}, "three rings")
+    # Maya's Rotate manipulator adds the view-axis ring and the
+    # free-rotate sphere to the three axis rings (design section 8.3).
+    _Check(set(byName) == {"x", "y", "z", "view", "free"},
+           "rotate handles: %s" % sorted(byName))
     z = byName["z"]
     _Check(z.kind == "ring" and len(z.points) == gs.RING_SEGMENTS, "ring")
     radius = gs.GIZMO_PIXELS * gs.RING_FRACTION
@@ -202,7 +208,8 @@ def TestDragMath():
            "wrapped into (-180, 180]: %s" % angle)
     scale = {h.name: h for h in gs.BuildHandles(
         gs.TOOL_SCALE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
-    _Check(set(scale) == {"x", "y", "z", "center"}, "scale handles")
+    _Check(set(scale) == {"x", "y", "z", "xy", "yz", "xz", "center"},
+           "scale handles: %s" % sorted(scale))
     f = gs.ScaleDragFactor(scale["x"], (400, 300), (460, 300), 1.0)
     _Check(_Close(f, 1.5, 1e-9), "60 px along x: %s" % f)
     f = gs.ScaleDragFactor(scale["x"], (400, 300), (400, 360), 1.0)
@@ -213,6 +220,158 @@ def TestDragMath():
     _Check(f >= 0.01, "factor is floored")
 
 
+def TestMayaTranslateHandles():
+    camera = _Camera()
+    byName = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
+           "Maya move handles: %s" % sorted(byName))
+    xy = byName["xy"]
+    _Check(xy.kind == "plane" and xy.axisIndex == 2
+           and xy.color == (0.0, 0.0, 1.0), "xy plane is blue (normal z)")
+    _Check(byName["yz"].color == (1.0, 0.0, 0.0)
+           and byName["xz"].color == (0.0, 1.0, 0.0), "plane colours")
+    xs = [p[0] for p in xy.points]
+    ys = [p[1] for p in xy.points]
+    side = gs.GIZMO_PIXELS * gs.PLANE_SIDE
+    _Check(_Close(max(xs) - min(xs), side, 0.5)
+           and _Close(max(ys) - min(ys), side, 0.5),
+           "xy square side is PLANE_SIDE * size on screen")
+    centre = ((max(xs) + min(xs)) / 2.0, (max(ys) + min(ys)) / 2.0)
+    off = gs.GIZMO_PIXELS * gs.PLANE_OFFSET
+    _Check(_Close(centre[0], 400 + off, 0.5)
+           and _Close(centre[1], 300 - off, 0.5),
+           "xy square sits at PLANE_OFFSET along +x and +y: %s" % (centre,))
+    _Check(_Close(xy.worldNormal[2], 1.0), "xy plane normal is +z")
+    _Check(byName["center"].color == gs.COLOR_VIEW, "centre is light blue")
+    # Axis orientation: world axes with a rotated gizmo frame.
+    rotated = Gf.Matrix4d(1.0).SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), 90))
+    world = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, rotated, camera, VIEWPORT, 1.0,
+        orientation=Gf.Matrix4d(1.0))}
+    _Check(_Close(world["x"].worldAxis[0], 1.0)
+           and _Close(world["x"].points[1][0], 400 + gs.GIZMO_PIXELS, 1e-3),
+           "orientation=identity draws world axes despite the frame")
+    # Manipulator size.
+    big = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0,
+        sizePixels=180.0)}
+    _Check(_Close(big["x"].points[1][0], 580, 1e-3), "sizePixels honoured")
+
+
+def TestMayaRotateHandles():
+    camera = _Camera()
+    byName = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    _Check(set(byName) == {"x", "y", "z", "view", "free"},
+           "Maya rotate handles: %s" % sorted(byName))
+    view = byName["view"]
+    radius = gs.GIZMO_PIXELS * gs.RING_FRACTION * gs.VIEW_RING_FRACTION
+    _Check(view.kind == "view" and view.color == gs.COLOR_VIEW
+           and all(_Close(_Dist(p, (400, 300)), radius, 0.5)
+                   for p in view.points), "view ring is 1.25x, light blue")
+    _Check(_Close(view.worldAxis[2], 1.0), "view axis points at the camera")
+    free = byName["free"]
+    _Check(free.kind == "sphere"
+           and _Close(free.radiusPixels, gs.GIZMO_PIXELS * gs.RING_FRACTION,
+                      1e-6), "free-rotate disc at the ring radius")
+    z = byName["z"]
+    _Check(len(z.frontPoints) >= 1 and sum(len(a) for a in z.frontPoints)
+           == gs.RING_SEGMENTS, "z ring faces the camera: fully visible")
+    x = byName["x"]
+    front = sum(len(a) for a in x.frontPoints)
+    _Check(gs.RING_SEGMENTS * 0.4 <= front <= gs.RING_SEGMENTS * 0.6,
+           "edge-on x ring shows about half its points: %d" % front)
+    _Check(all(p[2] >= -1e-6 for p in x.frontWorld),
+           "front half = points on the camera side of the ring centre")
+    # Gimbal axes override the ring axes.
+    axes = [Gf.Vec3d(0, 1, 0), Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 0, 1)]
+    gimbal = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0,
+        gimbalAxes=axes)}
+    _Check(_Close(gimbal["x"].worldAxis[1], 1.0), "x ring uses gimbal axis")
+    none = gs.BuildHandles(gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera,
+                           VIEWPORT, 1.0, freeRotate=False)
+    _Check("free" not in {h.name for h in none}, "freeRotate=False")
+    # Hit priority: ring beats view ring beats sphere; back half not hit.
+    hit = gs.HitTest(list(byName.values()), 400 + radius, 300, gs.HIT_PIXELS)
+    _Check(hit is not None and hit.name == "view", "view ring hit")
+    hit = gs.HitTest(list(byName.values()), 400 + 20, 300 - 20, gs.HIT_PIXELS)
+    _Check(hit is not None and hit.name == "free", "inside disc: free")
+    _Check(gs.HitTest(list(byName.values()), 700, 300, gs.HIT_PIXELS)
+           is None, "outside everything")
+
+
+def TestMayaScaleHandles():
+    camera = _Camera()
+    byName = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_SCALE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
+           "Maya scale handles: %s" % sorted(byName))
+    origin = (400, 300)
+    x = byName["x"]
+    f = gs.MayaScaleFactor(x, origin, (445, 300), (490, 300), True)
+    _Check(_Close(f, 2.0, 1e-9), "press at half length, drag to the tip: 2x")
+    # Design section 8.4 defines the factor as (cursor distance from the
+    # origin along the axis) / (that distance at press). Pressing 45 px
+    # out and dragging to 45 px on the far side is -45/45, so the factor
+    # is -1: same size, mirrored. The sign flip is what matters here.
+    f = gs.MayaScaleFactor(x, origin, (445, 300), (355, 300), True)
+    _Check(_Close(f, -1.0, 1e-9), "through the origin flips the sign")
+    f = gs.MayaScaleFactor(x, origin, (445, 300), (355, 300), False)
+    _Check(_Close(f, 1e-4, 1e-12), "Prevent Negative Scale clamps")
+    c = byName["center"]
+    f = gs.MayaScaleFactor(c, origin, (400, 300), (445, 300), True)
+    _Check(_Close(f, 1.5, 1e-9), "centre: 1 + dx / size")
+    xy = byName["xy"]
+    d = (xy.worldCenterScreen[0] - 400, xy.worldCenterScreen[1] - 300)
+    press = (400 + d[0], 300 + d[1])
+    current = (400 + 2 * d[0], 300 + 2 * d[1])
+    f = gs.MayaScaleFactor(xy, origin, press, current, True)
+    _Check(_Close(f, 2.0, 1e-6), "plane handle: ratio along the diagonal")
+
+
+def TestMayaDragMath():
+    camera = _Camera()
+    delta = gs.RayPlaneDragDelta(camera, VIEWPORT, Gf.Vec3d(0, 0, 0),
+                                 Gf.Vec3d(0, 0, 1), (400, 300), (410, 290))
+    wpp = gs.WorldPerPixel(camera, VIEWPORT, Gf.Vec3d(0, 0, 0))
+    _Check(_Close(delta[0], 10 * wpp, 1e-6) and _Close(delta[1], 10 * wpp,
+                                                          1e-6)
+           and _Close(delta[2], 0.0, 1e-9),
+           "ray/plane on the z=0 plane matches the camera-plane delta")
+    delta = gs.RayPlaneDragDelta(camera, VIEWPORT, Gf.Vec3d(0, 0, 0),
+                                 Gf.Vec3d(1, 0, 0), (400, 300), (400, 290))
+    _Check(_Close(delta[0], 0.0, 1e-9) and delta[1] > 0.0,
+           "yz plane: no x component, moves up: %s" % delta)
+    total = gs.AccumulateAngle(170.0, 170.0, -175.0)
+    _Check(_Close(total, 185.0, 1e-9), "accumulates through the wrap")
+    axis, degrees = gs.TrackballRotation(camera, (400, 300), (490, 300),
+                                         90.0)
+    _Check(_Close(axis[1], 1.0, 1e-9) and _Close(degrees, 90.0, 1e-9),
+           "dragging right one radius: +90 about +Y: %s %s" % (axis,
+                                                               degrees))
+    _Check(gs.TrackballRotation(camera, (400, 300), (400, 300), 90.0)
+           is None, "no travel: None")
+    _Check(_Close(gs.SnapRelative(2.4, 1.0), 2.0)
+           and _Close(gs.SnapRelative(-2.6, 1.0), -3.0)
+           and _Close(gs.SnapRelative(37.0, 15.0), 30.0), "relative snap")
+    v = gs.SnapAbsolute(Gf.Vec3d(0.4, 1.6, -0.5), 1.0)
+    _Check(v == Gf.Vec3d(0.0, 2.0, -0.0) or v == Gf.Vec3d(0.0, 2.0, 0.0)
+           or _Close(v[2], -1.0), "vector snap: %s" % v)
+    rings = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    z = rings["z"]
+    r = gs.GIZMO_PIXELS * gs.RING_FRACTION
+    t0 = gs.RingParameter(z, (400 + r, 300))
+    pie = gs.PiePolygon(z, t0, 90.0)
+    _Check(pie[0] == z.center and len(pie) >= gs.RING_SEGMENTS // 4,
+           "pie starts at the centre and walks a quarter of the ring")
+    last = pie[-1]
+    _Check(_Close(last[0], 400, 2.0) and _Close(last[1], 300 - r, 2.0),
+           "+90 sweep facing the camera ends at the top: %s" % (last,))
+
+
 def main():
     groups = [
         ("projection", TestProjection),
@@ -220,6 +379,10 @@ def main():
         ("rotate handles", TestRotateHandles),
         ("hit test", TestHitTest),
         ("drag math", TestDragMath),
+        ("maya translate handles", TestMayaTranslateHandles),
+        ("maya rotate handles", TestMayaRotateHandles),
+        ("maya scale handles", TestMayaScaleHandles),
+        ("maya drag math", TestMayaDragMath),
     ]
     for name, fn in groups:
         fn()
