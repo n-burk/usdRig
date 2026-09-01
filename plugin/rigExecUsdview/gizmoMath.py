@@ -488,9 +488,11 @@ def _FromRotationVector(vector):
 
 # Newton refinement budget for SolveWorldRotation. The closed-form first
 # guess is already exact for a rigid channel frame, so these steps only
-# ever run for a sheared one, where Newton converges quadratically.
+# ever run for a sheared one. The tolerance is a residual in radians and
+# cannot usefully go below ~1e-8: _RotationVector reads the angle back
+# through Gf.Rotation, whose acos loses half the mantissa near identity.
 _ROTATION_SOLVE_STEPS = 6
-_ROTATION_SOLVE_TOLERANCE = 1e-12
+_ROTATION_SOLVE_TOLERANCE = 1e-7
 _ROTATION_SOLVE_STEP = 1e-6
 
 
@@ -514,9 +516,11 @@ def SolveWorldRotation(base, channel, worldAxis, degrees):
     exactly invariant under a positive diagonal on the left and exactly
     equivariant under a rotation on the right, which is all the two lines
     above rely on. Newton on the three rotation parameters recovers the
-    exact answer instead, and the best iterate is kept, so a target
-    orientation that is genuinely unreachable (a reflecting channel
-    frame) still yields the closest reachable one, not a diverged one.
+    answer instead. The best iterate is kept rather than the last one, so
+    the two escapes below (the step budget, and a singular Jacobian)
+    return the closest orientation actually found, never a diverged one.
+    A rigid REFLECTION is not one of those cases: the closed form is
+    exact there too, since M C Rw C^-1 stays a rotation.
 
     The left invariance is why the avar scale S is absent here: uniform
     or not, a POSITIVE scale cannot change the drawn orientation. A
@@ -577,6 +581,14 @@ def GimbalAxes(order, rx, ry, rz, channelRotation):
     world -- pass the target's GimbalFrame(), which is the frame the
     ROTATE channels compose in (it includes avars:rspin, which sits
     between the Euler product and P; ChannelFrame() does not).
+
+    These axes are for DRAWING the rings and measuring the swept screen
+    angle. To apply the drag, Gimbal mode calls the target's
+    ApplyRotateChannel(axisIndex, degrees), which moves exactly the one
+    channel whatever the channel frame is; every other Rotate Axis mode
+    calls ApplyRotate(worldAxis, degrees). Feeding these axes back into
+    ApplyRotate agrees with ApplyRotateChannel only while the channel
+    frame is rigid -- see ApplyRotateChannel and SolveWorldRotation.
     """
     order = _NormalizeOrder(order)
     angles = (rx, ry, rz)
@@ -626,6 +638,10 @@ class Target(object):
         self.writer = writer
         self.label = prim.GetName()
         self.preserveChildren = False
+        # Children a Preserve Children drag will NOT hold still, one
+        # sentence each, for the toolbar to show: silently leaving a
+        # child behind looks like a bug from the viewport.
+        self.skippedChildren = []
         self._base = {}
 
     @property
@@ -665,6 +681,14 @@ class Target(object):
             self.supportsPreserveChildren
 
     def AttributePaths(self):
+        """
+        Every attribute this target may write, for the undo recorder.
+
+        STATEFUL on the xform pose target: with Preserve Children on it
+        also returns the compensated children's channels. Call it AFTER
+        SetPreserveChildren() and BEFORE the recorder's Begin(), or an
+        undo will move the parent back and leave the children behind.
+        """
         raise NotImplementedError
 
     def BeginDrag(self):
@@ -682,6 +706,23 @@ class Target(object):
         raise NotImplementedError
 
     def ApplyRotate(self, worldAxis, degrees):
+        """Turn the drawn world frame by `degrees` about a WORLD axis."""
+        raise NotImplementedError
+
+    def ApplyRotateChannel(self, axisIndex, degrees):
+        """
+        Add `degrees` to ONE Euler channel (0 = X, 1 = Y, 2 = Z), the
+        others held at their drag base.
+
+        This is Maya's Gimbal mode (design spec 8.3, "each ring changes
+        exactly one Euler channel"), and it needs its own entry point
+        because ApplyRotate cannot deliver it: ApplyRotate takes a world
+        axis and promises the drawn frame turns by the dragged angle,
+        and under a sheared channel frame (an ancestor with non-uniform
+        scale) the rotation that does that moves all three channels.
+        Here the guarantee is exact whatever the channel frame is,
+        because the Euler product isolates the channel by construction.
+        """
         raise NotImplementedError
 
     def ApplyScale(self, axisIndex, factor):
@@ -765,6 +806,11 @@ class RigPoseTarget(_RigTarget):
                                   worldAxis, degrees)
         self._WriteVector(AVAR_R, DecomposeEuler(rNew, order, hint=base))
 
+    def ApplyRotateChannel(self, axisIndex, degrees):
+        values = [self._base[n] for n in AVAR_R]
+        values[axisIndex] = values[axisIndex] + degrees
+        self._WriteVector(AVAR_R, values)
+
     def ApplyScale(self, axisIndex, factor):
         values = []
         for i, name in enumerate(AVAR_S):
@@ -814,6 +860,11 @@ class RigPivotTarget(_RigTarget):
         rNew = SolveWorldRotation(RotationFromEuler("XYZ", *base),
                                   self._Qw(), worldAxis, degrees)
         self._WriteVector(REST_R, DecomposeEuler(rNew, "XYZ", hint=base))
+
+    def ApplyRotateChannel(self, axisIndex, degrees):
+        values = [self._base[n] for n in REST_R]
+        values[axisIndex] = values[axisIndex] + degrees
+        self._WriteVector(REST_R, values)
 
     def ApplyScale(self, axisIndex, factor):
         pass
@@ -904,28 +955,54 @@ class _XformTarget(Target):
 
     def _PreserveCandidates(self):
         """
-        The children a Preserve Children drag can hold still: plain
-        xformables with an XformCommonAPI-compatible stack, a zero pivot
-        (a non-zero pivot makes the local decomposition of the
-        compensated matrix ambiguous) and a non-reflecting linear part
-        (row lengths cannot recover a negative scale, so a mirrored
+        The children a Preserve Children drag can hold still, and as a
+        side effect the sentences in self.skippedChildren explaining the
+        ones it cannot.
+
+        A RigExec prim is never a candidate even though the schema makes
+        it a UsdGeomXformable with an empty (so XformCommonAPI-
+        compatible) op stack: RigExecXformable inherits Boundable
+        (libs/rigExecSchema/schema.usda:197-198). The evaluator places
+        those prims from their avars and never reads an xformOp, so
+        authoring one would not hold the child still AND would break the
+        project rule that RigExec prims carry no xformOps. FindRigRoot
+        catches plain xforms grouped inside a rig too, whose children
+        are the evaluator's business either way.
+
+        The rest of the filter: an XformCommonAPI-compatible stack, a
+        zero pivot (a non-zero pivot makes the local decomposition of
+        the compensated matrix ambiguous) and a non-reflecting linear
+        part (row lengths cannot recover a negative scale, so a mirrored
         child would silently come back unmirrored).
         """
+        self.skippedChildren = []
         if not self.preserveChildren:
             return []
         cache = UsdGeom.XformCache(self.time)
         found = []
         for child in self.prim.GetChildren():
+            name = child.GetName()
+            if IsRigXformable(child) or FindRigRoot(child) is not None:
+                self.skippedChildren.append(
+                    "%s is placed by the rig, not by xformOps" % name)
+                continue
             if not child.IsA(UsdGeom.Xformable):
                 continue
             api = UsdGeom.XformCommonAPI(child)
             if not api:
+                self.skippedChildren.append(
+                    "%s: xformOp stack is not XformCommonAPI-compatible"
+                    % name)
                 continue
             vectors = api.GetXformVectors(self.time)
             if Gf.Vec3f(vectors[3]) != _ZERO3F:
+                self.skippedChildren.append(
+                    "%s has a non-zero pivot" % name)
                 continue
             local = UsdGeom.Xformable(child).GetLocalTransformation(self.time)
             if _Linear(local).GetDeterminant() <= 0.0:
+                self.skippedChildren.append(
+                    "%s is mirrored or collapsed" % name)
                 continue
             found.append(_PreservedChild(child, api, vectors, cache))
         return found
@@ -982,8 +1059,20 @@ class XformPoseTarget(_XformTarget):
     supportsPreserveChildren = True
 
     def GizmoMatrix(self):
+        """
+        The object's orientation, drawn at the PIVOT (design spec 8.2).
+
+        Maya centres all three manipulators on the point the rotate and
+        scale ops turn about, which for this op stack is `pivot +
+        translate` in parent space. Drawing at the prim's local origin
+        instead would put the rotate rings off the point the object
+        turns about, and the ring centre would orbit during the drag.
+        """
         local = UsdGeom.Xformable(self.prim).GetLocalTransformation(self.time)
-        return (local * self.parentWorld).GetOrthonormalized(False)
+        m = (local * self.parentWorld).GetOrthonormalized(False)
+        t, _, _, p, _ = self.vectors
+        m.SetTranslateOnly(self.parentWorld.Transform(Gf.Vec3d(p) + t))
+        return m
 
     def RotationState(self):
         # Read through the API rather than the cached self.vectors: the
@@ -1009,6 +1098,13 @@ class XformPoseTarget(_XformTarget):
         self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
         self._RestoreChildren()
 
+    def ApplyRotateChannel(self, axisIndex, degrees):
+        angles = [float(v) for v in self._base["r"]]
+        angles[axisIndex] = angles[axisIndex] + degrees
+        ops = self._Ops()
+        self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
+        self._RestoreChildren()
+
     def ApplyScale(self, axisIndex, factor):
         s = Gf.Vec3f(self._base["s"])
         for i in range(3):
@@ -1023,9 +1119,14 @@ class XformPivotTarget(_XformTarget):
     kind = "xform-pivot"
     supportsRotate = False
     supportsScale = False
-    # Moving the pivot leaves every child's world matrix alone until the
-    # next pose drag, so there is nothing to compensate.
-    preserveChildrenReason = "moving the pivot does not move the children"
+    # Children DO move with a pivot edit whenever the prim carries a
+    # rotate or a scale, since the pivot is part of the local matrix.
+    # The brief still puts Preserve Children out of scope for pivot
+    # mode (design spec 1.2: a pivot edit is uncompensated by design,
+    # like moving a Maya pivot without compensation), so say that
+    # rather than claiming the children hold still on their own.
+    preserveChildrenReason = ("pivot edits are not compensated, on this "
+                              "prim or its children (spec 1.2)")
 
     def GizmoMatrix(self):
         t, r, s, p, order = self.vectors
@@ -1041,6 +1142,9 @@ class XformPivotTarget(_XformTarget):
                         Gf.Vec3f(self._base["p"] + Gf.Vec3f(local)))
 
     def ApplyRotate(self, worldAxis, degrees):
+        pass
+
+    def ApplyRotateChannel(self, axisIndex, degrees):
         pass
 
     def ApplyScale(self, axisIndex, factor):

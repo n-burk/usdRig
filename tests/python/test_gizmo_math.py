@@ -446,11 +446,25 @@ def TestXformTargets():
         stage, box.GetPrim(), gizmoMath.CHANNELS_POSE, writer)
     _Check(target is not None and target.kind == "xform-pose", reason)
     cache = UsdGeom.XformCache(time)
-    origin = target.GizmoMatrix().ExtractTranslation()
     expected = cache.GetLocalToWorldTransform(box.GetPrim())\
         .ExtractTranslation()
-    _Check(all(_Close(origin[i], expected[i]) for i in range(3)),
-           "xform gizmo at the local origin in world")
+    # Maya centres all three manipulators on the point the rotate and
+    # scale ops turn about, which for this op stack is pivot + translate
+    # in parent space (design spec section 8.2), not the local origin.
+    startVectors = api.GetXformVectors(time)
+    startParent = cache.GetParentToWorldTransform(box.GetPrim())
+    expectedGizmo = startParent.Transform(
+        Gf.Vec3d(startVectors[3]) + startVectors[0])
+    gizmo = target.GizmoMatrix()
+    origin = gizmo.ExtractTranslation()
+    _Check(all(_Close(origin[i], expectedGizmo[i]) for i in range(3)),
+           "xform gizmo at the pivot in world: %s vs %s"
+           % (origin, expectedGizmo))
+    objectWorld = cache.GetLocalToWorldTransform(box.GetPrim())\
+        .GetOrthonormalized(False)
+    _Check(all(_Close(gizmo[r][c], objectWorld[r][c])
+               for r in range(3) for c in range(3)),
+           "the gizmo keeps the object's orientation")
     delta = Gf.Vec3d(0, 3, 0)
     _Drag(target, lambda: target.ApplyTranslate(delta))
     cache.Clear()
@@ -516,18 +530,18 @@ def TestGimbalAndFrames():
     channel j must move channel j by the dragged angle and leave the
     other two alone, whatever the rotation order and the current angles.
 
-    The parent's avars:sx is put back to 1 first. A ring drag reaches
-    ApplyRotate as a WORLD axis, and ApplyRotate's contract is that the
-    drawn world frame turns by the dragged angle; under a sheared channel
-    frame (the chain's non-uniform parent scale) that answer moves more
-    than one Euler channel, so the single-channel gimbal contract only
-    holds where the channel frame is rigid. That is the case the Gimbal
-    option exists for.
+    Checked twice over. First on the chain AS IS, whose parent carries
+    avars:sx = 2 and so hands the child a SHEARED channel frame: that is
+    the case ApplyRotate cannot serve (its contract is that the drawn
+    frame turns by the dragged angle, and under shear the rotation doing
+    that moves all three channels), so Gimbal mode goes through
+    ApplyRotateChannel, which is exact there. Then with the shear
+    removed, where GimbalAxes fed back into ApplyRotate must agree with
+    it -- that is what makes the drawn ring axes the right ones.
     """
     stage, parent, child = _ChainStage()
     time = Usd.TimeCode.Default()
     writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
-    parent.GetAttribute("avars:sx").Set(1.0)
     # Non-zero angles on all three channels, plus a non-zero avars:rspin:
     # the spin sits BETWEEN the Euler product and P, so a ring axis that
     # ignored it would turn the wrong channels.
@@ -556,6 +570,13 @@ def TestGimbalAndFrames():
     _Check(_MatClose(target.GimbalFrame(), expectedGimbal),
            "the gimbal frame carries avars:rspin:\n%s\n%s"
            % (target.GimbalFrame(), expectedGimbal))
+    # The channel frame really is sheared here, so this is the case
+    # ApplyRotate cannot serve.
+    channelLinear = frames.P * frames.assetToWorld
+    lengths = [Gf.Vec3d(channelLinear[r][0], channelLinear[r][1],
+                        channelLinear[r][2]).GetLength() for r in range(3)]
+    _Check(not _Close(lengths[0], lengths[1], 1e-3),
+           "the fixture's channel frame must be sheared: %s" % lengths)
     for j in range(3):
         target.Refresh()
         order, base = target.RotationState()
@@ -563,14 +584,31 @@ def TestGimbalAndFrames():
                                     target.GimbalFrame())
         _Check(_Close(Gf.Vec3d(axes[j]).GetLength(), 1.0),
                "ring axis %d is a unit vector" % j)
+        _Drag(target, lambda: target.ApplyRotateChannel(j, 10.0))
+        after = target.RotationState()[1]
+        for i in range(3):
+            want = base[i] + (10.0 if i == j else 0.0)
+            _Check(_Close(after[i], want, 1e-9),
+                   "sheared: ring %d must move only channel %d: %s -> %s"
+                   % (j, j, base, after))
+    # With the shear gone, the drawn ring axes and ApplyRotate agree with
+    # ApplyRotateChannel -- so the rings are drawn about the right axes.
+    parent.GetAttribute("avars:sx").Set(1.0)
+    for j in range(3):
+        target.Refresh()
+        order, base = target.RotationState()
+        axes = gizmoMath.GimbalAxes(order, base[0], base[1], base[2],
+                                    target.GimbalFrame())
         _Drag(target, lambda: target.ApplyRotate(axes[j], 10.0))
         after = target.RotationState()[1]
         for i in range(3):
             want = base[i] + (10.0 if i == j else 0.0)
             _Check(_Close(after[i], want, 1e-6),
-                   "ring %d must move only channel %d: %s -> %s"
+                   "rigid: ring %d must move only channel %d: %s -> %s"
                    % (j, j, base, after))
-    # Pivot mode: XYZ rest angles, expressed in Q.
+    # Pivot mode: XYZ rest angles, expressed in Q. Q rides on the
+    # parent's avars, so it has to be re-read after the scale change.
+    frames = gizmoMath.ComputeRigFrames(stage, child, time)
     pivot, reason = gizmoMath.MakeTarget(
         stage, child, gizmoMath.CHANNELS_PIVOT, writer)
     _Check(pivot is not None, reason)
@@ -582,6 +620,10 @@ def TestGimbalAndFrames():
     pivotExpected.SetTranslateOnly(pivot.GizmoMatrix().ExtractTranslation())
     _Check(_MatClose(pivot.ChannelFrame(), pivotExpected),
            "the pivot channel frame is Q")
+    _Drag(pivot, lambda: pivot.ApplyRotateChannel(2, 12.0))
+    _Check(_Close(child.GetAttribute("rest:rz").Get(), 12.0)
+           and _Close(child.GetAttribute("rest:ry").Get(), 45.0),
+           "the pivot gimbal ring moves one rest:r channel")
     # A plain xform: the channel frame is the parent, and there is no spin.
     spin = UsdGeom.Xform.Define(stage, "/Asset/Spin")
     spin.AddRotateZOp().Set(90.0)
@@ -612,10 +654,24 @@ def TestGimbalAndFrames():
             _Check(_Close(after[i], want, 1e-4),
                    "xform ring %d must move only channel %d: %s -> %s"
                    % (j, j, base, after))
+    xTarget.Refresh()
+    xOrder, base = xTarget.RotationState()
+    _Drag(xTarget, lambda: xTarget.ApplyRotateChannel(1, 5.0))
+    after = xTarget.RotationState()[1]
+    _Check(_Close(after[1], base[1] + 5.0, 1e-4)
+           and _Close(after[0], base[0], 1e-4)
+           and _Close(after[2], base[2], 1e-4),
+           "the xform gimbal ring moves one rotate component: %s -> %s"
+           % (base, after))
     xPivot, reason = gizmoMath.MakeTarget(
         stage, box.GetPrim(), gizmoMath.CHANNELS_PIVOT, writer)
     _Check(xPivot is not None and xPivot.RotationState() is None,
            "the xform pivot has no rotation channels")
+    # The xform pivot has no rotation channels, so Gimbal mode is a
+    # no-op on it rather than an error.
+    _Drag(xPivot, lambda: xPivot.ApplyRotateChannel(0, 30.0))
+    _Check(_Close(xTarget.RotationState()[1][0], after[0], 1e-4),
+           "the xform pivot ignores a gimbal ring")
 
 
 def TestPreserveChildren():
@@ -695,6 +751,48 @@ def TestPreserveChildren():
     _Check(not pivotTarget.supportsPreserveChildren
            and pivotTarget.preserveChildrenReason != "",
            "the xform pivot refuses Preserve Children")
+    # A plain Xform GROUP inside a rig. RigExecXformable inherits
+    # Boundable, so a RigExecControl IS a UsdGeom.Xformable with an
+    # empty, hence XformCommonAPI-compatible, op stack and a zero pivot:
+    # without an explicit guard the compensation would author xformOps
+    # on it, which the evaluator never reads and the project forbids.
+    # Nothing under a RigExecRoot is compensated, and every skip is
+    # reported so the toolbar can say why the children did not follow.
+    grp = UsdGeom.Xform.Define(rigStage, "/Asset/Rig/Grp")
+    UsdGeom.XformCommonAPI(grp).SetTranslate(Gf.Vec3d(2, 0, 0))
+    ctl = rigStage.DefinePrim("/Asset/Rig/Grp/Ctl", "RigExecControl")
+    ctl.GetAttribute("avars:tx").Set(1.0)
+    plain = UsdGeom.Xform.Define(rigStage, "/Asset/Rig/Grp/Plain")
+    UsdGeom.XformCommonAPI(plain).SetTranslate(Gf.Vec3d(0, 4, 0))
+    _Check(ctl.IsA(UsdGeom.Xformable)
+           and bool(UsdGeom.XformCommonAPI(ctl)),
+           "a RigExecControl looks like a compensable xformable")
+    grpTarget, reason = gizmoMath.MakeTarget(
+        rigStage, grp.GetPrim(), gizmoMath.CHANNELS_POSE, rigWriter)
+    _Check(grpTarget is not None and grpTarget.supportsPreserveChildren,
+           "an Xform group inside a rig is still an xform target: %s"
+           % reason)
+    grpTarget.SetPreserveChildren(True)
+    paths = grpTarget.AttributePaths()
+    _Check(not any(str(p).startswith("/Asset/Rig/Grp/") for p in paths),
+           "no child under a rig joins the undo set: %s" % paths)
+    _Check(sorted(grpTarget.skippedChildren) == sorted([
+        "Ctl is placed by the rig, not by xformOps",
+        "Plain is placed by the rig, not by xformOps"]),
+           "both children are reported skipped: %s"
+           % grpTarget.skippedChildren)
+    _Drag(grpTarget, lambda: grpTarget.ApplyTranslate(Gf.Vec3d(0, 0, 3)))
+    # GetPropertyNames lists the schema's own xformOpOrder, so only
+    # AUTHORED names answer "did the compensation write here".
+    _Check(not [n for n in ctl.GetAuthoredPropertyNames()
+                if n.startswith("xformOp")],
+           "no xformOp authored on the RigExec child: %s"
+           % ctl.GetAuthoredPropertyNames())
+    _Check(not [n for n in plain.GetPrim().GetAuthoredPropertyNames()
+                if n.startswith("xformOp:rotate")
+                or n.startswith("xformOp:scale")],
+           "no new op authored on the plain child under the rig either: %s"
+           % plain.GetPrim().GetAuthoredPropertyNames())
 
 
 def main():
