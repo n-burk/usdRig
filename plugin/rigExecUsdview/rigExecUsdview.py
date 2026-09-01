@@ -104,6 +104,7 @@ class RigExecUsdviewContainer(PluginContainer):
         self._cachedStage = None
         self._undoStack = None
         self._viewportTools = None
+        self._viewportToolsFailed = False
 
         # Release the stage BEFORE the interpreter finalizes.
         #
@@ -262,6 +263,11 @@ class RigExecUsdviewContainer(PluginContainer):
         """
         if self._viewportTools is not None:
             return self._viewportTools
+        if self._viewportToolsFailed:
+            # A headless or Qt-less session fails identically on every
+            # stage replacement; warning each time would bury the one
+            # message that mattered.
+            return None
         try:
             try:
                 import gizmoUI
@@ -275,6 +281,7 @@ class RigExecUsdviewContainer(PluginContainer):
             Tf.Warn("rigExecUsdview: viewport tools unavailable: %s"
                     % error)
             self._viewportTools = None
+            self._viewportToolsFailed = True
         return self._viewportTools
 
     def _ToggleViewportTools(self):

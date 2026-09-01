@@ -6,10 +6,12 @@
 # Layering, and why: everything that can be decided without Qt already
 # was. gizmoMath owns "what does this world delta do to the channels",
 # gizmoScreen owns "where is the handle and what did the mouse mean",
-# gizmoSettings owns "what are the tool's options". This file is the Qt
-# shell: a toolbar, a transparent overlay that paints projected handles,
-# a settings window, and the event filter that turns a drag into
-# Apply* calls bracketed by an EditRecorder.
+# gizmoDrag owns "what does this drag do" (the whole of spec 8.2-8.4's
+# manipulation half, headlessly tested), gizmoSettings owns "what are
+# the tool's options". This file is the Qt shell: a toolbar, a
+# transparent overlay that paints projected handles, a settings window,
+# and the event plumbing that turns mouse and key events into
+# gizmoDrag.ApplyDrag() calls bracketed by an EditRecorder.
 #
 # OVERLAY APPROACH: a transparent, mouse-transparent CHILD WIDGET of the
 # StageView, raised above it. usdview's StageView is a QOpenGLWidget,
@@ -20,10 +22,22 @@
 # the GL widget was NOT needed and is not implemented; if a future Qt or
 # driver breaks the composite, that is where to go.
 #
-# HOTKEYS AND usdview (design spec 8.5). Two things in a usdview window
-# get at a key before the stage view does: the Qt.ApplicationShortcut
-# actions in mainWindowUI.ui, and the application-wide AppEventFilter.
-# Neither key below is given up, but both are shared:
+# HOTKEYS AND usdview (design spec 8.5). The viewport keys are read from
+# an APPLICATION-level event filter (ViewportHotkeyFilter), not from the
+# stage view: usdview's stage view has no focus policy and its
+# application-wide AppEventFilter refocuses the main window on every
+# mouse move (appEventFilter.py SetFocusFromMousePos), so a key never
+# reaches the view and a widget-level filter never runs. The filter is
+# gated so it cannot steal anything: the event must belong to usdview's
+# main window, the focus widget must not be a text field or spin box,
+# and the tool / size / pivot keys additionally need the cursor over the
+# viewport. Escape and the J / X holds are claimed only while a drag is
+# live, wherever the cursor is.
+#
+# Three things in a usdview window get at a key first: the
+# Qt.ApplicationShortcut actions in mainWindowUI.ui, the shortcut map,
+# and AppEventFilter. Neither key below is given up, but both are
+# shared:
 #   J  -- "Toggle Framed View" (actionToggle_Framed_View, connected,
 #         application-wide). Maya's J is hold-to-step-snap and only
 #         means anything WHILE dragging, so a live drag claims it in
@@ -61,12 +75,14 @@ except ImportError:                                       # PySide2
     QtActionWidgets = QtWidgets
 
 try:
+    import gizmoDrag
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
     import rigExecUndo
 except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import gizmoDrag
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
@@ -117,17 +133,6 @@ SPHERE_FILL_OPACITY = 0.30
 # proportion Maya's move cones use.
 CONE_LENGTH_RATIO = 3.0
 
-# A ray/plane delta more than this many times the camera-plane delta for
-# the same mouse travel is the intersection blowing up on a plane that
-# has gone nearly edge-on since the press. gizmoScreen guards the
-# obvious case up front; this catches the plane that tips over mid-drag.
-_PLANE_DELTA_SANITY = 50.0
-
-# Longest status line the toolbar shows before truncating; the whole
-# text stays on the label's tooltip. A QToolBar sizes itself to its
-# contents, so an unbounded label would push the tool buttons off.
-_STATUS_CHARS = 72
-
 # How near a click has to land, in LOGICAL pixels, before it counts as
 # hitting a handle outline.
 HIT_PIXELS = gizmoScreen.HIT_PIXELS
@@ -155,102 +160,6 @@ def _Color(rgb, opacity=1.0):
                         int(round(max(0.0, min(1.0, opacity)) * 255)))
 
 
-def _Linear(matrix):
-    """The rotation part of an orthonormal frame, as a Gf.Matrix3d."""
-    return matrix.ExtractRotationMatrix()
-
-
-def _ToFrame(frame, worldVector):
-    """A world direction in `frame`'s axes (frame is orthonormal)."""
-    return Gf.Vec3d(worldVector) * _Linear(frame).GetTranspose()
-
-
-def _FromFrame(frame, localVector):
-    return Gf.Vec3d(localVector) * _Linear(frame)
-
-
-class _PlaneAxes(object):
-    """
-    An axis selector that means "these two axes" for Target.ApplyScale.
-
-    Maya's planar scale handles change TWO channels at once, and
-    Target.ApplyScale takes a single axis index or None for uniform: it
-    recomputes all three values from the drag base on every call, so two
-    successive single-axis calls cannot express it (the second undoes
-    the first). Every ApplyScale implementation asks `axisIndex is None
-    or axisIndex == i`, so an object whose __eq__ answers for a SET of
-    indices expresses the missing case exactly, without reaching into
-    the target's private base values.
-
-    This is a workaround for a gap in the gizmoMath interface, not a
-    pattern to copy: the right fix is an `axisIndices` argument on
-    ApplyScale, and this class disappears when that lands.
-    """
-
-    def __init__(self, indices):
-        self._indices = frozenset(indices)
-
-    def __eq__(self, other):
-        return other in self._indices
-
-    def __ne__(self, other):
-        return other not in self._indices
-
-    def __hash__(self):
-        return hash(self._indices)
-
-    def __repr__(self):
-        return "<axes %s>" % sorted(self._indices)
-
-
-class _Drag(object):
-    """
-    One live manipulation: what was grabbed, where, and what has been
-    written so far.
-
-    `handle` is the handle AS IT WAS AT THE PRESS and stays frozen for
-    the whole drag. A rotate drag must turn about the axis the artist
-    grabbed even as the object (and, in Object orientation, the ring)
-    turns underneath; recomputing the axis from the redrawn handles
-    would make the manipulator chase itself.
-    """
-
-    def __init__(self, tool, handle, recorder, target, press, camera,
-                 viewport, origin2d):
-        self.tool = tool
-        self.handle = handle
-        self.recorder = recorder
-        self.target = target
-        self.press = press
-        self.current = press
-        self.camera = camera
-        self.viewport = viewport
-        self.origin2d = origin2d
-        # Rotation bookkeeping: `raw` is the last wrapped angle from
-        # RotationDragAngle, `angle` the accumulated (and snapped) total
-        # actually applied, `startParameter` where on the ring the press
-        # landed so the pie slice can start there.
-        self.raw = 0.0
-        self.total = 0.0
-        self.angle = 0.0
-        self.startParameter = 0.0
-        # Free rotate composes each step into one running world rotation
-        # applied from the drag base, so a curved drag rolls the ball
-        # instead of snapping back to a single press-to-cursor axis.
-        self.trackballLast = press
-        self.trackball = Gf.Matrix4d(1.0)
-        self.lastDelta = None
-        # Maya's Ctrl+axis "move in the perpendicular plane", read from
-        # every event rather than only the press: on macOS Qt turns a
-        # Ctrl+left CLICK into a right-button press, so the reachable
-        # gesture is to grab the axis first and then hold Ctrl.
-        self.ctrl = False
-        # True when this ring was drawn on a GIMBAL axis, which changes
-        # which Target entry point the drag writes through -- see
-        # GizmoController._ApplyRotate.
-        self.gimbal = False
-
-
 # ---------------------------------------------------------------------------
 # Overlay
 # ---------------------------------------------------------------------------
@@ -271,8 +180,10 @@ class GizmoOverlay(QtWidgets.QWidget):
         super(GizmoOverlay, self).__init__(parent)
         self._controller = controller
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        # WA_NoSystemBackground plus no auto-fill is what leaves the
+        # stage view showing through; WA_TranslucentBackground is a
+        # top-level-window attribute and would do nothing on a child.
         self.setAttribute(QtCore.Qt.WA_NoSystemBackground, True)
-        self.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
         self.setFocusPolicy(QtCore.Qt.NoFocus)
 
@@ -394,7 +305,7 @@ class GizmoOverlay(QtWidgets.QWidget):
         polygon = self._Polygon(handle.points, ratio)
         painter.setBrush(QtGui.QBrush(
             self._HandleColor(handle, PLANE_FILL_OPACITY)))
-        painter.setPen(self._Pen(handle, LINE_WIDTH * 0.75))
+        painter.setPen(self._Pen(handle))
         painter.drawPolygon(polygon)
 
     def _DrawCenter(self, painter, handle, ratio):
@@ -448,6 +359,50 @@ class GizmoOverlay(QtWidgets.QWidget):
 # Toolbar
 # ---------------------------------------------------------------------------
 
+class ViewportStatusBar(QtWidgets.QLabel):
+    """
+    The gizmo's status line, on its own full-width row under the tools.
+
+    A row of its own because QToolBar moves whatever does not fit into
+    an overflow chevron, and at usdview's DEFAULT viewport width the
+    status label and the Tool Settings button were already behind it --
+    exactly the width at which "why is there no gizmo" and the live
+    rotation angle matter most. Elided rather than wrapped so the row
+    keeps one constant height and the viewport never jumps as the text
+    changes; the whole string stays on the tooltip.
+    """
+
+    def __init__(self, parent=None):
+        super(ViewportStatusBar, self).__init__(parent)
+        self._full = ""
+        self.setContentsMargins(6, 1, 6, 1)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                           QtWidgets.QSizePolicy.Fixed)
+        self.setToolTip("What the gizmo is editing, or why there is none.")
+
+    def SetStatus(self, text):
+        text = text or ""
+        if text != self._full:
+            self._full = text
+            self.setToolTip(text or "No viewport gizmo.")
+        self._Elide()
+
+    def FullText(self):
+        """The untruncated status; what a test should assert on."""
+        return self._full
+
+    def resizeEvent(self, event):
+        super(ViewportStatusBar, self).resizeEvent(event)
+        self._Elide()
+
+    def _Elide(self):
+        metrics = QtGui.QFontMetrics(self.font())
+        width = max(0, self.width() - 12)
+        QtWidgets.QLabel.setText(
+            self, metrics.elidedText(self._full, QtCore.Qt.ElideRight,
+                                     width))
+
+
 class ViewportToolbar(QtWidgets.QToolBar):
     """
     The strip above the viewport: tools, channel set, write mode, undo,
@@ -455,18 +410,27 @@ class ViewportToolbar(QtWidgets.QToolBar):
     there is no gizmo.
     """
 
-    def __init__(self, controller, parent=None):
+    def __init__(self, controller, statusBar, parent=None):
         super(ViewportToolbar, self).__init__("RigExec Viewport Tools",
                                               parent)
         self._controller = controller
+        self._status = statusBar
         self.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self.setMovable(False)
         self.setFloatable(False)
-        # The default style barely distinguishes a checked tool button,
-        # and "which tool am I in" is the one thing this bar must say.
+        # Two things this stylesheet buys. The checked state, because
+        # the default style barely distinguishes it and "which tool am I
+        # in" is the one thing this bar must say. And tight padding,
+        # because the row has to FIT: at usdview's default split the
+        # viewport is around 600 logical px and the default padding put
+        # the bar over that, which sends the trailing items into
+        # QToolBar's overflow chevron where nobody finds them.
         self.setStyleSheet(
-            "QToolButton:checked { background: #4879b4; color: white;"
+            "QToolBar { padding: 0px; spacing: 1px; }"
+            " QToolButton { padding: 1px 5px; margin: 0px; }"
+            " QToolButton:checked { background: #4879b4; color: white;"
             " border: 1px solid #79a6dc; border-radius: 3px; }")
+        self.setContentsMargins(0, 0, 0, 0)
 
         self._toolActions = {}
         self._channelActions = {}
@@ -485,16 +449,6 @@ class ViewportToolbar(QtWidgets.QToolBar):
         # does not fit into an overflow menu, and a right-aligned status
         # label is the first thing to disappear on a narrow viewport --
         # which is exactly when an artist needs to read it.
-        self._status = QtWidgets.QLabel("")
-        self._status.setToolTip(
-            "What the gizmo is editing, or why there is none.")
-        # The text is truncated in Sync() rather than given a shrinking
-        # size policy: a QToolBar hands an Ignored-policy widget zero
-        # width, and a status line that is there but empty is worse than
-        # one that is short. A very narrow viewport still moves it into
-        # the toolbar's overflow chevron, which is Qt's own doing.
-        self.addWidget(self._status)
-
     def _AddChecked(self, group, text, tooltip, checked, handler):
         action = QtActionWidgets.QAction(text, self)
         action.setCheckable(True)
@@ -526,7 +480,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
                 lambda checked=False, t=tool: self._onTool(t))
 
     def _BuildChannels(self):
-        self.addWidget(QtWidgets.QLabel("Channels:"))
+        self.addWidget(QtWidgets.QLabel(" Channels "))
         group = QtActionWidgets.QActionGroup(self)
         group.setExclusive(True)
         tips = {
@@ -545,7 +499,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
                 lambda checked=False, c=channels: self._onChannels(c))
 
     def _BuildWrite(self):
-        self.addWidget(QtWidgets.QLabel("Write:"))
+        self.addWidget(QtWidgets.QLabel(" Write "))
         group = QtActionWidgets.QActionGroup(self)
         group.setExclusive(True)
         tips = {
@@ -585,8 +539,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
         self.addAction(self.redoAction)
 
     def _BuildSettingsButton(self):
-        self.settingsAction = QtActionWidgets.QAction("Tool Settings…",
-                                                      self)
+        self.settingsAction = QtActionWidgets.QAction("Settings…", self)
         self.settingsAction.setToolTip(
             "Axis orientation, snapping and the manipulator size for "
             "the active tool.")
@@ -617,8 +570,12 @@ class ViewportToolbar(QtWidgets.QToolBar):
         for mode, action in self._writeActions.items():
             action.setChecked(mode == controller.WriteMode())
         stack = controller.undoStack
-        self.undoAction.setEnabled(stack.CanUndo())
-        self.redoAction.setEnabled(stack.CanRedo())
+        # Greyed out during a drag as well as when empty: the actions
+        # are application shortcuts and would otherwise fire with a
+        # mouse button down (see GizmoController.Undo).
+        dragging = controller.IsDragging()
+        self.undoAction.setEnabled(stack.CanUndo() and not dragging)
+        self.redoAction.setEnabled(stack.CanRedo() and not dragging)
         self.undoAction.setToolTip(
             "Undo %s (Ctrl+Z)" % stack.UndoText() if stack.CanUndo()
             else "Nothing to undo (Ctrl+Z)")
@@ -626,12 +583,10 @@ class ViewportToolbar(QtWidgets.QToolBar):
             "Redo %s (Ctrl+Shift+Z, Shift+Z, Ctrl+Y)" % stack.RedoText()
             if stack.CanRedo()
             else "Nothing to redo (Ctrl+Shift+Z, Shift+Z, Ctrl+Y)")
-        status = controller.Status()
-        self._status.setToolTip(status)
-        self._status.setText(status if len(status) <= _STATUS_CHARS
-                             else status[:_STATUS_CHARS - 1] + "\u2026")
+        self._status.SetStatus(controller.Status())
 
     def StatusLabel(self):
+        """The status row widget (a ViewportStatusBar, not in the bar)."""
         return self._status
 
 
@@ -663,7 +618,11 @@ class ToolSettingsPanel(QtWidgets.QWidget):
         self._tool = None
         self._updating = False
         self.setWindowTitle("RigExec: Tool Settings")
-        self.setGeometry(0, 0, 340, 300)
+        # A floor, not a fixed size: adjustSize() after each Rebuild
+        # fits the height to the tool's rows, and without the floor it
+        # also shrinks the width until "Prevent Negative Scale" clips.
+        self.setMinimumWidth(360)
+        self.resize(360, 300)
 
         outer = QtWidgets.QVBoxLayout()
         outer.setContentsMargins(10, 10, 10, 10)
@@ -783,6 +742,10 @@ class ToolSettingsPanel(QtWidgets.QWidget):
         self._form.addRow("Manipulator Size", self._size)
 
         self.Sync()
+        # The row count changes with the tool; without this the window
+        # keeps its first tool's height and shows an empty band.
+        self.adjustSize()
+        self.resize(max(self.width(), self.minimumWidth()), self.height())
 
     # -- refresh --------------------------------------------------------
 
@@ -883,6 +846,55 @@ class ToolSettingsPanel(QtWidgets.QWidget):
         self.Sync()
 
 
+# Focus widgets that own every key they are given. The viewport hotkeys
+# are bare letters, so typing a prim name into usdview's search box must
+# never switch the tool.
+_TEXT_WIDGETS = (QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox,
+                 QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)
+
+
+class ViewportHotkeyFilter(QtCore.QObject):
+    """
+    The viewport hotkeys, taken at the APPLICATION level.
+
+    A widget-level filter cannot work here: usdview's stage view sets no
+    focus policy (it reports NoFocus), and usdview's own application
+    filter calls SetFocusFromMousePos on every mouse move
+    (appEventFilter.py), which walks up from the stage view and hands
+    focus to the main window. So a key pressed over the viewport is
+    delivered to the main window, never to the view, and Q / W / E / R,
+    the size keys, D / Insert and the Escape abort were all dead in a
+    real session even though QTest keys sent straight at the view worked.
+
+    Qt runs application filters most-recently-installed first, and this
+    plugin loads after usdview installed its own, so this one sees the
+    key first -- which is also what lets a live drag take Escape ahead
+    of appEventFilter.py's unconditional focus reset.
+
+    Everything this filter claims, GizmoController.HandleHotkey decides;
+    nothing is claimed unless it is acted on.
+    """
+
+    def __init__(self, controller):
+        super(ViewportHotkeyFilter, self).__init__(controller)
+        self._controller = controller
+
+    def eventFilter(self, obj, event):
+        try:
+            kind = event.type()
+            if kind not in (QtCore.QEvent.KeyPress,
+                            QtCore.QEvent.KeyRelease,
+                            QtCore.QEvent.ShortcutOverride):
+                return False
+            return self._controller.HandleHotkey(obj, event, kind)
+        except Exception as error:
+            # An exception escaping an application-wide filter would
+            # break every key in usdview, not just ours.
+            Tf.Warn("rigExecUsdview: gizmo hotkey filter failed: %s"
+                    % error)
+            return False
+
+
 # ---------------------------------------------------------------------------
 # Controller
 # ---------------------------------------------------------------------------
@@ -914,6 +926,8 @@ class GizmoController(QtCore.QObject):
         self._holdSnap = False
         self._holdGrid = False
         self._ctrl = False
+        self._claimedKey = None
+        self._hotkeys = None
         self._visible = True
         self._gimbalAxes = None
         self._rebuilding = False
@@ -924,11 +938,19 @@ class GizmoController(QtCore.QObject):
         view = StageView(usdviewApi)
         self._view = view
         self.overlay = GizmoOverlay(self, view) if view is not None else None
-        self.toolbar = ViewportToolbar(self)
+        self.statusBar = ViewportStatusBar()
+        self.toolbar = ViewportToolbar(self, self.statusBar)
 
         self._InstallToolbar()
+        self._hotkeys = ViewportHotkeyFilter(self)
+        application = QtWidgets.QApplication.instance()
+        if application is not None:
+            application.installEventFilter(self._hotkeys)
         if view is not None:
+            # The stage view keeps the MOUSE filter; keys go through the
+            # application filter above (see ViewportHotkeyFilter).
             view.installEventFilter(self)
+            view.destroyed.connect(self._onViewDestroyed)
             # WA_Hover, not setMouseTracking: Maya's pre-selection
             # highlight needs mouse moves with no button down, and Qt
             # delivers those to a widget only if it tracks the mouse --
@@ -967,7 +989,29 @@ class GizmoController(QtCore.QObject):
         if layout is None:
             return
         layout.insertWidget(0, self.toolbar)
+        layout.insertWidget(1, self.statusBar)
         self.toolbar.Sync()
+
+    def Detach(self):
+        """
+        Take the application-wide key filter back off.
+
+        An application filter outlives the widgets it serves, so leaving
+        one installed after usdview has destroyed the stage view would
+        keep answering key events on behalf of a gizmo that no longer
+        has a viewport.
+        """
+        if self._hotkeys is None:
+            return
+        application = QtWidgets.QApplication.instance()
+        if application is not None:
+            application.removeEventFilter(self._hotkeys)
+        self._hotkeys = None
+
+    def _onViewDestroyed(self, *args):
+        self._view = None
+        self.overlay = None
+        self.Detach()
 
     def _ObserveStage(self, stage):
         if self._noticeKey is not None:
@@ -1051,6 +1095,7 @@ class GizmoController(QtCore.QObject):
         self._visible = visible
         self._AbortDrag()
         self.toolbar.setVisible(visible)
+        self.statusBar.setVisible(visible)
         if self.overlay is not None:
             self.overlay.setVisible(visible)
         self._RebuildHandles()
@@ -1280,7 +1325,8 @@ class GizmoController(QtCore.QObject):
         if not self._visible:
             return "Viewport tools hidden"
         if self._tool == TOOL_SELECT:
-            return "Select"
+            return ("Select: usdview picking. Choose Move, Rotate or "
+                    "Scale for a manipulator.")
         target = self._target
         if target is None:
             return self._reason
@@ -1320,13 +1366,18 @@ class GizmoController(QtCore.QObject):
     # -- undo -----------------------------------------------------------
 
     def Undo(self):
-        if not self.undoStack.Undo():
+        # Maya ignores undo while a manipulator is held. Running it here
+        # would restore an earlier edit that the drag's next event then
+        # overwrites from its own base, and the release would push over
+        # the redo branch -- the earlier edit lost from history with its
+        # effect half applied.
+        if self._drag is not None or not self.undoStack.Undo():
             return False
         self._AfterUndoRedo()
         return True
 
     def Redo(self):
-        if not self.undoStack.Redo():
+        if self._drag is not None or not self.undoStack.Redo():
             return False
         self._AfterUndoRedo()
         return True
@@ -1346,10 +1397,17 @@ class GizmoController(QtCore.QObject):
 
     # -- settings window ------------------------------------------------
 
+    def StatusBar(self):
+        """The status row widget under the tool buttons."""
+        return self.statusBar
+
     def ShowToolSettings(self):
         if self._panel is None:
             self._panel = ToolSettingsPanel.GetInstance(self)
-        self._panel.Rebuild()
+        # Sync() rebuilds by itself when the tool has changed; rebuilding
+        # unconditionally would throw away and recreate every row widget
+        # on each click of the button.
+        self._panel.Sync()
         self._panel.show()
         self._panel.raise_()
         self._panel.activateWindow()
@@ -1370,8 +1428,10 @@ class GizmoController(QtCore.QObject):
         self._RebuildHandles()
 
     def _onSelectionChanged(self, added=None, removed=None):
+        # _selected survives: Maya keeps the active handle across a
+        # selection change, so middle-drag still repeats it on the prim
+        # you just picked. The hover is stale by definition.
         self._AbortDrag()
-        self._selected = None
         self._hover = None
         self.RefreshTarget()
 
@@ -1426,12 +1486,9 @@ class GizmoController(QtCore.QObject):
             # -- has its own hook.
             self._SyncOverlay(restack=False)
             return False
-        if kind == QtCore.QEvent.ShortcutOverride:
-            return self._OnShortcutOverride(event)
-        if kind == QtCore.QEvent.KeyPress:
-            return self._OnKeyPress(event)
-        if kind == QtCore.QEvent.KeyRelease:
-            return self._OnKeyRelease(event)
+        # Key events are NOT handled here: usdview never lets the stage
+        # view hold focus, so they arrive through the application-level
+        # ViewportHotkeyFilter instead.
         if kind == QtCore.QEvent.HoverMove:
             self._UpdateHover(self._Position(event))
             return False
@@ -1558,78 +1615,156 @@ class GizmoController(QtCore.QObject):
 
     # -- keys -----------------------------------------------------------
 
-    # The keys a live drag owns outright. A KeyPress that matches ANY
-    # shortcut never reaches the focus widget -- Qt consumes it in the
-    # shortcut map -- so a drag has to claim these in ShortcutOverride
-    # or it will never see them. Escape is on the list because
-    # something in usdview's window claims it: without this, an aborted
-    # drag simply kept going.
+    # The keys a live drag owns outright, wherever the cursor is.
     _DRAG_KEYS = (QtCore.Qt.Key_Escape, QtCore.Qt.Key_J, QtCore.Qt.Key_X)
 
-    def _OnShortcutOverride(self, event):
-        """
-        Act on Escape, J and X here rather than waiting for the
-        KeyPress, but only while a drag is live.
+    # Everything else, which needs the cursor over the viewport.
+    _TOOL_KEYS = {QtCore.Qt.Key_Q: TOOL_SELECT,
+                  QtCore.Qt.Key_W: TOOL_TRANSLATE,
+                  QtCore.Qt.Key_E: TOOL_ROTATE,
+                  QtCore.Qt.Key_R: TOOL_SCALE}
+    _SIZE_KEYS = (QtCore.Qt.Key_Plus, QtCore.Qt.Key_Equal,
+                  QtCore.Qt.Key_Minus)
+    _PIVOT_KEYS = (QtCore.Qt.Key_D, QtCore.Qt.Key_Insert)
 
-        A key that matches ANY shortcut is consumed by Qt's shortcut map
-        and never reaches the focus widget, and both Escape and J match
-        one in a usdview window (J is Toggle Framed View). Accepting the
-        override is the documented way to reclaim such a key -- but it
-        does not always produce a KeyPress either, because a synthetic
-        key from QTest stops at the override it sees accepted. Doing the
-        work in the override itself is the one path that holds for a
-        real keyboard and for a test, and outside a drag none of this
-        runs, so usdview keeps its own bindings.
+    def _InMainWindow(self, receiver):
+        """Whether the event belongs to usdview's own main window."""
+        try:
+            main = self.usdviewApi.qMainWindow
+        except Exception:
+            return False
+        if main is None:
+            return False
+        if isinstance(receiver, QtWidgets.QWidget):
+            return receiver.window() is main
+        # A QWindow or another non-widget receiver: a real key press
+        # implies the window is active anyway.
+        return QtWidgets.QApplication.activeWindow() is main
+
+    @staticmethod
+    def _TypingFocus():
+        focus = QtWidgets.QApplication.focusWidget()
+        if focus is None:
+            return False
+        if isinstance(focus, _TEXT_WIDGETS):
+            return True
+        return (isinstance(focus, QtWidgets.QComboBox)
+                and focus.isEditable())
+
+    def _CursorOverView(self):
+        view = self._view
+        if view is None:
+            return False
+        if view.underMouse():
+            return True
+        try:
+            return view.rect().contains(
+                view.mapFromGlobal(QtGui.QCursor.pos()))
+        except Exception:
+            return False
+
+    def HandleHotkey(self, receiver, event, kind):
         """
-        if self._drag is None or event.key() not in self._DRAG_KEYS:
+        One key event from the application filter. True consumes it.
+
+        The gates, in order: the viewport tools must be visible, the
+        event must belong to usdview's main window, and the focus widget
+        must not be a text field. A live drag then owns Escape / J / X
+        wherever the cursor is; the tool, size and pivot keys need the
+        cursor over the viewport, or the event delivered straight at the
+        view (which is what QTest does and a real keyboard never does).
+        """
+        if not self._visible or self._view is None:
+            return False
+        if not self._InMainWindow(receiver):
             return False
         key = event.key()
-        if key == QtCore.Qt.Key_Escape:
-            self._AbortDrag()
-        elif key == QtCore.Qt.Key_J and not self._holdSnap:
-            self._holdSnap = True
-            self._ReapplyDrag()
-        elif key == QtCore.Qt.Key_X and not self._holdGrid:
-            self._holdGrid = True
-            self._ReapplyDrag()
-        event.accept()
+        # Release the latch BEFORE the typing gate: a key pressed over
+        # the viewport and released after the focus moved into a text
+        # field would otherwise stay latched and stop working.
+        if (kind == QtCore.QEvent.KeyRelease and key == self._claimedKey
+                and not event.isAutoRepeat()):
+            self._claimedKey = None
+        if self._TypingFocus():
+            return False
+        if kind == QtCore.QEvent.KeyRelease:
+            return self._Claim(event, self._ReleaseHold(event, key))
+        if self._drag is not None and key in self._DRAG_KEYS:
+            return self._Claim(event, self._Act(kind, key, self._DragKey))
+        if event.modifiers() & (QtCore.Qt.ControlModifier
+                                | QtCore.Qt.AltModifier
+                                | QtCore.Qt.MetaModifier):
+            return False              # leave usdview's Ctrl+... alone
+        if not (self._CursorOverView() or receiver is self._view):
+            return False
+        return self._Claim(event, self._Act(kind, key, self._ToolKey))
+
+    @staticmethod
+    def _Claim(event, handled):
+        """
+        Mark a key we acted on as accepted, not merely filtered.
+
+        Returning True from an event filter stops the delivery, but Qt's
+        shortcut map looks at the ACCEPTED flag on a ShortcutOverride to
+        decide whether to run the matching shortcut. Without this, J
+        both snapped the drag and fired usdview's Toggle Framed View,
+        which moved the camera out from under the manipulator.
+        """
+        if handled:
+            event.accept()
+        return handled
+
+    def _Act(self, kind, key, handler):
+        """
+        Run `handler` exactly ONCE per physical key press, whichever of
+        the several deliveries Qt makes arrives first.
+
+        One press reaches an application filter many times. Qt sends a
+        ShortcutOverride and then a KeyPress, and it delivers each of
+        them to the focus widget and then, while they stay unaccepted,
+        to every ancestor up to the window -- five hops in usdview. It
+        is also unknowable which of the two Qt will let through: a key
+        matching any shortcut is swallowed by the shortcut map before
+        the KeyPress, while QTest stops at an override it sees accepted.
+        So the rule is: act on the first delivery, remember the key, and
+        swallow every later one until its KeyRelease clears the latch.
+        Acting only in the override loses a real keyboard, acting only
+        in the KeyPress loses J and Escape, and acting on each delivery
+        grew the manipulator by 10% five times per keypress.
+        """
+        del kind                      # every delivery is treated alike
+        if key == self._claimedKey:
+            return True               # already acted on this press
+        if not handler(key):
+            return False
+        self._claimedKey = key
         return True
 
-    def _OnKeyPress(self, event):
-        if not self._visible:
-            return False
-        key = event.key()
-        if key == QtCore.Qt.Key_Escape and self._drag is not None:
+    def _DragKey(self, key):
+        if key == QtCore.Qt.Key_Escape:
             self._AbortDrag()
             return True
         if key == QtCore.Qt.Key_J:
             if not self._holdSnap:
                 self._holdSnap = True
                 self._ReapplyDrag()
-            return self._drag is not None
+            return True
         if key == QtCore.Qt.Key_X:
             if not self._holdGrid:
                 self._holdGrid = True
                 self._ReapplyDrag()
-            return self._drag is not None
-        if event.modifiers() & (QtCore.Qt.ControlModifier
-                                | QtCore.Qt.AltModifier
-                                | QtCore.Qt.MetaModifier):
-            return False              # leave usdview's Ctrl+... alone
-        tools = {QtCore.Qt.Key_Q: TOOL_SELECT,
-                 QtCore.Qt.Key_W: TOOL_TRANSLATE,
-                 QtCore.Qt.Key_E: TOOL_ROTATE,
-                 QtCore.Qt.Key_R: TOOL_SCALE}
-        if key in tools:
-            self.SetTool(tools[key])
             return True
-        if key in (QtCore.Qt.Key_Plus, QtCore.Qt.Key_Equal):
-            self.settings.ScaleManipulator(1.1)
+        return False
+
+    def _ToolKey(self, key):
+        if key in self._TOOL_KEYS:
+            self.SetTool(self._TOOL_KEYS[key])
             return True
-        if key == QtCore.Qt.Key_Minus:
-            self.settings.ScaleManipulator(1.0 / 1.1)
+        if key in self._SIZE_KEYS:
+            self.settings.ScaleManipulator(
+                1.0 / 1.1 if key == QtCore.Qt.Key_Minus else 1.1)
             return True
-        if key in (QtCore.Qt.Key_D, QtCore.Qt.Key_Insert):
+        if key in self._PIVOT_KEYS:
             self.SetChannels(
                 gizmoMath.CHANNELS_POSE
                 if self._channels == gizmoMath.CHANNELS_PIVOT
@@ -1637,14 +1772,14 @@ class GizmoController(QtCore.QObject):
             return True
         return False
 
-    def _OnKeyRelease(self, event):
+    def _ReleaseHold(self, event, key):
         if event.isAutoRepeat():
             return False
-        if event.key() == QtCore.Qt.Key_J and self._holdSnap:
+        if key == QtCore.Qt.Key_J and self._holdSnap:
             self._holdSnap = False
             self._ReapplyDrag()
             return self._drag is not None
-        if event.key() == QtCore.Qt.Key_X and self._holdGrid:
+        if key == QtCore.Qt.Key_X and self._holdGrid:
             self._holdGrid = False
             self._ReapplyDrag()
             return self._drag is not None
@@ -1657,13 +1792,11 @@ class GizmoController(QtCore.QObject):
 
     # -- drag -----------------------------------------------------------
 
-    def _SnapActive(self):
-        return bool(self.settings.For(self._tool).stepSnap) or self._holdSnap
-
-    def _StepSize(self):
-        return float(self.settings.For(self._tool).stepSize)
-
     def _BeginDrag(self, handle, point):
+        """
+        Bracket a drag: snapshot the attributes, record the base values,
+        and build the Qt-free DragState the maths runs on.
+        """
         target = self._target
         if target is None or not handle.grabbable:
             return False
@@ -1685,12 +1818,11 @@ class GizmoController(QtCore.QObject):
             Tf.Warn("rigExecUsdview: could not start the gizmo drag: %s"
                     % error)
             return False
-        drag = _Drag(self._tool, handle, recorder, target, point, camera,
-                     viewport, handle.center)
+        drag = gizmoDrag.DragState(
+            self._tool, handle, target, point, camera, viewport,
+            origin2d=handle.center,
+            gimbal=self._gimbalAxes is not None, recorder=recorder)
         drag.ctrl = self._ctrl
-        drag.gimbal = self._gimbalAxes is not None
-        if handle.kind in ("ring", "view"):
-            drag.startParameter = gizmoScreen.RingParameter(handle, point)
         self._drag = drag
         self.toolbar.Sync()
         self._Repaint()
@@ -1700,14 +1832,11 @@ class GizmoController(QtCore.QObject):
         drag = self._drag
         if drag is None:
             return
-        drag.current = point
         try:
-            if drag.tool == TOOL_TRANSLATE:
-                self._ApplyTranslate(drag)
-            elif drag.tool == TOOL_ROTATE:
-                self._ApplyRotate(drag)
-            elif drag.tool == TOOL_SCALE:
-                self._ApplyScale(drag)
+            gizmoDrag.ApplyDrag(
+                drag, point, self.settings.For(drag.tool),
+                holdSnap=self._holdSnap, holdGrid=self._holdGrid,
+                ctrl=drag.ctrl)
             drag.target.Refresh()
         except Exception as error:
             Tf.Warn("rigExecUsdview: gizmo drag failed: %s" % error)
@@ -1716,9 +1845,22 @@ class GizmoController(QtCore.QObject):
         self.toolbar.Sync()
         self.usdviewApi.UpdateViewport()
 
+    def _ClearHolds(self):
+        """
+        Drop the J / X holds and the key latch at the end of a drag.
+
+        A KeyRelease can land on a widget this filter never sees (the
+        focus moves under the cursor while a key is down), and a hold
+        that survived its drag would silently snap the next one.
+        """
+        self._holdSnap = False
+        self._holdGrid = False
+        self._claimedKey = None
+
     def _EndDrag(self):
         drag = self._drag
         self._drag = None
+        self._ClearHolds()
         if drag is None:
             return
         label = "%s %s" % (_EDIT_VERBS.get(drag.tool, drag.tool),
@@ -1739,6 +1881,7 @@ class GizmoController(QtCore.QObject):
     def _AbortDrag(self):
         drag = self._drag
         self._drag = None
+        self._ClearHolds()
         if drag is None:
             return
         if not drag.target.prim.IsValid():
@@ -1757,133 +1900,6 @@ class GizmoController(QtCore.QObject):
         self.toolbar.Sync()
         self._Repaint()
         self.usdviewApi.UpdateViewport()
-
-    # -- drag mathematics -----------------------------------------------
-
-    def _PlaneDelta(self, drag, origin, normal):
-        """
-        A ray/plane drag delta, with a sanity net.
-
-        The intersection is what keeps the grabbed point under the
-        cursor as the plane recedes, but a plane that tips towards
-        edge-on mid-drag sends it towards infinity. The camera-plane
-        delta for the same travel is always bounded, so a result wildly
-        larger than that one is a miss and the last good delta stands.
-        """
-        delta = gizmoScreen.RayPlaneDragDelta(
-            drag.camera, drag.viewport, origin, normal, drag.press,
-            drag.current)
-        reference = gizmoScreen.PlaneDragDelta(
-            drag.camera, drag.viewport, origin, drag.press, drag.current)
-        limit = max(reference.GetLength(), 1e-9) * _PLANE_DELTA_SANITY
-        if drag.lastDelta is not None and delta.GetLength() > limit:
-            return drag.lastDelta
-        drag.lastDelta = delta
-        return delta
-
-    def _ApplyTranslate(self, drag):
-        handle = drag.handle
-        origin = Gf.Vec3d(handle.worldCenter)
-        if handle.kind == "axis":
-            if drag.ctrl:
-                delta = self._PlaneDelta(drag, origin, handle.worldAxis)
-            else:
-                parameter = gizmoScreen.AxisDragParameter(
-                    handle, drag.press, drag.current)
-                delta = Gf.Vec3d(handle.worldAxis) * (parameter
-                                                      * handle.worldLength)
-        elif handle.kind == "plane":
-            delta = self._PlaneDelta(drag, origin, handle.worldNormal)
-        else:
-            delta = gizmoScreen.PlaneDragDelta(
-                drag.camera, drag.viewport, origin, drag.press, drag.current)
-        delta = self._SnapTranslate(drag, delta)
-        drag.target.ApplyTranslate(delta)
-
-    def _SnapTranslate(self, drag, delta):
-        """
-        Step Snap quantises the DELTA in the channel frame, so an object
-        that started off the grid moves in whole steps without jumping
-        onto it. Holding X instead lands the object ON a grid of the
-        same step, which is what Maya's grid snap does; the grid is the
-        active orientation's axes anchored at the world origin.
-        """
-        step = self._StepSize()
-        if step <= 0.0:
-            return delta
-        target = drag.target
-        if self._SnapActive():
-            frame = target.ChannelFrame()
-            local = gizmoScreen.SnapRelative(_ToFrame(frame, delta), step)
-            delta = _FromFrame(frame, local)
-        if self._holdGrid:
-            frame = self._Orientation(target)[0]
-            origin = Gf.Vec3d(drag.handle.worldCenter)
-            position = origin + delta
-            snapped = gizmoScreen.SnapAbsolute(_ToFrame(frame, position),
-                                               step)
-            delta = _FromFrame(frame, snapped) - origin
-        return delta
-
-    def _ApplyRotate(self, drag):
-        handle = drag.handle
-        if handle.kind == "sphere":
-            step = gizmoScreen.TrackballRotation(
-                drag.camera, drag.trackballLast, drag.current,
-                handle.radiusPixels)
-            drag.trackballLast = drag.current
-            if step is not None:
-                axis, degrees = step
-                matrix = Gf.Matrix4d(1.0)
-                matrix.SetRotate(Gf.Rotation(axis, degrees))
-                # Row-vector composition: the running rotation first,
-                # then this step, so a curved drag rolls the ball.
-                drag.trackball = drag.trackball * matrix
-            rotation = drag.trackball.ExtractRotation()
-            drag.angle = rotation.GetAngle()
-            drag.target.ApplyRotate(rotation.GetAxis(), drag.angle)
-            return
-        raw = gizmoScreen.RotationDragAngle(
-            handle.center, drag.press, drag.current,
-            gizmoScreen.AxisFacesCamera(drag.camera, handle.worldAxis))
-        drag.total = gizmoScreen.AccumulateAngle(drag.total, drag.raw, raw)
-        drag.raw = raw
-        angle = drag.total
-        if self._SnapActive():
-            angle = gizmoScreen.SnapRelative(angle, self._StepSize())
-        drag.angle = angle
-        if drag.gimbal and handle.kind == "ring":
-            # Maya Gimbal: the ring IS one Euler channel, so the angle
-            # goes straight onto that channel. ApplyRotate would take
-            # the world-axis route, which under a sheared channel frame
-            # (a non-uniform scale anywhere above) reaches the same
-            # drawn rotation by moving all three channels -- correct
-            # geometry, but not what a gimbal ring promises.
-            drag.target.ApplyRotateChannel(handle.axisIndex, angle)
-        else:
-            drag.target.ApplyRotate(handle.worldAxis, angle)
-
-    def _ApplyScale(self, drag):
-        handle = drag.handle
-        settings = self.settings.For(TOOL_SCALE)
-        factor = gizmoScreen.MayaScaleFactor(
-            handle, drag.origin2d, drag.press, drag.current,
-            not settings.preventNegativeScale)
-        if self._SnapActive():
-            # The ratio is quantised, not the resulting channel value:
-            # the base scale a drag started from is private to the
-            # target. For the ordinary unit-scale prim the two are the
-            # same thing.
-            factor = gizmoScreen.SnapRelative(factor, self._StepSize())
-            if settings.preventNegativeScale:
-                factor = max(gizmoScreen.MIN_SCALE_FACTOR, factor)
-        if handle.kind == "center":
-            drag.target.ApplyScale(None, factor)
-        elif handle.kind == "plane":
-            axes = [i for i in range(3) if i != handle.axisIndex]
-            drag.target.ApplyScale(_PlaneAxes(axes), factor)
-        else:
-            drag.target.ApplyScale(handle.axisIndex, factor)
 
 
 # ---------------------------------------------------------------------------
