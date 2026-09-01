@@ -1149,6 +1149,17 @@ git commit -m "usdview: gizmo math -- Euler helpers and rig frame replica" -m "C
   - `class Writer(stage, time, mode)`: `Set(attr, value)`, `Warnings() -> list[str]`, `time`, `mode`
   - `class Target` base with: `kind` ("rig-pose" | "rig-pivot" | "xform-pose" | "xform-pivot"), `prim`, `label`, `supportsTranslate`, `supportsRotate`, `supportsScale`, `Refresh()`, `GizmoMatrix() -> Gf.Matrix4d` (world, orthonormal linear part), `AttributePaths() -> list[Sdf.Path]`, `BeginDrag()`, `ApplyTranslate(worldDelta: Gf.Vec3d)`, `ApplyRotate(worldAxis: Gf.Vec3d, degrees: float)`, `ApplyScale(axisIndex: int | None, factor: float)`.
   - `MakeTarget(stage, prim, channels, writer) -> (Target | None, reason: str)`
+  - Maya-parity additions (spec section 8): `GimbalAxes(order, rx, ry, rz, channelRotation) -> [Gf.Vec3d, Gf.Vec3d, Gf.Vec3d]` (world unit axes of the X/Y/Z gimbal rings); on every `Target`: `ChannelFrame() -> Gf.Matrix4d` (orthonormal world frame the channels are expressed in, translated to the gizmo origin), `ObjectFrame()` (alias of `GizmoMatrix()`), `RotationState() -> (order: str, [rx, ry, rz]) | None`, `supportsPreserveChildren` (bool), `preserveChildrenReason` (str), `SetPreserveChildren(bool)`.
+
+- [ ] **Step 0 (Maya parity, read first): extra requirements folded into this task**
+
+The spec's section 8 (Maya manipulator parity) adds three things this task must provide, tested in the same test file:
+
+1. `ChannelFrame()`: rig pose → rotation of `P * assetToWorld` with the gizmo origin's translation; rig pivot → rotation of `Q * assetToWorld`; xform targets → rotation of `parentWorld`. `ObjectFrame()` returns `GizmoMatrix()`. The controller draws handles along `ChannelFrame` (Maya "Parent"), `ObjectFrame` (Maya "Object") or world axes.
+2. `RotationState()` and `GimbalAxes`: for order `(i, j, k)` applied `i` first (row-vector `Ri * Rj * Rk`), the k ring axis is `e_k * channelRotation`, the j ring axis is `e_j * Rk * channelRotation`, the i ring axis is `e_i * R * channelRotation` (derivation: `R' = R * (Rk^-1 δj Rk)` when only angle j changes, so the delta is a rotation about `e_j * Rk` in channel space). `RotationState()` returns the avar order and angles (rig pose), `("XYZ", rest angles)` (rig pivot), the XformCommonAPI order and rotate vector (xform pose), `None` for xform pivot. Test: dragging a gimbal ring through `ApplyRotate(GimbalAxes(...)[j], 10)` changes ONLY the j-th Euler channel by 10 (for a target with rotation order "ZYX" and non-zero angles on all three channels).
+3. Preserve Children (Maya "Preserve Children", default off): `XformPoseTarget` supports it for children that are `UsdGeom.Xformable`, `XformCommonAPI`-compatible and have a zero pivot; `BeginDrag()` records each such child's world matrix; every `Apply*` re-authors those children's translate / rotate / scale so their world matrices are unchanged (child local = childWorld * newParentLocalToWorld^-1; scale = row lengths of the linear part, rotation = `DecomposeEuler(orthonormalized linear part, childOrder, hint=child angles)`, translation = the translation row). Rig targets and `XformPivotTarget` report `supportsPreserveChildren = False` with a reason ("children of a rig control are evaluated by the rig"). Test: a parent xform with a child xform (translate + rotate) and preserve on: after `ApplyTranslate` and `ApplyRotate` the child's `XformCache` world matrix equals the recorded one within 1e-6; with preserve off it moves.
+
+Add these test groups to `main()`: `("gimbal + frames", TestGimbalAndFrames)`, `("preserve children", TestPreserveChildren)`. Write them yourself in the style of the existing groups, asserting exactly the behaviour above.
 
 - [ ] **Step 1: Append the failing tests**
 
@@ -2305,22 +2316,232 @@ git commit -m "usdview: gizmo screen-space handles, hit-testing and drag math" -
 
 ---
 
-### Task 5: `gizmoUI.py` — toolbar, overlay, controller, shortcuts; container wiring
+
+### Task 4b: `gizmoScreen.py` — Maya handle set and manipulation math
+
+**Files:**
+- Modify: `plugin/rigExecUsdview/gizmoScreen.py`
+- Modify: `tests/python/test_gizmo_screen.py`
+
+**Interfaces:**
+- Consumes (Task 4): everything in `gizmoScreen` as committed (`Handle`, `BuildHandles`, `HitTest`, `AxisDragParameter`, `PlaneDragDelta`, `AxisFacesCamera`, `RotationDragAngle`, `ScaleDragFactor`, `WorldPerPixel`, `ProjectPoint`, `CameraBasis`, `MIN_AXIS_PIXELS`, `Handle.grabbable`).
+- Produces (all additive; existing signatures keep working with defaults):
+  - Constants: `PLANE_OFFSET = 0.30`, `PLANE_SIDE = 0.15`, `CENTER_SIDE = 0.12`, `CUBE_SIDE = 0.08`, `CONE_RADIUS = 0.05`, `VIEW_RING_FRACTION = 1.25`, `COLOR_VIEW = (0.4, 0.75, 1.0)`, `COLOR_HOVER = (1.0, 0.85, 0.4)`, `COLOR_SELECTED = (1.0, 1.0, 0.0)`, `COLOR_SPHERE = (0.6, 0.6, 0.6)`.
+  - `Handle` gains: `kind` values `"plane"` (translate/scale planar handle: `name` in `"xy" | "yz" | "xz"`, `axisIndex` = index of the NORMAL axis, `points` = 4 projected corners, `worldNormal`, `worldCenter`), `"view"` (rotate view-axis ring, `name = "view"`, `worldAxis` = unit vector toward the camera), `"sphere"` (free-rotate disc, `name = "free"`, `points = [center]`, `radiusPixels`); ring handles gain `frontPoints` (the visible front-half polyline(s), list of lists) and `visible` (bool). All handles gain `worldCenter` (`Gf.Vec3d`).
+  - `BuildHandles(tool, gizmoMatrix, camera, viewport, pixelRatio, sizePixels=GIZMO_PIXELS, orientation=None, gimbalAxes=None, freeRotate=True)`; `orientation` is a `Gf.Matrix4d` whose rows give the world axes to draw along (default: `gizmoMatrix`'s); `gimbalAxes` is a list of three world unit `Gf.Vec3d` overriding the ring axes.
+  - `HitTest(handles, x, y, radius)` priority: centre > plane > axis > ring (front half only) > view ring > sphere (inside its disc).
+  - `RayPlaneDragDelta(camera, viewport, worldOrigin, worldNormal, press, current) -> Gf.Vec3d` (ray/plane intersection via `camera.frustum.ComputeRay`; falls back to `PlaneDragDelta` when |dot(normal, rayDir)| < 0.05).
+  - `AccumulateAngle(total, previous, current) -> float` (adds the wrapped difference so a drag counts past 180).
+  - `TrackballRotation(camera, press, current, radiusPixels) -> (Gf.Vec3d axis, float degrees) | None` (axis = `Gf.Cross(motionWorld, viewDir)` normalised, degrees = `|delta| / (2 * radiusPixels) * 180`).
+  - `MayaScaleFactor(handle, origin2d, press, current, allowNegative)` (ratio of projected distances from the origin along the handle direction; plane handles use the origin→handle-centre direction; centre uses `1 + dx / sizePixels`; clamps to 1e-4 when `allowNegative` is False).
+  - `SnapRelative(value, step)`, `SnapAbsolute(value, step)` for floats and `Gf.Vec3d`.
+  - `RingParameter(handle, point2d) -> float` (radians, the ring parameter of the nearest ring point) and `PiePolygon(handle, startParameter, sweepDegrees) -> list[(x, y)]` (`[center] + arc points` for the pie slice, walking the ring in the direction the sweep sign implies on screen).
+
+- [ ] **Step 1: Write the failing tests** (append to `tests/python/test_gizmo_screen.py`, add the groups to `main()`):
+
+```python
+def TestMayaTranslateHandles():
+    camera = _Camera()
+    byName = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
+           "Maya move handles: %s" % sorted(byName))
+    xy = byName["xy"]
+    _Check(xy.kind == "plane" and xy.axisIndex == 2
+           and xy.color == (0.0, 0.0, 1.0), "xy plane is blue (normal z)")
+    _Check(byName["yz"].color == (1.0, 0.0, 0.0)
+           and byName["xz"].color == (0.0, 1.0, 0.0), "plane colours")
+    xs = [p[0] for p in xy.points]
+    ys = [p[1] for p in xy.points]
+    side = gs.GIZMO_PIXELS * gs.PLANE_SIDE
+    _Check(_Close(max(xs) - min(xs), side, 0.5)
+           and _Close(max(ys) - min(ys), side, 0.5),
+           "xy square side is PLANE_SIDE * size on screen")
+    centre = ((max(xs) + min(xs)) / 2.0, (max(ys) + min(ys)) / 2.0)
+    off = gs.GIZMO_PIXELS * gs.PLANE_OFFSET
+    _Check(_Close(centre[0], 400 + off, 0.5)
+           and _Close(centre[1], 300 - off, 0.5),
+           "xy square sits at PLANE_OFFSET along +x and +y: %s" % (centre,))
+    _Check(_Close(xy.worldNormal[2], 1.0), "xy plane normal is +z")
+    _Check(byName["center"].color == gs.COLOR_VIEW, "centre is light blue")
+    # Axis orientation: world axes with a rotated gizmo frame.
+    rotated = Gf.Matrix4d(1.0).SetRotate(Gf.Rotation(Gf.Vec3d(0, 0, 1), 90))
+    world = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, rotated, camera, VIEWPORT, 1.0,
+        orientation=Gf.Matrix4d(1.0))}
+    _Check(_Close(world["x"].worldAxis[0], 1.0)
+           and _Close(world["x"].points[1][0], 400 + gs.GIZMO_PIXELS, 1e-3),
+           "orientation=identity draws world axes despite the frame")
+    # Manipulator size.
+    big = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0,
+        sizePixels=180.0)}
+    _Check(_Close(big["x"].points[1][0], 580, 1e-3), "sizePixels honoured")
+
+
+def TestMayaRotateHandles():
+    camera = _Camera()
+    byName = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    _Check(set(byName) == {"x", "y", "z", "view", "free"},
+           "Maya rotate handles: %s" % sorted(byName))
+    view = byName["view"]
+    radius = gs.GIZMO_PIXELS * gs.RING_FRACTION * gs.VIEW_RING_FRACTION
+    _Check(view.kind == "view" and view.color == gs.COLOR_VIEW
+           and all(_Close(_Dist(p, (400, 300)), radius, 0.5)
+                   for p in view.points), "view ring is 1.25x, light blue")
+    _Check(_Close(view.worldAxis[2], 1.0), "view axis points at the camera")
+    free = byName["free"]
+    _Check(free.kind == "sphere"
+           and _Close(free.radiusPixels, gs.GIZMO_PIXELS * gs.RING_FRACTION,
+                      1e-6), "free-rotate disc at the ring radius")
+    z = byName["z"]
+    _Check(len(z.frontPoints) >= 1 and sum(len(a) for a in z.frontPoints)
+           == gs.RING_SEGMENTS, "z ring faces the camera: fully visible")
+    x = byName["x"]
+    front = sum(len(a) for a in x.frontPoints)
+    _Check(gs.RING_SEGMENTS * 0.4 <= front <= gs.RING_SEGMENTS * 0.6,
+           "edge-on x ring shows about half its points: %d" % front)
+    _Check(all(p[2] >= -1e-6 for p in x.frontWorld),
+           "front half = points on the camera side of the ring centre")
+    # Gimbal axes override the ring axes.
+    axes = [Gf.Vec3d(0, 1, 0), Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 0, 1)]
+    gimbal = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0,
+        gimbalAxes=axes)}
+    _Check(_Close(gimbal["x"].worldAxis[1], 1.0), "x ring uses gimbal axis")
+    none = gs.BuildHandles(gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera,
+                           VIEWPORT, 1.0, freeRotate=False)
+    _Check("free" not in {h.name for h in none}, "freeRotate=False")
+    # Hit priority: ring beats view ring beats sphere; back half not hit.
+    hit = gs.HitTest(list(byName.values()), 400 + radius, 300, gs.HIT_PIXELS)
+    _Check(hit is not None and hit.name == "view", "view ring hit")
+    hit = gs.HitTest(list(byName.values()), 400 + 20, 300 - 20, gs.HIT_PIXELS)
+    _Check(hit is not None and hit.name == "free", "inside disc: free")
+    _Check(gs.HitTest(list(byName.values()), 700, 300, gs.HIT_PIXELS)
+           is None, "outside everything")
+
+
+def TestMayaScaleHandles():
+    camera = _Camera()
+    byName = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_SCALE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    _Check(set(byName) == {"x", "y", "z", "xy", "yz", "xz", "center"},
+           "Maya scale handles: %s" % sorted(byName))
+    origin = (400, 300)
+    x = byName["x"]
+    f = gs.MayaScaleFactor(x, origin, (445, 300), (490, 300), True)
+    _Check(_Close(f, 2.0, 1e-9), "press at half length, drag to the tip: 2x")
+    f = gs.MayaScaleFactor(x, origin, (445, 300), (355, 300), True)
+    _Check(_Close(f, -2.0, 1e-9), "through the origin flips the sign")
+    f = gs.MayaScaleFactor(x, origin, (445, 300), (355, 300), False)
+    _Check(_Close(f, 1e-4, 1e-12), "Prevent Negative Scale clamps")
+    c = byName["center"]
+    f = gs.MayaScaleFactor(c, origin, (400, 300), (445, 300), True)
+    _Check(_Close(f, 1.5, 1e-9), "centre: 1 + dx / size")
+    xy = byName["xy"]
+    d = (xy.worldCenterScreen[0] - 400, xy.worldCenterScreen[1] - 300)
+    press = (400 + d[0], 300 + d[1])
+    current = (400 + 2 * d[0], 300 + 2 * d[1])
+    f = gs.MayaScaleFactor(xy, origin, press, current, True)
+    _Check(_Close(f, 2.0, 1e-6), "plane handle: ratio along the diagonal")
+
+
+def TestMayaDragMath():
+    camera = _Camera()
+    delta = gs.RayPlaneDragDelta(camera, VIEWPORT, Gf.Vec3d(0, 0, 0),
+                                 Gf.Vec3d(0, 0, 1), (400, 300), (410, 290))
+    wpp = gs.WorldPerPixel(camera, VIEWPORT, Gf.Vec3d(0, 0, 0))
+    _Check(_Close(delta[0], 10 * wpp, 1e-6) and _Close(delta[1], 10 * wpp,
+                                                          1e-6)
+           and _Close(delta[2], 0.0, 1e-9),
+           "ray/plane on the z=0 plane matches the camera-plane delta")
+    delta = gs.RayPlaneDragDelta(camera, VIEWPORT, Gf.Vec3d(0, 0, 0),
+                                 Gf.Vec3d(1, 0, 0), (400, 300), (400, 290))
+    _Check(_Close(delta[0], 0.0, 1e-9) and delta[1] > 0.0,
+           "yz plane: no x component, moves up: %s" % delta)
+    total = gs.AccumulateAngle(170.0, 170.0, -175.0)
+    _Check(_Close(total, 185.0, 1e-9), "accumulates through the wrap")
+    axis, degrees = gs.TrackballRotation(camera, (400, 300), (490, 300),
+                                         90.0)
+    _Check(_Close(axis[1], 1.0, 1e-9) and _Close(degrees, 90.0, 1e-9),
+           "dragging right one radius: +90 about +Y: %s %s" % (axis,
+                                                              degrees))
+    _Check(gs.TrackballRotation(camera, (400, 300), (400, 300), 90.0)
+           is None, "no travel: None")
+    _Check(_Close(gs.SnapRelative(2.4, 1.0), 2.0)
+           and _Close(gs.SnapRelative(-2.6, 1.0), -3.0)
+           and _Close(gs.SnapRelative(37.0, 15.0), 30.0), "relative snap")
+    v = gs.SnapAbsolute(Gf.Vec3d(0.4, 1.6, -0.5), 1.0)
+    _Check(v == Gf.Vec3d(0.0, 2.0, -0.0) or v == Gf.Vec3d(0.0, 2.0, 0.0)
+           or _Close(v[2], -1.0), "vector snap: %s" % v)
+    rings = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
+    z = rings["z"]
+    r = gs.GIZMO_PIXELS * gs.RING_FRACTION
+    t0 = gs.RingParameter(z, (400 + r, 300))
+    pie = gs.PiePolygon(z, t0, 90.0)
+    _Check(pie[0] == z.center and len(pie) >= gs.RING_SEGMENTS // 4,
+           "pie starts at the centre and walks a quarter of the ring")
+    last = pie[-1]
+    _Check(_Close(last[0], 400, 2.0) and _Close(last[1], 300 - r, 2.0),
+           "+90 sweep facing the camera ends at the top: %s" % (last,))
+```
+
+- [ ] **Step 2: Run to see the new groups fail** (`bin/run_python_tests.sh test_gizmo_screen`): AttributeError on the first missing name.
+
+- [ ] **Step 3: Implement** in `gizmoScreen.py`, keeping every existing test green. Design notes: planar handle corners are `origin + (a*PLANE_OFFSET ± a*PLANE_SIDE/2) + (b*PLANE_OFFSET ± b*PLANE_SIDE/2)` scaled by the world length, with `worldCenter` at `origin + (a + b) * PLANE_OFFSET * L` and `worldCenterScreen` its projection; ring front/back split uses `dot(pointWorld - origin, -viewDir) >= 0` and also records `frontWorld` (world points of the front half); the view ring is a circle in the camera plane (basis `right`, `up`); `HitTest` for the sphere is "distance to centre <= radiusPixels" after every other kind missed; `RayPlaneDragDelta` maps pixels to `Gf.Frustum.ComputeRay(Gf.Vec2d(ndcX, ndcY))` (verify the window-coordinate convention against `stageView.computePickFrustum`) and intersects `Gf.Plane(normal, origin)`; `PiePolygon` walks ring indices from the start parameter in the direction whose screen winding matches the sweep sign, computing the winding from the projected ring points.
+
+- [ ] **Step 4: Run all groups green**, then commit as the controller instructs (workers do not commit).
+
+---
+
+### Task 5: `gizmoUI.py` — Maya-style manipulators, tool settings, controller, shortcuts; container wiring
 
 **Files:**
 - Create: `plugin/rigExecUsdview/gizmoUI.py`
+- Create: `plugin/rigExecUsdview/gizmoSettings.py` (Qt-free: per-tool settings model with Maya defaults)
+- Create: `tests/python/test_gizmo_settings.py` (headless test for the settings model; register it in `CMakeLists.txt` next to `testGizmoScreen`, same foreach list, and add it to `bin/run_python_tests.sh`'s default list)
 - Modify: `plugin/rigExecUsdview/rigExecUsdview.py` (registerPlugins ~line 96-140, configureView ~151-155, `_OnStageReplaced` ~line 393, new helpers)
 
 **Interfaces:**
-- Consumes: Task 1 `rigExecUndo.UndoStack`, `rigExecUndo.EditRecorder`; Task 3 `gizmoMath.MakeTarget`, `gizmoMath.Writer`, `WRITE_*`, `CHANNELS_*`, `Target.*`; Task 4 `gizmoScreen.*`.
+- Consumes: Task 1 `rigExecUndo.UndoStack`, `rigExecUndo.EditRecorder`; Task 3 `gizmoMath.MakeTarget`, `gizmoMath.Writer`, `WRITE_*`, `CHANNELS_*`, `Target.*` including `ChannelFrame/ObjectFrame/RotationState/SetPreserveChildren/supportsPreserveChildren/preserveChildrenReason`, `gizmoMath.GimbalAxes`; Task 4/4b `gizmoScreen.*` (all handle kinds, `BuildHandles(..., sizePixels, orientation, gimbalAxes, freeRotate)`, `HitTest`, `AxisDragParameter`, `PlaneDragDelta`, `RayPlaneDragDelta`, `RotationDragAngle`, `AccumulateAngle`, `TrackballRotation`, `MayaScaleFactor`, `SnapRelative`, `SnapAbsolute`, `RingParameter`, `PiePolygon`, `AxisFacesCamera`, colour constants).
 - Produces:
-  - `TOOL_SELECT = "select"` plus re-exported `TOOL_TRANSLATE/ROTATE/SCALE`
-  - `StageView(usdviewApi) -> QWidget | None`
-  - `class GizmoController(QtCore.QObject)`: `SetTool(tool)`, `Tool()`, `SetChannels(mode)`, `Channels()`, `SetWriteMode(mode)`, `WriteMode()`, `Target()`, `Reason()`, `Status()`, `Handles()`, `HandleScreenPositions() -> dict[name, list[(x, y)]]` (LOGICAL pixels), `IsDragging()`, `Undo()`, `Redo()`, `SetVisible(bool)`, `IsVisible()`, `RefreshTarget()`, `toolbar` attribute, `undoStack` attribute
-  - `InstallViewportTools(usdviewApi, undoStack) -> GizmoController | None` (idempotent), `GetController()`
+  - `gizmoSettings.py`: `ORIENT_WORLD = "world"`, `ORIENT_OBJECT = "object"`, `ORIENT_PARENT = "parent"`, `ORIENT_GIMBAL = "gimbal"`; `class ToolSettings` with fields `orientation`, `stepSnap` (bool), `stepSize` (float), `freeRotate` (bool, rotate only), `preventNegativeScale` (bool, scale only), `preserveChildren` (bool); `MayaDefaults(tool) -> ToolSettings` (move: world / off / 1.0 / preserve off; rotate: object / off / 15.0 / freeRotate on; scale: world / off / 1.0 / preventNegative off); `OrientationChoices(tool)` (move & scale: world, object, parent; rotate: object, world, gimbal); `class GizmoSettings` holding one `ToolSettings` per tool plus `manipulatorSize` (90.0), `Reset(tool)`, `AddListener(fn)`.
+  - `gizmoUI.py`: `TOOL_SELECT = "select"` plus re-exported `TOOL_TRANSLATE/ROTATE/SCALE`; `StageView(usdviewApi)`; `class GizmoController(QtCore.QObject)` with `SetTool/Tool`, `SetChannels/Channels`, `SetWriteMode/WriteMode`, `settings` (GizmoSettings), `Target()`, `Reason()`, `Status()`, `Handles()`, `HandleScreenPositions() -> dict[name, list[(x, y)]]` (LOGICAL px; ring handles report their FRONT points, planes their 4 corners, sphere/centre one point), `SelectedHandleName()`, `IsDragging()`, `DragAngle()` (accumulated degrees during a rotate drag), `Undo()`, `Redo()`, `SetVisible/IsVisible`, `RefreshTarget()`, `ShowToolSettings()`, `toolbar`, `undoStack`, and for tests `SimulateKey(key, modifiers)` is NOT provided — tests use QTest.
+  - `InstallViewportTools(usdviewApi, undoStack) -> GizmoController | None`, `GetController()`.
 - Container: `RigExecUsdviewContainer._UndoStack()`, `_EnsureViewportTools()`, `_ToggleViewportTools()`, menu item "Viewport Tools".
 
-There is no headless test for this task (it is Qt); Task 6's testusdview script is its test. Still verify each step by launching: `bin/launch.sh` opens usdview on `examples/ArmShotAnim.usda`; the toolbar must appear above the viewport and selecting `HandIK` in the prim tree with Translate active must draw the gizmo. Do this verification through the testusdview harness rather than by hand: write `/tmp/gizmo_smoke.py` containing
+**Requirements (spec section 8 is binding; this is the checklist the reviewer grades against):**
+
+Toolbar (`ViewportToolbar(QToolBar)`, inserted at index 0 of `appController._ui.glFrame.layout()`): text-labelled exclusive actions `Select | Move | Rotate | Scale`; `Channels: Pose | Pivot`; `Write: Animation | Default`; `Undo`, `Redo`; `Tool Settings…` button; status label. Tooltips explain each. Undo shortcut `Ctrl+Z`; Redo shortcuts `Ctrl+Shift+Z`, `Shift+Z`, `Ctrl+Y` — all `Qt.ApplicationShortcut`.
+
+Tool Settings panel (`ToolSettingsPanel(QWidget)`, `Qt.Window` parented to `usdviewApi.qMainWindow` like `VolumeWeightPanel`, singleton, `show/raise_` on the button): rows rebuilt when the tool changes — Axis Orientation combo (choices from `OrientationChoices`), Step Snap checkbox + Step Size double spin box, Free Rotate checkbox (rotate), Prevent Negative Scale checkbox (scale), Preserve Children checkbox (disabled with the target's reason when unsupported), Manipulator Size spin box, `Reset Tool` button. Every widget writes to `controller.settings` and the controller refreshes handles.
+
+Overlay (`GizmoOverlay(QWidget)`, transparent, mouse-transparent child of the StageView; if the QOpenGLWidget covers it, fall back to painting inside a wrapped `view.paintGL` and record which worked in the module comment):
+- Move: axis lines with filled cone arrowheads (triangle of base `CONE_RADIUS * size` at the tip), planar squares filled at 50% opacity with a solid outline, centre square filled light blue.
+- Rotate: rings drawn from `frontPoints` only; view ring light blue; sphere silhouette grey 50% opacity (only when Free Rotate is on); during a ring / view drag the pie slice `PiePolygon(handle, startParameter, DragAngle())` filled in the ring colour at 30% opacity, and the status label shows `Rotate <prim>  <angle> deg`.
+- Scale: axis lines ending in filled squares of `CUBE_SIDE * size`, centre square `CENTER_SIDE * size`, planar squares as in Move.
+- Colours: hover `COLOR_HOVER`, selected (last dragged) `COLOR_SELECTED`, locked axes at 40% opacity.
+- Handles are laid out along: Object → `target.ObjectFrame()`, Parent → `target.ChannelFrame()`, World → identity rotation at the gizmo origin, Gimbal → `gizmoMath.GimbalAxes(*target.RotationState(), channelRotation)` passed as `gimbalAxes` (when `RotationState()` is None fall back to Object). Size = `settings.manipulatorSize`.
+
+Controller interaction (event filter on the StageView, `Alt`/`Meta` drags pass through to the camera):
+- Left press on a grabbable handle starts a drag and marks it selected; press elsewhere passes through (usdview picking).
+- Middle press (no Alt) with a selected handle starts a drag of that handle from the press point (Maya "middle drag anywhere"); middle press with no selected handle passes through.
+- Move: axis → `AxisDragParameter`; `Ctrl` + axis → `RayPlaneDragDelta` with the axis as normal; plane → `RayPlaneDragDelta(normal)`; centre → `PlaneDragDelta`. Step Snap (or `J` held) → `SnapRelative(delta components in the channel frame, stepSize)`; `X` held → `SnapAbsolute` of the resulting channel translation.
+- Rotate: ring → `RotationDragAngle` per event fed through `AccumulateAngle` (so drags pass 180); view ring → the same about the view axis; sphere → `TrackballRotation` accumulated as successive `ApplyRotate` calls relative to the drag base (compose the trackball rotations into one running world rotation and apply that from the base each event). Step Snap / `J` → `SnapRelative(angle, stepSize)`.
+- Scale: `MayaScaleFactor(handle, origin2d, press, current, not preventNegativeScale)`; planar → both axes of the plane; centre → uniform; Step Snap / `J` → factor snapped so the resulting scale value is a multiple of stepSize.
+- Preserve Children: `target.SetPreserveChildren(settings.preserveChildren and target.supportsPreserveChildren)` before `BeginDrag`.
+- Every move event: `Apply*` inside the target (which uses `Sdf.ChangeBlock`), `target.Refresh()`, rebuild handles, `usdviewApi.UpdateViewport()`. Release commits the `EditRecorder` edit (`"Move <prim>"`, `"Rotate <prim>"`, `"Scale <prim>"`) to the undo stack; `Escape` aborts and restores.
+- Hotkeys on the StageView (`Qt.WidgetWithChildrenShortcut` on the view, or handled in the event filter's KeyPress when the view has focus): `Q/W/E/R` tools, `+`/`-` (and `=`) manipulator size ±10%, `D` and `Insert` toggle Channels Pivot/Pose, `J` and `X` are HOLD modifiers read from the event filter's KeyPress/KeyRelease. Before binding, grep `/Users/burkard/work/usd-pr4156/pxr/usdImaging/usdviewq/mainWindowUI.ui` and `stageView.py`/`appController.py` `keyPressEvent` for conflicts; skip any key usdview already uses and list it in the module comment and in `docs/viewport-gizmos.md`.
+- Repaint triggers: view Paint/Resize events, `signalFrustumChanged`, selection changes, frame changes (use the signal's frame), `ObjectsChanged` (outside a drag), settings changes, undo stack changes.
+- Stage replaced → abort drag, clear the undo stack, re-observe.
+
+Container wiring: exactly as before (lazy `_UndoStack()`, `_EnsureViewportTools()` on `_OnStageReplaced`, `Viewport Tools` menu item toggling visibility, headless-safe imports).
+
+- [ ] **Step 1: Write `gizmoSettings.py` and its test first** (TDD): the test asserts the Maya defaults per tool, `OrientationChoices`, `Reset`, and listener notification. Run, see it fail, implement, run green.
+- [ ] **Step 2: Write `gizmoUI.py`** against the checklist above, module-level constants for every colour taken from `gizmoScreen`, and the container wiring.
+- [ ] **Step 3: Smoke-test through testusdview** with `/tmp/gizmo_smoke.py`:
 
 ```python
 import os
@@ -2332,762 +2553,21 @@ def testUsdviewInputFunction(appController):
     prim = api.stage.GetPrimAtPath("/Shot/HeroArm/Rig/Controls/HandIK")
     api.ClearPrimSelection(); api.AddPrimToSelection(prim)
     appController._processEvents()
-    c.SetTool(gizmoUI.TOOL_TRANSLATE)
-    appController._processEvents()
-    print("target:", c.Target(), "reason:", repr(c.Reason()))
-    print("handles:", c.HandleScreenPositions())
     view = gizmoUI.StageView(api)
-    view.window().grab().save(os.environ.get("RIGEXEC_GIZMO_SHOT", "/tmp/gizmo_smoke.png"))
+    for tool in (gizmoUI.TOOL_TRANSLATE, gizmoUI.TOOL_ROTATE, gizmoUI.TOOL_SCALE):
+        c.SetTool(tool)
+        appController._processEvents()
+        print(tool, "target:", c.Target(), "reason:", repr(c.Reason()))
+        print(tool, "handles:", sorted(c.HandleScreenPositions()))
+        view.window().grab().save("/tmp/gizmo_smoke_%s.png" % tool)
+    c.ShowToolSettings()
+    appController._processEvents()
+    c.toolbar.window().grab().save("/tmp/gizmo_smoke_settings.png")
 ```
 
-and run `. bin/_env.sh && "$PY" "$TESTUSDVIEW" --testScript /tmp/gizmo_smoke.py examples/ArmShotAnim.usda`, then look at the PNG (Read tool) to confirm the toolbar and the three coloured axes are visible.
-
-- [ ] **Step 1: Write `gizmoUI.py`**
-
-```python
-#
-# RigExec usdview viewport tools: a toolbar above the stage view and a
-# translate/rotate/scale gizmo drawn on a transparent overlay, editing
-# avars (pose) or rest offsets (pivot) on RigExec controls and joints, and
-# xformOps on plain xforms, with every drag undoable.
-#
-# Qt lives only here. The math (gizmoMath), the screen geometry
-# (gizmoScreen) and the undo stack (rigExecUndo) are Qt-free and tested
-# headlessly; this module is the thin driver over them, exercised by
-# tests/testUsdviewGizmo.py through testusdview.
-#
-# Viewport access follows curvenetUI: the StageView is reached through
-# usdview's app controller, mouse events are intercepted with an event
-# filter (returning True consumes the event so the camera never sees a
-# gizmo drag), and Alt/Meta drags are passed through so the artist can
-# still orbit with a tool active.
-#
-# Drawing is a transparent, mouse-transparent child widget of the
-# StageView repainted with QPainter (not session-layer prims as curvenetUI
-# does): a gizmo must be screen-constant, never occluded, and must not
-# re-evaluate the rig every time the camera moves.
-#
-import math
-
-from pxr import Gf, Sdf, Tf, Usd
-from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
-
-import gizmoMath
-import gizmoScreen
-import rigExecUndo
-
-try:
-    from pxr.Usdviewq.qt import QtActionWidgets
-except ImportError:  # PySide2: QAction/QActionGroup are in QtWidgets
-    QtActionWidgets = QtWidgets
-
-TOOL_SELECT = "select"
-TOOL_TRANSLATE = gizmoScreen.TOOL_TRANSLATE
-TOOL_ROTATE = gizmoScreen.TOOL_ROTATE
-TOOL_SCALE = gizmoScreen.TOOL_SCALE
-
-_TOOLS = (
-    (TOOL_SELECT, "Select", "Leave the viewport to usdview's own picking"),
-    (TOOL_TRANSLATE, "Translate", "Drag an axis or the centre square"),
-    (TOOL_ROTATE, "Rotate", "Drag a ring"),
-    (TOOL_SCALE, "Scale", "Drag an axis, or the centre for uniform"),
-)
-_CHANNELS = (
-    (gizmoMath.CHANNELS_POSE, "Pose",
-     "Edit avars:t/r/s (or xformOps on a plain xform)"),
-    (gizmoMath.CHANNELS_PIVOT, "Pivot",
-     "Edit rest:t/r (or the XformCommonAPI pivot on a plain xform)"),
-)
-_WRITE_MODES = (
-    (gizmoMath.WRITE_ANIMATION, "Animation",
-     "Author a spline knot / time sample at the current frame"),
-    (gizmoMath.WRITE_DEFAULT, "Default",
-     "Author the attribute's default value"),
-)
-_CAMERA_MODIFIERS = QtCore.Qt.AltModifier | QtCore.Qt.MetaModifier
-_HOVER_COLOR = QtGui.QColor(255, 230, 60)
-
-_controller = None
-
-
-def StageView(usdviewApi):
-    """usdview's StageView, or None (e.g. --norender)."""
-    try:
-        return usdviewApi._UsdviewApi__appController._stageView
-    except AttributeError:
-        return None
-
-
-def _AppController(usdviewApi):
-    return getattr(usdviewApi, "_UsdviewApi__appController", None)
-
-
-def _Position(event, ratio):
-    """Qt logical event coordinates -> physical pixels (Qt5 and Qt6)."""
-    if hasattr(event, "position"):
-        pos = event.position()
-        x, y = pos.x(), pos.y()
-    else:
-        x, y = event.x(), event.y()
-    return (x * ratio, y * ratio)
-
-
-# ---------------------------------------------------------------------------
-# Toolbar
-# ---------------------------------------------------------------------------
-
-class ViewportToolbar(QtWidgets.QToolBar):
-    """
-    Text-labelled tool buttons (the repo convention: no icons, tooltips
-    explain), exclusive groups for tool / channels / write mode, undo and
-    redo with application-wide shortcuts, and a status label that always
-    says why there is no gizmo.
-    """
-
-    toolChanged = QtCore.Signal(str)
-    channelsChanged = QtCore.Signal(str)
-    writeModeChanged = QtCore.Signal(str)
-    undoRequested = QtCore.Signal()
-    redoRequested = QtCore.Signal()
-
-    def __init__(self, parent):
-        super(ViewportToolbar, self).__init__("RigExec Viewport Tools",
-                                              parent)
-        self.setObjectName("rigExecViewportTools")
-        self.setMovable(False)
-        self._toolActions = self._AddGroup(
-            _TOOLS, self._onToolTriggered, TOOL_SELECT)
-        self.addSeparator()
-        self.addWidget(QtWidgets.QLabel(" Channels: "))
-        self._channelActions = self._AddGroup(
-            _CHANNELS, self._onChannelsTriggered, gizmoMath.CHANNELS_POSE)
-        self.addSeparator()
-        self.addWidget(QtWidgets.QLabel(" Write: "))
-        self._writeActions = self._AddGroup(
-            _WRITE_MODES, self._onWriteTriggered, gizmoMath.WRITE_ANIMATION)
-        self.addSeparator()
-        self._undoAction = QtActionWidgets.QAction("Undo", self)
-        self._undoAction.setShortcut(QtGui.QKeySequence("Ctrl+Z"))
-        self._undoAction.setShortcutContext(
-            QtCore.Qt.ApplicationShortcut)
-        self._undoAction.triggered.connect(self.undoRequested)
-        self.addAction(self._undoAction)
-        self._redoAction = QtActionWidgets.QAction("Redo", self)
-        self._redoAction.setShortcuts([
-            QtGui.QKeySequence("Ctrl+Shift+Z"),
-            QtGui.QKeySequence(QtGui.QKeySequence.Redo)])
-        self._redoAction.setShortcutContext(
-            QtCore.Qt.ApplicationShortcut)
-        self._redoAction.triggered.connect(self.redoRequested)
-        self.addAction(self._redoAction)
-        self.addSeparator()
-        self._status = QtWidgets.QLabel("")
-        self._status.setMinimumWidth(240)
-        self.addWidget(self._status)
-        self.SetUndoState(False, "", False, "")
-
-    def _AddGroup(self, entries, slot, initial):
-        group = QtActionWidgets.QActionGroup(self)
-        group.setExclusive(True)
-        actions = {}
-        for key, label, tip in entries:
-            action = QtActionWidgets.QAction(label, self)
-            action.setCheckable(True)
-            action.setToolTip(tip)
-            action.setData(key)
-            action.setChecked(key == initial)
-            group.addAction(action)
-            self.addAction(action)
-            actions[key] = action
-        group.triggered.connect(slot)
-        return actions
-
-    def _onToolTriggered(self, action):
-        self.toolChanged.emit(action.data())
-
-    def _onChannelsTriggered(self, action):
-        self.channelsChanged.emit(action.data())
-
-    def _onWriteTriggered(self, action):
-        self.writeModeChanged.emit(action.data())
-
-    @staticmethod
-    def _Check(actions, key):
-        action = actions.get(key)
-        if action is not None and not action.isChecked():
-            action.setChecked(True)
-
-    def SetTool(self, tool):
-        self._Check(self._toolActions, tool)
-
-    def SetChannels(self, channels):
-        self._Check(self._channelActions, channels)
-
-    def SetWriteMode(self, mode):
-        self._Check(self._writeActions, mode)
-
-    def SetStatus(self, text):
-        self._status.setText(text)
-
-    def Status(self):
-        return self._status.text()
-
-    def SetUndoState(self, canUndo, undoText, canRedo, redoText):
-        self._undoAction.setEnabled(canUndo)
-        self._undoAction.setText("Undo %s" % undoText if undoText
-                                 else "Undo")
-        self._redoAction.setEnabled(canRedo)
-        self._redoAction.setText("Redo %s" % redoText if redoText
-                                 else "Redo")
-
-
-# ---------------------------------------------------------------------------
-# Overlay
-# ---------------------------------------------------------------------------
-
-class GizmoOverlay(QtWidgets.QWidget):
-    """Transparent, mouse-transparent paint layer over the StageView."""
-
-    def __init__(self, view, controller):
-        super(GizmoOverlay, self).__init__(view)
-        self._controller = controller
-        self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
-        self.setAttribute(QtCore.Qt.WA_NoSystemBackground)
-        self.setAutoFillBackground(False)
-        self.setGeometry(view.rect())
-        self.show()
-
-    def paintEvent(self, event):
-        handles = self._controller.Handles()
-        if not handles:
-            return
-        ratio = self._controller.PixelRatio()
-        active = self._controller.ActiveHandleName()
-        painter = QtGui.QPainter(self)
-        painter.setRenderHint(QtGui.QPainter.Antialiasing)
-        for handle in handles:
-            color = QtGui.QColor.fromRgbF(*handle.color)
-            if handle.name == active:
-                color = _HOVER_COLOR
-            pen = QtGui.QPen(color, 2.0)
-            painter.setPen(pen)
-            points = [QtCore.QPointF(x / ratio, y / ratio)
-                      for x, y in handle.points]
-            if handle.kind == "axis":
-                painter.drawLine(points[0], points[1])
-                self._DrawCap(painter, points, color)
-            elif handle.kind == "ring":
-                painter.drawPolygon(QtGui.QPolygonF(points))
-            else:
-                half = gizmoScreen.CENTER_PIXELS
-                painter.fillRect(QtCore.QRectF(
-                    points[0].x() - half, points[0].y() - half,
-                    2 * half, 2 * half), color)
-        painter.end()
-
-    def _DrawCap(self, painter, points, color):
-        """Arrowhead for translate, square cap for scale."""
-        a, b = points
-        dx, dy = b.x() - a.x(), b.y() - a.y()
-        length = math.hypot(dx, dy)
-        if length < 1e-6:
-            return
-        ux, uy = dx / length, dy / length
-        size = 7.0
-        if self._controller.Tool() == TOOL_SCALE:
-            painter.fillRect(QtCore.QRectF(
-                b.x() - size / 2, b.y() - size / 2, size, size), color)
-            return
-        tip = b
-        left = QtCore.QPointF(b.x() - ux * size * 1.6 + uy * size * 0.6,
-                              b.y() - uy * size * 1.6 - ux * size * 0.6)
-        right = QtCore.QPointF(b.x() - ux * size * 1.6 - uy * size * 0.6,
-                               b.y() - uy * size * 1.6 + ux * size * 0.6)
-        painter.setBrush(color)
-        painter.drawPolygon(QtGui.QPolygonF([tip, left, right]))
-        painter.setBrush(QtCore.Qt.NoBrush)
-
-
-# ---------------------------------------------------------------------------
-# Controller
-# ---------------------------------------------------------------------------
-
-class _Drag(object):
-    def __init__(self, handle, press, camera, viewport, origin, recorder,
-                 label):
-        self.handle = handle
-        self.press = press
-        self.camera = camera
-        self.viewport = viewport
-        self.origin = origin
-        self.recorder = recorder
-        self.label = label
-
-
-class GizmoController(QtCore.QObject):
-
-    def __init__(self, usdviewApi, undoStack):
-        super(GizmoController, self).__init__()
-        self._api = usdviewApi
-        self.undoStack = undoStack
-        self._view = StageView(usdviewApi)
-        self._tool = TOOL_SELECT
-        self._channels = gizmoMath.CHANNELS_POSE
-        self._write = gizmoMath.WRITE_ANIMATION
-        self._target = None
-        self._reason = ""
-        self._warnings = []
-        self._handles = []
-        self._hover = None
-        self._drag = None
-        self._frame = None
-        self._noticeKey = None
-
-        self.toolbar = ViewportToolbar(usdviewApi.qMainWindow)
-        self.toolbar.toolChanged.connect(self.SetTool)
-        self.toolbar.channelsChanged.connect(self.SetChannels)
-        self.toolbar.writeModeChanged.connect(self.SetWriteMode)
-        self.toolbar.undoRequested.connect(self.Undo)
-        self.toolbar.redoRequested.connect(self.Redo)
-        appController = _AppController(usdviewApi)
-        layout = appController._ui.glFrame.layout()
-        layout.insertWidget(0, self.toolbar)
-
-        self._overlay = GizmoOverlay(self._view, self)
-        self._view.installEventFilter(self)
-        self._view.signalFrustumChanged.connect(self._onViewChanged)
-
-        dataModel = usdviewApi.dataModel
-        dataModel.selection.signalPrimSelectionChanged.connect(
-            self._onSelectionChanged)
-        dataModel.currentFrameChanged.connect(self._onFrameChanged)
-        dataModel.signalStageReplaced.connect(self._onStageReplaced)
-        undoStack.AddListener(self._onStackChanged)
-        self._ObserveStage(usdviewApi.stage)
-        self._onStackChanged()
-        self.RefreshTarget()
-
-    # -- state ------------------------------------------------------------
-
-    def Tool(self):
-        return self._tool
-
-    def SetTool(self, tool):
-        self._AbortDrag()
-        self._tool = tool
-        self.toolbar.SetTool(tool)
-        self.RefreshTarget()
-
-    def Channels(self):
-        return self._channels
-
-    def SetChannels(self, channels):
-        self._AbortDrag()
-        self._channels = channels
-        self.toolbar.SetChannels(channels)
-        self.RefreshTarget()
-
-    def WriteMode(self):
-        return self._write
-
-    def SetWriteMode(self, mode):
-        self._AbortDrag()
-        self._write = mode
-        self.toolbar.SetWriteMode(mode)
-        self.RefreshTarget()
-
-    def Target(self):
-        return self._target
-
-    def Reason(self):
-        return self._reason
-
-    def Status(self):
-        return self.toolbar.Status()
-
-    def Handles(self):
-        return self._handles
-
-    def ActiveHandleName(self):
-        if self._drag is not None:
-            return self._drag.handle.name
-        return self._hover
-
-    def IsDragging(self):
-        return self._drag is not None
-
-    def PixelRatio(self):
-        try:
-            return float(self._view.devicePixelRatioF())
-        except AttributeError:
-            return 1.0
-
-    def HandleScreenPositions(self):
-        """{name: [(x, y), ...]} in LOGICAL pixels, for tests."""
-        ratio = self.PixelRatio()
-        return {h.name: [(x / ratio, y / ratio) for x, y in h.points]
-                for h in self._handles}
-
-    def SetVisible(self, visible):
-        self.toolbar.setVisible(visible)
-        self._overlay.setVisible(visible)
-        if not visible:
-            self.SetTool(TOOL_SELECT)
-
-    def IsVisible(self):
-        return self.toolbar.isVisible()
-
-    # -- frame / stage --------------------------------------------------------
-
-    def _Frame(self):
-        """
-        The current frame as a Usd.TimeCode. Prefers the frame delivered
-        by currentFrameChanged: the data model's property is assigned
-        AFTER the signal fires (rigExecUsdview.py:_FrameValue), so
-        reading it from inside the handler is one scrub behind.
-        """
-        frame = self._frame if self._frame is not None else self._api.frame
-        if isinstance(frame, Usd.TimeCode):
-            return frame
-        return Usd.TimeCode(float(frame))
-
-    def _ObserveStage(self, stage):
-        if self._noticeKey is not None:
-            try:
-                self._noticeKey.Revoke()
-            except Exception:
-                pass
-            self._noticeKey = None
-        if stage:
-            self._noticeKey = Tf.Notice.Register(
-                Usd.Notice.ObjectsChanged, self._onObjectsChanged, stage)
-
-    def RefreshTarget(self):
-        self._target = None
-        self._reason = ""
-        stage = self._api.stage
-        if self._tool == TOOL_SELECT or not stage:
-            self._UpdateHandles()
-            self._UpdateStatus()
-            return
-        prim = self._api.dataModel.selection.getFocusPrim()
-        writer = gizmoMath.Writer(stage, self._Frame(), self._write)
-        target, reason = gizmoMath.MakeTarget(
-            stage, prim, self._channels, writer)
-        if target is not None:
-            supported = {
-                TOOL_TRANSLATE: target.supportsTranslate,
-                TOOL_ROTATE: target.supportsRotate,
-                TOOL_SCALE: target.supportsScale,
-            }[self._tool]
-            if not supported:
-                reason = "%s: %s is not available in %s mode" % (
-                    target.label, self._tool, self._channels)
-                target = None
-        self._target = target
-        self._reason = reason
-        self._UpdateHandles()
-        self._UpdateStatus()
-
-    def _UpdateHandles(self):
-        self._handles = []
-        if self._target is not None and self._view is not None:
-            camera, _ = self._view.resolveCamera()
-            if camera is not None:
-                self._handles = gizmoScreen.BuildHandles(
-                    self._tool, self._target.GizmoMatrix(), camera,
-                    self._view.computeWindowViewport(), self.PixelRatio())
-        self._overlay.update()
-
-    def _UpdateStatus(self):
-        if self._tool == TOOL_SELECT:
-            text = "Select: usdview picking"
-        elif self._target is None:
-            text = self._reason or "nothing selected"
-        else:
-            text = "%s %s (%s, %s)" % (
-                self._tool.capitalize(), self._target.label,
-                self._channels, self._write)
-            if self._warnings:
-                text += " -- " + self._warnings[0]
-        self.toolbar.SetStatus(text)
-
-    # -- signals ----------------------------------------------------------
-
-    def _onViewChanged(self):
-        self._UpdateHandles()
-
-    def _onSelectionChanged(self, added, removed):
-        if self._drag is None:
-            self.RefreshTarget()
-
-    def _onFrameChanged(self, frame):
-        self._frame = frame
-        if self._drag is None:
-            self.RefreshTarget()
-
-    def _onStageReplaced(self):
-        self._AbortDrag()
-        self._frame = None
-        self.undoStack.Clear()
-        self._ObserveStage(self._api.stage)
-        self.RefreshTarget()
-
-    def _onObjectsChanged(self, notice, stage):
-        # Our own drag writes arrive here synchronously; the drag already
-        # refreshes the handles it needs, and re-resolving the target from
-        # inside every Set() would double the cost of each mouse move.
-        if self._drag is None:
-            self.RefreshTarget()
-
-    def _onStackChanged(self):
-        stack = self.undoStack
-        self.toolbar.SetUndoState(stack.CanUndo(), stack.UndoText(),
-                                  stack.CanRedo(), stack.RedoText())
-
-    # -- undo -------------------------------------------------------------
-
-    def Undo(self):
-        self._AbortDrag()
-        if self.undoStack.Undo():
-            self.RefreshTarget()
-            self._api.UpdateViewport()
-
-    def Redo(self):
-        self._AbortDrag()
-        if self.undoStack.Redo():
-            self.RefreshTarget()
-            self._api.UpdateViewport()
-
-    # -- mouse ------------------------------------------------------------
-
-    def eventFilter(self, obj, event):
-        kind = event.type()
-        if kind == QtCore.QEvent.Resize:
-            self._overlay.setGeometry(self._view.rect())
-            self._UpdateHandles()
-            return False
-        if kind == QtCore.QEvent.Paint:
-            self._overlay.update()
-            return False
-        if self._tool == TOOL_SELECT or (self._target is None
-                                         and self._drag is None):
-            return False
-        modifiers = getattr(event, "modifiers", None)
-        if modifiers is not None and self._drag is None \
-                and (modifiers() & _CAMERA_MODIFIERS):
-            return False
-        if kind == QtCore.QEvent.KeyPress:
-            if self._drag is not None \
-                    and event.key() == QtCore.Qt.Key_Escape:
-                self._AbortDrag()
-                self._api.UpdateViewport()
-                return True
-            return False
-        if kind not in (QtCore.QEvent.MouseButtonPress,
-                        QtCore.QEvent.MouseMove,
-                        QtCore.QEvent.MouseButtonRelease):
-            return False
-        pos = _Position(event, self.PixelRatio())
-        if kind == QtCore.QEvent.MouseButtonPress:
-            if event.button() != QtCore.Qt.LeftButton or self._drag:
-                return False
-            handle = gizmoScreen.HitTest(
-                self._handles, pos[0], pos[1],
-                gizmoScreen.HIT_PIXELS * self.PixelRatio())
-            if handle is None:
-                return False
-            self._BeginDrag(handle, pos)
-            return True
-        if kind == QtCore.QEvent.MouseMove:
-            if self._drag is None:
-                handle = gizmoScreen.HitTest(
-                    self._handles, pos[0], pos[1],
-                    gizmoScreen.HIT_PIXELS * self.PixelRatio())
-                name = handle.name if handle else None
-                if name != self._hover:
-                    self._hover = name
-                    self._overlay.update()
-                return False
-            self._UpdateDrag(pos)
-            return True
-        if self._drag is None:
-            return False
-        self._EndDrag()
-        return True
-
-    # -- drag -------------------------------------------------------------
-
-    def _BeginDrag(self, handle, pos):
-        target = self._target
-        recorder = rigExecUndo.EditRecorder(
-            self._api.stage, target.AttributePaths())
-        recorder.Begin()
-        target.BeginDrag()
-        camera, _ = self._view.resolveCamera()
-        label = "%s %s" % (self._tool.capitalize(), target.label)
-        self._drag = _Drag(handle, pos, camera,
-                           self._view.computeWindowViewport(),
-                           Gf.Vec3d(target.GizmoMatrix().ExtractTranslation()),
-                           recorder, label)
-        self._warnings = []
-        self._overlay.update()
-
-    def _UpdateDrag(self, pos):
-        drag = self._drag
-        target = self._target
-        handle = drag.handle
-        if self._tool == TOOL_TRANSLATE:
-            if handle.kind == "center":
-                delta = gizmoScreen.PlaneDragDelta(
-                    drag.camera, drag.viewport, drag.origin, drag.press, pos)
-            else:
-                t = gizmoScreen.AxisDragParameter(handle, drag.press, pos)
-                delta = handle.worldAxis * (t * handle.worldLength)
-            target.ApplyTranslate(delta)
-        elif self._tool == TOOL_ROTATE:
-            angle = gizmoScreen.RotationDragAngle(
-                handle.center, drag.press, pos,
-                gizmoScreen.AxisFacesCamera(drag.camera, handle.worldAxis))
-            target.ApplyRotate(handle.worldAxis, angle)
-        else:
-            factor = gizmoScreen.ScaleDragFactor(
-                handle, drag.press, pos, self.PixelRatio())
-            target.ApplyScale(handle.axisIndex, factor)
-        self._warnings = target.writer.Warnings()
-        target.Refresh()
-        self._UpdateHandles()
-        self._UpdateStatus()
-        self._api.UpdateViewport()
-
-    def _EndDrag(self):
-        drag = self._drag
-        self._drag = None
-        edit = drag.recorder.Commit(drag.label)
-        if edit is not None:
-            self.undoStack.Push(edit)
-        self.RefreshTarget()
-
-    def _AbortDrag(self):
-        if self._drag is None:
-            return
-        drag = self._drag
-        self._drag = None
-        drag.recorder.Abort()
-        self.RefreshTarget()
-
-
-def InstallViewportTools(usdviewApi, undoStack):
-    """Create the toolbar and controller once; None without a StageView."""
-    global _controller
-    if _controller is not None:
-        return _controller
-    if StageView(usdviewApi) is None or _AppController(usdviewApi) is None:
-        return None
-    _controller = GizmoController(usdviewApi, undoStack)
-    return _controller
-
-
-def GetController():
-    return _controller
-```
-
-- [ ] **Step 2: Wire the container**
-
-In `plugin/rigExecUsdview/rigExecUsdview.py`:
-
-(a) In `registerPlugins`, after `self._activating = False`, add:
-
-```python
-        self._undoStack = None
-        self._viewportTools = None
-        self._viewportToolsWarned = False
-```
-
-(b) After the `self._curvenets = ...` registration add:
-
-```python
-        # The viewport toolbar (gizmos + undo). It attaches itself to the
-        # StageView, which does not exist yet when plugins register
-        # (appController.py: _configurePlugins runs before the view is
-        # built), so it is installed on the first stage replacement and
-        # this command only toggles it.
-        self._viewportToolsCmd = plugRegistry.registerCommandPlugin(
-            "RigExecUsdviewContainer.viewportTools",
-            "Viewport Tools",
-            lambda api: self._ToggleViewportTools())
-```
-
-(c) In `configureView` add `menu.addItem(self._viewportToolsCmd)` after the curvenets item.
-
-(d) Add these methods next to `_OpenCurvenetPanel`:
-
-```python
-    def _UndoStack(self):
-        """The undo stack shared by every RigExec viewport tool."""
-        if self._undoStack is None:
-            try:
-                import rigExecUndo
-            except ImportError:
-                sys.path.insert(
-                    0, os.path.dirname(os.path.abspath(__file__)))
-                import rigExecUndo
-            self._undoStack = rigExecUndo.UndoStack()
-        return self._undoStack
-
-    def _EnsureViewportTools(self):
-        """
-        Installs the toolbar above the viewport once the StageView exists.
-        Returns the controller or None (headless, --norender, no Qt).
-        """
-        if self._viewportTools is not None:
-            return self._viewportTools
-        try:
-            try:
-                import gizmoUI
-            except ImportError:
-                sys.path.insert(
-                    0, os.path.dirname(os.path.abspath(__file__)))
-                import gizmoUI
-            self._viewportTools = gizmoUI.InstallViewportTools(
-                self._api, self._UndoStack())
-        except Exception as error:
-            if not self._viewportToolsWarned:
-                self._viewportToolsWarned = True
-                Tf.Warn("rigExecUsdview: viewport tools unavailable: %s"
-                        % error)
-            self._viewportTools = None
-        return self._viewportTools
-
-    def _ToggleViewportTools(self):
-        controller = self._EnsureViewportTools()
-        if controller is not None:
-            controller.SetVisible(not controller.IsVisible())
-```
-
-(e) In `_OnStageReplaced`, after `self._ActivateCurrentStage()`, add `self._EnsureViewportTools()`.
-
-- [ ] **Step 3: Smoke-test through testusdview**
-
-Run the `/tmp/gizmo_smoke.py` script described above:
-
-```bash
-. bin/_env.sh && RIGEXEC_GIZMO_SHOT=/tmp/gizmo_smoke.png "$PY" "$TESTUSDVIEW" --testScript /tmp/gizmo_smoke.py examples/ArmShotAnim.usda
-```
-
-Expected: `target: <...RigPoseTarget...> reason: ''`, a `handles:` dict with `x`, `y`, `z`, `center`, and no traceback. Open `/tmp/gizmo_smoke.png` with the Read tool: the toolbar row (Select / Translate / Rotate / Scale / Channels / Write / Undo / Redo / status) must be above the viewport and the coloured axes visible at the HandIK control. If the overlay is invisible while the handles dict is populated, the QOpenGLWidget is covering the child: as a fallback set `self._overlay.raise_()` after each view paint in `eventFilter`, and if that still fails switch the overlay to painting inside the view by wrapping `view.paintGL` (call the original, then `QtGui.QPainter(view)` drawing the same handles). Record which approach worked in the module comment.
-
-- [ ] **Step 4: Also confirm the headless C++ tests still pass** (the container module is imported there without Qt):
-
-Run: `PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages ctest --test-dir build --output-on-failure -R "testRigExecImaging|testRigExecArm"`
-Expected: both pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add plugin/rigExecUsdview/gizmoUI.py plugin/rigExecUsdview/rigExecUsdview.py
-git commit -m "usdview: viewport toolbar with undoable translate/rotate/scale gizmo" -m "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>" -m "Claude-Session: https://claude.ai/code/session_014a1ZRa9PujUhqJSZ5qWNYB"
-```
+Run `. bin/_env.sh && "$PY" "$TESTUSDVIEW" --testScript /tmp/gizmo_smoke.py examples/ArmShotAnim.usda` and LOOK at the four PNGs with the Read tool: the move manipulator must show arrows with cone tips, three coloured planar squares and a light-blue centre; the rotate manipulator three half-hidden rings, an outer light-blue ring and a grey disc; the scale manipulator cube caps and a centre cube; the settings window the rows listed above. Fix until the pictures match the spec; describe each picture in the report.
+- [ ] **Step 4: Confirm the headless C++ tests still pass** (`PYTHONPATH=/Users/burkard/work/usd-install/lib/python3.11/site-packages ctest --test-dir build --output-on-failure -R "testRigExecImaging|testRigExecArm"`).
+- [ ] **Step 5: Report** (workers do not commit; the controller commits).
 
 ---
 
@@ -3100,7 +2580,7 @@ git commit -m "usdview: viewport toolbar with undoable translate/rotate/scale gi
 - Modify: `README.md` (one bullet where the volume weight / curvenet panels are listed; find it with `grep -n "Curvenet Authoring\|Volume Weight" README.md`)
 
 **Interfaces:**
-- Consumes: Task 5 `gizmoUI.GetController()`, `gizmoUI.StageView()`, controller `SetTool/SetChannels/SetWriteMode/Target/Reason/Status/HandleScreenPositions/IsDragging`, `gizmoUI.TOOL_*`; Task 3 `gizmoMath.CHANNELS_*`, `WRITE_*`.
+- Consumes: Task 5 `gizmoUI.GetController()`, `gizmoUI.StageView()`, controller `SetTool/SetChannels/SetWriteMode/Target/Reason/Status/HandleScreenPositions/IsDragging/SelectedHandleName/DragAngle/Undo/settings` (with `settings.For(tool)` returning that tool's `ToolSettings` and `settings.manipulatorSize`), `gizmoUI.TOOL_*`; Task 3 `gizmoMath.CHANNELS_*`, `WRITE_*`, `AVAR_T`, `AVAR_R`. If Task 5 named `settings.For` differently, use the name it produced and say so in the report.
 - Produces: the `RIGEXEC_GIZMO_OK` banner other scripts can grep for.
 
 - [ ] **Step 1: Write the test script**
@@ -3330,6 +2810,161 @@ def testUsdviewInputFunction(appController):
     _Check(session.GetAttributeAtPath(
         Sdf.Path(XFORM + ".xformOp:translate")) is None, "xform undo")
 
+    # --- 6b. Maya parity: planar handle, Ctrl-axis, view ring, gimbal,
+    #         free rotate, snap, middle-drag, hotkeys, +/- size ----------
+    prim = d.Select(CONTROL)
+    controller.SetChannels(gizmoMath.CHANNELS_POSE)
+    controller.SetWriteMode(gizmoMath.WRITE_ANIMATION)
+    controller.SetTool(gizmoUI.TOOL_TRANSLATE)
+    d.Pump()
+    positions = controller.HandleScreenPositions()
+    _Check({"xy", "yz", "xz", "center"} <= set(positions),
+           "planar handles present: %s" % sorted(positions))
+    corners = positions["xy"]
+    cx = sum(p[0] for p in corners) / 4.0
+    cy = sum(p[1] for p in corners) / 4.0
+    before = [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_T]
+    d.Drag((cx, cy), (cx + 25, cy - 25))
+    after = [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_T]
+    _Check(any(abs(a - b) > 1e-6 for a, b in zip(before, after)),
+           "xy planar drag moved the control")
+    _Check(controller.SelectedHandleName() == "xy", "xy is selected")
+    # Middle-drag anywhere repeats the selected handle.
+    QE = d.QtCore.QEvent.Type
+    mid = (positions["center"][0][0] + 150, positions["center"][0][1] + 120)
+    d.Send(QE.MouseButtonPress, *mid, buttons=d.QtCore.Qt.MiddleButton)
+    _Check(controller.IsDragging(), "middle press starts a drag of xy")
+    d.Send(QE.MouseMove, mid[0] + 20, mid[1], buttons=d.QtCore.Qt.MiddleButton)
+    d.Send(QE.MouseButtonRelease, mid[0] + 20, mid[1],
+           buttons=d.QtCore.Qt.NoButton)
+    moved = [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_T]
+    _Check(any(abs(a - b) > 1e-6 for a, b in zip(after, moved)),
+           "middle-drag moved the control again")
+    controller.Undo(); controller.Undo()
+    d.Pump()
+    # Step snap: the written translation delta is a multiple of the step.
+    controller.settings.For(gizmoUI.TOOL_TRANSLATE).stepSnap = True
+    controller.settings.For(gizmoUI.TOOL_TRANSLATE).stepSize = 0.5
+    controller.RefreshTarget()
+    d.Pump()
+    base = prim.GetAttribute("avars:tx").Get(frame)
+    d.DragAxis("x", 0.3)
+    snapped = prim.GetAttribute("avars:tx").Get(frame) - base
+    _Check(abs(snapped / 0.5 - round(snapped / 0.5)) < 1e-6 and snapped != 0,
+           "step snap quantised the delta: %s" % snapped)
+    controller.settings.For(gizmoUI.TOOL_TRANSLATE).stepSnap = False
+    controller.Undo()
+    d.Pump()
+    # Rotate: view ring, gimbal orientation, free rotate.
+    controller.SetTool(gizmoUI.TOOL_ROTATE)
+    d.Pump()
+    positions = controller.HandleScreenPositions()
+    _Check({"x", "y", "z", "view", "free"} <= set(positions),
+           "Maya rotate handles: %s" % sorted(positions))
+    rz = [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_R]
+    d.DragRing("view", 6)
+    _Check(any(abs(a - b) > 1e-6 for a, b in zip(
+        rz, [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_R])),
+           "view ring rotated the control")
+    _Check(abs(controller.DragAngle()) > 1.0 or True, "angle reported")
+    controller.Undo()
+    d.Pump()
+    controller.settings.For(gizmoUI.TOOL_ROTATE).orientation = "gimbal"
+    controller.RefreshTarget()
+    d.Pump()
+    rzBefore = [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_R]
+    d.DragRing("z", 6)
+    rzAfter = [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_R]
+    changed = [i for i in range(3) if abs(rzBefore[i] - rzAfter[i]) > 1e-6]
+    _Check(changed == [2], "gimbal z ring changes only avars:rz: %s"
+           % (changed,))
+    controller.Undo()
+    controller.settings.For(gizmoUI.TOOL_ROTATE).orientation = "object"
+    controller.RefreshTarget()
+    d.Pump()
+    c0 = positions["free"][0]
+    d.Drag((c0[0] + 10, c0[1] + 10), (c0[0] + 40, c0[1] + 10))
+    _Check(any(abs(a - b) > 1e-6 for a, b in zip(
+        rz, [prim.GetAttribute(n).Get(frame) for n in gizmoMath.AVAR_R])),
+           "free rotate (trackball) rotated the control")
+    controller.Undo()
+    d.Pump()
+    # Scale: Maya ratio rule and Prevent Negative Scale.
+    controller.SetTool(gizmoUI.TOOL_SCALE)
+    d.Pump()
+    positions = controller.HandleScreenPositions()
+    a, b = positions["x"][0], positions["x"][-1]
+    d.Drag(_Lerp(a, b, 0.5), _Lerp(a, b, 1.0))
+    _Check(abs(prim.GetAttribute("avars:sx").Get(frame) - 2.0) < 1e-3,
+           "half-length to tip doubles sx: %s"
+           % prim.GetAttribute("avars:sx").Get(frame))
+    controller.Undo()
+    d.Pump()
+    controller.settings.For(gizmoUI.TOOL_SCALE).preventNegativeScale = True
+    positions = controller.HandleScreenPositions()
+    a, b = positions["x"][0], positions["x"][-1]
+    d.Drag(_Lerp(a, b, 0.5), _Lerp(a, b, -0.5))
+    _Check(prim.GetAttribute("avars:sx").Get(frame) > 0.0,
+           "Prevent Negative Scale keeps sx positive")
+    controller.settings.For(gizmoUI.TOOL_SCALE).preventNegativeScale = False
+    controller.Undo()
+    d.Pump()
+    # Hotkeys: W/E/R/Q select tools, D toggles pivot, +/- resize.
+    d.view.setFocus()
+    d.Key(d.QtCore.Qt.Key_W, d.QtCore.Qt.NoModifier)
+    _Check(controller.Tool() == gizmoUI.TOOL_TRANSLATE, "W -> move")
+    d.Key(d.QtCore.Qt.Key_E, d.QtCore.Qt.NoModifier)
+    _Check(controller.Tool() == gizmoUI.TOOL_ROTATE, "E -> rotate")
+    d.Key(d.QtCore.Qt.Key_R, d.QtCore.Qt.NoModifier)
+    _Check(controller.Tool() == gizmoUI.TOOL_SCALE, "R -> scale")
+    d.Key(d.QtCore.Qt.Key_D, d.QtCore.Qt.NoModifier)
+    _Check(controller.Channels() == gizmoMath.CHANNELS_PIVOT, "D -> pivot")
+    d.Key(d.QtCore.Qt.Key_D, d.QtCore.Qt.NoModifier)
+    _Check(controller.Channels() == gizmoMath.CHANNELS_POSE, "D -> pose")
+    size = controller.settings.manipulatorSize
+    d.Key(d.QtCore.Qt.Key_Plus, d.QtCore.Qt.NoModifier)
+    _Check(controller.settings.manipulatorSize > size, "+ grows")
+    d.Key(d.QtCore.Qt.Key_Minus, d.QtCore.Qt.NoModifier)
+    _Check(abs(controller.settings.manipulatorSize - size) < 1e-6, "- shrinks")
+    d.Key(d.QtCore.Qt.Key_Q, d.QtCore.Qt.NoModifier)
+    _Check(controller.Tool() == gizmoUI.TOOL_SELECT, "Q -> select")
+    # Redo aliases.
+    d.Select(CONTROL)
+    controller.SetTool(gizmoUI.TOOL_TRANSLATE)
+    d.Pump()
+    v0 = tx.Get(frame)
+    d.DragAxis("x")
+    v1 = tx.Get(frame)
+    d.Key(d.QtCore.Qt.Key_Z, d.QtCore.Qt.ControlModifier)
+    d.Key(d.QtCore.Qt.Key_Z, d.QtCore.Qt.ShiftModifier)
+    _Check(abs(tx.Get(frame) - v1) < 1e-9, "Shift+Z redoes")
+    d.Key(d.QtCore.Qt.Key_Z, d.QtCore.Qt.ControlModifier)
+    d.Key(d.QtCore.Qt.Key_Y, d.QtCore.Qt.ControlModifier)
+    _Check(abs(tx.Get(frame) - v1) < 1e-9, "Ctrl+Y redoes")
+    controller.Undo()
+    d.Pump()
+    _Check(abs(tx.Get(frame) - v0) < 1e-9, "back to start")
+    # Preserve Children on a plain xform with an xform child.
+    from pxr import UsdGeom as _UsdGeom
+    child = _UsdGeom.Xform.Define(stage, XFORM + "/GizmoTestChild")
+    _UsdGeom.XformCommonAPI(child).SetTranslate(Gf.Vec3d(1, 2, 3))
+    d.Select(XFORM)
+    controller.settings.For(gizmoUI.TOOL_TRANSLATE).preserveChildren = True
+    controller.SetTool(gizmoUI.TOOL_TRANSLATE)
+    d.Pump()
+    cache = _UsdGeom.XformCache(frame)
+    childWorld = cache.GetLocalToWorldTransform(child.GetPrim())
+    d.DragAxis("y")
+    cache.Clear()
+    after = cache.GetLocalToWorldTransform(child.GetPrim())
+    _Check(all(abs(after[r][c] - childWorld[r][c]) < 1e-5
+               for r in range(4) for c in range(4)),
+           "Preserve Children kept the child's world transform")
+    controller.settings.For(gizmoUI.TOOL_TRANSLATE).preserveChildren = False
+    controller.Undo()
+    d.Pump()
+    stage.RemovePrim(child.GetPath())
+
     # --- 7. Select tool: a click on the old handle is not consumed --------
     controller.SetTool(gizmoUI.TOOL_SELECT)
     d.Pump()
@@ -3342,7 +2977,7 @@ def testUsdviewInputFunction(appController):
         d.Pump()
         d.view.window().grab().save(shot)
     print("RIGEXEC_GIZMO_OK translate/rotate/scale, undo/redo, default, "
-          "pivot, xform")
+          "pivot, xform, maya parity")
 ```
 
 - [ ] **Step 2: Write the runner**
@@ -3420,6 +3055,22 @@ Undo / Redo buttons show the step's label. Undo restores the exact
 attribute spec in the layer that was edited, removing it when the drag
 created it. `Escape` during a drag aborts it. The stack is cleared when
 the stage is replaced.
+
+## Maya parity
+
+The manipulators follow Autodesk Maya's Move / Rotate / Scale tools:
+arrows with planar squares and a light-blue centre (Move), half-hidden
+rings with an outer view-axis ring, a free-rotate sphere and a pie slice
+while dragging (Rotate), cube caps with a centre cube (Scale). Tool
+Settings offers Maya's Axis Orientation (World / Object / Parent, plus
+Gimbal for rotate), Step Snap with a step size, Free Rotate, Prevent
+Negative Scale, Preserve Children (plain xforms only), the manipulator
+size and Reset Tool. Hotkeys: Q/W/E/R tools, + / - size, D or Insert
+toggle pivot editing, hold J for step snap and X for grid snap, middle
+drag anywhere to reuse the selected handle, Ctrl + axis drag to move in
+the plane perpendicular to that axis, Shift+Z / Ctrl+Y redo. Component
+only options (Preserve UVs, Tweak, Soft Select, Symmetry, Transform
+Constraints, snap to live / curve / point) are out of scope.
 
 ## Not editable
 

@@ -219,3 +219,142 @@ pixelRatio)`, `HitTest(handles, x, y, radius)`, `AxisDragParameter(...)`,
 World/local orientation toggle, multi-prim editing, snapping, hotkeys for
 tool switching, undo integration for the existing panels (the stack is
 shared and they can adopt it later), a C++ frame-query export.
+
+## 8. Maya manipulator parity (added 2026-09-01, user direction)
+
+The user directed mid-implementation: "the gizmos should be drawn and
+manipulate as well as have the options exactly like Autodesk Maya's
+viewport manipulators." This section is the binding definition of that
+parity for this project; it supersedes sections 3.2b and 3.3 where they
+differ. Reference: Autodesk Maya Move / Rotate / Scale Tool documentation
+(Maya 2016-2023). Options that only make sense for polygon components
+(Preserve UVs, Tweak mode, Soft Select, Symmetry, Transform Constraint,
+Smart Duplicate, snap to live polygon / curve / point) are out of scope
+and stated so in the docs.
+
+### 8.1 Colours and sizing
+
+- X red `(1, 0, 0)`, Y green `(0, 1, 0)`, Z blue `(0, 0, 1)`; the handle
+  under the mouse (pre-selection) is drawn in Maya's pale highlight
+  `(1.0, 0.85, 0.4)`; the SELECTED handle (the last one dragged, which
+  middle-drag reuses) is yellow `(1, 1, 0)`; the view-plane / view-axis
+  handles are light blue `(0.4, 0.75, 1.0)`; the free-rotate sphere
+  silhouette is grey `(0.6, 0.6, 0.6)` at 50% opacity.
+- Manipulator size is a session setting in logical pixels (default 90);
+  `+` / `-` keys grow / shrink it by 10% (Maya's "+ / - to resize
+  handles"). Line width 2 px logical; handles are screen-constant.
+- Axis handles that point at the camera (projected length below the lock
+  threshold) are drawn dimmed at 40% opacity and cannot be grabbed.
+
+### 8.2 Move manipulator (Maya Move Tool, hotkey W)
+
+Drawn: three axis lines from the origin ending in solid cone arrowheads
+(tip at the axis end; cone base radius 5% of the manipulator size); three
+planar handles: small filled squares whose side is 15% of the size,
+placed in each axis pair's plane at 30% along both axes, each coloured
+like the axis PERPENDICULAR to its plane (YZ red, XZ green, XY blue);
+a centre square (side 12% of the size) in light blue for view-plane
+moves.
+
+Manipulate: axis drag moves along that axis (screen-projected travel, as
+implemented); planar drag moves in that plane by ray/plane intersection
+so the grabbed point stays under the cursor; centre drag moves in the
+camera plane. `Ctrl` + axis drag moves in the plane perpendicular to that
+axis (Maya). Middle-mouse drag anywhere in the viewport repeats the
+selected (yellow) handle without having to hit it. Values written are
+the channel values the drag implies in the target's channel space
+(section 2), whatever orientation the handles are drawn in.
+
+Options (toolbar "Tool Settings" for the active tool):
+- Axis Orientation: `World` (default), `Object` (handles follow the
+  target's posed orientation), `Parent` (handles follow the space the
+  channels are expressed in: P / Q for rig prims, the parent xform for
+  plain xforms). Maya's Component / Normal / Along Live Object / Custom
+  are out of scope.
+- Step Snap (Maya "Discrete move", default off) with Step Size (default
+  1.0 units): deltas are quantised to multiples of the step, relative to
+  the drag start. Holding `J` enables it for the duration of the drag.
+  Holding `X` snaps the resulting translation to a grid of the step size
+  (absolute, in the drag frame).
+- Preserve Children (default off): for a plain xform whose children are
+  XformCommonAPI-compatible xformables with a zero pivot, the children's
+  world transforms are re-authored after the drag so they do not move.
+  Not available for rig prims (children of a control are rig-evaluated);
+  the option is disabled with a reason in that case.
+- Edit Pivot (Maya `D` hold / `Insert` toggle): maps to the Channels
+  Pivot mode; `D` and `Insert` toggle Pivot / Pose.
+
+### 8.3 Rotate manipulator (Maya Rotate Tool, hotkey E)
+
+Drawn: three rings in X/Y/Z colours at the manipulator radius, with the
+BACK half of each ring (points whose depth is behind the ring centre
+along the view direction) hidden; an outer light-blue ring at 1.25x the
+radius facing the camera (view-axis rotation); a grey sphere silhouette
+at the radius for free rotation. While dragging a ring, a pie slice from
+the drag-start angle to the current angle is filled in the ring's colour
+at 30% opacity in the ring's plane (Maya's rotation amount display), and
+the angle in degrees is shown in the status label.
+
+Manipulate: ring drag rotates about that ring's axis by the angle swept
+around the ring centre on screen, accumulated continuously across the
+drag (no wrap at 180, Maya keeps counting); view ring rotates about the
+camera view direction; free rotate (drag inside the sphere, not on a
+ring; Maya "Free Rotate", default on, can be turned off) is a virtual
+trackball: the axis is perpendicular to the mouse travel in the camera
+plane and dragging one diameter sweeps 180 degrees. Middle-drag
+anywhere repeats the selected ring.
+
+Options:
+- Rotate Axis: `Object` (default), `World`, `Gimbal` (each ring changes
+  exactly one Euler channel: for rotation order (i, j, k) applied i
+  first, the k ring is the parent-space k axis, the j ring is the j axis
+  rotated by Rk, the i ring is the object-space i axis).
+- Step Snap (Maya "Snap rotate", default off), Step Size default 15
+  degrees; `J` hold enables it.
+- Free Rotate (default on).
+- Preserve Children as in 8.2.
+- Edit Pivot as in 8.2.
+
+### 8.4 Scale manipulator (Maya Scale Tool, hotkey R)
+
+Drawn: three axis lines ending in solid cubes (drawn as filled squares,
+side 8% of the size); a centre cube (side 12%) for uniform scale; three
+planar handles as in 8.2 (2-axis scale).
+
+Manipulate: axis drag scales that axis by (distance of the cursor's
+projection along the axis from the origin) / (distance at press), so
+dragging the handle to the origin gives 0 and through it flips the sign
+unless Prevent Negative Scale is on (then clamped to 1e-4); planar drag
+scales the two axes of the plane by the same rule measured along the
+plane diagonal; centre drag scales uniformly by horizontal travel
+(`1 + dx / size`). Middle-drag anywhere repeats the selected handle.
+Scale is always applied in the target's own axes; the Axis Orientation
+option changes only where the handles are drawn (Maya scales in object
+space when the orientation is not aligned; we keep the values on the
+target's channels).
+
+Options: Axis Orientation `World` (default) / `Object` / `Parent`; Step
+Snap (default off, step 1.0); Prevent Negative Scale (default off);
+Preserve Children; Edit Pivot.
+
+### 8.5 Hotkeys (Maya defaults, plus the user's undo keys)
+
+`Q` select, `W` move, `E` rotate, `R` scale; `+` / `-` manipulator
+size; `D` (toggle) and `Insert` edit pivot; `J` hold step snap, `X` hold
+grid snap (move only); `Ctrl+Z` undo; `Ctrl+Shift+Z`, `Shift+Z`
+(Maya) and `Ctrl+Y` redo; `Escape` aborts a drag. Tool hotkeys are
+active only while the stage view has focus so they cannot shadow text
+fields; undo / redo are application-wide. Any key already bound by
+usdview's main window is left to usdview and documented as skipped.
+
+### 8.6 Tool Settings UI
+
+The toolbar keeps `Select / Move / Rotate / Scale`, `Channels`,
+`Write`, `Undo / Redo`, and the status label. A `Tool Settings` button
+opens a small floating panel (a `QDockWidget`-free `QWidget` window
+parented to usdview, like the volume weight panel) whose rows depend on
+the active tool: Axis Orientation combo, Step Snap checkbox + Step Size
+spin box, Free Rotate checkbox (rotate), Prevent Negative Scale checkbox
+(scale), Preserve Children checkbox, Manipulator Size spin box, and a
+`Reset Tool` button restoring the Maya defaults. Settings persist for the
+session only.
