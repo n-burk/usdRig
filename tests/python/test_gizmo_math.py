@@ -4,11 +4,17 @@ Headless test for plugin/rigExecUsdview/gizmoMath.py.
 
 Usage: test_gizmo_math.py [<generated schema resources dir>]
 
-The frame replica is checked against the native evaluator when the
-_rigexec binding is importable (build-python/python on PYTHONPATH); the
-check is reported as skipped otherwise, never silently passed.
+The frame replica is checked against the native evaluator through the
+_rigexec binding, which must be importable (build-python/python on
+PYTHONPATH). A MISSING binding is a test FAILURE, not a skip: under
+ctest stdout is hidden on a passing run, so a printed skip line would
+let the comparison disappear silently. Set RIGEXEC_GIZMO_ALLOW_NO_NATIVE
+to run the pure-python groups without it. A binding that is present but
+broken always raises, and is never mistaken for an absent one.
 """
+import importlib.util
 import math
+import os
 import random
 import sys
 
@@ -48,6 +54,30 @@ def _Rot(axis, deg):
     m = Gf.Matrix4d(1.0)
     m.SetRotate(Gf.Rotation(axis, deg))
     return m
+
+
+def _NativeModule():
+    """
+    The _rigexec binding, or None when its absence is explicitly allowed.
+
+    find_spec answers only "is it on the path", so a binding that IS
+    there but fails to load (stale against the current libs, wrong
+    python ABI) reaches the plain import below and raises with its real
+    error. A bare `except ImportError` around the import would swallow
+    that and report it as "not on PYTHONPATH", which is both wrong and,
+    because ctest hides stdout on a passing run, invisible.
+    """
+    if importlib.util.find_spec("_rigexec") is None:
+        if os.environ.get("RIGEXEC_GIZMO_ALLOW_NO_NATIVE"):
+            print("  (native _rigexec comparison skipped: "
+                  "RIGEXEC_GIZMO_ALLOW_NO_NATIVE is set)")
+            return None
+        raise AssertionError(
+            "native _rigexec comparison unavailable: put "
+            "build-python/python on PYTHONPATH or set "
+            "RIGEXEC_GIZMO_ALLOW_NO_NATIVE=1")
+    import _rigexec
+    return _rigexec
 
 
 def TestEulerRoundTrip():
@@ -144,12 +174,9 @@ def TestRigFramesReplica():
     _Check(pf.rest.GetOrthonormalized(False) == pf.rest
            or _MatClose(pf.rest, pf.rest.GetOrthonormalized(False)),
            "rest is orthonormal")
-    # Native comparison when the binding is available.
-    try:
-        import _rigexec
-    except ImportError:
-        print("  (native _rigexec comparison skipped: module not on "
-              "PYTHONPATH; run via bin/run_python_tests.sh)")
+    # Native comparison. Absent binding fails unless explicitly allowed.
+    _rigexec = _NativeModule()
+    if _rigexec is None:
         return
     rig = _rigexec.Rig(stage, "/Asset/Rig")
     rig.compile()
@@ -160,6 +187,61 @@ def TestRigFramesReplica():
         _Check(_MatClose(nm, frames.posed, 1e-5),
                "%s replica vs native:\n%s\n%s" % (prim.GetName(), nm,
                                                   frames.posed))
+
+
+def TestVolumeWeightScale():
+    """
+    A RigExecVolumeWeight must NOT take its scale from avars.
+
+    computations.cpp registers the abstract base with
+    readScaleAvars = false, because volume shape is owned by
+    inputs:scaleX/Y/Z. The generated schema does not even declare
+    avars:sx/sy/sz on the concrete volume weights -- RigExecControl has
+    all three, RigExecSphereWeight has none -- so reaching this bug needs
+    the scale authored as a custom attribute, which is exactly what a
+    gizmo writing avars blindly would do.
+    """
+    stage, parent, child = _ChainStage()
+    t = Usd.TimeCode.Default()
+    sphere = stage.DefinePrim("/Asset/Rig/Weights/Blob", "RigExecSphereWeight")
+    sphere.GetAttribute("avars:tx").Set(2.0)
+    sphere.GetAttribute("avars:rz").Set(25.0)
+    sphere.CreateAttribute("avars:sx", Sdf.ValueTypeNames.Double).Set(3.0)
+
+    _Check(gizmoMath.IsRigXformable(sphere), "a volume weight is xformable")
+    _Check(not gizmoMath.ReadsScaleAvars(sphere),
+           "a volume weight must not read scale avars")
+    _Check(gizmoMath.ReadsScaleAvars(parent), "a control reads scale avars")
+
+    sf = gizmoMath.ComputeRigFrames(stage, sphere, t)
+
+    def _AxisLengths(m):
+        return [Gf.Vec3d(m[r][0], m[r][1], m[r][2]).GetLength()
+                for r in range(3)]
+
+    for r, length in enumerate(_AxisLengths(sf.posed)):
+        _Check(_Close(length, 1.0, 1e-9),
+               "volume weight axis %d has length %s; avars:sx leaked into "
+               "the placement" % (r, length))
+    # An xformable parented under a volume weight inherits the rigid frame.
+    under = stage.DefinePrim("/Asset/Rig/Weights/Blob/J", "RigExecJoint")
+    uf = gizmoMath.ComputeRigFrames(stage, under, t)
+    for r, length in enumerate(_AxisLengths(uf.parentPosed)):
+        _Check(_Close(length, 1.0, 1e-9),
+               "parentPosed axis %d has length %s under a volume weight"
+               % (r, length))
+
+    _rigexec = _NativeModule()
+    if _rigexec is None:
+        return
+    rig = _rigexec.Rig(stage, "/Asset/Rig")
+    rig.compile()
+    pose = rig.evaluate(-1.0)
+    # weight_frame returns the 16-number matrix directly, not a PointFrame
+    # (python/_rigexec.cpp, the weight_frame binding uses _Mat4ToVec).
+    nm = Gf.Matrix4d(*pose.weight_frame(str(sphere.GetPath())))
+    _Check(_MatClose(nm, sf.posed, 1e-5),
+           "volume weight replica vs native:\n%s\n%s" % (nm, sf.posed))
 
 
 def TestRigFramesReasons():
@@ -195,6 +277,7 @@ def main():
         ("euler round trip", TestEulerRoundTrip),
         ("compose avars", TestComposeAvarMatrix),
         ("rig frames replica", TestRigFramesReplica),
+        ("volume weight scale", TestVolumeWeightScale),
         ("rig frames reasons", TestRigFramesReasons),
     ]
     for name, fn in groups:

@@ -41,6 +41,15 @@ REST_R = ("rest:rx", "rest:ry", "rest:rz")
 REST_SPACE = "rest:space"
 POSED_SPACE = "posed:space"
 
+# The concrete RigExecVolumeWeight subclasses. Used only as the fallback
+# for ReadsScaleAvars and IsRigXformable when the schema plugin is not
+# registered and Tf cannot answer an IsA question.
+VOLUME_WEIGHT_TYPE_NAMES = (
+    "RigExecSphereWeight",
+    "RigExecPlaneWeight",
+    "RigExecCurveWeight",
+)
+
 
 # ---------------------------------------------------------------------------
 # Scalars and rotations
@@ -165,8 +174,26 @@ def DecomposeEuler(matrix, order, hint=None):
 def IsRigXformable(prim):
     xformable = Tf.Type.FindByName("RigExecXformable")
     if xformable.isUnknown:
-        return prim.GetTypeName() in ("RigExecControl", "RigExecJoint")
+        return prim.GetTypeName() in (
+            ("RigExecControl", "RigExecJoint") + VOLUME_WEIGHT_TYPE_NAMES)
     return prim.IsA(xformable)
+
+
+def ReadsScaleAvars(prim):
+    """
+    Whether the evaluator feeds this prim's avars:sx/sy/sz into its frame.
+
+    False for RigExecVolumeWeight: computations.cpp registers it with
+    readScaleAvars = false on purpose, because volume shape is owned
+    exclusively by inputs:scaleX/Y/Z and transform-scale avars would be
+    silent no-ops. Reading them here anyway would give a volume weight --
+    and everything parented under one -- a replica frame the evaluator
+    disagrees with, so the gizmo would draw and edit in the wrong place.
+    """
+    volume = Tf.Type.FindByName("RigExecVolumeWeight")
+    if volume.isUnknown:
+        return prim.GetTypeName() not in VOLUME_WEIGHT_TYPE_NAMES
+    return not prim.IsA(volume)
 
 
 def FindRigRoot(prim):
@@ -242,13 +269,16 @@ def RestSpace(prim, time):
 def AvarsMatrix(prim, time):
     order = prim.GetAttribute(AVAR_ORDER)
     orderValue = order.Get(time) if order else None
+    # Mirrors _ComputeXformablePointFrame's readScaleAvars argument: a
+    # volume weight substitutes identity scale rather than reading avars.
+    scaled = ReadsScaleAvars(prim)
     return ComposeAvarMatrix(
         ScalarAvar(prim, AVAR_T[0], time, 0.0),
         ScalarAvar(prim, AVAR_T[1], time, 0.0),
         ScalarAvar(prim, AVAR_T[2], time, 0.0),
-        ScalarAvar(prim, AVAR_S[0], time, 1.0),
-        ScalarAvar(prim, AVAR_S[1], time, 1.0),
-        ScalarAvar(prim, AVAR_S[2], time, 1.0),
+        ScalarAvar(prim, AVAR_S[0], time, 1.0) if scaled else 1.0,
+        ScalarAvar(prim, AVAR_S[1], time, 1.0) if scaled else 1.0,
+        ScalarAvar(prim, AVAR_S[2], time, 1.0) if scaled else 1.0,
         ScalarAvar(prim, AVAR_R[0], time, 0.0),
         ScalarAvar(prim, AVAR_R[1], time, 0.0),
         ScalarAvar(prim, AVAR_R[2], time, 0.0),
