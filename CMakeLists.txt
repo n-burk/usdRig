@@ -297,23 +297,41 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_python.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
+    # Headless usdview-plugin tests (Qt-free modules under plugin/).
+    add_test(NAME testRigExecUndo
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_undo.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testGizmoMath
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_math.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testGizmoScreen
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py")
+
     # set_tests_properties takes exactly ONE value per property, so extra
     # assignments go through APPEND; ctest then splits the resulting list on
     # ';' into individual name=value entries (each entry below is itself
     # semicolon-free). pxr resolution and the native DLL directories are
     # handled by the test itself (_setup_environment); RIGEXEC_USD_INSTALL
     # pins the configured USD install so it does not have to guess.
-    set_tests_properties(testRigExecPython PROPERTIES ENVIRONMENT
-        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
-    if (WIN32)
-        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
-            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
-    else()
-        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
-            "LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
-        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
-            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
-    endif()
+    foreach(_python_test testRigExecPython
+                         testRigExecUndo testGizmoMath testGizmoScreen)
+        set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
+        set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+            "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+        if (WIN32)
+            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+                "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+        else()
+            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+                "LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
+            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+                "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+        endif()
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
