@@ -436,6 +436,38 @@ def testUsdviewInputFunction(appController):
     controller.Undo()
     d.Pump()
 
+    # Ctrl + an axis drag moves in the plane PERPENDICULAR to that axis
+    # (Maya). The modifier is applied to the MOVES, not the press: Qt
+    # turns Ctrl+left-click into a right-button press on macOS, so "grab
+    # the axis, then hold Ctrl" is the gesture that works everywhere.
+    # Run twice on identical geometry, plain then Ctrl, so the assertion
+    # is "Ctrl changed which channels moved" rather than the weaker
+    # "something moved".
+    a, b = d.AxisPoints("x")
+    grab = _Lerp(a, b, 0.5)
+    away = (grab[0] + 40, grab[1] - 30)
+    beforeT = _Values(prim, gizmoMath.AVAR_T, frame)
+    d.Drag(grab, away)
+    plainMoved = _Changed(beforeT, _Values(prim, gizmoMath.AVAR_T, frame))
+    _Check(plainMoved == [0],
+           "without Ctrl the same drag moves along X only: %s" % plainMoved)
+    controller.Undo()
+    d.Pump()
+    d.Press(grab)
+    _Check(controller.IsDragging(), "the X arrow started a drag")
+    for point in (_Lerp(grab, away, 0.5), away):
+        d.Move(point, button=d.QtCore.Qt.NoButton,
+               buttons=d.QtCore.Qt.LeftButton,
+               modifiers=d.QtCore.Qt.ControlModifier)
+    d.Release(away)
+    ctrlMoved = _Changed(beforeT, _Values(prim, gizmoMath.AVAR_T, frame))
+    _Check(ctrlMoved and 0 not in ctrlMoved,
+           "Ctrl + the X arrow moves in the YZ plane instead: X is "
+           "unchanged and Y or Z moved, got %s (%s -> %s)"
+           % (ctrlMoved, beforeT, _Values(prim, gizmoMath.AVAR_T, frame)))
+    controller.Undo()
+    d.Pump()
+
     # Step snap quantises the written channel delta. The same drag geometry
     # is run twice -- once with snapping off to measure the raw delta, then
     # with it on -- and the step is deliberately 0.6 of that raw delta, so

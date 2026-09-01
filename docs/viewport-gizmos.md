@@ -8,6 +8,12 @@ an undoable Move / Rotate / Scale manipulator. `RigExec → Viewport Tools`
 toggles it; the menu item is a toggle rather than a window because the
 toolbar lives inside the viewport frame, not in a floating panel.
 
+It is two rows: the tool, channel, write, undo and settings controls, and
+under them a full-width status line. The status line has a row of its own
+because a `QToolBar` folds whatever does not fit into an overflow chevron,
+and at usdview's default viewport width the status was the first thing to
+disappear — exactly when an artist most needs to read it.
+
 The manipulator is drawn on a transparent child widget of the stage view,
 not as prims in the session layer the way the curvenet authoring guides
 are. A gizmo has to be screen-constant, unoccluded by the geometry it
@@ -65,8 +71,10 @@ default value, not a rig default pose.
 Every drag is one undo step, on the same `rigExecUndo` stack the other
 panels can adopt later. `Ctrl+Z` undoes; `Ctrl+Shift+Z`, `Shift+Z`
 (Maya's redo) and `Ctrl+Y` all redo. They are application shortcuts, so
-they work wherever focus is in the window, and the toolbar's Undo / Redo
-buttons carry the step's label.
+they work wherever focus is in the window. The toolbar's Undo and Redo
+buttons name the step they would reverse on their tooltips, and both go
+grey while a drag is live, because undoing the edit a held mouse button
+is still writing would leave the two disagreeing.
 
 Undo restores the exact attribute spec in the layer the drag edited,
 removing the spec entirely when the drag was what created it — an undone
@@ -101,7 +109,8 @@ repeats that handle without having to hit it again. An axis pointing at
 the camera is dimmed and cannot be grabbed, because a foreshortened axis
 turns a few pixels of travel into an enormous move.
 
-**Tool Settings** (a floating window, one row set per tool) offers Axis
+The `Settings…` button opens the **Tool Settings** window (floating, one
+row set per tool). It offers Axis
 Orientation (World / Object / Parent, and Gimbal for Rotate, where each
 ring changes exactly one Euler channel), Step Snap with a Step Size, Free
 Rotate, Prevent Negative Scale, Preserve Children, the manipulator size,
@@ -133,6 +142,15 @@ field has keyboard focus, so typing a prim name into the search box
 cannot switch tools out from under you. Undo and redo work anywhere in
 the window, and `Escape` aborts a drag whatever has focus.
 
+`J` and `X` are both step snapping and they mean different things. `J`
+quantises the movement, so an object that started off the step grid moves
+in whole steps and stays off it — Maya's Discrete Move. `X` quantises the
+result, so the object lands on the grid however the drag started — Maya's
+grid snap. Holding both, `X` wins, because it fully determines where the
+object ends up and the relative step then says nothing. Snapping is always
+applied to the channel values that get written, never to the world delta,
+so an object under a rotated parent still moves in whole steps.
+
 Two keys are shared with usdview rather than taken from it. `J` is
 usdview's Toggle Framed View; since Maya's `J` only means anything while
 dragging, a live drag claims it and the rest of the time it still frames
@@ -147,15 +165,6 @@ take.
   Qt before anything sees it, so Ctrl-clicking an axis cannot start a
   drag there. The gesture that works everywhere is to grab the axis
   first and then hold `Ctrl`.
-- **Scale Step Snap quantises the scale factor**, not the resulting
-  channel value. For a prim at unit scale the two are the same thing;
-  for a prim already at `sx = 2` the results land on multiples of twice
-  the step.
-- **`X` snaps the manipulator onto a grid** of the step size, in the axes
-  the handles are drawn along and anchored at the world origin, which is
-  what Maya's grid snap does. `J` instead quantises the movement, so an
-  object that started off the grid moves in whole steps without jumping
-  onto one.
 
 ## When there is no gizmo
 
@@ -189,14 +198,15 @@ reason.
 - `bin/run_python_tests.sh` — headless and Qt-free: the frame replica
   against the native evaluator, the channel math for all three tools,
   edit targets and write modes, undo snapshots, screen projection and
-  hit testing, and the per-tool settings defaults.
+  hit testing, the drag rules that turn a mouse move into an `Apply*`
+  call, and the per-tool settings defaults.
 - `bin/run_testusdview_gizmo.sh` — `tests/testUsdviewGizmo.py` under
   `testusdview` on `examples/ArmShotAnim.usda`. It drives synthetic mouse
   and key events through the gizmo's own projected handle positions and
   asserts what landed on the stage: the avar at the frame, the spline
   knot in the session layer, the Ctrl+Z / Ctrl+Shift+Z round trip, the
   outranked-default warning, `rest:*` in Pivot mode, an xform's op stack,
-  and the Maya behaviours (planar handles, middle-drag repeat, step snap,
-  the view ring, gimbal rings, free rotate, the scale ratio rule,
-  Preserve Children and the hotkeys). It prints `RIGEXEC_GIZMO_OK` and
+  and the Maya behaviours (planar handles, `Ctrl` + axis, middle-drag
+  repeat, step snap, the view ring, gimbal rings, free rotate, the scale
+  ratio rule, Preserve Children and the hotkeys). It prints `RIGEXEC_GIZMO_OK` and
   saves a window grab to `$RIGEXEC_GIZMO_SHOT` when that is set.
