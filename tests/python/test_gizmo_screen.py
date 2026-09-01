@@ -6,12 +6,13 @@ Gf.Camera at (0, 0, 10) looking down -Z into an 800x600 viewport, so
 (400, 300). Usage: test_gizmo_screen.py [ignored]
 """
 import math
-import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.normpath(
-    os.path.join(_HERE, "..", "..", "plugin", "rigExecUsdview")))
+# Sibling module: this script's own directory is sys.path[0]. It must run
+# before the pxr import so pxr resolves from the configured USD install.
+import rigexec_test_env
+
+rigexec_test_env.SetupPluginTest()
 
 from pxr import Gf  # noqa: E402
 
