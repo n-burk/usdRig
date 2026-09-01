@@ -8,43 +8,15 @@ The frame replica is checked against the native evaluator when the
 _rigexec binding is importable (build-python/python on PYTHONPATH); the
 check is reported as skipped otherwise, never silently passed.
 """
-import glob
-import importlib.util
 import math
-import os
 import random
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.normpath(
-    os.path.join(_HERE, "..", "..", "plugin", "rigExecUsdview")))
+# Sibling module: this script's own directory is sys.path[0]. It must run
+# before the pxr import so pxr resolves from the configured USD install.
+import rigexec_test_env
 
-
-def _SetupPxr():
-    """
-    Make pxr importable when the ambient PYTHONPATH does not carry it.
-
-    ctest sets ENVIRONMENT PYTHONPATH to the build-tree python directory
-    ALONE -- a multi-entry value cannot be passed on Windows, where ctest
-    splits the property on every ';' (see the comment in CMakeLists.txt)
-    -- so a test run under ctest gets no site-packages at all. The other
-    python tests bootstrap themselves for the same reason; resolve pxr
-    from the configured USD install, never from a global copy whose
-    binary modules would not load against this tree.
-    """
-    if importlib.util.find_spec("pxr") is not None:
-        return
-    usdInstall = os.environ.get("RIGEXEC_USD_INSTALL") or os.path.normpath(
-        os.path.join(_HERE, "..", "..", "..", "usd-install"))
-    candidates = [os.path.join(usdInstall, "Lib", "site-packages")]
-    candidates.extend(sorted(glob.glob(os.path.join(
-        usdInstall, "lib", "python*", "site-packages"))))
-    for site in candidates:
-        if os.path.isdir(site) and site not in sys.path:
-            sys.path.insert(0, site)
-
-
-_SetupPxr()
+rigexec_test_env.SetupPluginTest()
 
 from pxr import Gf, Plug, Sdf, Usd, UsdGeom  # noqa: E402
 
