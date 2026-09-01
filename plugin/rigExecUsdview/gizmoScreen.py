@@ -209,13 +209,17 @@ def _FrontRuns(mask):
     Maximal cyclic runs of True in `mask`, as lists of indices.
 
     A ring that faces the camera is one run of every point, not two runs
-    split at index 0, so the caller can draw it as a single polyline.
+    split at index 0, and that run repeats its first index at the end so
+    it closes: a circle drawn or picked as an open polyline has a notch
+    between the last point and the first, and a click landing in that
+    notch finds nothing. A partly hidden ring's runs stay open, because
+    their ends are the horizon rather than a seam.
     """
     count = len(mask)
     if not any(mask):
         return []
     if all(mask):
-        return [list(range(count))]
+        return [list(range(count)) + [0]]
     start = next(i for i in range(count) if mask[i] and not mask[i - 1])
     runs, run = [], []
     for step in range(count):
@@ -349,9 +353,14 @@ def BuildHandles(tool, gizmoMatrix, camera, viewport, pixelRatio,
         screen, world = _ProjectRing(vp, viewport, origin, right, up,
                                      viewRadius)
         if screen is not None:
+            # Always fully visible, and closed for the same reason the
+            # face-on axis rings are.
+            runs = _FrontRuns([True] * len(screen))
             handles.append(_Make(
                 "view", "view", None, screen, toCamera, viewRadius,
-                COLOR_VIEW, frontPoints=[list(screen)], frontWorld=world))
+                COLOR_VIEW,
+                frontPoints=[[screen[k] for k in run] for run in runs],
+                frontWorld=[world[k] for run in runs for k in run]))
         if freeRotate:
             handles.append(_Make(
                 "free", "sphere", None, [center], toCamera, radius,
@@ -409,10 +418,12 @@ def _HandleDistance(handle, p):
         if _PointInPolygon(p, handle.points):
             return 0.0
         return _PolylineDistance(p, handle.points, True)
-    if kind == "ring":
+    if kind in ("ring", "view"):
         # Only the front half is drawn, so only the front half is aimed
-        # at. Each run is an open polyline: closing it would add a chord
-        # straight across the manipulator.
+        # at. Each run is treated as an open polyline: closing it here
+        # would add a chord straight across the manipulator. A fully
+        # visible ring is already closed by _FrontRuns, so its seam is
+        # a real segment and is pickable.
         distances = [_PolylineDistance(p, run, False)
                      for run in handle.frontPoints]
         distances = [d for d in distances if d is not None]
@@ -699,20 +710,6 @@ def SnapAbsolute(value, step):
     return _RoundToStep(value, step)
 
 
-def _IndexIsCounterClockwise(points):
-    """
-    True when walking `points` by increasing index turns the way the
-    artist reads as counter-clockwise. Screen y grows downward, so the
-    shoelace sign is measured on y-flipped points.
-    """
-    total = 0.0
-    for i in range(len(points)):
-        x0, y0 = points[i]
-        x1, y1 = points[(i + 1) % len(points)]
-        total += x1 * y0 - x0 * y1
-    return total >= 0.0
-
-
 def RingParameter(handle, point2d):
     """The ring parameter, in radians, of the ring point nearest point2d."""
     points = handle.points
@@ -731,8 +728,16 @@ def PiePolygon(handle, startParameter, sweepDegrees):
     Maya's rotation-amount wedge: the manipulator centre followed by the
     arc from `startParameter` through `sweepDegrees`.
 
-    The walk direction comes from the ring's own projected winding, so
-    the wedge follows the cursor whichever way the ring happens to face.
+    `sweepDegrees` is degrees about the ring's OWN world axis -- what
+    RotationDragAngle returns and what the controller applies -- so a
+    positive sweep always walks increasing parameter. The ring is
+    parameterised as origin + (u cos t + v sin t) r with (u, v, axis)
+    right-handed, so increasing t is a positive turn about the axis
+    whichever way that axis happens to face. Inferring the direction
+    from the projected winding instead would send the wedge to the
+    opposite side of the ring from the cursor whenever the axis points
+    away from the camera, because RotationDragAngle has already flipped
+    the sign for exactly that case.
     """
     points = handle.points
     count = len(points)
@@ -740,8 +745,7 @@ def PiePolygon(handle, startParameter, sweepDegrees):
         return [handle.center]
     start = int(round(startParameter / (2.0 * math.pi) * count)) % count
     steps = int(round(abs(sweepDegrees) / 360.0 * count))
-    forward = _IndexIsCounterClockwise(points)
-    direction = 1 if (sweepDegrees >= 0.0) == forward else -1
+    direction = 1 if sweepDegrees >= 0.0 else -1
     wedge = [handle.center]
     for step in range(steps + 1):
         wedge.append(points[(start + direction * step) % count])

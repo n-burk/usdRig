@@ -276,14 +276,34 @@ def TestMayaRotateHandles():
            and _Close(free.radiusPixels, gs.GIZMO_PIXELS * gs.RING_FRACTION,
                       1e-6), "free-rotate disc at the ring radius")
     z = byName["z"]
-    _Check(len(z.frontPoints) >= 1 and sum(len(a) for a in z.frontPoints)
-           == gs.RING_SEGMENTS, "z ring faces the camera: fully visible")
+    # A fully visible ring is one closed arc: the first point is repeated
+    # at the end so it draws and picks as a circle rather than a circle
+    # with a notch between the last index and the first.
+    _Check(len(z.frontPoints) == 1 and sum(len(a) for a in z.frontPoints)
+           == gs.RING_SEGMENTS + 1,
+           "z ring faces the camera: fully visible and closed")
+    _Check(z.frontPoints[0][0] == z.frontPoints[0][-1],
+           "fully visible ring closes on itself")
+    _Check(byName["view"].frontPoints[0][0]
+           == byName["view"].frontPoints[0][-1], "view ring closes too")
     x = byName["x"]
     front = sum(len(a) for a in x.frontPoints)
     _Check(gs.RING_SEGMENTS * 0.4 <= front <= gs.RING_SEGMENTS * 0.6,
            "edge-on x ring shows about half its points: %d" % front)
+    _Check(x.frontPoints[0][0] != x.frontPoints[0][-1],
+           "a half-visible arc stays open: its ends are the horizon")
     _Check(all(p[2] >= -1e-6 for p in x.frontWorld),
            "front half = points on the camera side of the ring centre")
+    # The closing segment is pickable, not a dead gap.
+    big = gs.BuildHandles(gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera,
+                          VIEWPORT, 1.0, sizePixels=180.0)
+    bigZ = {h.name: h for h in big}["z"]
+    seam = ((bigZ.points[-1][0] + bigZ.points[0][0]) / 2.0,
+            (bigZ.points[-1][1] + bigZ.points[0][1]) / 2.0)
+    hit = gs.HitTest(big, seam[0], seam[1], gs.HIT_PIXELS)
+    _Check(hit is not None and hit.name == "z",
+           "the seam between the last and first ring point is pickable: %s"
+           % (hit and hit.name))
     # Gimbal axes override the ring axes.
     axes = [Gf.Vec3d(0, 1, 0), Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 0, 1)]
     gimbal = {h.name: h for h in gs.BuildHandles(
@@ -370,6 +390,26 @@ def TestMayaDragMath():
     last = pie[-1]
     _Check(_Close(last[0], 400, 2.0) and _Close(last[1], 300 - r, 2.0),
            "+90 sweep facing the camera ends at the top: %s" % (last,))
+    # The wedge must end under the cursor whichever way the ring's axis
+    # points. The sweep is degrees about the ring's OWN world axis, which
+    # is what RotationDragAngle produces and what the controller applies,
+    # so the walk follows the sweep sign and not the screen winding.
+    away = Gf.Matrix4d(1.0).SetRotate(Gf.Rotation(Gf.Vec3d(1, 0, 0), 180))
+    awayZ = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_ROTATE, away, camera, VIEWPORT, 1.0)}["z"]
+    _Check(_Close(awayZ.worldAxis[2], -1.0)
+           and not gs.AxisFacesCamera(camera, awayZ.worldAxis),
+           "the flipped frame's z ring points away from the camera")
+    for ring in (z, awayZ):
+        press, current = (400 + r, 300), (400, 300 - r)
+        sweep = gs.RotationDragAngle(
+            ring.center, press, current,
+            gs.AxisFacesCamera(camera, ring.worldAxis))
+        end = gs.PiePolygon(ring, gs.RingParameter(ring, press), sweep)[-1]
+        _Check(_Close(end[0], current[0], 2.0)
+               and _Close(end[1], current[1], 2.0),
+               "the wedge ends under the cursor (sweep %.1f): %s"
+               % (sweep, (end,)))
 
 
 def main():
