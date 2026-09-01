@@ -898,6 +898,60 @@ def TestSnapAndPlanarScale():
            and _Close(ctl.GetAttribute("avars:sz").Get(), 0.5),
            "a list of axes works too: %s"
            % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_S])
+    # Any iterable of ints, not a list of blessed classes: the
+    # controller hands over whatever its handle description carries.
+    for name in gizmoMath.AVAR_S:
+        ctl.GetAttribute(name).Set(1.0)
+    _Drag(target, lambda: target.ApplyScale((i for i in (0, 2)), 5.0))
+    _Check(_Close(ctl.GetAttribute("avars:sx").Get(), 5.0)
+           and _Close(ctl.GetAttribute("avars:sy").Get(), 1.0)
+           and _Close(ctl.GetAttribute("avars:sz").Get(), 5.0),
+           "a generator of axes works: %s"
+           % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_S])
+
+    class _PlaneAxes(object):
+        """A sequence-like handle description, as the controller has."""
+
+        def __init__(self, *axes):
+            self._axes = axes
+
+        def __len__(self):
+            return len(self._axes)
+
+        def __getitem__(self, index):
+            return self._axes[index]
+
+    for name in gizmoMath.AVAR_S:
+        ctl.GetAttribute(name).Set(1.0)
+    _Drag(target, lambda: target.ApplyScale(_PlaneAxes(1, 2), 7.0))
+    _Check(_Close(ctl.GetAttribute("avars:sx").Get(), 1.0)
+           and _Close(ctl.GetAttribute("avars:sy").Get(), 7.0)
+           and _Close(ctl.GetAttribute("avars:sz").Get(), 7.0),
+           "a sequence-like object works: %s"
+           % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_S])
+    _Check(gizmoMath._ScaleAxes(2) == (2,)
+           and gizmoMath._ScaleAxes(None) == (0, 1, 2),
+           "an int is still one axis and None is still all three")
+    # The snap knobs are keyword-only: positionally, the third argument
+    # to ApplyTranslate would be snapAbsolute, and a mix-up would turn
+    # grid snapping on without anyone asking.
+    target.BeginDrag()
+    raised = False
+    try:
+        target.ApplyTranslate(Gf.Vec3d(0.7, 0, 0), 0.5)
+    except TypeError:
+        raised = True
+    _Check(raised, "a positional snapStep must be refused")
+    for method, args in ((target.ApplyRotate, (Gf.Vec3d(0, 0, 1), 37.0)),
+                         (target.ApplyRotateChannel, (0, 37.0)),
+                         (target.ApplyScale, (0, 1.37))):
+        raised = False
+        try:
+            method(*(args + (15.0,)))
+        except TypeError:
+            raised = True
+        _Check(raised, "%s must refuse a positional snapStep"
+               % method.__name__)
     _Drag(target, lambda: target.ApplyScale((1,), 0.0, snapStep=0.5))
     _Check(_Close(ctl.GetAttribute("avars:sy").Get(), 1e-4),
            "the 1e-4 floor still runs after the snap: %s"
@@ -961,14 +1015,19 @@ def TestXformOpNoise():
     A drag on a plain Xform with no authored ops must author only the op
     it writes, and must not make USD complain.
 
-    An end-to-end run reported a burst of "Unable to get attribute
-    associated with the xformOp" from usdGeom/xformable.cpp. USD raises
-    that whenever xformOpOrder names an op whose attribute is missing,
-    once per transform composition. Creating all four common ops for
-    every drag put three ops the drag never writes into xformOpOrder --
-    scene description the user did not ask for, including a zero pivot
-    pair on a prim that had none -- so each caller now creates only the
-    one op it is about to write.
+    Creating all four common ops for every drag put three ops the drag
+    never writes into xformOpOrder -- scene description the user did not
+    ask for, including a zero pivot pair on a prim that had none, and
+    three more specs for an undo to remove. Each caller now creates only
+    the op it is about to write.
+
+    The silence check is a separate guarantee, not the reason for the
+    narrowing: the "Unable to get attribute associated with the xformOp"
+    burst an end-to-end run reported was traced to the undo stack
+    restoring op attributes and xformOpOrder in separate change blocks,
+    which is rigExecUndo's to fix. This asserts that a drag through this
+    module composes cleanly on its own, so the two cannot be confused
+    again.
     """
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.Xform.Define(stage, "/Shot")

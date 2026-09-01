@@ -507,14 +507,24 @@ def _SnapTranslation(base, delta, step, absolute):
 def _ScaleAxes(axisIndex):
     """
     Which scale channels a drag touches: None for all three (the centre
-    cube), an int for one (an axis handle), a tuple or list for a planar
-    handle -- (0, 1) is Maya's XY square.
+    cube), an int for one (an axis handle), or ANY iterable of ints for a
+    planar handle -- (0, 1) is Maya's XY square.
+
+    The iterable case is duck-typed rather than a list of accepted
+    classes: the controller hands over whatever its handle description
+    carries, and an isinstance whitelist turned a perfectly good
+    generator or sequence-like object into a TypeError deep inside a
+    drag. Only the iteration is guarded, so a genuinely bad element
+    still raises where it is written rather than being read as a
+    single-axis index.
     """
     if axisIndex is None:
         return (0, 1, 2)
-    if isinstance(axisIndex, (tuple, list, set, frozenset)):
-        return tuple(int(i) for i in axisIndex)
-    return (int(axisIndex),)
+    try:
+        axes = tuple(axisIndex)
+    except TypeError:
+        return (int(axisIndex),)
+    return tuple(int(i) for i in axes)
 
 
 def _RotationVector(matrix):
@@ -748,7 +758,8 @@ class Target(object):
     def _Write(self, name, value):
         self.writer.Set(self.prim.GetAttribute(name), float(value))
 
-    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
+    def ApplyTranslate(self, worldDelta, *, snapStep=None,
+                       snapAbsolute=False):
         """
         Move by a WORLD delta, optionally with Maya's Step Snap.
 
@@ -759,7 +770,7 @@ class Target(object):
         """
         raise NotImplementedError
 
-    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
+    def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         """
         Turn the drawn world frame by `degrees` about a WORLD axis.
 
@@ -769,7 +780,7 @@ class Target(object):
         """
         raise NotImplementedError
 
-    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
+    def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
         """
         Add `degrees` to ONE Euler channel (0 = X, 1 = Y, 2 = Z), the
         others held at their drag base. `snapStep` quantises the angle
@@ -786,7 +797,7 @@ class Target(object):
         """
         raise NotImplementedError
 
-    def ApplyScale(self, axisIndex, factor, snapStep=None):
+    def ApplyScale(self, axisIndex, factor, *, snapStep=None):
         """
         Multiply the scale channels by `factor`.
 
@@ -861,14 +872,15 @@ class RigPoseTarget(_RigTarget):
         return (self._Order(),
                 [ScalarAvar(self.prim, n, self.time, 0.0) for n in AVAR_R])
 
-    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
+    def ApplyTranslate(self, worldDelta, *, snapStep=None,
+                       snapAbsolute=False):
         local = _Linear(self._Pw()).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
         base = [self._base[n] for n in AVAR_T]
         self._WriteVector(AVAR_T, _SnapTranslation(
             base, local, snapStep, snapAbsolute))
 
-    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
+    def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         base = [self._base[n] for n in AVAR_R]
         order = self._Order()
         # World linear = S * R * spin * linear(P*assetToWorld); only R is
@@ -878,12 +890,12 @@ class RigPoseTarget(_RigTarget):
                                   worldAxis, _SnapValue(degrees, snapStep))
         self._WriteVector(AVAR_R, DecomposeEuler(rNew, order, hint=base))
 
-    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
+    def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
         values = [self._base[n] for n in AVAR_R]
         values[axisIndex] = values[axisIndex] + _SnapValue(degrees, snapStep)
         self._WriteVector(AVAR_R, values)
 
-    def ApplyScale(self, axisIndex, factor, snapStep=None):
+    def ApplyScale(self, axisIndex, factor, *, snapStep=None):
         axes = _ScaleAxes(axisIndex)
         values = []
         for i, name in enumerate(AVAR_S):
@@ -922,26 +934,27 @@ class RigPivotTarget(_RigTarget):
         return ("XYZ",
                 [ScalarAvar(self.prim, n, self.time, 0.0) for n in REST_R])
 
-    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
+    def ApplyTranslate(self, worldDelta, *, snapStep=None,
+                       snapAbsolute=False):
         local = _Linear(self._Qw()).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
         base = [self._base[n] for n in REST_T]
         self._WriteVector(REST_T, _SnapTranslation(
             base, local, snapStep, snapAbsolute))
 
-    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
+    def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         base = [self._base[n] for n in REST_R]
         rNew = SolveWorldRotation(RotationFromEuler("XYZ", *base),
                                   self._Qw(), worldAxis,
                                   _SnapValue(degrees, snapStep))
         self._WriteVector(REST_R, DecomposeEuler(rNew, "XYZ", hint=base))
 
-    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
+    def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
         values = [self._base[n] for n in REST_R]
         values[axisIndex] = values[axisIndex] + _SnapValue(degrees, snapStep)
         self._WriteVector(REST_R, values)
 
-    def ApplyScale(self, axisIndex, factor, snapStep=None):
+    def ApplyScale(self, axisIndex, factor, *, snapStep=None):
         pass
 
 
@@ -1026,12 +1039,11 @@ class _XformTarget(Target):
         and scale on a prim that already has a pivot keeps the pivot and
         still reports it in slot 1).
 
-        Each caller asks for the one op it is about to write. Asking for
-        all four instead put three ops the drag never touches into
-        xformOpOrder, which is scene description the user did not ask
-        for -- a zero pivot pair on a prim that had none -- and three
-        more chances for xformOpOrder to name an op whose attribute is
-        missing, which USD warns about once per transform composition.
+        Each caller asks for the one op it is about to write, so a drag
+        adds no scene description beyond what it changes. Asking for all
+        four instead gave a prim that had none a zero pivot pair and two
+        more ops on the first translate, none of which the user asked
+        for and all of which then had to be undone.
         """
         return self.api.CreateXformOps(self._base["order"], *which)
 
@@ -1163,7 +1175,8 @@ class XformPoseTarget(_XformTarget):
         _, r, _, _, order = self.api.GetXformVectors(self.time)
         return (_XFORM_ORDER_NAMES[order], [float(v) for v in r])
 
-    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
+    def ApplyTranslate(self, worldDelta, *, snapStep=None,
+                       snapAbsolute=False):
         local = _Linear(self.parentWorld).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
         base = self._base["t"]
@@ -1173,7 +1186,7 @@ class XformPoseTarget(_XformTarget):
         self.writer.Set(ops[0].GetAttr(), Gf.Vec3d(*values))
         self._RestoreChildren()
 
-    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
+    def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         order = _XFORM_ORDER_NAMES[self._base["order"]]
         base = [float(v) for v in self._base["r"]]
         rNew = SolveWorldRotation(RotationFromEuler(order, *base),
@@ -1184,14 +1197,14 @@ class XformPoseTarget(_XformTarget):
         self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
         self._RestoreChildren()
 
-    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
+    def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
         angles = [float(v) for v in self._base["r"]]
         angles[axisIndex] = angles[axisIndex] + _SnapValue(degrees, snapStep)
         ops = self._Ops(UsdGeom.XformCommonAPI.OpRotate)
         self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
         self._RestoreChildren()
 
-    def ApplyScale(self, axisIndex, factor, snapStep=None):
+    def ApplyScale(self, axisIndex, factor, *, snapStep=None):
         axes = _ScaleAxes(axisIndex)
         s = Gf.Vec3f(self._base["s"])
         for i in range(3):
@@ -1221,7 +1234,8 @@ class XformPivotTarget(_XformTarget):
         m.SetTranslateOnly(self.parentWorld.Transform(Gf.Vec3d(p) + t))
         return m
 
-    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
+    def ApplyTranslate(self, worldDelta, *, snapStep=None,
+                       snapAbsolute=False):
         local = _Linear(self.parentWorld).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
         # Both sides are rounded to float32 before the sum, so the
@@ -1233,13 +1247,13 @@ class XformPivotTarget(_XformTarget):
         self.writer.Set(ops[1].GetAttr(), Gf.Vec3f(*_SnapTranslation(
             base, delta, snapStep, snapAbsolute)))
 
-    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
+    def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         pass
 
-    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
+    def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
         pass
 
-    def ApplyScale(self, axisIndex, factor, snapStep=None):
+    def ApplyScale(self, axisIndex, factor, *, snapStep=None):
         pass
 
 
