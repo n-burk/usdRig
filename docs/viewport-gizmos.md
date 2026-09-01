@@ -128,34 +128,34 @@ moved silently.
 | `Ctrl+Z` | undo |
 | `Ctrl+Shift+Z`, `Shift+Z`, `Ctrl+Y` | redo |
 
-The tool keys are read from the stage view's own event filter, so they
-cannot shadow a text field elsewhere in the window. Undo and redo are
-application-wide.
+The tool keys act while the pointer is over the viewport and no text
+field has keyboard focus, so typing a prim name into the search box
+cannot switch tools out from under you. Undo and redo work anywhere in
+the window, and `Escape` aborts a drag whatever has focus.
 
 Two keys are shared with usdview rather than taken from it. `J` is
 usdview's Toggle Framed View; since Maya's `J` only means anything while
 dragging, a live drag claims it and the rest of the time it still frames
-the view. `Escape` is swallowed by usdview's application event filter,
-which resets focus from the mouse position; a live drag claims it the
-same way. `W` is declared in usdview as Watch Window but that action is
-disabled and connected to nothing, so it was free to take.
+the view. `Escape` is usdview's own focus reset, and is likewise claimed
+only while a drag is live. `W` is declared in usdview as Watch Window,
+but that action is disabled and connected to nothing, so it was free to
+take.
 
 ### Known differences from Maya
 
 - **`Ctrl` + left-click on macOS** is turned into a right-button press by
   Qt before anything sees it, so Ctrl-clicking an axis cannot start a
   drag there. The gesture that works everywhere is to grab the axis
-  first and then hold `Ctrl`; the modifier is read on every move event,
-  not only on the press.
+  first and then hold `Ctrl`.
 - **Scale Step Snap quantises the scale factor**, not the resulting
-  channel value. For a prim already at unit scale the two are the same
-  thing; for a prim already at `sx = 2` the results land on multiples of
-  twice the step. Closing this needs the drag's base scale exposed on
-  `gizmoMath.Target`.
-- **`X` snaps a world position** onto a grid aligned with the active
-  orientation and anchored at the world origin, which is what Maya's
-  snap-to-grid does, rather than snapping the channel value itself. For
-  a rig under an untransformed asset root the two coincide.
+  channel value. For a prim at unit scale the two are the same thing;
+  for a prim already at `sx = 2` the results land on multiples of twice
+  the step.
+- **`X` snaps the manipulator onto a grid** of the step size, in the axes
+  the handles are drawn along and anchored at the world origin, which is
+  what Maya's grid snap does. `J` instead quantises the movement, so an
+  object that started off the grid moves in whole steps without jumping
+  onto one.
 
 ## When there is no gizmo
 

@@ -285,7 +285,6 @@ The package also exports `rigExec::rigExecMath` and
 - [Control and solver guides](docs/control-guides.md)
 - [Curvenet design and authoring](docs/curvenet.md)
 - [Volumetric weights](docs/volume-weights.md)
-- [Viewport gizmos in usdview](docs/viewport-gizmos.md) — the undoable
-  Maya-style translate / rotate / scale toolbar (`RigExec → Viewport Tools`)
+- [Viewport gizmos in usdview](docs/viewport-gizmos.md)
 - [OpenExec API notes](docs/exec-api-notes.md) and
   [ExecUsd API notes](docs/execusd-api-notes.md)

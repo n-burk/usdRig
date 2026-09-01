@@ -119,6 +119,9 @@ class _Driver(object):
         self.Drag(points[0], points[quarter % len(points)])
 
     def Key(self, key, modifiers=None):
+        # QtTest is the one Qt module pxr.Usdviewq.qt does not re-export, so
+        # it has to come from the binding directly. That is fine in a test;
+        # the plugin modules themselves still go through Usdviewq.qt.
         try:
             from PySide6 import QtTest
         except ImportError:
@@ -221,6 +224,18 @@ def testUsdviewInputFunction(appController):
     d.Pump()
     _Check(d.QtWidgets.QApplication.activeWindow() is not None,
            "the main window is active, so application shortcuts dispatch")
+
+    # Widen the window so the toolbar is not folded into QToolBar's
+    # overflow chevron, which is where testusdview's default width puts
+    # the status label -- the one control a reader of the grab most wants
+    # to see. The rendered viewport stays 597x540 whatever this says:
+    # testusdview pins it with SetPhysicalWindowSize for reproducible test
+    # images, which is why the grab shows a small render in a wide window.
+    # Done here rather than before the grab because every drag below reads
+    # its coordinates from the controller's own projections, so the layout
+    # must settle before anything is projected.
+    appController._mainWindow.resize(1800, 1000)
+    d.Pump()
 
     # Frame the control and tumble off the default straight-down-Z view.
     # Not cosmetic: down -Z the Z axis projects to a point, so its handle
@@ -344,6 +359,9 @@ def testUsdviewInputFunction(appController):
            % sorted(controller.HandleScreenPositions()))
     controller.Undo()
     d.Pump()
+    _Check(session.GetAttributeAtPath(Sdf.Path(CONTROL + ".rest:tx"))
+           is None, "the undo removed the rest:tx spec the pivot drag "
+           "created, the same way it does for an avar")
     controller.SetChannels(gizmoMath.CHANNELS_POSE)
     d.Pump()
 
@@ -353,11 +371,21 @@ def testUsdviewInputFunction(appController):
     d.Pump()
     _Check(controller.Target() is not None
            and controller.Target().kind == "xform-pose", controller.Reason())
+    xformOp = stage.GetAttributeAtPath(Sdf.Path(XFORM + ".xformOp:translate"))
+    opBefore = xformOp.Get(frame) if xformOp else None
     d.DragAxis("y")
-    op = session.GetAttributeAtPath(Sdf.Path(XFORM + ".xformOp:translate"))
-    _Check(op is not None and op.default != Gf.Vec3d(0, 0, 0),
-           "the drag authored xformOp:translate in the session layer: %s"
-           % (op.default if op is not None else None))
+    opPath = Sdf.Path(XFORM + ".xformOp:translate")
+    op = session.GetAttributeAtPath(opPath)
+    _Check(op is not None,
+           "the drag authored xformOp:translate in the session layer")
+    # Read the VALUE through the stage, not spec.default: Animation mode
+    # writes a double3 as a time sample, so the spec's default is None and
+    # comparing it to the zero vector proves nothing.
+    opAfter = stage.GetAttributeAtPath(opPath).Get(frame)
+    _Check(opAfter is not None and Gf.Vec3d(opAfter).GetLength() > 1e-6
+           and opAfter != opBefore,
+           "the authored translate is non-zero and differs from before the "
+           "drag: %s -> %s" % (opBefore, opAfter))
     controller.Undo()
     d.Pump()
     _Check(session.GetAttributeAtPath(
@@ -408,26 +436,36 @@ def testUsdviewInputFunction(appController):
     controller.Undo()
     d.Pump()
 
-    # Step snap quantises the delta. Measured against the SAME drag run
-    # unsnapped, so the assertion is "the snap rounded this delta", not
-    # the weaker "the result happens to divide by the step".
+    # Step snap quantises the written channel delta. The same drag geometry
+    # is run twice -- once with snapping off to measure the raw delta, then
+    # with it on -- and the step is deliberately 0.6 of that raw delta, so
+    # `loose / step` is about 1.67 and can never be a whole number. That is
+    # the whole point: with any step that divides the raw delta, "the
+    # result is a multiple of the step" is also true of an unsnapped drag,
+    # and the assertion would pass with the feature switched off.
     base = tx.Get(frame)
     d.DragAxis("x", 0.3)
     loose = tx.Get(frame) - base
     controller.Undo()
     d.Pump()
-    step = 0.5 if abs(loose) > 1.2 else max(abs(loose) / 3.0, 1e-3)
+    _Check(abs(loose) > 1e-3,
+           "the unsnapped reference drag moved far enough to snap: %s"
+           % loose)
+    step = abs(loose) * 0.6
     settings = controller.settings.For(gizmoUI.TOOL_TRANSLATE)
     settings.stepSize = step
     settings.stepSnap = True
     d.Pump()
     d.DragAxis("x", 0.3)
     snapped = tx.Get(frame) - base
-    _Check(abs(snapped) > 1e-9 and
-           abs(snapped - round(loose / step) * step) < 1e-6,
-           "step snap rounded the %.4f delta to the nearest %.4f: got %.4f, "
-           "expected %.4f" % (loose, step, snapped,
-                              round(loose / step) * step))
+    multiple = snapped / step
+    _Check(abs(snapped) > 1e-9 and abs(multiple - round(multiple)) < 1e-6,
+           "step snap wrote a whole multiple of the %.4f step: %.6f is "
+           "%.4f steps" % (step, snapped, multiple))
+    _Check(abs(snapped - loose) > 1e-3,
+           "the snap actually moved the value: the same drag wrote %.6f "
+           "unsnapped and %.6f snapped, which is what an ignored stepSnap "
+           "would also produce" % (loose, snapped))
     settings.stepSnap = False
     controller.Undo()
     d.Pump()
@@ -525,9 +563,9 @@ def testUsdviewInputFunction(appController):
     _Check(controller.Tool() == gizmoUI.TOOL_SELECT, "Q selects the Select "
            "tool")
 
-    # Escape aborts a live drag without pushing an edit. QTest delivers
-    # Escape through ShortcutOverride only (usdview's AppEventFilter eats
-    # the KeyPress), which is exactly where the controller claims it.
+    # Escape aborts a live drag without pushing an edit. usdview binds
+    # Escape itself, so the gizmo has to win it only while a drag is live;
+    # what is asserted here is that behaviour, not how it is delivered.
     controller.SetTool(gizmoUI.TOOL_TRANSLATE)
     d.Pump()
     a, b = d.AxisPoints("x")
@@ -562,6 +600,8 @@ def testUsdviewInputFunction(appController):
     # Preserve Children holds a child xform's world transform still.
     child = UsdGeom.Xform.Define(stage, XFORM + "/GizmoTestChild")
     UsdGeom.XformCommonAPI(child).SetTranslate(Gf.Vec3d(1, 2, 3))
+    childPath = child.GetPath()
+    childOpPath = childPath.AppendProperty("xformOp:translate")
     d.Select(XFORM)
     controller.settings.For(gizmoUI.TOOL_TRANSLATE).preserveChildren = True
     controller.SetTool(gizmoUI.TOOL_TRANSLATE)
@@ -585,6 +625,16 @@ def testUsdviewInputFunction(appController):
     controller.settings.For(gizmoUI.TOOL_TRANSLATE).preserveChildren = False
     controller.Undo()
     d.Pump()
+    # One drag is one undo step, compensated children included: the parent's
+    # op spec is gone and the child is back on the translate it was defined
+    # with, not left holding the value the compensation wrote.
+    _Check(session.GetAttributeAtPath(
+        Sdf.Path(XFORM + ".xformOp:translate")) is None,
+        "the undo removed the parent's xformOp spec")
+    _Check(stage.GetAttributeAtPath(childOpPath).Get(frame)
+           == Gf.Vec3d(1, 2, 3),
+           "the same undo step reverted the child's compensation: %s"
+           % stage.GetAttributeAtPath(childOpPath).Get(frame))
     # Removing the prim again is cleanup, and it works -- but it surfaces a
     # Tf error raised by a handler that has nothing to do with the gizmo:
     # RigExecUsdviewContainer._OnStageObjectsChanged calls _FindRigPaths,
@@ -592,7 +642,6 @@ def testUsdviewInputFunction(appController):
     # notice, and the range hits the half-removed prim ("Applying predicate
     # to invalid prim", usd/primFlags.cpp). Reported, not fixed here; the
     # removal itself is still asserted so this cannot hide a real failure.
-    childPath = child.GetPath()
     try:
         stage.RemovePrim(childPath)
     except Exception as error:
@@ -624,11 +673,6 @@ def testUsdviewInputFunction(appController):
     if shot:
         d.Select(CONTROL)
         controller.SetTool(gizmoUI.TOOL_TRANSLATE)
-        # testusdview pins the window narrower than the toolbar, which
-        # pushes the status label into QToolBar's overflow chevron -- the
-        # one control a reader of the picture most wants to see. Widened
-        # after every assertion, so it changes nothing but the grab.
-        appController._mainWindow.resize(1800, 1000)
         d.Pump()
         d.view.window().grab().save(shot)
 
