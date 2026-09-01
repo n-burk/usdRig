@@ -795,6 +795,141 @@ def TestPreserveChildren():
            % plain.GetPrim().GetAuthoredPropertyNames())
 
 
+def _AxisAlignedRigStage():
+    """
+    A rig with one control and no rest spaces, so P and Q are the
+    identity and a world delta IS the channel delta. The snap numbers
+    below are then readable instead of being wrapped in a rotation.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, "/Asset")
+    stage.DefinePrim("/Asset/Rig", "RigExecRoot")
+    return stage, stage.DefinePrim("/Asset/Rig/Ctl", "RigExecControl")
+
+
+def TestSnapAndPlanarScale():
+    """
+    Maya's planar (two-axis) scale handles and Step Snap (design spec
+    8.2, 8.4). Snapping is done here, not in the controller, because it
+    has to happen in CHANNEL space: quantising the world delta would put
+    the written values off the grid whenever the channel frame is turned.
+    """
+    stage, ctl = _AxisAlignedRigStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, ctl, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None, reason)
+    channel = target.ChannelFrame()
+    _Check(all(_Close(channel[r][c], 1.0 if r == c else 0.0)
+               for r in range(3) for c in range(3)),
+           "the fixture's channel frame is axis-aligned:\n%s" % channel)
+    # No snapStep: the delta lands untouched.
+    _Drag(target, lambda: target.ApplyTranslate(Gf.Vec3d(0.7, 0.2, 0.0)))
+    _Check(_Close(ctl.GetAttribute("avars:tx").Get(), 0.7)
+           and _Close(ctl.GetAttribute("avars:ty").Get(), 0.2),
+           "no snapStep leaves the delta alone")
+    # Relative snap (Maya's J hold) quantises the DELTA.
+    for name in gizmoMath.AVAR_T:
+        ctl.GetAttribute(name).Set(0.0)
+    _Drag(target, lambda: target.ApplyTranslate(
+        Gf.Vec3d(0.7, 0.2, 0.0), snapStep=0.5))
+    _Check(_Close(ctl.GetAttribute("avars:tx").Get(), 0.5)
+           and _Close(ctl.GetAttribute("avars:ty").Get(), 0.0),
+           "relative step snap quantises the channel delta: %s"
+           % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_T])
+    # Absolute snap (Maya's X grid hold) quantises the RESULT, which is
+    # what makes it different: the same delta is swallowed by relative.
+    ctl.GetAttribute("avars:tx").Set(1.3)
+    _Drag(target, lambda: target.ApplyTranslate(
+        Gf.Vec3d(0.2, 0.0, 0.0), snapStep=0.5, snapAbsolute=True))
+    _Check(_Close(ctl.GetAttribute("avars:tx").Get(), 1.5),
+           "absolute step snap puts the value on the grid: %s"
+           % ctl.GetAttribute("avars:tx").Get())
+    ctl.GetAttribute("avars:tx").Set(1.3)
+    _Drag(target, lambda: target.ApplyTranslate(
+        Gf.Vec3d(0.2, 0.0, 0.0), snapStep=0.5))
+    _Check(_Close(ctl.GetAttribute("avars:tx").Get(), 1.3),
+           "relative snap swallows a sub-step delta: %s"
+           % ctl.GetAttribute("avars:tx").Get())
+    # Scale: snap, then the planar and uniform axis selections.
+    _Drag(target, lambda: target.ApplyScale(0, 1.37, snapStep=0.5))
+    _Check(_Close(ctl.GetAttribute("avars:sx").Get(), 1.5)
+           and _Close(ctl.GetAttribute("avars:sy").Get(), 1.0),
+           "scale step snap: %s"
+           % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_S])
+    for name in gizmoMath.AVAR_S:
+        ctl.GetAttribute(name).Set(1.0)
+    _Drag(target, lambda: target.ApplyScale((0, 1), 3.0))
+    _Check(_Close(ctl.GetAttribute("avars:sx").Get(), 3.0)
+           and _Close(ctl.GetAttribute("avars:sy").Get(), 3.0)
+           and _Close(ctl.GetAttribute("avars:sz").Get(), 1.0),
+           "the XY planar handle scales exactly two channels: %s"
+           % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_S])
+    _Drag(target, lambda: target.ApplyScale([1, 2], 0.5))
+    _Check(_Close(ctl.GetAttribute("avars:sx").Get(), 3.0)
+           and _Close(ctl.GetAttribute("avars:sy").Get(), 1.5)
+           and _Close(ctl.GetAttribute("avars:sz").Get(), 0.5),
+           "a list of axes works too: %s"
+           % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_S])
+    _Drag(target, lambda: target.ApplyScale((1,), 0.0, snapStep=0.5))
+    _Check(_Close(ctl.GetAttribute("avars:sy").Get(), 1e-4),
+           "the 1e-4 floor still runs after the snap: %s"
+           % ctl.GetAttribute("avars:sy").Get())
+    # Rotate: the ANGLE is snapped, relative to the drag base.
+    _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(0, 0, 1), 37.0,
+                                             snapStep=15.0))
+    _Check(_Close(ctl.GetAttribute("avars:rz").Get(), 30.0, 1e-6),
+           "rotate step snap: %s" % ctl.GetAttribute("avars:rz").Get())
+    _Drag(target, lambda: target.ApplyRotateChannel(0, 37.0, snapStep=15.0))
+    _Check(_Close(ctl.GetAttribute("avars:rx").Get(), 30.0)
+           and _Close(ctl.GetAttribute("avars:rz").Get(), 30.0, 1e-6),
+           "gimbal ring step snap: %s"
+           % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_R])
+    # Pivot mode snaps its own channels.
+    pivotTarget, reason = gizmoMath.MakeTarget(
+        stage, ctl, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(pivotTarget is not None, reason)
+    _Drag(pivotTarget, lambda: pivotTarget.ApplyTranslate(
+        Gf.Vec3d(0.7, 0.0, 0.0), snapStep=0.5))
+    _Check(_Close(ctl.GetAttribute("rest:tx").Get(), 0.5),
+           "the rig pivot honours step snap: %s"
+           % ctl.GetAttribute("rest:tx").Get())
+    _Drag(pivotTarget, lambda: pivotTarget.ApplyRotateChannel(
+        1, 37.0, snapStep=15.0))
+    _Check(_Close(ctl.GetAttribute("rest:ry").Get(), 30.0),
+           "the rig pivot honours a snapped gimbal ring")
+    # The same two knobs on the plain xform targets.
+    box = UsdGeom.Xform.Define(stage, "/Asset/Box")
+    api = UsdGeom.XformCommonAPI(box)
+    xTarget, reason = gizmoMath.MakeTarget(
+        stage, box.GetPrim(), gizmoMath.CHANNELS_POSE, writer)
+    _Check(xTarget is not None, reason)
+    _Drag(xTarget, lambda: xTarget.ApplyScale((0, 2), 4.0))
+    _Check(api.GetXformVectors(time)[2] == Gf.Vec3f(4, 1, 4),
+           "xform planar scale: %s" % (api.GetXformVectors(time)[2],))
+    _Drag(xTarget, lambda: xTarget.ApplyScale(None, 1.1, snapStep=1.0))
+    _Check(api.GetXformVectors(time)[2] == Gf.Vec3f(4, 1, 4),
+           "a snapped uniform scale lands back on the grid: %s"
+           % (api.GetXformVectors(time)[2],))
+    _Drag(xTarget, lambda: xTarget.ApplyTranslate(
+        Gf.Vec3d(0.7, 0.2, 0.0), snapStep=0.5))
+    t = api.GetXformVectors(time)[0]
+    _Check(_Close(t[0], 0.5, 1e-6) and _Close(t[1], 0.0, 1e-6),
+           "xform translate step snap: %s" % (t,))
+    _Drag(xTarget, lambda: xTarget.ApplyRotate(Gf.Vec3d(0, 0, 1), 37.0,
+                                               snapStep=15.0))
+    _Check(_Close(api.GetXformVectors(time)[1][2], 30.0, 1e-4),
+           "xform rotate step snap: %s" % (api.GetXformVectors(time)[1],))
+    xPivot, reason = gizmoMath.MakeTarget(
+        stage, box.GetPrim(), gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(xPivot is not None, reason)
+    _Drag(xPivot, lambda: xPivot.ApplyTranslate(
+        Gf.Vec3d(0.0, 0.7, 0.0), snapStep=0.5))
+    _Check(_Close(api.GetXformVectors(time)[3][1], 0.5, 1e-6),
+           "xform pivot step snap: %s" % (api.GetXformVectors(time)[3],))
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -809,6 +944,7 @@ def main():
         ("xform targets", TestXformTargets),
         ("gimbal + frames", TestGimbalAndFrames),
         ("preserve children", TestPreserveChildren),
+        ("snap + planar scale", TestSnapAndPlanarScale),
     ]
     for name, fn in groups:
         fn()

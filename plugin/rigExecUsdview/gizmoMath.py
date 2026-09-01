@@ -471,6 +471,52 @@ def _FrameAt(matrix, origin):
     return m
 
 
+def _SnapValue(value, step):
+    """
+    `value` rounded to the nearest multiple of `step` (Maya's Step Snap),
+    or `value` unchanged when `step` is None or 0.
+
+    Halves go AWAY from zero. Python's round() sends them to even, which
+    makes a slow drag stick unevenly -- 0.5 snapping to 0 but 1.5 to 2 --
+    and the asymmetry is visible on a step grid.
+    """
+    if not step:
+        return value
+    steps = math.floor(abs(value) / abs(step) + 0.5)
+    return math.copysign(steps * abs(step), value)
+
+
+def _SnapTranslation(base, delta, step, absolute):
+    """
+    base + delta with Step Snap applied where the channel values live.
+
+    Relative (Maya's `J` hold) quantises the DELTA, so a drag advances in
+    whole steps from wherever it started; absolute (Maya's `X` grid hold,
+    move only) quantises the RESULT, so the value lands on the grid
+    however the drag started. Snapping the WORLD delta instead would put
+    the channels off the grid whenever the channel frame is rotated,
+    which is the whole reason this lives here and not in the controller.
+    """
+    if not step:
+        return [base[i] + delta[i] for i in range(3)]
+    if absolute:
+        return [_SnapValue(base[i] + delta[i], step) for i in range(3)]
+    return [base[i] + _SnapValue(delta[i], step) for i in range(3)]
+
+
+def _ScaleAxes(axisIndex):
+    """
+    Which scale channels a drag touches: None for all three (the centre
+    cube), an int for one (an axis handle), a tuple or list for a planar
+    handle -- (0, 1) is Maya's XY square.
+    """
+    if axisIndex is None:
+        return (0, 1, 2)
+    if isinstance(axisIndex, (tuple, list, set, frozenset)):
+        return tuple(int(i) for i in axisIndex)
+    return (int(axisIndex),)
+
+
 def _RotationVector(matrix):
     """A rotation as axis * radians, the 3 free parameters of SO(3)."""
     rotation = matrix.ExtractRotation()
@@ -702,17 +748,32 @@ class Target(object):
     def _Write(self, name, value):
         self.writer.Set(self.prim.GetAttribute(name), float(value))
 
-    def ApplyTranslate(self, worldDelta):
+    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
+        """
+        Move by a WORLD delta, optionally with Maya's Step Snap.
+
+        `snapStep` quantises in CHANNEL space, where the values that get
+        written live; see _SnapTranslation for why that is not the same
+        as quantising the world delta, and for what `snapAbsolute` picks
+        between. Passing no snapStep leaves the delta exactly as given.
+        """
         raise NotImplementedError
 
-    def ApplyRotate(self, worldAxis, degrees):
-        """Turn the drawn world frame by `degrees` about a WORLD axis."""
+    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
+        """
+        Turn the drawn world frame by `degrees` about a WORLD axis.
+
+        `snapStep` quantises the ANGLE, relative to the drag base, so a
+        snapped drag advances in whole steps (Maya's `J` hold, default
+        step 15 degrees).
+        """
         raise NotImplementedError
 
-    def ApplyRotateChannel(self, axisIndex, degrees):
+    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
         """
         Add `degrees` to ONE Euler channel (0 = X, 1 = Y, 2 = Z), the
-        others held at their drag base.
+        others held at their drag base. `snapStep` quantises the angle
+        exactly as it does for ApplyRotate.
 
         This is Maya's Gimbal mode (design spec 8.3, "each ring changes
         exactly one Euler channel"), and it needs its own entry point
@@ -725,7 +786,17 @@ class Target(object):
         """
         raise NotImplementedError
 
-    def ApplyScale(self, axisIndex, factor):
+    def ApplyScale(self, axisIndex, factor, snapStep=None):
+        """
+        Multiply the scale channels by `factor`.
+
+        `axisIndex` picks them: None for all three (the centre cube), an
+        int for one (an axis handle), or a tuple or list for a planar
+        handle -- (0, 1) is Maya's XY square. `snapStep` quantises the
+        RESULTING value of each channel the drag touches, before the
+        evaluator's 1e-4 floor. Channels the drag does not touch keep
+        their authored value rather than being nudged onto the grid.
+        """
         raise NotImplementedError
 
 
@@ -790,33 +861,35 @@ class RigPoseTarget(_RigTarget):
         return (self._Order(),
                 [ScalarAvar(self.prim, n, self.time, 0.0) for n in AVAR_R])
 
-    def ApplyTranslate(self, worldDelta):
+    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
         local = _Linear(self._Pw()).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
-        self._WriteVector(AVAR_T, [self._base[n] + local[i]
-                                   for i, n in enumerate(AVAR_T)])
+        base = [self._base[n] for n in AVAR_T]
+        self._WriteVector(AVAR_T, _SnapTranslation(
+            base, local, snapStep, snapAbsolute))
 
-    def ApplyRotate(self, worldAxis, degrees):
+    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
         base = [self._base[n] for n in AVAR_R]
         order = self._Order()
         # World linear = S * R * spin * linear(P*assetToWorld); only R is
         # ours to move, so spin * P is the channel frame it turns inside.
         channel = _AxisRotation(0, self._base[AVAR_RSPIN]) * self._Pw()
         rNew = SolveWorldRotation(RotationFromEuler(order, *base), channel,
-                                  worldAxis, degrees)
+                                  worldAxis, _SnapValue(degrees, snapStep))
         self._WriteVector(AVAR_R, DecomposeEuler(rNew, order, hint=base))
 
-    def ApplyRotateChannel(self, axisIndex, degrees):
+    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
         values = [self._base[n] for n in AVAR_R]
-        values[axisIndex] = values[axisIndex] + degrees
+        values[axisIndex] = values[axisIndex] + _SnapValue(degrees, snapStep)
         self._WriteVector(AVAR_R, values)
 
-    def ApplyScale(self, axisIndex, factor):
+    def ApplyScale(self, axisIndex, factor, snapStep=None):
+        axes = _ScaleAxes(axisIndex)
         values = []
         for i, name in enumerate(AVAR_S):
             value = self._base[name]
-            if axisIndex is None or axisIndex == i:
-                value = value * factor
+            if i in axes:
+                value = _SnapValue(value * factor, snapStep)
             values.append(NormalizeAvarScale(value))
         self._WriteVector(AVAR_S, values)
 
@@ -849,24 +922,26 @@ class RigPivotTarget(_RigTarget):
         return ("XYZ",
                 [ScalarAvar(self.prim, n, self.time, 0.0) for n in REST_R])
 
-    def ApplyTranslate(self, worldDelta):
+    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
         local = _Linear(self._Qw()).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
-        self._WriteVector(REST_T, [self._base[n] + local[i]
-                                   for i, n in enumerate(REST_T)])
+        base = [self._base[n] for n in REST_T]
+        self._WriteVector(REST_T, _SnapTranslation(
+            base, local, snapStep, snapAbsolute))
 
-    def ApplyRotate(self, worldAxis, degrees):
+    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
         base = [self._base[n] for n in REST_R]
         rNew = SolveWorldRotation(RotationFromEuler("XYZ", *base),
-                                  self._Qw(), worldAxis, degrees)
+                                  self._Qw(), worldAxis,
+                                  _SnapValue(degrees, snapStep))
         self._WriteVector(REST_R, DecomposeEuler(rNew, "XYZ", hint=base))
 
-    def ApplyRotateChannel(self, axisIndex, degrees):
+    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
         values = [self._base[n] for n in REST_R]
-        values[axisIndex] = values[axisIndex] + degrees
+        values[axisIndex] = values[axisIndex] + _SnapValue(degrees, snapStep)
         self._WriteVector(REST_R, values)
 
-    def ApplyScale(self, axisIndex, factor):
+    def ApplyScale(self, axisIndex, factor, snapStep=None):
         pass
 
 
@@ -1081,35 +1156,40 @@ class XformPoseTarget(_XformTarget):
         _, r, _, _, order = self.api.GetXformVectors(self.time)
         return (_XFORM_ORDER_NAMES[order], [float(v) for v in r])
 
-    def ApplyTranslate(self, worldDelta):
+    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
         local = _Linear(self.parentWorld).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
+        base = self._base["t"]
+        values = _SnapTranslation([base[i] for i in range(3)], local,
+                                  snapStep, snapAbsolute)
         ops = self._Ops()
-        self.writer.Set(ops[0].GetAttr(), self._base["t"] + local)
+        self.writer.Set(ops[0].GetAttr(), Gf.Vec3d(*values))
         self._RestoreChildren()
 
-    def ApplyRotate(self, worldAxis, degrees):
+    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
         order = _XFORM_ORDER_NAMES[self._base["order"]]
         base = [float(v) for v in self._base["r"]]
         rNew = SolveWorldRotation(RotationFromEuler(order, *base),
-                                  self.parentWorld, worldAxis, degrees)
+                                  self.parentWorld, worldAxis,
+                                  _SnapValue(degrees, snapStep))
         angles = DecomposeEuler(rNew, order, hint=base)
         ops = self._Ops()
         self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
         self._RestoreChildren()
 
-    def ApplyRotateChannel(self, axisIndex, degrees):
+    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
         angles = [float(v) for v in self._base["r"]]
-        angles[axisIndex] = angles[axisIndex] + degrees
+        angles[axisIndex] = angles[axisIndex] + _SnapValue(degrees, snapStep)
         ops = self._Ops()
         self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
         self._RestoreChildren()
 
-    def ApplyScale(self, axisIndex, factor):
+    def ApplyScale(self, axisIndex, factor, snapStep=None):
+        axes = _ScaleAxes(axisIndex)
         s = Gf.Vec3f(self._base["s"])
         for i in range(3):
-            if axisIndex is None or axisIndex == i:
-                s[i] = s[i] * factor
+            if i in axes:
+                s[i] = _SnapValue(s[i] * factor, snapStep)
         ops = self._Ops()
         self.writer.Set(ops[3].GetAttr(), s)
         self._RestoreChildren()
@@ -1134,20 +1214,25 @@ class XformPivotTarget(_XformTarget):
         m.SetTranslateOnly(self.parentWorld.Transform(Gf.Vec3d(p) + t))
         return m
 
-    def ApplyTranslate(self, worldDelta):
+    def ApplyTranslate(self, worldDelta, snapStep=None, snapAbsolute=False):
         local = _Linear(self.parentWorld).GetInverse().TransformDir(
             Gf.Vec3d(worldDelta))
+        # Both sides are rounded to float32 before the sum, so the
+        # unsnapped result is the same value the plain Vec3f addition
+        # this replaced produced.
+        base = [float(v) for v in self._base["p"]]
+        delta = [float(v) for v in Gf.Vec3f(local)]
         ops = self._Ops()
-        self.writer.Set(ops[1].GetAttr(),
-                        Gf.Vec3f(self._base["p"] + Gf.Vec3f(local)))
+        self.writer.Set(ops[1].GetAttr(), Gf.Vec3f(*_SnapTranslation(
+            base, delta, snapStep, snapAbsolute)))
 
-    def ApplyRotate(self, worldAxis, degrees):
+    def ApplyRotate(self, worldAxis, degrees, snapStep=None):
         pass
 
-    def ApplyRotateChannel(self, axisIndex, degrees):
+    def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
         pass
 
-    def ApplyScale(self, axisIndex, factor):
+    def ApplyScale(self, axisIndex, factor, snapStep=None):
         pass
 
 
