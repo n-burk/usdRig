@@ -120,10 +120,19 @@ class Edit(object):
         self.entries = list(entries)
 
     def _Apply(self, useAfter):
-        for entry in self.entries:
-            if entry.layer is None or entry.layer.expired:
-                continue
-            (entry.after if useAfter else entry.before).Restore()
+        # ONE change block around the whole edit, not one per attribute.
+        # An xform edit writes the op attributes and xformOpOrder as
+        # separate specs; restoring them in separate blocks lets the
+        # stage see an xformOpOrder naming ops that do not exist yet,
+        # and anything that recomposes on every notice (the gizmo
+        # controller, outside a drag) reads that half-applied state and
+        # warns. The nested blocks inside Restore() are harmless: USD
+        # sends the notices when the OUTERMOST block closes.
+        with Sdf.ChangeBlock():
+            for entry in self.entries:
+                if entry.layer is None or entry.layer.expired:
+                    continue
+                (entry.after if useAfter else entry.before).Restore()
 
     def Undo(self):
         self._Apply(useAfter=False)
@@ -226,6 +235,9 @@ class EditRecorder(object):
         return Edit(label, entries)
 
     def Abort(self):
-        for before in self._before.values():
-            before.Restore()
+        # One change block for the same reason as Edit._Apply: the drag
+        # being rolled back is one edit, so it must un-happen as one.
+        with Sdf.ChangeBlock():
+            for before in self._before.values():
+                before.Restore()
         self._before = {}

@@ -14,7 +14,7 @@ import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()
 
-from pxr import Plug, Sdf, Ts, Usd  # noqa: E402
+from pxr import Plug, Sdf, Tf, Ts, Usd  # noqa: E402
 
 import rigExecUndo  # noqa: E402
 
@@ -176,6 +176,83 @@ def TestEditRecorder():
            "abort restores the pre-drag state")
 
 
+class _NoticeCounter(object):
+    """Counts Usd.Notice.ObjectsChanged rounds on one stage."""
+
+    def __init__(self, stage):
+        self.count = 0
+        # The key must outlive the listener: dropping it revokes it.
+        self._key = Tf.Notice.Register(
+            Usd.Notice.ObjectsChanged, self._OnChanged, stage)
+
+    def _OnChanged(self, notice, sender):
+        self.count += 1
+
+    def Revoke(self):
+        self._key.Revoke()
+
+
+def TestSingleNoticePerEdit():
+    """
+    A multi-attribute edit must reach the stage as ONE change round.
+
+    An xform edit writes the op attributes and xformOpOrder separately.
+    Restoring them in separate change blocks leaves the stage briefly
+    holding an xformOpOrder that names ops which do not exist yet, and
+    anything recomposing on every notice (the gizmo controller does,
+    outside a drag) reads that inconsistent state and warns.
+    """
+    stage = _Stage()
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    session = stage.GetSessionLayer()
+    tx = Sdf.Path("/Rig/Ctl.avars:tx")
+    ty = Sdf.Path("/Rig/Ctl.avars:ty")
+
+    beforeTx = rigExecUndo.AttributeSnapshot.Capture(session, tx)
+    beforeTy = rigExecUndo.AttributeSnapshot.Capture(session, ty)
+    stage.GetAttributeAtPath(tx).Set(1.0)
+    stage.GetAttributeAtPath(ty).Set(2.0)
+    edit = rigExecUndo.Edit("Translate", [
+        rigExecUndo.EditEntry(
+            session, tx, beforeTx,
+            rigExecUndo.AttributeSnapshot.Capture(session, tx)),
+        rigExecUndo.EditEntry(
+            session, ty, beforeTy,
+            rigExecUndo.AttributeSnapshot.Capture(session, ty))])
+
+    counter = _NoticeCounter(stage)
+    edit.Undo()
+    _Check(counter.count == 1,
+           "a two-entry undo must fire exactly one ObjectsChanged, got %d"
+           % counter.count)
+    _Check(session.GetAttributeAtPath(tx) is None
+           and session.GetAttributeAtPath(ty) is None, "undo took effect")
+
+    counter.count = 0
+    edit.Redo()
+    _Check(counter.count == 1,
+           "a two-entry redo must fire exactly one ObjectsChanged, got %d"
+           % counter.count)
+    counter.Revoke()
+
+    # The same rule for an aborted drag: one notice, not one per path.
+    recorder = rigExecUndo.EditRecorder(stage, [tx, ty])
+    recorder.Begin()
+    stage.GetAttributeAtPath(tx).Set(11.0)
+    stage.GetAttributeAtPath(ty).Set(12.0)
+    counter = _NoticeCounter(stage)
+    recorder.Abort()
+    _Check(counter.count == 1,
+           "a two-path abort must fire exactly one ObjectsChanged, got %d"
+           % counter.count)
+    # Begin() ran after the redo above, so the pre-drag state it restores
+    # is the redone value, not an absent spec.
+    _Check(stage.GetAttributeAtPath(tx).Get() == 1.0
+           and stage.GetAttributeAtPath(ty).Get() == 2.0,
+           "abort took effect")
+    counter.Revoke()
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -184,6 +261,7 @@ def main():
         ("spline", TestSnapshotSpline),
         ("undo stack", TestUndoStack),
         ("edit recorder", TestEditRecorder),
+        ("one notice per edit", TestSingleNoticePerEdit),
     ]
     for name, fn in groups:
         fn()
