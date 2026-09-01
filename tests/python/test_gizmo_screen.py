@@ -83,6 +83,11 @@ def TestTranslateHandles():
     z = byName["z"]
     _Check(_Dist(z.points[0], z.points[1]) < 1.0,
            "z axis points at the camera and projects to a point")
+    # A foreshortened axis is still drawn but cannot be dragged: the
+    # artist orbits a few degrees rather than dragging an axis that
+    # points at the camera.
+    _Check(z.grabbable is False, "z axis is not grabbable")
+    _Check(x.grabbable is True, "x axis is grabbable")
     _Check(_Close(x.worldLength, gs.GIZMO_PIXELS
                   * gs.WorldPerPixel(camera, VIEWPORT, Gf.Vec3d(0, 0, 0)),
                   1e-9), "world length matches the pixel length")
@@ -133,6 +138,25 @@ def TestHitTest():
            "centre wins over the axes that start there: %s"
            % (hit and hit.name))
     _Check(gs.HitTest(handles, 600, 600, gs.HIT_PIXELS) is None, "miss")
+    # The z axis collapses onto the centre; clicking its tip is the artist
+    # aiming at the centre handle, not at an axis they cannot drag.
+    zPoint = {h.name: h for h in handles}["z"].points[1]
+    hit = gs.HitTest(handles, zPoint[0], zPoint[1], gs.HIT_PIXELS)
+    _Check(hit is not None and hit.name == "center",
+           "the ungrabbable z axis does not steal its own tip: %s"
+           % (hit and hit.name))
+    # An axis 2 degrees off the view direction is ungrabbable too.
+    edgeOn = Gf.Matrix4d(1.0).SetRotate(Gf.Rotation(Gf.Vec3d(0, 1, 0), 88))
+    edge = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, edgeOn, camera, VIEWPORT, 1.0)}
+    ex = edge["x"]
+    _Check(ex.grabbable is False,
+           "an x axis 2 degrees off the view direction is not grabbable: "
+           "%s px" % _Dist(ex.points[0], ex.points[1]))
+    hit = gs.HitTest(list(edge.values()), ex.points[1][0], ex.points[1][1],
+                     gs.HIT_PIXELS)
+    _Check(hit is None or hit.name != "x",
+           "an ungrabbable axis is never picked: %s" % (hit and hit.name))
     rings = gs.BuildHandles(gs.TOOL_ROTATE, Gf.Matrix4d(1.0), camera,
                             VIEWPORT, 1.0)
     radius = gs.GIZMO_PIXELS * gs.RING_FRACTION
@@ -155,8 +179,9 @@ def TestDragMath():
            "to the mouse travel: %s" % (moved,))
     # A degenerate (foreshortened) axis does not explode.
     z = handles["z"]
-    _Check(abs(gs.AxisDragParameter(z, (400, 300), (500, 300))) < 100.0,
-           "foreshortened axis is clamped")
+    _Check(abs(gs.AxisDragParameter(z, (400, 300), (500, 300)))
+           <= 100.0 / gs.MIN_AXIS_PIXELS + 1e-9,
+           "foreshortened axis is clamped to the MIN_AXIS_PIXELS floor")
     wpp = gs.WorldPerPixel(camera, VIEWPORT, Gf.Vec3d(0, 0, 0))
     plane = gs.PlaneDragDelta(camera, VIEWPORT, Gf.Vec3d(0, 0, 0),
                               (400, 300), (410, 290))

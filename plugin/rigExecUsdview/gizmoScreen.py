@@ -22,7 +22,14 @@ CENTER_PIXELS = 6.0
 RING_FRACTION = 0.85
 RING_SEGMENTS = 48
 SCALE_PIXELS_PER_UNIT = 120.0
-_MIN_AXIS_PIXELS = 4.0
+
+# Shortest projected axis that may still be grabbed, in LOGICAL pixels.
+# An axis pointing nearly at the camera has almost no screen direction, so
+# every pixel of mouse travel becomes a huge world move: at 4 px a 100 px
+# drag would push the object 11 world units with the camera 10 units away.
+# Every other DCC gizmo answers this the same way -- the axis goes
+# ungrabbable and the artist orbits a few degrees before dragging it.
+MIN_AXIS_PIXELS = 12.0
 
 _AXES = (Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 1, 0), Gf.Vec3d(0, 0, 1))
 _AXIS_NAMES = ("x", "y", "z")
@@ -31,8 +38,17 @@ _CENTER_COLOR = (0.95, 0.95, 0.95)
 
 
 class Handle(object):
+    """
+    One drawable, pickable piece of the gizmo.
+
+    `grabbable` is False for an axis that is too foreshortened to drag
+    (see MIN_AXIS_PIXELS). Such a handle is still returned so it can be
+    drawn -- the artist needs to see that the axis is there and why it is
+    edge-on -- but HitTest refuses to pick it.
+    """
+
     def __init__(self, name, kind, axisIndex, points, worldAxis,
-                 worldLength, color, center):
+                 worldLength, color, center, grabbable=True):
         self.name = name
         self.kind = kind
         self.axisIndex = axisIndex
@@ -41,9 +57,11 @@ class Handle(object):
         self.worldLength = worldLength
         self.color = color
         self.center = center
+        self.grabbable = grabbable
 
     def __repr__(self):
-        return "<Handle %s %s>" % (self.name, self.kind)
+        return "<Handle %s %s%s>" % (
+            self.name, self.kind, "" if self.grabbable else " (locked)")
 
 
 def ViewProjection(camera):
@@ -111,9 +129,11 @@ def BuildHandles(tool, gizmoMatrix, camera, viewport, pixelRatio):
             end = ProjectPoint(vp, viewport, origin + axes[i] * length)
             if end is None:
                 continue
+            screenLength = math.hypot(end[0] - center[0], end[1] - center[1])
             handles.append(Handle(
                 _AXIS_NAMES[i], "axis", i, [center, end], axes[i], length,
-                _AXIS_COLORS[i], center))
+                _AXIS_COLORS[i], center,
+                screenLength >= MIN_AXIS_PIXELS * pixelRatio))
         handles.append(Handle(
             "center", "center", None, [center], None, length,
             _CENTER_COLOR, center))
@@ -167,13 +187,18 @@ def HitTest(handles, x, y, radius):
     The handle under (x, y) within `radius` pixels, or None. The centre
     handle wins when it is hit at all: every axis starts there, and the
     small square is the thing the artist aimed at.
+
+    Handles marked not grabbable are skipped, so a foreshortened axis
+    cannot be picked by accident -- it collapses onto the centre, which is
+    exactly where the artist is clicking.
     """
     p = (x, y)
-    for handle in handles:
+    pickable = [h for h in handles if h.grabbable]
+    for handle in pickable:
         if handle.kind == "center" and _HandleDistance(handle, p) <= radius:
             return handle
     best = None
-    for handle in handles:
+    for handle in pickable:
         d = _HandleDistance(handle, p)
         if d <= radius and (best is None or d < best[0]):
             best = (d, handle)
@@ -184,19 +209,21 @@ def AxisDragParameter(handle, press, current):
     """
     Mouse travel projected onto the handle's screen direction, as a
     fraction of the handle's screen length (so 1.0 == one handle length
-    == handle.worldLength in world units). A foreshortened axis has its
-    screen length floored so a few pixels cannot become a huge move.
+    == handle.worldLength in world units). The screen length is floored at
+    MIN_AXIS_PIXELS so a few pixels cannot become a huge move. That is a
+    safety net only: BuildHandles already marks such an axis ungrabbable,
+    so a drag should never start on one.
     """
     ax, ay = handle.points[0]
     bx, by = handle.points[-1]
     dx, dy = bx - ax, by - ay
     length = math.hypot(dx, dy)
-    if length < _MIN_AXIS_PIXELS:
+    if length < MIN_AXIS_PIXELS:
         if length < 1e-9:
             return 0.0
-        dx = dx / length * _MIN_AXIS_PIXELS
-        dy = dy / length * _MIN_AXIS_PIXELS
-        length = _MIN_AXIS_PIXELS
+        dx = dx / length * MIN_AXIS_PIXELS
+        dy = dy / length * MIN_AXIS_PIXELS
+        length = MIN_AXIS_PIXELS
     ux, uy = dx / length, dy / length
     travel = (current[0] - press[0]) * ux + (current[1] - press[1]) * uy
     return travel / length
@@ -236,7 +263,13 @@ def RotationDragAngle(center, press, current, axisFacesCamera):
 
 
 def ScaleDragFactor(handle, press, current, pixelRatio):
-    """1 + travel / SCALE_PIXELS_PER_UNIT, floored at 0.01."""
+    """
+    1 + travel / SCALE_PIXELS_PER_UNIT, floored at 0.01.
+
+    Returns 1.0 unchanged for an axis too foreshortened to grab: it has no
+    usable screen direction, so any travel along it would be noise
+    amplified into a huge scale.
+    """
     if handle.kind == "center":
         travel = current[0] - press[0]
     else:
@@ -244,6 +277,8 @@ def ScaleDragFactor(handle, press, current, pixelRatio):
         bx, by = handle.points[-1]
         dx, dy = bx - ax, by - ay
         length = math.hypot(dx, dy)
+        if handle.kind == "axis" and length < MIN_AXIS_PIXELS * pixelRatio:
+            return 1.0
         if length < 1e-9:
             travel = current[0] - press[0]
         else:
