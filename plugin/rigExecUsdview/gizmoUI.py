@@ -831,7 +831,7 @@ class ToolSettingsPanel(QtWidgets.QWidget):
         self._preserveChildren.setChecked(
             bool(settings.preserveChildren) and supported)
         if supported:
-            skipped = self._controller._SkippedChildren()
+            skipped = self._controller.SkippedChildren()
             tip = ("Re-author the children after the drag so they keep "
                    "their world transforms.")
             if skipped:
@@ -1297,7 +1297,7 @@ class GizmoController(QtCore.QObject):
             else "Pose",
             "Default" if self._writeMode == gizmoMath.WRITE_DEFAULT
             else "Animation")
-        skipped = self._SkippedChildren()
+        skipped = self.SkippedChildren()
         if skipped:
             text += "  (%d child%s not preserved)" % (
                 len(skipped), "" if len(skipped) == 1 else "ren")
@@ -1305,7 +1305,7 @@ class GizmoController(QtCore.QObject):
             text += "  warning: " + "; ".join(self._warnings)
         return text
 
-    def _SkippedChildren(self):
+    def SkippedChildren(self):
         """
         The target's explanations for children a Preserve Children drag
         will NOT hold still (a rig-placed child, an incompatible op
