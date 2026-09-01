@@ -102,6 +102,8 @@ class RigExecUsdviewContainer(PluginContainer):
         self._active = False
         self._rigPaths = []
         self._cachedStage = None
+        self._undoStack = None
+        self._viewportTools = None
 
         # Release the stage BEFORE the interpreter finalizes.
         #
@@ -136,6 +138,14 @@ class RigExecUsdviewContainer(PluginContainer):
             "Curvenet Authoring",
             lambda api: self._OpenCurvenetPanel(api))
 
+        # The viewport manipulator toolbar. Same lazy-import reasoning
+        # again; the menu item toggles it rather than opening a window,
+        # because the toolbar lives inside the viewport frame.
+        self._viewportToolsCommand = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.viewportTools",
+            "Viewport Tools",
+            lambda api: self._ToggleViewportTools())
+
         dataModel = self._api.dataModel
         # Plugins load before the stage opens: activate on stage
         # replacement and re-evaluate on every timeline change.
@@ -150,6 +160,7 @@ class RigExecUsdviewContainer(PluginContainer):
         menu.addItem(self._reactivate)
         menu.addItem(self._volumeWeights)
         menu.addItem(self._curvenets)
+        menu.addItem(self._viewportToolsCommand)
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring
@@ -221,6 +232,58 @@ class RigExecUsdviewContainer(PluginContainer):
             import curvenetUI
 
         return curvenetUI.OpenCurvenetPanel(usdviewApi)
+
+    def _UndoStack(self):
+        """
+        The undo stack the viewport gizmos push onto, created once.
+
+        Lazy for the same reason the panels are: rigExecUndo is Qt-free,
+        but nothing needs a stack until something authors through it,
+        and the two existing panels can adopt this one later.
+        """
+        if self._undoStack is None:
+            try:
+                import rigExecUndo
+            except ImportError:
+                sys.path.insert(
+                    0, os.path.dirname(os.path.abspath(__file__)))
+                import rigExecUndo
+            self._undoStack = rigExecUndo.UndoStack()
+        return self._undoStack
+
+    def _EnsureViewportTools(self):
+        """
+        Install the gizmo toolbar on the stage view, once it exists.
+
+        Plugins load BEFORE the stage view is built, so this is driven
+        off stage replacement rather than off registerPlugins. Returns
+        None in any context without Qt or without a viewport, which is
+        how the headless tests get away with loading this container.
+        """
+        if self._viewportTools is not None:
+            return self._viewportTools
+        try:
+            try:
+                import gizmoUI
+            except ImportError:
+                sys.path.insert(
+                    0, os.path.dirname(os.path.abspath(__file__)))
+                import gizmoUI
+            self._viewportTools = gizmoUI.InstallViewportTools(
+                self._api, self._UndoStack())
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: viewport tools unavailable: %s"
+                    % error)
+            self._viewportTools = None
+        return self._viewportTools
+
+    def _ToggleViewportTools(self):
+        """Menu item: show or hide the toolbar and its manipulators."""
+        controller = self._EnsureViewportTools()
+        if controller is None:
+            return None
+        controller.SetVisible(not controller.IsVisible())
+        return controller
 
     def _FrameValue(self, frame=None):
         """
@@ -295,6 +358,10 @@ class RigExecUsdviewContainer(PluginContainer):
         self._cachedStage = None
 
     def _OnStageReplaced(self):
+        # The stage view exists by now (plugins load before it is built),
+        # so this is where the gizmo toolbar can attach; it re-resolves
+        # its target on the selection and edit notices that follow.
+        self._EnsureViewportTools()
         stage = self._api.dataModel.stage
         self._active = False
         self._rigPaths = []

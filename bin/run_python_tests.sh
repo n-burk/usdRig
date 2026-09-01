@@ -14,7 +14,8 @@ SCHEMA="$RIG/build/usd/rigExecSchema/resources"
 
 TESTS=("$@")
 if [ ${#TESTS[@]} -eq 0 ]; then
-    TESTS=(test_rigexec_undo test_gizmo_math test_gizmo_screen)
+    TESTS=(test_rigexec_undo test_gizmo_math test_gizmo_screen
+           test_gizmo_settings)
 fi
 for t in "${TESTS[@]}"; do
     echo "== $t"

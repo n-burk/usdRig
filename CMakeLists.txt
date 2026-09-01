@@ -309,6 +309,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testGizmoScreen
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py")
+    add_test(NAME testGizmoSettings
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_settings.py")
 
     # set_tests_properties takes exactly ONE value per property, so extra
     # assignments go through APPEND; ctest then splits the resulting list on
@@ -317,7 +320,8 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     # handled by the test itself (_setup_environment); RIGEXEC_USD_INSTALL
     # pins the configured USD install so it does not have to guess.
     foreach(_python_test testRigExecPython
-                         testRigExecUndo testGizmoMath testGizmoScreen)
+                         testRigExecUndo testGizmoMath testGizmoScreen
+                         testGizmoSettings)
         set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
