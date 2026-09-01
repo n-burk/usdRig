@@ -21,7 +21,6 @@ HIT_PIXELS = 8.0
 CENTER_PIXELS = 6.0
 RING_FRACTION = 0.85
 RING_SEGMENTS = 48
-SCALE_PIXELS_PER_UNIT = 120.0
 
 # Maya manipulator geometry, as fractions of the manipulator size (design
 # section 8.1-8.4).  PLANE_OFFSET places each planar handle 30% out along
@@ -522,31 +521,6 @@ def RotationDragAngle(center, press, current, axisFacesCamera):
     while degrees <= -180.0:
         degrees += 360.0
     return degrees if axisFacesCamera else -degrees
-
-
-def ScaleDragFactor(handle, press, current, pixelRatio):
-    """
-    1 + travel / SCALE_PIXELS_PER_UNIT, floored at 0.01.
-
-    Returns 1.0 unchanged for an axis too foreshortened to grab: it has no
-    usable screen direction, so any travel along it would be noise
-    amplified into a huge scale.
-    """
-    if handle.kind == "center":
-        travel = current[0] - press[0]
-    else:
-        ax, ay = handle.points[0]
-        bx, by = handle.points[-1]
-        dx, dy = bx - ax, by - ay
-        length = math.hypot(dx, dy)
-        if handle.kind == "axis" and length < MIN_AXIS_PIXELS * pixelRatio:
-            return 1.0
-        if length < 1e-9:
-            travel = current[0] - press[0]
-        else:
-            travel = ((current[0] - press[0]) * dx
-                      + (current[1] - press[1]) * dy) / length
-    return max(0.01, 1.0 + travel / (SCALE_PIXELS_PER_UNIT * pixelRatio))
 
 
 def _PickRay(camera, viewport, point):

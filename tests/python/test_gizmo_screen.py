@@ -210,14 +210,8 @@ def TestDragMath():
         gs.TOOL_SCALE, Gf.Matrix4d(1.0), camera, VIEWPORT, 1.0)}
     _Check(set(scale) == {"x", "y", "z", "xy", "yz", "xz", "center"},
            "scale handles: %s" % sorted(scale))
-    f = gs.ScaleDragFactor(scale["x"], (400, 300), (460, 300), 1.0)
-    _Check(_Close(f, 1.5, 1e-9), "60 px along x: %s" % f)
-    f = gs.ScaleDragFactor(scale["x"], (400, 300), (400, 360), 1.0)
-    _Check(_Close(f, 1.0, 1e-9), "perpendicular travel does nothing")
-    f = gs.ScaleDragFactor(scale["center"], (400, 300), (340, 300), 1.0)
-    _Check(_Close(f, 0.5, 1e-9), "centre: horizontal travel, uniform")
-    f = gs.ScaleDragFactor(scale["x"], (400, 300), (0, 300), 1.0)
-    _Check(f >= 0.01, "factor is floored")
+    # The scale RULE is Maya's ratio, MayaScaleFactor, asserted in
+    # TestMayaScaleHandles; only the handle set belongs here.
 
 
 def TestMayaTranslateHandles():

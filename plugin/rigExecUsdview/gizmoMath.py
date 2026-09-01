@@ -229,6 +229,87 @@ def SolverPosedPaths(rigRoot):
     return paths
 
 
+class SolverPosedCache(object):
+    """
+    SolverPosedPaths memoised per rig root.
+
+    Every Refresh() of a rig target re-derives its frames, and that walks
+    the WHOLE rig looking for rigExec:joints. Outside a drag the
+    controller refreshes on every relevant stage notice, so without this
+    an avar change costs a full traversal for an answer that cannot have
+    moved: the set only changes when a relationship, a prim or a
+    composition arc changes, and all three arrive as a RESYNC.
+
+    Invalidation is the caller's job -- InvalidateResynced on a notice's
+    resynced paths, Clear when the stage is replaced -- because only the
+    caller sees the notices.
+    """
+
+    def __init__(self):
+        self._byRoot = {}
+
+    def For(self, rigRoot):
+        """The memoised SolverPosedPaths(rigRoot); empty without a root."""
+        if not rigRoot:
+            return set()
+        path = rigRoot.GetPath()
+        paths = self._byRoot.get(path)
+        if paths is None:
+            paths = SolverPosedPaths(rigRoot)
+            self._byRoot[path] = paths
+        return paths
+
+    def Clear(self):
+        self._byRoot = {}
+
+    def InvalidateResynced(self, resyncedPaths):
+        """
+        Drop every rig root a resynced path could have changed: one
+        INSIDE the rig (a joints relationship was authored, a prim added
+        or removed) and one AT or ABOVE it (the rig itself was replaced
+        or its composition changed).
+        """
+        for root in list(self._byRoot):
+            for path in resyncedPaths:
+                prim = path.GetPrimPath()
+                if prim.HasPrefix(root) or root.HasPrefix(prim):
+                    del self._byRoot[root]
+                    break
+
+
+def NoticeAffectsTarget(resyncedPaths, changedPaths, targetPath,
+                        rigRootPath=None):
+    """
+    Whether an ObjectsChanged notice can have moved the gizmo's target.
+
+    True when any resynced or changed-info path IS the target prim or
+    one of its ancestors (an ancestor's transform carries it), and -- for
+    a rig target -- when any of them lies under `rigRootPath`, because
+    the evaluator composes a control's frame from every avar above it
+    and a solver can pose it from a joint anywhere else in the rig.
+
+    A property path answers for the prim that owns it: an avar edit
+    arrives as </Rig/Arm.avars:tx>, and what moved is /Rig/Arm.
+
+    Without the filter every notice on the stage -- the volume weight
+    panel, the curvenet panel, a timeline scrub -- costs a full rig walk,
+    a resolveCamera() (which is NOT side-effect free, see gizmoUI._Camera)
+    and a reprojection of the whole manipulator, for a target that
+    usually did not change. A target-less controller is always affected:
+    the notice may be the very edit that gives the focus prim a target.
+    """
+    if targetPath is None:
+        return True
+    for paths in (resyncedPaths, changedPaths):
+        for path in paths:
+            prim = path.GetPrimPath()
+            if targetPath.HasPrefix(prim):
+                return True
+            if rigRootPath is not None and prim.HasPrefix(rigRootPath):
+                return True
+    return False
+
+
 def ScalarAvar(prim, name, time, fallback):
     attr = prim.GetAttribute(name)
     if attr:
@@ -707,6 +788,19 @@ class Target(object):
     def Refresh(self):
         """Re-read the stage; call after a frame change or an undo."""
 
+    def RigRootPath(self):
+        """
+        The enclosing RigExecRoot's path, or None for a plain xform.
+
+        The controller needs it to decide whether a stage notice can
+        have moved this target: a rig control's frame is composed from
+        every avar above it and can be posed by a solver reading a joint
+        elsewhere in the rig, so anything under the root is relevant
+        (NoticeAffectsTarget), while an xform only follows its own
+        ancestors.
+        """
+        return None
+
     def GizmoMatrix(self):
         raise NotImplementedError
 
@@ -820,13 +914,23 @@ class _RigTarget(Target):
     preserveChildrenReason = ("children of a rig control are evaluated by "
                               "the rig")
 
-    def __init__(self, stage, prim, writer):
+    def __init__(self, stage, prim, writer, solverPosed=None):
         Target.__init__(self, stage, prim, writer)
+        # A SolverPosedCache, or None to walk the rig on every Refresh.
+        self._solverPosed = solverPosed
         self.frames = None
         self.Refresh()
 
     def Refresh(self):
-        self.frames = ComputeRigFrames(self.stage, self.prim, self.time)
+        posed = None
+        if self._solverPosed is not None:
+            posed = self._solverPosed.For(FindRigRoot(self.prim))
+        self.frames = ComputeRigFrames(self.stage, self.prim, self.time,
+                                       posed)
+
+    def RigRootPath(self):
+        root = self.frames.rigRoot if self.frames is not None else None
+        return root.GetPath() if root else None
 
     def _WriteVector(self, names, values):
         with Sdf.ChangeBlock():
@@ -970,6 +1074,36 @@ _XFORM_ORDER_NAMES = {
 _ZERO3F = Gf.Vec3f(0.0, 0.0, 0.0)
 
 
+def _XformCommonMatrix(t, p, r, s, order):
+    """
+    The local matrix of an XformCommonAPI op stack, composed from its
+    five components WITHOUT reading the stage.
+
+    Preserve Children compensates the children against the parent's NEW
+    world transform, and the write that produces it now shares one
+    Sdf.ChangeBlock with the children's own writes -- reading a
+    recomposed value back from inside the block that authored it is the
+    documented Sdf.ChangeBlock hazard. Composing it here instead is what
+    lets a whole Apply* be a single change notification.
+
+    Probed against GetLocalTransformation and covered by the "xform
+    local matrix" group in test_gizmo_math.py: the stack
+    [translate, pivot, rotate, scale, !invert!pivot] composes row-vector
+    as pivot^-1 * S * R * pivot * T -- ops apply to points last-to-first
+    -- and R is RotationFromEuler in the op's own rotation order. The
+    two pure translations collapse into one because pivot and translate
+    commute.
+    """
+    m = Gf.Matrix4d(1.0)
+    m.SetTranslate(-Gf.Vec3d(p))
+    scale = Gf.Matrix4d(1.0)
+    scale.SetScale(Gf.Vec3d(s))
+    m = m * scale * RotationFromEuler(order, r[0], r[1], r[2])
+    back = Gf.Matrix4d(1.0)
+    back.SetTranslate(Gf.Vec3d(p) + Gf.Vec3d(t))
+    return m * back
+
+
 class _PreservedChild(object):
     """
     One child of a Preserve Children drag: its world transform at the
@@ -1101,26 +1235,29 @@ class _XformTarget(Target):
             found.append(_PreservedChild(child, api, vectors, cache))
         return found
 
-    def _RestoreChildren(self):
+    def _ChildCompensation(self, parentWorld):
         """
-        Put every recorded child back on its captured world matrix:
-        childLocal = childWorld * newParentLocalToWorld^-1, split into
-        row lengths (scale), the orthonormalized linear part (rotation)
-        and the translation row -- exactly the decomposition
+        [(child, translation, angles, scale)] putting every recorded
+        child back on its captured world matrix against the parent's NEW
+        world transform: childLocal = childWorld * newParent^-1, split
+        into row lengths (scale), the orthonormalized linear part
+        (rotation) and the translation row -- exactly the decomposition
         XformCommonAPI recomposes from.
+
+        Computation only, authoring nothing, so the caller can put every
+        write of one Apply* -- the target's op and all 3N child channels
+        -- inside a single Sdf.ChangeBlock.
         """
         if not self._preserved:
-            return
-        api = UsdGeom.XformCommonAPI
-        parentWorld = UsdGeom.XformCache(self.time)\
-            .GetLocalToWorldTransform(self.prim)
+            return []
         if abs(_Linear(parentWorld).GetDeterminant()) < 1e-12:
             # A collapsed parent (a scale drag through zero) has no
             # inverse; Gf answers with FLT_MAX rather than raising, so
             # compensating here would author garbage on the children.
             # Leave them where they are and let the next event recover.
-            return
+            return []
         inverse = parentWorld.GetInverse()
+        writes = []
         for entry in self._preserved:
             local = entry.world * inverse
             linear = _Linear(local)
@@ -1128,11 +1265,53 @@ class _XformTarget(Target):
                               linear[r][2]).GetLength() for r in range(3)]
             angles = DecomposeEuler(linear, _XFORM_ORDER_NAMES[entry.order],
                                     hint=entry.angles)
-            ops = entry.api.CreateXformOps(
+            writes.append((entry, local.ExtractTranslation(),
+                           Gf.Vec3f(*angles), Gf.Vec3f(*scale)))
+        return writes
+
+    def _WriteOp(self, opType, slot, value, t=None, r=None, s=None, p=None):
+        """
+        Author one XformCommonAPI op and every Preserve Children
+        compensation in ONE Sdf.ChangeBlock, so a mouse-move costs the
+        stage one change notification (design spec 3.3 and 4.2).
+
+        The RigExec evaluator republishes synchronously on
+        ObjectsChanged, so the unbatched version of this cost 1 + 3N
+        recompositions per event with N preserved children, all thrown
+        away but the last.
+
+        `t`/`r`/`s`/`p` name the component this call changes; the others
+        come from the drag base. They are needed rather than read back
+        because the children are compensated against the parent's new
+        world transform, which _XformCommonMatrix composes instead of
+        the stage recomposing it -- see that function for why.
+
+        The order inside the block is deliberate: every CreateXformOps
+        runs before any value is written, and no prim's op stack is read
+        after this block has authored to that same prim.
+        """
+        children = []
+        if self._preserved:
+            base = self._base
+            local = _XformCommonMatrix(
+                base["t"] if t is None else t,
+                base["p"] if p is None else p,
+                base["r"] if r is None else r,
+                base["s"] if s is None else s,
+                _XFORM_ORDER_NAMES[base["order"]])
+            children = self._ChildCompensation(local * self.parentWorld)
+        api = UsdGeom.XformCommonAPI
+        with Sdf.ChangeBlock():
+            target = self._Ops(opType)[slot].GetAttr()
+            childOps = [entry.api.CreateXformOps(
                 entry.order, api.OpTranslate, api.OpRotate, api.OpScale)
-            self.writer.Set(ops[0].GetAttr(), local.ExtractTranslation())
-            self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
-            self.writer.Set(ops[3].GetAttr(), Gf.Vec3f(*scale))
+                for entry, _, _, _ in children]
+            self.writer.Set(target, value)
+            for ops, (_, translation, angles, scale) in zip(childOps,
+                                                            children):
+                self.writer.Set(ops[0].GetAttr(), translation)
+                self.writer.Set(ops[2].GetAttr(), angles)
+                self.writer.Set(ops[3].GetAttr(), scale)
 
     def AttributePaths(self):
         prefix = self.prim.GetPath()
@@ -1182,9 +1361,8 @@ class XformPoseTarget(_XformTarget):
         base = self._base["t"]
         values = _SnapTranslation([base[i] for i in range(3)], local,
                                   snapStep, snapAbsolute)
-        ops = self._Ops(UsdGeom.XformCommonAPI.OpTranslate)
-        self.writer.Set(ops[0].GetAttr(), Gf.Vec3d(*values))
-        self._RestoreChildren()
+        t = Gf.Vec3d(*values)
+        self._WriteOp(UsdGeom.XformCommonAPI.OpTranslate, 0, t, t=t)
 
     def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         order = _XFORM_ORDER_NAMES[self._base["order"]]
@@ -1192,17 +1370,14 @@ class XformPoseTarget(_XformTarget):
         rNew = SolveWorldRotation(RotationFromEuler(order, *base),
                                   self.parentWorld, worldAxis,
                                   _SnapValue(degrees, snapStep))
-        angles = DecomposeEuler(rNew, order, hint=base)
-        ops = self._Ops(UsdGeom.XformCommonAPI.OpRotate)
-        self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
-        self._RestoreChildren()
+        angles = Gf.Vec3f(*DecomposeEuler(rNew, order, hint=base))
+        self._WriteOp(UsdGeom.XformCommonAPI.OpRotate, 2, angles, r=angles)
 
     def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
-        angles = [float(v) for v in self._base["r"]]
-        angles[axisIndex] = angles[axisIndex] + _SnapValue(degrees, snapStep)
-        ops = self._Ops(UsdGeom.XformCommonAPI.OpRotate)
-        self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
-        self._RestoreChildren()
+        values = [float(v) for v in self._base["r"]]
+        values[axisIndex] = values[axisIndex] + _SnapValue(degrees, snapStep)
+        angles = Gf.Vec3f(*values)
+        self._WriteOp(UsdGeom.XformCommonAPI.OpRotate, 2, angles, r=angles)
 
     def ApplyScale(self, axisIndex, factor, *, snapStep=None):
         axes = _ScaleAxes(axisIndex)
@@ -1210,9 +1385,7 @@ class XformPoseTarget(_XformTarget):
         for i in range(3):
             if i in axes:
                 s[i] = _SnapValue(s[i] * factor, snapStep)
-        ops = self._Ops(UsdGeom.XformCommonAPI.OpScale)
-        self.writer.Set(ops[3].GetAttr(), s)
-        self._RestoreChildren()
+        self._WriteOp(UsdGeom.XformCommonAPI.OpScale, 3, s, s=s)
 
 
 class XformPivotTarget(_XformTarget):
@@ -1243,9 +1416,8 @@ class XformPivotTarget(_XformTarget):
         # this replaced produced.
         base = [float(v) for v in self._base["p"]]
         delta = [float(v) for v in Gf.Vec3f(local)]
-        ops = self._Ops(UsdGeom.XformCommonAPI.OpPivot)
-        self.writer.Set(ops[1].GetAttr(), Gf.Vec3f(*_SnapTranslation(
-            base, delta, snapStep, snapAbsolute)))
+        p = Gf.Vec3f(*_SnapTranslation(base, delta, snapStep, snapAbsolute))
+        self._WriteOp(UsdGeom.XformCommonAPI.OpPivot, 1, p, p=p)
 
     def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         pass
@@ -1285,8 +1457,13 @@ def _IsRigTargetType(prim):
     return False
 
 
-def MakeTarget(stage, prim, channels, writer):
-    """(target, "") or (None, reason) for usdview's focus prim."""
+def MakeTarget(stage, prim, channels, writer, solverPosed=None):
+    """
+    (target, "") or (None, reason) for usdview's focus prim.
+
+    `solverPosed` is an optional SolverPosedCache, shared with the
+    target so a Refresh() reuses the rig walk instead of repeating it.
+    """
     if not prim or not prim.IsValid():
         return None, "nothing selected"
     if IsRigXformable(prim):
@@ -1296,7 +1473,9 @@ def MakeTarget(stage, prim, channels, writer):
                               "Weight panel" % prim.GetName())
             return None, "%s (%s) is not a control or a joint" % (
                 prim.GetName(), prim.GetTypeName() or "untyped")
-        frames = ComputeRigFrames(stage, prim, writer.time)
+        posed = (solverPosed.For(FindRigRoot(prim))
+                 if solverPosed is not None else None)
+        frames = ComputeRigFrames(stage, prim, writer.time, posed)
         if frames.reason:
             return None, frames.reason
         names = (AVAR_T + AVAR_R + AVAR_S if channels == CHANNELS_POSE
@@ -1306,8 +1485,8 @@ def MakeTarget(stage, prim, channels, writer):
             return None, "%s.%s is connected; edit its source instead" % (
                 prim.GetName(), connected)
         if channels == CHANNELS_PIVOT:
-            return RigPivotTarget(stage, prim, writer), ""
-        return RigPoseTarget(stage, prim, writer), ""
+            return RigPivotTarget(stage, prim, writer, solverPosed), ""
+        return RigPoseTarget(stage, prim, writer, solverPosed), ""
     if prim.IsA(UsdGeom.Xformable):
         if not UsdGeom.XformCommonAPI(prim):
             return None, ("%s: xformOp stack is not XformCommonAPI-"

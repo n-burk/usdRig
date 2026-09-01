@@ -933,6 +933,7 @@ class GizmoController(QtCore.QObject):
         self._rebuilding = False
         self._panel = None
         self._noticeKey = None
+        self._solverPosed = gizmoMath.SolverPosedCache()
         self._frame = usdviewApi.frame
 
         view = StageView(usdviewApi)
@@ -942,6 +943,7 @@ class GizmoController(QtCore.QObject):
         self.toolbar = ViewportToolbar(self, self.statusBar)
 
         self._InstallToolbar()
+        self._InstallUndoShortcuts()
         self._hotkeys = ViewportHotkeyFilter(self)
         application = QtWidgets.QApplication.instance()
         if application is not None:
@@ -992,14 +994,39 @@ class GizmoController(QtCore.QObject):
         layout.insertWidget(1, self.statusBar)
         self.toolbar.Sync()
 
+    def _UndoActions(self):
+        return [a for a in (getattr(self.toolbar, "undoAction", None),
+                            getattr(self.toolbar, "redoAction", None))
+                if a is not None]
+
+    def _InstallUndoShortcuts(self):
+        """
+        Give usdview's main window its own handle on the undo and redo
+        actions.
+
+        Their shortcuts are Qt.ApplicationShortcut, but Qt will not fire
+        a shortcut whose owning widget is hidden -- and RigExec ->
+        Viewport Tools hides the toolbar while leaving every edit on the
+        undo stack, so Ctrl+Z died on a stack full of drags. Adding the
+        SAME actions to the main window gives them a second home that is
+        visible for as long as usdview is. They stay parented to the
+        toolbar, so they are still destroyed with it, and Detach takes
+        them back off for the case where the toolbar outlives its view.
+        """
+        window = self._MainWindow()
+        if window is None:
+            return
+        for action in self._UndoActions():
+            window.addAction(action)
+
     def Detach(self):
         """
-        Take the application-wide key filter back off.
+        Take the application-wide key filter, and the main window's copy
+        of the undo actions, back off.
 
-        An application filter outlives the widgets it serves, so leaving
-        one installed after usdview has destroyed the stage view would
-        keep answering key events on behalf of a gizmo that no longer
-        has a viewport.
+        Both outlive the widgets they serve, so leaving them installed
+        after usdview has destroyed the stage view would keep answering
+        keys on behalf of a gizmo that no longer has a viewport.
         """
         if self._hotkeys is None:
             return
@@ -1007,6 +1034,18 @@ class GizmoController(QtCore.QObject):
         if application is not None:
             application.removeEventFilter(self._hotkeys)
         self._hotkeys = None
+        window = self._MainWindow()
+        if window is None:
+            return
+        for action in self._UndoActions():
+            try:
+                window.removeAction(action)
+            except RuntimeError:
+                # Detach also runs from the stage view's destroyed
+                # signal at shutdown, by which point the main window's
+                # C++ object can be gone while the wrapper survives.
+                # Qt has already dropped the action with it.
+                return
 
     def _onViewDestroyed(self, *args):
         self._view = None
@@ -1140,7 +1179,8 @@ class GizmoController(QtCore.QObject):
             self._target, self._reason = None, "no stage"
         else:
             self._target, self._reason = gizmoMath.MakeTarget(
-                stage, prim, self._channels, self._Writer())
+                stage, prim, self._channels, self._Writer(),
+                self._solverPosed)
         self._PrimePreserveChildren()
         self._RebuildHandles()
         self.toolbar.Sync()
@@ -1447,21 +1487,44 @@ class GizmoController(QtCore.QObject):
     def _onStageReplaced(self):
         self._AbortDrag()
         self.undoStack.Clear()
+        self._solverPosed.Clear()
         self._frame = self.usdviewApi.frame
         self._ObserveStage(self.usdviewApi.dataModel.stage)
         self.RefreshTarget()
 
     def _onObjectsChanged(self, notice, stage):
+        """
+        Refresh the target, but only for a notice that can have moved it.
+
+        Notices arrive from the volume weight panel, the curvenet panel,
+        a timeline scrub and anything else authoring in the session, not
+        just from the gizmo. Refreshing unconditionally bought each of
+        them a full rig walk plus a resolveCamera() -- which conforms
+        the frustum and can emit signalFrustumChanged, see _Camera --
+        plus a reprojection of the whole manipulator, so the filter has
+        to come BEFORE any of that, not inside it.
+        """
         # Inside a drag the target is already being refreshed by the
         # drag itself, and re-resolving it here would throw away the
         # base values every Apply* is computed from.
         if self._drag is not None:
             return
-        if self._target is None:
+        resynced = notice.GetResyncedPaths()
+        if resynced:
+            # Only a resync can add or remove a rigExec:joints target.
+            self._solverPosed.InvalidateResynced(resynced)
+        target = self._target
+        # A missing target may be exactly what this notice creates, and a
+        # focus prim that no longer matches needs the full re-resolve.
+        if target is None or self._FocusPrim() != target.prim:
             self.RefreshTarget()
             return
+        if not gizmoMath.NoticeAffectsTarget(
+                resynced, notice.GetChangedInfoOnlyPaths(),
+                target.prim.GetPath(), target.RigRootPath()):
+            return
         try:
-            self._target.Refresh()
+            target.Refresh()
         except Exception:
             self.RefreshTarget()
             return
@@ -1627,12 +1690,16 @@ class GizmoController(QtCore.QObject):
                   QtCore.Qt.Key_Minus)
     _PIVOT_KEYS = (QtCore.Qt.Key_D, QtCore.Qt.Key_Insert)
 
+    def _MainWindow(self):
+        """usdview's main window, or None (a headless probe has none)."""
+        try:
+            return self.usdviewApi.qMainWindow
+        except Exception:
+            return None
+
     def _InMainWindow(self, receiver):
         """Whether the event belongs to usdview's own main window."""
-        try:
-            main = self.usdviewApi.qMainWindow
-        except Exception:
-            return False
+        main = self._MainWindow()
         if main is None:
             return False
         if isinstance(receiver, QtWidgets.QWidget):

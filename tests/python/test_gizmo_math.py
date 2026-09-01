@@ -24,7 +24,7 @@ import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()
 
-from pxr import Gf, Plug, Sdf, Usd, UsdGeom  # noqa: E402
+from pxr import Gf, Plug, Sdf, Tf, Usd, UsdGeom  # noqa: E402
 
 import gizmoMath  # noqa: E402
 
@@ -1095,6 +1095,204 @@ def TestXformOpNoise():
            "every channel still holds what its drag wrote: %s" % (vectors,))
 
 
+class _NoticeCounter(object):
+    """Counts Usd.Notice.ObjectsChanged rounds on one stage."""
+
+    def __init__(self, stage):
+        self.count = 0
+        # The key must outlive the listener: dropping it revokes it.
+        self._key = Tf.Notice.Register(
+            Usd.Notice.ObjectsChanged, self._OnChanged, stage)
+
+    def _OnChanged(self, notice, sender):
+        self.count += 1
+
+    def Revoke(self):
+        self._key.Revoke()
+
+
+def TestXformLocalMatrix():
+    """
+    _XformCommonMatrix must reproduce GetLocalTransformation exactly.
+
+    It is what a Preserve Children drag compensates against, composed
+    instead of read back because the write that produces it is inside
+    the same Sdf.ChangeBlock. If the composition rule is wrong the
+    children drift and nothing else notices, so it is pinned against USD
+    itself for every rotation order and for a non-zero pivot.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    time = Usd.TimeCode.Default()
+    t = Gf.Vec3d(1.0, -2.0, 3.5)
+    p = Gf.Vec3f(0.5, -1.0, 2.0)
+    r = Gf.Vec3f(10.0, 20.0, 30.0)
+    s = Gf.Vec3f(2.0, 3.0, 4.0)
+    for name in gizmoMath.ROTATION_ORDERS:
+        order = getattr(UsdGeom.XformCommonAPI, "RotationOrder" + name)
+        xform = UsdGeom.Xform.Define(stage, "/X" + name)
+        api = UsdGeom.XformCommonAPI(xform.GetPrim())
+        api.SetTranslate(t)
+        api.SetPivot(p)
+        api.SetRotate(r, order)
+        api.SetScale(s)
+        _Check(_MatClose(gizmoMath._XformCommonMatrix(t, p, r, s, name),
+                         xform.GetLocalTransformation(time), 1e-6),
+               "%s: composed local matrix must equal USD's" % name)
+    # A zero pivot is the common case and must collapse to plain TRS.
+    zero = UsdGeom.Xform.Define(stage, "/Z")
+    zeroApi = UsdGeom.XformCommonAPI(zero.GetPrim())
+    zeroApi.SetTranslate(t)
+    zeroApi.SetRotate(r)
+    zeroApi.SetScale(s)
+    _Check(_MatClose(
+        gizmoMath._XformCommonMatrix(t, Gf.Vec3f(0, 0, 0), r, s, "XYZ"),
+        zero.GetLocalTransformation(time), 1e-6), "zero pivot")
+
+
+def TestOneNoticePerApply():
+    """
+    One Apply* must reach the stage as ONE ObjectsChanged (design spec
+    3.3 and 4.2).
+
+    The RigExec evaluator republishes synchronously on the notice, so an
+    unbatched Preserve Children drag cost 1 + 3N recompositions per
+    mouse-move for N children, all discarded but the last -- invisible
+    in a test that only checks the values, and very visible in a scene.
+    """
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None, reason)
+    target.BeginDrag()
+    counter = _NoticeCounter(stage)
+    target.ApplyTranslate(Gf.Vec3d(0.25, -0.5, 0.75))
+    _Check(counter.count == 1,
+           "a rig ApplyTranslate writes three avars in one notice, got %d"
+           % counter.count)
+    counter.Revoke()
+
+    # An xform pose target with Preserve Children on and two children:
+    # the op write plus 3 channels on each child, still one notice.
+    xstage = Usd.Stage.CreateInMemory()
+    group = UsdGeom.Xform.Define(xstage, "/P")
+    UsdGeom.XformCommonAPI(group).SetTranslate(Gf.Vec3d(1, 0, 0))
+    kids = []
+    for i, name in enumerate(("A", "B")):
+        kid = UsdGeom.Xform.Define(xstage, "/P/" + name)
+        UsdGeom.XformCommonAPI(kid).SetTranslate(Gf.Vec3d(0, 2 + i, 0))
+        UsdGeom.XformCommonAPI(kid).SetRotate(Gf.Vec3f(0, 0, 30 * (i + 1)))
+        kids.append(kid)
+    cache = UsdGeom.XformCache(time)
+    before = [cache.GetLocalToWorldTransform(k.GetPrim()) for k in kids]
+    xwriter = gizmoMath.Writer(xstage, time, gizmoMath.WRITE_DEFAULT)
+    xtarget, reason = gizmoMath.MakeTarget(
+        xstage, group.GetPrim(), gizmoMath.CHANNELS_POSE, xwriter)
+    _Check(xtarget is not None, reason)
+    xtarget.SetPreserveChildren(True)
+    _Check(xtarget.preserveChildren, "Preserve Children is on")
+    xtarget.AttributePaths()
+    xtarget.BeginDrag()
+    counter = _NoticeCounter(xstage)
+    xtarget.ApplyTranslate(Gf.Vec3d(0, 5, 0))
+    _Check(counter.count == 1,
+           "an xform ApplyTranslate compensating two children must fire "
+           "exactly one ObjectsChanged, got %d" % counter.count)
+    counter.Revoke()
+    # ... and the batching must not have cost the compensation itself:
+    # the children have to be exactly where they were.
+    cache.Clear()
+    for kid, was in zip(kids, before):
+        _Check(_MatClose(cache.GetLocalToWorldTransform(kid.GetPrim()),
+                         was, 1e-5),
+               "%s held its world transform through the batched write"
+               % kid.GetPath())
+    _Check(_Close(UsdGeom.XformCommonAPI(group).GetXformVectors(time)[0][1],
+                  5.0, 1e-6), "and the parent actually moved")
+    # A second move is one notice too, now that the ops already exist.
+    xtarget.BeginDrag()
+    counter = _NoticeCounter(xstage)
+    xtarget.ApplyRotate(Gf.Vec3d(0, 0, 1), 15.0)
+    _Check(counter.count == 1,
+           "a second Apply* is one notice as well, got %d" % counter.count)
+    counter.Revoke()
+
+
+def TestNoticeFilter():
+    """
+    NoticeAffectsTarget and SolverPosedCache: what the controller uses to
+    keep an unrelated stage edit from costing a rig walk, a
+    resolveCamera() and a full manipulator reprojection.
+    """
+    ctl = Sdf.Path("/Asset/Rig/Controls/Parent/Child")
+    root = Sdf.Path("/Asset/Rig")
+    none = []
+    _Check(gizmoMath.NoticeAffectsTarget(none, none, None, None),
+           "no target: every notice is relevant, it may create one")
+    _Check(not gizmoMath.NoticeAffectsTarget(none, none, ctl, root),
+           "an empty notice affects nothing")
+    _Check(gizmoMath.NoticeAffectsTarget(
+        none, [ctl.AppendProperty("avars:tx")], ctl, root),
+           "a property of the target prim is the target moving")
+    _Check(gizmoMath.NoticeAffectsTarget(
+        none, [Sdf.Path("/Asset/Rig/Controls/Parent.avars:tx")], ctl, root),
+           "an ancestor's avar carries the target")
+    _Check(gizmoMath.NoticeAffectsTarget(
+        [Sdf.Path("/Asset")], none, ctl, root),
+           "the asset root is an ancestor too")
+    _Check(gizmoMath.NoticeAffectsTarget(
+        none, [Sdf.Path("/Asset/Rig/Solvers/Ik.rigExec:joints")], ctl, root),
+           "anything under the rig root can pose a rig target")
+    _Check(not gizmoMath.NoticeAffectsTarget(
+        none, [Sdf.Path("/Asset/Rig2/Ctl.avars:tx")], ctl, root),
+           "another rig does not")
+    _Check(not gizmoMath.NoticeAffectsTarget(
+        none, [Sdf.Path("/Asset/Geo/Mesh.points")], ctl, root),
+           "and neither does an unrelated prim")
+    # An xform target has no rig root: only its own ancestors count, and
+    # a descendant (a compensated child) does not move the gizmo.
+    box = Sdf.Path("/World/Group/Box")
+    _Check(gizmoMath.NoticeAffectsTarget(
+        none, [Sdf.Path("/World/Group.xformOp:translate")], box, None),
+           "an xform follows its ancestors")
+    _Check(not gizmoMath.NoticeAffectsTarget(
+        none, [Sdf.Path("/World/Group/Box/Kid.xformOp:translate")],
+        box, None), "but not its children")
+
+    stage, parent, child = _ChainStage()
+    cache = gizmoMath.SolverPosedCache()
+    rigRoot = stage.GetPrimAtPath(root)
+    _Check(cache.For(rigRoot) == set(), "no solver in the plain chain")
+    _Check(cache.For(None) == set(), "and no root answers empty")
+    solver = stage.DefinePrim("/Asset/Rig/Ik", "RigExecSingleChainIk")
+    solver.CreateRelationship("rigExec:joints").SetTargets(
+        [child.GetPath()])
+    _Check(cache.For(rigRoot) == set(),
+           "the memo is stale until the caller invalidates it")
+    cache.InvalidateResynced([solver.GetPath()])
+    _Check(cache.For(rigRoot) == {child.GetPath()},
+           "a resync inside the rig drops the memo: %s" % cache.For(rigRoot))
+    cache.InvalidateResynced([Sdf.Path("/Asset")])
+    _Check(cache._byRoot == {}, "a resync ABOVE the rig drops it as well")
+    cache.For(rigRoot)
+    cache.InvalidateResynced([Sdf.Path("/Other")])
+    _Check(cache._byRoot != {}, "an unrelated resync keeps it")
+    cache.Clear()
+    _Check(cache._byRoot == {}, "Clear drops everything (stage replaced)")
+    # A rig target handed the cache reads through it, and answers the
+    # rig root path the filter needs.
+    writer = gizmoMath.Writer(stage, Usd.TimeCode.Default(),
+                              gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, parent, gizmoMath.CHANNELS_POSE, writer, cache)
+    _Check(target is not None, reason)
+    _Check(target.RigRootPath() == root,
+           "a rig target reports its root: %s" % target.RigRootPath())
+    _Check(cache._byRoot.get(root) == {child.GetPath()},
+           "MakeTarget filled the memo")
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -1111,6 +1309,9 @@ def main():
         ("preserve children", TestPreserveChildren),
         ("snap + planar scale", TestSnapAndPlanarScale),
         ("xformOp noise", TestXformOpNoise),
+        ("xform local matrix", TestXformLocalMatrix),
+        ("one notice per apply", TestOneNoticePerApply),
+        ("notice filter", TestNoticeFilter),
     ]
     for name, fn in groups:
         fn()

@@ -76,11 +76,15 @@ buttons name the step they would reverse on their tooltips, and both go
 grey while a drag is live, because undoing the edit a held mouse button
 is still writing would leave the two disagreeing.
 
-Undo restores the exact attribute spec in the layer the drag edited,
-removing the spec entirely when the drag was what created it — an undone
-gizmo edit leaves no trace in the layer, not a zero. `Escape` during a
-drag aborts it and pushes nothing. The stack is cleared when the stage is
-replaced, because the specs it holds belong to layers that are gone.
+Undo restores the exact attribute spec in the layer the drag edited —
+default, spline and time samples alike — and removes the property spec
+entirely when the drag was what created it, so an undone edit puts back
+the value you had rather than a zero. What it does not remove are the
+empty `over` prim specs the first drag on a prim had to create to hold
+that property: they stay in the session layer, contribute nothing to
+composition and are harmless. `Escape` during a drag aborts it and
+pushes nothing. The stack is cleared when the stage is replaced, because
+the specs it holds belong to layers that are gone.
 
 ## Maya parity
 
@@ -140,7 +144,11 @@ moved silently.
 The tool keys act while the pointer is over the viewport and no text
 field has keyboard focus, so typing a prim name into the search box
 cannot switch tools out from under you. Undo and redo work anywhere in
-the window, and `Escape` aborts a drag whatever has focus.
+the window. `Escape` aborts a drag from anywhere in the window too —
+including with the cursor off the viewport — but it goes through the
+same typing gate as the tool keys, so it does nothing while a text field
+has keyboard focus: that `Escape` belongs to the field. Move the focus
+off the field to get it back.
 
 `J` and `X` are both step snapping and they mean different things. `J`
 quantises the movement, so an object that started off the step grid moves

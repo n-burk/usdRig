@@ -629,6 +629,34 @@ def testUsdviewInputFunction(appController):
     _Check(abs(tx.Get(frame) - v0) < 1e-9,
            "the control is back where it started: %s" % tx.Get(frame))
 
+    # Undo and redo must survive RigExec -> Viewport Tools being turned
+    # off. The edits stay on the stack, so the shortcuts that reach them
+    # cannot live only on the toolbar: a hidden widget's actions do not
+    # fire, and the artist would be left holding un-undoable drags.
+    d.DragAxis("x")
+    vHidden = tx.Get(frame)
+    _Check(abs(vHidden - v0) > 1e-6, "the drag moved the control")
+    controller.SetVisible(False)
+    d.Pump()
+    _Check(not controller.toolbar.isVisible(),
+           "the toolbar is hidden")
+    _Check(controller.undoStack.CanUndo(),
+           "the edit is still on the stack with the toolbar hidden")
+    d.Key(d.QtCore.Qt.Key_Z, d.QtCore.Qt.ControlModifier)
+    _Check(abs(tx.Get(frame) - v0) < 1e-9,
+           "Ctrl+Z still undoes with the viewport tools hidden: %s"
+           % tx.Get(frame))
+    d.Key(d.QtCore.Qt.Key_Z,
+          d.QtCore.Qt.ControlModifier | d.QtCore.Qt.ShiftModifier)
+    _Check(abs(tx.Get(frame) - vHidden) < 1e-9,
+           "and Ctrl+Shift+Z still redoes: %s" % tx.Get(frame))
+    controller.SetVisible(True)
+    d.Pump()
+    controller.Undo()
+    d.Pump()
+    _Check(abs(tx.Get(frame) - v0) < 1e-9,
+           "back to the start again: %s" % tx.Get(frame))
+
     # Preserve Children holds a child xform's world transform still.
     child = UsdGeom.Xform.Define(stage, XFORM + "/GizmoTestChild")
     UsdGeom.XformCommonAPI(child).SetTranslate(Gf.Vec3d(1, 2, 3))
