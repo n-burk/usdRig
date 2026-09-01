@@ -271,6 +271,432 @@ def TestRigFramesReasons():
            "control outside a rig refused")
 
 
+def TestWriter():
+    stage, parent, child = _ChainStage()
+    attr = child.GetAttribute("avars:tx")
+    anim = gizmoMath.Writer(stage, Usd.TimeCode(1001.0),
+                            gizmoMath.WRITE_ANIMATION)
+    anim.Set(attr, 2.0)
+    _Check(attr.HasSpline() and len(attr.GetSpline().GetKnots()) == 1,
+           "animation mode writes a spline knot")
+    _Check(_Close(attr.Get(Usd.TimeCode(1001.0)), 2.0), "knot value")
+    anim.Set(attr, 3.0)
+    _Check(len(attr.GetSpline().GetKnots()) == 1
+           and _Close(attr.Get(Usd.TimeCode(1001.0)), 3.0),
+           "re-writing the same frame updates the knot")
+    _Check(anim.Warnings() == [], "no warnings in animation mode")
+    default = gizmoMath.Writer(stage, Usd.TimeCode(1001.0),
+                               gizmoMath.WRITE_DEFAULT)
+    default.Set(attr, 9.0)
+    _Check(stage.GetRootLayer().GetAttributeAtPath(
+        attr.GetPath()).default == 9.0, "default mode writes the default")
+    _Check(len(default.Warnings()) == 1
+           and "avars:tx" in default.Warnings()[0],
+           "default outranked by the spline is reported: %s"
+           % default.Warnings())
+    clean = child.GetAttribute("avars:ty")
+    default.Set(clean, 1.0)
+    _Check(not clean.HasSpline() and clean.Get() == 1.0, "plain default")
+    # A vector attribute (xformOp) gets a time sample, not a spline.
+    xf = UsdGeom.Xform.Define(stage, "/Asset/Box")
+    op = xf.AddTranslateOp()
+    anim.Set(op.GetAttr(), Gf.Vec3d(1, 2, 3))
+    _Check(op.GetAttr().GetNumTimeSamples() == 1, "vec3 -> time sample")
+
+
+def _Drag(target, fn):
+    target.BeginDrag()
+    fn()
+
+
+def TestRigPoseTarget():
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None and reason == "", "child is a target")
+    _Check(target.kind == "rig-pose" and target.supportsScale, "kind")
+    before = gizmoMath.ComputeRigFrames(stage, child, time)
+    gizmo = target.GizmoMatrix()
+    origin = gizmo.ExtractTranslation()
+    expectedOrigin = (before.posed * before.assetToWorld).ExtractTranslation()
+    _Check(all(_Close(origin[i], expectedOrigin[i]) for i in range(3)),
+           "gizmo sits at the posed world origin")
+    # Translate by a world delta: the world origin moves by exactly that.
+    delta = Gf.Vec3d(0.7, -1.3, 2.1)
+    _Drag(target, lambda: target.ApplyTranslate(delta))
+    after = gizmoMath.ComputeRigFrames(stage, child, time)
+    moved = (after.posed * after.assetToWorld).ExtractTranslation()
+    _Check(all(_Close(moved[i], expectedOrigin[i] + delta[i], 1e-6)
+               for i in range(3)), "world translate maps onto avars:t")
+    _Check(all(_Close(after.rest[r][c], before.rest[r][c])
+               for r in range(4) for c in range(4)),
+           "pose mode never touches rest")
+    # Rotate about world Z by 30: the world linear part rotates by Rz(30).
+    target.Refresh()
+    base = gizmoMath.ComputeRigFrames(stage, child, time)
+    baseWorld = (base.posed * base.assetToWorld).GetOrthonormalized(False)
+    _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(0, 0, 1), 30.0))
+    rotated = gizmoMath.ComputeRigFrames(stage, child, time)
+    rotWorld = (rotated.posed * rotated.assetToWorld)\
+        .GetOrthonormalized(False)
+    expected = baseWorld * _Rot(Gf.Vec3d(0, 0, 1), 30.0)
+    expected.SetTranslateOnly(rotWorld.ExtractTranslation())
+    _Check(_MatClose(rotWorld, expected, 1e-6),
+           "world rotate maps onto avars:r (order ZYX):\n%s\n%s"
+           % (rotWorld, expected))
+    _Check(_Close(child.GetAttribute("avars:rspin").Get(), 0.0),
+           "rspin untouched")
+    # Scale along local X by 1.5 multiplies avars:sx only.
+    target.Refresh()
+    _Drag(target, lambda: target.ApplyScale(0, 1.5))
+    _Check(_Close(child.GetAttribute("avars:sx").Get(), 1.5), "sx scaled")
+    _Check(_Close(child.GetAttribute("avars:sy").Get(), 1.0), "sy kept")
+    target.Refresh()
+    _Drag(target, lambda: target.ApplyScale(None, 2.0))
+    _Check(_Close(child.GetAttribute("avars:sx").Get(), 3.0)
+           and _Close(child.GetAttribute("avars:sz").Get(), 2.0),
+           "uniform scale multiplies every axis from the drag base")
+    target.Refresh()
+    _Drag(target, lambda: target.ApplyScale(1, 0.0))
+    _Check(_Close(child.GetAttribute("avars:sy").Get(), 1e-4),
+           "scale floor applied on write")
+    paths = target.AttributePaths()
+    _Check(Sdf.Path("/Asset/Rig/Controls/Parent/Child.avars:tx") in paths
+           and Sdf.Path("/Asset/Rig/Controls/Parent/Child.avars:sz") in paths
+           and len(paths) == 9, "pose target owns the nine avars")
+    # Refusals surface as reasons.
+    joint = stage.DefinePrim("/Asset/Rig/Joints/J", "RigExecJoint")
+    solver = stage.DefinePrim("/Asset/Rig/Solvers/Fk", "RigExecFkChain")
+    solver.GetRelationship("rigExec:joints").SetTargets([joint.GetPath()])
+    refused, reason = gizmoMath.MakeTarget(
+        stage, joint, gizmoMath.CHANNELS_POSE, writer)
+    _Check(refused is None and "solver" in reason, "solver-posed refused")
+    # A volume weight is a RigExecXformable but has its own panel and no
+    # scale avars, so the gizmo declines it by concrete type (spec 1.3).
+    blob = stage.DefinePrim("/Asset/Rig/Weights/Blob", "RigExecSphereWeight")
+    refused, reason = gizmoMath.MakeTarget(
+        stage, blob, gizmoMath.CHANNELS_POSE, writer)
+    _Check(refused is None and "volume weight" in reason,
+           "volume weight refused: %r" % reason)
+    free = stage.DefinePrim("/Asset/Rig/Joints/Free", "RigExecJoint")
+    accepted, reason = gizmoMath.MakeTarget(
+        stage, free, gizmoMath.CHANNELS_POSE, writer)
+    _Check(accepted is not None and accepted.kind == "rig-pose",
+           "an unwired joint is a target: %r" % reason)
+    child.GetAttribute("avars:rz").AddConnection(
+        parent.GetAttribute("avars:rz").GetPath())
+    refused, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_POSE, writer)
+    _Check(refused is None and "avars:rz" in reason,
+           "connected avar refused: %r" % reason)
+
+
+def TestRigPivotTarget():
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(target is not None and target.kind == "rig-pivot", reason)
+    _Check(target.supportsTranslate and target.supportsRotate
+           and not target.supportsScale, "pivot: no scale")
+    before = gizmoMath.ComputeRigFrames(stage, child, time)
+    expectedOrigin = (before.restLocal * before.Q * before.assetToWorld)\
+        .ExtractTranslation()
+    origin = target.GizmoMatrix().ExtractTranslation()
+    _Check(all(_Close(origin[i], expectedOrigin[i]) for i in range(3)),
+           "pivot gizmo sits at the rest frame origin")
+    avarsBefore = [child.GetAttribute(n).Get() for n in gizmoMath.AVAR_T]
+    delta = Gf.Vec3d(1.0, 2.0, -0.5)
+    _Drag(target, lambda: target.ApplyTranslate(delta))
+    after = gizmoMath.ComputeRigFrames(stage, child, time)
+    moved = (after.restLocal * after.Q * after.assetToWorld)\
+        .ExtractTranslation()
+    _Check(all(_Close(moved[i], expectedOrigin[i] + delta[i], 1e-6)
+               for i in range(3)), "pivot translate maps onto rest:t")
+    _Check([child.GetAttribute(n).Get() for n in gizmoMath.AVAR_T]
+           == avarsBefore, "pivot mode never touches avars")
+    target.Refresh()
+    base = (after.restLocal * after.Q * after.assetToWorld)\
+        .GetOrthonormalized(False)
+    _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(1, 0, 0), -20.0))
+    rotated = gizmoMath.ComputeRigFrames(stage, child, time)
+    rotWorld = (rotated.restLocal * rotated.Q * rotated.assetToWorld)\
+        .GetOrthonormalized(False)
+    expected = base * _Rot(Gf.Vec3d(1, 0, 0), -20.0)
+    expected.SetTranslateOnly(rotWorld.ExtractTranslation())
+    _Check(_MatClose(rotWorld, expected, 1e-6), "pivot rotate onto rest:r")
+    _Check(len(target.AttributePaths()) == 6, "six rest channels")
+
+
+def TestXformTargets():
+    stage = Usd.Stage.CreateInMemory()
+    world = UsdGeom.Xform.Define(stage, "/World")
+    world.AddRotateZOp().Set(90.0)
+    box = UsdGeom.Xform.Define(stage, "/World/Box")
+    api = UsdGeom.XformCommonAPI(box)
+    api.SetTranslate(Gf.Vec3d(1, 0, 0))
+    api.SetRotate(Gf.Vec3f(0, 0, 45))
+    api.SetPivot(Gf.Vec3f(0, 2, 0))
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, box.GetPrim(), gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None and target.kind == "xform-pose", reason)
+    cache = UsdGeom.XformCache(time)
+    origin = target.GizmoMatrix().ExtractTranslation()
+    expected = cache.GetLocalToWorldTransform(box.GetPrim())\
+        .ExtractTranslation()
+    _Check(all(_Close(origin[i], expected[i]) for i in range(3)),
+           "xform gizmo at the local origin in world")
+    delta = Gf.Vec3d(0, 3, 0)
+    _Drag(target, lambda: target.ApplyTranslate(delta))
+    cache.Clear()
+    moved = cache.GetLocalToWorldTransform(box.GetPrim()).ExtractTranslation()
+    _Check(all(_Close(moved[i], expected[i] + delta[i], 1e-6)
+               for i in range(3)), "world translate through a rotated "
+           "parent lands on xformOp:translate: %s" % moved)
+    t = api.GetXformVectors(time)[0]
+    # (0,3,0) * Rz(-90) = (3,0,0) in parent space, added to (1,0,0).
+    _Check(_Close(t[0], 4.0, 1e-6) and _Close(t[1], 0.0, 1e-6),
+           "parent-space translate value: %s" % t)
+    target.Refresh()
+    baseWorld = cache.GetLocalToWorldTransform(box.GetPrim())\
+        .GetOrthonormalized(False)
+    _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(0, 0, 1), 10.0))
+    cache.Clear()
+    rotWorld = cache.GetLocalToWorldTransform(box.GetPrim())\
+        .GetOrthonormalized(False)
+    exp = baseWorld * _Rot(Gf.Vec3d(0, 0, 1), 10.0)
+    exp.SetTranslateOnly(rotWorld.ExtractTranslation())
+    _Check(_MatClose(rotWorld, exp, 1e-5), "xform rotate")
+    _Check(_Close(api.GetXformVectors(time)[1][2], 55.0, 1e-5),
+           "rotateXYZ z = 55: %s" % (api.GetXformVectors(time)[1],))
+    target.Refresh()
+    _Drag(target, lambda: target.ApplyScale(None, 2.0))
+    _Check(api.GetXformVectors(time)[2] == Gf.Vec3f(2, 2, 2), "scale")
+    # Pivot target moves only the pivot, in parent space.
+    pivotTarget, reason = gizmoMath.MakeTarget(
+        stage, box.GetPrim(), gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(pivotTarget is not None and pivotTarget.kind == "xform-pivot",
+           reason)
+    _Check(pivotTarget.supportsTranslate and not pivotTarget.supportsRotate
+           and not pivotTarget.supportsScale, "xform pivot: translate only")
+    vectors = api.GetXformVectors(time)
+    parentWorld = cache.GetParentToWorldTransform(box.GetPrim())
+    expectedPivot = parentWorld.Transform(
+        Gf.Vec3d(vectors[3]) + vectors[0])
+    got = pivotTarget.GizmoMatrix().ExtractTranslation()
+    _Check(all(_Close(got[i], expectedPivot[i], 1e-6) for i in range(3)),
+           "pivot gizmo at (pivot + translate) in parent space")
+    _Drag(pivotTarget, lambda: pivotTarget.ApplyTranslate(Gf.Vec3d(0, 1, 0)))
+    pivot = api.GetXformVectors(time)[3]
+    _Check(_Close(pivot[0], 1.0, 1e-5) and _Close(pivot[1], 2.0, 1e-5),
+           "pivot moved by the parent-space delta: %s" % pivot)
+    # Incompatible op stacks are refused with a reason.
+    odd = UsdGeom.Xform.Define(stage, "/Odd")
+    odd.AddTransformOp().Set(Gf.Matrix4d(1.0))
+    refused, reason = gizmoMath.MakeTarget(
+        stage, odd.GetPrim(), gizmoMath.CHANNELS_POSE, writer)
+    _Check(refused is None and "XformCommonAPI" in reason, reason)
+    scope = stage.DefinePrim("/Scope", "Scope")
+    refused, reason = gizmoMath.MakeTarget(
+        stage, scope, gizmoMath.CHANNELS_POSE, writer)
+    _Check(refused is None and reason != "", "non-xformable refused")
+
+
+def TestGimbalAndFrames():
+    """
+    Maya's Gimbal rotate axes and the frames the handles are drawn in
+    (design spec section 8.2 Axis Orientation, 8.3 Rotate Axis).
+
+    The gimbal contract is exact, not approximate: dragging the ring for
+    channel j must move channel j by the dragged angle and leave the
+    other two alone, whatever the rotation order and the current angles.
+
+    The parent's avars:sx is put back to 1 first. A ring drag reaches
+    ApplyRotate as a WORLD axis, and ApplyRotate's contract is that the
+    drawn world frame turns by the dragged angle; under a sheared channel
+    frame (the chain's non-uniform parent scale) that answer moves more
+    than one Euler channel, so the single-channel gimbal contract only
+    holds where the channel frame is rigid. That is the case the Gimbal
+    option exists for.
+    """
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    parent.GetAttribute("avars:sx").Set(1.0)
+    # Non-zero angles on all three channels, plus a non-zero avars:rspin:
+    # the spin sits BETWEEN the Euler product and P, so a ring axis that
+    # ignored it would turn the wrong channels.
+    child.GetAttribute("avars:ry").Set(-35.0)
+    child.GetAttribute("avars:rz").Set(50.0)
+    child.GetAttribute("avars:rspin").Set(15.0)
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None, reason)
+    order, angles = target.RotationState()
+    _Check(order == "ZYX", "rotation order comes from the avar: %s" % order)
+    _Check(all(_Close(a, b) for a, b in zip(angles, (20.0, -35.0, 50.0))),
+           "rotation state angles: %s" % (angles,))
+    frames = gizmoMath.ComputeRigFrames(stage, child, time)
+    origin = target.GizmoMatrix().ExtractTranslation()
+    _Check(_MatClose(target.ObjectFrame(), target.GizmoMatrix()),
+           "ObjectFrame is the gizmo matrix")
+    expected = (frames.P * frames.assetToWorld).GetOrthonormalized(False)
+    expected.SetTranslateOnly(origin)
+    _Check(_MatClose(target.ChannelFrame(), expected),
+           "channel frame is rotation(P) at the gizmo origin:\n%s\n%s"
+           % (target.ChannelFrame(), expected))
+    expectedGimbal = (_Rot(Gf.Vec3d(1, 0, 0), 15.0) * frames.P
+                      * frames.assetToWorld).GetOrthonormalized(False)
+    expectedGimbal.SetTranslateOnly(origin)
+    _Check(_MatClose(target.GimbalFrame(), expectedGimbal),
+           "the gimbal frame carries avars:rspin:\n%s\n%s"
+           % (target.GimbalFrame(), expectedGimbal))
+    for j in range(3):
+        target.Refresh()
+        order, base = target.RotationState()
+        axes = gizmoMath.GimbalAxes(order, base[0], base[1], base[2],
+                                    target.GimbalFrame())
+        _Check(_Close(Gf.Vec3d(axes[j]).GetLength(), 1.0),
+               "ring axis %d is a unit vector" % j)
+        _Drag(target, lambda: target.ApplyRotate(axes[j], 10.0))
+        after = target.RotationState()[1]
+        for i in range(3):
+            want = base[i] + (10.0 if i == j else 0.0)
+            _Check(_Close(after[i], want, 1e-6),
+                   "ring %d must move only channel %d: %s -> %s"
+                   % (j, j, base, after))
+    # Pivot mode: XYZ rest angles, expressed in Q.
+    pivot, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(pivot is not None, reason)
+    pivotOrder, pivotAngles = pivot.RotationState()
+    _Check(pivotOrder == "XYZ" and _Close(pivotAngles[1], 45.0),
+           "pivot rotation state is the XYZ rest angles: %s" % (pivotAngles,))
+    pivotExpected = (frames.Q * frames.assetToWorld)\
+        .GetOrthonormalized(False)
+    pivotExpected.SetTranslateOnly(pivot.GizmoMatrix().ExtractTranslation())
+    _Check(_MatClose(pivot.ChannelFrame(), pivotExpected),
+           "the pivot channel frame is Q")
+    # A plain xform: the channel frame is the parent, and there is no spin.
+    spin = UsdGeom.Xform.Define(stage, "/Asset/Spin")
+    spin.AddRotateZOp().Set(90.0)
+    box = UsdGeom.Xform.Define(stage, "/Asset/Spin/Box")
+    UsdGeom.XformCommonAPI(box).SetRotate(Gf.Vec3f(10, 20, 30))
+    xTarget, reason = gizmoMath.MakeTarget(
+        stage, box.GetPrim(), gizmoMath.CHANNELS_POSE, writer)
+    _Check(xTarget is not None, reason)
+    xOrder, xAngles = xTarget.RotationState()
+    _Check(xOrder == "XYZ" and _Close(xAngles[2], 30.0, 1e-4),
+           "xform rotation state: %s %s" % (xOrder, xAngles))
+    xExpected = UsdGeom.XformCache(time)\
+        .GetParentToWorldTransform(box.GetPrim()).GetOrthonormalized(False)
+    xExpected.SetTranslateOnly(xTarget.GizmoMatrix().ExtractTranslation())
+    _Check(_MatClose(xTarget.ChannelFrame(), xExpected),
+           "the xform channel frame is the parent frame")
+    _Check(_MatClose(xTarget.GimbalFrame(), xTarget.ChannelFrame()),
+           "a plain xform has no spin between its channels and its parent")
+    for j in range(3):
+        xTarget.Refresh()
+        xOrder, base = xTarget.RotationState()
+        axes = gizmoMath.GimbalAxes(xOrder, base[0], base[1], base[2],
+                                    xTarget.GimbalFrame())
+        _Drag(xTarget, lambda: xTarget.ApplyRotate(axes[j], -7.0))
+        after = xTarget.RotationState()[1]
+        for i in range(3):
+            want = base[i] + (-7.0 if i == j else 0.0)
+            _Check(_Close(after[i], want, 1e-4),
+                   "xform ring %d must move only channel %d: %s -> %s"
+                   % (j, j, base, after))
+    xPivot, reason = gizmoMath.MakeTarget(
+        stage, box.GetPrim(), gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(xPivot is not None and xPivot.RotationState() is None,
+           "the xform pivot has no rotation channels")
+
+
+def TestPreserveChildren():
+    """
+    Maya's Preserve Children (design spec section 8.2), default off: the
+    children keep their world transforms while the parent is dragged.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    parent = UsdGeom.Xform.Define(stage, "/P")
+    UsdGeom.XformCommonAPI(parent).SetTranslate(Gf.Vec3d(1, 0, 0))
+    child = UsdGeom.Xform.Define(stage, "/P/C")
+    childApi = UsdGeom.XformCommonAPI(child)
+    childApi.SetTranslate(Gf.Vec3d(0, 2, 0))
+    childApi.SetRotate(Gf.Vec3f(0, 0, 30))
+    # A child with a non-zero pivot is out of scope: it rides along.
+    offset = UsdGeom.Xform.Define(stage, "/P/Offset")
+    offsetApi = UsdGeom.XformCommonAPI(offset)
+    offsetApi.SetTranslate(Gf.Vec3d(0, 0, 1))
+    offsetApi.SetPivot(Gf.Vec3f(0, 1, 0))
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, parent.GetPrim(), gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None and target.supportsPreserveChildren,
+           "a plain xform supports Preserve Children: %s" % reason)
+    _Check(not target.preserveChildren, "Preserve Children defaults to off")
+    cache = UsdGeom.XformCache(time)
+    before = cache.GetLocalToWorldTransform(child.GetPrim())
+    offsetBefore = cache.GetLocalToWorldTransform(offset.GetPrim())
+    target.SetPreserveChildren(True)
+    paths = target.AttributePaths()
+    _Check(Sdf.Path("/P/C.xformOp:translate") in paths
+           and Sdf.Path("/P/C.xformOp:rotateXYZ") in paths,
+           "a preserved child's channels join the undo set: %s" % paths)
+    _Check(Sdf.Path("/P/Offset.xformOp:translate") not in paths,
+           "a pivoted child is not preserved")
+    for label, apply in (
+            ("translate", lambda: target.ApplyTranslate(Gf.Vec3d(3, -1, 2))),
+            ("rotate", lambda: target.ApplyRotate(Gf.Vec3d(0, 0, 1), 25.0)),
+            ("scale", lambda: target.ApplyScale(None, 2.0))):
+        target.Refresh()
+        _Drag(target, apply)
+        cache.Clear()
+        now = cache.GetLocalToWorldTransform(child.GetPrim())
+        _Check(_MatClose(now, before, 1e-6),
+               "the child holds still through a %s:\n%s\n%s"
+               % (label, now, before))
+    cache.Clear()
+    _Check(not _MatClose(cache.GetLocalToWorldTransform(offset.GetPrim()),
+                         offsetBefore, 1e-6),
+           "the pivoted child rides along, as documented")
+    # Off: the child rides along with the parent.
+    target.SetPreserveChildren(False)
+    target.Refresh()
+    _Drag(target, lambda: target.ApplyTranslate(Gf.Vec3d(0, 5, 0)))
+    cache.Clear()
+    _Check(not _MatClose(cache.GetLocalToWorldTransform(child.GetPrim()),
+                         before, 1e-6),
+           "with Preserve Children off the child moves")
+    _Check(Sdf.Path("/P/C.xformOp:translate") not in target.AttributePaths(),
+           "off: no child channels in the undo set")
+    # Rig prims and the xform pivot refuse, with a reason.
+    rigStage, rigParent, rigChild = _ChainStage()
+    rigWriter = gizmoMath.Writer(rigStage, time, gizmoMath.WRITE_DEFAULT)
+    rigTarget, reason = gizmoMath.MakeTarget(
+        rigStage, rigChild, gizmoMath.CHANNELS_POSE, rigWriter)
+    _Check(rigTarget is not None, reason)
+    _Check(not rigTarget.supportsPreserveChildren
+           and "rig" in rigTarget.preserveChildrenReason,
+           "a rig target refuses: %r" % rigTarget.preserveChildrenReason)
+    rigTarget.SetPreserveChildren(True)
+    _Check(not rigTarget.preserveChildren,
+           "the refusal cannot be overridden")
+    pivotTarget, reason = gizmoMath.MakeTarget(
+        stage, parent.GetPrim(), gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(pivotTarget is not None, reason)
+    _Check(not pivotTarget.supportsPreserveChildren
+           and pivotTarget.preserveChildrenReason != "",
+           "the xform pivot refuses Preserve Children")
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -279,6 +705,12 @@ def main():
         ("rig frames replica", TestRigFramesReplica),
         ("volume weight scale", TestVolumeWeightScale),
         ("rig frames reasons", TestRigFramesReasons),
+        ("writer", TestWriter),
+        ("rig pose target", TestRigPoseTarget),
+        ("rig pivot target", TestRigPivotTarget),
+        ("xform targets", TestXformTargets),
+        ("gimbal + frames", TestGimbalAndFrames),
+        ("preserve children", TestPreserveChildren),
     ]
     for name, fn in groups:
         fn()

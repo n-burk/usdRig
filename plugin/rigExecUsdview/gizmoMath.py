@@ -295,8 +295,19 @@ class RigFrames(object):
       posed      avars * P   (the evaluator's computePointFrame)
       P          rest * parentRest^-1 * parentPosed: the frame the avars
                  are expressed in -- Pose mode edits happen relative to it
-      Q          rest:space * parentRest^-1 * parentPosed: the frame the
-                 rest offsets are expressed in -- Pivot mode edits
+      Q          orthonormalize(rest:space) * parentRest^-1 * parentPosed:
+                 the frame the rest offsets are expressed in -- Pivot mode
+                 edits. rest:space is ORTHONORMALIZED here, not passed
+                 through raw, so that restLocal * Q reproduces P: the
+                 evaluator's rest frame is orthonormalize(restLocal *
+                 rest:space), and for a rigid rest:space (the only kind a
+                 rest frame is meant to carry) that equals restLocal *
+                 orthonormalize(rest:space). Orthonormalization does not
+                 commute with a non-rigid left factor, so a rest:space
+                 carrying scale or shear leaves the pivot gizmo drawn on
+                 the orthonormalized frame while the evaluator keeps the
+                 scale -- the same approximation the evaluator itself
+                 makes when it throws that scale away.
       restLocal  compose(rest:t, rest:r)
       reason     "" when the prim is editable through its avars, else why
                  not (solver-posed, posed:space authority, no rig root)
@@ -350,7 +361,8 @@ def ComputeRigFrames(stage, prim, time, solverPosed=None):
     frames.rest = RestSpace(prim, time)
     toParent = frames.parentRest.GetInverse() * frames.parentPosed
     frames.P = frames.rest * toParent
-    frames.Q = _MatrixAttr(prim, REST_SPACE, time) * toParent
+    frames.Q = _MatrixAttr(prim, REST_SPACE, time)\
+        .GetOrthonormalized(False) * toParent
     frames.posed = AvarsMatrix(prim, time) * frames.P
 
     assetRoot = frames.rigRoot.GetParent()
@@ -358,3 +370,740 @@ def ComputeRigFrames(stage, prim, time, solverPosed=None):
         frames.assetToWorld = UsdGeom.XformCache(time)\
             .GetLocalToWorldTransform(assetRoot)
     return frames
+
+
+# ---------------------------------------------------------------------------
+# Writing values: animation (spline knot at the frame) or default
+# ---------------------------------------------------------------------------
+
+WRITE_ANIMATION = "animation"
+WRITE_DEFAULT = "default"
+CHANNELS_POSE = "pose"
+CHANNELS_PIVOT = "pivot"
+
+
+def SetAnimated(attr, value, time):
+    """
+    volumeWeightUI.SetAtTime's rule (volumeWeightUI.py:68-111), restated
+    here so this module stays Qt-free (volumeWeightUI imports Qt at
+    module scope): default time or existing time samples or a
+    spline-incapable type -> Set(value, time); otherwise a
+    curve-interpolated knot on the attribute's spline.
+    """
+    from pxr import Ts
+    if attr.GetVariability() == Sdf.VariabilityUniform:
+        attr.Set(value)
+        return
+    valueType = attr.GetTypeName().type
+    if (time.IsDefault() or attr.GetNumTimeSamples() > 0 or
+            not Ts.Spline.IsSupportedValueType(valueType)):
+        attr.Set(value, time)
+        return
+    frame = time.GetValue()
+    spline = attr.GetSpline()
+    knot = spline.GetKnot(frame)
+    if knot:
+        knot.SetValue(value)
+    else:
+        knot = Ts.Knot(
+            typeName=valueType.typeName, time=frame, value=value,
+            nextInterp=Ts.InterpCurve)
+    spline.SetKnot(knot)
+    attr.SetSpline(spline)
+
+
+class Writer(object):
+    """
+    Where a gizmo value lands. WRITE_ANIMATION authors at `time` through
+    SetAnimated; WRITE_DEFAULT authors the default and records a warning
+    for every attribute whose spline or time samples will outrank it
+    (the default is then invisible in the viewport, and the toolbar says
+    so rather than letting the drag look broken).
+    """
+
+    def __init__(self, stage, time, mode):
+        self.stage = stage
+        self.time = time
+        self.mode = mode
+        self._warnings = []
+
+    def Set(self, attr, value):
+        if self.mode == WRITE_DEFAULT:
+            if attr.HasSpline() or attr.GetNumTimeSamples() > 0:
+                message = ("%s: the default is outranked by its %s" % (
+                    attr.GetPath(),
+                    "spline" if attr.HasSpline() else "time samples"))
+                if message not in self._warnings:
+                    self._warnings.append(message)
+            attr.Set(value)
+        else:
+            SetAnimated(attr, value, self.time)
+
+    def Warnings(self):
+        return list(self._warnings)
+
+
+# ---------------------------------------------------------------------------
+# Edit targets
+# ---------------------------------------------------------------------------
+
+def _Linear(matrix):
+    """The 3x3 part as a 4x4 with zero translation."""
+    m = Gf.Matrix4d(matrix)
+    m.SetTranslateOnly(Gf.Vec3d(0, 0, 0))
+    return m
+
+
+def _RotationOnly(matrix):
+    return _Linear(matrix).GetOrthonormalized(False)
+
+
+def _WorldRotation(axis, degrees):
+    m = Gf.Matrix4d(1.0)
+    m.SetRotate(Gf.Rotation(Gf.Vec3d(axis).GetNormalized(), degrees))
+    return m
+
+
+def _FrameAt(matrix, origin):
+    """`matrix`'s rotation, moved to `origin`: a drawable handle frame."""
+    m = _RotationOnly(matrix)
+    m.SetTranslateOnly(Gf.Vec3d(origin))
+    return m
+
+
+def _RotationVector(matrix):
+    """A rotation as axis * radians, the 3 free parameters of SO(3)."""
+    rotation = matrix.ExtractRotation()
+    axis = rotation.GetAxis()
+    angle = math.radians(rotation.GetAngle())
+    return [axis[i] * angle for i in range(3)]
+
+
+def _FromRotationVector(vector):
+    length = math.sqrt(sum(v * v for v in vector))
+    if length < 1e-15:
+        return Gf.Matrix4d(1.0)
+    return _WorldRotation(Gf.Vec3d(*vector) / length, math.degrees(length))
+
+
+# Newton refinement budget for SolveWorldRotation. The closed-form first
+# guess is already exact for a rigid channel frame, so these steps only
+# ever run for a sheared one, where Newton converges quadratically.
+_ROTATION_SOLVE_STEPS = 6
+_ROTATION_SOLVE_TOLERANCE = 1e-12
+_ROTATION_SOLVE_STEP = 1e-6
+
+
+def SolveWorldRotation(base, channel, worldAxis, degrees):
+    """
+    The channel rotation R' whose ORTHONORMALIZED world frame is the
+    current one turned by `degrees` about `worldAxis`, where the world
+    frame is `base * channel` and only `base` may be edited.
+
+    `channel` is the full linear part that follows the rotation channels
+    (spin * P, Q, or the parent xform), NOT orthonormalized. When it is
+    rigid -- the ordinary case -- the answer is the closed form of design
+    spec section 2, R' = base * Cr * Rw * Cr^-1, and the loop below exits
+    on its first residual check without touching it.
+
+    When an ancestor carries non-uniform scale the channel frame is
+    sheared and that conjugate is no longer a rotation, so no closed form
+    exists. What the viewport shows is Gf's orthonormalization of a
+    sheared matrix, and that operator is measurably neither Gram-Schmidt
+    nor the polar factor, so it cannot be inverted algebraically. It is
+    exactly invariant under a positive diagonal on the left and exactly
+    equivariant under a rotation on the right, which is all the two lines
+    above rely on. Newton on the three rotation parameters recovers the
+    exact answer instead, and the best iterate is kept, so a target
+    orientation that is genuinely unreachable (a reflecting channel
+    frame) still yields the closest reachable one, not a diverged one.
+
+    The left invariance is why the avar scale S is absent here: uniform
+    or not, a POSITIVE scale cannot change the drawn orientation. A
+    negative one is a reflection and does; the gizmo turns the
+    unreflected frame in that case.
+    """
+    channel = _Linear(channel)
+    base = _Linear(base)
+    rigid = channel.GetOrthonormalized(False)
+    turn = _WorldRotation(worldAxis, degrees)
+    target = (base * channel).GetOrthonormalized(False) * turn
+    result = base * rigid * turn * rigid.GetInverse()
+
+    def Residual(candidate):
+        current = (candidate * channel).GetOrthonormalized(False)
+        return _RotationVector(current.GetInverse() * target)
+
+    best = None
+    for _ in range(_ROTATION_SOLVE_STEPS):
+        residual = Residual(result)
+        length = math.sqrt(sum(v * v for v in residual))
+        if best is None or length < best[0]:
+            best = (length, Gf.Matrix4d(result))
+        if length < _ROTATION_SOLVE_TOLERANCE:
+            break
+        columns = []
+        for axis in range(3):
+            nudge = [0.0, 0.0, 0.0]
+            nudge[axis] = _ROTATION_SOLVE_STEP
+            moved = Residual(result * _FromRotationVector(nudge))
+            columns.append([(moved[r] - residual[r]) / _ROTATION_SOLVE_STEP
+                            for r in range(3)])
+        jacobian = Gf.Matrix3d(columns[0][0], columns[1][0], columns[2][0],
+                               columns[0][1], columns[1][1], columns[2][1],
+                               columns[0][2], columns[1][2], columns[2][2])
+        if abs(jacobian.GetDeterminant()) < 1e-9:
+            break
+        inverse = jacobian.GetInverse()
+        step = [sum(inverse[r][c] * -residual[c] for c in range(3))
+                for r in range(3)]
+        result = (result * _FromRotationVector(step))\
+            .GetOrthonormalized(False)
+    return best[1]
+
+
+def GimbalAxes(order, rx, ry, rz, channelRotation):
+    """
+    The world unit axes of the X / Y / Z gimbal rings (design spec 8.3
+    "Rotate Axis: Gimbal"), returned indexed by AXIS: [0] turns rx, [1]
+    turns ry, [2] turns rz, whatever `order` is.
+
+    For order (i, j, k) applied i first the composition is R = Ri*Rj*Rk
+    (row-vector). Moving angle j alone gives R' = Ri*Rj*dj*Rk =
+    R * (Rk^-1 dj Rk), and conjugation maps M^-1 d(x) M to d(x*M), so in
+    CHANNEL space the j ring turns about e_j * Rk; likewise the k ring
+    about e_k and the i ring about e_i * Rj * Rk (= e_i * R, since a
+    rotation fixes its own axis). `channelRotation` carries those into
+    world -- pass the target's GimbalFrame(), which is the frame the
+    ROTATE channels compose in (it includes avars:rspin, which sits
+    between the Euler product and P; ChannelFrame() does not).
+    """
+    order = _NormalizeOrder(order)
+    angles = (rx, ry, rz)
+    i, j, k = ("XYZ".index(axis) for axis in order)
+    rk = _AxisRotation(k, angles[k])
+    rj = _AxisRotation(j, angles[j])
+    axes = [None, None, None]
+    axes[k] = _AXES[k]
+    axes[j] = rk.TransformDir(_AXES[j])
+    axes[i] = (rj * rk).TransformDir(_AXES[i])
+    world = _RotationOnly(channelRotation)
+    return [world.TransformDir(axis).GetNormalized() for axis in axes]
+
+
+class Target(object):
+    """
+    One prim being edited by the gizmo. Subclasses know which attributes
+    they own and how a WORLD-space delta maps back onto them. Every
+    Apply* is computed from the values captured by BeginDrag(), never
+    incrementally, so a drag cannot accumulate rounding drift and an
+    aborted drag has one well-defined state to return to.
+
+    Three frames, all orthonormal and all translated to the gizmo origin,
+    feed the Axis Orientation option (design spec 8.2):
+
+      ObjectFrame()   Maya "Object": the target's own posed orientation
+      ChannelFrame()  Maya "Parent": the space the channels are written
+                      in (P or Q for a rig prim, the parent xform
+                      otherwise)
+      GimbalFrame()   the space the ROTATE channels compose in; equal to
+                      ChannelFrame() except on a rig pose target, where
+                      avars:rspin sits between the Euler product and P
+
+    World orientation needs no frame: the controller uses the identity.
+    """
+
+    kind = ""
+    supportsTranslate = True
+    supportsRotate = True
+    supportsScale = True
+    supportsPreserveChildren = False
+    preserveChildrenReason = ""
+
+    def __init__(self, stage, prim, writer):
+        self.stage = stage
+        self.prim = prim
+        self.writer = writer
+        self.label = prim.GetName()
+        self.preserveChildren = False
+        self._base = {}
+
+    @property
+    def time(self):
+        return self.writer.time
+
+    def Refresh(self):
+        """Re-read the stage; call after a frame change or an undo."""
+
+    def GizmoMatrix(self):
+        raise NotImplementedError
+
+    def ObjectFrame(self):
+        return self.GizmoMatrix()
+
+    def ChannelFrame(self):
+        raise NotImplementedError
+
+    def GimbalFrame(self):
+        return self.ChannelFrame()
+
+    def RotationState(self):
+        """
+        (rotation order, [rx, ry, rz]) for the Euler channels this target
+        writes, or None when it has none. Read live from the stage, so
+        the controller can draw gimbal rings outside a drag.
+        """
+        return None
+
+    def SetPreserveChildren(self, enabled):
+        """
+        Maya "Preserve Children". A target that cannot honour it stays
+        off however often it is asked, so a stale toolbar checkbox can
+        never make a drag silently skip the compensation.
+        """
+        self.preserveChildren = bool(enabled) and \
+            self.supportsPreserveChildren
+
+    def AttributePaths(self):
+        raise NotImplementedError
+
+    def BeginDrag(self):
+        self.Refresh()
+        self._base = {name: ScalarAvar(self.prim, name, self.time, fallback)
+                      for name, fallback in self._ScalarChannels()}
+
+    def _ScalarChannels(self):
+        return []
+
+    def _Write(self, name, value):
+        self.writer.Set(self.prim.GetAttribute(name), float(value))
+
+    def ApplyTranslate(self, worldDelta):
+        raise NotImplementedError
+
+    def ApplyRotate(self, worldAxis, degrees):
+        raise NotImplementedError
+
+    def ApplyScale(self, axisIndex, factor):
+        raise NotImplementedError
+
+
+class _RigTarget(Target):
+    """Shared frame bookkeeping for the two RigExecXformable modes."""
+
+    # A control's children are placed by the evaluator from the parent's
+    # published frame, so there is nothing to re-author: compensating
+    # them here would fight the rig on the next evaluation.
+    preserveChildrenReason = ("children of a rig control are evaluated by "
+                              "the rig")
+
+    def __init__(self, stage, prim, writer):
+        Target.__init__(self, stage, prim, writer)
+        self.frames = None
+        self.Refresh()
+
+    def Refresh(self):
+        self.frames = ComputeRigFrames(self.stage, self.prim, self.time)
+
+    def _WriteVector(self, names, values):
+        with Sdf.ChangeBlock():
+            for name, value in zip(names, values):
+                self._Write(name, value)
+
+
+class RigPoseTarget(_RigTarget):
+    """Edits avars:t/r/s relative to P (see RigFrames)."""
+
+    kind = "rig-pose"
+
+    def _ScalarChannels(self):
+        return ([(n, 0.0) for n in AVAR_T] + [(n, 0.0) for n in AVAR_R]
+                + [(n, 1.0) for n in AVAR_S] + [(AVAR_RSPIN, 0.0)])
+
+    def _Order(self):
+        attr = self.prim.GetAttribute(AVAR_ORDER)
+        value = attr.Get(self.time) if attr else None
+        return _NormalizeOrder(value)
+
+    def AttributePaths(self):
+        return [self.prim.GetPath().AppendProperty(n)
+                for n in AVAR_T + AVAR_R + AVAR_S]
+
+    def GizmoMatrix(self):
+        world = self.frames.posed * self.frames.assetToWorld
+        return world.GetOrthonormalized(False)
+
+    def _Pw(self):
+        return self.frames.P * self.frames.assetToWorld
+
+    def ChannelFrame(self):
+        return _FrameAt(self._Pw(), self.GizmoMatrix().ExtractTranslation())
+
+    def GimbalFrame(self):
+        spin = _AxisRotation(0, ScalarAvar(
+            self.prim, AVAR_RSPIN, self.time, 0.0))
+        return _FrameAt(spin * self._Pw(),
+                        self.GizmoMatrix().ExtractTranslation())
+
+    def RotationState(self):
+        return (self._Order(),
+                [ScalarAvar(self.prim, n, self.time, 0.0) for n in AVAR_R])
+
+    def ApplyTranslate(self, worldDelta):
+        local = _Linear(self._Pw()).GetInverse().TransformDir(
+            Gf.Vec3d(worldDelta))
+        self._WriteVector(AVAR_T, [self._base[n] + local[i]
+                                   for i, n in enumerate(AVAR_T)])
+
+    def ApplyRotate(self, worldAxis, degrees):
+        base = [self._base[n] for n in AVAR_R]
+        order = self._Order()
+        # World linear = S * R * spin * linear(P*assetToWorld); only R is
+        # ours to move, so spin * P is the channel frame it turns inside.
+        channel = _AxisRotation(0, self._base[AVAR_RSPIN]) * self._Pw()
+        rNew = SolveWorldRotation(RotationFromEuler(order, *base), channel,
+                                  worldAxis, degrees)
+        self._WriteVector(AVAR_R, DecomposeEuler(rNew, order, hint=base))
+
+    def ApplyScale(self, axisIndex, factor):
+        values = []
+        for i, name in enumerate(AVAR_S):
+            value = self._base[name]
+            if axisIndex is None or axisIndex == i:
+                value = value * factor
+            values.append(NormalizeAvarScale(value))
+        self._WriteVector(AVAR_S, values)
+
+
+class RigPivotTarget(_RigTarget):
+    """Edits rest:t/r relative to Q (see RigFrames); no scale."""
+
+    kind = "rig-pivot"
+    supportsScale = False
+
+    def _ScalarChannels(self):
+        return [(n, 0.0) for n in REST_T] + [(n, 0.0) for n in REST_R]
+
+    def AttributePaths(self):
+        return [self.prim.GetPath().AppendProperty(n)
+                for n in REST_T + REST_R]
+
+    def _Qw(self):
+        return self.frames.Q * self.frames.assetToWorld
+
+    def GizmoMatrix(self):
+        return (self.frames.restLocal * self._Qw()).GetOrthonormalized(False)
+
+    def ChannelFrame(self):
+        return _FrameAt(self._Qw(), self.GizmoMatrix().ExtractTranslation())
+
+    def RotationState(self):
+        # RestLocal composes rest:r in XYZ with no spin (computations.cpp
+        # :196-215), so the pivot rings are always XYZ rings.
+        return ("XYZ",
+                [ScalarAvar(self.prim, n, self.time, 0.0) for n in REST_R])
+
+    def ApplyTranslate(self, worldDelta):
+        local = _Linear(self._Qw()).GetInverse().TransformDir(
+            Gf.Vec3d(worldDelta))
+        self._WriteVector(REST_T, [self._base[n] + local[i]
+                                   for i, n in enumerate(REST_T)])
+
+    def ApplyRotate(self, worldAxis, degrees):
+        base = [self._base[n] for n in REST_R]
+        rNew = SolveWorldRotation(RotationFromEuler("XYZ", *base),
+                                  self._Qw(), worldAxis, degrees)
+        self._WriteVector(REST_R, DecomposeEuler(rNew, "XYZ", hint=base))
+
+    def ApplyScale(self, axisIndex, factor):
+        pass
+
+
+_XFORM_ORDER_NAMES = {
+    UsdGeom.XformCommonAPI.RotationOrderXYZ: "XYZ",
+    UsdGeom.XformCommonAPI.RotationOrderXZY: "XZY",
+    UsdGeom.XformCommonAPI.RotationOrderYXZ: "YXZ",
+    UsdGeom.XformCommonAPI.RotationOrderYZX: "YZX",
+    UsdGeom.XformCommonAPI.RotationOrderZXY: "ZXY",
+    UsdGeom.XformCommonAPI.RotationOrderZYX: "ZYX",
+}
+
+_ZERO3F = Gf.Vec3f(0.0, 0.0, 0.0)
+
+
+class _PreservedChild(object):
+    """
+    One child of a Preserve Children drag: its world transform at the
+    press, plus the values needed to re-author it afterwards.
+
+    The Euler hint is the child's angles at the press, so the
+    compensation stays on the same branch as whatever an animator
+    already authored instead of jumping to an equivalent triple.
+    """
+
+    def __init__(self, prim, api, vectors, cache):
+        self.prim = prim
+        self.api = api
+        self.order = vectors[4]
+        self.angles = [float(v) for v in vectors[1]]
+        self.world = cache.GetLocalToWorldTransform(prim)
+
+    def AttributePaths(self):
+        prefix = self.prim.GetPath()
+        rotateName = "xformOp:rotate" + _XFORM_ORDER_NAMES[self.order]
+        return [prefix.AppendProperty(n) for n in (
+            "xformOp:translate", rotateName, "xformOp:scale",
+            "xformOpOrder")]
+
+
+class _XformTarget(Target):
+    """
+    A plain UsdGeomXformable through UsdGeomXformCommonAPI, whose op
+    stack is [translate, pivot, rotate, scale, !invert!pivot]: ops apply
+    to points last-to-first, so scale then rotation happen about the
+    pivot and the translate is in PARENT space -- which is why world
+    deltas are mapped through the parent's transform, not the prim's.
+    """
+
+    def __init__(self, stage, prim, writer):
+        Target.__init__(self, stage, prim, writer)
+        self.api = UsdGeom.XformCommonAPI(prim)
+        self.vectors = None
+        self.parentWorld = Gf.Matrix4d(1.0)
+        self._preserved = []
+        self.Refresh()
+
+    def Refresh(self):
+        cache = UsdGeom.XformCache(self.time)
+        self.parentWorld = cache.GetParentToWorldTransform(self.prim)
+        self.vectors = self.api.GetXformVectors(self.time)
+
+    def BeginDrag(self):
+        self.Refresh()
+        t, r, s, p, order = self.vectors
+        self._base = {"t": Gf.Vec3d(t), "r": Gf.Vec3f(r), "s": Gf.Vec3f(s),
+                      "p": Gf.Vec3f(p), "order": order}
+        self._preserved = self._PreserveCandidates()
+
+    def ChannelFrame(self):
+        return _FrameAt(self.parentWorld,
+                        self.GizmoMatrix().ExtractTranslation())
+
+    def _Ops(self):
+        """
+        The four ops, created on demand (a no-op for existing ones).
+        CreateXformOps always answers a 5-tuple in fixed slots --
+        translate, pivot, rotate, scale, !invert!pivot -- filling the
+        slots it was not asked for with invalid ops, and it leaves an
+        already-authored op alone. Slots 0..3 are the ones written here.
+        """
+        api = UsdGeom.XformCommonAPI
+        return self.api.CreateXformOps(
+            self._base["order"], api.OpTranslate, api.OpPivot,
+            api.OpRotate, api.OpScale)
+
+    def _PreserveCandidates(self):
+        """
+        The children a Preserve Children drag can hold still: plain
+        xformables with an XformCommonAPI-compatible stack, a zero pivot
+        (a non-zero pivot makes the local decomposition of the
+        compensated matrix ambiguous) and a non-reflecting linear part
+        (row lengths cannot recover a negative scale, so a mirrored
+        child would silently come back unmirrored).
+        """
+        if not self.preserveChildren:
+            return []
+        cache = UsdGeom.XformCache(self.time)
+        found = []
+        for child in self.prim.GetChildren():
+            if not child.IsA(UsdGeom.Xformable):
+                continue
+            api = UsdGeom.XformCommonAPI(child)
+            if not api:
+                continue
+            vectors = api.GetXformVectors(self.time)
+            if Gf.Vec3f(vectors[3]) != _ZERO3F:
+                continue
+            local = UsdGeom.Xformable(child).GetLocalTransformation(self.time)
+            if _Linear(local).GetDeterminant() <= 0.0:
+                continue
+            found.append(_PreservedChild(child, api, vectors, cache))
+        return found
+
+    def _RestoreChildren(self):
+        """
+        Put every recorded child back on its captured world matrix:
+        childLocal = childWorld * newParentLocalToWorld^-1, split into
+        row lengths (scale), the orthonormalized linear part (rotation)
+        and the translation row -- exactly the decomposition
+        XformCommonAPI recomposes from.
+        """
+        if not self._preserved:
+            return
+        api = UsdGeom.XformCommonAPI
+        parentWorld = UsdGeom.XformCache(self.time)\
+            .GetLocalToWorldTransform(self.prim)
+        if abs(_Linear(parentWorld).GetDeterminant()) < 1e-12:
+            # A collapsed parent (a scale drag through zero) has no
+            # inverse; Gf answers with FLT_MAX rather than raising, so
+            # compensating here would author garbage on the children.
+            # Leave them where they are and let the next event recover.
+            return
+        inverse = parentWorld.GetInverse()
+        for entry in self._preserved:
+            local = entry.world * inverse
+            linear = _Linear(local)
+            scale = [Gf.Vec3d(linear[r][0], linear[r][1],
+                              linear[r][2]).GetLength() for r in range(3)]
+            angles = DecomposeEuler(linear, _XFORM_ORDER_NAMES[entry.order],
+                                    hint=entry.angles)
+            ops = entry.api.CreateXformOps(
+                entry.order, api.OpTranslate, api.OpRotate, api.OpScale)
+            self.writer.Set(ops[0].GetAttr(), local.ExtractTranslation())
+            self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
+            self.writer.Set(ops[3].GetAttr(), Gf.Vec3f(*scale))
+
+    def AttributePaths(self):
+        prefix = self.prim.GetPath()
+        _, _, _, _, order = self.vectors
+        rotateName = "xformOp:rotate" + _XFORM_ORDER_NAMES[order]
+        paths = [prefix.AppendProperty(n) for n in (
+            "xformOp:translate", "xformOp:translate:pivot", rotateName,
+            "xformOp:scale", "xformOpOrder")]
+        # The compensated children are re-authored by the same drag, so
+        # they belong to the same undo entry as the target itself.
+        for entry in self._PreserveCandidates():
+            paths.extend(entry.AttributePaths())
+        return paths
+
+
+class XformPoseTarget(_XformTarget):
+    kind = "xform-pose"
+    supportsPreserveChildren = True
+
+    def GizmoMatrix(self):
+        local = UsdGeom.Xformable(self.prim).GetLocalTransformation(self.time)
+        return (local * self.parentWorld).GetOrthonormalized(False)
+
+    def RotationState(self):
+        # Read through the API rather than the cached self.vectors: the
+        # base class promises a live answer, and the controller asks for
+        # one between the writes of a drag to redraw the rings.
+        _, r, _, _, order = self.api.GetXformVectors(self.time)
+        return (_XFORM_ORDER_NAMES[order], [float(v) for v in r])
+
+    def ApplyTranslate(self, worldDelta):
+        local = _Linear(self.parentWorld).GetInverse().TransformDir(
+            Gf.Vec3d(worldDelta))
+        ops = self._Ops()
+        self.writer.Set(ops[0].GetAttr(), self._base["t"] + local)
+        self._RestoreChildren()
+
+    def ApplyRotate(self, worldAxis, degrees):
+        order = _XFORM_ORDER_NAMES[self._base["order"]]
+        base = [float(v) for v in self._base["r"]]
+        rNew = SolveWorldRotation(RotationFromEuler(order, *base),
+                                  self.parentWorld, worldAxis, degrees)
+        angles = DecomposeEuler(rNew, order, hint=base)
+        ops = self._Ops()
+        self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
+        self._RestoreChildren()
+
+    def ApplyScale(self, axisIndex, factor):
+        s = Gf.Vec3f(self._base["s"])
+        for i in range(3):
+            if axisIndex is None or axisIndex == i:
+                s[i] = s[i] * factor
+        ops = self._Ops()
+        self.writer.Set(ops[3].GetAttr(), s)
+        self._RestoreChildren()
+
+
+class XformPivotTarget(_XformTarget):
+    kind = "xform-pivot"
+    supportsRotate = False
+    supportsScale = False
+    # Moving the pivot leaves every child's world matrix alone until the
+    # next pose drag, so there is nothing to compensate.
+    preserveChildrenReason = "moving the pivot does not move the children"
+
+    def GizmoMatrix(self):
+        t, r, s, p, order = self.vectors
+        m = _RotationOnly(self.parentWorld)
+        m.SetTranslateOnly(self.parentWorld.Transform(Gf.Vec3d(p) + t))
+        return m
+
+    def ApplyTranslate(self, worldDelta):
+        local = _Linear(self.parentWorld).GetInverse().TransformDir(
+            Gf.Vec3d(worldDelta))
+        ops = self._Ops()
+        self.writer.Set(ops[1].GetAttr(),
+                        Gf.Vec3f(self._base["p"] + Gf.Vec3f(local)))
+
+    def ApplyRotate(self, worldAxis, degrees):
+        pass
+
+    def ApplyScale(self, axisIndex, factor):
+        pass
+
+
+def _ConnectedAvar(prim, names):
+    for name in names:
+        attr = prim.GetAttribute(name)
+        if attr and attr.HasAuthoredConnections():
+            return name
+    return None
+
+
+# The only rig prims the gizmo edits (design spec assumption 1.3). Volume
+# weights also inherit RigExecXformable, but they carry no scale avars
+# and have their own panel, so they are declined by concrete type rather
+# than through IsRigXformable.
+RIG_TARGET_TYPE_NAMES = ("RigExecControl", "RigExecJoint")
+
+
+def _IsRigTargetType(prim):
+    for name in RIG_TARGET_TYPE_NAMES:
+        schemaType = Tf.Type.FindByName(name)
+        if schemaType.isUnknown:
+            # No schema plugin registered: fall back to the type name,
+            # matching IsRigXformable's own fallback.
+            if prim.GetTypeName() == name:
+                return True
+        elif prim.IsA(schemaType):
+            return True
+    return False
+
+
+def MakeTarget(stage, prim, channels, writer):
+    """(target, "") or (None, reason) for usdview's focus prim."""
+    if not prim or not prim.IsValid():
+        return None, "nothing selected"
+    if IsRigXformable(prim):
+        if not _IsRigTargetType(prim):
+            if not ReadsScaleAvars(prim):
+                return None, ("%s is a volume weight; use the Volume "
+                              "Weight panel" % prim.GetName())
+            return None, "%s (%s) is not a control or a joint" % (
+                prim.GetName(), prim.GetTypeName() or "untyped")
+        frames = ComputeRigFrames(stage, prim, writer.time)
+        if frames.reason:
+            return None, frames.reason
+        names = (AVAR_T + AVAR_R + AVAR_S if channels == CHANNELS_POSE
+                 else REST_T + REST_R)
+        connected = _ConnectedAvar(prim, names)
+        if connected:
+            return None, "%s.%s is connected; edit its source instead" % (
+                prim.GetName(), connected)
+        if channels == CHANNELS_PIVOT:
+            return RigPivotTarget(stage, prim, writer), ""
+        return RigPoseTarget(stage, prim, writer), ""
+    if prim.IsA(UsdGeom.Xformable):
+        if not UsdGeom.XformCommonAPI(prim):
+            return None, ("%s: xformOp stack is not XformCommonAPI-"
+                          "compatible" % prim.GetName())
+        if channels == CHANNELS_PIVOT:
+            return XformPivotTarget(stage, prim, writer), ""
+        return XformPoseTarget(stage, prim, writer), ""
+    return None, "%s (%s) has no transform to edit" % (
+        prim.GetName(), prim.GetTypeName() or "untyped")
