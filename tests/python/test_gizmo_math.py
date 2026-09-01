@@ -56,6 +56,32 @@ def _Rot(axis, deg):
     return m
 
 
+def _CaptureStderr(fn):
+    """
+    Run `fn` with file descriptor 2 redirected, and return what it wrote.
+
+    TF_WARN is raised in C++ and printed by the diagnostic manager, so a
+    Python-level hook does not see it, and Tf.DiagnosticNotice is not
+    bound in this USD build. Redirecting the descriptor catches it
+    whatever layer it comes from.
+    """
+    import tempfile
+    handle = tempfile.TemporaryFile(mode="w+b")
+    sys.stderr.flush()
+    saved = os.dup(2)
+    os.dup2(handle.fileno(), 2)
+    try:
+        fn()
+    finally:
+        sys.stderr.flush()
+        os.dup2(saved, 2)
+        os.close(saved)
+    handle.seek(0)
+    text = handle.read().decode("utf-8", "replace")
+    handle.close()
+    return text
+
+
 def _NativeModule():
     """
     The _rigexec binding, or None when its absence is explicitly allowed.
@@ -930,6 +956,86 @@ def TestSnapAndPlanarScale():
            "xform pivot step snap: %s" % (api.GetXformVectors(time)[3],))
 
 
+def TestXformOpNoise():
+    """
+    A drag on a plain Xform with no authored ops must author only the op
+    it writes, and must not make USD complain.
+
+    An end-to-end run reported a burst of "Unable to get attribute
+    associated with the xformOp" from usdGeom/xformable.cpp. USD raises
+    that whenever xformOpOrder names an op whose attribute is missing,
+    once per transform composition. Creating all four common ops for
+    every drag put three ops the drag never writes into xformOpOrder --
+    scene description the user did not ask for, including a zero pivot
+    pair on a prim that had none -- so each caller now creates only the
+    one op it is about to write.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, "/Shot")
+    box = UsdGeom.Xform.Define(stage, "/Shot/HeroArm")
+    prim = box.GetPrim()
+    time = Usd.TimeCode.Default()
+    # usdview edits the session layer; keep the prim and its ops in
+    # different layers, as they are in the app.
+    stage.SetEditTarget(stage.GetSessionLayer())
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, prim, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None, reason)
+
+    def _TranslateDrag():
+        target.BeginDrag()
+        # Recompose between events, the way the viewport does: that is
+        # what turns an inconsistent op stack into a printed warning.
+        for step in range(4):
+            target.ApplyTranslate(Gf.Vec3d(step + 1.0, 0, 0))
+            UsdGeom.XformCache(time).GetLocalToWorldTransform(prim)
+            target.Refresh()
+            target.GizmoMatrix()
+
+    noise = _CaptureStderr(_TranslateDrag)
+    _Check("Unable to get attribute" not in noise,
+           "a drag on a bare Xform must not warn:\n%s" % noise.strip())
+    _Check(noise.strip() == "", "a drag on a bare Xform is silent:\n%s"
+           % noise.strip())
+    _Check(sorted(prim.GetAuthoredPropertyNames())
+           == ["xformOp:translate", "xformOpOrder"],
+           "a translate drag authors only the translate op: %s"
+           % sorted(prim.GetAuthoredPropertyNames()))
+    _Check(list(prim.GetAttribute("xformOpOrder").Get())
+           == ["xformOp:translate"],
+           "xformOpOrder names only the op that was written: %s"
+           % (prim.GetAttribute("xformOpOrder").Get(),))
+    # Each tool adds its own op, and only its own.
+    _Drag(target, lambda: target.ApplyScale(None, 2.0))
+    _Check("xformOp:scale" in prim.GetAuthoredPropertyNames()
+           and "xformOp:rotateXYZ" not in prim.GetAuthoredPropertyNames()
+           and "xformOp:translate:pivot"
+           not in prim.GetAuthoredPropertyNames(),
+           "a scale drag adds the scale op alone: %s"
+           % sorted(prim.GetAuthoredPropertyNames()))
+    _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(0, 0, 1), 20.0))
+    _Check("xformOp:rotateXYZ" in prim.GetAuthoredPropertyNames()
+           and "xformOp:translate:pivot"
+           not in prim.GetAuthoredPropertyNames(),
+           "a rotate drag adds the rotate op alone: %s"
+           % sorted(prim.GetAuthoredPropertyNames()))
+    # The pivot op appears only when pivot mode writes it.
+    pivotTarget, reason = gizmoMath.MakeTarget(
+        stage, prim, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(pivotTarget is not None, reason)
+    _Drag(pivotTarget, lambda: pivotTarget.ApplyTranslate(Gf.Vec3d(0, 1, 0)))
+    _Check("xformOp:translate:pivot" in prim.GetAuthoredPropertyNames(),
+           "pivot mode still creates the pivot op: %s"
+           % sorted(prim.GetAuthoredPropertyNames()))
+    # The values all survived the narrower op creation.
+    vectors = UsdGeom.XformCommonAPI(prim).GetXformVectors(time)
+    _Check(_Close(vectors[0][0], 4.0) and vectors[2] == Gf.Vec3f(2, 2, 2)
+           and _Close(vectors[1][2], 20.0, 1e-4)
+           and _Close(vectors[3][1], 1.0, 1e-6),
+           "every channel still holds what its drag wrote: %s" % (vectors,))
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -945,6 +1051,7 @@ def main():
         ("gimbal + frames", TestGimbalAndFrames),
         ("preserve children", TestPreserveChildren),
         ("snap + planar scale", TestSnapAndPlanarScale),
+        ("xformOp noise", TestXformOpNoise),
     ]
     for name, fn in groups:
         fn()

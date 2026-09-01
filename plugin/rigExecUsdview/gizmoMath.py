@@ -1015,18 +1015,25 @@ class _XformTarget(Target):
         return _FrameAt(self.parentWorld,
                         self.GizmoMatrix().ExtractTranslation())
 
-    def _Ops(self):
+    def _Ops(self, *which):
         """
-        The four ops, created on demand (a no-op for existing ones).
-        CreateXformOps always answers a 5-tuple in fixed slots --
+        Create ONLY the ops named in `which`, and answer all five slots.
+
+        CreateXformOps always returns a 5-tuple in fixed slots --
         translate, pivot, rotate, scale, !invert!pivot -- filling the
         slots it was not asked for with invalid ops, and it leaves an
-        already-authored op alone. Slots 0..3 are the ones written here.
+        already-authored op alone (probed: asking for translate, rotate
+        and scale on a prim that already has a pivot keeps the pivot and
+        still reports it in slot 1).
+
+        Each caller asks for the one op it is about to write. Asking for
+        all four instead put three ops the drag never touches into
+        xformOpOrder, which is scene description the user did not ask
+        for -- a zero pivot pair on a prim that had none -- and three
+        more chances for xformOpOrder to name an op whose attribute is
+        missing, which USD warns about once per transform composition.
         """
-        api = UsdGeom.XformCommonAPI
-        return self.api.CreateXformOps(
-            self._base["order"], api.OpTranslate, api.OpPivot,
-            api.OpRotate, api.OpScale)
+        return self.api.CreateXformOps(self._base["order"], *which)
 
     def _PreserveCandidates(self):
         """
@@ -1162,7 +1169,7 @@ class XformPoseTarget(_XformTarget):
         base = self._base["t"]
         values = _SnapTranslation([base[i] for i in range(3)], local,
                                   snapStep, snapAbsolute)
-        ops = self._Ops()
+        ops = self._Ops(UsdGeom.XformCommonAPI.OpTranslate)
         self.writer.Set(ops[0].GetAttr(), Gf.Vec3d(*values))
         self._RestoreChildren()
 
@@ -1173,14 +1180,14 @@ class XformPoseTarget(_XformTarget):
                                   self.parentWorld, worldAxis,
                                   _SnapValue(degrees, snapStep))
         angles = DecomposeEuler(rNew, order, hint=base)
-        ops = self._Ops()
+        ops = self._Ops(UsdGeom.XformCommonAPI.OpRotate)
         self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
         self._RestoreChildren()
 
     def ApplyRotateChannel(self, axisIndex, degrees, snapStep=None):
         angles = [float(v) for v in self._base["r"]]
         angles[axisIndex] = angles[axisIndex] + _SnapValue(degrees, snapStep)
-        ops = self._Ops()
+        ops = self._Ops(UsdGeom.XformCommonAPI.OpRotate)
         self.writer.Set(ops[2].GetAttr(), Gf.Vec3f(*angles))
         self._RestoreChildren()
 
@@ -1190,7 +1197,7 @@ class XformPoseTarget(_XformTarget):
         for i in range(3):
             if i in axes:
                 s[i] = _SnapValue(s[i] * factor, snapStep)
-        ops = self._Ops()
+        ops = self._Ops(UsdGeom.XformCommonAPI.OpScale)
         self.writer.Set(ops[3].GetAttr(), s)
         self._RestoreChildren()
 
@@ -1222,7 +1229,7 @@ class XformPivotTarget(_XformTarget):
         # this replaced produced.
         base = [float(v) for v in self._base["p"]]
         delta = [float(v) for v in Gf.Vec3f(local)]
-        ops = self._Ops()
+        ops = self._Ops(UsdGeom.XformCommonAPI.OpPivot)
         self.writer.Set(ops[1].GetAttr(), Gf.Vec3f(*_SnapTranslation(
             base, delta, snapStep, snapAbsolute)))
 
