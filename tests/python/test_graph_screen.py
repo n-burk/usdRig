@@ -310,6 +310,44 @@ def TestTangentGlyphs():
            "no selection, no handles")
 
 
+def TestDualValuedKeys():
+    transform = _Transform()
+    curves = ["curveA"]
+    spline = _Spline([(0.0, 0.0), (10.0, 5.0)])
+    jump = Ts.Knot(typeName="double", time=5.0, value=2.5,
+                   nextInterp=Ts.InterpCurve)
+    jump.SetPreValue(1.0)
+    spline.SetKnot(jump)
+    keys = gscr.KeyGlyphs(curves, [spline], transform, set())
+    middle = [k for k in keys if _Close(k.time, 5.0)][0]
+    _Check(len([k for k in keys if _Close(k.time, 5.0)]) == 1,
+           "a dual-valued knot is ONE glyph, not two")
+    _Check(middle.IsDualValued(), "the glyph reports the jump: %s" % (middle,))
+    # The two squares share a column and differ only in y: the value the
+    # next segment leaves from, and the value the previous one arrives at.
+    _Check(_ClosePoint((middle.x, middle.y), transform.ToPixel(5.0, 2.5)),
+           "value square: %s" % ((middle.x, middle.y),))
+    _Check(_Close(middle.preValue, 1.0)
+           and _Close(middle.preY, transform.ValueToY(1.0)),
+           "pre-value square: %s" % ((middle.preValue, middle.preY),))
+    _Check(_Close(middle.preY, 572.0 - 109.6, 1e-6),
+           "pre-value square pixel: %s" % (middle.preY,))
+    # Either square grabs the key, and both give back the same glyph.
+    onValue = gscr.HitKey(keys, middle.x, middle.y + 2.0)
+    onPre = gscr.HitKey(keys, middle.x, middle.preY - 2.0)
+    _Check(onValue is middle and onPre is middle,
+           "both squares hit the same key: %s %s" % (onValue, onPre))
+    _Check(gscr.HitKey(keys, middle.x,
+                       (middle.y + middle.preY) * 0.5) is None,
+           "the gap between the two squares hits nothing")
+    # An ordinary knot leaves both fields unset, so the painter draws one
+    # square without asking.
+    plain = [k for k in keys if _Close(k.time, 0.0)][0]
+    _Check(plain.preValue is None and plain.preY is None
+           and not plain.IsDualValued(),
+           "an ordinary knot has no pre-value square: %s" % (plain,))
+
+
 def TestHitTesting():
     transform = _Transform()
     curves = ["curveA"]
@@ -434,6 +472,7 @@ def main():
         ("sampling", TestSampling),
         ("key glyphs", TestKeyGlyphs),
         ("tangent glyphs", TestTangentGlyphs),
+        ("dual-valued keys", TestDualValuedKeys),
         ("hit testing", TestHitTesting),
         ("key drag", TestKeyDrag),
         ("tangent drag", TestTangentDrag),

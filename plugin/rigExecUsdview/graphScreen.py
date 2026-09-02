@@ -260,19 +260,36 @@ def SamplePolylines(spline, transform, interval=None):
 
 
 class KeyGlyph(object):
-    """One key square: its curve, its knot, and where it is on screen."""
+    """
+    One key square: its curve, its knot, and where it is on screen.
 
-    def __init__(self, curveIndex, time, value, x, y, selected):
+    A DUAL-VALUED knot is two squares in one column, because the curve
+    jumps at that frame: `value` / `y` is the value the segment AFTER the
+    knot starts from, and `preValue` / `preY` the value the segment
+    before it arrives at (spec section 2.2, "Dual-valued knots draw both
+    the pre-value and value squares"). Both are None on an ordinary
+    knot, so the painter can draw one square without asking.
+    """
+
+    def __init__(self, curveIndex, time, value, x, y, selected,
+                 preValue=None, preY=None):
         self.curveIndex = curveIndex
         self.time = time
         self.value = value
         self.x = x
         self.y = y
         self.selected = selected
+        self.preValue = preValue
+        self.preY = preY
+
+    def IsDualValued(self):
+        return self.preY is not None
 
     def __repr__(self):
-        return "<KeyGlyph c%d t=%g v=%g at (%.1f, %.1f)%s>" % (
+        return "<KeyGlyph c%d t=%g v=%g at (%.1f, %.1f)%s%s>" % (
             self.curveIndex, self.time, self.value, self.x, self.y,
+            "" if self.preY is None else " pre=%g@%.1f" % (self.preValue,
+                                                           self.preY),
             " selected" if self.selected else "")
 
 
@@ -330,6 +347,10 @@ def KeyGlyphs(curves, splines, transform, selection):
     because the CurveRef carries the colour and the label, which the
     painter needs and the geometry does not. `selection` is a container
     of (curveIndex, time) pairs.
+
+    A dual-valued knot gets ONE glyph carrying BOTH squares, not two
+    glyphs: it is a single knot, so selecting, dragging and deleting it
+    must move both halves together.
     """
     glyphs = []
     for index in range(len(curves)):
@@ -338,8 +359,13 @@ def KeyGlyphs(curves, splines, transform, selection):
             time = knot.GetTime()
             value = float(knot.GetValue())
             x, y = transform.ToPixel(time, value)
+            preValue, preY = None, None
+            if knot.IsDualValued():
+                preValue = float(knot.GetPreValue())
+                preY = transform.ValueToY(preValue)
             glyphs.append(KeyGlyph(index, time, value, x, y,
-                                   _IsSelected(selection, index, time)))
+                                   _IsSelected(selection, index, time),
+                                   preValue, preY))
     return glyphs
 
 
@@ -407,7 +433,21 @@ def _Nearest(glyphs, x, y, radius):
 
 
 def HitKey(keys, x, y, radius=HIT_PIXELS):
-    return _Nearest(keys, x, y, radius)
+    """
+    The key glyph nearest (x, y) within `radius` pixels, or None.
+
+    A dual-valued knot is aimed at by EITHER of its two squares and
+    returns the same glyph, because both belong to one knot: an artist
+    who grabs the pre-value square has grabbed that key.
+    """
+    best = None
+    for glyph in keys:
+        distance = math.hypot(x - glyph.x, y - glyph.y)
+        if glyph.preY is not None:
+            distance = min(distance, math.hypot(x - glyph.x, y - glyph.preY))
+        if distance <= radius and (best is None or distance < best[0]):
+            best = (distance, glyph)
+    return None if best is None else best[1]
 
 
 def HitTangent(tangents, x, y, radius=HIT_PIXELS):
