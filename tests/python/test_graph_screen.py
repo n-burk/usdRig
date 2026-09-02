@@ -237,6 +237,90 @@ def TestSampling():
            "no spline samples to nothing")
 
 
+def TestSplitExtrapolation():
+    """
+    The dashed-tail split (spec 2.2).
+
+    The regression that motivated the test: Ts hands the PRE
+    extrapolation back as its own polyline ending exactly on the first
+    knot's column, and a splitter that asks the INSIDE point which bound
+    it crossed picks the far one -- emitting a solid run from the first
+    knot to the last at the first key's value, drawn over every curve.
+    """
+    low, high = 100.0, 900.0
+
+    # A pre tail, ending exactly on the first knot's column: everything
+    # left of `low` is dashed and NOTHING is solid, because the run
+    # never reaches into the knot range.
+    inside, outside = gscr.SplitExtrapolation(
+        [(20.0, 300.0), (100.0, 300.0)], low, high)
+    _Check(inside == [],
+           "a pre tail contributes no solid run: %s" % (inside,))
+    _Check(len(outside) == 1
+           and _ClosePoint(outside[0][0], (20.0, 300.0))
+           and _ClosePoint(outside[0][-1], (100.0, 300.0)),
+           "the pre tail is one dashed run up to the first knot: %s"
+           % (outside,))
+
+    # A post tail starting on the last knot's column.
+    inside, outside = gscr.SplitExtrapolation(
+        [(900.0, 400.0), (980.0, 400.0)], low, high)
+    _Check(inside == [],
+           "a post tail contributes no solid run: %s" % (inside,))
+    _Check(len(outside) == 1
+           and _ClosePoint(outside[0][0], (900.0, 400.0)),
+           "the post tail is one dashed run from the last knot: %s"
+           % (outside,))
+
+    # One polyline carrying both tails and the body: each bound is cut
+    # at its OWN column, and the crossing y is interpolated.
+    both = [(0.0, 100.0), (200.0, 300.0), (800.0, 300.0), (1000.0, 500.0)]
+    inside, outside = gscr.SplitExtrapolation(both, low, high)
+    _Check(len(outside) == 2, "two tails: %s" % (outside,))
+    _Check(_Close(outside[0][-1][0], low)
+           and _Close(outside[0][-1][1], 200.0),
+           "the pre tail is cut at xLow, y interpolated: %s"
+           % (outside[0][-1],))
+    _Check(_Close(outside[1][0][0], high)
+           and _Close(outside[1][0][1], 400.0),
+           "the post tail is cut at xHigh, y interpolated: %s"
+           % (outside[1][0],))
+    _Check(len(inside) == 1
+           and _Close(inside[0][0][0], low)
+           and _Close(inside[0][-1][0], high),
+           "the body runs bound to bound: %s" % (inside,))
+
+    # A polyline wholly inside is one solid run and no tail; one wholly
+    # outside on either side is one dashed run and no body.
+    body = [(200.0, 100.0), (400.0, 120.0), (800.0, 140.0)]
+    inside, outside = gscr.SplitExtrapolation(body, low, high)
+    _Check(inside == [body] and outside == [],
+           "a polyline inside the knot range is all solid: %s"
+           % ((inside, outside),))
+    for tail in ([(0.0, 10.0), (50.0, 20.0)], [(950.0, 10.0), (990.0, 20.0)]):
+        inside, outside = gscr.SplitExtrapolation(tail, low, high)
+        _Check(inside == [] and outside == [tail],
+               "a polyline outside the knot range is all dashed: %s"
+               % ((inside, outside),))
+
+    # Degenerate inputs: no points, one point, and a single-knot curve
+    # whose bounds coincide.
+    _Check(gscr.SplitExtrapolation([], low, high) == ([], []),
+           "no points split to nothing")
+    _Check(gscr.SplitExtrapolation([(500.0, 1.0)], low, high) == ([], []),
+           "a lone point strokes nothing")
+    inside, outside = gscr.SplitExtrapolation(
+        [(0.0, 5.0), (500.0, 5.0), (900.0, 5.0)], 500.0, 500.0)
+    _Check(len(outside) == 2 and inside == [],
+           "a single-knot curve is dashed on both sides: %s"
+           % ((inside, outside),))
+
+    # Bounds handed over backwards still name the same range.
+    _Check(gscr.SplitExtrapolation(both, high, low)
+           == gscr.SplitExtrapolation(both, low, high),
+           "reversed bounds are normalised")
+
+
 def TestKeyGlyphs():
     transform = _Transform()
     curves = ["curveA", "curveB"]
@@ -470,6 +554,7 @@ def main():
         ("nice step", TestNiceStep),
         ("grid lines", TestGridLines),
         ("sampling", TestSampling),
+        ("extrapolation split", TestSplitExtrapolation),
         ("key glyphs", TestKeyGlyphs),
         ("tangent glyphs", TestTangentGlyphs),
         ("dual-valued keys", TestDualValuedKeys),

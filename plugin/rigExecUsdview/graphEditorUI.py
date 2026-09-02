@@ -445,14 +445,15 @@ class GraphCanvas(QtWidgets.QWidget):
         Each visible curve as polylines, with the EXTRAPOLATED tails
         dashed (spec 2.2).
 
-        Ts.Spline.Sample returns the extrapolated parts inside the same
-        polyline as the knot range, so the run is split at the first and
-        last knot's pixel column here, interpolating the crossing point
-        so a dashed tail meets its solid body exactly.
+        The split at the first and last knot's pixel column is
+        graphScreen.SplitExtrapolation, so it is covered headlessly by
+        tests/python/test_graph_screen.py -- it used to live here and
+        cut the PRE tail at the wrong bound, painting a solid run at the
+        first key's value clean across the knot range.
 
-        Non-finite samples are dropped: linear extrapolation off a knot
-        whose tangent algorithm is None samples as NaN in this Ts build,
-        and a NaN point poisons the whole polyline.
+        Non-finite samples are dropped first: linear extrapolation off a
+        knot whose tangent algorithm is None samples as NaN in this Ts
+        build, and a NaN point poisons the whole polyline.
         """
         curves = self._panel.Curves()
         splines = self._Splines()
@@ -473,7 +474,8 @@ class GraphCanvas(QtWidgets.QWidget):
             for polyline in graphScreen.SamplePolylines(spline,
                                                         self.transform):
                 for run in _FinitePolylines(polyline):
-                    inside, outside = _SplitAtBounds(run, xLow, xHigh)
+                    inside, outside = graphScreen.SplitExtrapolation(
+                        run, xLow, xHigh)
                     painter.setPen(solidPen)
                     self._Strokes(painter, inside)
                     painter.setPen(dashedPen)
@@ -816,43 +818,23 @@ def _FinitePolylines(points):
     return runs
 
 
-def _InterpolateAtX(a, b, x):
-    span = b[0] - a[0]
-    if abs(span) < 1e-12:
-        return (x, b[1])
-    t = (x - a[0]) / span
-    return (x, a[1] + (b[1] - a[1]) * t)
-
-
-def _SplitAtBounds(points, xLow, xHigh):
-    """
-    (runs inside [xLow, xHigh], runs outside it), splitting a polyline
-    exactly at the boundary so the dashed extrapolation meets the solid
-    curve at the first and last knot.
-    """
-    inside, outside = [], []
-    current, currentIn = [], None
-    for point in points:
-        isIn = xLow - 1e-9 <= point[0] <= xHigh + 1e-9
-        if currentIn is None:
-            current, currentIn = [point], isIn
-            continue
-        if isIn == currentIn:
-            current.append(point)
-            continue
-        boundary = xLow if point[0] < xLow else xHigh
-        crossing = _InterpolateAtX(current[-1], point, boundary)
-        current.append(crossing)
-        (inside if currentIn else outside).append(current)
-        current, currentIn = [crossing, point], isIn
-    if current and len(current) > 1:
-        (inside if currentIn else outside).append(current)
-    return inside, outside
-
-
 # ---------------------------------------------------------------------------
 # Gestures
 # ---------------------------------------------------------------------------
+
+class _Refused(Exception):
+    """
+    A model operation declined to change the spline.
+
+    Raised through _Apply so the EditRecorder rolls the whole command
+    back: several curves are edited in one pass, and a command that one
+    of them refuses must not be half-applied to the rest.
+    """
+
+    def __init__(self, time=None):
+        super(_Refused, self).__init__("refused")
+        self.time = time
+
 
 class _Gesture(object):
     """
@@ -887,7 +869,7 @@ class _Gesture(object):
         return Ts.Spline(self.origin[index])
 
     def Write(self, index, spline):
-        self.panel.WriteSpline(index, spline)
+        self.panel.WriteSpline(index, spline, self.label)
 
     def Commit(self):
         edit = self.recorder.Commit(self.label)
@@ -1015,6 +997,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
         self._weighted = False
         self._gesture = None
         self._updating = False
+        self._notice = ""
         self._framed = False
         self._noticeKey = None
         self._frame = _FrameValue(usdviewApi.frame)
@@ -1196,21 +1179,23 @@ class GraphEditorPanel(QtWidgets.QWidget):
         row.addSpacing(8)
         row.addWidget(QtWidgets.QLabel("Infinity"))
         self.preInfinity = self._InfinityCombo(
-            "What the curve does BEFORE its first key.")
+            "What the curve does BEFORE its first key.",
+            self._onPreInfinityChanged)
         row.addWidget(self.preInfinity)
         self.postInfinity = self._InfinityCombo(
-            "What the curve does AFTER its last key.")
+            "What the curve does AFTER its last key.",
+            self._onPostInfinityChanged)
         row.addWidget(self.postInfinity)
         row.addStretch(1)
         return row
 
-    def _InfinityCombo(self, tip):
+    def _InfinityCombo(self, tip, slot):
         combo = QtWidgets.QComboBox()
         combo.setToolTip(tip)
         combo.setFixedWidth(132)
         for label, name in INFINITY_CHOICES:
             combo.addItem(label, name)
-        combo.currentIndexChanged.connect(self._onInfinityChanged)
+        combo.currentIndexChanged.connect(slot)
         return combo
 
     def _InstallUndoActions(self):
@@ -1312,13 +1297,28 @@ class GraphEditorPanel(QtWidgets.QWidget):
                 copy = graphModel.SplineFor(attr)
         return copy
 
-    def WriteSpline(self, index, spline):
-        """Author `spline` onto curve `index` and keep the panel's copy."""
-        attr = self._Attribute(index)
-        if attr is None:
+    def WriteSpline(self, index, spline, label="Graph Edit"):
+        """
+        Author `spline` onto curve `index`, through the model.
+
+        graphModel.ApplySpline is the editor's ONLY writer, so the rule
+        that an EMPTY spline clears the opinion rather than authoring an
+        empty curve (graphModel.ClearSpline: an empty spline still wins
+        value resolution and resolves to no value, which reads back as
+        None) holds on every path -- deleting a curve's last key, a live
+        drag, a tangent button -- without this file restating it.
+
+        The undo stack argument is None ON PURPOSE. The gesture around
+        this write is what pushes, once, at its release; ApplySpline's
+        own recorder then only measures this one write and its Edit is
+        dropped, which is what lets a drag author on EVERY mouse move
+        without leaving a hundred entries in the history.
+        """
+        if index >= len(self._curves) or not self.Stage():
             return False
         try:
-            attr.SetSpline(spline)
+            graphModel.ApplySpline(self.Stage(), self._curves[index].attrPath,
+                                   spline, None, label)
         except Exception as error:
             Tf.Warn("rigExecUsdview: graph editor could not author %s: %s"
                     % (self._curves[index].attrPath, error))
@@ -1658,6 +1658,12 @@ class GraphEditorPanel(QtWidgets.QWidget):
         This is the non-drag half of the same bracket _Gesture gives a
         drag: a tangent button pressed with three curves selected is one
         step, not three.
+
+        An operation that RAISES aborts the whole command: the recorder
+        puts every curve back, so a command that cannot be applied to
+        one curve is not half-applied to the others. `_Refused` is how
+        the Time field says "this would consume another key" (see
+        SetKeyTime); anything else propagates.
         """
         indices = [i for i in indices if i < len(self._curves)]
         if not indices or not self.Stage() or self._gesture is not None:
@@ -1675,6 +1681,10 @@ class GraphEditorPanel(QtWidgets.QWidget):
             gesture.Commit()
         except Exception:
             gesture.Abort()
+            # The layer is back but the panel's cached splines are the
+            # half-applied ones it wrote on the way to the failure.
+            self._ReadSplines()
+            self._PruneSelection()
             raise
         finally:
             self._gesture = None
@@ -1779,16 +1789,37 @@ class GraphEditorPanel(QtWidgets.QWidget):
         self.canvas.update()
         return applied
 
+    def AnimatedIndices(self):
+        """
+        The visible curves that actually HAVE keys.
+
+        The editor lists a control's unanimated rig channels too, so an
+        artist can key one from the graph (spec 1.3). They are not
+        curves yet: extrapolation on a knotless spline means nothing,
+        and authoring one would replace the channel's resolved value
+        with an empty spline.
+        """
+        return [i for i in self.VisibleIndices()
+                if self._splines[i] is not None
+                and not self._splines[i].IsEmpty()]
+
     def SetInfinity(self, pre=None, post=None):
         """
-        Maya's Infinity combos, on the curves the editor is showing.
+        Maya's Infinity combos, on the visible curves that have keys.
 
         The visible set IS the selected set here: picking rows in the
         curve list isolates them, so what is drawn is what an artist
-        would call selected.
+        would call selected. Knotless channels are skipped -- see
+        AnimatedIndices.
+
+        `pre` / `post` are independent: each combo passes only its own
+        side and leaves the other None, so changing the post infinity
+        cannot quietly rewrite every curve's pre infinity from whatever
+        the other combo happened to be displaying.
         """
-        indices = self.VisibleIndices()
+        indices = self.AnimatedIndices()
         if not indices:
+            self._Notify("Infinity needs a curve with keys.")
             return False
         return self._Apply(
             indices, "Set Infinity",
@@ -1812,37 +1843,74 @@ class GraphEditorPanel(QtWidgets.QWidget):
         return self._weighted
 
     def SetKeyTime(self, time):
-        """Move every selected key so the reference key lands on `time`."""
+        """
+        Put the selection at `time`: Maya's Time field (spec 2.4).
+
+        graphModel.SetKeyTimes does the move per spline, refusing when
+        the frame is already held by a key OUTSIDE the selection. Across
+        several curves the selection has to stay RIGID, so each curve is
+        asked for its own target -- the earliest selected key of ALL of
+        them lands on `time` and the rest keep their offsets -- and one
+        curve's refusal aborts the whole command rather than shearing
+        the selection apart.
+        """
         times = self.SelectedTimes()
         if not times:
             return False
-        every = [t for group in times.values() for t in group]
-        dt = float(time) - min(every)
-        if abs(dt) < 1e-12:
+        target = float(time)
+        earliest = min(t for group in times.values() for t in group)
+        if abs(target - earliest) < 1e-12:
             return False
-        moved = {}
 
         def Move(index, spline):
-            moved[index] = graphModel.MoveKeys(spline, times[index], dt, 0.0,
-                                               self._snapFrames)
+            offset = min(times[index]) - earliest
+            if not graphModel.SetKeyTimes(spline, times[index],
+                                          target + offset):
+                raise _Refused(target + offset)
             return True
 
-        applied = self._Apply(sorted(times), "Move Keys", Move)
+        try:
+            applied = self._Apply(sorted(times), "Move Keys", Move)
+        except _Refused as refusal:
+            self._Notify("Frame %g already has a key; nothing moved."
+                         % refusal.time)
+            return False
         if applied:
-            self._selection = set((index, t) for index, group in moved.items()
-                                  for t in group)
-            self._Sync()
-            self.canvas.update()
+            self._SelectMovedKeys(times, target - earliest)
         return applied
 
+    def _SelectMovedKeys(self, times, delta):
+        """
+        Follow the keys the Time field just moved.
+
+        Their new times are read back off the stage rather than assumed:
+        graphModel clamps a key that has no room, so the shift asked for
+        is not always the shift applied.
+        """
+        selection = set()
+        for index, group in times.items():
+            spline = self._splines[index]
+            if spline is None:
+                continue
+            for time in group:
+                for candidate in (time + delta, time):
+                    knot = spline.GetKnot(candidate)
+                    if knot is not None:
+                        selection.add((index, knot.GetTime()))
+                        break
+        self._selection = selection
+        self._Sync()
+        self.canvas.update()
+
     def SetKeyValue(self, value):
-        """Set every selected key to `value` as one step."""
+        """Set every selected key to `value` as one step (Maya's Value)."""
         times = self.SelectedTimes()
         if not times:
             return False
         return self._Apply(
             sorted(times), "Set Key Value",
-            lambda index, spline: _SetValues(spline, times[index], value))
+            lambda index, spline: graphModel.SetKeyValues(
+                spline, times[index], value))
 
     def FrameAll(self):
         self.canvas.FrameAll()
@@ -1955,12 +2023,18 @@ class GraphEditorPanel(QtWidgets.QWidget):
     def _onSnapFrames(self, checked):
         self._snapFrames = bool(checked)
 
-    def _onInfinityChanged(self, index):
+    def _onPreInfinityChanged(self, index):
+        # ONLY the pre side. Passing both combos' values would push the
+        # displayed pre mode -- which comes from ONE curve, the focus
+        # one -- onto every other curve every time the post combo moved.
         del index
-        if self._updating:
-            return
-        self.SetInfinity(self.preInfinity.currentData(),
-                         self.postInfinity.currentData())
+        if not self._updating:
+            self.SetInfinity(pre=self.preInfinity.currentData())
+
+    def _onPostInfinityChanged(self, index):
+        del index
+        if not self._updating:
+            self.SetInfinity(post=self.postInfinity.currentData())
 
     def _onTimeEdited(self):
         if self._updating or self.timeBox.IsBlank():
@@ -2080,12 +2154,29 @@ class GraphEditorPanel(QtWidgets.QWidget):
         text += "  frame %g" % self._frame
         if self._gesture is not None:
             text += "  [%s]" % self._gesture.label
+        if self._notice:
+            text += "  --  %s" % self._notice
         return text
+
+    def _Notify(self, message):
+        """
+        Say why a command did nothing, on the status line.
+
+        The message survives exactly until the next thing the panel
+        does: a refusal an artist never sees is a refusal that reads as
+        a broken button, and one that outlives its cause reads as a
+        broken editor.
+        """
+        self._notice = message or ""
+        self.statusLabel.setText(self.Status())
 
     def _Sync(self):
         """Mirror the model onto the key stats, the status and the undo."""
         self._updating = True
         try:
+            # A refusal explains the command that has just been refused,
+            # so the next thing the panel does retires it.
+            self._notice = ""
             self._SyncKeyStats()
             self._SyncInfinityCombos()
             self.statusLabel.setText(self.Status())
@@ -2113,10 +2204,33 @@ class GraphEditorPanel(QtWidgets.QWidget):
         else:
             self.valueBox.SetBlank()
 
+    def FocusCurveIndex(self):
+        """
+        The curve the key stats and the Infinity combos DISPLAY.
+
+        The lowest-indexed curve holding a selected key, else the first
+        visible curve with keys. A knotless channel is never the focus:
+        its extrapolation is Held by construction and showing that would
+        say the artist's cycle had been lost.
+        """
+        animated = self.AnimatedIndices()
+        if not animated:
+            return None
+        selected = sorted(index for index, _ in self._selection
+                          if index in animated)
+        return selected[0] if selected else animated[0]
+
     def _SyncInfinityCombos(self):
-        """Show the first visible curve's infinities."""
-        indices = self.VisibleIndices()
-        spline = self._splines[indices[0]] if indices else None
+        """
+        Show the focus curve's infinities, WITHOUT writing.
+
+        Setting a combo's index fires its slot, so this only ever runs
+        under the `_updating` guard `_Sync` holds; otherwise merely
+        looking at a second curve would author the first one's modes
+        onto it.
+        """
+        index = self.FocusCurveIndex()
+        spline = self._splines[index] if index is not None else None
         if spline is None:
             return
         for combo, getter in ((self.preInfinity, spline.GetPreExtrapolation),
@@ -2128,9 +2242,9 @@ class GraphEditorPanel(QtWidgets.QWidget):
                 name = None
             if name is None:
                 continue
-            index = combo.findData(name)
-            if index >= 0 and index != combo.currentIndex():
-                combo.setCurrentIndex(index)
+            item = combo.findData(name)
+            if item >= 0 and item != combo.currentIndex():
+                combo.setCurrentIndex(item)
 
     # -- window ---------------------------------------------------------
 
@@ -2146,27 +2260,6 @@ def _SwatchIcon(rgb, size=10):
     pixmap = QtGui.QPixmap(size, size)
     pixmap.fill(_Color(rgb))
     return QtGui.QIcon(pixmap)
-
-
-def _SetValues(spline, times, value):
-    """
-    Set the keys at `times` to `value`.
-
-    graphModel has no absolute value setter -- its MoveKeys is a DELTA,
-    which is what a drag needs -- and the Value field is Maya's absolute
-    one, so the knots are written here. A dual-valued knot takes the
-    value on both sides: the field shows one number and setting it must
-    not leave a step behind.
-    """
-    for time in sorted(set(float(t) for t in times)):
-        knot = spline.GetKnot(time)
-        if knot is None:
-            continue
-        if knot.IsDualValued():
-            knot.SetPreValue(float(value))
-        knot.SetValue(float(value))
-        spline.SetKnot(knot)
-    return True
 
 
 def _FrameValue(frame):

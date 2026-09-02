@@ -53,6 +53,11 @@ MIN_TANGENT_TIME = 1e-3
 # zero while the artist is mid-gesture.
 _MIN_RANGE = 1e-9
 
+# Slack, in pixels, on the knot-range test in SplitExtrapolation. A
+# sampled tail ends exactly on its knot's column, and floating point
+# leaves that point a hair outside often enough to emit a one-point run.
+_SPLIT_EPSILON = 1e-9
+
 SIDE_IN = "in"
 SIDE_OUT = "out"
 
@@ -257,6 +262,76 @@ def SamplePolylines(spline, transform, interval=None):
         return []
     return [[transform.ToPixel(p[0], p[1]) for p in polyline]
             for polyline in samples.polylines]
+
+
+def _InterpolateAtX(a, b, x):
+    """The point on the segment a->b at pixel column `x`."""
+    span = b[0] - a[0]
+    if abs(span) < _MIN_RANGE:
+        return (x, b[1])
+    t = (x - a[0]) / span
+    return (x, a[1] + (b[1] - a[1]) * t)
+
+
+def SplitExtrapolation(points, xLow, xHigh):
+    """
+    One sampled polyline split into (runs inside the knot range, runs
+    outside it), so a caller can stroke the extrapolated tails dashed
+    (spec section 2.2).
+
+    `points` are PIXELS, as SamplePolylines returns them, and `xLow` /
+    `xHigh` are the pixel columns of the first and the last knot. The
+    bounds are pixels rather than times because Sample's output is
+    already mapped: converting back to time to compare, then forward to
+    draw, would round trip through the transform for nothing.
+
+    A run that crosses a bound is cut at it, with the crossing point
+    interpolated, so a dashed tail meets the solid body exactly. The
+    bound a crossing is cut at is chosen from the OUTSIDE point of the
+    pair, never the inside one: Ts.Spline.Sample returns the PRE
+    extrapolation as its own polyline whose last point sits exactly on
+    the first knot's column, and asking the inside point which side it
+    fell off picks `xHigh` -- which draws a solid run all the way from
+    the first knot to the last, at the first key's value.
+
+    Non-finite samples must be removed by the caller; Ts samples a
+    linear extrapolation off an untangented knot as NaN.
+    """
+    if xHigh < xLow:
+        xLow, xHigh = xHigh, xLow
+    inside, outside = [], []
+    current, currentIn = [], None
+    for point in points:
+        isIn = xLow - _SPLIT_EPSILON <= point[0] <= xHigh + _SPLIT_EPSILON
+        if currentIn is None:
+            current, currentIn = [point], isIn
+            continue
+        if isIn == currentIn:
+            current.append(point)
+            continue
+        outsidePoint = current[-1] if isIn else point
+        boundary = xLow if outsidePoint[0] < xLow else xHigh
+        crossing = _InterpolateAtX(current[-1], point, boundary)
+        current.append(crossing)
+        (inside if currentIn else outside).append(current)
+        current, currentIn = [crossing, point], isIn
+    if len(current) > 1:
+        (inside if currentIn else outside).append(current)
+    # A tail that ends exactly ON its bound hands the crossing point to
+    # the next run, which then holds that one point twice and strokes
+    # nothing. Dropping runs with no extent keeps the two lists to what
+    # is actually drawable.
+    return ([run for run in inside if _HasExtent(run)],
+            [run for run in outside if _HasExtent(run)])
+
+
+def _HasExtent(run):
+    """Whether a run is more than one point repeated."""
+    if len(run) < 2:
+        return False
+    first = run[0]
+    return any(abs(p[0] - first[0]) > _SPLIT_EPSILON
+               or abs(p[1] - first[1]) > _SPLIT_EPSILON for p in run)
 
 
 class KeyGlyph(object):
