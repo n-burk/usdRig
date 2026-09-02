@@ -52,6 +52,17 @@ a double attribute and a time sample for anything else, by the same rule
 the volume weight panel uses (`volumeWeightUI.SetAtTime`). **Write:
 Default** authors the attribute's default instead.
 
+The knot Animation mode authors is Maya's default new key: Auto tangents
+on both sides and a curve segment after it. It comes from the same
+`graphModel.AuthorKnot` the graph editor's Insert Key uses, so a gizmo
+drag and a graph insert produce the same key, and re-keying a channel an
+artist has already shaped keeps that shape. "Anything else" is mostly the
+vector ops: `Ts` splines are scalar-only in this USD build, so a rig
+avar (`double`) gets a knot while `xformOp:translate` on a plain xform
+(`double3`) gets a time sample, because USD cannot store a spline on it
+at all. That is why the [graph editor](graph-editor.md) lists a control's
+avars and not a plain xform's ops — there is no curve to draw.
+
 A default is invisible whenever a spline or time samples exist on the
 same attribute, because value resolution ranks them above it. That is a
 trap worth naming: the drag succeeds, the layer changes, and the viewport

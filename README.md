@@ -286,5 +286,6 @@ The package also exports `rigExec::rigExecMath` and
 - [Curvenet design and authoring](docs/curvenet.md)
 - [Volumetric weights](docs/volume-weights.md)
 - [Viewport gizmos in usdview](docs/viewport-gizmos.md)
+- [Graph editor in usdview](docs/graph-editor.md)
 - [OpenExec API notes](docs/exec-api-notes.md) and
   [ExecUsd API notes](docs/execusd-api-notes.md)
