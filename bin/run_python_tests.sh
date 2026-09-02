@@ -15,13 +15,13 @@ SCHEMA="$RIG/build/usd/rigExecSchema/resources"
 TESTS=("$@")
 if [ ${#TESTS[@]} -eq 0 ]; then
     TESTS=(test_rigexec_undo test_gizmo_math test_gizmo_screen
-           test_gizmo_settings test_gizmo_drag)
+           test_gizmo_settings test_gizmo_drag test_rigexec_stage_edits)
 fi
 
 # Only these two read argv[1], to Plug-register the generated schema.
 # The other three never touch sys.argv -- they need neither a schema nor
 # a build -- so handing them $SCHEMA would tell a reader otherwise.
-SCHEMA_TESTS=" test_rigexec_undo test_gizmo_math "
+SCHEMA_TESTS=" test_rigexec_undo test_gizmo_math test_rigexec_stage_edits "
 for t in "${TESTS[@]}"; do
     echo "== $t"
     case "$SCHEMA_TESTS" in

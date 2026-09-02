@@ -695,19 +695,12 @@ def testUsdviewInputFunction(appController):
            == Gf.Vec3d(1, 2, 3),
            "the same undo step reverted the child's compensation: %s"
            % stage.GetAttributeAtPath(childOpPath).Get(frame))
-    # Removing the prim again is cleanup, and it works -- but it surfaces a
-    # Tf error raised by a handler that has nothing to do with the gizmo:
-    # RigExecUsdviewContainer._OnStageObjectsChanged calls _FindRigPaths,
-    # which runs stage.Traverse() inside the removal's own ObjectsChanged
-    # notice, and the range hits the half-removed prim ("Applying predicate
-    # to invalid prim", usd/primFlags.cpp). Reported, not fixed here; the
-    # removal itself is still asserted so this cannot hide a real failure.
-    try:
-        stage.RemovePrim(childPath)
-    except Exception as error:
-        _Check("invalid prim" in str(error),
-               "the only error RemovePrim raises here is the known "
-               "container traversal one: %s" % error)
+    # Removing the prim is plain cleanup. It used to raise "Applying
+    # predicate to invalid prim" out of OpenExec's resync handler
+    # (pxr/exec/esfUsd/stageData.cpp) whenever a compiled evaluator was
+    # attached; tests/python/test_rigexec_stage_edits.py pins that fix, and
+    # an exception here is a real regression, not something to guard.
+    stage.RemovePrim(childPath)
     d.Pump()
     _Check(not stage.GetPrimAtPath(childPath),
            "the test's temporary child prim is gone from the stage")

@@ -312,6 +312,10 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testGizmoSettings
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_settings.py")
+    add_test(NAME testRigExecStageEdits
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_stage_edits.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testGizmoDrag
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_drag.py")
@@ -324,7 +328,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     # pins the configured USD install so it does not have to guess.
     foreach(_python_test testRigExecPython
                          testRigExecUndo testGizmoMath testGizmoScreen
-                         testGizmoSettings testGizmoDrag)
+                         testGizmoSettings testGizmoDrag testRigExecStageEdits)
         set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
