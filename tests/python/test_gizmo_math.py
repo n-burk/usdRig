@@ -24,7 +24,7 @@ import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()
 
-from pxr import Gf, Plug, Sdf, Tf, Usd, UsdGeom  # noqa: E402
+from pxr import Gf, Plug, Sdf, Tf, Ts, Usd, UsdGeom  # noqa: E402
 
 import gizmoMath  # noqa: E402
 
@@ -306,6 +306,14 @@ def TestWriter():
     _Check(attr.HasSpline() and len(attr.GetSpline().GetKnots()) == 1,
            "animation mode writes a spline knot")
     _Check(_Close(attr.Get(Usd.TimeCode(1001.0)), 2.0), "knot value")
+    # Maya's default new key (graphModel.AuthorKnot), so a gizmo drag and
+    # a graph-editor insert produce the same knot.
+    knot = attr.GetSpline().GetKnot(1001.0)
+    _Check(knot.GetPreTanAlgorithm() == Ts.TangentAlgorithmAutoEase
+           and knot.GetPostTanAlgorithm() == Ts.TangentAlgorithmAutoEase,
+           "the authored knot has AutoEase tangents on both sides")
+    _Check(knot.GetNextInterpolation() == Ts.InterpCurve,
+           "and a curve segment after it")
     anim.Set(attr, 3.0)
     _Check(len(attr.GetSpline().GetKnots()) == 1
            and _Close(attr.Get(Usd.TimeCode(1001.0)), 3.0),

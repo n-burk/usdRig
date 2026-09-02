@@ -504,6 +504,11 @@ def SetAnimated(attr, value, time):
     module scope): default time or existing time samples or a
     spline-incapable type -> Set(value, time); otherwise a
     curve-interpolated knot on the attribute's spline.
+
+    The knot itself comes from graphModel.AuthorKnot, so a gizmo drag
+    and a graph-editor insert produce the SAME key -- Maya's default new
+    key, AutoEase on both tangents (graph editor design spec 1.2) -- and
+    a key the artist has already shaped keeps its tangents.
     """
     from pxr import Ts
     if attr.GetVariability() == Sdf.VariabilityUniform:
@@ -514,16 +519,11 @@ def SetAnimated(attr, value, time):
             not Ts.Spline.IsSupportedValueType(valueType)):
         attr.Set(value, time)
         return
-    frame = time.GetValue()
-    spline = attr.GetSpline()
-    knot = spline.GetKnot(frame)
-    if knot:
-        knot.SetValue(value)
-    else:
-        knot = Ts.Knot(
-            typeName=valueType.typeName, time=frame, value=value,
-            nextInterp=Ts.InterpCurve)
-    spline.SetKnot(knot)
+    # Imported inside the function: graphModel imports THIS module at
+    # module scope, so a top-level import here would be a cycle.
+    import graphModel
+    spline = graphModel.SplineFor(attr)
+    graphModel.AuthorKnot(spline, time.GetValue(), value)
     attr.SetSpline(spline)
 
 
