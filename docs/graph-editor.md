@@ -48,14 +48,29 @@ Everything is authored into the current edit target. usdview starts on
 the session layer, so by default a session's graph work disappears when
 usdview closes, exactly like the other RigExec panels.
 
-Every write is a **whole spline**. `attr.SetSpline(spline)` replaces the
-curve rather than patching a knot, because Ts has no partial-authoring
-API and because it makes the undo record trivially correct: one gesture,
-one snapshot, one step. A drag writes the whole spline on every mouse
-move so the viewport follows the mouse, but each of those writes is
-recomputed from the spline the gesture *started* with, never from the
-previous one, so a slow drag cannot accumulate rounding or re-clamp its
-own clamp.
+Every write is a **whole spline**, and every one of them goes through
+`graphModel.ApplySpline`. The editor replaces the curve rather than
+patching a knot, because Ts has no partial-authoring API and because it
+makes the undo record trivially correct: one gesture, one snapshot, one
+step. A drag writes the whole spline on every mouse move so the viewport
+follows the mouse, but each of those writes is recomputed from the spline
+the gesture *started* with, never from the previous one, so a slow drag
+cannot accumulate rounding or re-clamp its own clamp.
+
+A gesture that leaves a curve with **no keys at all** clears the layer's
+spline opinion instead of authoring an empty one, and drops the
+attribute spec too once it holds nothing else. An empty spline is still
+a spline: it would outrank every weaker opinion and resolve to no value,
+so the attribute would read back as `None` and the rig would collapse.
+Deleting the last key means "this layer no longer animates the
+attribute", which is a cleared opinion rather than an empty curve — so
+on a channel the file already animates, deleting all of the session's
+keys brings the file's animation back rather than blanking it. The
+status line says so when it happens — `session keys cleared; file
+animation shows through` — because a delete that leaves keys on screen
+otherwise reads as a delete that did not work. The clear happens inside
+the same undo bracket as any other write, so one `Ctrl+Z` puts the
+spline back exactly.
 
 ## Undo
 
@@ -144,7 +159,13 @@ Every gesture below is one undo step.
 - **Delete** the selected keys with `Delete` or `Backspace`.
 - **Type** an exact `Time` or `Value` for the selected keys. `Time`
   moves the whole selection so its earliest key lands on the number,
-  since several keys cannot share one time.
+  since several keys cannot share one time. It uses the number exactly
+  and does not honour `Snap Frames`: a typed frame *is* the exact value,
+  and only drags snap. A typed frame that is already held by a key
+  outside the selection is refused outright, with nothing moved and
+  `Frame N already has a key; nothing moved.` on the status line — a
+  number in a field gives no hint that it is about to consume another
+  key, the way dragging one over it does.
 - **Drag a tangent handle** to change its slope. With `Weighted` off the
   handle keeps the length it had and only the angle changes; with
   `Weighted` on, dragging outward lengthens it. Dragging a handle always

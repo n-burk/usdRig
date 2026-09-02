@@ -1313,8 +1313,24 @@ class GraphEditorPanel(QtWidgets.QWidget):
         own recorder then only measures this one write and its Edit is
         dropped, which is what lets a drag author on EVERY mouse move
         without leaving a hundred entries in the history.
+
+        What is CACHED afterwards is what the attribute now RESOLVES to,
+        not the spline handed in. Since an empty spline clears the edit
+        target's opinion instead of authoring an empty curve, the two
+        stopped being the same thing: delete a root-animated curve's
+        last key with the session layer as the edit target and the root
+        layer's spline reappears, so caching the empty spline would draw
+        a curve with no keys while the viewport kept animating it. The
+        ObjectsChanged notice that would otherwise correct this is
+        discarded, correctly, because the gesture still holds _gesture.
         """
         if index >= len(self._curves) or not self.Stage():
+            return False
+        attr = self._Attribute(index)
+        if attr is None or not attr:
+            # The attribute went out from under the editor (a stage edit
+            # between the gesture starting and this write). Leave the
+            # cache alone: it is the last thing that was true.
             return False
         try:
             graphModel.ApplySpline(self.Stage(), self._curves[index].attrPath,
@@ -1323,7 +1339,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
             Tf.Warn("rigExecUsdview: graph editor could not author %s: %s"
                     % (self._curves[index].attrPath, error))
             return False
-        self._splines[index] = spline
+        self._splines[index] = graphModel.SplineFor(attr)
         self.canvas.update()
         self.usdviewApi.UpdateViewport()
         return True
@@ -1622,17 +1638,26 @@ class GraphEditorPanel(QtWidgets.QWidget):
         self._Sync()
 
     def EndGesture(self):
+        """
+        Close the live gesture; True when it changed the edit target.
+
+        A drag that ends where it started, or on a curve a weaker layer
+        owns, commits nothing -- the recorder compares the spec before
+        and after -- and there is then no undo entry to offer.
+        """
         gesture = self._gesture
         self._gesture = None
         if gesture is None:
-            return
+            return False
+        changed = False
         try:
-            gesture.Commit()
+            changed = gesture.Commit() is not None
         except Exception as error:
             Tf.Warn("rigExecUsdview: graph editor could not record the "
                     "edit: %s" % error)
         self._Sync()
         self.canvas.update()
+        return changed
 
     def AbortGesture(self):
         gesture = self._gesture
@@ -1664,6 +1689,13 @@ class GraphEditorPanel(QtWidgets.QWidget):
         one curve is not half-applied to the others. `_Refused` is how
         the Time field says "this would consume another key" (see
         SetKeyTime); anything else propagates.
+
+        Returns True only when the edit target actually CHANGED -- when
+        the recorder produced an Edit and it went on the undo stack.
+        A command can run through cleanly and change nothing: deleting
+        keys that a weaker layer owns clears an opinion the edit target
+        never held. Reporting that as success would clear the selection
+        and offer a Ctrl+Z for an edit that is not there.
         """
         indices = [i for i in indices if i < len(self._curves)]
         if not indices or not self.Stage() or self._gesture is not None:
@@ -1678,7 +1710,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
                 if operation(index, spline) is False:
                     continue
                 gesture.Write(index, spline)
-            gesture.Commit()
+            changed = gesture.Commit() is not None
         except Exception:
             gesture.Abort()
             # The layer is back but the panel's cached splines are the
@@ -1690,7 +1722,7 @@ class GraphEditorPanel(QtWidgets.QWidget):
             self._gesture = None
         self._Sync()
         self.canvas.update()
-        return True
+        return changed
 
     # -- edit commands --------------------------------------------------
 
@@ -1777,6 +1809,20 @@ class GraphEditorPanel(QtWidgets.QWidget):
         return applied
 
     def DeleteSelectedKeys(self):
+        """
+        Remove the selected keys from the EDIT TARGET; True when the
+        layer changed.
+
+        Deleting is a clear, not an erasure, so a key can survive it:
+        the editor draws the curve the stage RESOLVES, and a key that
+        belongs to a weaker layer than the edit target is still there
+        afterwards. Two outcomes get a status line rather than a silent
+        surprise.
+
+        Nothing changed at all -- the edit target held no opinion on
+        those keys -- keeps the selection, because the keys the artist
+        picked are still on screen and still theirs to pick.
+        """
         times = self.SelectedTimes()
         if not times:
             return False
@@ -1784,10 +1830,33 @@ class GraphEditorPanel(QtWidgets.QWidget):
             sorted(times), "Delete Keys",
             lambda index, spline: graphModel.DeleteKeys(spline,
                                                         times[index]))
+        survivors = self._SurvivingKeys(times)
+        if not applied:
+            self._Notify("Nothing deleted: those keys come from a weaker "
+                         "layer, not the edit target.")
+            return False
         self._selection = set()
         self._Sync()
         self.canvas.update()
-        return applied
+        if survivors:
+            self._Notify("Session keys cleared; file animation shows "
+                         "through.")
+        return True
+
+    def _SurvivingKeys(self, times):
+        """
+        The curves among `times` still holding one of those keys after
+        a delete, read off the RESOLVED spline the write cached.
+        """
+        survivors = []
+        for index, group in times.items():
+            spline = (self._splines[index] if index < len(self._splines)
+                      else None)
+            if spline is None:
+                continue
+            if any(spline.GetKnot(time) is not None for time in group):
+                survivors.append(index)
+        return survivors
 
     def AnimatedIndices(self):
         """
