@@ -66,8 +66,8 @@ Deleting the last key means "this layer no longer animates the
 attribute", which is a cleared opinion rather than an empty curve — so
 on a channel the file already animates, deleting all of the session's
 keys brings the file's animation back rather than blanking it. The
-status line says so when it happens — `session keys cleared; file
-animation shows through` — because a delete that leaves keys on screen
+status line says so when it happens — `Session keys cleared; file
+animation shows through.` — because a delete that leaves keys on screen
 otherwise reads as a delete that did not work. The clear happens inside
 the same undo bracket as any other write, so one `Ctrl+Z` puts the
 spline back exactly.
