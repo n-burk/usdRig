@@ -224,11 +224,13 @@ def _IsBrokenMarked(knot):
 
 
 def _MarkBroken(knot, broken):
-    # Ts.Spline.SetKnot MERGES a knot's customData into what the spline
-    # already holds for that time (verified: clearing the dictionary on
-    # the knot and writing it back leaves the old key in place), so
-    # unifying writes False over True rather than removing the key. A
-    # knot that was never broken is left with no customData at all.
+    # Ts.Spline.SetKnot SKIPS the customData write when the incoming
+    # dictionary is empty and REPLACES it wholesale when it is not
+    # (ts/splineData.h:414-416), so emptying the dictionary on the knot
+    # cannot clear what the spline already holds. Unifying therefore
+    # writes False over True; the residual `tangentsBroken = 0` in the
+    # layer is expected. A knot that was never broken is left with no
+    # customData at all.
     if not broken and BROKEN_FIELD not in knot.GetCustomData().get(
             BROKEN_KEY, {}):
         return
@@ -343,6 +345,55 @@ def IsUnified(knot):
 # Edit operations (each mutates the spline it is given)
 # ---------------------------------------------------------------------------
 
+def _PlaceMovedKeys(moving, blocked, pinned, dt, gap, snapFrames, forward):
+    """
+    One placement pass: where each moving key would land.
+
+    Returns `(placed, stuck)`. `blocked` are the times no key may take
+    (the keys that are not moving, plus the moving keys already found
+    immovable); `pinned` is that second group, which keeps its own time.
+    `stuck` names the keys this pass found no room for -- the caller pins
+    them and runs again, because a key that cannot move is an obstacle
+    for the others and the first pass did not know that yet.
+
+    Keys are placed in the direction of travel so each one is bounded by
+    the previously placed key it would otherwise overtake.
+    """
+    placed = {}
+    stuck = set()
+    limit = None
+    for time in (reversed(moving) if forward else moving):
+        if time in pinned:
+            placed[time] = time
+            limit = time
+            continue
+        below = [t for t in blocked if t < time]
+        above = [t for t in blocked if t > time]
+        low = below[-1] if below else None
+        high = above[0] if above else None
+        if limit is not None:
+            if forward:
+                high = limit if high is None else min(high, limit)
+            else:
+                low = limit if low is None else max(low, limit)
+        lowBound = None if low is None else low + gap
+        highBound = None if high is None else high - gap
+        if (lowBound is not None and highBound is not None
+                and lowBound > highBound):
+            stuck.add(time)
+            placed[time] = time
+            limit = time
+            continue
+        target = SnapTime(time + dt) if snapFrames else time + dt
+        if lowBound is not None:
+            target = max(target, lowBound)
+        if highBound is not None:
+            target = min(target, highBound)
+        placed[time] = target
+        limit = target
+    return placed, stuck
+
+
 def MoveKeys(spline, times, dt, dv, snapFrames=True):
     """
     Move the keys at `times` by `dt` frames and `dv` in value; return
@@ -354,6 +405,16 @@ def MoveKeys(spline, times, dt, dv, snapFrames=True):
     collide with each other either. While snapping, the clamp stops one
     whole frame short of the neighbour, which keeps every key on its own
     frame; with snapping off it stops MIN_TIME_GAP short.
+
+    When that leaves NO room -- neighbours less than two frames apart
+    while snapping, which is what a sub-frame key authored elsewhere
+    looks like -- the key keeps its own time and only the value delta
+    applies. Clamping it onto the neighbour instead would write over that
+    neighbour and silently destroy a key.
+
+    Snapping applies to any move, `dt` of zero included, so a value-only
+    drag pulls a fractional key onto a whole frame. That is Maya's
+    behaviour: Snap Frames is a property of the drag, not of the axis.
 
     Times that name no key are ignored: the canvas can ask to move a
     selection that a concurrent stage change has already invalidated.
@@ -367,23 +428,28 @@ def MoveKeys(spline, times, dt, dv, snapFrames=True):
     gap = 1.0 if snapFrames else MIN_TIME_GAP
     forward = dt >= 0.0
 
-    placed = {}
-    limit = None
-    for time in (reversed(moving) if forward else moving):
-        target = time + dt
-        if snapFrames:
-            target = SnapTime(target)
-        below = [t for t in fixed if t < time]
-        above = [t for t in fixed if t > time]
-        if below:
-            target = max(target, below[-1] + gap)
-        if above:
-            target = min(target, above[0] - gap)
-        if limit is not None:
-            target = (min(target, limit - gap) if forward
-                      else max(target, limit + gap))
-        placed[time] = target
-        limit = target
+    # Pin the keys that turn out to have no room, one pass at a time. A
+    # pinned key stays on its own frame and becomes an obstacle, which
+    # can take the room away from a key the previous pass had already
+    # placed -- so the passes repeat until nothing new is stuck. Each
+    # pass pins at least one more key, so this runs at most len(moving)
+    # times.
+    pinned = set()
+    while True:
+        blocked = sorted(set(fixed) | pinned)
+        placed, stuck = _PlaceMovedKeys(
+            moving, blocked, pinned, dt, gap, snapFrames, forward)
+        if not stuck:
+            break
+        pinned |= stuck
+
+    # Last resort. Nothing above should produce a collision, but this
+    # function's failure mode is a silently destroyed key -- SetKnot
+    # replaces whatever sits on the target time -- so a placement that is
+    # not one-to-one moves nothing at all rather than losing a key.
+    targets = list(placed.values())
+    if len(set(targets)) != len(targets) or set(targets) & set(fixed):
+        placed = dict((time, time) for time in moving)
 
     # Build every moved knot before removing any: a knot read out of the
     # spline resolves its automatic tangents against its neighbours, and

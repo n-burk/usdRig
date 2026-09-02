@@ -251,6 +251,77 @@ def TestMoveKeys():
            and _Close(spline.GetKnot(19.0).GetValue(), 2.0),
            "values travel with their keys")
 
+    # Two keys dragged onto each other's frames: the block is rebuilt as
+    # a whole, so neither is written over the other on the way past.
+    spline = _Spline(((0.0, 0.0), (5.0, 1.0), (6.0, 2.0), (20.0, 3.0)))
+    moved = gm.MoveKeys(spline, [5.0, 6.0], 1.0, 0.0)
+    _Check(moved == [6.0, 7.0], "the block moves through itself: %s"
+           % (moved,))
+    _Check(_Times(spline) == [0.0, 6.0, 7.0, 20.0],
+           "all four keys survive: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(6.0).GetValue(), 1.0)
+           and _Close(spline.GetKnot(7.0).GetValue(), 2.0),
+           "and stay in order, values with them")
+
+    # The same going backwards, which takes the other placement branch.
+    spline = _Spline(((0.0, 0.0), (5.0, 1.0), (6.0, 2.0), (20.0, 3.0)))
+    moved = gm.MoveKeys(spline, [5.0, 6.0], -1.0, 0.0)
+    _Check(moved == [4.0, 5.0], "backwards through itself: %s" % (moved,))
+    _Check(_Times(spline) == [0.0, 4.0, 5.0, 20.0],
+           "all four keys survive backwards: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(4.0).GetValue(), 1.0)
+           and _Close(spline.GetKnot(5.0).GetValue(), 2.0),
+           "values travel backwards too")
+
+    # SUB-FRAME keys: snapping cannot find a free whole frame between the
+    # neighbours, so the key does not move at all. A file authored
+    # elsewhere, or this editor with snapping off, contains such keys, and
+    # clamping one onto a neighbour would silently destroy that neighbour.
+    spline = _Spline(((0.0, 0.0), (0.5, 1.0), (1.0, 2.0)))
+    moved = gm.MoveKeys(spline, [0.5], 5.0, 0.25)
+    _Check(moved == [0.5], "no free frame: the key keeps its time: %s"
+           % (moved,))
+    _Check(_Times(spline) == [0.0, 0.5, 1.0],
+           "and no key is overwritten: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(0.5).GetValue(), 1.25),
+           "the value delta still applies: %s"
+           % spline.GetKnot(0.5).GetValue())
+    _Check(_Close(spline.GetKnot(0.0).GetValue(), 0.0)
+           and _Close(spline.GetKnot(1.0).GetValue(), 2.0),
+           "the neighbours keep their own values")
+
+    # Two sub-frame keys with no whole frame free between the fixed
+    # neighbours at all: neither moves, and neither eats the other.
+    spline = _Spline(((0.0, 0.0), (0.4, 1.0), (0.6, 2.0), (1.0, 3.0)))
+    moved = gm.MoveKeys(spline, [0.4, 0.6], 5.0, 0.0)
+    _Check(moved == [0.4, 0.6], "both crowded keys stay: %s" % (moved,))
+    _Check(_Times(spline) == [0.0, 0.4, 0.6, 1.0],
+           "and nothing is lost: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(0.4).GetValue(), 1.0)
+           and _Close(spline.GetKnot(0.6).GetValue(), 2.0),
+           "with their own values")
+
+    # A key with no room becomes an obstacle for the rest of the block,
+    # so a crowded pair does not half-move: here only frame 1 is free
+    # between the neighbours, and one whole frame of clearance from the
+    # key that has to stay puts it out of reach. Neither moves.
+    spline = _Spline(((0.0, 0.0), (0.5, 1.0), (0.6, 2.0), (2.0, 3.0)))
+    moved = gm.MoveKeys(spline, [0.5, 0.6], 5.0, 0.0)
+    _Check(moved == [0.5, 0.6],
+           "a pinned key blocks its neighbours too: %s" % (moved,))
+    _Check(_Times(spline) == [0.0, 0.5, 0.6, 2.0],
+           "four keys still: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(0.0).GetValue(), 0.0)
+           and _Close(spline.GetKnot(2.0).GetValue(), 3.0),
+           "the fixed neighbours are untouched")
+
+    # With snapping OFF the same drag has room and does move.
+    spline = _Spline(((0.0, 0.0), (0.5, 1.0), (1.0, 2.0)))
+    moved = gm.MoveKeys(spline, [0.5], 5.0, 0.0, snapFrames=False)
+    _Check(len(moved) == 1 and 0.5 < moved[0] < 1.0,
+           "unsnapped, the sub-frame key still slides: %s" % (moved,))
+    _Check(len(spline.GetKnots()) == 3, "and all three keys remain")
+
     # A time that is not a key is ignored rather than fatal.
     spline = _Spline()
     _Check(gm.MoveKeys(spline, [7.5], 1.0, 0.0) == [],
