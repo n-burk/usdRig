@@ -444,6 +444,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
         self._BuildUndo()
         self.addSeparator()
         self._BuildSettingsButton()
+        self._BuildGraphButton()
 
         # No expanding spacer before the label: QToolBar moves whatever
         # does not fit into an overflow menu, and a right-aligned status
@@ -546,6 +547,15 @@ class ViewportToolbar(QtWidgets.QToolBar):
         self.settingsAction.triggered.connect(
             lambda checked=False: self._controller.ShowToolSettings())
         self.addAction(self.settingsAction)
+
+    def _BuildGraphButton(self):
+        self.graphAction = QtActionWidgets.QAction("Graph…", self)
+        self.graphAction.setToolTip(
+            "Open the Graph Editor: the selected attributes' animation "
+            "curves, their keys and their tangents.")
+        self.graphAction.triggered.connect(
+            lambda checked=False: self._controller.OpenGraphEditor())
+        self.addAction(self.graphAction)
 
     # -- slots ----------------------------------------------------------
 
@@ -907,10 +917,16 @@ class GizmoController(QtCore.QObject):
     settings panel only set state, and the overlay only reads it.
     """
 
-    def __init__(self, usdviewApi, undoStack, parent=None):
+    def __init__(self, usdviewApi, undoStack, parent=None,
+                 openGraphEditor=None):
         super(GizmoController, self).__init__(parent)
         self.usdviewApi = usdviewApi
         self.undoStack = undoStack
+        # The container's opener, so this module never imports
+        # graphEditorUI at module scope and stays loadable in the
+        # headless contexts the C++ tests use. None falls back to a
+        # lazy import inside OpenGraphEditor.
+        self._openGraphEditor = openGraphEditor
         self.settings = gizmoSettings.GizmoSettings()
 
         self._tool = TOOL_SELECT
@@ -1453,6 +1469,31 @@ class GizmoController(QtCore.QObject):
         self._panel.activateWindow()
         return self._panel
 
+    def OpenGraphEditor(self):
+        """
+        The Graph… button: the animation curves of whatever is selected,
+        editable on THIS controller's undo stack.
+
+        The container hands its own opener in at install time so it owns
+        the panel; the lazy import is the fallback for an install that
+        did not, and keeps this module importable without Qt's graph
+        editor present.
+        """
+        if self._openGraphEditor is not None:
+            return self._openGraphEditor()
+        try:
+            try:
+                import graphEditorUI
+            except ImportError:
+                sys.path.insert(
+                    0, os.path.dirname(os.path.abspath(__file__)))
+                import graphEditorUI
+            return graphEditorUI.OpenGraphEditor(self.usdviewApi,
+                                                 self.undoStack)
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: graph editor unavailable: %s" % error)
+            return None
+
     # -- signals --------------------------------------------------------
 
     def _onSettingsChanged(self):
@@ -1990,9 +2031,14 @@ _INSTALL_RETRIES = 20
 _installPending = False
 
 
-def InstallViewportTools(usdviewApi, undoStack, retries=_INSTALL_RETRIES):
+def InstallViewportTools(usdviewApi, undoStack, retries=_INSTALL_RETRIES,
+                         openGraphEditor=None):
     """
     Put the toolbar and the overlay on usdview's stage view once.
+
+    `openGraphEditor` is the container's callable for the Graph… button;
+    passing it in rather than importing graphEditorUI here is what keeps
+    this module free of a Qt graph-editor import.
 
     Returns the controller, or None when there is no stage view yet (in
     which case an install is queued) or none at all.
@@ -2007,11 +2053,13 @@ def InstallViewportTools(usdviewApi, undoStack, retries=_INSTALL_RETRIES):
             def _Retry():
                 global _installPending
                 _installPending = False
-                InstallViewportTools(usdviewApi, undoStack, retries - 1)
+                InstallViewportTools(usdviewApi, undoStack, retries - 1,
+                                     openGraphEditor)
 
             QtCore.QTimer.singleShot(0, _Retry)
         return None
-    _controller = GizmoController(usdviewApi, undoStack)
+    _controller = GizmoController(usdviewApi, undoStack,
+                                  openGraphEditor=openGraphEditor)
     return _controller
 
 

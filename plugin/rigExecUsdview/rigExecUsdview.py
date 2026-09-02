@@ -139,6 +139,13 @@ class RigExecUsdviewContainer(PluginContainer):
             "Curvenet Authoring",
             lambda api: self._OpenCurvenetPanel(api))
 
+        # The Maya-style animation graph editor. Same lazy-import
+        # reasoning as the panels above: graphEditorUI pulls in Qt.
+        self._graphEditor = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.graphEditor",
+            "Graph Editor",
+            lambda api: self._OpenGraphEditor(api))
+
         # The viewport manipulator toolbar. Same lazy-import reasoning
         # again; the menu item toggles it rather than opening a window,
         # because the toolbar lives inside the viewport frame.
@@ -161,6 +168,7 @@ class RigExecUsdviewContainer(PluginContainer):
         menu.addItem(self._reactivate)
         menu.addItem(self._volumeWeights)
         menu.addItem(self._curvenets)
+        menu.addItem(self._graphEditor)
         menu.addItem(self._viewportToolsCommand)
 
     def _EnsureLibrary(self):
@@ -234,6 +242,25 @@ class RigExecUsdviewContainer(PluginContainer):
 
         return curvenetUI.OpenCurvenetPanel(usdviewApi)
 
+    def _OpenGraphEditor(self, usdviewApi=None):
+        """
+        Open the graph editor on the SHARED undo stack, so Ctrl+Z spans
+        graph edits and viewport gizmo drags alike.
+
+        Takes no argument from the toolbar button, which has no
+        usdviewApi of its own to pass.
+        """
+        # Same lazy sibling import as _OpenVolumeWeightPanel.
+        try:
+            import graphEditorUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import graphEditorUI
+
+        return graphEditorUI.OpenGraphEditor(usdviewApi or self._api,
+                                             self._UndoStack())
+
     def _UndoStack(self):
         """
         The undo stack the viewport gizmos push onto, created once.
@@ -276,7 +303,8 @@ class RigExecUsdviewContainer(PluginContainer):
                     0, os.path.dirname(os.path.abspath(__file__)))
                 import gizmoUI
             self._viewportTools = gizmoUI.InstallViewportTools(
-                self._api, self._UndoStack())
+                self._api, self._UndoStack(),
+                openGraphEditor=self._OpenGraphEditor)
         except Exception as error:
             Tf.Warn("rigExecUsdview: viewport tools unavailable: %s"
                     % error)
