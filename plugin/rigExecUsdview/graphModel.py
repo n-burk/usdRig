@@ -469,6 +469,61 @@ def MoveKeys(spline, times, dt, dv, snapFrames=True):
     return sorted(placed.values())
 
 
+def SetKeyValues(spline, times, value):
+    """
+    Give every key in `times` the ABSOLUTE `value`; return the times set.
+
+    The graph editor's Value field, which shows one number for the whole
+    selection and writes it to all of them (spec 2.4). Unlike MoveKeys'
+    `dv` this is not a delta, so a selection with different values ends
+    up flat. Times that name no key are ignored, as everywhere else.
+    """
+    knots = spline.GetKnots()
+    changed = []
+    for time in sorted(set(float(t) for t in times)):
+        if time not in knots:
+            continue
+        knot = spline.GetKnot(time)
+        if knot.IsDualValued():
+            knot.SetPreValue(value)
+        knot.SetValue(value)
+        spline.SetKnot(knot)
+        changed.append(time)
+    return changed
+
+
+def SetKeyTimes(spline, times, time):
+    """
+    Put the selected keys at the ABSOLUTE `time`; True when applied.
+
+    The graph editor's Time field. One key lands on `time`; several move
+    RIGIDLY so the earliest lands there and the selection keeps its
+    shape, because collapsing a selection onto a single frame would
+    destroy every key but one.
+
+    REFUSED, with the spline untouched, when `time` is already held by a
+    key outside the selection: a number typed into a field gives no hint
+    that it is about to consume another key. A frame held by a selected
+    key is fine -- that key moves out of its own way.
+
+    The move itself goes through MoveKeys, so it inherits the same
+    clamping: keys never cross their neighbours, and a key with no room
+    stays where it is. The typed time is used exactly, without frame
+    snapping, because a numeric field IS the exact value.
+    """
+    knots = spline.GetKnots()
+    selected = sorted(t for t in set(float(t) for t in times)
+                      if t in knots)
+    if not selected:
+        return False
+    target = float(time)
+    if target in knots and target not in set(selected):
+        return False
+    MoveKeys(spline, selected, target - selected[0], 0.0,
+             snapFrames=False)
+    return True
+
+
 def InsertKey(spline, time):
     """
     Add a key at `time` holding the curve's value there, or return the
@@ -752,6 +807,36 @@ def SetExtrapolation(spline, pre=None, post=None):
 # Writing
 # ---------------------------------------------------------------------------
 
+def ClearSpline(stage, attrPath):
+    """
+    Drop the spline opinion for `attrPath` from the edit target layer.
+
+    Used instead of authoring an empty spline. An empty spline is still a
+    spline: it wins value resolution over every weaker opinion and
+    resolves to NO VALUE, so the attribute reads back as None and the rig
+    collapses. Deleting the last key means "this layer no longer animates
+    the attribute", which is a cleared opinion, not an empty curve.
+
+    The spec goes too once it holds nothing else, so the value falls back
+    to the weaker layer rather than to an empty override.
+    """
+    target = stage.GetEditTarget()
+    layer = target.GetLayer()
+    specPath = target.MapToSpecPath(Sdf.Path(attrPath))
+    spec = layer.GetAttributeAtPath(specPath)
+    if spec is None:
+        return
+    # One change block: clearing the spline and removing the spec are one
+    # edit, and anything recomposing per notice should not see the
+    # half-done state (the reason rigExecUndo.Edit._Apply uses one).
+    with Sdf.ChangeBlock():
+        if spec.HasSpline():
+            spec.ClearSpline()
+        if (not spec.HasDefaultValue()
+                and not layer.ListTimeSamplesForPath(specPath)):
+            spec.owner.RemoveProperty(spec)
+
+
 def ApplySpline(stage, attrPath, spline, undoStack, label):
     """
     Write `spline` onto `attrPath` as one undo step; True when anything
@@ -763,6 +848,11 @@ def ApplySpline(stage, attrPath, spline, undoStack, label):
     spec that did not exist before (rigExecUndo.py:9-16). A gesture that
     left the spline as it was pushes nothing, so the undo stack has no
     empty steps in it.
+
+    An EMPTY spline -- the artist deleted the last key -- clears the
+    opinion instead of authoring an empty curve; see ClearSpline. The
+    clear happens inside the same recorder bracket, so undo puts the
+    spline back exactly.
     """
     path = Sdf.Path(attrPath)
     attr = stage.GetAttributeAtPath(path)
@@ -771,7 +861,10 @@ def ApplySpline(stage, attrPath, spline, undoStack, label):
     recorder = rigExecUndo.EditRecorder(stage, [path])
     recorder.Begin()
     try:
-        attr.SetSpline(spline)
+        if spline.IsEmpty():
+            ClearSpline(stage, path)
+        else:
+            attr.SetSpline(spline)
     except Exception:
         recorder.Abort()
         raise

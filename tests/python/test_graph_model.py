@@ -606,6 +606,150 @@ def TestApplySpline():
            "an unresolvable attribute is refused, not fatal")
 
 
+def TestApplyEmptySpline():
+    """
+    Deleting the last key must not author an EMPTY spline.
+
+    An empty spline is still a spline, and it outranks every weaker
+    opinion, so the attribute resolves to None -- no value at all, which
+    reads in the viewport as the rig collapsing. Clearing the session
+    opinion is what "the animation is gone" actually means.
+    """
+    # A spline in the ROOT layer, edited into the session.
+    stage, control, _ = _RigStage()
+    attr = control.GetAttribute("avars:tx")
+    attr.SetSpline(_Spline(((1.0, -0.78), (5.0, 2.0))))
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    session = stage.GetSessionLayer()
+    stack = rigExecUndo.UndoStack()
+
+    edited = Ts.Spline(attr.GetSpline())
+    gm.MoveKeys(edited, [5.0], 1.0, 0.0)
+    _Check(gm.ApplySpline(stage, attr.GetPath(), edited, stack, "Move"),
+           "the session edit was pushed")
+    sessionSpline = Ts.Spline(attr.GetSpline())
+
+    emptied = Ts.Spline(attr.GetSpline())
+    gm.DeleteKeys(emptied, gm.KeyTimes(emptied))
+    _Check(emptied.IsEmpty(), "the test really did empty the spline")
+    _Check(gm.ApplySpline(stage, attr.GetPath(), emptied, stack, "Delete"),
+           "clearing the session opinion is an edit")
+    _Check(session.GetAttributeAtPath(attr.GetPath()) is None,
+           "the session spec is gone, not left holding an empty spline")
+    _Check(_Close(attr.Get(Usd.TimeCode(1.0)), -0.78),
+           "the root layer's animation resolves again, not None: %s"
+           % attr.Get(Usd.TimeCode(1.0)))
+
+    _Check(stack.Undo(), "undo runs")
+    _Check(attr.GetSpline() == sessionSpline,
+           "undo brings the session spline back exactly")
+
+    # A spline authored ONLY in the session, over the schema fallback.
+    stage, control, _ = _RigStage()
+    attr = control.GetAttribute("avars:ty")
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    session = stage.GetSessionLayer()
+    stack = rigExecUndo.UndoStack()
+    first = gm.SplineFor(attr)
+    gm.AuthorKnot(first, 3.0, 4.0)
+    _Check(gm.ApplySpline(stage, attr.GetPath(), first, stack, "Key"),
+           "the session key was pushed")
+    _Check(_Close(attr.Get(Usd.TimeCode(3.0)), 4.0), "and it resolves")
+
+    emptied = Ts.Spline(attr.GetSpline())
+    gm.DeleteKeys(emptied, gm.KeyTimes(emptied))
+    _Check(gm.ApplySpline(stage, attr.GetPath(), emptied, stack, "Delete"),
+           "emptying a session-only spline is an edit")
+    _Check(session.GetAttributeAtPath(attr.GetPath()) is None,
+           "the spec is removed once it holds nothing")
+    _Check(not attr.HasSpline(), "the attribute has no spline left")
+    _Check(_Close(attr.Get(Usd.TimeCode(3.0)), 0.0),
+           "and falls back to the schema default: %s" % attr.Get())
+
+    # A spec that still carries a DEFAULT must survive the clear.
+    stage, control, _ = _RigStage()
+    attr = control.GetAttribute("avars:tz")
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    session = stage.GetSessionLayer()
+    attr.Set(7.5)
+    keyed = gm.SplineFor(attr)
+    gm.AuthorKnot(keyed, 2.0, 1.0)
+    _Check(gm.ApplySpline(stage, attr.GetPath(), keyed, None, "Key"),
+           "the session spline was written over the session default")
+    emptied = Ts.Spline(attr.GetSpline())
+    gm.DeleteKeys(emptied, gm.KeyTimes(emptied))
+    _Check(gm.ApplySpline(stage, attr.GetPath(), emptied, None, "Delete"),
+           "emptying it is an edit")
+    spec = session.GetAttributeAtPath(attr.GetPath())
+    _Check(spec is not None and spec.HasDefaultValue(),
+           "the spec stays because it still holds a default")
+    _Check(not spec.HasSpline(), "but the spline is cleared")
+    _Check(_Close(attr.Get(Usd.TimeCode(2.0)), 7.5),
+           "and the default resolves: %s" % attr.Get(Usd.TimeCode(2.0)))
+
+    # Emptying a spline that was never authored here changes nothing.
+    stage, control, _ = _RigStage()
+    attr = control.GetAttribute("avars:sx")
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    stack = rigExecUndo.UndoStack()
+    _Check(not gm.ApplySpline(stage, attr.GetPath(), Ts.Spline("double"),
+                              stack, "Delete"),
+           "clearing what was never authored reports no edit")
+    _Check(not stack.CanUndo(), "and pushes nothing")
+
+
+def TestSetKeyValuesAndTimes():
+    spline = _Spline()
+    done = gm.SetKeyValues(spline, [10.0, 20.0], 3.5)
+    _Check(done == [10.0, 20.0], "both keys were set: %s" % (done,))
+    _Check(_Close(spline.GetKnot(10.0).GetValue(), 3.5)
+           and _Close(spline.GetKnot(20.0).GetValue(), 3.5),
+           "the value is absolute, not a delta")
+    _Check(_Close(spline.GetKnot(0.0).GetValue(), 0.0),
+           "an unselected key is untouched")
+    _Check(_Times(spline) == [0.0, 10.0, 20.0, 30.0], "no key moved")
+    _Check(gm.SetKeyValues(spline, [7.5], 1.0) == [],
+           "a time that names no key is ignored")
+
+    # One key to an absolute frame.
+    spline = _Spline()
+    _Check(gm.SetKeyTimes(spline, [10.0], 13.0), "the key was moved")
+    _Check(_Times(spline) == [0.0, 13.0, 20.0, 30.0],
+           "it sits on the frame asked for: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(13.0).GetValue(), 10.0), "value travels")
+
+    # Several keys move rigidly, the first landing on the frame.
+    spline = _Spline()
+    _Check(gm.SetKeyTimes(spline, [10.0, 20.0], 12.0), "the block moved")
+    _Check(_Times(spline) == [0.0, 12.0, 22.0, 30.0],
+           "the selection keeps its shape: %s" % _Times(spline))
+
+    # Refused: the target frame belongs to a key that is not selected.
+    spline = _Spline()
+    _Check(not gm.SetKeyTimes(spline, [10.0], 20.0),
+           "moving onto an unselected key is refused")
+    _Check(_Times(spline) == [0.0, 10.0, 20.0, 30.0],
+           "and the spline is untouched: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(20.0).GetValue(), 5.0),
+           "the key that would have been overwritten still has its value")
+
+    # A frame held by a key that IS selected is fine: it moves out of
+    # the way itself, so nothing is overwritten.
+    spline = _Spline(((0.0, 0.0), (10.0, 1.0), (20.0, 2.0), (50.0, 3.0)))
+    _Check(gm.SetKeyTimes(spline, [10.0, 20.0], 20.0),
+           "the target frame may belong to the selection")
+    _Check(_Times(spline) == [0.0, 20.0, 30.0, 50.0],
+           "the block slid onto it: %s" % _Times(spline))
+    _Check(_Close(spline.GetKnot(20.0).GetValue(), 1.0)
+           and _Close(spline.GetKnot(30.0).GetValue(), 2.0),
+           "both keys survive with their own values")
+
+    _Check(not gm.SetKeyTimes(spline, [], 5.0),
+           "an empty selection is refused")
+    _Check(not gm.SetKeyTimes(_Spline(), [7.5], 5.0),
+           "a selection that names no key is refused")
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -621,6 +765,8 @@ def main():
         ("extrapolation", TestExtrapolation),
         ("snap + neighbours", TestSnapAndNeighbours),
         ("apply spline", TestApplySpline),
+        ("apply empty spline", TestApplyEmptySpline),
+        ("set key values + times", TestSetKeyValuesAndTimes),
     ]
     for name, fn in groups:
         fn()
