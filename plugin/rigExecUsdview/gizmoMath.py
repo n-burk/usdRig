@@ -215,6 +215,11 @@ def _FindParentXformable(prim, rigRoot):
     return None
 
 
+# The relationship SolverPosedPaths reads and SolverPosedCache watches
+# for invalidation. Named once so the two cannot drift apart.
+SOLVER_JOINTS_REL = "rigExec:joints"
+
+
 def SolverPosedPaths(rigRoot):
     """
     Every prim a solver poses: the union of all rigExec:joints targets
@@ -223,7 +228,7 @@ def SolverPosedPaths(rigRoot):
     """
     paths = set()
     for prim in Usd.PrimRange(rigRoot):
-        rel = prim.GetRelationship("rigExec:joints")
+        rel = prim.GetRelationship(SOLVER_JOINTS_REL)
         if rel:
             paths.update(rel.GetTargets())
     return paths
@@ -237,12 +242,23 @@ class SolverPosedCache(object):
     the WHOLE rig looking for rigExec:joints. Outside a drag the
     controller refreshes on every relevant stage notice, so without this
     an avar change costs a full traversal for an answer that cannot have
-    moved: the set only changes when a relationship, a prim or a
-    composition arc changes, and all three arrive as a RESYNC.
+    moved.
 
-    Invalidation is the caller's job -- InvalidateResynced on a notice's
-    resynced paths, Clear when the stage is replaced -- because only the
-    caller sees the notices.
+    The set changes in two notice shapes, not one, and missing either
+    leaves the memo handing out an editable target for a control a
+    solver has taken over. Probed on this USD build:
+
+      SetTargets on a NEW relationship     resync   /Rig/Ik.rigExec:joints
+      SetTargets on an existing one        INFO     /Rig/Ik.rigExec:joints
+      ClearTargets                         resync   /Rig/Ik.rigExec:joints
+      a new prim carrying the relationship resync   /Rig/Other
+
+    So retargeting -- the common case, and what a panel or a script
+    does -- is info-only. InvalidateChanged covers it; InvalidateResynced
+    covers the rest.
+
+    Invalidation is the caller's job -- both methods on a notice, Clear
+    when the stage is replaced -- because only the caller sees notices.
     """
 
     def __init__(self):
@@ -273,6 +289,24 @@ class SolverPosedCache(object):
             for path in resyncedPaths:
                 prim = path.GetPrimPath()
                 if prim.HasPrefix(root) or root.HasPrefix(prim):
+                    del self._byRoot[root]
+                    break
+
+    def InvalidateChanged(self, changedPaths):
+        """
+        Drop every rig root whose solver joints were RE-TARGETED.
+
+        SetTargets on a relationship that already has targets is an
+        info-only change (see the class docstring's probe table), so a
+        memo invalidated on resync alone would keep answering with the
+        joints from before the edit. The name matched here is the one
+        SolverPosedPaths reads, so the two cannot drift apart.
+        """
+        for root in list(self._byRoot):
+            for path in changedPaths:
+                if (path.IsPropertyPath()
+                        and path.name == SOLVER_JOINTS_REL
+                        and path.GetPrimPath().HasPrefix(root)):
                     del self._byRoot[root]
                     break
 
@@ -1148,7 +1182,16 @@ class _XformTarget(Target):
 
     def Refresh(self):
         cache = UsdGeom.XformCache(self.time)
-        self.parentWorld = cache.GetParentToWorldTransform(self.prim)
+        # An op stack beginning with !resetXformStack! ignores its
+        # ancestors, and XformCommonAPI accepts one. GetParentToWorld-
+        # Transform is just the parent's CTM (xformCache.cpp:37-41) and
+        # does not consult the flag, so without this the gizmo would be
+        # drawn and the children compensated against a parent frame the
+        # prim does not actually sit in.
+        if UsdGeom.Xformable(self.prim).GetResetXformStack():
+            self.parentWorld = Gf.Matrix4d(1.0)
+        else:
+            self.parentWorld = cache.GetParentToWorldTransform(self.prim)
         self.vectors = self.api.GetXformVectors(self.time)
 
     def BeginDrag(self):
@@ -1272,8 +1315,9 @@ class _XformTarget(Target):
     def _WriteOp(self, opType, slot, value, t=None, r=None, s=None, p=None):
         """
         Author one XformCommonAPI op and every Preserve Children
-        compensation in ONE Sdf.ChangeBlock, so a mouse-move costs the
-        stage one change notification (design spec 3.3 and 4.2).
+        compensation, with all the VALUES in one Sdf.ChangeBlock, so a
+        mouse-move costs the stage one change notification (design spec
+        3.3 and 4.2).
 
         The RigExec evaluator republishes synchronously on
         ObjectsChanged, so the unbatched version of this cost 1 + 3N
@@ -1286,9 +1330,16 @@ class _XformTarget(Target):
         world transform, which _XformCommonMatrix composes instead of
         the stage recomposing it -- see that function for why.
 
-        The order inside the block is deliberate: every CreateXformOps
-        runs before any value is written, and no prim's op stack is read
-        after this block has authored to that same prim.
+        Op CREATION stays outside the block, deliberately. AddXformOp
+        validates the op it just created with a composed stage query
+        (xformable.cpp:200-207), and inside a change block a prim whose
+        specs come only from a reference cannot see the spec that was
+        just authored -- its index has not been rescanned -- so the op
+        reads back undefined, AddXformOp posts a coding error, and the
+        Apply* raises before it has written anything. Creating the ops
+        first costs one extra notification on the first event of a drag
+        that has an op to create, and nothing on any event after it,
+        which is once per drag rather than once per mouse-move.
         """
         children = []
         if self._preserved:
@@ -1301,11 +1352,11 @@ class _XformTarget(Target):
                 _XFORM_ORDER_NAMES[base["order"]])
             children = self._ChildCompensation(local * self.parentWorld)
         api = UsdGeom.XformCommonAPI
+        target = self._Ops(opType)[slot].GetAttr()
+        childOps = [entry.api.CreateXformOps(
+            entry.order, api.OpTranslate, api.OpRotate, api.OpScale)
+            for entry, _, _, _ in children]
         with Sdf.ChangeBlock():
-            target = self._Ops(opType)[slot].GetAttr()
-            childOps = [entry.api.CreateXformOps(
-                entry.order, api.OpTranslate, api.OpRotate, api.OpScale)
-                for entry, _, _, _ in children]
             self.writer.Set(target, value)
             for ops, (_, translation, angles, scale) in zip(childOps,
                                                             children):

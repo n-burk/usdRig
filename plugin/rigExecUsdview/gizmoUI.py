@@ -1510,9 +1510,13 @@ class GizmoController(QtCore.QObject):
         if self._drag is not None:
             return
         resynced = notice.GetResyncedPaths()
+        changed = notice.GetChangedInfoOnlyPaths()
+        # Both kinds: a new or cleared joints relationship resyncs, but
+        # RE-targeting an existing one is info-only (SolverPosedCache).
         if resynced:
-            # Only a resync can add or remove a rigExec:joints target.
             self._solverPosed.InvalidateResynced(resynced)
+        if changed:
+            self._solverPosed.InvalidateChanged(changed)
         target = self._target
         # A missing target may be exactly what this notice creates, and a
         # focus prim that no longer matches needs the full re-resolve.
@@ -1520,7 +1524,7 @@ class GizmoController(QtCore.QObject):
             self.RefreshTarget()
             return
         if not gizmoMath.NoticeAffectsTarget(
-                resynced, notice.GetChangedInfoOnlyPaths(),
+                resynced, changed,
                 target.prim.GetPath(), target.RigRootPath()):
             return
         try:

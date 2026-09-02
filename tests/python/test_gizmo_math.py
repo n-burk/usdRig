@@ -1151,13 +1151,18 @@ def TestXformLocalMatrix():
 
 def TestOneNoticePerApply():
     """
-    One Apply* must reach the stage as ONE ObjectsChanged (design spec
-    3.3 and 4.2).
+    One Apply* must reach the stage as ONE ObjectsChanged once the ops
+    it writes exist (design spec 3.3 and 4.2).
 
     The RigExec evaluator republishes synchronously on the notice, so an
     unbatched Preserve Children drag cost 1 + 3N recompositions per
     mouse-move for N children, all discarded but the last -- invisible
     in a test that only checks the values, and very visible in a scene.
+
+    The exception is an event that has to CREATE an op: that authoring
+    cannot happen inside the block (see TestReferencedPrimDrag), so it
+    costs one extra notice. The last group here pins that to once per
+    drag rather than once per event, which is the whole trade.
     """
     stage, parent, child = _ChainStage()
     time = Usd.TimeCode.Default()
@@ -1175,14 +1180,22 @@ def TestOneNoticePerApply():
 
     # An xform pose target with Preserve Children on and two children:
     # the op write plus 3 channels on each child, still one notice.
+    # Every prim here carries a full T/R/S stack already, so nothing in
+    # this group has an op to create and the count is the steady-state
+    # cost of a mouse-move mid-drag.
     xstage = Usd.Stage.CreateInMemory()
     group = UsdGeom.Xform.Define(xstage, "/P")
-    UsdGeom.XformCommonAPI(group).SetTranslate(Gf.Vec3d(1, 0, 0))
+    groupApi = UsdGeom.XformCommonAPI(group)
+    groupApi.SetTranslate(Gf.Vec3d(1, 0, 0))
+    groupApi.SetRotate(Gf.Vec3f(0, 0, 0))
+    groupApi.SetScale(Gf.Vec3f(1, 1, 1))
     kids = []
     for i, name in enumerate(("A", "B")):
         kid = UsdGeom.Xform.Define(xstage, "/P/" + name)
-        UsdGeom.XformCommonAPI(kid).SetTranslate(Gf.Vec3d(0, 2 + i, 0))
-        UsdGeom.XformCommonAPI(kid).SetRotate(Gf.Vec3f(0, 0, 30 * (i + 1)))
+        kidApi = UsdGeom.XformCommonAPI(kid)
+        kidApi.SetTranslate(Gf.Vec3d(0, 2 + i, 0))
+        kidApi.SetRotate(Gf.Vec3f(0, 0, 30 * (i + 1)))
+        kidApi.SetScale(Gf.Vec3f(1, 1, 1))
         kids.append(kid)
     cache = UsdGeom.XformCache(time)
     before = [cache.GetLocalToWorldTransform(k.GetPrim()) for k in kids]
@@ -1217,6 +1230,173 @@ def TestOneNoticePerApply():
     _Check(counter.count == 1,
            "a second Apply* is one notice as well, got %d" % counter.count)
     counter.Revoke()
+
+    # A prim with NO ops pays for creating them, and pays ONCE.
+    #
+    # Op creation cannot go in the block (TestReferencedPrimDrag), and
+    # it is not cheap: measured on this USD build, CreateXformOps for a
+    # single missing op costs three change rounds -- the op attribute,
+    # then xformOpOrder, then xformOpOrder's value -- and nothing at all
+    # when the ops already exist. So the first event of a drag on a bare
+    # prim is 3 + 1 and every event after it is 1. What matters is that
+    # the cost is once per drag, not once per mouse-move; the assertion
+    # is written to say exactly that rather than to pin a magic number.
+    bare = UsdGeom.Xform.Define(xstage, "/Bare")
+    bareTarget, reason = gizmoMath.MakeTarget(
+        xstage, bare.GetPrim(), gizmoMath.CHANNELS_POSE, xwriter)
+    _Check(bareTarget is not None, reason)
+    bareTarget.BeginDrag()
+    counter = _NoticeCounter(xstage)
+    bareTarget.ApplyTranslate(Gf.Vec3d(1, 0, 0))
+    first = counter.count
+    counter.count = 0
+    bareTarget.ApplyTranslate(Gf.Vec3d(2, 0, 0))
+    second = counter.count
+    counter.count = 0
+    bareTarget.ApplyTranslate(Gf.Vec3d(3, 0, 0))
+    _Check(second == 1 and counter.count == 1,
+           "once the op exists every further event is one notice: "
+           "first=%d, second=%d, third=%d" % (first, second, counter.count))
+    _Check(first > second,
+           "and the creation cost fell on the first event: %d" % first)
+    counter.Revoke()
+    _Check(_Close(UsdGeom.XformCommonAPI(bare).GetXformVectors(time)[0][0],
+                  3.0, 1e-6), "and every event landed")
+
+
+def TestResetXformStack():
+    """
+    A target whose op stack starts with !resetXformStack! sits in WORLD
+    space, not its parent's.
+
+    XformCommonAPI accepts such a stack, so the gizmo can be handed one.
+    GetParentToWorldTransform is only the parent's CTM and does not
+    consult the flag, so taking it at face value would draw the
+    manipulator in the wrong place and -- worse, because it is silent --
+    compensate Preserve Children against a frame the prim is not in.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    time = Usd.TimeCode.Default()
+    root = UsdGeom.Xform.Define(stage, "/Root")
+    root.AddTranslateOp().Set(Gf.Vec3d(100, 0, 0))
+    prim = UsdGeom.Xform.Define(stage, "/Root/T")
+    api = UsdGeom.XformCommonAPI(prim)
+    api.SetTranslate(Gf.Vec3d(1, 2, 3))
+    api.SetRotate(Gf.Vec3f(0, 0, 30))
+    api.SetScale(Gf.Vec3f(1, 1, 1))
+    prim.SetResetXformStack(True)
+    _Check(bool(UsdGeom.XformCommonAPI(prim.GetPrim())),
+           "a reset stack is still XformCommonAPI-compatible")
+    kid = UsdGeom.Xform.Define(stage, "/Root/T/Kid")
+    kidApi = UsdGeom.XformCommonAPI(kid)
+    kidApi.SetTranslate(Gf.Vec3d(0, 4, 0))
+    kidApi.SetRotate(Gf.Vec3f(0, 0, 0))
+    kidApi.SetScale(Gf.Vec3f(1, 1, 1))
+    cache = UsdGeom.XformCache(time)
+    before = cache.GetLocalToWorldTransform(kid.GetPrim())
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, prim.GetPrim(), gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None, reason)
+    _Check(_MatClose(target.GizmoMatrix(),
+                     cache.GetLocalToWorldTransform(prim.GetPrim())
+                     .GetOrthonormalized(False), 1e-6),
+           "the gizmo is drawn where the prim actually is, not 100 units "
+           "away: %s" % target.GizmoMatrix().ExtractTranslation())
+    # A world delta maps straight onto the channels, the parent's 100
+    # units of translate being reset away.
+    target.SetPreserveChildren(True)
+    target.AttributePaths()
+    target.BeginDrag()
+    target.ApplyTranslate(Gf.Vec3d(0, 5, 0))
+    _Check(_Close(api.GetXformVectors(time)[0][1], 7.0, 1e-6),
+           "the world delta reached the channel unscaled: %s"
+           % (api.GetXformVectors(time)[0],))
+    cache.Clear()
+    _Check(_MatClose(cache.GetLocalToWorldTransform(kid.GetPrim()),
+                     before, 1e-5),
+           "and the child held its world transform")
+
+
+def _ReferencedStage():
+    """
+    A shot layer referencing an asset, which is the ordinary layout the
+    in-memory fixtures above do not reproduce.
+
+    `/World` references an anonymous layer's `/Asset`, so `/World/Group`
+    and `/World/Group/Kid` have specs ONLY in the referenced layer and
+    none anywhere in the root layer stack. That is what makes the prim
+    index reject a spec authored during a change block: `AddXformOp`
+    validates the op it just created with a composed stage query, and
+    until change processing rescans the prim the new spec is invisible.
+    Every other fixture here defines its prims in the root layer, where
+    the node already has specs and the query happens to succeed.
+
+    The child carries a translate op only, so a Preserve Children drag
+    has to CREATE its rotate and scale ops.
+    """
+    asset = Sdf.Layer.CreateAnonymous("gizmoAsset.usda")
+    assetStage = Usd.Stage.Open(asset)
+    UsdGeom.Xform.Define(assetStage, "/Asset")
+    group = UsdGeom.Xform.Define(assetStage, "/Asset/Group")
+    group.AddTranslateOp().Set(Gf.Vec3d(1, 0, 0))
+    kid = UsdGeom.Xform.Define(assetStage, "/Asset/Group/Kid")
+    kid.AddTranslateOp().Set(Gf.Vec3d(0, 2, 0))
+    stage = Usd.Stage.CreateInMemory()
+    world = UsdGeom.Xform.Define(stage, "/World")
+    world.GetPrim().GetReferences().AddReference(asset.identifier, "/Asset")
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    # The anonymous layer is returned so the caller holds it: nothing
+    # else owns it, and a dropped layer leaves the reference dangling.
+    return stage, asset
+
+
+def TestReferencedPrimDrag():
+    """
+    A drag on a prim reached only through a reference must not raise,
+    and must not leave a half-created op stack behind.
+
+    Creating an xform op inside the change block that writes it fails
+    exactly here, and it fails on the FIRST event of a drag -- the one
+    that would otherwise author the op -- so the exception ate that
+    event's target write and left the child with a rotate op but no
+    scale op. Op creation therefore happens before the block; only the
+    value writes are batched.
+    """
+    stage, _layer = _ReferencedStage()
+    time = Usd.TimeCode.Default()
+    group = stage.GetPrimAtPath("/World/Group")
+    kid = stage.GetPrimAtPath("/World/Group/Kid")
+    _Check(group and kid, "the reference composed")
+    _Check(not stage.GetRootLayer().GetPrimAtPath("/World/Group"),
+           "the referenced prims have no root-layer spec")
+    cache = UsdGeom.XformCache(time)
+    before = cache.GetLocalToWorldTransform(kid)
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, group, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None, reason)
+    target.SetPreserveChildren(True)
+    target.AttributePaths()
+    target.BeginDrag()
+    target.ApplyTranslate(Gf.Vec3d(0, 5, 0))
+    cache.Clear()
+    _Check(_Close(UsdGeom.XformCommonAPI(group).GetXformVectors(time)[0][1],
+                  5.0, 1e-6),
+           "the target's own write survived the first event")
+    _Check(_MatClose(cache.GetLocalToWorldTransform(kid), before, 1e-5),
+           "the referenced child held its world transform")
+    authored = [n for n in kid.GetAuthoredPropertyNames()
+                if n.startswith("xformOp")]
+    _Check("xformOp:rotateXYZ" in authored and "xformOp:scale" in authored,
+           "both compensation ops were created, not just the first: %s"
+           % authored)
+    # A second event on the same prim, with the ops now in place.
+    target.BeginDrag()
+    target.ApplyTranslate(Gf.Vec3d(0, 0, 3))
+    cache.Clear()
+    _Check(_MatClose(cache.GetLocalToWorldTransform(kid), before, 1e-5),
+           "and again on the next event")
 
 
 def TestNoticeFilter():
@@ -1293,6 +1473,84 @@ def TestNoticeFilter():
            "MakeTarget filled the memo")
 
 
+class _CacheListener(object):
+    """
+    Drives a SolverPosedCache from REAL ObjectsChanged notices, exactly
+    the way GizmoController._onObjectsChanged does, and records the last
+    notice's paths so a test can assert what kind of change it was.
+    """
+
+    def __init__(self, stage, cache):
+        self.cache = cache
+        self.resynced = []
+        self.changed = []
+        self._key = Tf.Notice.Register(
+            Usd.Notice.ObjectsChanged, self._OnChanged, stage)
+
+    def _OnChanged(self, notice, sender):
+        self.resynced = list(notice.GetResyncedPaths())
+        self.changed = list(notice.GetChangedInfoOnlyPaths())
+        if self.resynced:
+            self.cache.InvalidateResynced(self.resynced)
+        if self.changed:
+            self.cache.InvalidateChanged(self.changed)
+
+    def Revoke(self):
+        self._key.Revoke()
+
+
+def TestSolverCacheRetarget():
+    """
+    Re-pointing an existing rigExec:joints relationship must reach the
+    memo, and it does NOT arrive as a resync.
+
+    Driven through a real listener rather than by calling the
+    invalidators directly, because the whole bug was a wrong belief
+    about which notice USD sends: SetTargets on a relationship that
+    already has targets is info-only, so a memo invalidated on resync
+    alone kept handing out an editable target for a control the solver
+    had just taken over.
+    """
+    stage, parent, child = _ChainStage()
+    root = Sdf.Path("/Asset/Rig")
+    rigRoot = stage.GetPrimAtPath(root)
+    cache = gizmoMath.SolverPosedCache()
+    solver = stage.DefinePrim("/Asset/Rig/Ik", "RigExecSingleChainIk")
+    rel = solver.CreateRelationship(gizmoMath.SOLVER_JOINTS_REL)
+    listener = _CacheListener(stage, cache)
+    try:
+        rel.SetTargets([child.GetPath()])
+        _Check(cache.For(rigRoot) == {child.GetPath()},
+               "the first SetTargets reached the memo: %s"
+               % cache.For(rigRoot))
+        # The one that used to be missed: the relationship already has
+        # targets, so USD reports an info-only change.
+        rel.SetTargets([parent.GetPath()])
+        _Check(not listener.resynced and listener.changed,
+               "retargeting is info-only, not a resync: resynced=%s "
+               "changed=%s" % (listener.resynced, listener.changed))
+        _Check(cache.For(rigRoot) == {parent.GetPath()},
+               "the retarget reached the memo: %s" % cache.For(rigRoot))
+        # Clearing goes back to a resync, and must land too.
+        rel.ClearTargets(True)
+        _Check(cache.For(rigRoot) == set(),
+               "clearing the targets reached the memo: %s"
+               % cache.For(rigRoot))
+        # An unrelated info-only edit must NOT throw the memo away.
+        # The FIRST Set creates the attribute spec, which is a resync
+        # under the rig root and legitimately drops it; the second only
+        # changes a value, which is the case that has to be kept.
+        child.GetAttribute("avars:tx").Set(3.0)
+        cache.For(rigRoot)
+        child.GetAttribute("avars:tx").Set(4.0)
+        _Check(not listener.resynced,
+               "the second avar Set is info-only: %s" % listener.resynced)
+        _Check(root in cache._byRoot,
+               "an avar value change keeps the memo")
+    finally:
+        listener.Revoke()
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -1311,7 +1569,10 @@ def main():
         ("xformOp noise", TestXformOpNoise),
         ("xform local matrix", TestXformLocalMatrix),
         ("one notice per apply", TestOneNoticePerApply),
+        ("referenced prim drag", TestReferencedPrimDrag),
+        ("reset xform stack", TestResetXformStack),
         ("notice filter", TestNoticeFilter),
+        ("solver cache retarget", TestSolverCacheRetarget),
     ]
     for name, fn in groups:
         fn()
