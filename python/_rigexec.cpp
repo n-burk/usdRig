@@ -15,15 +15,18 @@
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/gf/vec3i.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/tf/refPtr.h"
 #include "pxr/usd/sdf/path.h"
+#include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
 
 #include "rigExec/rigEvaluator.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecRigging/rigBuilder.h"
+#include "rigExecRigging/schemaAuthoring.h"
 
 #include <array>
 #include <memory>
@@ -182,6 +185,342 @@ _PathStr(const SdfPath &p) { return p.IsEmpty() ? "" : p.GetString(); }
 
 SdfPath
 _StrToPath(const std::string &s) { return s.empty() ? SdfPath() : SdfPath(s); }
+
+GfVec3f
+_PythonToVec3f(const py::handle &value, const std::string &context)
+{
+    if (py::isinstance<py::str>(value) ||
+        py::isinstance<py::bytes>(value) || !PySequence_Check(value.ptr())) {
+        throw py::type_error(context + " needs a sequence of 3 numbers");
+    }
+    py::sequence seq = py::reinterpret_borrow<py::sequence>(value);
+    if (seq.size() != 3) {
+        throw py::type_error(context + " needs exactly 3 numbers");
+    }
+    return GfVec3f(
+        float(seq[0].cast<double>()), float(seq[1].cast<double>()),
+        float(seq[2].cast<double>()));
+}
+
+GfVec3d
+_PythonToVec3d(const py::handle &value, const std::string &context)
+{
+    if (py::isinstance<py::str>(value) ||
+        py::isinstance<py::bytes>(value) || !PySequence_Check(value.ptr())) {
+        throw py::type_error(context + " needs a sequence of 3 numbers");
+    }
+    py::sequence seq = py::reinterpret_borrow<py::sequence>(value);
+    if (seq.size() != 3) {
+        throw py::type_error(context + " needs exactly 3 numbers");
+    }
+    return GfVec3d(
+        seq[0].cast<double>(), seq[1].cast<double>(),
+        seq[2].cast<double>());
+}
+
+GfVec3i
+_PythonToVec3i(const py::handle &value, const std::string &context)
+{
+    if (py::isinstance<py::str>(value) ||
+        py::isinstance<py::bytes>(value) || !PySequence_Check(value.ptr())) {
+        throw py::type_error(context + " needs a sequence of 3 integers");
+    }
+    py::sequence seq = py::reinterpret_borrow<py::sequence>(value);
+    if (seq.size() != 3) {
+        throw py::type_error(context + " needs exactly 3 integers");
+    }
+    return GfVec3i(
+        seq[0].cast<int>(), seq[1].cast<int>(), seq[2].cast<int>());
+}
+
+/// Convert a Python value using the attribute's actual composed schema type.
+/// No type name is supplied by Python: that avoids duplicating the schema and
+/// makes misspelled/off-schema properties fail before authoring anything.
+VtValue
+_PythonToSchemaValue(
+    const UsdPrim &prim, const TfToken &attributeName, const py::object &value)
+{
+    if (!prim) {
+        throw py::value_error("invalid prim for schema attribute");
+    }
+    const UsdAttribute attr = prim.GetAttribute(attributeName);
+    if (!attr) {
+        throw py::key_error(
+            "attribute '" + attributeName.GetString() +
+            "' is not declared by the prim's concrete or applied schemas");
+    }
+
+    const std::string typeName = attr.GetTypeName().GetAsToken().GetString();
+    const std::string context =
+        "attribute '" + attributeName.GetString() + "' (" + typeName + ")";
+
+    if (typeName == "bool") {
+        if (!PyBool_Check(value.ptr())) {
+            throw py::type_error(context + " needs a bool");
+        }
+        return VtValue(value.cast<bool>());
+    }
+    if (typeName == "int") {
+        if (PyBool_Check(value.ptr())) {
+            throw py::type_error(context + " needs an integer, not bool");
+        }
+        return VtValue(value.cast<int>());
+    }
+    if (typeName == "float") {
+        if (PyBool_Check(value.ptr())) {
+            throw py::type_error(context + " needs a number, not bool");
+        }
+        return VtValue(float(value.cast<double>()));
+    }
+    if (typeName == "double") {
+        if (PyBool_Check(value.ptr())) {
+            throw py::type_error(context + " needs a number, not bool");
+        }
+        return VtValue(value.cast<double>());
+    }
+    if (typeName == "token") {
+        if (!py::isinstance<py::str>(value)) {
+            throw py::type_error(context + " needs a string token");
+        }
+        return VtValue(TfToken(value.cast<std::string>()));
+    }
+    if (typeName == "float3" || typeName == "color3f" ||
+        typeName == "point3f" || typeName == "normal3f" ||
+        typeName == "vector3f") {
+        return VtValue(_PythonToVec3f(value, context));
+    }
+    if (typeName == "double3" || typeName == "point3d" ||
+        typeName == "vector3d") {
+        return VtValue(_PythonToVec3d(value, context));
+    }
+    if (typeName == "int3") {
+        return VtValue(_PythonToVec3i(value, context));
+    }
+    if (typeName == "matrix4d") {
+        if (py::isinstance<py::str>(value) ||
+            py::isinstance<py::bytes>(value) ||
+            !PySequence_Check(value.ptr())) {
+            throw py::type_error(
+                context + " needs a sequence of 16 row-major numbers");
+        }
+        py::sequence seq = value;
+        if (seq.size() != 16) {
+            throw py::type_error(context + " needs 16 row-major numbers");
+        }
+        std::vector<double> numbers(16);
+        for (size_t i = 0; i < numbers.size(); ++i) {
+            numbers[i] = seq[i].cast<double>();
+        }
+        return VtValue(_VecToMat4(numbers));
+    }
+
+    if (py::isinstance<py::str>(value) ||
+        py::isinstance<py::bytes>(value) || !PySequence_Check(value.ptr())) {
+        throw py::type_error(context + " needs a non-string sequence");
+    }
+    py::sequence seq = value;
+    if (typeName == "token[]") {
+        VtTokenArray out(seq.size());
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = TfToken(seq[i].cast<std::string>());
+        }
+        return VtValue(out);
+    }
+    if (typeName == "float[]") {
+        VtFloatArray out(seq.size());
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = float(seq[i].cast<double>());
+        }
+        return VtValue(out);
+    }
+    if (typeName == "double[]") {
+        VtDoubleArray out(seq.size());
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = seq[i].cast<double>();
+        }
+        return VtValue(out);
+    }
+    if (typeName == "int[]") {
+        VtIntArray out(seq.size());
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = seq[i].cast<int>();
+        }
+        return VtValue(out);
+    }
+    if (typeName == "int64[]") {
+        VtInt64Array out(seq.size());
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = seq[i].cast<int64_t>();
+        }
+        return VtValue(out);
+    }
+    if (typeName == "float3[]" || typeName == "color3f[]" ||
+        typeName == "point3f[]" || typeName == "normal3f[]" ||
+        typeName == "vector3f[]") {
+        VtArray<GfVec3f> out(seq.size());
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = _PythonToVec3f(seq[i], context + " row");
+        }
+        return VtValue(out);
+    }
+    if (typeName == "double3[]") {
+        VtArray<GfVec3d> out(seq.size());
+        for (size_t i = 0; i < out.size(); ++i) {
+            out[i] = _PythonToVec3d(seq[i], context + " row");
+        }
+        return VtValue(out);
+    }
+
+    throw py::type_error(
+        "unsupported schema value type '" + typeName + "' for " +
+        attributeName.GetString());
+}
+
+SdfPath
+_PathFromText(const std::string &text, bool allowEmpty)
+{
+    if (text.empty()) {
+        if (allowEmpty) {
+            return SdfPath();
+        }
+        throw py::value_error("path must not be empty");
+    }
+    std::string whyNot;
+    if (!SdfPath::IsValidPathString(text, &whyNot)) {
+        throw py::value_error(
+            "invalid USD path '" + text + "'" +
+            (whyNot.empty() ? std::string() : ": " + whyNot));
+    }
+    return SdfPath(text);
+}
+
+SdfPath
+_PythonToPath(const py::handle &value, bool allowEmpty = true)
+{
+    if (value.is_none()) {
+        if (allowEmpty) {
+            return SdfPath();
+        }
+        throw py::value_error("path must not be None");
+    }
+    if (py::isinstance<py::str>(value)) {
+        return _PathFromText(value.cast<std::string>(), allowEmpty);
+    }
+    if (py::hasattr(value, "pathString")) {
+        return _PathFromText(
+            py::str(value.attr("pathString")).cast<std::string>(),
+            allowEmpty);
+    }
+    if (py::hasattr(value, "path")) {
+        return _PathFromText(
+            py::str(value.attr("path")).cast<std::string>(), allowEmpty);
+    }
+    if (py::hasattr(value, "GetPath")) {
+        return _PathFromText(
+            py::str(value.attr("GetPath")()).cast<std::string>(),
+            allowEmpty);
+    }
+    throw py::type_error("expected a path string, RigExec handle, or Usd.Prim");
+}
+
+SdfPath
+_PythonToDependencyPath(
+    const py::handle &value, const UsdStageRefPtr &ownerStage,
+    const TfToken &expectedType = TfToken(), bool allowEmpty = true)
+{
+    const SdfPath path = _PythonToPath(value, allowEmpty);
+    TfToken actualType;
+    UsdStageRefPtr dependencyStage;
+
+    if (py::isinstance<rigExec::RigExecHandleBase>(value)) {
+        const auto &handle = value.cast<const rigExec::RigExecHandleBase &>();
+        if (!handle.IsValid()) {
+            throw py::value_error("dependency handle is no longer valid");
+        }
+        dependencyStage = handle.GetStage();
+        actualType = handle.GetSchemaTypeName();
+    } else if (py::isinstance<rigExec::RigExecSchemaPrim>(value)) {
+        const auto &schemaPrim =
+            value.cast<const rigExec::RigExecSchemaPrim &>();
+        if (!schemaPrim.IsValid()) {
+            throw py::value_error("dependency SchemaPrim is no longer valid");
+        }
+        dependencyStage = schemaPrim.GetStage();
+        actualType = schemaPrim.GetSchemaTypeName();
+    } else if (_IsPxrType(
+                   py::reinterpret_borrow<py::object>(value),
+                   "pxr.Usd.Prim")) {
+        const int isValid = PyObject_IsTrue(value.ptr());
+        if (isValid < 0) {
+            throw py::error_already_set();
+        }
+        if (!isValid) {
+            throw py::value_error("dependency Usd.Prim is no longer valid");
+        }
+        dependencyStage = _ExtractStage(value.attr("GetStage")());
+        actualType = TfToken(
+            py::str(value.attr("GetTypeName")()).cast<std::string>());
+    } else if (py::hasattr(value, "GetPrim")) {
+        const py::object prim = value.attr("GetPrim")();
+        const int isValid = prim.is_none() ? 0 : PyObject_IsTrue(prim.ptr());
+        if (isValid < 0) {
+            throw py::error_already_set();
+        }
+        if (!isValid) {
+            throw py::value_error("dependency Usd schema object is no longer valid");
+        }
+        if (py::hasattr(prim, "GetStage") &&
+            py::hasattr(prim, "GetTypeName")) {
+            dependencyStage = _ExtractStage(prim.attr("GetStage")());
+            actualType = TfToken(
+                py::str(prim.attr("GetTypeName")()).cast<std::string>());
+        }
+    }
+
+    if (dependencyStage && ownerStage && dependencyStage != ownerStage) {
+        throw py::value_error(
+            "dependency handle/prim belongs to a different UsdStage");
+    }
+    if (!expectedType.IsEmpty()) {
+        if (actualType.IsEmpty()) {
+            if (!ownerStage || !path.IsPrimPath()) {
+                throw py::type_error(
+                    "dependency must name a " + expectedType.GetString() +
+                    " prim");
+            }
+            const UsdPrim prim = ownerStage->GetPrimAtPath(path);
+            if (!prim) {
+                throw py::value_error(
+                    "typed dependency does not exist: " + path.GetString());
+            }
+            actualType = prim.GetTypeName();
+        }
+        if (actualType != expectedType) {
+            throw py::type_error(
+                "dependency must be a " + expectedType.GetString() +
+                ", got " + actualType.GetString());
+        }
+    }
+    return path;
+}
+
+SdfPathVector
+_PythonToDependencyPaths(
+    const py::iterable &values, const UsdStageRefPtr &ownerStage,
+    const TfToken &expectedType = TfToken())
+{
+    if (py::isinstance<py::str>(values) ||
+        py::isinstance<py::bytes>(values)) {
+        throw py::type_error(
+            "expected an iterable of path-like values, not a string");
+    }
+    SdfPathVector out;
+    for (const py::handle &value : values) {
+        out.push_back(_PythonToDependencyPath(
+            value, ownerStage, expectedType, false));
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // Rig: the evaluator wrapper.
@@ -404,6 +743,109 @@ PYBIND11_MODULE(_rigexec, m) {
                 return _Mat4ToVec(it->second);
             }, py::arg("path"));
 
+    // ---- Strict low-level schema authoring ---------------------------------
+
+    py::class_<rigExec::RigExecSchemaPrim>(m, "SchemaPrim",
+        "A strict authoring view of one registered concrete schema prim.\n\n"
+        "Properties are resolved from OpenUSD's composed prim definition; "
+        "undeclared names and caller-invented types are rejected.")
+        .def_static("define",
+            [](py::object stageObj, py::object path,
+               const std::string &schemaType) {
+                auto stage = _ExtractStage(stageObj);
+                if (!stage) {
+                    throw py::type_error(
+                        "SchemaPrim.define() needs a pxr.Usd.Stage instance");
+                }
+                return rigExec::RigExecSchemaPrim::Define(
+                    std::move(stage), _PythonToPath(path, false),
+                    TfToken(schemaType));
+            }, py::arg("stage"), py::arg("path"), py::arg("schema_type"))
+        .def_static("get",
+            [](py::object stageObj, py::object path,
+               const std::string &expectedSchemaType) {
+                auto stage = _ExtractStage(stageObj);
+                if (!stage) {
+                    throw py::type_error(
+                        "SchemaPrim.get() needs a pxr.Usd.Stage instance");
+                }
+                return rigExec::RigExecSchemaPrim::Get(
+                    std::move(stage), _PythonToPath(path, false),
+                    TfToken(expectedSchemaType));
+            }, py::arg("stage"), py::arg("path"),
+               py::arg("expected_schema_type"))
+        .def_property_readonly("valid", &rigExec::RigExecSchemaPrim::IsValid)
+        .def_property_readonly("path",
+            [](const rigExec::RigExecSchemaPrim &prim) {
+                return _PathStr(prim.GetPath());
+            })
+        .def_property_readonly("schema_type",
+            [](const rigExec::RigExecSchemaPrim &prim) {
+                return prim.GetSchemaTypeName().GetString();
+            })
+        .def("has_api",
+            [](const rigExec::RigExecSchemaPrim &prim,
+               const std::string &schemaIdentifier) {
+                return prim.HasAPI(TfToken(schemaIdentifier));
+            }, py::arg("schema_identifier"))
+        .def("apply_api",
+            [](const rigExec::RigExecSchemaPrim &prim,
+               const std::string &schemaIdentifier) {
+                prim.ApplyAPI(TfToken(schemaIdentifier));
+            }, py::arg("schema_identifier"))
+        .def("set_attribute",
+            [](const rigExec::RigExecSchemaPrim &prim, const std::string &name,
+               const py::object &value, const py::object &time) {
+                const TfToken token(name);
+                UsdTimeCode timeCode = UsdTimeCode::Default();
+                if (!time.is_none()) {
+                    if (py::hasattr(time, "IsDefault") &&
+                        time.attr("IsDefault")().cast<bool>()) {
+                        timeCode = UsdTimeCode::Default();
+                    } else if (py::hasattr(time, "GetValue")) {
+                        timeCode = UsdTimeCode(
+                            time.attr("GetValue")().cast<double>());
+                    } else {
+                        timeCode = UsdTimeCode(time.cast<double>());
+                    }
+                }
+                prim.SetAttribute(
+                    token, _PythonToSchemaValue(prim.GetPrim(), token, value),
+                    timeCode);
+            }, py::arg("name"), py::arg("value"), py::arg("time") = py::none(),
+            "Set a declared attribute; its type comes from the composed schema.")
+        .def("set_relationship",
+            [](const rigExec::RigExecSchemaPrim &prim, const std::string &name,
+               const py::iterable &targets) {
+                prim.SetRelationship(
+                    TfToken(name),
+                    _PythonToDependencyPaths(targets, prim.GetStage()));
+            }, py::arg("name"), py::arg("targets"),
+            "Replace targets on a declared relationship.")
+        .def("_validate_relationship_targets",
+            [](const rigExec::RigExecSchemaPrim &prim,
+               const py::iterable &targets) {
+                std::vector<std::string> result;
+                for (const SdfPath &path : _PythonToDependencyPaths(
+                         targets, prim.GetStage())) {
+                    result.push_back(path.GetString());
+                }
+                return result;
+            }, py::arg("targets"))
+        .def("clear_attribute",
+            [](const rigExec::RigExecSchemaPrim &prim, const std::string &name) {
+                prim.ClearAttribute(TfToken(name));
+            }, py::arg("name"))
+        .def("set_read_phase",
+            [](const rigExec::RigExecSchemaPrim &prim,
+               const std::string &propertyName, const std::string &phase) {
+                prim.SetReadPhase(TfToken(propertyName), phase);
+            }, py::arg("property_name"), py::arg("phase"))
+        .def("__repr__", [](const rigExec::RigExecSchemaPrim &prim) {
+            return "<SchemaPrim " + prim.GetSchemaTypeName().GetString() +
+                   " '" + _PathStr(prim.GetPath()) + "'>";
+        });
+
     // ---- Rigging API: handles ----------------------------------------------
 
     using rigExec::RigExecHandleBase;
@@ -413,116 +855,63 @@ PYBIND11_MODULE(_rigexec, m) {
         .def_property_readonly("valid", &RigExecHandleBase::IsValid)
         .def_property_readonly("path", [](const RigExecHandleBase &h) { return _PathStr(h.GetPath()); })
         .def_property_readonly("name", &RigExecHandleBase::GetName)
-        .def("set_attr", [](RigExecHandleBase &h, std::string name,
-                            std::string typeName, py::object value) {
-                // Generic escape hatch: dispatch on the DECLARED Sdf type so
-                // the payload matches exactly what this USD build's VtValue
-                // accepts (raw std::vector payloads are rejected for array
-                // attributes). A Python list is a sequence, so type-name
-                // dispatch must come first.
-                auto set = [&h, &name, &typeName](VtValue v) {
-                    h.SetAttr(name.c_str(), TfToken(typeName), std::move(v));
-                };
-                if (typeName == "float") {
-                    set(VtValue(float(value.cast<double>())));
-                } else if (typeName == "double") {
-                    set(VtValue(value.cast<double>()));
-                } else if (typeName == "int") {
-                    set(VtValue(value.cast<int>()));
-                } else if (typeName == "bool") {
-                    set(VtValue(value.cast<bool>()));
-                } else if (typeName == "token" || typeName == "string") {
-                    const std::string s = value.cast<std::string>();
-                    set(typeName == "token" ? VtValue(TfToken(s)) : VtValue(s));
-                } else if (typeName == "point3f" || typeName == "vec3f") {
-                    py::sequence seq = value;
-                    if (seq.size() != 3) {
-                        throw py::type_error("set_attr: point3f needs 3 values");
-                    }
-                    set(VtValue(GfVec3f(float(seq[0].cast<double>()),
-                                        float(seq[1].cast<double>()),
-                                        float(seq[2].cast<double>()))));
-                } else if (typeName == "point3d" || typeName == "vec3d" ||
-                           typeName == "double3") {
-                    py::sequence seq = value;
-                    if (seq.size() != 3) {
-                        throw py::type_error("set_attr: point3d needs 3 values");
-                    }
-                    set(VtValue(GfVec3d(seq[0].cast<double>(),
-                                        seq[1].cast<double>(),
-                                        seq[2].cast<double>())));
-                } else if (typeName == "matrix4d") {
-                    py::sequence seq = value;
-                    if (seq.size() != 16) {
-                        throw py::type_error(
-                            "set_attr: matrix4d needs a flat list of 16 values");
-                    }
-                    std::vector<double> v(16);
-                    for (size_t i = 0; i < 16; ++i) {
-                        v[i] = seq[i].cast<double>();
-                    }
-                    set(VtValue(_VecToMat4(v)));
-                } else if (typeName == "float[]") {
-                    py::sequence seq = value;
-                    VtFloatArray arr(seq.size());
-                    for (size_t i = 0; i < seq.size(); ++i) {
-                        arr[i] = float(seq[i].cast<double>());
-                    }
-                    set(VtValue(arr));
-                } else if (typeName == "double[]") {
-                    py::sequence seq = value;
-                    VtDoubleArray arr(seq.size());
-                    for (size_t i = 0; i < seq.size(); ++i) {
-                        arr[i] = seq[i].cast<double>();
-                    }
-                    set(VtValue(arr));
-                } else if (typeName == "int[]") {
-                    py::sequence seq = value;
-                    VtIntArray arr(seq.size());
-                    for (size_t i = 0; i < seq.size(); ++i) {
-                        arr[i] = seq[i].cast<int>();
-                    }
-                    set(VtValue(arr));
-                } else if (typeName == "point3f[]" || typeName == "vec3f[]") {
-                    py::sequence rows = value;
-                    VtArray<GfVec3f> arr(rows.size());
-                    for (size_t i = 0; i < rows.size(); ++i) {
-                        py::sequence row = rows[i];
-                        if (row.size() != 3) {
-                            throw py::type_error(
-                                "set_attr: point3f[] rows need 3 values");
-                        }
-                        arr[i] = GfVec3f(float(row[0].cast<double>()),
-                                         float(row[1].cast<double>()),
-                                         float(row[2].cast<double>()));
-                    }
-                    set(VtValue(arr));
-                } else if (typeName == "point3d[]" || typeName == "vec3d[]" ||
-                           typeName == "double3[]") {
-                    py::sequence rows = value;
-                    VtArray<GfVec3d> arr(rows.size());
-                    for (size_t i = 0; i < rows.size(); ++i) {
-                        py::sequence row = rows[i];
-                        if (row.size() != 3) {
-                            throw py::type_error(
-                                "set_attr: point3d[] rows need 3 values");
-                        }
-                        arr[i] = GfVec3d(row[0].cast<double>(),
-                                         row[1].cast<double>(),
-                                         row[2].cast<double>());
-                    }
-                    set(VtValue(arr));
-                } else {
-                    throw py::type_error("set_attr: unsupported type name: " + typeName);
+        .def("set_attribute",
+            [](RigExecHandleBase &h, const std::string &name,
+               const py::object &value) {
+                const TfToken token(name);
+                const UsdPrim prim = h.GetPrim();
+                const UsdAttribute attribute = prim.GetAttribute(token);
+                if (!attribute) {
+                    throw py::key_error(
+                        "attribute '" + name +
+                        "' is not declared by this handle's composed schema");
                 }
-            }, py::arg("name"), py::arg("type_name"), py::arg("value"),
-           "Author one attribute with an explicit Sdf type name (e.g. 'float',"
-           " 'token', 'point3f[]'). The value is converted to the exact payload"
-           " for that declared type.")
+                h.SetAttr(
+                    name.c_str(), attribute.GetTypeName().GetAsToken(),
+                    _PythonToSchemaValue(prim, token, value));
+            }, py::arg("name"), py::arg("value"),
+            "Set a declared attribute using its OpenUSD schema type."
+            " Undeclared names are rejected and never materialized.")
+        .def("set_relationship",
+            [](RigExecHandleBase &h, const std::string &name,
+               const py::iterable &targets) {
+                rigExec::RigExecSchemaPrim::Get(
+                    h.GetStage(), h.GetPath(), h.GetSchemaTypeName())
+                    .SetRelationship(
+                        TfToken(name),
+                        _PythonToDependencyPaths(targets, h.GetStage()));
+            }, py::arg("name"), py::arg("targets"),
+            "Replace targets on a declared relationship. Undeclared names "
+            "are rejected and never materialized.")
         .def("__repr__", [](const RigExecHandleBase &h) {
             return "<" + std::string(h.GetPrim().GetTypeName().GetString()) + " '" +
                    _PathStr(h.GetPath()) + "'>";
         });
+
+    py::class_<rigExec::RigExecMoverHandle, RigExecHandleBase>(m, "Mover",
+        "Common schema-backed handle for operations carrying RigExecMoverAPI.")
+        .def("set_enabled", &rigExec::RigExecMoverHandle::SetEnabled,
+             py::arg("enabled"))
+        .def("set_default_weight",
+             &rigExec::RigExecMoverHandle::SetDefaultWeight,
+             py::arg("weight"),
+             "Set the common normalized mover envelope used without a weight object.")
+        .def("set_weight_object",
+            [](rigExec::RigExecMoverHandle &h, py::object p) {
+                h.SetWeightObject(_PythonToDependencyPath(p, h.GetStage()));
+            }, py::arg("path") = py::none(),
+            "Bind a target-compatible weight object, or clear it with None.")
+        .def("set_moves",
+            [](rigExec::RigExecMoverHandle &h, const py::iterable &targets) {
+                h.SetMoves(_PythonToDependencyPaths(
+                    targets, h.GetStage()));
+            }, py::arg("targets"))
+        .def("set_read_phase",
+            [](rigExec::RigExecMoverHandle &h,
+               const std::string &propertyName, const std::string &phase) {
+                h.SetReadPhase(TfToken(propertyName), phase);
+            }, py::arg("property_name"), py::arg("phase"),
+            "Set canonical rigExecReadPhase metadata on a declared input.");
 
     // Control / joint.
     py::class_<rigExec::RigExecControlHandle, RigExecHandleBase>(m, "Control")
@@ -534,6 +923,12 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_avar_rotation", [](rigExec::RigExecControlHandle &h, double rx, double ry, double rz, std::string order) {
             h.SetAvarRotation(rx, ry, rz, TfToken(order));
         }, py::arg("rx"), py::arg("ry"), py::arg("rz"), py::arg("order") = "XYZ")
+        .def("set_avar_scale", &rigExec::RigExecControlHandle::SetAvarScale,
+             py::arg("sx"), py::arg("sy"), py::arg("sz"),
+             "Author finite local scale; magnitudes below 1e-4 keep their "
+             "sign and are raised to 1e-4.")
+        .def("set_avar_spin", &rigExec::RigExecControlHandle::SetAvarSpin,
+             py::arg("degrees"))
         .def("set_channel_role", [](rigExec::RigExecControlHandle &h, std::string role) {
             h.SetChannelRole(TfToken(role));
         }, py::arg("role"));
@@ -546,59 +941,95 @@ PYBIND11_MODULE(_rigexec, m) {
              py::arg("tx"), py::arg("ty"), py::arg("tz"))
         .def("set_avar_rotation", [](rigExec::RigExecJointHandle &h, double rx, double ry, double rz, std::string order) {
             h.SetAvarRotation(rx, ry, rz, TfToken(order));
-        }, py::arg("rx"), py::arg("ry"), py::arg("rz"), py::arg("order") = "XYZ");
+        }, py::arg("rx"), py::arg("ry"), py::arg("rz"), py::arg("order") = "XYZ")
+        .def("set_avar_scale", &rigExec::RigExecJointHandle::SetAvarScale,
+             py::arg("sx"), py::arg("sy"), py::arg("sz"),
+             "Author finite local scale; magnitudes below 1e-4 keep their "
+             "sign and are raised to 1e-4.")
+        .def("set_avar_spin", &rigExec::RigExecJointHandle::SetAvarSpin,
+             py::arg("degrees"));
 
     // Solvers.
     py::class_<rigExec::RigExecSolverHandle, RigExecHandleBase>(m, "Solver")
-        .def("set_joints", [](rigExec::RigExecSolverHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> p;
-            for (const auto &s : paths) {
-                p.push_back(_StrToPath(s));
-            }
-            h.SetJoints(p);
+        .def("set_joints", [](rigExec::RigExecSolverHandle &h,
+                              const py::iterable &joints) {
+            h.SetJoints(_PythonToDependencyPaths(
+                joints, h.GetStage(), TfToken("RigExecJoint")));
         }, py::arg("paths"));
 
     py::class_<rigExec::RigExecFkChainHandle, rigExec::RigExecSolverHandle>(m, "FkChain")
-        .def("set_controls", [](rigExec::RigExecFkChainHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> p;
-            for (const auto &s : paths) {
-                p.push_back(_StrToPath(s));
-            }
-            h.SetControls(p);
+        .def("set_controls", [](rigExec::RigExecFkChainHandle &h,
+                                const py::iterable &controls) {
+            h.SetControls(_PythonToDependencyPaths(
+                controls, h.GetStage(), TfToken("RigExecControl")));
         }, py::arg("paths"));
 
     py::class_<rigExec::RigExecTwoBoneIkHandle, rigExec::RigExecSolverHandle>(m, "TwoBoneIk")
-        .def("set_root_control", [](rigExec::RigExecTwoBoneIkHandle &h, std::string p) { h.SetRootControl(_StrToPath(p)); }, py::arg("path"))
-        .def("set_effector_control", [](rigExec::RigExecTwoBoneIkHandle &h, std::string p) { h.SetEffectorControl(_StrToPath(p)); }, py::arg("path"))
-        .def("set_pole_control", [](rigExec::RigExecTwoBoneIkHandle &h, std::string p) { h.SetPoleControl(_StrToPath(p)); }, py::arg("path"))
+        .def("set_root_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
+            h.SetRootControl(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
+        .def("set_effector_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
+            h.SetEffectorControl(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
+        .def("set_pole_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
+            h.SetPoleControl(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
+        .def("set_upper_length", &rigExec::RigExecTwoBoneIkHandle::SetUpperLength,
+             py::arg("length"))
+        .def("set_lower_length", &rigExec::RigExecTwoBoneIkHandle::SetLowerLength,
+             py::arg("length"))
+        .def("set_upper_length_offset",
+             &rigExec::RigExecTwoBoneIkHandle::SetUpperLengthOffset,
+             py::arg("offset"))
+        .def("set_lower_length_offset",
+             &rigExec::RigExecTwoBoneIkHandle::SetLowerLengthOffset,
+             py::arg("offset"))
+        .def("set_preferred_bend_radians",
+             &rigExec::RigExecTwoBoneIkHandle::SetPreferredBendRadians,
+             py::arg("radians"))
+        .def("set_stretch", &rigExec::RigExecTwoBoneIkHandle::SetStretch,
+             py::arg("stretch"))
+        .def("set_softness", &rigExec::RigExecTwoBoneIkHandle::SetSoftness,
+             py::arg("softness"))
         .def("set_stretch_policy", [](rigExec::RigExecTwoBoneIkHandle &h, std::string v) { h.SetStretchPolicy(TfToken(v)); }, py::arg("policy"))
         .def("set_unreachable_policy", [](rigExec::RigExecTwoBoneIkHandle &h, std::string v) { h.SetUnreachablePolicy(TfToken(v)); }, py::arg("policy"));
 
     py::class_<rigExec::RigExecBlendPointFramesHandle, rigExec::RigExecSolverHandle>(m, "BlendPointFrames")
-        .def("set_input_a", [](rigExec::RigExecBlendPointFramesHandle &h, std::string p) { h.SetInputA(_StrToPath(p)); }, py::arg("path"))
-        .def("set_input_b", [](rigExec::RigExecBlendPointFramesHandle &h, std::string p) { h.SetInputB(_StrToPath(p)); }, py::arg("path"))
+        .def("set_input_a", [](rigExec::RigExecBlendPointFramesHandle &h, py::object p) {
+            h.SetInputA(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
+        .def("set_input_b", [](rigExec::RigExecBlendPointFramesHandle &h, py::object p) {
+            h.SetInputB(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
         .def("set_weight", &rigExec::RigExecBlendPointFramesHandle::SetWeight, py::arg("weight"))
         .def("set_rotation_blend", [](rigExec::RigExecBlendPointFramesHandle &h, std::string v) { h.SetRotationBlend(TfToken(v)); }, py::arg("mode"))
         .def("set_scale_blend", [](rigExec::RigExecBlendPointFramesHandle &h, std::string v) { h.SetScaleBlend(TfToken(v)); }, py::arg("mode"));
 
     py::class_<rigExec::RigExecTwistDistributionHandle, rigExec::RigExecSolverHandle>(m, "TwistDistribution")
-        .def("set_start", [](rigExec::RigExecTwistDistributionHandle &h, std::string p) { h.SetStart(_StrToPath(p)); }, py::arg("path"))
-        .def("set_end", [](rigExec::RigExecTwistDistributionHandle &h, std::string p) { h.SetEnd(_StrToPath(p)); }, py::arg("path"))
+        .def("set_start", [](rigExec::RigExecTwistDistributionHandle &h, py::object p) {
+            h.SetStart(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
+        .def("set_end", [](rigExec::RigExecTwistDistributionHandle &h, py::object p) {
+            h.SetEnd(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
         .def("set_count", &rigExec::RigExecTwistDistributionHandle::SetCount, py::arg("count"))
         .def("set_weights", [](rigExec::RigExecTwistDistributionHandle &h, std::vector<float> w) { h.SetWeights(w); }, py::arg("weights"))
         .def("set_distribution", [](rigExec::RigExecTwistDistributionHandle &h, std::string v) { h.SetDistribution(TfToken(v)); }, py::arg("mode"))
         .def("set_joint_elements", [](rigExec::RigExecTwistDistributionHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
 
     py::class_<rigExec::RigExecRibbonHandle, rigExec::RigExecSolverHandle>(m, "Ribbon")
-        .def("set_driver_curve", [](rigExec::RigExecRibbonHandle &h, std::string p) { h.SetDriverCurve(_StrToPath(p)); }, py::arg("path"))
-        .def("set_start_frame", [](rigExec::RigExecRibbonHandle &h, std::string p) { h.SetStartFrame(_StrToPath(p)); }, py::arg("path"))
-        .def("set_end_frame", [](rigExec::RigExecRibbonHandle &h, std::string p) { h.SetEndFrame(_StrToPath(p)); }, py::arg("path"))
-        .def("set_twist_frames", [](rigExec::RigExecRibbonHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> p;
-            for (const auto &s : paths) {
-                p.push_back(_StrToPath(s));
-            }
-            h.SetTwistFrames(p);
+        .def("set_driver_curve", [](rigExec::RigExecRibbonHandle &h, py::object p) {
+            h.SetDriverCurve(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
+        .def("set_start_frame", [](rigExec::RigExecRibbonHandle &h, py::object p) {
+            h.SetStartFrame(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
+        .def("set_end_frame", [](rigExec::RigExecRibbonHandle &h, py::object p) {
+            h.SetEndFrame(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
+        .def("set_twist_frames", [](rigExec::RigExecRibbonHandle &h,
+                                      const py::iterable &paths) {
+            h.SetTwistFrames(_PythonToDependencyPaths(paths, h.GetStage()));
         }, py::arg("paths"))
         .def("set_sample_count", &rigExec::RigExecRibbonHandle::SetSampleCount, py::arg("count"))
         .def("set_parameterization", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetParameterization(TfToken(v)); }, py::arg("mode"))
@@ -607,48 +1038,81 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_joint_elements", [](rigExec::RigExecRibbonHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
 
     // Constraints.
-    py::class_<rigExec::RigExecConstraintHandle, RigExecHandleBase>(m, "Constraint")
-        .def("set_target", [](rigExec::RigExecConstraintHandle &h, std::string p) { h.SetTarget(_StrToPath(p)); }, py::arg("path"))
-        .def("set_default_weight", &rigExec::RigExecConstraintHandle::SetDefaultWeight, py::arg("weight"))
-        .def("set_weight_object", [](rigExec::RigExecConstraintHandle &h, std::string p) { h.SetWeightObject(_StrToPath(p)); }, py::arg("path"))
-        .def("set_translation_offset", &rigExec::RigExecConstraintHandle::SetTranslationOffset,
-             py::arg("x"), py::arg("y"), py::arg("z"))
-        .def("set_rotation_offset", &rigExec::RigExecConstraintHandle::SetRotationOffset,
-             py::arg("x"), py::arg("y"), py::arg("z"))
-        .def("set_scale_offset", &rigExec::RigExecConstraintHandle::SetScaleOffset,
-             py::arg("x"), py::arg("y"), py::arg("z"));
+    py::class_<rigExec::RigExecConstraintHandle, rigExec::RigExecMoverHandle>(m, "Constraint")
+        .def("set_target", [](rigExec::RigExecConstraintHandle &h, py::object p) {
+            h.SetTarget(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
+        .def("set_locked", &rigExec::RigExecConstraintHandle::SetLocked,
+             py::arg("locked"));
 
     py::class_<rigExec::RigExecSourceConstraintHandle, rigExec::RigExecConstraintHandle>(m, "SourceConstraint")
-        .def("set_sources", [](rigExec::RigExecSourceConstraintHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> p;
-            for (const auto &s : paths) {
-                p.push_back(_StrToPath(s));
+        .def("set_sources", [](rigExec::RigExecSourceConstraintHandle &h,
+                               const py::iterable &sources,
+                               const py::object &weights) {
+            const SdfPathVector paths =
+                _PythonToDependencyPaths(sources, h.GetStage());
+            if (weights.is_none()) {
+                h.SetSources(paths);
+            } else {
+                h.SetSources(paths, weights.cast<std::vector<float>>());
             }
-            h.SetSources(p);
-        }, py::arg("paths"))
-        .def("set_sources_weighted", [](rigExec::RigExecSourceConstraintHandle &h, std::vector<std::string> paths, std::vector<float> weights) {
-            std::vector<SdfPath> p;
-            for (const auto &s : paths) {
-                p.push_back(_StrToPath(s));
-            }
-            h.SetSources(p, weights);
-        }, py::arg("paths"), py::arg("weights"));
+        }, py::arg("paths"), py::arg("weights") = py::none(),
+           "Replace ordered sources and, optionally, their parallel weights. "
+           "Omitting weights clears any previously authored source weights.")
+        .def("set_source_weights",
+             &rigExec::RigExecSourceConstraintHandle::SetSourceWeights,
+             py::arg("weights"));
 
     py::class_<rigExec::RigExecAimConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "AimConstraint")
+        .def("set_affect_rotation", &rigExec::RigExecAimConstraintHandle::SetAffectRotation,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_rotation_offset", &rigExec::RigExecAimConstraintHandle::SetRotationOffset,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_rotation_order", [](rigExec::RigExecAimConstraintHandle &h, std::string v) {
+            h.SetRotationOrder(TfToken(v));
+        }, py::arg("order"))
         .def("set_aim_vector", &rigExec::RigExecAimConstraintHandle::SetAimVector,
              py::arg("x"), py::arg("y"), py::arg("z"))
         .def("set_up_vector", &rigExec::RigExecAimConstraintHandle::SetUpVector,
              py::arg("x"), py::arg("y"), py::arg("z"))
-        .def("set_aim_target", [](rigExec::RigExecAimConstraintHandle &h, std::string p) { h.SetAimTarget(_StrToPath(p)); }, py::arg("path"))
-        .def("set_world_up_object", [](rigExec::RigExecAimConstraintHandle &h, std::string p) { h.SetWorldUpObject(_StrToPath(p)); }, py::arg("path"))
+        .def("set_world_up_vector", &rigExec::RigExecAimConstraintHandle::SetWorldUpVector,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_aim_target", [](rigExec::RigExecAimConstraintHandle &h, py::object p) {
+            h.SetAimTarget(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
+        .def("set_world_up_object", [](rigExec::RigExecAimConstraintHandle &h, py::object p) {
+            h.SetWorldUpObject(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
         .def("set_world_up_type", [](rigExec::RigExecAimConstraintHandle &h, std::string v) { h.SetWorldUpType(TfToken(v)); }, py::arg("type"));
 
-    py::class_<rigExec::RigExecPositionConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "PositionConstraint");
-    py::class_<rigExec::RigExecRotationConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "RotationConstraint");
-    py::class_<rigExec::RigExecScaleConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "ScaleConstraint");
+    py::class_<rigExec::RigExecPositionConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "PositionConstraint")
+        .def("set_affect_translation", &rigExec::RigExecPositionConstraintHandle::SetAffectTranslation,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_translation_offset", &rigExec::RigExecPositionConstraintHandle::SetTranslationOffset,
+             py::arg("x"), py::arg("y"), py::arg("z"));
+    py::class_<rigExec::RigExecRotationConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "RotationConstraint")
+        .def("set_affect_rotation", &rigExec::RigExecRotationConstraintHandle::SetAffectRotation,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_rotation_offset", &rigExec::RigExecRotationConstraintHandle::SetRotationOffset,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_rotation_order", [](rigExec::RigExecRotationConstraintHandle &h, std::string v) {
+            h.SetRotationOrder(TfToken(v));
+        }, py::arg("order"));
+    py::class_<rigExec::RigExecScaleConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "ScaleConstraint")
+        .def("set_affect_scale", &rigExec::RigExecScaleConstraintHandle::SetAffectScale,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_scale_offset", &rigExec::RigExecScaleConstraintHandle::SetScaleOffset,
+             py::arg("x"), py::arg("y"), py::arg("z"));
     py::class_<rigExec::RigExecParentConstraintHandle, rigExec::RigExecSourceConstraintHandle>(m, "ParentConstraint")
-        // The parent constraint reads PER-SOURCE offset arrays (double3[],
-        // parallel to set_sources); the inherited scalar setters do not apply.
+        .def("set_affect_translation", &rigExec::RigExecParentConstraintHandle::SetAffectTranslation,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_affect_rotation", &rigExec::RigExecParentConstraintHandle::SetAffectRotation,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_affect_scale", &rigExec::RigExecParentConstraintHandle::SetAffectScale,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_rotation_order", [](rigExec::RigExecParentConstraintHandle &h, std::string v) {
+            h.SetRotationOrder(TfToken(v));
+        }, py::arg("order"))
         .def("set_translation_offsets",
              [](rigExec::RigExecParentConstraintHandle &h,
                 std::vector<std::array<double, 3>> v) {
@@ -669,37 +1133,53 @@ PYBIND11_MODULE(_rigexec, m) {
              }, py::arg("degrees"));
 
     py::class_<rigExec::RigExecSingleChainIkConstraintHandle, rigExec::RigExecConstraintHandle>(m, "SingleChainIkConstraint")
-        .def("set_first_joint", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::string p) { h.SetFirstJoint(_StrToPath(p)); }, py::arg("path"))
-        .def("set_end_joint", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::string p) { h.SetEndJoint(_StrToPath(p)); }, py::arg("path"))
-        .def("set_effector", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::string p) { h.SetEffector(_StrToPath(p)); }, py::arg("path"))
-        .def("set_moves", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> out;
-            for (const auto &p : paths) { out.push_back(_StrToPath(p)); }
-            h.SetMoves(out);
+        .def("set_first_joint", [](rigExec::RigExecSingleChainIkConstraintHandle &h, py::object p) {
+            h.SetFirstJoint(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecJoint"), false));
+        }, py::arg("path"))
+        .def("set_end_joint", [](rigExec::RigExecSingleChainIkConstraintHandle &h, py::object p) {
+            h.SetEndJoint(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecJoint"), false));
+        }, py::arg("path"))
+        .def("set_effector", [](rigExec::RigExecSingleChainIkConstraintHandle &h, py::object p) {
+            h.SetEffector(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
+        .def("set_moves", [](rigExec::RigExecSingleChainIkConstraintHandle &h,
+                              const py::iterable &paths) {
+            h.SetMoves(_PythonToDependencyPaths(
+                paths, h.GetStage(), TfToken("RigExecJoint")));
         }, py::arg("paths"))
-        .def("set_pole_vector_objects", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> p;
-            for (const auto &s : paths) {
-                p.push_back(_StrToPath(s));
-            }
-            h.SetPoleVectorObjects(p);
+        .def("set_pole_vector_objects", [](rigExec::RigExecSingleChainIkConstraintHandle &h,
+                                            const py::iterable &paths) {
+            h.SetPoleVectorObjects(_PythonToDependencyPaths(paths, h.GetStage()));
         }, py::arg("paths"))
+        .def("set_pole_vector_weights", &rigExec::RigExecSingleChainIkConstraintHandle::SetPoleVectorWeights,
+             py::arg("weights"))
+        .def("set_pole_vector", &rigExec::RigExecSingleChainIkConstraintHandle::SetPoleVector,
+             py::arg("x"), py::arg("y"), py::arg("z"))
+        .def("set_twist_degrees", &rigExec::RigExecSingleChainIkConstraintHandle::SetTwistDegrees,
+             py::arg("degrees"))
         .def("set_solver_mode", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::string v) { h.SetSolverMode(TfToken(v)); }, py::arg("mode"))
-        .def("set_pole_vector_mode", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::string v) { h.SetPoleVectorMode(TfToken(v)); }, py::arg("mode"));
+        .def("set_pole_vector_mode", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::string v) { h.SetPoleVectorMode(TfToken(v)); }, py::arg("mode"))
+        .def("set_evaluation_mode", [](rigExec::RigExecSingleChainIkConstraintHandle &h, std::string v) { h.SetEvaluationMode(TfToken(v)); }, py::arg("mode"));
 
     // Weight objects.
     py::class_<rigExec::RigExecWeightHandle, RigExecHandleBase>(m, "Weight")
-        .def("set_target", [](rigExec::RigExecWeightHandle &h, std::string p) { h.SetTarget(_StrToPath(p)); }, py::arg("path"))
+        .def("set_target", [](rigExec::RigExecWeightHandle &h, py::object p) {
+            h.SetTarget(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
         .def("set_representation", [](rigExec::RigExecWeightHandle &h, std::string v) { h.SetRepresentation(TfToken(v)); }, py::arg("rep"))
         .def("set_range_policy", [](rigExec::RigExecWeightHandle &h, std::string v) { h.SetRangePolicy(TfToken(v)); }, py::arg("policy"));
 
     py::class_<rigExec::RigExecStaticWeightHandle, rigExec::RigExecWeightHandle>(m, "StaticWeight")
         .def("set_values", [](rigExec::RigExecStaticWeightHandle &h, std::vector<float> v) { h.SetValues(v); }, py::arg("values"))
         .def("set_indices", [](rigExec::RigExecStaticWeightHandle &h, std::vector<int> i) { h.SetIndices(i); }, py::arg("indices"))
+        .def("set_sparse_values", &rigExec::RigExecStaticWeightHandle::SetSparseValues,
+             py::arg("values"), py::arg("indices"))
         .def("set_default_weight", &rigExec::RigExecStaticWeightHandle::SetDefaultWeight, py::arg("weight"));
 
     py::class_<rigExec::RigExecDynamicWeightHandle, rigExec::RigExecWeightHandle>(m, "DynamicWeight")
-        .def("set_base_weight", [](rigExec::RigExecDynamicWeightHandle &h, std::string p) { h.SetBaseWeight(_StrToPath(p)); }, py::arg("path"))
+        .def("set_base_weight", [](rigExec::RigExecDynamicWeightHandle &h, py::object p) {
+            h.SetBaseWeight(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"))
         .def("set_driver", &rigExec::RigExecDynamicWeightHandle::SetDriver, py::arg("driver"))
         .def("set_scale", &rigExec::RigExecDynamicWeightHandle::SetScale, py::arg("scale"))
         .def("set_bias", &rigExec::RigExecDynamicWeightHandle::SetBias, py::arg("bias"));
@@ -711,6 +1191,8 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_avar_rotation", [](rigExec::RigExecVolumeWeightHandle &h, double rx, double ry, double rz, std::string order) {
             h.SetAvarRotation(rx, ry, rz, TfToken(order));
         }, py::arg("rx"), py::arg("ry"), py::arg("rz"), py::arg("order") = "XYZ")
+        .def("set_avar_spin", &rigExec::RigExecVolumeWeightHandle::SetAvarSpin,
+             py::arg("degrees"))
         .def("set_falloff", &rigExec::RigExecVolumeWeightHandle::SetFalloff,
              py::arg("falloff_min"), py::arg("falloff_max"))
         .def("set_invert", &rigExec::RigExecVolumeWeightHandle::SetInvert, py::arg("invert"))
@@ -720,7 +1202,9 @@ PYBIND11_MODULE(_rigexec, m) {
             h.SetFalloffCurve(knots);
         }, py::arg("knots"), "A list of (x, y) pairs over x in [0, 1].")
         .def("set_sample_phase", [](rigExec::RigExecVolumeWeightHandle &h, std::string v) { h.SetSamplePhase(TfToken(v)); }, py::arg("phase"))
-        .def("set_sample_source", [](rigExec::RigExecVolumeWeightHandle &h, std::string p) { h.SetSampleSource(_StrToPath(p)); }, py::arg("path"));
+        .def("set_sample_source", [](rigExec::RigExecVolumeWeightHandle &h, py::object p) {
+            h.SetSampleSource(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"));
 
     py::class_<rigExec::RigExecSphereWeightHandle, rigExec::RigExecVolumeWeightHandle>(m, "SphereWeight")
         .def("set_scales", &rigExec::RigExecSphereWeightHandle::SetScales,
@@ -733,17 +1217,16 @@ PYBIND11_MODULE(_rigexec, m) {
              py::arg("extent_u"), py::arg("extent_v"));
 
     py::class_<rigExec::RigExecCurveWeightHandle, rigExec::RigExecVolumeWeightHandle>(m, "CurveWeight")
-        .def("set_curve", [](rigExec::RigExecCurveWeightHandle &h, std::string p) { h.SetCurve(_StrToPath(p)); }, py::arg("path"))
+        .def("set_curve", [](rigExec::RigExecCurveWeightHandle &h, py::object p) {
+            h.SetCurve(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
         .def("set_scales", &rigExec::RigExecCurveWeightHandle::SetScales,
              py::arg("sx"), py::arg("sy"), py::arg("sz"));
 
     py::class_<rigExec::RigExecCombineWeightHandle, rigExec::RigExecWeightHandle>(m, "CombineWeight")
-        .def("set_input_weights", [](rigExec::RigExecCombineWeightHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> p;
-            for (const auto &s : paths) {
-                p.push_back(_StrToPath(s));
-            }
-            h.SetInputWeights(p);
+        .def("set_input_weights", [](rigExec::RigExecCombineWeightHandle &h,
+                                      const py::iterable &paths) {
+            h.SetInputWeights(_PythonToDependencyPaths(paths, h.GetStage()));
         }, py::arg("paths"))
         .def("set_combine_mode", [](rigExec::RigExecCombineWeightHandle &h, std::string v) { h.SetCombineMode(TfToken(v)); }, py::arg("mode"))
         .def("set_strength", &rigExec::RigExecCombineWeightHandle::SetStrength, py::arg("strength"))
@@ -752,7 +1235,9 @@ PYBIND11_MODULE(_rigexec, m) {
     // Blend inputs / samples.
     py::class_<rigExec::RigExecBlendSampleHandle, RigExecHandleBase>(m, "BlendSample")
         .def("set_activation", &rigExec::RigExecBlendSampleHandle::SetActivation, py::arg("activation"))
-        .def("set_target_points", [](rigExec::RigExecBlendSampleHandle &h, std::string p) { h.SetTargetPoints(_StrToPath(p)); }, py::arg("path"))
+        .def("set_target_points", [](rigExec::RigExecBlendSampleHandle &h, py::object p) {
+            h.SetTargetPoints(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
+        }, py::arg("path"))
         .def("set_read_phase", [](rigExec::RigExecBlendSampleHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
     py::class_<rigExec::RigExecBlendInputHandle, RigExecHandleBase>(m, "BlendInput")
@@ -776,60 +1261,95 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_samples_per_spline", &rigExec::RigExecCurvenetHandle::SetSamplesPerSpline, py::arg("count"));
 
     // Mover handles.
-    py::class_<rigExec::RigExecMatrixMoverHandle, RigExecHandleBase>(m, "MatrixMover")
-        .def("set_transform_provider", [](rigExec::RigExecMatrixMoverHandle &h, std::string p) { h.SetTransformProvider(_StrToPath(p)); }, py::arg("path"))
-        .def("set_weight_object", [](rigExec::RigExecMatrixMoverHandle &h, std::string p) { h.SetWeightObject(_StrToPath(p)); }, py::arg("path"))
-        .def("set_read_phase", [](rigExec::RigExecMatrixMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
+    py::class_<rigExec::RigExecMatrixMoverHandle, rigExec::RigExecMoverHandle>(m, "MatrixMover")
+        .def("set_transform_provider", [](rigExec::RigExecMatrixMoverHandle &h, py::object p) { h.SetTransformProvider(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
+        .def("set_read_phase", [](rigExec::RigExecMatrixMoverHandle &h,
+                                    std::string phase) {
+            h.SetReadPhase(TfToken(phase));
+        }, py::arg("phase"), "Legacy transform read-phase attribute setter.")
+        .def("set_read_phase", [](rigExec::RigExecMatrixMoverHandle &h,
+                                    std::string property, std::string phase) {
+            h.RigExecMoverHandle::SetReadPhase(
+                TfToken(property), phase);
+        }, py::arg("property_name"), py::arg("phase"))
+        .def("set_transform_read_phase", [](rigExec::RigExecMatrixMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
-    py::class_<rigExec::RigExecLatticeMoverHandle, RigExecHandleBase>(m, "LatticeMover")
-        .def("set_cage", [](rigExec::RigExecLatticeMoverHandle &h, std::string p) { h.SetCage(_StrToPath(p)); }, py::arg("path"))
+    py::class_<rigExec::RigExecLatticeMoverHandle, rigExec::RigExecMoverHandle>(m, "LatticeMover")
+        .def("set_cage", [](rigExec::RigExecLatticeMoverHandle &h, py::object p) { h.SetCage(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
         .def("set_basis", [](rigExec::RigExecLatticeMoverHandle &h, std::string v) { h.SetBasis(TfToken(v)); }, py::arg("basis"))
         .def("set_divisions", &rigExec::RigExecLatticeMoverHandle::SetDivisions,
              py::arg("x"), py::arg("y"), py::arg("z"))
-        .def("set_read_phase", [](rigExec::RigExecLatticeMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
+        .def("set_read_phase", [](rigExec::RigExecLatticeMoverHandle &h,
+                                    std::string phase) {
+            h.SetReadPhase(TfToken(phase));
+        }, py::arg("phase"), "Legacy cage read-phase attribute setter.")
+        .def("set_read_phase", [](rigExec::RigExecLatticeMoverHandle &h,
+                                    std::string property, std::string phase) {
+            h.RigExecMoverHandle::SetReadPhase(
+                TfToken(property), phase);
+        }, py::arg("property_name"), py::arg("phase"))
+        .def("set_cage_read_phase", [](rigExec::RigExecLatticeMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
-    py::class_<rigExec::RigExecBlendShapeMoverHandle, RigExecHandleBase>(m, "BlendShapeMover")
+    py::class_<rigExec::RigExecBlendShapeMoverHandle, rigExec::RigExecMoverHandle>(m, "BlendShapeMover")
         .def("add_blend_input", [](rigExec::RigExecBlendShapeMoverHandle &h, std::string name, float weight) {
             return h.AddBlendInput(name, weight);
         }, py::arg("name"), py::arg("weight") = 0.0f)
-        .def("set_weight_object", [](rigExec::RigExecBlendShapeMoverHandle &h, std::string p) { h.SetWeightObject(_StrToPath(p)); }, py::arg("path"));
+        .def("set_blend_inputs", [](rigExec::RigExecBlendShapeMoverHandle &h,
+                                     const py::iterable &inputs) {
+            h.SetBlendInputs(_PythonToDependencyPaths(
+                inputs, h.GetStage(), TfToken("RigExecBlendInput")));
+        }, py::arg("inputs"));
 
-    py::class_<rigExec::RigExecCurveMoverHandle, RigExecHandleBase>(m, "CurveMover")
-        .def("set_driver_curve", [](rigExec::RigExecCurveMoverHandle &h, std::string p) { h.SetDriverCurve(_StrToPath(p)); }, py::arg("path"))
-        .def("set_driver_frames", [](rigExec::RigExecCurveMoverHandle &h, std::vector<std::string> paths) {
-            std::vector<SdfPath> ps;
-            ps.reserve(paths.size());
-            for (const auto &p : paths) {
-                ps.push_back(_StrToPath(p));
-            }
-            h.SetDriverFrames(ps);
+    py::class_<rigExec::RigExecCurveMoverHandle, rigExec::RigExecMoverHandle>(m, "CurveMover")
+        .def("set_driver_curve", [](rigExec::RigExecCurveMoverHandle &h, py::object p) { h.SetDriverCurve(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
+        .def("set_driver_frames", [](rigExec::RigExecCurveMoverHandle &h,
+                                      const py::iterable &paths) {
+            h.SetDriverFrames(_PythonToDependencyPaths(paths, h.GetStage()));
         }, py::arg("paths"))
-        .def("set_bind_coordinates", [](rigExec::RigExecCurveMoverHandle &h, std::string p) { h.SetBindCoordinates(_StrToPath(p)); }, py::arg("path"))
+        .def("set_bind_coordinates", [](rigExec::RigExecCurveMoverHandle &h, py::object p) { h.SetBindCoordinates(_PythonToDependencyPath(p, h.GetStage())); }, py::arg("path"))
         .def("set_mode", [](rigExec::RigExecCurveMoverHandle &h, std::string v) { h.SetMode(TfToken(v)); }, py::arg("mode"))
-        .def("set_read_phase", [](rigExec::RigExecCurveMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
+        .def("set_read_phase", [](rigExec::RigExecCurveMoverHandle &h,
+                                    std::string phase) {
+            h.SetReadPhase(TfToken(phase));
+        }, py::arg("phase"), "Legacy driver-curve read-phase attribute setter.")
+        .def("set_read_phase", [](rigExec::RigExecCurveMoverHandle &h,
+                                    std::string property, std::string phase) {
+            h.RigExecMoverHandle::SetReadPhase(
+                TfToken(property), phase);
+        }, py::arg("property_name"), py::arg("phase"))
+        .def("set_driver_curve_read_phase", [](rigExec::RigExecCurveMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
-    py::class_<rigExec::RigExecSurfaceMoverHandle, RigExecHandleBase>(m, "SurfaceMover")
-        .def("set_surface", [](rigExec::RigExecSurfaceMoverHandle &h, std::string p) { h.SetSurface(_StrToPath(p)); }, py::arg("path"))
+    py::class_<rigExec::RigExecSurfaceMoverHandle, rigExec::RigExecMoverHandle>(m, "SurfaceMover")
+        .def("set_surface", [](rigExec::RigExecSurfaceMoverHandle &h, py::object p) { h.SetSurface(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
         .def("set_mode", [](rigExec::RigExecSurfaceMoverHandle &h, std::string v) { h.SetMode(TfToken(v)); }, py::arg("mode"))
-        .def("set_read_phase", [](rigExec::RigExecSurfaceMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
+        .def("set_read_phase", [](rigExec::RigExecSurfaceMoverHandle &h,
+                                    std::string phase) {
+            h.SetReadPhase(TfToken(phase));
+        }, py::arg("phase"), "Legacy surface read-phase attribute setter.")
+        .def("set_read_phase", [](rigExec::RigExecSurfaceMoverHandle &h,
+                                    std::string property, std::string phase) {
+            h.RigExecMoverHandle::SetReadPhase(
+                TfToken(property), phase);
+        }, py::arg("property_name"), py::arg("phase"))
+        .def("set_surface_read_phase", [](rigExec::RigExecSurfaceMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
-    py::class_<rigExec::RigExecSmoothMoverHandle, RigExecHandleBase>(m, "SmoothMover")
+    py::class_<rigExec::RigExecSmoothMoverHandle, rigExec::RigExecMoverHandle>(m, "SmoothMover")
         .def("set_strength", &rigExec::RigExecSmoothMoverHandle::SetStrength, py::arg("strength"));
 
-    py::class_<rigExec::RigExecVolumeCorrectMoverHandle, RigExecHandleBase>(m, "VolumeCorrectMover")
+    py::class_<rigExec::RigExecVolumeCorrectMoverHandle, rigExec::RigExecMoverHandle>(m, "VolumeCorrectMover")
         .def("set_strength", &rigExec::RigExecVolumeCorrectMoverHandle::SetStrength, py::arg("strength"));
 
-    py::class_<rigExec::RigExecCurvenetMoverHandle, RigExecHandleBase>(m, "CurvenetMover")
-        .def("set_curvenet", [](rigExec::RigExecCurvenetMoverHandle &h, std::string p) { h.SetCurvenet(_StrToPath(p)); }, py::arg("path"))
+    py::class_<rigExec::RigExecCurvenetMoverHandle, rigExec::RigExecMoverHandle>(m, "CurvenetMover")
+        .def("set_curvenet", [](rigExec::RigExecCurvenetMoverHandle &h, py::object p) { h.SetCurvenet(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecCurvenet"), false)); }, py::arg("path"))
         .def("set_strength", &rigExec::RigExecCurvenetMoverHandle::SetStrength, py::arg("strength"));
 
-    py::class_<rigExec::RigExecFloatMathMoverHandle, RigExecHandleBase>(m, "FloatMathMover")
+    py::class_<rigExec::RigExecFloatMathMoverHandle, rigExec::RigExecMoverHandle>(m, "FloatMathMover")
         .def("set_operation", [](rigExec::RigExecFloatMathMoverHandle &h, std::string v) { h.SetOperation(TfToken(v)); }, py::arg("op"))
         .def("set_value", &rigExec::RigExecFloatMathMoverHandle::SetValue, py::arg("value"))
         .def("set_bounds", &rigExec::RigExecFloatMathMoverHandle::SetBounds, py::arg("min"), py::arg("max"))
         .def("set_weight", &rigExec::RigExecFloatMathMoverHandle::SetWeight, py::arg("weight"));
 
-    py::class_<rigExec::RigExecVec3fMathMoverHandle, RigExecHandleBase>(m, "Vec3fMathMover")
+    py::class_<rigExec::RigExecVec3fMathMoverHandle, rigExec::RigExecMoverHandle>(m, "Vec3fMathMover")
         .def("set_operation", [](rigExec::RigExecVec3fMathMoverHandle &h, std::string v) { h.SetOperation(TfToken(v)); }, py::arg("op"))
         .def("set_value", [](rigExec::RigExecVec3fMathMoverHandle &h, std::array<double, 3> v) {
             h.SetValue(GfVec3f(float(v[0]), float(v[1]), float(v[2])));
@@ -840,7 +1360,7 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("min"), py::arg("max"))
         .def("set_weight", &rigExec::RigExecVec3fMathMoverHandle::SetWeight, py::arg("weight"));
 
-    py::class_<rigExec::RigExecMatrixMathMoverHandle, RigExecHandleBase>(m, "MatrixMathMover")
+    py::class_<rigExec::RigExecMatrixMathMoverHandle, rigExec::RigExecMoverHandle>(m, "MatrixMathMover")
         .def("set_operation", [](rigExec::RigExecMatrixMathMoverHandle &h, std::string v) { h.SetOperation(TfToken(v)); }, py::arg("op"))
         .def("set_value", [](rigExec::RigExecMatrixMathMoverHandle &h, std::vector<double> m) {
             h.SetValue(_VecToMat4(m));
@@ -851,73 +1371,225 @@ PYBIND11_MODULE(_rigexec, m) {
     py::class_<rigExec::RigExecMoverChain>(m, "MoverChain",
         "One mover chain: operations added here apply in REVERSE add order\n(last added runs first); add outermost passes first.")
         .def_property_readonly("scope_path", [](const rigExec::RigExecMoverChain &c) { return _PathStr(c.GetScopePath()); })
-        .def("add_matrix_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string transformProvider, std::string weightObject, std::string target, std::string readPhase) {
-            return c.AddMatrixMover(name, _StrToPath(transformProvider), _StrToPath(weightObject), _StrToPath(target), TfToken(readPhase));
-        }, py::arg("name"), py::arg("transform_provider"), py::arg("weight_object"),
-           py::arg("target") = "", py::arg("read_phase") = "base")
-        .def("add_lattice_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string cagePrim, int dx, int dy, int dz, std::string basis, std::string target, std::string readPhase) {
-            return c.AddLatticeMover(name, _StrToPath(cagePrim), dx, dy, dz, TfToken(basis), _StrToPath(target), TfToken(readPhase));
+        .def("add_matrix_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                     py::object transformProvider,
+                                     py::object weightObject, py::object target,
+                                     std::string readPhase) {
+            return c.AddMatrixMover(
+                name,
+                _PythonToDependencyPath(transformProvider, c.GetStage(), TfToken(), false),
+                _PythonToDependencyPath(weightObject, c.GetStage()),
+                _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
+        }, py::arg("name"), py::arg("transform_provider"),
+           py::arg("weight_object") = py::none(),
+           py::arg("target") = py::none(), py::arg("read_phase") = "base")
+        .def("add_lattice_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                      py::object cagePrim, int dx, int dy, int dz,
+                                      std::string basis, py::object target,
+                                      std::string readPhase) {
+            return c.AddLatticeMover(
+                name, _PythonToDependencyPath(cagePrim, c.GetStage(), TfToken(), false),
+                dx, dy, dz, TfToken(basis),
+                _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
         }, py::arg("name"), py::arg("cage_prim"), py::arg("div_x"), py::arg("div_y"), py::arg("div_z"),
-           py::arg("basis") = "bspline", py::arg("target") = "", py::arg("read_phase") = "base")
-        .def("add_blend_shape_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string weightObject, std::string target) {
-            return c.AddBlendShapeMover(name, _StrToPath(weightObject), _StrToPath(target));
-        }, py::arg("name"), py::arg("weight_object") = "", py::arg("target") = "")
-        .def("add_curve_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string driverCurve, std::string driverFrames, std::string bindCoordinates, std::string mode, std::string target, std::string readPhase) {
-            return c.AddCurveMover(name, _StrToPath(driverCurve), _StrToPath(driverFrames), _StrToPath(bindCoordinates), TfToken(mode), _StrToPath(target), TfToken(readPhase));
-        }, py::arg("name"), py::arg("driver_curve"), py::arg("driver_frames") = "",
-           py::arg("bind_coordinates") = "", py::arg("mode") = "ribbon",
-           py::arg("target") = "", py::arg("read_phase") = "base")
-        .def("add_surface_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string surfacePrim, std::string mode, std::string target, std::string readPhase) {
-            return c.AddSurfaceMover(name, _StrToPath(surfacePrim), TfToken(mode), _StrToPath(target), TfToken(readPhase));
+           py::arg("basis") = "bspline", py::arg("target") = py::none(), py::arg("read_phase") = "base")
+        .def("add_blend_shape_mover", [](rigExec::RigExecMoverChain &c,
+                                          std::string name, py::object weightObject,
+                                          py::object target) {
+            return c.AddBlendShapeMover(
+                name, _PythonToDependencyPath(weightObject, c.GetStage()),
+                _PythonToDependencyPath(target, c.GetStage()));
+        }, py::arg("name"), py::arg("weight_object") = py::none(),
+           py::arg("target") = py::none())
+        .def("add_curve_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                    py::object driverCurve,
+                                    const py::object &driverFrames,
+                                    py::object bindCoordinates, std::string mode,
+                                    py::object target, std::string readPhase) {
+            SdfPathVector frames;
+            if (!driverFrames.is_none()) {
+                const bool isSinglePath =
+                    py::isinstance<py::str>(driverFrames) ||
+                    py::hasattr(driverFrames, "pathString") ||
+                    py::hasattr(driverFrames, "path") ||
+                    py::hasattr(driverFrames, "GetPath");
+                if (isSinglePath) {
+                    frames.push_back(_PythonToDependencyPath(
+                        driverFrames, c.GetStage(), TfToken(), false));
+                } else {
+                    frames = _PythonToDependencyPaths(
+                        driverFrames.cast<py::iterable>(), c.GetStage());
+                }
+            }
+            return c.AddCurveMover(
+                name, _PythonToDependencyPath(driverCurve, c.GetStage(), TfToken(), false),
+                frames,
+                _PythonToDependencyPath(bindCoordinates, c.GetStage()), TfToken(mode),
+                _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
+        }, py::arg("name"), py::arg("driver_curve"),
+           py::arg("driver_frames") = py::none(),
+           py::arg("bind_coordinates") = py::none(), py::arg("mode") = "ribbon",
+           py::arg("target") = py::none(), py::arg("read_phase") = "base")
+        .def("add_surface_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                      py::object surfacePrim, std::string mode,
+                                      py::object target, std::string readPhase) {
+            return c.AddSurfaceMover(
+                name, _PythonToDependencyPath(surfacePrim, c.GetStage(), TfToken(), false),
+                TfToken(mode), _PythonToDependencyPath(target, c.GetStage()),
+                TfToken(readPhase));
         }, py::arg("name"), py::arg("surface_prim"), py::arg("mode") = "attach",
-           py::arg("target") = "", py::arg("read_phase") = "base")
-        .def("add_smooth_mover", [](rigExec::RigExecMoverChain &c, std::string name, float strength, std::string target) {
-            return c.AddSmoothMover(name, strength, _StrToPath(target));
-        }, py::arg("name"), py::arg("strength"), py::arg("target") = "")
-        .def("add_volume_correct_mover", [](rigExec::RigExecMoverChain &c, std::string name, float strength, std::string target) {
-            return c.AddVolumeCorrectMover(name, strength, _StrToPath(target));
-        }, py::arg("name"), py::arg("strength"), py::arg("target") = "")
-        .def("add_curvenet_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string curvenetPrim, float strength, std::string target) {
-            return c.AddCurvenetMover(name, _StrToPath(curvenetPrim), strength, _StrToPath(target));
-        }, py::arg("name"), py::arg("curvenet_prim"), py::arg("strength"), py::arg("target") = "")
-        .def("add_float_math_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string operation, float value, std::string target, float weight) {
-            return c.AddFloatMathMover(name, TfToken(operation), value, _StrToPath(target), weight);
-        }, py::arg("name"), py::arg("operation"), py::arg("value"), py::arg("target") = "", py::arg("weight") = 1.0f)
-        .def("add_vec3f_math_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string operation, std::array<double, 3> value, std::string target, float weight) {
-            return c.AddVec3fMathMover(name, TfToken(operation), GfVec3f(float(value[0]), float(value[1]), float(value[2])), _StrToPath(target), weight);
-        }, py::arg("name"), py::arg("operation"), py::arg("value"), py::arg("target") = "", py::arg("weight") = 1.0f)
-        .def("add_matrix_math_mover", [](rigExec::RigExecMoverChain &c, std::string name, std::string operation, std::vector<double> value, std::string target, float weight) {
-            return c.AddMatrixMathMover(name, TfToken(operation), _VecToMat4(value), _StrToPath(target), weight);
-        }, py::arg("name"), py::arg("operation"), py::arg("matrix"), py::arg("target") = "", py::arg("weight") = 1.0f)
-        .def("add_aim_constraint", [](rigExec::RigExecMoverChain &c, std::string name, std::string target) {
-            return c.AddAimConstraint(name, _StrToPath(target));
-        }, py::arg("name"), py::arg("target") = "")
-        .def("add_position_constraint", [](rigExec::RigExecMoverChain &c, std::string name, std::string target) {
-            return c.AddPositionConstraint(name, _StrToPath(target));
-        }, py::arg("name"), py::arg("target") = "")
-        .def("add_rotation_constraint", [](rigExec::RigExecMoverChain &c, std::string name, std::string target) {
-            return c.AddRotationConstraint(name, _StrToPath(target));
-        }, py::arg("name"), py::arg("target") = "")
-        .def("add_scale_constraint", [](rigExec::RigExecMoverChain &c, std::string name, std::string target) {
-            return c.AddScaleConstraint(name, _StrToPath(target));
-        }, py::arg("name"), py::arg("target") = "")
-        .def("add_parent_constraint", [](rigExec::RigExecMoverChain &c, std::string name, std::string target) {
-            return c.AddParentConstraint(name, _StrToPath(target));
-        }, py::arg("name"), py::arg("target") = "")
-        .def("add_single_chain_ik_constraint", [](rigExec::RigExecMoverChain &c, std::string name, std::string target) {
-            return c.AddSingleChainIkConstraint(name, _StrToPath(target));
-        }, py::arg("name"), py::arg("target") = "");
+           py::arg("target") = py::none(), py::arg("read_phase") = "base")
+        .def("add_smooth_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                     float defaultWeight, py::object target) {
+            return c.AddSmoothMover(name, defaultWeight,
+                                    _PythonToDependencyPath(target, c.GetStage()));
+        }, py::arg("name"), py::arg("default_weight") = 1.0f,
+           py::arg("target") = py::none())
+        .def("add_volume_correct_mover", [](rigExec::RigExecMoverChain &c,
+                                             std::string name, float defaultWeight,
+                                             py::object target) {
+            return c.AddVolumeCorrectMover(
+                name, defaultWeight,
+                _PythonToDependencyPath(target, c.GetStage()));
+        }, py::arg("name"), py::arg("default_weight") = 1.0f,
+           py::arg("target") = py::none())
+        .def("add_curvenet_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                       py::object curvenetPrim, float defaultWeight,
+                                       py::object target) {
+            return c.AddCurvenetMover(
+                name, _PythonToDependencyPath(curvenetPrim, c.GetStage(), TfToken("RigExecCurvenet"), false),
+                defaultWeight, _PythonToDependencyPath(target, c.GetStage()));
+        }, py::arg("name"), py::arg("curvenet_prim"),
+           py::arg("default_weight") = 1.0f,
+           py::arg("target") = py::none())
+        .def("add_float_math_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                         std::string operation, float value,
+                                         py::object target, float defaultWeight) {
+            return c.AddFloatMathMover(
+                name, TfToken(operation), value,
+                _PythonToDependencyPath(target, c.GetStage()), defaultWeight);
+        }, py::arg("name"), py::arg("operation"), py::arg("value"),
+           py::arg("target") = py::none(), py::arg("default_weight") = 1.0f)
+        .def("add_vec3f_math_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                         std::string operation,
+                                         std::array<double, 3> value,
+                                         py::object target, float defaultWeight) {
+            return c.AddVec3fMathMover(
+                name, TfToken(operation),
+                GfVec3f(float(value[0]), float(value[1]), float(value[2])),
+                _PythonToDependencyPath(target, c.GetStage()), defaultWeight);
+        }, py::arg("name"), py::arg("operation"), py::arg("value"),
+           py::arg("target") = py::none(), py::arg("default_weight") = 1.0f)
+        .def("add_matrix_math_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                          std::string operation,
+                                          std::vector<double> value,
+                                          py::object target, float defaultWeight) {
+            return c.AddMatrixMathMover(
+                name, TfToken(operation), _VecToMat4(value),
+                _PythonToDependencyPath(target, c.GetStage()), defaultWeight);
+        }, py::arg("name"), py::arg("operation"), py::arg("matrix"),
+           py::arg("target") = py::none(), py::arg("default_weight") = 1.0f)
+        .def("add_aim_constraint", [](rigExec::RigExecMoverChain &c, std::string name,
+                                       py::object target, const py::iterable &sources,
+                                       std::vector<float> weights) {
+            const SdfPath t = _PythonToDependencyPath(target, c.GetStage());
+            const SdfPathVector s = _PythonToDependencyPaths(sources, c.GetStage());
+            if (!weights.empty() && weights.size() != s.size()) throw py::value_error("weights must match sources");
+            auto h = c.AddAimConstraint(name, t);
+            if (!s.empty()) h.SetSources(s, weights);
+            return h;
+        }, py::arg("name"), py::arg("target") = py::none(),
+           py::arg("sources") = py::tuple(), py::arg("weights") = py::list())
+        .def("add_position_constraint", [](rigExec::RigExecMoverChain &c, std::string name,
+                                            py::object target, const py::iterable &sources,
+                                            std::vector<float> weights) {
+            const SdfPath t = _PythonToDependencyPath(target, c.GetStage());
+            const SdfPathVector s = _PythonToDependencyPaths(sources, c.GetStage());
+            if (!weights.empty() && weights.size() != s.size()) throw py::value_error("weights must match sources");
+            auto h = c.AddPositionConstraint(name, t);
+            if (!s.empty()) h.SetSources(s, weights);
+            return h;
+        }, py::arg("name"), py::arg("target") = py::none(),
+           py::arg("sources") = py::tuple(), py::arg("weights") = py::list())
+        .def("add_rotation_constraint", [](rigExec::RigExecMoverChain &c, std::string name,
+                                            py::object target, const py::iterable &sources,
+                                            std::vector<float> weights) {
+            const SdfPath t = _PythonToDependencyPath(target, c.GetStage());
+            const SdfPathVector s = _PythonToDependencyPaths(sources, c.GetStage());
+            if (!weights.empty() && weights.size() != s.size()) throw py::value_error("weights must match sources");
+            auto h = c.AddRotationConstraint(name, t);
+            if (!s.empty()) h.SetSources(s, weights);
+            return h;
+        }, py::arg("name"), py::arg("target") = py::none(),
+           py::arg("sources") = py::tuple(), py::arg("weights") = py::list())
+        .def("add_scale_constraint", [](rigExec::RigExecMoverChain &c, std::string name,
+                                         py::object target, const py::iterable &sources,
+                                         std::vector<float> weights) {
+            const SdfPath t = _PythonToDependencyPath(target, c.GetStage());
+            const SdfPathVector s = _PythonToDependencyPaths(sources, c.GetStage());
+            if (!weights.empty() && weights.size() != s.size()) throw py::value_error("weights must match sources");
+            auto h = c.AddScaleConstraint(name, t);
+            if (!s.empty()) h.SetSources(s, weights);
+            return h;
+        }, py::arg("name"), py::arg("target") = py::none(),
+           py::arg("sources") = py::tuple(), py::arg("weights") = py::list())
+        .def("add_parent_constraint", [](rigExec::RigExecMoverChain &c, std::string name,
+                                          py::object target, const py::iterable &sources,
+                                          std::vector<float> weights) {
+            const SdfPath t = _PythonToDependencyPath(target, c.GetStage());
+            const SdfPathVector s = _PythonToDependencyPaths(sources, c.GetStage());
+            if (!weights.empty() && weights.size() != s.size()) throw py::value_error("weights must match sources");
+            auto h = c.AddParentConstraint(name, t);
+            if (!s.empty()) h.SetSources(s, weights);
+            return h;
+        }, py::arg("name"), py::arg("target") = py::none(),
+           py::arg("sources") = py::tuple(), py::arg("weights") = py::list())
+        .def("add_single_chain_ik_constraint",
+            [](rigExec::RigExecMoverChain &c, std::string name,
+               py::object firstJoint, py::object endJoint, py::object effector,
+               const py::iterable &poleObjects, const py::object &moves) {
+                const SdfPath first = _PythonToDependencyPath(
+                    firstJoint, c.GetStage(), TfToken("RigExecJoint"), false);
+                const SdfPath end = _PythonToDependencyPath(
+                    endJoint, c.GetStage(), TfToken("RigExecJoint"), false);
+                const SdfPath effectorPath = _PythonToDependencyPath(
+                    effector, c.GetStage(), TfToken(), false);
+                const SdfPathVector poles =
+                    _PythonToDependencyPaths(poleObjects, c.GetStage());
+                if (moves.is_none()) {
+                    return c.AddSingleChainIkConstraint(
+                        name, first, end, effectorPath, poles);
+                }
+                return c.AddSingleChainIkConstraint(
+                    name,
+                    _PythonToDependencyPaths(
+                        moves.cast<py::iterable>(), c.GetStage(),
+                        TfToken("RigExecJoint")),
+                    first, end, effectorPath, poles);
+            }, py::arg("name"), py::arg("first_joint"), py::arg("end_joint"),
+               py::arg("effector"), py::arg("pole_vector_objects") = py::tuple(),
+               py::kw_only(), py::arg("moves") = py::none(),
+               "Create a complete joint-chain IK constraint. The coarse form "
+               "infers its write set; moves= enables strict importer parity "
+               "validation.")
+        .def("under", [](const rigExec::RigExecMoverChain &c,
+                          const RigExecHandleBase &mover, py::object defaultTarget) {
+            return c.Under(
+                mover, _PythonToDependencyPath(defaultTarget, c.GetStage()));
+        }, py::arg("mover"), py::arg("default_target") = py::none());
 
     // Builder.
     py::class_<rigExec::RigExecRigBuilder>(m, "Builder",
         "The top-level rig builder: one per (stage, rig root). Creates and wires the prims a RigExec rig is made of.")
-        .def_static("create", [](py::object stageObj, std::string rigRoot, std::string partition) {
+        .def_static("create", [](py::object stageObj, py::object rigRoot,
+                                  std::string partition) {
             auto s = _ExtractStage(stageObj);
             if (!s) {
                 throw py::type_error(
                     "Builder.create() needs a pxr.Usd.Stage instance");
             }
-            return rigExec::RigExecRigBuilder::Create(s, SdfPath(rigRoot), TfToken(partition));
+            return rigExec::RigExecRigBuilder::Create(
+                s, _PythonToPath(rigRoot, false), TfToken(partition));
         }, py::arg("stage"), py::arg("rig_root") = "/Rig", py::arg("partition") = "")
         .def_property_readonly("root_path", [](const rigExec::RigExecRigBuilder &b) { return _PathStr(b.GetRootPath()); })
 
@@ -925,49 +1597,195 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("add_control", [](rigExec::RigExecRigBuilder &b, std::string name, std::vector<double> restSpace) {
             return b.AddControl(name, restSpace.empty() ? GfMatrix4d() : _VecToMat4(restSpace));
         }, py::arg("name"), py::arg("rest_space") = py::list())
-        .def("add_joint", [](rigExec::RigExecRigBuilder &b, std::string name, std::vector<double> restSpace, const rigExec::RigExecJointHandle *parent) {
-            return b.AddJoint(name, restSpace.empty() ? GfMatrix4d() : _VecToMat4(restSpace), parent);
-        }, py::arg("name"), py::arg("rest_space") = py::list(), py::arg("parent_joint") = nullptr)
+        .def("add_joint", [](rigExec::RigExecRigBuilder &b, std::string name,
+                              std::vector<double> restSpace,
+                              const py::object &parentObject) {
+            rigExec::RigExecJointHandle parent;
+            const rigExec::RigExecJointHandle *parentPtr = nullptr;
+            if (!parentObject.is_none()) {
+                parent = rigExec::RigExecJointHandle(
+                    b.GetStage(), _PythonToDependencyPath(
+                        parentObject, b.GetStage(),
+                        TfToken("RigExecJoint"), false));
+                parentPtr = &parent;
+            }
+            return b.AddJoint(
+                name, restSpace.empty() ? GfMatrix4d() : _VecToMat4(restSpace),
+                parentPtr);
+        }, py::arg("name"), py::arg("rest_space") = py::list(),
+           py::arg("parent_joint") = py::none())
 
         // Solvers.
-        .def("add_fk_chain", &rigExec::RigExecRigBuilder::AddFkChain, py::arg("name"))
-        .def("add_two_bone_ik", [](rigExec::RigExecRigBuilder &b, std::string name, std::string rootControl, std::string effectorControl, std::string poleControl) {
-            return b.AddTwoBoneIk(name, _StrToPath(rootControl), _StrToPath(effectorControl), _StrToPath(poleControl));
-        }, py::arg("name"), py::arg("root_control") = "", py::arg("effector_control") = "", py::arg("pole_control") = "")
-        .def("add_blend_point_frames", [](rigExec::RigExecRigBuilder &b, std::string name, std::string inputA, std::string inputB, float weight) {
-            return b.AddBlendPointFrames(name, _StrToPath(inputA), _StrToPath(inputB), weight);
-        }, py::arg("name"), py::arg("input_a") = "", py::arg("input_b") = "", py::arg("weight") = 0.0f)
-        .def("add_twist_distribution", [](rigExec::RigExecRigBuilder &b, std::string name, std::string start, std::string end, int count) {
-            return b.AddTwistDistribution(name, _StrToPath(start), _StrToPath(end), count);
-        }, py::arg("name"), py::arg("start") = "", py::arg("end") = "", py::arg("count") = 1)
-        .def("add_ribbon", [](rigExec::RigExecRigBuilder &b, std::string name, std::string driverCurve, int sampleCount) {
-            return b.AddRibbon(name, _StrToPath(driverCurve), sampleCount);
-        }, py::arg("name"), py::arg("driver_curve") = "", py::arg("sample_count") = 5)
+        .def("add_fk_chain", [](rigExec::RigExecRigBuilder &b,
+                                 std::string name, const py::object &controls,
+                                 const py::object &joints) {
+            SdfPathVector controlPaths;
+            SdfPathVector jointPaths;
+            if (!controls.is_none()) {
+                controlPaths = _PythonToDependencyPaths(
+                    controls.cast<py::iterable>(), b.GetStage(),
+                    TfToken("RigExecControl"));
+            }
+            if (!joints.is_none()) {
+                jointPaths = _PythonToDependencyPaths(
+                    joints.cast<py::iterable>(), b.GetStage(),
+                    TfToken("RigExecJoint"));
+            }
+            auto handle = b.AddFkChain(name);
+            if (!controls.is_none()) {
+                handle.SetControls(controlPaths);
+            }
+            if (!joints.is_none()) {
+                handle.SetJoints(jointPaths);
+            }
+            return handle;
+        }, py::arg("name"), py::arg("controls") = py::none(),
+           py::arg("joints") = py::none(),
+           "Create an FK solver and optionally wire its ordered controls and joints.")
+        .def("add_two_bone_ik", [](rigExec::RigExecRigBuilder &b,
+                                     std::string name, py::object rootControl,
+                                     py::object effectorControl,
+                                     py::object poleControl) {
+            return b.AddTwoBoneIk(
+                name,
+                _PythonToDependencyPath(rootControl, b.GetStage(),
+                    TfToken("RigExecControl"), false),
+                _PythonToDependencyPath(effectorControl, b.GetStage(),
+                    TfToken("RigExecControl"), false),
+                _PythonToDependencyPath(poleControl, b.GetStage(),
+                    TfToken("RigExecControl")));
+        }, py::arg("name"), py::arg("root_control"),
+           py::arg("effector_control"), py::arg("pole_control") = py::none())
+        .def("add_blend_point_frames", [](rigExec::RigExecRigBuilder &b,
+                                            std::string name, py::object inputA,
+                                            py::object inputB, float weight) {
+            return b.AddBlendPointFrames(
+                name,
+                _PythonToDependencyPath(inputA, b.GetStage(), TfToken(), false),
+                _PythonToDependencyPath(inputB, b.GetStage(), TfToken(), false),
+                weight);
+        }, py::arg("name"), py::arg("input_a"), py::arg("input_b"),
+           py::arg("weight") = 0.0f)
+        .def("add_twist_distribution", [](rigExec::RigExecRigBuilder &b,
+                                            std::string name, py::object start,
+                                            py::object end, int count) {
+            return b.AddTwistDistribution(
+                name,
+                _PythonToDependencyPath(start, b.GetStage(), TfToken(), false),
+                _PythonToDependencyPath(end, b.GetStage(), TfToken(), false),
+                count);
+        }, py::arg("name"), py::arg("start"), py::arg("end"),
+           py::arg("count") = 1)
+        .def("add_ribbon", [](rigExec::RigExecRigBuilder &b,
+                                std::string name, py::object driverCurve,
+                                int sampleCount) {
+            return b.AddRibbon(
+                name, _PythonToDependencyPath(
+                    driverCurve, b.GetStage(), TfToken(), false),
+                sampleCount);
+        }, py::arg("name"), py::arg("driver_curve"),
+           py::arg("sample_count") = 5)
 
         // Weight objects.
-        .def("add_static_weight", [](rigExec::RigExecRigBuilder &b, std::string name, std::string target, std::vector<float> values, std::vector<int> indices, float defaultWeight) {
-            return b.AddStaticWeight(name, _StrToPath(target), values, indices, defaultWeight);
-        }, py::arg("name"), py::arg("target") = "", py::arg("values") = py::list(),
+        .def("add_static_weight", [](rigExec::RigExecRigBuilder &b,
+                                      std::string name, py::object target,
+                                      std::vector<float> values,
+                                      std::vector<int> indices,
+                                      float defaultWeight) {
+            return b.AddStaticWeight(
+                name, _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                values, indices, defaultWeight);
+        }, py::arg("name"), py::arg("target"), py::arg("values") = py::list(),
            py::arg("indices") = py::list(), py::arg("default_weight") = 0.0f)
-        .def("add_dynamic_weight", [](rigExec::RigExecRigBuilder &b, std::string name, std::string target, std::string baseWeight) {
-            return b.AddDynamicWeight(name, _StrToPath(target), _StrToPath(baseWeight));
-        }, py::arg("name"), py::arg("target") = "", py::arg("base_weight") = "")
-        .def("add_sphere_weight", [](rigExec::RigExecRigBuilder &b, std::string name, std::string target, float falloffMin, float falloffMax) {
-            return b.AddSphereWeight(name, _StrToPath(target), falloffMin, falloffMax);
-        }, py::arg("name"), py::arg("target") = "", py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
-        .def("add_plane_weight", [](rigExec::RigExecRigBuilder &b, std::string name, std::string target, float falloffMin, float falloffMax) {
-            return b.AddPlaneWeight(name, _StrToPath(target), falloffMin, falloffMax);
-        }, py::arg("name"), py::arg("target") = "", py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
-        .def("add_curve_weight", [](rigExec::RigExecRigBuilder &b, std::string name, std::string target, std::string curve, float falloffMin, float falloffMax) {
-            return b.AddCurveWeight(name, _StrToPath(target), _StrToPath(curve), falloffMin, falloffMax);
-        }, py::arg("name"), py::arg("target") = "", py::arg("curve") = "", py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
-        .def("add_combine_weight", [](rigExec::RigExecRigBuilder &b, std::string name, std::string target, std::vector<std::string> inputWeights, std::string mode) {
-            std::vector<SdfPath> p;
-            for (const auto &s : inputWeights) {
-                p.push_back(_StrToPath(s));
-            }
-            return b.AddCombineWeight(name, _StrToPath(target), p, TfToken(mode));
-        }, py::arg("name"), py::arg("target") = "", py::arg("input_weights") = py::list(), py::arg("mode") = "multiply")
+        .def("add_dynamic_weight", [](rigExec::RigExecRigBuilder &b,
+                                       std::string name, py::object target,
+                                       py::object baseWeight) {
+            return b.AddDynamicWeight(
+                name, _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                _PythonToDependencyPath(baseWeight, b.GetStage()));
+        }, py::arg("name"), py::arg("target"),
+           py::arg("base_weight") = py::none())
+        .def("add_sphere_weight", [](rigExec::RigExecRigBuilder &b,
+                                      std::string name, py::object target,
+                                      float falloffMin, float falloffMax) {
+            return b.AddSphereWeight(
+                name, _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                falloffMin, falloffMax);
+        }, py::arg("name"), py::arg("target"),
+           py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
+        .def("add_plane_weight", [](rigExec::RigExecRigBuilder &b,
+                                     std::string name, py::object target,
+                                     float falloffMin, float falloffMax) {
+            return b.AddPlaneWeight(
+                name, _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                falloffMin, falloffMax);
+        }, py::arg("name"), py::arg("target"),
+           py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
+        .def("add_curve_weight", [](rigExec::RigExecRigBuilder &b,
+                                     std::string name, py::object target,
+                                     py::object curve, float falloffMin,
+                                     float falloffMax) {
+            return b.AddCurveWeight(
+                name, _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                _PythonToDependencyPath(
+                    curve, b.GetStage(), TfToken(), false),
+                falloffMin, falloffMax);
+        }, py::arg("name"), py::arg("target"), py::arg("curve"),
+           py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
+        .def("define_sphere_weight", [](rigExec::RigExecRigBuilder &b,
+                                         py::object path, py::object target,
+                                         float falloffMin, float falloffMax) {
+            return b.DefineSphereWeight(
+                _PythonToPath(path, false),
+                _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                falloffMin, falloffMax);
+        }, py::arg("path"), py::arg("target"),
+           py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
+        .def("define_plane_weight", [](rigExec::RigExecRigBuilder &b,
+                                        py::object path, py::object target,
+                                        float falloffMin, float falloffMax) {
+            return b.DefinePlaneWeight(
+                _PythonToPath(path, false),
+                _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                falloffMin, falloffMax);
+        }, py::arg("path"), py::arg("target"),
+           py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
+        .def("define_curve_weight", [](rigExec::RigExecRigBuilder &b,
+                                        py::object path, py::object target,
+                                        py::object curve, float falloffMin,
+                                        float falloffMax) {
+            return b.DefineCurveWeight(
+                _PythonToPath(path, false),
+                _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                _PythonToDependencyPath(
+                    curve, b.GetStage(), TfToken(), false),
+                falloffMin, falloffMax);
+        }, py::arg("path"), py::arg("target"), py::arg("curve"),
+           py::arg("falloff_min") = 0.0f, py::arg("falloff_max") = 1.0f)
+        .def("add_combine_weight", [](rigExec::RigExecRigBuilder &b,
+                                       std::string name, py::object target,
+                                       const py::iterable &inputWeights,
+                                       std::string mode) {
+            return b.AddCombineWeight(
+                name, _PythonToDependencyPath(
+                    target, b.GetStage(), TfToken(), false),
+                _PythonToDependencyPaths(inputWeights, b.GetStage()),
+                TfToken(mode));
+        }, py::arg("name"), py::arg("target"),
+           py::arg("input_weights") = py::tuple(),
+           py::arg("mode") = "multiply")
+
+        // Independently composable blend inputs.
+        .def("add_blend_input", &rigExec::RigExecRigBuilder::AddBlendInput,
+             py::arg("name"), py::arg("weight") = 0.0f)
 
         // Curvenets.
         .def("add_curvenet", [](rigExec::RigExecRigBuilder &b, std::string name, std::vector<std::array<double, 3>> points) {
@@ -981,9 +1799,11 @@ PYBIND11_MODULE(_rigexec, m) {
         // Mover chains.
         .def("new_mover_chain",
              [](rigExec::RigExecRigBuilder &b, std::string name,
-                std::string defaultTarget) {
-                 return b.NewMoverChain(name, _StrToPath(defaultTarget));
-             }, py::arg("name"), py::arg("default_target") = "",
+                py::object defaultTarget) {
+                 return b.NewMoverChain(
+                     name, _PythonToDependencyPath(
+                         defaultTarget, b.GetStage()));
+             }, py::arg("name"), py::arg("default_target") = py::none(),
              "Start a mover chain; operations added without an explicit target"
              " reuse default_target.");
 }

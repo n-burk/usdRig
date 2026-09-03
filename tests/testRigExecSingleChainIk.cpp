@@ -159,6 +159,15 @@ TestTwoJointReachableAndEndOrientation()
     CHECK(Near(UnitX(solved.front()), GfVec3d(0.0, 1.0, 0.0)));
     CHECK(Near(UnitX(solved.back()), UnitX(effector)));
     CHECK(Near(UnitY(solved.back()), UnitY(effector)));
+
+    // At full strength the solved end position and basis are the candidate,
+    // not values rotated toward and normalized one more time with weight 1.
+    // This simple orthogonal case therefore has an exact expected frame.
+    RigExecPointFrame exactEnd;
+    exactEnd.points = {
+        GfVec3d(0.0, 1.0, 0.0), GfVec3d(0.0, 1.0, 1.0),
+        GfVec3d(0.0, 2.0, 0.0), GfVec3d(-1.0, 1.0, 0.0)};
+    CHECK(solved.back() == exactEnd);
 }
 
 static void
@@ -380,6 +389,12 @@ TestGlobalWeightEndpoints()
     params.pole = GfVec3d(0.0, 1.0, 0.0);
     params.weight = 0.0;
     CHECK(RigExecSolveSingleChainIk(chain, effector, params) == chain);
+    std::vector<RigExecPointFrame> signedZeroChain = chain;
+    signedZeroChain[1].points[2][2] = -0.0;
+    const auto dormant =
+        RigExecSolveSingleChainIk(signedZeroChain, effector, params);
+    CHECK(dormant.size() == signedZeroChain.size());
+    CHECK(dormant.size() > 1 && std::signbit(dormant[1].points[2][2]));
 
     params.weight = 1.0;
     const auto full = RigExecSolveSingleChainIk(chain, effector, params);

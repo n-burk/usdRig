@@ -349,7 +349,6 @@ class RigExecCurvenet : UsdGeomPoints
     int[]      rigExec:splineIndices   # 4 per cubic spline, into points
     uniform token rigExec:basis        # "bezier" | "catmullRom"
     uniform int   rigExec:samplesPerSpline = 5
-    color3f    guide:displayColor / float guide:displayOpacity / double guide:radius
 ```
 
 `points` is a native `point3f[]` on a `UsdGeomPointBased`, so it passes
@@ -358,15 +357,22 @@ in the engine can pose it. Index sharing carries the net topology,
 exactly as the paper encodes it. Knots are `splineIndices[4k]` and
 `splineIndices[4k+3]`; handles are the two between.
 
+The schema deliberately has no `guide:*` styling properties. The usdview
+authoring panel owns its session-layer spline and knot displays, including
+their colors and widths, so persistent attributes on the curvenet would have
+no consumer.
+
 ```
 class RigExecCurvenetMover : Typed            # the Profile Mover
     rel rigExec:curvenet                       # exactly one RigExecCurvenet
     uniform token rigExec:restPose = "projection"   # | "preceding"
     uniform token rigExec:curvenetReadPhase = "base"  # | "preceding" | "final"
-    float inputs:strength = 1
+    # RigExecMoverAPI supplies inputs:defaultWeight and rigExec:weightObject
 ```
 
 writes the target mesh's `points` like any other geometry mover.
+Its final influence is the common mover envelope: a bound weight object, or
+`inputs:defaultWeight` when no object is bound.
 `restPose = "projection"` is the plain §4 formulation; `"preceding"` is
 §5, warping the curvenet onto whatever the chain handed in.
 

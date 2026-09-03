@@ -16,12 +16,16 @@
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
 
+#include "pxr/base/gf/range3d.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
+#include "pxr/imaging/hd/extentSchema.h"
+#include "pxr/imaging/hd/meshSchema.h"
+#include "pxr/imaging/hd/meshTopologySchema.h"
 #include "pxr/imaging/hd/sceneIndexObserver.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
 #include "pxr/imaging/hd/primvarSchema.h"
@@ -39,7 +43,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace rigExec;
@@ -516,6 +522,123 @@ TestSphereVolumeGuides()
     CHECK(_GetPointsPrimvar(results->GetPrim(_kMeshPath)).size() == 4);
 }
 
+// A placed volume is useful while it is being authored, before any mover has
+// been wired to consume it. Prove the complete standalone path: a rig whose
+// ONLY outputs are SphereWeight, PlaneWeight, and a valid CurveWeight must
+// compile, evaluate, publish each placement, and announce servable guide
+// children beneath all three typed prims.
+static void
+TestStandaloneVolumeGuides()
+{
+    // Each fallback-only primitive is independently enough to make a rig
+    // nonempty; neither relies on the other (or on the valid CurveWeight case
+    // below) to sneak through the output gate.
+    for (const TfToken &type : {TfToken("RigExecSphereWeight"),
+                                TfToken("RigExecPlaneWeight")}) {
+        UsdStageRefPtr one = UsdStage::CreateInMemory();
+        const SdfPath oneRig("/Only/Rig");
+        const SdfPath oneWeight = oneRig.AppendChild(TfToken("Weight"));
+        one->DefinePrim(oneRig, TfToken("RigExecRoot"));
+        one->DefinePrim(oneWeight, type);
+        RigExecRigEvaluator evaluator(one, oneRig);
+        std::vector<std::string> oneErrors;
+        CHECK(evaluator.Compile(&oneErrors));
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        CHECK(pose.weightFrames.count(oneWeight) == 1);
+    }
+
+    const SdfPath rigPath("/Standalone/Rig");
+    const SdfPath spherePath("/Standalone/Rig/Weights/Sphere");
+    const SdfPath planePath("/Standalone/Rig/Weights/Plane");
+    const SdfPath curveWeightPath("/Standalone/Rig/Weights/CurveWeight");
+    const SdfPath curvePath("/Standalone/Rig/Curve");
+
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(rigPath, TfToken("RigExecRoot"));
+    UsdPrim sphere =
+        stage->DefinePrim(spherePath, TfToken("RigExecSphereWeight"));
+    sphere.CreateAttribute(TfToken("inputs:falloffMin"),
+                           SdfValueTypeNames->Float).Set(0.5f);
+    UsdPrim plane =
+        stage->DefinePrim(planePath, TfToken("RigExecPlaneWeight"));
+    UsdPrim curve = stage->DefinePrim(curvePath, TfToken("BasisCurves"));
+    curve.CreateAttribute(TfToken("points"),
+                          SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(-2, 0, 0), GfVec3f(0, 1, 0),
+                          GfVec3f(2, 0, 0)});
+    UsdPrim curveWeight = stage->DefinePrim(
+        curveWeightPath, TfToken("RigExecCurveWeight"));
+    curveWeight.CreateRelationship(TfToken("rigExec:curve"))
+        .SetTargets({curvePath.AppendProperty(TfToken("points"))});
+    curveWeight.CreateAttribute(TfToken("inputs:falloffMin"),
+                                SdfValueTypeNames->Float).Set(0.5f);
+
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    upstream->AddPrims(
+        {{spherePath, TfToken("RigExecSphereWeight"),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)},
+         {planePath, TfToken("RigExecPlaneWeight"),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)},
+         {curveWeightPath, TfToken("RigExecCurveWeight"),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)}});
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    RigExecImagingBridge bridge(stage, rigPath, store);
+    std::vector<std::string> errors;
+    if (!bridge.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("standalone-volume: compile error: %s\n", e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    RigExecInternalPrimPruningSceneIndexRefPtr pruning =
+        RigExecInternalPrimPruningSceneIndex::New(upstream);
+    RigExecBindingResolvingSceneIndexRefPtr binding =
+        RigExecBindingResolvingSceneIndex::New(pruning);
+    RigExecResultsSceneIndexRefPtr results =
+        RigExecResultsSceneIndex::New(binding, store);
+    bridge.SetSceneIndices(binding, results);
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+
+    const RigExecImagingSnapshotConstPtr snapshot = store->Get();
+    CHECK(snapshot);
+    if (!snapshot) {
+        return;
+    }
+    for (const SdfPath &path : {spherePath, planePath, curveWeightPath}) {
+        const auto it = snapshot->prims.find(path);
+        CHECK(it != snapshot->prims.end());
+        if (it != snapshot->prims.end()) {
+            CHECK(it->second.hasVolumeGuides);
+            CHECK(!it->second.volumeGuides.empty());
+        }
+        const SdfPathVector children = results->GetChildPrimPaths(path);
+        CHECK(!children.empty());
+        for (const SdfPath &child : children) {
+            CHECK(results->GetPrim(child).dataSource);
+        }
+    }
+
+    // A CurveWeight still requires exactly one real point3f[] source. Making
+    // volumes standalone must not turn malformed schema authoring into a
+    // plausible empty guide generation.
+    UsdStageRefPtr invalidStage = UsdStage::CreateInMemory();
+    const SdfPath invalidRig("/Invalid/Rig");
+    invalidStage->DefinePrim(invalidRig, TfToken("RigExecRoot"));
+    invalidStage->DefinePrim(
+        invalidRig.AppendChild(TfToken("BadCurve")),
+        TfToken("RigExecCurveWeight"));
+    RigExecRigEvaluator invalid(invalidStage, invalidRig);
+    errors.clear();
+    CHECK(!invalid.Compile(&errors));
+    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &e) {
+        return e.find("rigExec:curve must name exactly one points source") !=
+               std::string::npos;
+    }));
+}
+
 // Plane and curve weights draw guides too, and each draws a DIFFERENT
 // shape from the sphere: a square in the plane perpendicular to
 // rigExec:planeAxis, and a tube along the curve's polyline. Asserted
@@ -656,6 +779,271 @@ TestPlaneAndCurveVolumeGuides()
                     CHECK(int(v.UncheckedGet<VtVec3fArray>().size()) ==
                           total);
                 }
+            }
+        }
+    }
+}
+
+// Curve geometry mode is a genuinely closed tube, not the wire ladder with
+// its width removed. Besides checking the advertised prim type, validate the
+// mesh contract a renderer actually consumes: every face count covers the
+// index buffer, every edge is shared by two oppositely wound faces, normals
+// are face-varying and outward, and extent encloses exactly the local points.
+static void
+TestCurveGeometryVolumeGuides()
+{
+    constexpr int kSegments = 8;
+    constexpr int kRings = 3;
+
+    Fixture f;
+    f.stage->RemovePrim(_kVolumePath);
+    UsdPrim volume =
+        f.stage->DefinePrim(_kVolumePath, TfToken("RigExecCurveWeight"));
+    volume.CreateAttribute(TfToken("posed:space"),
+                           SdfValueTypeNames->Matrix4d)
+        .Set(GfMatrix4d(1.0));
+    volume.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({_kTarget});
+    volume.CreateAttribute(TfToken("inputs:falloffMin"),
+                           SdfValueTypeNames->Float).Set(0.5f);
+    volume.CreateAttribute(TfToken("inputs:falloffMax"),
+                           SdfValueTypeNames->Float).Set(2.0f);
+    volume.CreateAttribute(TfToken("rigExec:falloffProfile"),
+                           SdfValueTypeNames->Token).Set(TfToken("linear"));
+    volume.CreateAttribute(TfToken("guide:drawMode"),
+                           SdfValueTypeNames->Token).Set(TfToken("geometry"));
+    // Exercise the same split as the field: the curve is divided into local
+    // space while this scale rides in the synthesized child's transform.
+    const double axisScale[3] = {2.0, 3.0, 4.0};
+    const char *scaleNames[3] = {
+        "inputs:scaleX", "inputs:scaleY", "inputs:scaleZ"};
+    for (int axis = 0; axis < 3; ++axis) {
+        volume.CreateAttribute(TfToken(scaleNames[axis]),
+                               SdfValueTypeNames->Float)
+            .Set(float(axisScale[axis]));
+    }
+
+    UsdPrim curve = f.stage->DefinePrim(SdfPath("/Asset/Rig/Curve"),
+                                        TfToken("BasisCurves"));
+    curve.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(4, 3, 0),
+                          GfVec3f(8, 3, 4)});
+    volume.CreateRelationship(TfToken("rigExec:curve"))
+        .SetTargets({SdfPath("/Asset/Rig/Curve.points")});
+
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    upstream->AddPrims(
+        {{_kMeshPath, HdPrimTypeTokens->mesh,
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)},
+         {_kVolumePath, TfToken("RigExecCurveWeight"),
+          HdRetainedContainerDataSource::New(0, nullptr, nullptr)}});
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    RigExecImagingBridge bridge(f.stage, _kRigPath, store);
+    std::vector<std::string> errors;
+    if (!bridge.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("curve-geometry: compile error: %s\n", e.c_str());
+        }
+        ++failures;
+        return;
+    }
+    RigExecInternalPrimPruningSceneIndexRefPtr pruning =
+        RigExecInternalPrimPruningSceneIndex::New(upstream);
+    RigExecBindingResolvingSceneIndexRefPtr binding =
+        RigExecBindingResolvingSceneIndex::New(pruning);
+    RigExecResultsSceneIndexRefPtr results =
+        RigExecResultsSceneIndex::New(binding, store);
+    bridge.SetSceneIndices(binding, results);
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+
+    const SdfPathVector children = results->GetChildPrimPaths(_kVolumePath);
+    CHECK(children.size() == 2);  // both falloff iso-surfaces
+    if (children.size() != 2) {
+        return;
+    }
+
+    const int sideFaces = (kRings - 1) * kSegments;
+    double previousDiagonal = 0.0;
+    for (const SdfPath &child : children) {
+        const HdSceneIndexPrim guide = results->GetPrim(child);
+        CHECK(guide.dataSource);
+        CHECK(guide.primType == HdPrimTypeTokens->mesh);
+        if (!guide.dataSource) {
+            continue;
+        }
+        // Geometry mode must not accidentally retain a curves schema.
+        CHECK(!HdBasisCurvesSchema::GetFromParent(guide.dataSource));
+        HdMeshSchema mesh = HdMeshSchema::GetFromParent(guide.dataSource);
+        CHECK(static_cast<bool>(mesh));
+        if (!mesh) {
+            continue;
+        }
+        CHECK(mesh.GetDoubleSided() &&
+              !mesh.GetDoubleSided()->GetTypedValue(0.0f));
+
+        HdMeshTopologySchema topology = mesh.GetTopology();
+        HdIntArrayDataSourceHandle countsSource =
+            topology.GetFaceVertexCounts();
+        HdIntArrayDataSourceHandle indicesSource =
+            topology.GetFaceVertexIndices();
+        CHECK(countsSource && indicesSource);
+        if (!countsSource || !indicesSource) {
+            continue;
+        }
+        const VtIntArray counts = countsSource->GetTypedValue(0.0f);
+        const VtIntArray indices = indicesSource->GetTypedValue(0.0f);
+        CHECK(counts.size() == size_t(sideFaces + 2));
+        CHECK(indices.size() ==
+              size_t(sideFaces * 4 + 2 * kSegments));
+        if (counts.size() != size_t(sideFaces + 2)) {
+            continue;
+        }
+        for (int face = 0; face < sideFaces; ++face) {
+            CHECK(counts[face] == 4);
+        }
+        CHECK(counts[sideFaces] == kSegments);
+        CHECK(counts[sideFaces + 1] == kSegments);
+
+        const VtVec3fArray points = _GetPointsPrimvar(guide);
+        CHECK(points.size() == size_t(kRings * kSegments));
+        if (points.size() != size_t(kRings * kSegments)) {
+            continue;
+        }
+
+        // Every undirected edge must occur exactly twice, with opposite
+        // directions. This proves the two caps share the side-ring vertices
+        // and close the tube topologically, not only visually.
+        struct EdgeUses {
+            int count = 0;
+            int orientation = 0;
+        };
+        std::map<std::pair<int, int>, EdgeUses> edgeUses;
+        size_t cursor = 0;
+        for (const int count : counts) {
+            CHECK(count >= 3);
+            CHECK(cursor + size_t(count) <= indices.size());
+            if (cursor + size_t(count) > indices.size()) {
+                break;
+            }
+            for (int corner = 0; corner < count; ++corner) {
+                const int from = indices[cursor + corner];
+                const int to = indices[cursor + (corner + 1) % count];
+                CHECK(from >= 0 && size_t(from) < points.size());
+                CHECK(to >= 0 && size_t(to) < points.size());
+                EdgeUses &uses = edgeUses[std::minmax(from, to)];
+                ++uses.count;
+                uses.orientation += from < to ? 1 : -1;
+            }
+            cursor += size_t(count);
+        }
+        CHECK(cursor == indices.size());
+        for (const auto &[edge, uses] : edgeUses) {
+            (void)edge;
+            CHECK(uses.count == 2);
+            CHECK(uses.orientation == 0);
+        }
+
+        HdPrimvarsSchema primvars =
+            HdPrimvarsSchema::GetFromParent(guide.dataSource);
+        HdPrimvarSchema normalsPrimvar =
+            primvars.GetPrimvar(HdTokens->normals);
+        CHECK(static_cast<bool>(normalsPrimvar));
+        CHECK(normalsPrimvar.GetInterpolation() &&
+              normalsPrimvar.GetInterpolation()->GetTypedValue(0.0f) ==
+                  HdPrimvarSchemaTokens->faceVarying);
+        VtVec3fArray normals;
+        if (HdSampledDataSourceHandle value =
+                normalsPrimvar.GetPrimvarValue()) {
+            const VtValue v = value->GetValue(0.0f);
+            CHECK(v.IsHolding<VtVec3fArray>());
+            if (v.IsHolding<VtVec3fArray>()) {
+                normals = v.UncheckedGet<VtVec3fArray>();
+            }
+        }
+        CHECK(normals.size() == indices.size());
+
+        // Ring centers recover the transported centerline from the points.
+        GfVec3f ringCenters[kRings] = {
+            GfVec3f(0.0f), GfVec3f(0.0f), GfVec3f(0.0f)};
+        for (int ring = 0; ring < kRings; ++ring) {
+            for (int j = 0; j < kSegments; ++j) {
+                ringCenters[ring] += points[ring * kSegments + j];
+            }
+            ringCenters[ring] /= float(kSegments);
+        }
+
+        cursor = 0;
+        for (size_t face = 0; face < counts.size(); ++face) {
+            const int count = counts[face];
+            const GfVec3f origin = points[indices[cursor]];
+            GfVec3f geometricNormal(0.0f);
+            GfVec3f center(0.0f);
+            for (int corner = 0; corner < count; ++corner) {
+                center += points[indices[cursor + corner]];
+                if (corner > 0 && corner + 1 < count) {
+                    geometricNormal += GfCross(
+                        points[indices[cursor + corner]] - origin,
+                        points[indices[cursor + corner + 1]] - origin);
+                }
+            }
+            center /= float(count);
+            CHECK(geometricNormal.GetLength() > 1e-6f);
+            if (geometricNormal.GetLength() > 1e-6f) {
+                geometricNormal.Normalize();
+            }
+
+            GfVec3f outward(0.0f);
+            if (int(face) < sideFaces) {
+                const int span = int(face) / kSegments;
+                outward = center -
+                    0.5f * (ringCenters[span] + ringCenters[span + 1]);
+            } else if (int(face) == sideFaces) {
+                outward = ringCenters[0] - ringCenters[1];
+            } else {
+                outward = ringCenters[kRings - 1] -
+                           ringCenters[kRings - 2];
+            }
+            CHECK(GfDot(geometricNormal, outward) > 0.0f);
+            if (normals.size() == indices.size()) {
+                for (int corner = 0; corner < count; ++corner) {
+                    const GfVec3f &normal = normals[cursor + corner];
+                    CHECK(Near(normal.GetLength(), 1.0f));
+                    CHECK(GfDot(normal, geometricNormal) > 0.999f);
+                }
+            }
+            cursor += size_t(count);
+        }
+
+        GfRange3d expectedExtent;
+        for (const GfVec3f &point : points) {
+            expectedExtent.UnionWith(GfVec3d(point));
+        }
+        HdExtentSchema extent =
+            HdExtentSchema::GetFromParent(guide.dataSource);
+        CHECK(extent.GetMin() && extent.GetMax());
+        if (extent.GetMin() && extent.GetMax()) {
+            const GfVec3d min = extent.GetMin()->GetTypedValue(0.0f);
+            const GfVec3d max = extent.GetMax()->GetTypedValue(0.0f);
+            for (int axis = 0; axis < 3; ++axis) {
+                CHECK(Near(float(min[axis]),
+                           float(expectedExtent.GetMin()[axis])));
+                CHECK(Near(float(max[axis]),
+                           float(expectedExtent.GetMax()[axis])));
+            }
+            const double diagonal = (max - min).GetLength();
+            CHECK(diagonal > previousDiagonal);
+            previousDiagonal = diagonal;
+        }
+
+        HdXformSchema xform =
+            HdXformSchema::GetFromParent(guide.dataSource);
+        CHECK(xform.GetMatrix());
+        if (xform.GetMatrix()) {
+            const GfMatrix4d matrix =
+                xform.GetMatrix()->GetTypedValue(0.0f);
+            for (int axis = 0; axis < 3; ++axis) {
+                CHECK(Near(float(matrix.GetRow3(axis).GetLength()),
+                           float(axisScale[axis])));
             }
         }
     }
@@ -1134,8 +1522,10 @@ main(int argc, char **argv)
     TestOverlayOfUnknownWeightObjectPaintsNothing();
     TestOverlayToggleDirtiesTheMesh();
     TestOverlayValueChangeDirtiesDisplayColor();
+    TestStandaloneVolumeGuides();
     TestSphereVolumeGuides();
     TestPlaneAndCurveVolumeGuides();
+    TestCurveGeometryVolumeGuides();
     TestPlaneGuideSizeIsExtentsNotBand();
     TestRegistrySetWeightOverlay();
     TestAuthoredEditRepublishesFreshField();

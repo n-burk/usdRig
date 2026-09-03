@@ -53,6 +53,7 @@ def _setup_environment():
     win_site = usd_install / "Lib" / "site-packages"
     if win_site.is_dir():
         site_candidates.append(win_site)
+
     site_candidates.extend(sorted(usd_install.glob("lib/python*/site-packages")))
     for site_packages in site_candidates:
         if site_packages.is_dir():

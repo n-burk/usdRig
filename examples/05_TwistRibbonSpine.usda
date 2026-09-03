@@ -111,7 +111,6 @@ def Xform "SpineAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 4
                 double guide:radius = 0.25
                 matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
@@ -120,7 +119,6 @@ def Xform "SpineAsset"
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    double guide:length = 4
                     double guide:radius = 0.25
                     matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 4, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
@@ -131,7 +129,6 @@ def Xform "SpineAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 4
                 double guide:radius = 0.25
                 matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 2, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
@@ -252,4 +249,3 @@ def Xform "SpineAsset"
         }
     }
 }
-

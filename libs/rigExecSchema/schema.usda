@@ -55,7 +55,12 @@ class "RigExecMoverAPI" (
     doc = """Marks an operation for hierarchy-ordered compilation. rigExec:moves
     targets the exact prim or property the operation modifies; target-list
     order is non-semantic. The mover prim's position in the composed USD
-    namespace supplies operation order (spec sections 4.1-4.2)."""
+    namespace supplies operation order (spec sections 4.1-4.2).
+
+    Every mover has one common envelope. With no rigExec:weightObject target,
+    inputs:defaultWeight broadcasts over every logical target element. When a
+    weight object is bound, its compatible total field is authoritative and
+    inputs:defaultWeight is ignored rather than multiplied into that field."""
 )
 {
     rel rigExec:moves (
@@ -65,6 +70,22 @@ class "RigExecMoverAPI" (
         doc = """Shape-preserving enable. Disabled movers pass their preceding
         revision through unchanged (value-only edit)."""
     )
+    float inputs:defaultWeight = 1 (
+        doc = """Normalized common mover envelope in [0, 1]. With no bound
+        rigExec:weightObject it broadcasts over every logical element: zero
+        passes the incoming value through bit-for-bit and one applies the
+        mover's full-strength result."""
+    )
+    rel rigExec:weightObject (
+        doc = """Optional compatible total weight field, at most one target.
+        When bound, the weight object's values (including its own sparse or
+        constant fallback) supply the common envelope instead of
+        inputs:defaultWeight. Target, domain, and cardinality must match each
+        mover application; an incompatible binding is a compile error. A
+        multi-target mover may bind only a constant operation envelope whose
+        weightTarget is the mover prim itself; that one value broadcasts to
+        every application of the atomic mover."""
+    )
 }
 
 ################################################################
@@ -72,13 +93,15 @@ class "RigExecMoverAPI" (
 ################################################################
 
 class RigExecRoot "RigExecRoot" (
-    inherits = </Typed>
+    inherits = </Imageable>
     customData = {
         string className = "Root"
     }
     doc = """Character root: partition and namespace root for control,
     joint, and mover discovery (spec section 4.1). Publishes
-    computeDiagnostics.
+    computeDiagnostics. It is Imageable (but deliberately not Xformable) so
+    bounds from guide-only controls and joints propagate through the rig root
+    to the enclosing asset for host camera framing.
 
     The rig declares no membership lists. Controls, joints, and movers are
     all discovered from the composed namespace beneath it: a RigExecControl
@@ -109,6 +132,15 @@ class RigExecControl "RigExecControl" (
     same synthesis-only style as the RigExecJoint guides."""
 )
 {
+    double avars:sx = 1 (
+        doc = "Local X scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
+    )
+    double avars:sy = 1 (
+        doc = "Local Y scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
+    )
+    double avars:sz = 1 (
+        doc = "Local Z scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
+    )
     uniform token guide:shape = "circle" (
         allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
         doc = """Guide primitive synthesized at the control's posed frame
@@ -129,10 +161,10 @@ class RigExecControl "RigExecControl" (
     )
     double guide:wireWidth = 0.05 (
         doc = """Width authored onto the wire curves, in the LOCAL
-        pre-scale units of the unit shape -- so the drawn width tracks
-        guide:scaleX/Y/Z along with the rest of the shape, and a
-        non-uniform scale thickens the curve anisotropically exactly as
-        it stretches the points.
+        pre-scale units of the unit shape -- so the drawn width tracks the
+        evaluated control-frame scale multiplied by guide:scaleX/Y/Z along
+        with the rest of the shape. A non-uniform effective scale thickens
+        the curve anisotropically exactly as it stretches the points.
 
         Zero or negative authors no widths at all and falls back to
         hairline rendering; geometry draw mode ignores this entirely.
@@ -144,13 +176,13 @@ class RigExecControl "RigExecControl" (
         width is what makes a wire control selectable at all."""
     )
     double guide:scaleX = 1.0 (
-        doc = """Per-axis draw scale of the guide shape, deliberately
-        three separate double properties rather than a vec3. This is the
-        SOLE dimensional scale applied to the guide -- the control's
-        posed frame is orthonormalized before drawing (guides are rigid),
-        so guide:scaleX/Y/Z is what actually sizes the shape. A
-        non-positive or non-finite value on any axis draws no guide at
-        all, mirroring the RigExecJoint guide:radius rule."""
+        doc = """Positive per-axis draw multiplier of the guide shape whose
+        final size is abs(evaluated frame axis) * guide:scaleAxis, authored as
+        three separate double properties rather than a vec3. The control's
+        posed frame is orthonormalized for placement while its evaluated axis
+        magnitudes are retained for sizing. A non-positive
+        or non-finite guide multiplier on any axis draws no guide at all,
+        independently of the signed 1e-4 floor on avars:sx/sy/sz."""
     )
     double guide:scaleY = 1.0 (
         doc = "Per-axis draw scale along the local Y axis; see guide:scaleX."
@@ -170,8 +202,10 @@ class "RigExecXformable" (
     doc = """An abstract animation interface for an animatable coordinate
     space, mirroring OpenExec's IrXformable contract exactly
     (user-directed alignment, 2026-07-25): matrix4d local-to-world
-    rest/default/posed/parent spaces and scalar avars (rotations in
-    degrees). For a joint, the posed space comes from the compiler's
+    rest/default/posed/parent spaces and scalar translation/rotation avars
+    (rotations in degrees). Concrete controls and joints add local scale
+    avars; volume weights deliberately do not because their shape comes from
+    inputs:scaleX/Y/Z. For a joint, the posed space comes from the compiler's
     private solver binding (view-free extraction: one element of the
     source solver's computePointFrameArray); a connected or
     non-identity authored posed:space is otherwise used directly;
@@ -249,11 +283,21 @@ class RigExecJoint "RigExecJoint" (
     }
     doc = """The joint of an armature-based rig, mirroring OpenExec's
     IrJointScope exactly: a RigExecXformable specialized so guides can be
-    drawn (a sphere at the posed origin and a cone of guide:length along
-    the posed aim axis, purpose guide). Hierarchy is namespace nesting (a
-    child joint is authored inside its parent joint)."""
+    drawn (a sphere at the posed origin and one cone to each nested child
+    joint, purpose guide). Hierarchy is namespace nesting (a child joint is
+    authored inside its parent joint), and guide links derive directly from
+    the evaluated parent and child origins."""
 )
 {
+    double avars:sx = 1 (
+        doc = "Local X scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
+    )
+    double avars:sy = 1 (
+        doc = "Local Y scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
+    )
+    double avars:sz = 1 (
+        doc = "Local Z scale applied before rotation and translation; finite magnitudes below 1e-4 resolve to signed 1e-4, strict authoring rejects non-finite values, and raw non-finite USD resolves to identity on this axis."
+    )
     uniform token purpose = "guide" (
         doc = """Render purpose, overriding UsdGeomImageable's `default`
         fallback: joint and solver guides are DIAGNOSTICS, drawn when a
@@ -268,13 +312,12 @@ class RigExecJoint "RigExecJoint" (
         `guide` on one moves both its drawing and its bounds together."""
     )
 
-    double guide:length = 0
     double guide:radius = 1.0 (
         doc = """Radius of BOTH guide primitives: the sphere at the posed
-        origin and the cone drawn along the aim axis. guide:length sizes the
-        cone's height only, so without this the guides are stuck at Hydra's
-        fallback radius of 1.0 -- correct at arm scale, far larger than the
-        geometry on a small asset. Zero or negative draws no guides at all."""
+        origin and every cone drawn to a nested child joint. Without this the
+        guides use Hydra's fallback radius of 1.0 -- correct at arm scale,
+        far larger than the geometry on a small asset. Zero or negative draws
+        no guides at all."""
     )
     color3f guide:displayColor = (1.0, 0.3, 0.3)
     float guide:displayOpacity = 0.5
@@ -614,11 +657,11 @@ class "RigExecConstraint" (
     }
     doc = """Abstract common contract for FBX-style pose constraints.
 
-    Every constraint has a per-element weight field. inputs:defaultWeight is
-    its constant value and rigExec:weightObject refines it per element, so the
-    transform domain -- which has exactly one element -- and the geometry
-    domain share one concept rather than the geometry side being a special
-    case.
+    A constraint that modifies an existing result applies RigExecMoverAPI. It
+    computes a full-strength constrained candidate, then the API's common
+    envelope blends that candidate over the incoming value. The transform
+    domain has one logical element; geometry domains may have one element per
+    point.
 
     rigExec:locked is durable authoring metadata: it tells tools that the
     constraint's setup should not be edited, but it is not an enable switch
@@ -627,23 +670,6 @@ class "RigExecConstraint" (
     target on rigExec:moves."""
 )
 {
-    float inputs:defaultWeight = 1 (
-        doc = """The constraint's envelope: the normalized blend from the
-        incoming pose to the constrained pose, in [0, 1]. Zero passes the
-        incoming pose through and one applies the constrained pose in full.
-
-        It is the per-element weight used for every element that
-        rigExec:weightObject does not supply a value for; with no weight
-        object bound it is the weight everywhere. The transform domain has
-        exactly one element, so there it is simply the envelope."""
-    )
-    rel rigExec:weightObject (
-        doc = """Optional per-element weight field refining
-        inputs:defaultWeight, at most one. Meaningful only when the constraint
-        writes the geometry domain -- a <prim>.points target -- because the
-        transform domain has a single element and nothing to vary over.
-        Authoring it on a transform-domain constraint is an error."""
-    )
     uniform bool rigExec:locked = false (
         doc = """Authoring lock metadata for DCC interchange. Evaluation
         remains active while locked; use RigExecMoverAPI inputs:enabled or
@@ -774,7 +800,8 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
     }
     doc = """FBX-style position constraint. It blends the ordered source
     translations, applies inputs:translationOffset, masks the result per
-    axis, and blends it over the incoming pose by inputs:defaultWeight."""
+    axis, and blends it over the incoming pose by the common MoverAPI
+    envelope."""
 )
 {
     # inputs:affectTranslation* and inputs:translationOffset are inherited.
@@ -787,7 +814,8 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
     }
     doc = """FBX-style rotation constraint. It blends the ordered source
     orientations, applies the authored Euler offset and axis masks, and
-    blends the result over the incoming pose by inputs:defaultWeight."""
+    blends the result over the incoming pose by the common MoverAPI
+    envelope."""
 )
 {
     # inputs:affectRotation*, inputs:rotationOffset and rigExec:rotationOrder
@@ -801,7 +829,7 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
     }
     doc = """FBX-style scale constraint. It blends the ordered source scales,
     applies inputs:scaleOffset and the per-axis masks, and blends the result
-    over the incoming pose by inputs:defaultWeight."""
+    over the incoming pose by the common MoverAPI envelope."""
 )
 {
     # inputs:affectScale* and inputs:scaleOffset are inherited.
@@ -884,22 +912,6 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     )
 }
 
-class RigExecCustomConstraint "RigExecCustomConstraint" (
-    inherits = </RigExecConstraint>
-    customData = {
-        string className = "CustomConstraint"
-    }
-    doc = """Non-evaluating extensibility carrier for DCC-specific constraint
-    metadata: RigExec intentionally assigns no source relationship or built-in
-    solve semantics to this type, the built-in evaluator rejects a Custom prim
-    carrying a rigExec:moves write set and exposes no handler registry, and an
-    external integration must evaluate any Custom behavior outside the
-    built-in RigExecRigEvaluator path while retaining the common weight/lock
-    contract."""
-)
-{
-}
-
 class RigExecFloatMathMover "RigExecFloatMathMover" (
     inherits = </Typed>
     customData = {
@@ -908,10 +920,9 @@ class RigExecFloatMathMover "RigExecFloatMathMover" (
     doc = """Statically typed add, multiply, clamp, remap, or blend over an
     exact float property target (spec section 4.1).
 
-    The revision is r = op(incoming), mixed back as
-    incoming + inputs:weight * (r - incoming), so weight 0 is a pass-through
-    and weight 1 (the default) is the operation applied outright -- the same
-    uniform weight rule the point-domain matrix mover follows.
+    The revision is r = op(incoming), then the common MoverAPI envelope mixes
+    it back over the incoming value. Zero is a pass-through and one applies
+    the operation outright -- the same rule every mover follows.
 
     remap normalizes from [inputs:min, inputs:max] to [0, 1] and does NOT
     clamp; compose a clamp mover after it to bound the result."""
@@ -923,7 +934,6 @@ class RigExecFloatMathMover "RigExecFloatMathMover" (
     float inputs:value = 0
     float inputs:min = 0
     float inputs:max = 1
-    float inputs:weight = 1
 }
 
 ################################################################
@@ -941,7 +951,9 @@ class "RigExecWeightObject" (
 )
 {
     rel rigExec:weightTarget (
-        doc = "Canonical prim or exact property carrying the weighted domain."
+        doc = """Canonical prim or exact property carrying the weighted
+        domain. For a constant envelope over an atomic multi-target mover,
+        this is the mover prim itself."""
     )
     uniform token rigExec:representation = "constant" (
         allowedTokens = ["constant", "dense", "sparse"]
@@ -1351,15 +1363,12 @@ class RigExecMatrixMover "RigExecMatrixMover" (
         string className = "MatrixMover"
     }
     doc = """Moves the preceding native point3f[] points value through one
-    declared target-local affine transform and blends each point with exactly
-    one compatible weight object: p' = q + w (T q - q) (spec section 7.4)."""
+    declared target-local affine transform and blends each point with the
+    common MoverAPI envelope: p' = q + w (T q - q) (spec section 7.4)."""
 )
 {
     rel rigExec:transform (
         doc = "Exactly one GfMatrix4d provider (computeMatrix)."
-    )
-    rel rigExec:weightObject (
-        doc = "Exactly one compatible weight object for the points target."
     )
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
@@ -1373,13 +1382,11 @@ class RigExecBlendShapeMover "RigExecBlendShapeMover" (
     }
     doc = """Applies independently composed blend inputs and native
     target-shape points samples to an exact standard UsdGeomPointBased.points
-    property (spec section 7.3)."""
+    property, then applies the common MoverAPI envelope to the accumulated
+    delta (spec section 7.3)."""
 )
 {
     rel rigExec:blendInputs
-    rel rigExec:weightObject (
-        doc = "Optional per-point weight multiplying the final delta."
-    )
 }
 
 class RigExecBlendInput "RigExecBlendInput" (
@@ -1444,7 +1451,7 @@ class RigExecVec3fMathMover "RigExecVec3fMathMover" (
     exact float3/vector-valued property target (spec section 4.1).
 
     Every operation is component-wise, which is why the bounds are float3
-    rather than float. Weight and remap semantics match
+    rather than float. Remap and common MoverAPI-envelope semantics match
     RigExecFloatMathMover."""
 )
 {
@@ -1454,7 +1461,6 @@ class RigExecVec3fMathMover "RigExecVec3fMathMover" (
     float3 inputs:value = (0, 0, 0)
     float3 inputs:min = (0, 0, 0)
     float3 inputs:max = (1, 1, 1)
-    float inputs:weight = 1
 }
 
 class RigExecMatrixMathMover "RigExecMatrixMathMover" (
@@ -1467,15 +1473,14 @@ class RigExecMatrixMathMover "RigExecMatrixMathMover" (
     RigExecMatrixMover.
 
     multiply post-multiplies (inputs:value applied AFTER the incoming
-    matrix, in GfMatrix4d's row-vector convention); blend replaces. The
-    inputs:weight mix is component-wise, exact at both endpoints."""
+    matrix, in GfMatrix4d's row-vector convention); blend replaces. The common
+    MoverAPI envelope mixes component-wise and is exact at both endpoints."""
 )
 {
     uniform token rigExec:operation = "multiply" (
         allowedTokens = ["multiply", "blend"]
     )
     matrix4d inputs:value = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
-    float inputs:weight = 1
 }
 
 class RigExecLatticeMover "RigExecLatticeMover" (
@@ -1530,12 +1535,10 @@ class RigExecSmoothMover "RigExecSmoothMover" (
     property through uniform-weight Laplacian smoothing with fixed edge
     adjacency taken from the destination's standard topology (spec
     section 7.6 revised: the former post-mover smooth operation as a
-    first-class mover)."""
+    first-class mover). The common MoverAPI envelope blends the full
+    Laplacian step over the incoming points."""
 )
 {
-    float inputs:strength = 0.5 (
-        doc = "Blend of the Laplacian step per point, in [0, 1]."
-    )
 }
 
 class RigExecCurvenet "RigExecCurvenet" (
@@ -1584,11 +1587,6 @@ class RigExecCurvenet "RigExecCurvenet" (
         section 3: the count per spline is this value times the ratio of the
         spline's control polygon length to the surface's mean edge length."""
     )
-    color3f guide:displayColor = (0.9, 0.4, 1)
-    float guide:displayOpacity = 1
-    double guide:radius = 0 (
-        doc = "Knot marker radius for the viewport; zero draws no markers."
-    )
 }
 
 class RigExecCurvenetMover "RigExecCurvenetMover" (
@@ -1611,15 +1609,12 @@ class RigExecCurvenetMover "RigExecCurvenetMover" (
     The surface this deforms FROM is whatever the preceding revision in the
     chain produced, which is exactly the paper's section 5 separation of
     the projection pose from the rest pose: a curvenet layers over skinning,
-    another curvenet, or a simulation with no extra setup."""
+    another curvenet, or a simulation with no extra setup. The common MoverAPI
+    envelope blends the solved surface over that incoming revision."""
 )
 {
     rel rigExec:curvenet (
         doc = "Exactly one RigExecCurvenet supplying the posed control points."
-    )
-    float inputs:strength = 1 (
-        doc = """Blend of the solved surface against the incoming one, in
-        [0, 1]. Applied after the solve, so zero is exactly a no-op."""
     )
 }
 
@@ -1631,12 +1626,10 @@ class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
     doc = """Moves exactly one exact native UsdGeomPointBased points
     property by uniform centroid scaling toward the authored rest bound
     volume (spec section 7.6 revised: the former post-mover volumeCorrect
-    operation as a first-class mover)."""
+    operation as a first-class mover). The common MoverAPI envelope blends
+    full bound-volume restoration over the incoming points."""
 )
 {
-    float inputs:strength = 0 (
-        doc = "Blend toward full bound-volume restoration, in [0, 1]."
-    )
 }
 
 ################################################################

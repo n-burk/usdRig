@@ -118,7 +118,6 @@ def Xform "VolumeAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 2
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )
                 double avars:rz.connect = </VolumeAsset/Rig/Controls/Root.avars:rz>
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
@@ -153,7 +152,6 @@ def Xform "VolumeAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 2
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
                 double avars:rz = 0
                 double avars:rz.spline = {
@@ -169,7 +167,6 @@ def Xform "VolumeAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 2
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 9, 0, 1) )
                 double avars:tz = 0
                 double avars:tz.spline = {

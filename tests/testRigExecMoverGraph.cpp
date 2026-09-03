@@ -210,6 +210,7 @@ TestBlendShapeRevision()
     RigExecMoverParameters params;
     params.valid = true;
     params.kind = TfToken("blendShape");
+    params.weights = RigExecWeightPacket::Constant(1.0f);
     params.blendDeltas = {GfVec3f(0, 1, 0), GfVec3f(0, 1, 0),
                           GfVec3f(0, 1, 0), GfVec3f(0, 1, 0)};
 
@@ -236,6 +237,7 @@ TestBlendCardinalityMismatchPassesThrough()
     RigExecMoverParameters params;
     params.valid = true;
     params.kind = TfToken("blendShape");
+    params.weights = RigExecWeightPacket::Constant(1.0f);
     params.blendDeltas = {GfVec3f(0, 1, 0)};  // 1 delta for 4 points
 
     const VdfMaskedOutput head = graph.AddRevision(
@@ -286,6 +288,7 @@ TestMixedOpChain()
     RigExecMoverParameters blend;
     blend.valid = true;
     blend.kind = TfToken("blendShape");
+    blend.weights = RigExecWeightPacket::Constant(1.0f);
     blend.blendDeltas = {GfVec3f(1, 0, 0), GfVec3f(1, 0, 0),
                          GfVec3f(1, 0, 0), GfVec3f(1, 0, 0)};
     head = graph.AddRevision(
@@ -521,11 +524,11 @@ TestAssembleNonMatrixParameters()
         .Set(VtIntArray({0, 1, 2}));
     const SdfPath target("/A/Geom/M.points");
 
-    // Smooth: strength plus the destination's own topology.
+    // Smooth: common envelope plus the destination's own topology.
     {
         UsdPrim mover = stage->DefinePrim(SdfPath("/A/Rig/Movers/Relax"),
                                           TfToken("RigExecSmoothMover"));
-        mover.CreateAttribute(TfToken("inputs:strength"),
+        mover.CreateAttribute(TfToken("inputs:defaultWeight"),
                               SdfValueTypeNames->Float)
             .Set(0.25f);
         const RigExecRevisionBinding b =
@@ -534,7 +537,10 @@ TestAssembleNonMatrixParameters()
             mover, RigExecRevisionOp::Smooth, b, {});
         CHECK(p.valid);
         CHECK(p.kind == TfToken("smooth"));
-        CHECK(p.strength == 0.25f);
+        CHECK(p.strength == 1.0f);
+        CHECK(p.weights.valid);
+        CHECK(p.weights.representation == TfToken("constant"));
+        CHECK(p.weights.defaultWeight == 0.25f);
         CHECK(p.topologyCounts.size() == 1);
         CHECK(p.topologyIndices.size() == 3);
     }

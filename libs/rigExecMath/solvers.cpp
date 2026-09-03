@@ -2,6 +2,7 @@
 // RigExec solver kernels.
 //
 #include "solvers.h"
+#include "envelope.h"
 
 #include "pxr/base/gf/matrix3d.h"
 #include "pxr/base/gf/rotation.h"
@@ -577,8 +578,16 @@ _ApplyEulerDelta(
     GfVec3d output = inputEuler;
     for (int axis = 0; axis < 3; ++axis) {
         if (_Affects(affect, axis)) {
-            output[axis] += weight * _ShortestDegrees(
-                targetEuler[axis] - inputEuler[axis]);
+            // The target Euler representation is the full-strength
+            // candidate.  Select it directly at the endpoint: reconstructing
+            // the equivalent input + shortestDelta representation can differ
+            // bit-for-bit (for example, 190 versus -170 degrees).
+            if (weight >= 1.0) {
+                output[axis] = targetEuler[axis];
+            } else {
+                output[axis] += weight * _ShortestDegrees(
+                    targetEuler[axis] - inputEuler[axis]);
+            }
         }
     }
     return output;
@@ -629,17 +638,28 @@ RigExecApplyPositionConstraint(
     GfVec3d constrainedOrigin = input.Origin();
     for (int axis = 0; axis < 3; ++axis) {
         if (_Affects(params.affect, axis)) {
-            constrainedOrigin[axis] += globalWeight *
-                (target[axis] - constrainedOrigin[axis]);
+            constrainedOrigin[axis] = RigExecBlendEnvelope(
+                input.Origin()[axis], target[axis], globalWeight);
         }
     }
     if (!_IsFinite(constrainedOrigin)) {
         return _ConstraintFailure(input);
     }
-    const GfVec3d translation = constrainedOrigin - input.Origin();
     RigExecPointFrame output = input;
-    for (GfVec3d &point : output.points) {
-        point += translation;
+    if (globalWeight >= 1.0) {
+        // At full strength the candidate pose owns its origin exactly.  Build
+        // its other landmarks from the preceding linear part instead of
+        // translating through another cancellation-prone a + (b - a).
+        for (size_t point = 1; point < output.points.size(); ++point) {
+            output.points[point] = constrainedOrigin +
+                (input.points[point] - input.Origin());
+        }
+        output.points[0] = constrainedOrigin;
+    } else {
+        const GfVec3d translation = constrainedOrigin - input.Origin();
+        for (GfVec3d &point : output.points) {
+            point += translation;
+        }
     }
     return output;
 }
@@ -761,8 +781,8 @@ RigExecApplyScaleConstraint(
     }
     for (int axis = 0; axis < 3; ++axis) {
         if (_Affects(params.affect, axis)) {
-            inputParams.scale[axis] += globalWeight *
-                (targetScale[axis] - inputParams.scale[axis]);
+            inputParams.scale[axis] = RigExecBlendEnvelope(
+                inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
     return _FrameFromConstraintParams(input, inputParams);
@@ -866,12 +886,13 @@ RigExecApplyParentConstraint(
 
     for (int axis = 0; axis < 3; ++axis) {
         if (_Affects(params.translationAxes, axis)) {
-            inputParams.translation[axis] += globalWeight *
-                (targetTranslation[axis] - inputParams.translation[axis]);
+            inputParams.translation[axis] = RigExecBlendEnvelope(
+                inputParams.translation[axis], targetTranslation[axis],
+                globalWeight);
         }
         if (_Affects(params.scaleAxes, axis)) {
-            inputParams.scale[axis] += globalWeight *
-                (targetScale[axis] - inputParams.scale[axis]);
+            inputParams.scale[axis] = RigExecBlendEnvelope(
+                inputParams.scale[axis], targetScale[axis], globalWeight);
         }
     }
     const GfVec3d outputEuler = _ApplyEulerDelta(
@@ -1028,14 +1049,18 @@ RigExecApplyAimConstraint(
 
     const GfRotation full(a0, a1);
     const GfRotation partial(full.GetAxis(), full.GetAngle() * weight);
-    const GfVec3d newAim = partial.TransformDir(a0).GetNormalized();
+    const GfVec3d newAim = weight >= 1.0
+        ? a1
+        : partial.TransformDir(a0).GetNormalized();
 
     const double upLen = inUp.GetLength();
     const double sideLen = inSide.GetLength();
     GfVec3d up = inUp;
     up -= newAim * GfDot(newAim, up);
     if (up.GetLength() < 1e-12) {
-        up = partial.TransformDir(inUp);
+        up = weight >= 1.0
+            ? full.TransformDir(inUp)
+            : partial.TransformDir(inUp);
         up -= newAim * GfDot(newAim, up);
     }
     if (up.GetLength() < 1e-12) {

@@ -72,7 +72,6 @@ def Xform "TurretAsset"
         {
             def RigExecJoint "Base"
             {
-                double guide:length = 1
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
             }
         }

@@ -36,7 +36,7 @@ credential.
 
 | Key looks like | Endpoint | Auth header | Default model |
 |---|---|---|---|
-| `LLM_…` (Meta Muse) | `https://api.meta.ai` | `Authorization: Bearer` | `muse-spark-1.2-contributor` |
+| `LLM_…` (Meta Muse) | `https://api.meta.ai` | `Authorization: Bearer` | `muse-spark-1.3-contributor` |
 | `sk-ant-…` (Anthropic) | `https://api.anthropic.com` | `x-api-key` | `claude-opus-5` |
 | *(none)* — **Ollama** | `http://127.0.0.1:11434` by default | none | `qwen3.5:9b` |
 | *(none)* — **LM Studio** | `http://hivemind.local:1234` by default | inert `lmstudio` placeholder only | `MUSE_MODEL`, or selected from the server |
@@ -155,14 +155,14 @@ keys this off the endpoint rather than the key, because the scheme belongs to
 the service. A `MUSE_BASE_URL` gateway is a third service whose scheme we do not
 know, so it keeps `x-api-key`.
 
-Meta publishes a standard tier (`muse-spark-1.1`, `muse-spark-1.2`) and a
-contributor tier. **Every Meta call goes through `muse-spark-1.2-contributor`.**
+Meta publishes a standard tier (`muse-spark-1.1`, `muse-spark-1.2`, `muse-spark-1.3`) and a
+contributor tier. **Every Meta call goes through `muse-spark-1.3-contributor`.**
 `force_contributor_model()` is applied to both routes a model can arrive by —
 `MUSE_MODEL` and an explicit `model=` argument — so `MUSE_MODEL` can select a
 different *contributor* model but cannot drop back to the standard tier; a
 standard id is replaced and the substitution is reported on stderr. A
 standard-tier id is swapped outright rather than having `-contributor`
-appended, because only `muse-spark-1.2-contributor` is published and a
+appended, because only `muse-spark-1.3-contributor` is published and a
 synthesised `muse-spark-1.1-contributor` would fail at the API instead of
 here. Anthropic and `MUSE_BASE_URL` gateways are untouched — the tier is a
 Meta concept.
@@ -172,7 +172,7 @@ says so in its transcript when no key is set. Optional overrides:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MUSE_MODEL` | `claude-opus-5`, `muse-spark-1.2-contributor` on Meta, or server-selected on LM Studio | Model id. Ignored by Apple, which is fixed to on-device `system` |
+| `MUSE_MODEL` | `claude-opus-5`, `muse-spark-1.3-contributor` on Meta, or server-selected on LM Studio | Model id. Ignored by Apple, which is fixed to on-device `system` |
 | `MUSE_EFFORT` | `xhigh` | `low` / `medium` / `high` / `xhigh` / `max` |
 | `MUSE_MAX_TOKENS` | `32000` | Output cap per turn |
 | `MUSE_BASE_URL` | — | An Anthropic-compatible endpoint other than `api.anthropic.com` (a gateway, proxy, or local relay). Ignored by the explicit Apple and LM Studio providers |
@@ -261,7 +261,7 @@ API key   ••••••••••••••••••••
 
 Endpoint  https://api.meta.ai        (Meta Muse key)
 Header    Authorization: Bearer
-Model     muse-spark-1.2-contributor
+Model     muse-spark-1.3-contributor
 ```
 
 For the hosted back ends the endpoint, header and model are read-only because

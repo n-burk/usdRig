@@ -22,7 +22,7 @@ import zlib
 # exposed by ``fm serve`` and has a small translation layer below.
 #
 #   Anthropic   api.anthropic.com   sk-ant-…   x-api-key       claude-opus-5
-#   Meta Muse   api.meta.ai         LLM_…      Bearer token    muse-spark-1.2-contributor
+#   Meta Muse   api.meta.ai         LLM_…      Bearer token    muse-spark-1.3-contributor
 #   Ollama      <host>:11434        (none)     (ignored)       qwen3.5:9b
 #   LM Studio   hivemind.local:1234 (none)     (ignored)       selected from server
 #   Apple FM    localhost:1976      (none)     (none)          system
@@ -44,11 +44,11 @@ DEFAULT_MODEL = "claude-opus-5"
 META_BASE_URL = "https://api.meta.ai"
 META_HOST = "api.meta.ai"
 
-# Meta publishes a standard tier (muse-spark-1.1, muse-spark-1.2) and a
-# contributor tier. Every call to Meta goes through the contributor tier — see
-# force_contributor_model, which is why MUSE_MODEL cannot drop back to the
-# standard one.
-META_DEFAULT_MODEL = "muse-spark-1.2-contributor"
+# Meta publishes a standard tier (muse-spark-1.1, muse-spark-1.2,
+# muse-spark-1.3) and a contributor tier. Every call to Meta goes through
+# the contributor tier — see force_contributor_model, which is why
+# MUSE_MODEL cannot drop back to the standard one.
+META_DEFAULT_MODEL = "muse-spark-1.3-contributor"
 META_CONTRIBUTOR_SUFFIX = "-contributor"
 META_KEY_PREFIX = "LLM_"
 
@@ -793,7 +793,7 @@ def force_contributor_model(model, base_url):
     have to agree.
 
     A standard-tier id is replaced outright rather than having "-contributor"
-    appended to it: only muse-spark-1.2-contributor is published, so
+    appended to it: only muse-spark-1.3-contributor is published, so
     synthesising "muse-spark-1.1-contributor" would produce a name that does
     not exist and fail at the API instead of here.
 

@@ -84,6 +84,65 @@ def _AssertActivationFailureKeepsStageAlive():
         container._Shutdown()
 
 
+def _AssertLiveRootAutoActivation():
+    """A rig authored into the open blank stage activates by itself."""
+    from rigExecUsdview import RigExecUsdviewContainer
+
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/World", "Xform")
+
+    class _SuccessLibrary:
+        def __init__(self):
+            self.activations = 0
+            self.deactivations = 0
+
+        def RigExecImaging_Deactivate(self):
+            self.deactivations += 1
+
+        def RigExecImaging_Activate(self, cacheId, rigPath, frame):
+            self.activations += 1
+            return 0
+
+    viewSettings = type("ViewSettings", (), {})()
+    viewSettings.displayGuide = False
+    dataModel = type("DataModel", (), {})()
+    dataModel.stage = stage
+    dataModel.currentFrame = Usd.TimeCode.Default()
+    dataModel.viewSettings = viewSettings
+    api = type("UsdviewApi", (), {})()
+    api.dataModel = dataModel
+
+    container = RigExecUsdviewContainer.__new__(RigExecUsdviewContainer)
+    container._api = api
+    container._lib = _SuccessLibrary()
+    container._active = False
+    container._rigPaths = []
+    container._cachedStage = None
+    container._stageNoticeKey = None
+    container._activating = False
+
+    try:
+        container._OnStageReplaced()
+        stage.DefinePrim("/Rig", "RigExecRoot")
+        stage.DefinePrim("/Rig/Joints", "Scope")
+        if container._lib.activations:
+            raise AssertionError("empty live-authored rig activated too early")
+
+        stage.DefinePrim("/Rig/Joints/J", "RigExecJoint")
+        if container._lib.activations != 1 or not container._active:
+            raise AssertionError("first live-authored joint did not activate")
+        if container._rigPaths != [Sdf.Path("/Rig")]:
+            raise AssertionError("live root set was not recorded")
+        if not viewSettings.displayGuide:
+            raise AssertionError("live activation did not enable guides")
+
+        stage.RemovePrim("/Rig")
+        if container._active or container._rigPaths:
+            raise AssertionError("removing the last live root stayed active")
+    finally:
+        container._Shutdown()
+
+
 def testUsdviewInputFunction(appController):
     # The plugin owns the platform naming (.dll/.dylib/.so) and the
     # installed-vs-build search order; asking it keeps this script working on
@@ -145,6 +204,7 @@ def testUsdviewInputFunction(appController):
             % (viaSignal[0], viaDirect[0]))
 
     _AssertActivationFailureKeepsStageAlive()
+    _AssertLiveRootAutoActivation()
 
     print("RIGEXEC_USDVIEW_OK generations %d -> %d, frame 1024 published "
           "the frame 1024 pose" % (generation0, generation1))

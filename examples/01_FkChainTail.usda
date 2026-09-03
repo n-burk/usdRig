@@ -149,7 +149,6 @@ def Xform "TailAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 2
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -157,7 +156,6 @@ def Xform "TailAsset"
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    double guide:length = 2
                     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -165,7 +163,6 @@ def Xform "TailAsset"
                         prepend apiSchemas = ["NodeGraphNodeAPI"]
                     )
                     {
-                        double guide:length = 2
                         matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
                         uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -173,7 +170,6 @@ def Xform "TailAsset"
                             prepend apiSchemas = ["NodeGraphNodeAPI"]
                         )
                         {
-                            double guide:length = 2
                             matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
                             uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                         }
@@ -300,4 +296,3 @@ def Xform "TailAsset"
         }
     }
 }
-

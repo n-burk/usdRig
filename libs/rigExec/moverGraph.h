@@ -30,6 +30,7 @@
 #include "pxr/exec/vdf/network.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/object.h"
+#include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
 
@@ -37,6 +38,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -161,6 +163,42 @@ public:
         }
         *out = v->UncheckedGet<T>();
         return true;
+    }
+
+    /// Resolves one scalar/static input exactly as Exec's AttributeValue
+    /// accessor does: an in-memory property override wins, otherwise a single
+    /// authored attribute connection is followed recursively, otherwise the
+    /// attribute's own value is read. Compile validates connection
+    /// cardinality/type/cycles for schema inputs that require one scalar.
+    template <class T>
+    bool GetAttribute(
+        const UsdAttribute &attribute, UsdTimeCode time, T *out) const {
+        std::set<SdfPath> visiting;
+        std::function<bool(const UsdAttribute &)> read =
+            [&](const UsdAttribute &a) {
+            if (!a || !out || !visiting.insert(a.GetPath()).second) {
+                return false;
+            }
+            struct _EraseOnReturn {
+                std::set<SdfPath> *paths;
+                SdfPath path;
+                ~_EraseOnReturn() { paths->erase(path); }
+            } erase{&visiting, a.GetPath()};
+            if (Get(a.GetPath(), out)) {
+                return true;
+            }
+            SdfPathVector connections;
+            a.GetConnections(&connections);
+            if (connections.size() == 1) {
+                const UsdAttribute source =
+                    a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
+                if (read(source)) {
+                    return true;
+                }
+            }
+            return a.Get(out, time);
+        };
+        return read(attribute);
     }
 
     bool IsEmpty() const { return _values.empty(); }
@@ -321,8 +359,9 @@ std::optional<RigExecRevisionOp> RigExecRevisionOpForSchema(
 /// Peer of _BuildMatrixMoverParameters in moverKernels.cpp, but built from
 /// values rather than from a VdfContext: \p transform and \p weights are the
 /// already-evaluated results of the providers named by the revision binding,
-/// pulled through a tap set on the authored stage. Null means the provider did
-/// not produce a value, which fails the application (spec §7.4).
+/// pulled through a tap set on the authored stage. A null transform fails the
+/// application. Null weights mean no object is bound, so the assembler reads
+/// inputs:defaultWeight and synthesizes the common constant envelope.
 RigExecMoverParameters RigExecAssembleMatrixParameters(
     const UsdPrim &moverPrim,
     const GfMatrix4d *transform,
@@ -341,11 +380,14 @@ RigExecMoverStatus RigExecStatusForParameters(
 /// Everything else an assembler needs is a static read off the authored stage
 /// through the revision binding. These are the dynamic ones: results of
 /// computations on authored prims, pulled through a tap set on that same stage.
-/// A null/empty member means the provider produced nothing, which fails the
-/// application rather than substituting a default (spec §6.6).
+/// A null/empty member means the provider produced nothing and normally fails
+/// the application rather than substituting a default (spec §6.6). The one
+/// deliberate exception is weights: null means no weight object was bound,
+/// so inputs:defaultWeight supplies the common envelope.
 struct RigExecProviderValues {
     const GfMatrix4d *transform = nullptr;          ///< computeMatrix
-    const RigExecWeightPacket *weights = nullptr;   ///< computeWeightPacket
+    /// Bound computeWeightPacket, or null to use inputs:defaultWeight.
+    const RigExecWeightPacket *weights = nullptr;
     const RigExecPointFrameArray *driverFrames = nullptr;
     std::vector<GfVec3f> basePoints;   ///< authored base of the target
     std::vector<GfVec3f> blendDeltas;  ///< summed channel deltas

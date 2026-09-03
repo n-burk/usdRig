@@ -123,7 +123,6 @@ def Xform "LegAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 4
                 matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 8, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -131,7 +130,6 @@ def Xform "LegAsset"
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    double guide:length = 4
                     matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 4, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -139,7 +137,6 @@ def Xform "LegAsset"
                         prepend apiSchemas = ["NodeGraphNodeAPI"]
                     )
                     {
-                        double guide:length = 1
                         matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
                         uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                     }
@@ -262,4 +259,3 @@ def Xform "LegAsset"
         }
     }
 }
-

@@ -44,7 +44,7 @@ def Xform "LatticeAsset"
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
-                    float inputs:strength = 0.35
+                    float inputs:defaultWeight = 0.35
                     rel rigExec:moves = </LatticeAsset/Geom/Slab.points>
                     uniform asset ui:nodegraph:node:icon = @../icons/volume_correct_mover.png@
 
@@ -52,7 +52,7 @@ def Xform "LatticeAsset"
                         prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                     )
                     {
-                        float inputs:strength = 0.6
+                        float inputs:defaultWeight = 0.6
                         rel rigExec:moves = </LatticeAsset/Geom/Slab.points>
                         uniform asset ui:nodegraph:node:icon = @../icons/smooth_mover.png@
 
@@ -102,4 +102,3 @@ def Xform "LatticeAsset"
         }
     }
 }
-

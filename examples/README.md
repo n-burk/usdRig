@@ -11,13 +11,12 @@ The rigExecUsdview plugin activates automatically for stages carrying a
 `RigExecRoot` prim and republishes OpenExec-evaluated results on every
 timeline change.
 
-Joints and aggregate solvers draw as **guide geometry** (a sphere at each
-posed frame origin plus a cone along the aim axis, aligned with OpenExec's
-`IrJointScope` guide contract): enable *Display → Display Purposes →
-Guide* in usdview to see them. Joints style via `guide:length` /
-`guide:displayColor` / `guide:displayOpacity` (unauthored length falls
-back to the posed bone length); solvers draw one guide per aggregate
-frame element with their own `guide:displayColor`/`guide:displayOpacity`.
+Joints and aggregate solvers draw as **guide geometry**: each joint draws a
+sphere at its posed origin and a cone to every nested child joint, while
+solvers draw from their aggregate frame aim axes. Enable *Display → Display
+Purposes → Guide* in usdview to see them. Joints style via `guide:radius` /
+`guide:displayColor` / `guide:displayOpacity`; solvers draw one guide per
+aggregate frame element with their own radius, color, and opacity.
 
 ## The original arm
 
@@ -151,8 +150,8 @@ frame element with their own `guide:displayColor`/`guide:displayOpacity`.
   either). Authoring the solver's `rigExec:joints` list is the whole job. Joint hierarchy is prim nesting;
   an xformable with only a `rest:space` follows its rest (or its
   namespace parent) — see `08_AimEyes` for static joints posed
-  downstream by movers. Guide cones use the authored `guide:length`
-  only, with Ir's unit-radius primitives.
+  downstream by movers. Joint guide cones derive their direction and length
+  from evaluated parent/child origins; leaf joints draw only their sphere.
 - Typed geometry movers (matrix, blend shape, smooth, volume correct,
   lattice, surface, curve) write native `UsdGeomPointBased` `point3f[]`
   `points` attributes only; smooth/volumeCorrect/lattice (like blend

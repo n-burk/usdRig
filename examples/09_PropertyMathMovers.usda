@@ -17,8 +17,9 @@
     handed BACK to exec as the attribute's value. 03_IkFkBlendClamp is where
     that matters: its clamped weight is what RigExecBlendPointFrames reads.
 
-    Each operation is r = op(incoming), mixed as
-    incoming + inputs:weight * (r - incoming); weight defaults to 1.
+    Each operation is r = op(incoming), mixed through the common mover
+    envelope as incoming + inputs:defaultWeight * (r - incoming); the
+    envelope defaults to 1.
     remap normalizes [min, max] to [0, 1] and does not clamp - compose a
     clamp mover after it if you want the result bounded.
 
@@ -27,7 +28,7 @@
     it straight off the stage and never touches exec, so it gets the same
     value through RigExecResolvedInputs. Both are filled from the one chain
     result before anything reads an input, so a mover that revises another
-    mover's inputs:strength actually changes the deformation.
+    mover's inputs:defaultWeight actually changes the deformation.
 
     Results at Default time, asserted by TestPropertyMathMoversAreEvaluated:
       rigExec:gain         2.5   -> 1.0             (clamp into [0, 1])
@@ -126,7 +127,7 @@ def Xform "PropMathAsset"
             )
             {
                 uniform token rigExec:operation = "multiply"
-                float inputs:weight = 1
+                float inputs:defaultWeight = 1
                 matrix4d inputs:value = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
                 rel rigExec:moves = </PropMathAsset/Rig/Channels/Dials.rigExec:localOffset>
             }

@@ -770,7 +770,7 @@ def testMetaMuseKeyRoutesToMetaWithTheRightModel():
     base_url, source = ma.resolve_base_url()
     if base_url != ma.META_BASE_URL:
         raise AssertionError("a Meta Muse key routed to %r (%s)" % (base_url, source))
-    if ma.resolve_model(base_url) != "muse-spark-1.2-contributor":
+    if ma.resolve_model(base_url) != "muse-spark-1.3-contributor":
         raise AssertionError("wrong default model: %s" % ma.resolve_model(base_url))
     if ma.describe_key_problem("LLM_x", base_url) is not None:
         raise AssertionError("a routed Meta key should not be reported as a problem")
@@ -805,12 +805,12 @@ def testMetaMuseKeyRoutesToMetaWithTheRightModel():
 
     if seen.get("base_url") != ma.META_BASE_URL:
         raise AssertionError("client was not pointed at Meta: %s" % seen)
-    if seen.get("model") != "muse-spark-1.2-contributor":
+    if seen.get("model") != "muse-spark-1.3-contributor":
         raise AssertionError("wrong model sent to Meta: %s" % seen)
 
     # MUSE_MODEL may not drop Meta back to the standard tier.
     os.environ["MUSE_MODEL"] = "muse-spark-1.1"
-    if ma.resolve_model(ma.META_BASE_URL) != "muse-spark-1.2-contributor":
+    if ma.resolve_model(ma.META_BASE_URL) != "muse-spark-1.3-contributor":
         raise AssertionError("MUSE_MODEL escaped the contributor tier")
     os.environ.pop("MUSE_MODEL")
 
@@ -848,7 +848,7 @@ def testTheRequestCarriesTheContributorModelAndXhighEffort():
                  on_event=lambda kind, payload: None)
 
     request = captured[0]
-    if request["model"] != "muse-spark-1.2-contributor":
+    if request["model"] != "muse-spark-1.3-contributor":
         raise AssertionError("model on the wire was %r" % request["model"])
     effort = (request.get("output_config") or {}).get("effort")
     if effort != "xhigh":
@@ -1277,7 +1277,7 @@ def testMetaKeyReachesTheClientAsABearerToken():
         raise AssertionError("the Meta key must not also go in x-api-key: %s" % seen)
     if seen.get("base_url") != ma.META_BASE_URL:
         raise AssertionError("not routed to Meta: %s" % seen)
-    if seen.get("model") != "muse-spark-1.2-contributor":
+    if seen.get("model") != "muse-spark-1.3-contributor":
         raise AssertionError("expected the contributor tier, got %s" % seen.get("model"))
     os.environ.pop("MUSE_API_KEY", None)
 
@@ -1287,22 +1287,22 @@ def testEveryMetaCallUsesTheContributorTier():
     Both routes to a model — MUSE_MODEL and an explicit model= argument — must
     land on the contributor tier when the endpoint is Meta. A standard-tier id
     is replaced outright rather than having "-contributor" appended, because
-    only muse-spark-1.2-contributor is published and a synthesised
+    only muse-spark-1.3-contributor is published and a synthesised
     "muse-spark-1.1-contributor" would fail at the API instead of here.
     """
     META = ma.META_BASE_URL
     os.environ.pop("MUSE_MODEL", None)
-    if ma.resolve_model(META) != "muse-spark-1.2-contributor":
+    if ma.resolve_model(META) != "muse-spark-1.3-contributor":
         raise AssertionError("the Meta default is not the contributor tier")
 
-    for standard in ("muse-spark-1.1", "muse-spark-1.2"):
+    for standard in ("muse-spark-1.1", "muse-spark-1.2", "muse-spark-1.3"):
         os.environ["MUSE_MODEL"] = standard
-        if ma.resolve_model(META) != "muse-spark-1.2-contributor":
+        if ma.resolve_model(META) != "muse-spark-1.3-contributor":
             raise AssertionError("MUSE_MODEL=%s escaped the contributor tier" % standard)
     os.environ.pop("MUSE_MODEL")
 
     # An explicit argument goes through the same gate.
-    if ma.force_contributor_model("muse-spark-1.2", META) != "muse-spark-1.2-contributor":
+    if ma.force_contributor_model("muse-spark-1.2", META) != "muse-spark-1.3-contributor":
         raise AssertionError("an explicit model= escaped the contributor tier")
 
     # A future contributor model is left alone rather than rewritten.
@@ -1338,7 +1338,7 @@ def testExplicitModelArgumentCannotEscapeTheTier():
                  model="muse-spark-1.2")
 
     sent = captured[0]["model"]
-    if sent != "muse-spark-1.2-contributor":
+    if sent != "muse-spark-1.3-contributor":
         raise AssertionError("the request went out as %r" % sent)
     os.environ.pop("MUSE_API_KEY", None)
 

@@ -14,6 +14,7 @@
 #include "frameExtraction.h"
 
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/envelope.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
@@ -70,6 +71,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((values, "rigExec:values"))
     ((indices, "rigExec:indices"))
     ((defaultWeight, "rigExec:defaultWeight"))
+    ((inputsDefaultWeight, "inputs:defaultWeight"))
     ((baseWeight, "rigExec:baseWeight"))
     ((inputsDriver, "inputs:driver"))
     ((inputsScale, "inputs:scale"))
@@ -746,6 +748,20 @@ _BuildBlendChannel(const VdfContext &ctx)
 // the rigExec:resolved* relationships in the generated session layer,
 // binding each declared dependency to exactly one catalogued provider.
 
+bool
+_SetCommonMoverEnvelope(
+    const VdfContext &ctx, RigExecMoverParameters *params)
+{
+    const RigExecWeightPacket *weights =
+        ctx.GetInputValuePtr<RigExecWeightPacket>(_tokens->weightPacket);
+    const float *defaultWeight =
+        ctx.GetInputValuePtr<float>(_tokens->inputsDefaultWeight);
+    params->weights = weights
+        ? *weights
+        : RigExecWeightPacket::Constant(defaultWeight ? *defaultWeight : 1.0f);
+    return params->weights.valid;
+}
+
 RigExecMoverParameters
 _BuildMatrixMoverParameters(const VdfContext &ctx)
 {
@@ -760,9 +776,7 @@ _BuildMatrixMoverParameters(const VdfContext &ctx)
 
     const GfMatrix4d *transform =
         ctx.GetInputValuePtr<GfMatrix4d>(_tokens->transform);
-    const RigExecWeightPacket *weights =
-        ctx.GetInputValuePtr<RigExecWeightPacket>(_tokens->weightPacket);
-    if (!transform || !weights || !weights->valid) {
+    if (!transform || !_SetCommonMoverEnvelope(ctx, &params)) {
         return params;  // MoverFailed
     }
     // The matrix must be finite and affine (spec §7.4).
@@ -778,7 +792,6 @@ _BuildMatrixMoverParameters(const VdfContext &ctx)
         return params;
     }
     params.transform = *transform;
-    params.weights = *weights;
     params.valid = true;
     return params;
 }
@@ -824,14 +837,9 @@ _BuildBlendMoverParameters(const VdfContext &ctx)
                                           &params.blendDeltas)) {
         return params;  // structural error: fails atomically
     }
-    // Optional per-point mask (spec §7.3).
-    const RigExecWeightPacket *mask =
-        ctx.GetInputValuePtr<RigExecWeightPacket>(_tokens->weightPacket);
-    if (mask) {
-        if (!mask->valid) {
-            return params;
-        }
-        params.weights = *mask;
+    // Common MoverAPI envelope. A bound object supersedes the scalar.
+    if (!_SetCommonMoverEnvelope(ctx, &params)) {
+        return params;
     }
     params.valid = true;
     return params;
@@ -903,22 +911,12 @@ _EvaluateMatrixPointArrayExpression(const VdfContext &ctx)
         passThrough();
         return;
     }
-    // A dense field whose cardinality mismatches the target fails the
-    // application atomically (spec §7.4).
-    if (params->weights.representation == "dense" &&
-        params->weights.values.size() != count) {
+    // Resolve the common envelope first so a cardinality failure passes
+    // through before any output is written.
+    std::vector<float> weights(count);
+    if (!params->weights.ResolveAll(count, &weights)) {
         passThrough();
         return;
-    }
-    // Resolve weights first so a cardinality failure passes through
-    // before any output is written.
-    std::vector<float> weights(count);
-    for (size_t i = 0; i < count; ++i) {
-        weights[i] = params->weights.Resolve(i, count);
-        if (weights[i] < 0.0f) {
-            passThrough();
-            return;
-        }
     }
     // CPU SIMD over the contiguous elements (spec 6.5): parity-gated
     // against the scalar reference; RIGEXEC_ENABLE_SIMD=false forces the
@@ -967,24 +965,17 @@ _EvaluateBlendPointArrayExpression(const VdfContext &ctx)
         passThrough();
         return;
     }
-    const bool hasMask = params->weights.valid;
-    if (hasMask && params->weights.representation == "dense" &&
-        params->weights.values.size() != count) {
+    std::vector<float> envelope;
+    if (!params->weights.ResolveAll(count, &envelope)) {
         passThrough();
         return;
     }
     auto out = VdfReadWriteIterator<GfVec3f>::Allocate(ctx, count);
     size_t i = 0;
     for (; !previous.IsAtEnd(); ++previous, ++out, ++i) {
-        float mask = 1.0f;
-        if (hasMask) {
-            mask = params->weights.Resolve(i, count);
-            if (mask < 0.0f) {
-                passThrough();
-                return;
-            }
-        }
-        *out = *previous + params->blendDeltas[i] * mask;
+        const GfVec3f preceding = *previous;
+        *out = rigExec::RigExecBlendEnvelope(
+            preceding, preceding + params->blendDeltas[i], envelope[i]);
     }
 }
 
@@ -1016,12 +1007,10 @@ _BuildSmoothMoverParameters(const VdfContext &ctx)
         params.valid = true;
         return params;
     }
-    const float *strength =
-        ctx.GetInputValuePtr<float>(_tokens->strengthAttr);
-    params.strength = strength ? *strength : 0.5f;
-    if (!std::isfinite(params.strength)) {
+    if (!_SetCommonMoverEnvelope(ctx, &params)) {
         return params;
     }
+    params.strength = 1.0f;
     params.topologyCounts = _Collect<int>(ctx, _tokens->topologyCounts);
     params.topologyIndices = _Collect<int>(ctx, _tokens->topologyIndices);
     params.valid = !params.topologyCounts.empty();
@@ -1041,12 +1030,10 @@ _BuildVolumeCorrectMoverParameters(const VdfContext &ctx)
         params.valid = true;
         return params;
     }
-    const float *strength =
-        ctx.GetInputValuePtr<float>(_tokens->strengthAttr);
-    params.strength = strength ? *strength : 0.0f;
-    if (!std::isfinite(params.strength)) {
+    if (!_SetCommonMoverEnvelope(ctx, &params)) {
         return params;
     }
+    params.strength = 1.0f;
     const std::vector<GfVec3f> base =
         _Collect<GfVec3f>(ctx, _tokens->basePoints);
     if (base.empty()) {
@@ -1070,6 +1057,9 @@ _BuildLatticeMoverParameters(const VdfContext &ctx)
     params.enabled = enabled ? *enabled : true;
     if (!params.enabled) {
         params.valid = true;
+        return params;
+    }
+    if (!_SetCommonMoverEnvelope(ctx, &params)) {
         return params;
     }
     const GfVec3i *divisions =
@@ -1100,6 +1090,9 @@ _BuildSurfaceMoverParameters(const VdfContext &ctx)
         params.valid = true;
         return params;
     }
+    if (!_SetCommonMoverEnvelope(ctx, &params)) {
+        return params;
+    }
     params.strength = 1.0f;  // v0.1 attach/project maps fully
     params.auxPoints = _Collect<GfVec3f>(ctx, _tokens->surfacePoints);
     params.topologyCounts = _Collect<int>(ctx, _tokens->topologyCounts);
@@ -1120,6 +1113,9 @@ _BuildCurveMoverParameters(const VdfContext &ctx)
     params.enabled = enabled ? *enabled : true;
     if (!params.enabled) {
         params.valid = true;
+        return params;
+    }
+    if (!_SetCommonMoverEnvelope(ctx, &params)) {
         return params;
     }
     const RigExecPointFrameArray *frames =
@@ -1161,9 +1157,23 @@ _EvaluateScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
     for (; !previous.IsAtEnd(); ++previous) {
         scratch.push_back(*previous);
     }
+    const std::vector<GfVec3f> preceding = scratch;
     if (!kernel(*params, &scratch)) {
         passThrough();
         return;
+    }
+    if (scratch.size() != preceding.size()) {
+        passThrough();
+        return;
+    }
+    std::vector<float> envelope;
+    if (!params->weights.ResolveAll(scratch.size(), &envelope)) {
+        passThrough();
+        return;
+    }
+    for (size_t i = 0; i < scratch.size(); ++i) {
+        scratch[i] = rigExec::RigExecBlendEnvelope(
+            preceding[i], scratch[i], envelope[i]);
     }
     auto out = VdfReadWriteIterator<GfVec3f>::Allocate(ctx, scratch.size());
     size_t i = 0;
@@ -1412,19 +1422,23 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendInput)
 // declared read phase to exactly one catalogued provider.
 // ---------------------------------------------------------------------------
 
+#define RIGEXEC_MOVER_COMMON_INPUTS                                         \
+    AttributeValue<bool>(_tokens->inputsEnabled),                           \
+        AttributeValue<float>(_tokens->inputsDefaultWeight),                \
+        Relationship(_tokens->weightObjectRel)                              \
+            .TargetedObjects<RigExecWeightPacket>(                          \
+                _tokens->computeWeightPacket)                               \
+            .InputName(_tokens->weightPacket)
+
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecMatrixMover)
 {
     self.PrimComputation(_tokens->computeMoverParameters)
         .Callback<RigExecMoverParameters>(&_BuildMatrixMoverParameters)
         .Inputs(
-            AttributeValue<bool>(_tokens->inputsEnabled),
+            RIGEXEC_MOVER_COMMON_INPUTS,
             Relationship(_tokens->resolvedTransform)
                 .TargetedObjects<GfMatrix4d>(_tokens->computeMatrix)
-                .InputName(_tokens->transform),
-            Relationship(_tokens->weightObjectRel)
-                .TargetedObjects<RigExecWeightPacket>(
-                    _tokens->computeWeightPacket)
-                .InputName(_tokens->weightPacket));
+                .InputName(_tokens->transform));
 
     self.PrimComputation(_tokens->computeMoverStatus)
         .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
@@ -1441,7 +1455,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendShapeMover)
     self.PrimComputation(_tokens->computeMoverParameters)
         .Callback<RigExecMoverParameters>(&_BuildBlendMoverParameters)
         .Inputs(
-            AttributeValue<bool>(_tokens->inputsEnabled),
+            RIGEXEC_MOVER_COMMON_INPUTS,
             Relationship(_tokens->resolvedBlendInputs)
                 .TargetedObjects<RigExecBlendChannel>(
                     _tokens->computeBlendChannel)
@@ -1449,11 +1463,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendShapeMover)
             Relationship(_tokens->resolvedBase)
                 .TargetedObjects<GfVec3f>(
                     ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->basePoints),
-            Relationship(_tokens->weightObjectRel)
-                .TargetedObjects<RigExecWeightPacket>(
-                    _tokens->computeWeightPacket)
-                .InputName(_tokens->weightPacket));
+                .InputName(_tokens->basePoints));
 
     self.PrimComputation(_tokens->computeMoverStatus)
         .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
@@ -1533,8 +1543,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSmoothMover)
     self.PrimComputation(_tokens->computeMoverParameters)
         .Callback<RigExecMoverParameters>(&_BuildSmoothMoverParameters)
         .Inputs(
-            AttributeValue<bool>(_tokens->inputsEnabled),
-            AttributeValue<float>(_tokens->strengthAttr),
+            RIGEXEC_MOVER_COMMON_INPUTS,
             Relationship(_tokens->resolvedTopologyCounts)
                 .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
                 .InputName(_tokens->topologyCounts),
@@ -1558,8 +1567,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecVolumeCorrectMover)
         .Callback<RigExecMoverParameters>(
             &_BuildVolumeCorrectMoverParameters)
         .Inputs(
-            AttributeValue<bool>(_tokens->inputsEnabled),
-            AttributeValue<float>(_tokens->strengthAttr),
+            RIGEXEC_MOVER_COMMON_INPUTS,
             Relationship(_tokens->resolvedBase)
                 .TargetedObjects<GfVec3f>(
                     ExecBuiltinComputations->computeValue)
@@ -1580,7 +1588,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecLatticeMover)
     self.PrimComputation(_tokens->computeMoverParameters)
         .Callback<RigExecMoverParameters>(&_BuildLatticeMoverParameters)
         .Inputs(
-            AttributeValue<bool>(_tokens->inputsEnabled),
+            RIGEXEC_MOVER_COMMON_INPUTS,
             AttributeValue<GfVec3i>(_tokens->divisionsAttr),
             AttributeValue<GfVec3f>(_tokens->restCagePointsAttr),
             Relationship(_tokens->resolvedBase)
@@ -1607,7 +1615,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSurfaceMover)
     self.PrimComputation(_tokens->computeMoverParameters)
         .Callback<RigExecMoverParameters>(&_BuildSurfaceMoverParameters)
         .Inputs(
-            AttributeValue<bool>(_tokens->inputsEnabled),
+            RIGEXEC_MOVER_COMMON_INPUTS,
             Relationship(_tokens->resolvedSurfacePoints)
                 .TargetedObjects<GfVec3f>(
                     ExecBuiltinComputations->computeValue)
@@ -1634,7 +1642,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecCurveMover)
     self.PrimComputation(_tokens->computeMoverParameters)
         .Callback<RigExecMoverParameters>(&_BuildCurveMoverParameters)
         .Inputs(
-            AttributeValue<bool>(_tokens->inputsEnabled),
+            RIGEXEC_MOVER_COMMON_INPUTS,
             AttributeValue<TfToken>(_tokens->modeAttr),
             Relationship(_tokens->resolvedBindCoords)
                 .TargetedObjects<GfVec2f>(
@@ -1654,6 +1662,8 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecCurveMover)
             Computation<SdfPath>(ExecBuiltinComputations->computePath)
                 .InputName(_tokens->moverPath));
 }
+
+#undef RIGEXEC_MOVER_COMMON_INPUTS
 
 // ---------------------------------------------------------------------------
 // Operation/type-specific Phase 3 property applications (spec §4.1, §7.2):

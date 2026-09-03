@@ -42,9 +42,10 @@ struct RigExecPropertyMathParams {
     T value{};
     T min{};
     T max{};
-    /// inputs:weight, the uniform mover blend (spec §5): the operation's
-    /// result is mixed back toward the incoming value, so weight 0 is a
-    /// no-op and weight 1 is the operation applied outright. Same rule the
+    /// Resolved common MoverAPI envelope (spec §5): either the bound
+    /// rigExec:weightObject's one-element field or inputs:defaultWeight. The
+    /// operation's result is mixed back toward the incoming value, so weight
+    /// 0 is a no-op and weight 1 applies the operation outright. Same rule the
     /// point-domain matrix mover follows (p' = q + w*(T q - q)).
     float weight = 1.0f;
 };

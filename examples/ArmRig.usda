@@ -156,7 +156,6 @@ def Xform "ArmAsset" (
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 4
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -164,7 +163,6 @@ def Xform "ArmAsset" (
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    double guide:length = 4
                     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 10, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -172,7 +170,6 @@ def Xform "ArmAsset" (
                         prepend apiSchemas = ["NodeGraphNodeAPI"]
                     )
                     {
-                        double guide:length = 2
                         matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (8, 10, 0, 1) )
                         uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                     }
@@ -306,7 +303,7 @@ def Xform "ArmAsset" (
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
-                    float inputs:strength = 0.25
+                    float inputs:defaultWeight = 0.25
                     rel rigExec:moves = </ArmAsset/Geom/ArmBody.points>
                     uniform asset ui:nodegraph:node:icon = @../icons/volume_correct_mover.png@
 

@@ -247,12 +247,24 @@ def TestBind(ui, stage, mesh):
     mover = ui.BindCurvenet(stage, net, mesh, rig)
     Check(mover.GetTypeName() == "RigExecCurvenetMover",
           "bind creates a RigExecCurvenetMover")
+    Check(mover.HasAPI("RigExecMoverAPI"),
+          "the curvenet mover carries RigExecMoverAPI")
     curvenetTargets = mover.GetRelationship("rigExec:curvenet").GetTargets()
     Check(curvenetTargets == [net.GetPath()],
           "the mover names the curvenet")
-    movesTargets = mover.GetRelationship("rigExec:moves").GetTargets()
+    moves = mover.GetRelationship("rigExec:moves")
+    Check(moves and not moves.IsCustom(),
+          "rigExec:moves comes from RigExecMoverAPI, not a custom property")
+    movesTargets = moves.GetTargets()
     Check(movesTargets == [mesh.GetPath().AppendProperty("points")],
           "the mover writes the mesh's points, got %s" % movesTargets)
+    defaultWeight = mover.GetAttribute("inputs:defaultWeight")
+    Check(defaultWeight and not defaultWeight.IsCustom(),
+          "inputs:defaultWeight comes from RigExecMoverAPI")
+    Check(defaultWeight.Get() == 1.0,
+          "the curvenet mover defaults to full influence")
+    Check(not mover.HasProperty("inputs:strength"),
+          "the curvenet binder does not author retired inputs:strength")
 
     warnings = ui.CheckBindPreconditions(stage, mesh, rig)
     Check(not warnings,

@@ -216,7 +216,7 @@ else
       # A Meta Muse key. api.anthropic.com answers this shape with 401, so the
       # plugin routes it to Meta's Messages API automatically.
       echo "Muse endpoint: https://api.meta.ai (Meta Muse key detected)"
-      echo "Muse model: ${MUSE_MODEL:-muse-spark-1.2-contributor}"
+      echo "Muse model: ${MUSE_MODEL:-muse-spark-1.3-contributor}"
     else
       echo "Muse endpoint: https://api.anthropic.com"
       echo "Muse model: ${MUSE_MODEL:-claude-opus-5}"

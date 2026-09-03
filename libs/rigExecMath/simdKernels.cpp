@@ -77,9 +77,16 @@ RigExecApplyWeightedMatrixSimd(
                 _mm_mul_ps(_mm_shuffle_ps(q, q, _MM_SHUFFLE(2, 2, 2, 2)),
                            row2),
                 row3));
-        const __m128 w = _mm_set1_ps(weights[i]);
-        const __m128 blended =
-            _mm_add_ps(q, _mm_mul_ps(w, _mm_sub_ps(moved, q)));
+        __m128 blended;
+        if (weights[i] <= 0.0f) {
+            blended = q;
+        } else if (weights[i] >= 1.0f) {
+            blended = moved;
+        } else {
+            const __m128 w = _mm_set1_ps(weights[i]);
+            blended =
+                _mm_add_ps(q, _mm_mul_ps(w, _mm_sub_ps(moved, q)));
+        }
         alignas(16) float result[4];
         _mm_store_ps(result, blended);
         out[i] = GfVec3f(result[0], result[1], result[2]);

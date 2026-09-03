@@ -95,28 +95,25 @@ TestSchemaSurface()
     const char *types[] = {
         "RigExecAimConstraint", "RigExecPositionConstraint",
         "RigExecRotationConstraint", "RigExecScaleConstraint",
-        "RigExecParentConstraint", "RigExecSingleChainIkConstraint",
-        "RigExecCustomConstraint"};
+        "RigExecParentConstraint", "RigExecSingleChainIkConstraint"};
     for (const char *type : types) {
         const UsdPrimDefinition *definition =
             registry.FindConcretePrimDefinition(TfToken(type));
         CHECK(definition);
-        CHECK(HasProperty(definition, "inputs:defaultWeight"));
         CHECK(HasProperty(definition, "rigExec:locked"));
-        if (std::string(type) != "RigExecSingleChainIkConstraint" &&
-            std::string(type) != "RigExecCustomConstraint") {
+        if (std::string(type) != "RigExecSingleChainIkConstraint") {
             CHECK(HasProperty(definition, "rigExec:sources"));
             CHECK(HasProperty(definition, "inputs:sourceWeights"));
         }
-        float weight = 0;
-        CHECK(definition && definition->GetAttributeFallbackValue(
-                                TfToken("inputs:defaultWeight"), &weight));
-        CHECK(std::abs(weight - 1.0f) < 1e-7f);
     }
-    const UsdPrimDefinition *custom = registry.FindConcretePrimDefinition(
-        TfToken("RigExecCustomConstraint"));
-    CHECK(custom && !HasProperty(custom, "rigExec:sources"));
-
+    const UsdPrimDefinition *moverApi =
+        registry.FindAppliedAPIPrimDefinition(TfToken("RigExecMoverAPI"));
+    CHECK(moverApi);
+    CHECK(HasProperty(moverApi, "inputs:defaultWeight"));
+    float weight = 0;
+    CHECK(moverApi && moverApi->GetAttributeFallbackValue(
+                          TfToken("inputs:defaultWeight"), &weight));
+    CHECK(std::abs(weight - 1.0f) < 1e-7f);
     struct PropertyCase {
         const char *type;
         const char *property;
@@ -431,6 +428,250 @@ HasDiagnostic(const RigExecRigPose &pose, const char *needle)
         });
 }
 
+// A DynamicWeight with a base must transform the complete base packet, not
+// silently fall back to the no-base constant case. Exercise both the Exec
+// packet and the evaluator's independent CPU resolver through a real matrix
+// consumer so parity covers the composed field.
+static void
+TestDynamicWeightDenseBaseFormulaAndParity()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const SdfPath target("/Asset/Geom/P.points");
+    const VtVec3fArray basePoints = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+    const UsdPrim points =
+        stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+    points.CreateAttribute(TfToken("points"),
+                           SdfValueTypeNames->Point3fArray)
+        .Set(basePoints);
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Weights"), TfToken("Scope"));
+
+    const UsdPrim joint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/J"), TfToken("RigExecJoint"));
+    joint.CreateAttribute(TfToken("posed:space"),
+                          SdfValueTypeNames->Matrix4d)
+        .Set(Matrix(GfVec3d(0, 10, 0)));
+
+    const UsdPrim base = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Base"),
+        TfToken("RigExecStaticWeight"));
+    base.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({target});
+    base.CreateAttribute(TfToken("rigExec:representation"),
+                         SdfValueTypeNames->Token)
+        .Set(TfToken("dense"));
+    base.CreateAttribute(TfToken("rigExec:values"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{0.0f, 0.25f, 0.5f});
+    base.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                         SdfValueTypeNames->Float)
+        .Set(0.0f);
+
+    const UsdPrim dynamic = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Driven"),
+        TfToken("RigExecDynamicWeight"));
+    dynamic.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({target});
+    dynamic.CreateRelationship(TfToken("rigExec:baseWeight"))
+        .SetTargets({base.GetPath()});
+    dynamic.CreateAttribute(TfToken("rigExec:representation"),
+                            SdfValueTypeNames->Token)
+        .Set(TfToken("dense"));
+    dynamic.CreateAttribute(TfToken("inputs:driver"),
+                            SdfValueTypeNames->Float)
+        .Set(0.5f);
+    dynamic.CreateAttribute(TfToken("inputs:scale"),
+                            SdfValueTypeNames->Float)
+        .Set(1.5f);
+    dynamic.CreateAttribute(TfToken("inputs:bias"),
+                            SdfValueTypeNames->Float)
+        .Set(0.125f);
+
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+    mover.CreateRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    mover.CreateRelationship(TfToken("rigExec:transform"))
+        .SetTargets({joint.GetPath()});
+    mover.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.0f);
+    mover.CreateRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({dynamic.GetPath()});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    const bool compiled = evaluator.Compile(&errors);
+    CHECK(compiled);
+    for (const std::string &error : errors) {
+        if (error.rfind("warning:", 0) != 0) {
+            std::printf("dynamic weight compile diagnostic: %s\n",
+                        error.c_str());
+        }
+    }
+    if (!compiled) {
+        return;
+    }
+
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    CHECK(pose.moverGraphParityMismatches == 0);
+    CHECK(pose.moverGraphParityAgreements > 0);
+
+    // (base * 0.5) * 1.5 + 0.125 gives {0.125, 0.3125, 0.5}.
+    const VtVec3fArray expected = {
+        GfVec3f(0, 1.25f, 0), GfVec3f(1, 3.125f, 0),
+        GfVec3f(2, 5.0f, 0)};
+    const auto checkResult = [&](const auto &results) {
+        const auto it = results.find(target);
+        CHECK(it != results.end());
+        if (it == results.end()) {
+            return;
+        }
+        CHECK(it->second.template IsHolding<VtVec3fArray>());
+        if (!it->second.template IsHolding<VtVec3fArray>()) {
+            return;
+        }
+        const VtVec3fArray &actual =
+            it->second.template UncheckedGet<VtVec3fArray>();
+        CHECK(actual.size() == expected.size());
+        for (size_t i = 0;
+             i < actual.size() && i < expected.size(); ++i) {
+            CHECK(Near(GfVec3d(actual[i]), GfVec3d(expected[i])));
+        }
+    };
+    checkResult(pose.movedProperties);
+}
+
+// SingleChainIK writes a complete joint chain as one atomic operation. Its
+// common object envelope is therefore a one-element constant targeted at the
+// mover prim, not a spatial field targeted at one of the joints. The value
+// broadcasts to the whole solve and supersedes inputs:defaultWeight.
+static void
+TestSingleChainIkUniversalWeightObject()
+{
+    const SdfPath ikPath("/Asset/Rig/Movers/IK");
+    const SdfPath weightPath("/Asset/Rig/Weights/IkEnvelope");
+    const SdfPath jointPaths[] = {
+        SdfPath("/Asset/Rig/Joints/Root"),
+        SdfPath("/Asset/Rig/Joints/Root/Mid"),
+        SdfPath("/Asset/Rig/Joints/Root/Mid/End")};
+
+    const auto authorWeight = [&](const UsdStageRefPtr &stage,
+                                  const TfToken &representation,
+                                  const SdfPath &target, float value) {
+        const UsdPrim weight = stage->DefinePrim(
+            weightPath, TfToken("RigExecStaticWeight"));
+        weight.CreateRelationship(TfToken("rigExec:weightTarget"))
+            .SetTargets({target});
+        weight.CreateAttribute(TfToken("rigExec:representation"),
+                               SdfValueTypeNames->Token)
+            .Set(representation);
+        weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                               SdfValueTypeNames->Float)
+            .Set(representation == "constant" ? value : 0.0f);
+        if (representation == "dense" || representation == "sparse") {
+            weight.CreateAttribute(TfToken("rigExec:values"),
+                                   SdfValueTypeNames->FloatArray)
+                .Set(VtFloatArray{value});
+        }
+        if (representation == "sparse") {
+            weight.CreateAttribute(TfToken("rigExec:indices"),
+                                   SdfValueTypeNames->IntArray)
+                .Set(VtIntArray{0});
+        }
+        stage->GetPrimAtPath(ikPath)
+            .GetRelationship(TfToken("rigExec:weightObject"))
+            .SetTargets({weightPath});
+    };
+
+    const auto evaluate = [&](float scalar, bool bindObject) {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        const UsdPrim ik = stage->GetPrimAtPath(ikPath);
+        ik.GetAttribute(TfToken("inputs:defaultWeight")).Set(scalar);
+        if (bindObject) {
+            authorWeight(stage, TfToken("constant"), ikPath, 0.5f);
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        const bool compiled = evaluator.Compile(&errors);
+        if (!compiled) {
+            for (const std::string &error : errors) {
+                std::printf("single-chain weight compile error: %s\n",
+                            error.c_str());
+            }
+        }
+        CHECK(compiled);
+        const RigExecRigPose pose =
+            compiled ? evaluator.Evaluate(UsdTimeCode::Default())
+                     : RigExecRigPose();
+        CHECK(pose.valid);
+        return pose;
+    };
+
+    // Scalar 0 would make the IK dormant. A bound 0.5 object must instead
+    // produce exactly the same complete chain as scalar 0.5 with no object.
+    const RigExecRigPose scalarZero = evaluate(0.0f, false);
+    const RigExecRigPose scalarHalf = evaluate(0.5f, false);
+    const RigExecRigPose objectHalf = evaluate(0.0f, true);
+    size_t changedJoints = 0;
+    for (const SdfPath &jointPath : jointPaths) {
+        const auto zero = scalarZero.jointFramesFinal.find(jointPath);
+        const auto expected = scalarHalf.jointFramesFinal.find(jointPath);
+        const auto actual = objectHalf.jointFramesFinal.find(jointPath);
+        CHECK(zero != scalarZero.jointFramesFinal.end());
+        CHECK(expected != scalarHalf.jointFramesFinal.end());
+        CHECK(actual != objectHalf.jointFramesFinal.end());
+        if (zero == scalarZero.jointFramesFinal.end() ||
+            expected == scalarHalf.jointFramesFinal.end() ||
+            actual == objectHalf.jointFramesFinal.end()) {
+            continue;
+        }
+        bool changed = false;
+        for (size_t point = 0; point < actual->second.points.size(); ++point) {
+            CHECK(Near(actual->second.points[point],
+                       expected->second.points[point], 2e-4));
+            changed = changed ||
+                !Near(actual->second.points[point],
+                      zero->second.points[point], 2e-4);
+        }
+        changedJoints += changed ? 1 : 0;
+    }
+    CHECK(changedJoints >= 2);
+
+    // A multi-target atomic operation has no per-joint spatial cardinality.
+    // Dense/sparse encodings are rejected even when they contain one value.
+    for (const TfToken &representation :
+         {TfToken("dense"), TfToken("sparse")}) {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        authorWeight(stage, representation, ikPath, 0.5f);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        CHECK(std::any_of(
+            errors.begin(), errors.end(), [](const std::string &error) {
+                return error.find("atomic multi-target mover") !=
+                           std::string::npos &&
+                       error.find("constant") != std::string::npos;
+            }));
+    }
+
+    // The operation-domain target is the IK mover itself. Targeting one joint
+    // would make the result ordering-dependent and must fail at compile time.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        authorWeight(stage, TfToken("constant"), jointPaths[1], 0.5f);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        CHECK(std::any_of(
+            errors.begin(), errors.end(), [](const std::string &error) {
+                return error.find("weightTarget does not match mover target") !=
+                       std::string::npos;
+            }));
+    }
+}
+
 static void
 TestConstraintCompositionAndHierarchy()
 {
@@ -695,6 +936,61 @@ TestModeAndFailureContracts()
         }
     }
 
+    // AutoDetect means animated translation/scale, not merely any animated
+    // avar. A time-sampled scale must preserve the current scaled chain
+    // lengths. Conversely, a static scale plus a time-sampled rotation must
+    // still use rest-derived lengths: rotation is deliberately outside T/S
+    // detection. Author a zero rotation sample so the two cases differ only
+    // in which property carries the time sample.
+    for (const bool animatedScale : {true, false}) {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        const SdfPath root("/Asset/Rig/Joints/Root");
+        const SdfPath mid("/Asset/Rig/Joints/Root/Mid");
+        const SdfPath end("/Asset/Rig/Joints/Root/Mid/End");
+        const SdfPath joints[] = {root, mid, end};
+        const double restX[] = {0.0, 1.0, 2.0};
+        for (size_t i = 0; i < 3; ++i) {
+            const UsdPrim joint = stage->GetPrimAtPath(joints[i]);
+            joint.GetAttribute(TfToken("posed:space")).Clear();
+            joint.CreateAttribute(TfToken("rest:space"),
+                                  SdfValueTypeNames->Matrix4d)
+                .Set(Matrix(GfVec3d(restX[i], 0, 0)));
+        }
+
+        const UsdPrim rootJoint = stage->GetPrimAtPath(root);
+        const UsdAttribute sx =
+            rootJoint.GetAttribute(TfToken("avars:sx"));
+        CHECK(sx);
+        if (animatedScale) {
+            sx.Set(2.0, UsdTimeCode(1));
+        } else {
+            sx.Set(2.0);
+            rootJoint.GetAttribute(TfToken("avars:rz"))
+                .Set(0.0, UsdTimeCode(1));
+        }
+        stage->GetAttributeAtPath(
+                 SdfPath("/Asset/Sources/Effector.xformOp:transform"))
+            .Set(Matrix(GfVec3d(3, 0, 0)), UsdTimeCode(1));
+        const UsdPrim ik =
+            stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/IK"));
+        ik.GetAttribute(TfToken("rigExec:solverMode"))
+            .Set(TfToken("singleChain"));
+        ik.GetAttribute(TfToken("rigExec:evaluationMode"))
+            .Set(TfToken("autoDetect"));
+
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode(1));
+        const auto solvedEnd = pose.jointFramesFinal.find(end);
+        CHECK(solvedEnd != pose.jointFramesFinal.end());
+        if (solvedEnd != pose.jointFramesFinal.end()) {
+            const double expectedX = animatedScale ? 3.0 : 2.0;
+            CHECK(Near(solvedEnd->second.Origin(),
+                       GfVec3d(expectedX, 0, 0), 2e-4));
+        }
+    }
+
     // Parent rotation offsets are parallel source-local Euler values and are
     // applied alongside translation offsets before source aggregation.
     {
@@ -937,7 +1233,7 @@ TestMeshAndXformTargetsAgree()
 
 // The registry is the single source of truth about which operators exist.
 // Every concrete constraint in the schema must have exactly one row, and the
-// membership predicates must agree with it -- otherwise a seventh operator
+// membership predicates must agree with it -- otherwise another operator
 // can be added to one and forgotten in the other, which is the failure mode
 // the table exists to remove.
 static void
@@ -947,14 +1243,13 @@ TestConstraintRegistryCoversTheSchema()
     for (const char *typeName :
          {"RigExecAimConstraint", "RigExecPositionConstraint",
           "RigExecRotationConstraint", "RigExecScaleConstraint",
-          "RigExecParentConstraint", "RigExecSingleChainIkConstraint",
-          "RigExecCustomConstraint"}) {
+          "RigExecParentConstraint", "RigExecSingleChainIkConstraint"}) {
         CHECK(registry.FindConcretePrimDefinition(TfToken(typeName)));
         CHECK(RigExecConstraintHandlerCount(TfToken(typeName)) == 1);
     }
-    // Seven rows, no more: an unregistered type must not resolve.
+    // Six rows, no more: an unregistered type must not resolve.
     CHECK(RigExecConstraintHandlerCount(TfToken("RigExecSmoothMover")) == 0);
-    CHECK(RigExecConstraintHandlerTotal() == 7);
+    CHECK(RigExecConstraintHandlerTotal() == 6);
 }
 
 // No authored constraint property is silently ignored. rigExec:rotationOrder
@@ -1158,28 +1453,126 @@ TestGeometryDomainTargetCompiles()
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
 
-    // A transform-domain constraint cannot carry a per-element weight field.
+    // A constant one-element field is target-compatible with the transform
+    // domain. It supersedes (rather than multiplies) the scalar fallback.
     const UsdStageRefPtr xformStage = UsdStage::CreateInMemory();
     MakeXform(xformStage, SdfPath("/Asset"), Matrix());
     MakeXform(xformStage, SdfPath("/Asset/Target"), Matrix());
-    MakeXform(xformStage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
+    MakeXform(xformStage, SdfPath("/Asset/Source"), Matrix(GfVec3d(10, 0, 0)));
     xformStage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
     xformStage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
-    const UsdPrim rot2 = MakeConstraint(
-        xformStage, "Rot", "RigExecRotationConstraint",
+    const UsdPrim pos2 = MakeConstraint(
+        xformStage, "Pos", "RigExecPositionConstraint",
         {SdfPath("/Asset/Target")});
-    rot2.CreateRelationship(TfToken("rigExec:sources"))
+    pos2.CreateRelationship(TfToken("rigExec:sources"))
         .SetTargets({SdfPath("/Asset/Source")});
-    rot2.CreateRelationship(TfToken("rigExec:weightObject"))
-        .SetTargets({SdfPath("/Asset/Rig/Weights/W")});
+    pos2.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.25f);
+    const UsdPrim weight = xformStage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/W"), TfToken("RigExecStaticWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({SdfPath("/Asset/Target")});
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token)
+        .Set(TfToken("constant"));
+    weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                           SdfValueTypeNames->Float)
+        .Set(0.5f);
+    pos2.CreateRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({weight.GetPath()});
     RigExecRigEvaluator xformEvaluator(xformStage, SdfPath("/Asset/Rig"));
     std::vector<std::string> xformErrors;
-    CHECK(!xformEvaluator.Compile(&xformErrors));
-    CHECK(std::any_of(xformErrors.begin(), xformErrors.end(),
-                      [](const std::string &error) {
-                          return error.find("nothing to vary over") !=
-                                 std::string::npos;
-                      }));
+    CHECK(xformEvaluator.Compile(&xformErrors));
+    const RigExecRigPose xformPose =
+        xformEvaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(xformPose.valid);
+    const auto xformResult =
+        xformPose.providerXforms.find(SdfPath("/Asset/Target"));
+    CHECK(xformResult != xformPose.providerXforms.end());
+    if (xformResult != xformPose.providerXforms.end()) {
+        CHECK(Near(xformResult->second.ExtractTranslation(),
+                   GfVec3d(5, 0, 0)));
+    }
+}
+
+// Geometry-domain constraints publish their solved delta directly onto the
+// target points. A bound dense object is the total per-point envelope on this
+// path and must supersede, not multiply, a conflicting scalar fallback.
+static void
+TestGeometryConstraintDenseEnvelopeSupersedesScalar()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+    const VtVec3fArray rest = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(rest);
+    MakeXform(stage, SdfPath("/Asset/Source"),
+              Matrix(GfVec3d(0, 10, 0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Weights"), TfToken("Scope"));
+
+    const SdfPath target("/Asset/Geom/M.points");
+    const UsdPrim position = MakeConstraint(
+        stage, "Pos", "RigExecPositionConstraint", {target});
+    position.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+    position.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.25f);
+
+    const UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/PointField"),
+        TfToken("RigExecStaticWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({target});
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token)
+        .Set(TfToken("dense"));
+    weight.CreateAttribute(TfToken("rigExec:values"),
+                           SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{0.0f, 0.5f, 1.0f});
+    weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                           SdfValueTypeNames->Float)
+        .Set(0.0f);
+    position.CreateRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({weight.GetPath()});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    const bool compiled = evaluator.Compile(&errors);
+    CHECK(compiled);
+    for (const std::string &error : errors) {
+        if (error.rfind("warning:", 0) != 0) {
+            std::printf("geometry constraint compile diagnostic: %s\n",
+                        error.c_str());
+        }
+    }
+    if (!compiled) {
+        return;
+    }
+
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    const auto it = pose.movedProperties.find(target);
+    CHECK(it != pose.movedProperties.end());
+    if (it == pose.movedProperties.end()) {
+        return;
+    }
+    CHECK(it->second.IsHolding<VtVec3fArray>());
+    if (!it->second.IsHolding<VtVec3fArray>()) {
+        return;
+    }
+    const VtVec3fArray &moved = it->second.UncheckedGet<VtVec3fArray>();
+    const VtVec3fArray expected = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 5, 0), GfVec3f(2, 10, 0)};
+    CHECK(moved.size() == expected.size());
+    for (size_t i = 0;
+         i < moved.size() && i < expected.size(); ++i) {
+        CHECK(Near(GfVec3d(moved[i]), GfVec3d(expected[i])));
+    }
+    CHECK(pose.movedPropertiesCpu.find(target) ==
+          pose.movedPropertiesCpu.end());
 }
 
 // The design's defining property: the target spelling picks WHERE the answer
@@ -1595,25 +1988,6 @@ TestInvalidContractsFailClosed()
                           }));
     }
 
-    // Custom is a lossless carrier, not a silent mover implementation.
-    {
-        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
-        MakeXform(stage, SdfPath("/Asset"), Matrix());
-        MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
-        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
-        stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
-        MakeConstraint(stage, "Custom", "RigExecCustomConstraint",
-                       {SdfPath("/Asset/Target")});
-        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-        std::vector<std::string> errors;
-        CHECK(!evaluator.Compile(&errors));
-        CHECK(std::any_of(errors.begin(), errors.end(),
-                          [](const std::string &error) {
-                              return error.find("no registered evaluator") !=
-                                     std::string::npos;
-                          }));
-    }
-
     // A source-based constraint without a source cannot become a no-op that
     // still claims a write in the mover graph.
     {
@@ -1633,6 +2007,96 @@ TestInvalidContractsFailClosed()
                                      std::string::npos;
                           }));
     }
+}
+
+static void
+TestSolverBindsJointsUnderAnyScope()
+{
+    // Solvers are discovered by TYPE anywhere beneath the rig: the scope
+    // they sit under is an authoring convenience, not identity. A
+    // TwoBoneIk placed under Movers (no "Solvers" scope anywhere) must
+    // still bind its joints and pose them when the effector moves.
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Target"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Source"), Matrix(GfVec3d(1, 0, 0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    // One wired mover so the rig publishes outputs and compiles.
+    const UsdPrim mover = MakeConstraint(
+        stage, "Par", "RigExecParentConstraint",
+        {SdfPath("/Asset/Target")});
+    mover.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Source")});
+
+    const auto makeControl = [&](const char *name, double tx, double tz) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+        CHECK(prim);
+        prim.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+            .Set(tx);
+        prim.CreateAttribute(TfToken("rest:tz"), SdfValueTypeNames->Double)
+            .Set(tz);
+        prim.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+            .Set(0.0);
+        return prim;
+    };
+    const UsdPrim rootCtl = makeControl("Root", 0.0, 0.0);
+    const UsdPrim effCtl = makeControl("Eff", 5.0, 0.0);
+    const UsdPrim poleCtl = makeControl("Pole", 2.5, 2.0);
+
+    stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Shoulder"),
+                      TfToken("RigExecJoint"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Shoulder/Elbow"),
+                      TfToken("RigExecJoint"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Shoulder/Elbow/Wrist"),
+                      TfToken("RigExecJoint"));
+
+    // Deliberately NOT under any "Solvers" scope.
+    const UsdPrim ik = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/LegIK"), TfToken("RigExecTwoBoneIk"));
+    CHECK(ik);
+    ik.CreateRelationship(TfToken("rigExec:rootControl"))
+        .SetTargets({rootCtl.GetPath()});
+    ik.CreateRelationship(TfToken("rigExec:effectorControl"))
+        .SetTargets({effCtl.GetPath()});
+    ik.CreateRelationship(TfToken("rigExec:poleControl"))
+        .SetTargets({poleCtl.GetPath()});
+    ik.CreateRelationship(TfToken("rigExec:joints"))
+        .SetTargets({SdfPath("/Asset/Rig/Joints/Shoulder"),
+                     SdfPath("/Asset/Rig/Joints/Shoulder/Elbow"),
+                     SdfPath("/Asset/Rig/Joints/Shoulder/Elbow/Wrist")});
+    ik.CreateAttribute(TfToken("rigExec:upperLength"),
+                       SdfValueTypeNames->Double)
+        .Set(3.0);
+    ik.CreateAttribute(TfToken("rigExec:lowerLength"),
+                       SdfValueTypeNames->Double)
+        .Set(3.0);
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const std::string &error : errors) {
+        std::printf("  compile message: %s\n", error.c_str());
+    }
+    CHECK(errors.empty());
+
+    const auto wristOrigin = [&](UsdTimeCode time) {
+        const RigExecRigPose pose = evaluator.Evaluate(time);
+        CHECK(pose.valid);
+        const auto it = pose.jointFramesFinal.find(
+            SdfPath("/Asset/Rig/Joints/Shoulder/Elbow/Wrist"));
+        CHECK(it != pose.jointFramesFinal.end());
+        return it != pose.jointFramesFinal.end()
+                   ? it->second.Origin()
+                   : GfVec3d(0);
+    };
+    // Rest: the wrist sits exactly on the effector rest at (5, 0, 0).
+    CHECK(Near(wristOrigin(UsdTimeCode::Default()), GfVec3d(5, 0, 0)));
+    // Posed: +1 on the effector reaches (6, 0, 0), full 3+3 extension.
+    effCtl.GetAttribute(TfToken("avars:tx")).Set(1.0);
+    CHECK(Near(wristOrigin(UsdTimeCode::Default()), GfVec3d(6, 0, 0)));
 }
 
 static void
@@ -1842,6 +2306,7 @@ TestTwoBoneIkImpliedLengths()
     CHECK(Near(authored[2], GfVec3d(5, 0, 0)));
     CHECK(!hasDiagnostic(authoredPose, "implied rigExec:"));
 }
+
 int
 main()
 {
@@ -1855,6 +2320,8 @@ main()
 
     TestSchemaSurface();
     TestEvaluatorSemantics();
+    TestDynamicWeightDenseBaseFormulaAndParity();
+    TestSingleChainIkUniversalWeightObject();
     TestConstraintCompositionAndHierarchy();
     TestReverseSiblingPostOrder();
     TestModeAndFailureContracts();
@@ -1863,6 +2330,7 @@ main()
     TestPointDomainMoverNamesTheFix();
     TestMeshAndXformTargetsAgree();
     TestGeometryDomainTargetCompiles();
+    TestGeometryConstraintDenseEnvelopeSupersedesScalar();
     TestTransformAndGeometrySpellingsAgree();
     TestGeometryEnvelopeIsChordLerp();
     TestDomainsOnOnePrimDoNotCompete();
@@ -1871,6 +2339,7 @@ main()
     TestRotationOrderCapabilityIsRecorded();
     TestLegacyWeightSpellingIsRejected();
     TestInvalidContractsFailClosed();
+    TestSolverBindsJointsUnderAnyScope();
     TestIncompleteSolverLeavesJointsVisible();
     TestTwoBoneIkImpliedLengths();
 

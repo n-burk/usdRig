@@ -218,7 +218,7 @@ Both kinds of consumer see it. A computation reading the attribute gets the
 exec value override; packet assembly, which never touches exec, gets the same
 value through `RigExecResolvedInputs` — filled from the one chain result before
 any input is read. `TestPropertyMoverReachesStaticPacketReads` drives a smooth
-mover's `inputs:strength` to 0 from a property mover and asserts the smoothing
+mover's `inputs:defaultWeight` to 0 from a property mover and asserts the smoothing
 actually stops, with graph/CPU parity proving both routes carry the same
 number.
 

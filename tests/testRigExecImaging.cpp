@@ -12,10 +12,12 @@
 #include "rigExecImaging/bridge.h"
 #include "rigExecImaging/registry.h"
 #include "rigExecImaging/sceneIndices.h"
+#include "rigExecMath/avarScale.h"
 
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/references.h"
 
 #include "pxr/base/gf/rotation.h"
@@ -23,6 +25,7 @@
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
+#include "pxr/imaging/hd/coneSchema.h"
 #include "pxr/imaging/hd/cubeSchema.h"
 #include "pxr/imaging/hd/dataSourceLocator.h"
 #include "pxr/imaging/hd/extentSchema.h"
@@ -868,7 +871,8 @@ TestBridgeOverShotStage(const std::string &examplesDir)
             if (p == wristSphere) sawSphere = true;
             if (p.GetName() == "rigGuideCone_0") sawCone = true;
         }
-        CHECK(sawSphere && sawCone);
+        // Wrist is a leaf: hierarchy-derived joint links stop there.
+        CHECK(sawSphere && !sawCone);
 
         const HdSceneIndexPrim sphere = results->GetPrim(wristSphere);
         CHECK(sphere.primType == HdPrimTypeTokens->sphere);
@@ -969,7 +973,7 @@ TestBridgeOverShotStage(const std::string &examplesDir)
             if (p == wristCone) ++coneAdds;
         }
         CHECK(sphereAdds == 1);
-        CHECK(coneAdds == 1);
+        CHECK(coneAdds == 0);
         CHECK(results->GetPrim(wristSphere).dataSource);
     }
 
@@ -1011,8 +1015,8 @@ TestBridgeOverShotStage(const std::string &examplesDir)
 
 // Control guides (spec §10.3 extension): every RigExecControl grows one
 // synthesized `rigGuideCtrl` child drawing the authored guide:shape in the
-// authored guide:drawMode, sized by guide:scaleX/Y/Z and placed at the
-// control's posed frame.
+// authored guide:drawMode, sized by evaluated control scale multiplied by
+// guide:scaleX/Y/Z, and placed at the control's posed frame.
 //
 // The shape table is asserted exhaustively -- all six shapes in both draw
 // modes -- because the prim type and the topology are the contract a
@@ -1397,9 +1401,10 @@ TestControlGuides(const std::string &examplesDir)
     CHECK((guideXform(shoulderFk).ExtractTranslation() -
            GfVec3d(0, 10, 0)).GetLength() < 1e-6);
 
-    // Per-axis scale shows up as the basis-vector lengths, and ONLY there:
-    // the posed frame is orthonormalized before it places the guide, so
-    // guide:scaleX/Y/Z is the sole dimensional scale.
+    // These fixture controls have identity scale avars, so the authored
+    // guide:scaleX/Y/Z values are the effective basis-vector lengths. The
+    // focused standalone test below covers their multiplication by evaluated
+    // avar scale.
     {
         const GfMatrix4d xform = guideXform(elbowPole);
         const double expectedLengths[3] = {2.0, 3.0, 0.5};
@@ -1753,6 +1758,419 @@ TestControlGuides(const std::string &examplesDir)
     }
 
     results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+}
+
+// A control guide is an output in its own right.  Authoring tools commonly
+// create and place controls before wiring joints or movers, and that isolated
+// control must remain visible while the rig is being built.  Exercise the
+// schema fallbacks too: the minimally authored typed prim should draw the
+// default unit wire circle at its default frame.
+static void
+TestStandaloneControlGuide()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    const SdfPath rigPath("/Asset/Rig");
+    stage->DefinePrim(rigPath, TfToken("RigExecRoot"));
+    stage->DefinePrim(rigPath.AppendChild(TfToken("Controls")),
+                      TfToken("Scope"));
+    const SdfPath control =
+        rigPath.AppendPath(SdfPath("Controls/Control"));
+    const UsdPrim controlPrim =
+        stage->DefinePrim(control, TfToken("RigExecControl"));
+
+    RigExecImagingBridge bridge(stage, rigPath);
+    std::vector<std::string> errors;
+    const bool compiled = bridge.Compile(&errors);
+    for (const std::string &e : errors) {
+        std::printf("standalone-control compile error: %s\n", e.c_str());
+    }
+    CHECK(compiled);
+    if (!compiled) return;
+
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+    const RigExecImagingSnapshotConstPtr snapshot = bridge.GetStore()->Get();
+    CHECK(snapshot);
+    if (!snapshot) return;
+    const auto published = snapshot->prims.find(control);
+    CHECK(published != snapshot->prims.end());
+    if (published == snapshot->prims.end()) return;
+    CHECK(published->second.hasControlGuide);
+    CHECK(published->second.controlGuideShape == TfToken("circle"));
+    CHECK(published->second.controlGuideDrawMode == TfToken("wire"));
+    CHECK(published->second.controlGuideScale == GfVec3d(1.0));
+
+    // The live guide gets its size from the evaluated frame, not a second raw
+    // read of the avars. Authored guide scale remains a positive shape-size
+    // multiplier. A negative transform scale mirrors deformation but keeps
+    // the guide visible through its evaluated magnitude.
+    const GfVec3d avarScale(-2.0, 3.0, 0.5);
+    const GfVec3d authoredGuideScale(1.5, 0.5, 4.0);
+    static const char *avarNames[3] = {
+        "avars:sx", "avars:sy", "avars:sz"};
+    static const char *guideScaleNames[3] = {
+        "guide:scaleX", "guide:scaleY", "guide:scaleZ"};
+    for (int axis = 0; axis < 3; ++axis) {
+        const UsdAttribute avar =
+            controlPrim.GetAttribute(TfToken(avarNames[axis]));
+        const UsdAttribute guideScale =
+            controlPrim.GetAttribute(TfToken(guideScaleNames[axis]));
+        CHECK(avar && avar.Set(1.0, UsdTimeCode(0.0)));
+        CHECK(avar && avar.Set(avarScale[axis], UsdTimeCode(10.0)));
+        CHECK(guideScale && guideScale.Set(authoredGuideScale[axis]));
+    }
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode(10.0)));
+    const RigExecImagingSnapshotConstPtr scaledSnapshot =
+        bridge.GetStore()->Get();
+    CHECK(scaledSnapshot);
+    if (!scaledSnapshot) return;
+    const auto scaled = scaledSnapshot->prims.find(control);
+    CHECK(scaled != scaledSnapshot->prims.end());
+    if (scaled == scaledSnapshot->prims.end()) return;
+    const GfVec3d expectedScale(3.0, 1.5, 2.0);
+    CHECK(scaled->second.controlGuideScale == expectedScale);
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK(std::abs(
+                  scaled->second.controlGuideFrame.GetRow3(axis).GetLength() -
+                  1.0) < 1e-9);
+    }
+
+    // Zero and signed sub-floor avars are supported transform channels. They
+    // normalize to signed 1e-4 in evaluation; guide sizing uses magnitudes, so
+    // none of these axes may make the guide disappear.
+    const GfVec3d subfloorScale(
+        0.0, -0.0, -0.5 * RigExecAvarScaleFloor);
+    for (int axis = 0; axis < 3; ++axis) {
+        const UsdAttribute avar =
+            controlPrim.GetAttribute(TfToken(avarNames[axis]));
+        CHECK(avar && avar.Set(subfloorScale[axis], UsdTimeCode(20.0)));
+    }
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode(20.0)));
+    const RigExecImagingSnapshotConstPtr floorSnapshot =
+        bridge.GetStore()->Get();
+    CHECK(floorSnapshot);
+    if (!floorSnapshot) return;
+    const auto floored = floorSnapshot->prims.find(control);
+    CHECK(floored != floorSnapshot->prims.end());
+    if (floored == floorSnapshot->prims.end()) return;
+    CHECK(floored->second.hasControlGuide);
+    const GfVec3d floorExpected =
+        authoredGuideScale * RigExecAvarScaleFloor;
+    for (int axis = 0; axis < 3; ++axis) {
+        CHECK(std::abs(floored->second.controlGuideScale[axis] -
+                       floorExpected[axis]) < 1e-12);
+        CHECK(std::abs(
+                  floored->second.controlGuideFrame.GetRow3(axis).GetLength() -
+                  1.0) < 1e-9);
+    }
+
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    const HdContainerDataSourceHandle origin =
+        HdRetainedContainerDataSource::New(
+            HdPrimOriginSchemaTokens->scenePath,
+            HdRetainedTypedSampledDataSource<
+                HdPrimOriginSchema::OriginPath>::New(
+                    HdPrimOriginSchema::OriginPath(control)));
+    upstream->AddPrims(
+        {{control, TfToken(),
+          HdRetainedContainerDataSource::New(
+              HdPrimOriginSchema::GetSchemaToken(), origin)}});
+    const RigExecResultsSceneIndexRefPtr results =
+        RigExecResultsSceneIndex::New(upstream, bridge.GetStore());
+    const HdSceneIndexPrim guide = results->GetPrim(
+        control.AppendChild(TfToken("rigGuideCtrl")));
+    CHECK(guide.primType == HdPrimTypeTokens->basisCurves);
+    CHECK(!_GetPointsPrimvar(guide).empty());
+    const HdXformSchema guideXform =
+        HdXformSchema::GetFromParent(guide.dataSource);
+    CHECK(guideXform && guideXform.GetMatrix());
+    if (guideXform && guideXform.GetMatrix()) {
+        const GfMatrix4d matrix =
+            guideXform.GetMatrix()->GetTypedValue(0.0f);
+        for (int axis = 0; axis < 3; ++axis) {
+            CHECK(std::abs(matrix.GetRow3(axis).GetLength() -
+                           floorExpected[axis]) < 1e-12);
+        }
+    }
+}
+
+// Joint guides are hierarchy edges, not authored dimensions: one sphere per
+// joint and one cone from the evaluated parent origin to every nested child.
+// The shipped spider component is the user-facing regression for an oblique
+// link whose parent +X axis does not already point at the child.
+static void
+TestJointHierarchyGuides(const std::string &examplesDir)
+{
+    const UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/components/spider_leg.usd");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath rigPath("/RigRoot");
+    const SdfPath jointPath("/RigRoot/Joints/Shoulder");
+    const SdfPath childPath("/RigRoot/Joints/Shoulder/ankle");
+    CHECK(stage->GetPrimAtPath(jointPath));
+    CHECK(stage->GetPrimAtPath(childPath));
+    CHECK(!stage->GetPrimAtPath(jointPath).HasProperty(
+        TfToken("guide:length")));
+
+    RigExecImagingBridge bridge(stage, rigPath);
+    std::vector<std::string> errors;
+    const bool compiled = bridge.Compile(&errors);
+    for (const std::string &error : errors) {
+        std::printf("joint-hierarchy compile error: %s\n", error.c_str());
+    }
+    CHECK(compiled);
+    if (!compiled) return;
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+
+    const RigExecImagingSnapshotConstPtr snapshot = bridge.GetStore()->Get();
+    CHECK(snapshot);
+    if (!snapshot) return;
+    const auto published = snapshot->prims.find(jointPath);
+    CHECK(published != snapshot->prims.end());
+    if (published == snapshot->prims.end()) return;
+    CHECK(published->second.hasGuides);
+    CHECK(published->second.guideFrames.size() == 1);
+    CHECK(published->second.guideLengths.size() == 1);
+    CHECK(published->second.guideRadii.size() == 1);
+    CHECK(published->second.guideDrawSpheres.size() == 1);
+    const GfVec3d expectedDelta(
+        4.476721406958012, -2.6550437955052333, 0.0);
+    const double expectedLength = expectedDelta.GetLength();
+    CHECK(std::abs(published->second.guideLengths[0] - expectedLength) <
+          1e-9);
+    CHECK(published->second.guideRadii[0] == 1.0);
+    CHECK(published->second.guideDrawSpheres[0]);
+    CHECK((published->second.guideFrames[0].GetRow3(0) -
+           expectedDelta / expectedLength).GetLength() < 1e-9);
+    CHECK(published->second.guidePurpose == UsdGeomTokens->guide);
+
+    const auto childPublished = snapshot->prims.find(childPath);
+    CHECK(childPublished != snapshot->prims.end());
+    if (childPublished != snapshot->prims.end()) {
+        CHECK(childPublished->second.guideFrames.size() == 1);
+        CHECK(childPublished->second.guideLengths.size() == 1);
+        CHECK(childPublished->second.guideLengths[0] == 0.0);
+        CHECK(childPublished->second.guideDrawSpheres[0]);
+    }
+
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    auto shell = [](const SdfPath &path) {
+        const HdContainerDataSourceHandle origin =
+            HdRetainedContainerDataSource::New(
+                HdPrimOriginSchemaTokens->scenePath,
+                HdRetainedTypedSampledDataSource<
+                    HdPrimOriginSchema::OriginPath>::New(
+                        HdPrimOriginSchema::OriginPath(path)));
+        return HdRetainedSceneIndex::AddedPrimEntry{
+            path, TfToken(),
+            HdRetainedContainerDataSource::New(
+                HdPrimOriginSchema::GetSchemaToken(), origin)};
+    };
+    upstream->AddPrims({shell(jointPath), shell(childPath)});
+    const RigExecResultsSceneIndexRefPtr results =
+        RigExecResultsSceneIndex::New(upstream, bridge.GetStore());
+    const SdfPath spherePath =
+        jointPath.AppendChild(TfToken("rigGuideSphere_0"));
+    const SdfPath conePath =
+        jointPath.AppendChild(TfToken("rigGuideCone_0"));
+    const SdfPathVector children = results->GetChildPrimPaths(jointPath);
+    CHECK(children.size() == 3);  // authored ankle plus sphere and cone
+    CHECK(std::find(children.begin(), children.end(), spherePath) !=
+          children.end());
+    CHECK(std::find(children.begin(), children.end(), conePath) !=
+          children.end());
+    const HdSceneIndexPrim cone = results->GetPrim(conePath);
+    CHECK(cone.primType == HdPrimTypeTokens->cone);
+    const HdConeSchema coneSchema =
+        HdConeSchema::GetFromParent(cone.dataSource);
+    CHECK(coneSchema.GetHeight());
+    if (coneSchema.GetHeight()) {
+        CHECK(std::abs(coneSchema.GetHeight()->GetTypedValue(0.0f) -
+                       expectedLength) < 1e-9);
+    }
+    const HdSceneIndexPrim sphere = results->GetPrim(spherePath);
+    CHECK(sphere.primType == HdPrimTypeTokens->sphere);
+    CHECK(sphere.dataSource);
+    const HdSphereSchema sphereSchema =
+        HdSphereSchema::GetFromParent(sphere.dataSource);
+    CHECK(sphereSchema.GetRadius());
+    if (sphereSchema.GetRadius()) {
+        CHECK(sphereSchema.GetRadius()->GetTypedValue(0.0f) == 1.0);
+    }
+    const HdPurposeSchema purpose =
+        HdPurposeSchema::GetFromParent(sphere.dataSource);
+    CHECK(purpose.GetPurpose());
+    if (purpose.GetPurpose()) {
+        CHECK(purpose.GetPurpose()->GetTypedValue(0.0f) ==
+              HdRenderTagTokens->guide);
+    }
+    const HdXformSchema xform = HdXformSchema::GetFromParent(
+        sphere.dataSource);
+    CHECK(xform.GetMatrix());
+    CHECK(xform.GetResetXformStack());
+    if (xform.GetResetXformStack()) {
+        CHECK(xform.GetResetXformStack()->GetTypedValue(0.0f));
+    }
+
+    const SdfPath childSphere =
+        childPath.AppendChild(TfToken("rigGuideSphere_0"));
+    const SdfPath childCone =
+        childPath.AppendChild(TfToken("rigGuideCone_0"));
+    CHECK(results->GetPrim(childSphere).primType == HdPrimTypeTokens->sphere);
+    CHECK(!results->GetPrim(childCone).dataSource);
+
+    // Moving the child changes the derived link without changing topology.
+    _RecordingObserver observer;
+    results->AddObserver(HdSceneIndexObserverPtr(&observer));
+    const UsdAttribute childTx =
+        stage->GetPrimAtPath(childPath).GetAttribute(TfToken("rest:tx"));
+    CHECK(childTx && childTx.Set(6.0));
+    RigExecImagingBridge::PublishResult update =
+        bridge.EvaluateAndPublishResult(UsdTimeCode::Default());
+    CHECK(update.ok);
+    results->NotifyGenerationPublished(update.dirtied);
+    CHECK(results->GetPrim(spherePath).dataSource);
+    CHECK(results->GetPrim(conePath).primType == HdPrimTypeTokens->cone);
+    CHECK(results->GetChildPrimPaths(jointPath).size() == 3);
+    CHECK(observer.added.empty());
+    CHECK(observer.removed.empty());
+    const RigExecImagingSnapshotConstPtr movedSnapshot =
+        bridge.GetStore()->Get();
+    const auto moved = movedSnapshot->prims.find(jointPath);
+    CHECK(moved != movedSnapshot->prims.end());
+    if (moved != movedSnapshot->prims.end()) {
+        const GfVec3d movedDelta(6.0, -2.6550437955052333, 0.0);
+        CHECK(std::abs(moved->second.guideLengths[0] -
+                       movedDelta.GetLength()) < 1e-9);
+    }
+
+    // Branching adds a second cone but not a duplicate parent sphere.
+    const SdfPath branchPath = jointPath.AppendChild(TfToken("knee"));
+    const UsdPrim branch = stage->DefinePrim(branchPath,
+                                              TfToken("RigExecJoint"));
+    CHECK(branch.GetAttribute(TfToken("rest:tx")).Set(-3.0));
+    CHECK(branch.GetAttribute(TfToken("rest:ty")).Set(1.0));
+    errors.clear();
+    CHECK(bridge.Compile(&errors));
+    update = bridge.EvaluateAndPublishResult(UsdTimeCode::Default());
+    CHECK(update.ok);
+    results->NotifyGenerationPublished(update.dirtied);
+    const SdfPath branchCone =
+        jointPath.AppendChild(TfToken("rigGuideCone_1"));
+    const SdfPath duplicateSphere =
+        jointPath.AppendChild(TfToken("rigGuideSphere_1"));
+    CHECK(results->GetPrim(branchCone).primType == HdPrimTypeTokens->cone);
+    CHECK(!results->GetPrim(duplicateSphere).dataSource);
+    CHECK(results->GetChildPrimPaths(jointPath).size() == 4);
+    results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+}
+
+// The shipped minimal rig is the user-facing integration case: its lone
+// control both publishes a wire guide and drives a MatrixMover without a
+// boilerplate weight object. Rotating the control must revise the real mesh
+// points, not merely rotate the guide.
+static void
+TestSimpleRigControlAndDeformation(const std::string &examplesDir)
+{
+    const UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/simple_rig.usd");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath rigPath("/World/RigExecRoot");
+    const SdfPath controlPath(
+        "/World/RigExecRoot/Controllers/Root");
+    const SdfPath moverPath(
+        "/World/RigExecRoot/Movers/RigExecMatrixMover1");
+    const SdfPath spherePath("/World/Geom/Sphere");
+    const SdfPath guidePath =
+        controlPath.AppendChild(TfToken("rigGuideCtrl"));
+
+    const UsdPrim mover = stage->GetPrimAtPath(moverPath);
+    CHECK(mover);
+    SdfPathVector weightObjects;
+    if (const UsdRelationship relationship =
+            mover.GetRelationship(TfToken("rigExec:weightObject"))) {
+        relationship.GetTargets(&weightObjects);
+    }
+    CHECK(weightObjects.empty());
+
+    RigExecImagingBridge bridge(stage, rigPath);
+    std::vector<std::string> errors;
+    const bool compiled = bridge.Compile(&errors);
+    for (const std::string &error : errors) {
+        std::printf("simple-rig compile error: %s\n", error.c_str());
+    }
+    CHECK(compiled);
+    if (!compiled) return;
+
+    const UsdPrim control = stage->GetPrimAtPath(controlPath);
+    CHECK(control);
+    const UsdAttribute ry =
+        control.GetAttribute(TfToken("avars:ry"));
+    CHECK(ry);
+    if (!control || !ry) return;
+
+    CHECK(ry.Set(0.0));
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+    const RigExecImagingSnapshotConstPtr restSnapshot =
+        bridge.GetStore()->Get();
+    CHECK(restSnapshot);
+    if (!restSnapshot) return;
+    const auto restSphere = restSnapshot->prims.find(spherePath);
+    CHECK(restSphere != restSnapshot->prims.end());
+    CHECK(restSphere != restSnapshot->prims.end() &&
+          restSphere->second.hasPoints);
+    if (restSphere == restSnapshot->prims.end() ||
+        !restSphere->second.hasPoints) {
+        return;
+    }
+    const VtVec3fArray restPoints = restSphere->second.points;
+    CHECK(!restPoints.empty());
+
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    const HdContainerDataSourceHandle origin =
+        HdRetainedContainerDataSource::New(
+            HdPrimOriginSchemaTokens->scenePath,
+            HdRetainedTypedSampledDataSource<
+                HdPrimOriginSchema::OriginPath>::New(
+                    HdPrimOriginSchema::OriginPath(controlPath)));
+    upstream->AddPrims(
+        {{controlPath, TfToken(),
+          HdRetainedContainerDataSource::New(
+              HdPrimOriginSchema::GetSchemaToken(), origin)}});
+    const RigExecResultsSceneIndexRefPtr results =
+        RigExecResultsSceneIndex::New(upstream, bridge.GetStore());
+    const HdSceneIndexPrim guide = results->GetPrim(guidePath);
+    CHECK(guide.primType == HdPrimTypeTokens->basisCurves);
+    CHECK(!_GetPointsPrimvar(guide).empty());
+
+    CHECK(ry.Set(45.0));
+    CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+    const RigExecImagingSnapshotConstPtr posedSnapshot =
+        bridge.GetStore()->Get();
+    CHECK(posedSnapshot);
+    if (!posedSnapshot) return;
+    const auto posedSphere = posedSnapshot->prims.find(spherePath);
+    CHECK(posedSphere != posedSnapshot->prims.end());
+    CHECK(posedSphere != posedSnapshot->prims.end() &&
+          posedSphere->second.hasPoints);
+    if (posedSphere == posedSnapshot->prims.end() ||
+        !posedSphere->second.hasPoints) {
+        return;
+    }
+    const VtVec3fArray &posedPoints = posedSphere->second.points;
+    CHECK(posedPoints.size() == restPoints.size());
+    double maxDisplacement = 0.0;
+    for (size_t i = 0;
+         i < posedPoints.size() && i < restPoints.size(); ++i) {
+        maxDisplacement = std::max(
+            maxDisplacement,
+            (GfVec3d(posedPoints[i]) - GfVec3d(restPoints[i])).GetLength());
+    }
+    CHECK(maxDisplacement > 1e-4);
 }
 
 // A constraint-driven ASSET ROOT carries the synthesized guides with it,
@@ -2281,9 +2699,8 @@ TestEditTriggeredReevaluation(const std::string &examplesDir)
     const uint64_t generation1 = snapshot->generation;
     stage->GetPrimAtPath(
              SdfPath("/ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist"))
-        .CreateAttribute(TfToken("guide:length"),
-                         SdfValueTypeNames->Double)
-        .Set(3.5);
+        .GetAttribute(TfToken("guide:radius"))
+        .Set(0.75);
     snapshot = registry.GetStore()->Get();
     CHECK(snapshot && snapshot->generation > generation1);
 
@@ -3648,6 +4065,9 @@ main(int argc, char **argv)
     TestNarrowLocators();
     TestFilterChainOverRetainedScene();
     TestBridgeOverShotStage(examplesDir);
+    TestStandaloneControlGuide();
+    TestJointHierarchyGuides(examplesDir);
+    TestSimpleRigControlAndDeformation(examplesDir);
     TestControlGuides(examplesDir);
     TestGuidesFollowDrivenAssetRoot();
     TestSolverGuideRadius(examplesDir);

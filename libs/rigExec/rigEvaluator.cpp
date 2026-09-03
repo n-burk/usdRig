@@ -4,6 +4,7 @@
 #include "rigEvaluator.h"
 
 #include "frameExtraction.h"
+#include "rigExecMath/envelope.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/propertyMath.h"
 #include "rigExecMath/singleChainIk.h"
@@ -59,10 +60,7 @@ _ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
     }
     const TfToken token(name);
     if (const UsdAttribute a = prim.GetAttribute(token)) {
-        if (resolved.Get(prim.GetPath().AppendProperty(token), &value)) {
-            return value;
-        }
-        a.Get(&value, time);
+        resolved.GetAttribute(a, time, &value);
     }
     return value;
 }
@@ -167,9 +165,8 @@ RigExecPointFrame _SolveParentConstraint(const _ConstraintSolveContext &);
 /// atomically. They are still registered, so the table remains the complete
 /// answer to "which operators exist".
 ///
-/// solve == nullptr with dispatchesInline == false means the operator has no
-/// evaluator at all -- a legal carrier prim that must not silently do
-/// nothing, which is what RigExecCustomConstraint is.
+/// solve == nullptr with dispatchesInline == false means a registered
+/// operator has no evaluator at all and must not silently do nothing.
 /// The channel group an operator's per-axis mask addresses. Masks and offsets
 /// are spelled by (group, axis) on the base class, so an operator declares
 /// which group is "its" channel rather than each inventing a name.
@@ -210,8 +207,6 @@ _ConstraintHandlers()
          _ChannelGroup::All, _ChannelGroup::None,
          _SolveParentConstraint},
         {"RigExecSingleChainIkConstraint", false, true, false, true,
-         _ChannelGroup::None, _ChannelGroup::None, nullptr},
-        {"RigExecCustomConstraint", false, false, false, false,
          _ChannelGroup::None, _ChannelGroup::None, nullptr},
     };
     return handlers;
@@ -465,6 +460,351 @@ _ResolveGeometryInput(const UsdStageRefPtr &stage, const SdfPath &target)
     return target;
 }
 
+// Scalar AttributeValue inputs compile to one provider edge. Validate that
+// edge recursively so the graph and the independent CPU resolver never choose
+// different fallbacks for a malformed, dangling, or cyclic source chain.
+bool
+_ValidateScalarConnection(
+    const UsdStageRefPtr &stage, const UsdAttribute &attribute,
+    const SdfValueTypeName &expectedType, std::set<SdfPath> *visiting,
+    std::string *error)
+{
+    if (!attribute) {
+        return true;
+    }
+    if (!visiting->insert(attribute.GetPath()).second) {
+        *error = attribute.GetPath().GetString() +
+                 ": scalar attribute connection contains a cycle";
+        return false;
+    }
+    struct _EraseOnReturn {
+        std::set<SdfPath> *paths;
+        SdfPath path;
+        ~_EraseOnReturn() { paths->erase(path); }
+    } erase{visiting, attribute.GetPath()};
+
+    SdfPathVector sources;
+    attribute.GetConnections(&sources);
+    if (sources.size() > 1) {
+        *error = attribute.GetPath().GetString() +
+                 ": scalar input must have at most one connection";
+        return false;
+    }
+    if (sources.empty()) {
+        return true;
+    }
+    const UsdAttribute source = stage->GetAttributeAtPath(sources[0]);
+    if (!source) {
+        *error = attribute.GetPath().GetString() +
+                 ": connection targets missing attribute " +
+                 sources[0].GetString();
+        return false;
+    }
+    if (source.GetTypeName() != expectedType) {
+        *error = attribute.GetPath().GetString() +
+                 ": connection target " + sources[0].GetString() +
+                 " has type " + source.GetTypeName().GetAsToken().GetString() +
+                 ", expected " + expectedType.GetAsToken().GetString();
+        return false;
+    }
+    return _ValidateScalarConnection(
+        stage, source, expectedType, visiting, error);
+}
+
+// Validates the complete weight-object composition against one mover domain.
+// Point domains retain the long-standing PointBased-prim -> .points
+// canonicalization. Scalar property and transform domains are exact: there is
+// no second value on those targets for the compiler to infer. An atomic
+// multi-target mover uses its own prim as a one-element operation domain.
+// Every composed input is checked too, so a CombineWeight cannot hide a field
+// painted for a different target behind a compatible top-level declaration.
+bool
+_ValidateWeightObjectDomain(
+    const UsdStageRefPtr &stage, const SdfPath &weightPath,
+    const SdfPath &moverTarget, bool pointDomain, bool operationDomain,
+    size_t logicalCount, std::set<SdfPath> *visiting, std::string *error)
+{
+    if (!weightPath.IsPrimPath()) {
+        *error = "rigExec:weightObject must target a weight-object prim, got " +
+                 weightPath.GetString();
+        return false;
+    }
+    const UsdPrim weightPrim = stage->GetPrimAtPath(weightPath);
+    if (!weightPrim || !_IsWeightObjectType(weightPrim.GetTypeName())) {
+        *error = "rigExec:weightObject targets missing or incompatible prim " +
+                 weightPath.GetString();
+        return false;
+    }
+    if (!visiting->insert(weightPath).second) {
+        *error = weightPath.GetString() +
+                 ": weight object composition contains a cycle";
+        return false;
+    }
+    struct _EraseOnReturn {
+        std::set<SdfPath> *paths;
+        SdfPath path;
+        ~_EraseOnReturn() { paths->erase(path); }
+    } erase{visiting, weightPath};
+
+    if (!pointDomain && _IsVolumeWeightType(weightPrim.GetTypeName())) {
+        *error = weightPath.GetString() +
+                 ": volumetric weights require a point domain";
+        return false;
+    }
+
+    const TfToken typeName = weightPrim.GetTypeName();
+    auto readToken = [&weightPrim](const char *name, const char *fallback) {
+        TfToken value(fallback);
+        if (const UsdAttribute attr =
+                weightPrim.GetAttribute(TfToken(name))) {
+            attr.Get(&value, UsdTimeCode::Default());
+        }
+        return value;
+    };
+    const TfToken representation = readToken(
+        "rigExec:representation",
+        (typeName == "RigExecCombineWeight" ||
+         _IsVolumeWeightType(typeName)) ? "dense" : "constant");
+    const TfToken rangePolicy = readToken(
+        "rigExec:rangePolicy",
+        (typeName == "RigExecCombineWeight" ||
+         _IsVolumeWeightType(typeName)) ? "clamp" : "strict");
+    if (rangePolicy != "strict" && rangePolicy != "clamp") {
+        *error = weightPath.GetString() +
+                 ": unknown rigExec:rangePolicy '" +
+                 rangePolicy.GetString() + "'";
+        return false;
+    }
+    if (typeName == "RigExecStaticWeight" ||
+        typeName == "RigExecDynamicWeight") {
+        if (representation != "constant" && representation != "dense" &&
+            representation != "sparse") {
+            *error = weightPath.GetString() +
+                     ": unknown rigExec:representation '" +
+                     representation.GetString() + "'";
+            return false;
+        }
+    } else if (representation != "dense") {
+        *error = weightPath.GetString() +
+                 ": generated/composed weights require dense "
+                 "rigExec:representation";
+        return false;
+    }
+
+    if (typeName == "RigExecStaticWeight") {
+        // Static means the complete descriptor and field are authored once.
+        // A time sample or value-producing connection would make Exec consume
+        // a changing packet while the CPU oracle and binding epoch treated it
+        // as frozen.
+        static const TfToken staticFields[] = {
+            TfToken("rigExec:values"), TfToken("rigExec:indices"),
+            TfToken("rigExec:defaultWeight"),
+            TfToken("rigExec:representation"),
+            TfToken("rigExec:rangePolicy")};
+        for (const TfToken &field : staticFields) {
+            const UsdAttribute attr = weightPrim.GetAttribute(field);
+            if (attr && (attr.GetNumTimeSamples() > 0 ||
+                         attr.HasAuthoredConnections())) {
+                *error = weightPath.GetString() + ": static weight field " +
+                         field.GetString() +
+                         " must not have time samples or connections";
+                return false;
+            }
+        }
+
+        VtFloatArray values;
+        VtIntArray indices;
+        float defaultWeight = 0.0f;
+        if (const UsdAttribute attr = weightPrim.GetAttribute(
+                TfToken("rigExec:values"))) {
+            attr.Get(&values, UsdTimeCode::Default());
+        }
+        if (const UsdAttribute attr = weightPrim.GetAttribute(
+                TfToken("rigExec:indices"))) {
+            attr.Get(&indices, UsdTimeCode::Default());
+        }
+        if (const UsdAttribute attr = weightPrim.GetAttribute(
+                TfToken("rigExec:defaultWeight"))) {
+            attr.Get(&defaultWeight, UsdTimeCode::Default());
+        }
+        // Values and the sparse/constant fallback are value-generation state,
+        // not descriptor shape.  Their finite/range policy is enforced while
+        // building the current packet so a bad edit fails this application
+        // atomically without rebuilding (or invalidating) the whole epoch.
+        if (representation == "constant") {
+            if (!values.empty() || !indices.empty()) {
+                *error = weightPath.GetString() +
+                         ": constant weights must not author values or "
+                         "indices";
+                return false;
+            }
+        } else if (representation == "dense") {
+            if (!indices.empty() || values.size() != logicalCount ||
+                defaultWeight != 0.0f) {
+                *error = weightPath.GetString() +
+                         ": dense weight must have exactly " +
+                         std::to_string(logicalCount) +
+                         " values, no indices, and canonical "
+                         "defaultWeight 0";
+                return false;
+            }
+        } else {
+            if (indices.size() != values.size()) {
+                *error = weightPath.GetString() +
+                         ": sparse index/value size mismatch";
+                return false;
+            }
+            std::set<int> support;
+            for (int index : indices) {
+                if (index < 0 || static_cast<size_t>(index) >= logicalCount ||
+                    !support.insert(index).second) {
+                    *error = weightPath.GetString() +
+                             ": sparse indices must be unique and within "
+                             "the weighted domain";
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (typeName == "RigExecDynamicWeight") {
+        const TfToken operation =
+            readToken("rigExec:operation", "multiply");
+        if (operation != "multiply") {
+            *error = weightPath.GetString() +
+                     ": unknown rigExec:operation '" +
+                     operation.GetString() + "'";
+            return false;
+        }
+        for (const char *name :
+             {"inputs:driver", "inputs:scale", "inputs:bias"}) {
+            const UsdAttribute input =
+                weightPrim.GetAttribute(TfToken(name));
+            std::set<SdfPath> visitingConnections;
+            if (!_ValidateScalarConnection(
+                    stage, input, SdfValueTypeNames->Float,
+                    &visitingConnections, error)) {
+                return false;
+            }
+        }
+        SdfPathVector bases;
+        if (const UsdRelationship rel = weightPrim.GetRelationship(
+                TfToken("rigExec:baseWeight"))) {
+            rel.GetTargets(&bases);
+        }
+        if (bases.size() > 1) {
+            *error = weightPath.GetString() +
+                     ": rigExec:baseWeight must have at most one target";
+            return false;
+        }
+        if (bases.empty() && representation != "constant") {
+            *error = weightPath.GetString() +
+                     ": a DynamicWeight without a base must be constant";
+            return false;
+        }
+        if (bases.size() == 1) {
+            const UsdPrim base = stage->GetPrimAtPath(bases[0]);
+            TfToken actualBaseRepresentation("constant");
+            if (base) {
+                if (const UsdAttribute attr = base.GetAttribute(
+                        TfToken("rigExec:representation"))) {
+                    attr.Get(&actualBaseRepresentation,
+                             UsdTimeCode::Default());
+                }
+                if (base.GetTypeName() == "RigExecCombineWeight" ||
+                    _IsVolumeWeightType(base.GetTypeName())) {
+                    if (!base.GetAttribute(
+                            TfToken("rigExec:representation"))) {
+                        actualBaseRepresentation = TfToken("dense");
+                    }
+                }
+            }
+            if (!base || actualBaseRepresentation != representation) {
+                *error = weightPath.GetString() +
+                         ": dynamic/base representation mismatch";
+                return false;
+            }
+            if (representation == "sparse") {
+                VtIntArray mine, theirs;
+                if (const UsdAttribute attr = weightPrim.GetAttribute(
+                        TfToken("rigExec:indices"))) {
+                    attr.Get(&mine, UsdTimeCode::Default());
+                }
+                if (const UsdAttribute attr = base.GetAttribute(
+                        TfToken("rigExec:indices"))) {
+                    attr.Get(&theirs, UsdTimeCode::Default());
+                }
+                if (!mine.empty() &&
+                    std::set<int>(mine.begin(), mine.end()) !=
+                        std::set<int>(theirs.begin(), theirs.end())) {
+                    *error = weightPath.GetString() +
+                             ": dynamic/base sparse support mismatch";
+                    return false;
+                }
+            }
+        }
+    }
+
+    if (typeName == "RigExecCombineWeight") {
+        const TfToken mode = readToken("rigExec:combineMode", "multiply");
+        static const std::set<TfToken> modes = {
+            TfToken("multiply"), TfToken("add"), TfToken("subtract"),
+            TfToken("max"), TfToken("min"), TfToken("average"),
+            TfToken("overlay")};
+        if (!modes.count(mode)) {
+            *error = weightPath.GetString() +
+                     ": unknown rigExec:combineMode '" +
+                     mode.GetString() + "'";
+            return false;
+        }
+    }
+    if (operationDomain) {
+        if (representation != "constant") {
+            *error = weightPath.GetString() +
+                     ": an atomic multi-target mover requires a constant "
+                     "one-element weight field";
+            return false;
+        }
+    }
+
+    SdfPathVector declaredTargets;
+    if (const UsdRelationship rel =
+            weightPrim.GetRelationship(TfToken("rigExec:weightTarget"))) {
+        rel.GetTargets(&declaredTargets);
+    }
+    if (declaredTargets.size() != 1) {
+        *error = weightPath.GetString() +
+                 ": rigExec:weightTarget must have exactly one target";
+        return false;
+    }
+    const SdfPath declared = pointDomain
+        ? _ResolveGeometryInput(stage, declaredTargets[0])
+        : declaredTargets[0];
+    if (declared != moverTarget) {
+        *error = weightPath.GetString() +
+                 ": rigExec:weightTarget does not match mover target " +
+                 moverTarget.GetString();
+        return false;
+    }
+
+    for (const char *relName : {"rigExec:inputWeights",
+                                "rigExec:baseWeight"}) {
+        SdfPathVector inputs;
+        if (const UsdRelationship rel =
+                weightPrim.GetRelationship(TfToken(relName))) {
+            rel.GetTargets(&inputs);
+        }
+        for (const SdfPath &input : inputs) {
+            if (!_ValidateWeightObjectDomain(
+                    stage, input, moverTarget, pointDomain, operationDomain,
+                    logicalCount, visiting, error)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // The write path no longer infers <prim> -> <prim>.points, so a point-domain
 // mover handed a bare PointBased prim gets the spelling it needed. Empty for
 // any other target, so callers can append unconditionally.
@@ -564,6 +904,27 @@ _DiscoverControls(const UsdStageRefPtr &stage, const SdfPath &rigPath)
         }
     }
     return controls;
+}
+
+// Discovers every concrete placed weight volume beneath the rig. A volume is
+// a viewport output in its own right: the authored falloff surfaces are useful
+// while the rigger is placing the field, before any mover consumes it. Keep
+// this namespace-based, like joints and controls, so no manifest or temporary
+// weight binding is required merely to make the schema's guide contract work.
+std::vector<SdfPath>
+_DiscoverVolumeWeights(const UsdStageRefPtr &stage, const SdfPath &rigPath)
+{
+    std::vector<SdfPath> volumes;
+    const UsdPrim rig = stage->GetPrimAtPath(rigPath);
+    if (!rig) {
+        return volumes;
+    }
+    for (const UsdPrim &prim : UsdPrimRange(rig)) {
+        if (_IsVolumeWeightType(prim.GetTypeName())) {
+            volumes.push_back(prim.GetPath());
+        }
+    }
+    return volumes;
 }
 
 // Every solver type that publishes computePointFrameArray for view-free
@@ -680,6 +1041,39 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
         digest += value.GetString();
         digest += '|';
     };
+    auto appendAttributeBinding =
+        [this, &digest](const UsdPrim &prim, const char *name) {
+        const UsdAttribute attr = prim.GetAttribute(TfToken(name));
+        digest += name;
+        digest += "@sources=";
+        std::set<SdfPath> visiting;
+        std::function<void(const UsdAttribute &)> append =
+            [&](const UsdAttribute &a) {
+            if (!a || !visiting.insert(a.GetPath()).second) {
+                digest += a ? "cycle:" + a.GetPath().GetString()
+                            : std::string("missing");
+                digest += ',';
+                return;
+            }
+            digest += a.GetPath().GetString() + ":" +
+                      a.GetTypeName().GetAsToken().GetString() + ":samples:" +
+                      std::to_string(a.GetNumTimeSamples()) + "->";
+            SdfPathVector sources;
+            a.GetConnections(&sources);
+            for (const SdfPath &source : sources) {
+                const UsdAttribute sourceAttr =
+                    _stage->GetAttributeAtPath(source);
+                if (!sourceAttr) {
+                    digest += "missing:" + source.GetString() + ",";
+                } else {
+                    append(sourceAttr);
+                }
+            }
+            visiting.erase(a.GetPath());
+        };
+        append(attr);
+        digest += '|';
+    };
     auto appendFrameBindingIdentity =
         [this, &digest](const UsdPrim &prim, const char *name) {
         SdfPathVector targets;
@@ -752,6 +1146,29 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             digest += ',';
         }
         digest += '|';
+        VtFloatArray values;
+        if (UsdAttribute a = w.GetAttribute(TfToken("rigExec:values"))) {
+            a.Get(&values);
+        }
+        digest += "rigExec:values#size=" +
+                  std::to_string(values.size()) + '|';
+
+        // Attribute connection identity is compiled Exec wiring. A rewire
+        // must rebuild the prepared request even when the two sources happen
+        // to carry the same value at the current time. Static fields include
+        // these markers too so adding an illegal source re-enters Compile and
+        // is rejected instead of replaying the old request.
+        for (const char *field : {
+                 "rigExec:values", "rigExec:indices",
+                 "rigExec:defaultWeight", "rigExec:representation",
+                 "rigExec:rangePolicy", "rigExec:operation",
+                 "inputs:driver", "inputs:scale", "inputs:bias",
+                 "inputs:falloffMin", "inputs:falloffMax",
+                 "inputs:invert", "inputs:strength", "inputs:scaleX",
+                 "inputs:scaleY", "inputs:scaleZ", "inputs:extentU",
+                 "inputs:extentV"}) {
+            appendAttributeBinding(w, field);
+        }
 
         // Volumetric extension. Only STRUCTURAL properties belong here:
         // the shape family, which axis it measures, where it samples,
@@ -766,7 +1183,27 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
         appendToken(w, "rigExec:planeAxis");
         appendToken(w, "rigExec:planeBounds");
         appendToken(w, "rigExec:combineMode");
-        appendRelTargets(w, "rigExec:curve", true);
+        const SdfPathVector curveTargets =
+            appendRelTargets(w, "rigExec:curve", true);
+        // A CurveWeight's relationship alone is not the complete structural
+        // binding: the target must still resolve to a point3f[] attribute.
+        // Hash that resolution so removing/retyping the source, or repairing
+        // it in place without changing the relationship path, re-enters
+        // Compile and applies the same validation as the original authoring.
+        for (const SdfPath &target : curveTargets) {
+            const SdfPath pointsPath = target.IsPropertyPath()
+                ? target
+                : target.AppendProperty(TfToken("points"));
+            const UsdAttribute points =
+                _stage->GetAttributeAtPath(pointsPath);
+            digest += "rigExec:curveSource=";
+            digest += pointsPath.GetString();
+            digest += ':';
+            digest += points
+                ? points.GetTypeName().GetAsToken().GetString()
+                : std::string("missing");
+            digest += '|';
+        }
         appendRelTargets(w, "rigExec:sampleSource", true);
         // The falloff curve is structural: it is resampled to a table
         // once per epoch, so an edit to it has to begin a new one.
@@ -843,23 +1280,31 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     }
     digest += '|';
 
+    // Standalone volume guides carry placement taps and baked falloff state
+    // even when no mover consumes their field. Their discovered paths and
+    // structural properties therefore belong to the epoch just as standalone
+    // controls do; otherwise adding or repairing one would replay a tap set
+    // that can never publish it.
+    for (const SdfPath &volumePath :
+         _DiscoverVolumeWeights(_stage, _rigPath)) {
+        digest += volumePath.GetString();
+        digest += '|';
+        appendWeightObject(volumePath);
+    }
+    digest += '|';
+
     // Solver->joint wiring is epoch identity (view-free extraction,
     // user-directed 2026-07-25, replaces RigExecPointFrameView): each
     // solver's ORDERED rigExec:joints list decides which joint
     // self-extracts which aggregate element, so adding, removing, or
     // reordering joints changes what compile Pass 0 synthesizes. Order is
     // semantic (position = element index), so this list is never sorted.
-    if (const UsdPrim solvers = _stage->GetPrimAtPath(
-            _rigPath.AppendChild(TfToken("Solvers")))) {
-        // Recursive over the composed Solvers subtree (not GetChildren):
-        // nested solver scopes must contribute to epoch identity too
+    if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
+        // Recursive over the composed rig subtree (not GetChildren):
+        // solvers live wherever the author put them, so every scope's
+        // wiring must contribute to epoch identity
         // (consistent with mover discovery and compile Pass 0).
-        static const std::set<TfToken> kAggregateSolverTypes = {
-            TfToken("RigExecFkChain"), TfToken("RigExecTwoBoneIk"),
-            TfToken("RigExecBlendPointFrames"),
-            TfToken("RigExecTwistDistribution"),
-            TfToken("RigExecRibbon")};
-        for (const UsdPrim &solver : UsdPrimRange(solvers)) {
+        for (const UsdPrim &solver : UsdPrimRange(rig)) {
             SdfPathVector joints;
             if (const UsdRelationship rel =
                     solver.GetRelationship(TfToken("rigExec:joints"))) {
@@ -870,7 +1315,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             // Phase A element checks, possibly indirectly through a Blend
             // input, so a cardinality edit must begin a new epoch.
             const bool isAggregate =
-                kAggregateSolverTypes.count(solver.GetTypeName()) > 0;
+                _IsAggregateSolverType(solver.GetTypeName());
             if (joints.empty() && !isAggregate) {
                 continue;
             }
@@ -1001,6 +1446,44 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                 if (canonical.IsPropertyPath() &&
                     canonical.GetNameToken() == "points") {
                     const SdfPath owner = canonical.GetPrimPath();
+                    // Point-domain cardinality is frozen descriptor shape.
+                    // Hash every authored cardinality (not the point values)
+                    // so a 3 -> 2 target edit rebuilds the epoch and lets the
+                    // compile validator reject a now-mismatched dense field.
+                    // A set avoids recompiling merely because another sample
+                    // with the same frozen cardinality was authored.
+                    std::set<size_t> cardinalities;
+                    if (const UsdAttribute points =
+                            _stage->GetAttributeAtPath(canonical)) {
+                        VtVec3fArray value;
+                        bool resolved = false;
+                        if (points.GetResolveInfo(UsdTimeCode::Default())
+                                .GetSource() ==
+                                UsdResolveInfoSourceDefault &&
+                            points.Get(&value, UsdTimeCode::Default())) {
+                            cardinalities.insert(value.size());
+                            resolved = true;
+                        }
+                        std::vector<double> times;
+                        points.GetTimeSamples(&times);
+                        for (double sampleTime : times) {
+                            if (points.Get(
+                                    &value, UsdTimeCode(sampleTime))) {
+                                cardinalities.insert(value.size());
+                                resolved = true;
+                            }
+                        }
+                        if (!resolved &&
+                            points.Get(&value, UsdTimeCode::Default())) {
+                            cardinalities.insert(value.size());
+                        }
+                    }
+                    digest += "pointCardinalities=";
+                    for (size_t cardinality : cardinalities) {
+                        digest += std::to_string(cardinality);
+                        digest += ',';
+                    }
+                    digest += '|';
                     auto authored = [this, &owner](const char *name) {
                         const UsdAttribute a = _stage->GetAttributeAtPath(
                             owner.AppendProperty(TfToken(name)));
@@ -1025,6 +1508,11 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             appendToken(prim, "rigExec:transformReadPhase");
             appendToken(prim, "rigExec:operation");
             appendToken(prim, "rigExec:mode");
+            for (const char *input : {
+                     "inputs:defaultWeight", "inputs:enabled",
+                     "inputs:value", "inputs:min", "inputs:max"}) {
+                appendAttributeBinding(prim, input);
+            }
             // Pose-constraint wiring. Source order is semantic because every
             // source has a parallel weight (and Parent has parallel offsets),
             // so it must never be sorted. aimTarget remains the legacy
@@ -1168,10 +1656,13 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     //
     // What the rig DOES need is at least one output, and that cannot be known
     // until the mover walk below has run. The check moved there.
-    // Controls are discovered alongside the joints but never gate the
-    // compile: zero controls is an ordinary rig, not a broken one.
+    // Controls and placed volumes are discovered alongside the joints. Zero
+    // of either kind is ordinary; the combined output gate below decides
+    // whether the whole rig is genuinely empty.
     std::vector<SdfPath> newControlPaths =
         _DiscoverControls(_stage, _rigPath);
+    std::vector<SdfPath> newVolumeWeightPaths =
+        _DiscoverVolumeWeights(_stage, _rigPath);
 
     // Transform-authority validation (host-durability redesign).
     //
@@ -1202,19 +1693,12 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         std::vector<SdfPath> providers = newJointPaths;
         providers.insert(providers.end(), newControlPaths.begin(),
                          newControlPaths.end());
+        providers.insert(providers.end(), newVolumeWeightPaths.begin(),
+                         newVolumeWeightPaths.end());
         {
-            static const std::set<TfToken> kBoundableSolverTypes = {
-                TfToken("RigExecFkChain"), TfToken("RigExecTwoBoneIk"),
-                TfToken("RigExecBlendPointFrames"),
-                TfToken("RigExecTwistDistribution"),
-                TfToken("RigExecRibbon")};
-            if (const UsdPrim solverRoot = _stage->GetPrimAtPath(
-                    _rigPath.AppendChild(TfToken("Solvers")))) {
-                for (const UsdPrim &solver : UsdPrimRange(solverRoot)) {
-                    if (kBoundableSolverTypes.count(solver.GetTypeName())) {
-                        providers.push_back(solver.GetPath());
-                    }
-                }
+            for (const UsdPrim &solver :
+                 _DiscoverAggregateSolvers(_stage, _rigPath)) {
+                providers.push_back(solver.GetPath());
             }
         }
         for (const SdfPath &providerPath : providers) {
@@ -1320,39 +1804,28 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 
     std::vector<SdfPath> solverArrayPaths;
     std::map<SdfPath, SdfPath> newRibbonDriverPoints;
-    const UsdPrim solvers =
-        _stage->GetPrimAtPath(_rigPath.AppendChild(TfToken("Solvers")));
-    if (solvers) {
-        // Every aggregate frame provider: their computePointFrameArray
-        // results are published (and drawn as guides by the imaging
-        // chain, like OpenExec's IrJointScope guides).
-        static const std::set<TfToken> aggregateSolverTypes = {
-            TfToken("RigExecFkChain"),
-            TfToken("RigExecTwoBoneIk"),
-            TfToken("RigExecBlendPointFrames"),
-            TfToken("RigExecTwistDistribution"),
-            TfToken("RigExecRibbon")};
-        for (const UsdPrim &child : UsdPrimRange(solvers)) {
-            if (aggregateSolverTypes.count(child.GetTypeName())) {
-                solverArrayPaths.push_back(child.GetPath());
+    // Every aggregate frame provider, wherever the author placed it: their
+    // computePointFrameArray results are published (and drawn as guides by
+    // the imaging chain, like OpenExec's IrJointScope guides).
+    for (const UsdPrim &child :
+         _DiscoverAggregateSolvers(_stage, _rigPath)) {
+        solverArrayPaths.push_back(child.GetPath());
+        // A ribbon's driver-curve points, resolved to the exact native
+        // attribute. This replaces the compiler's last authoring pass:
+        // the resolution is compiled state (rewiring the relationship is
+        // structural, and the epoch digest already treats it that way),
+        // and the values ride in as exec overrides at evaluation time.
+        if (child.GetTypeName() == "RigExecRibbon") {
+            SdfPathVector curves;
+            if (const UsdRelationship rel = child.GetRelationship(
+                    TfToken("rigExec:driverCurve"))) {
+                rel.GetTargets(&curves);
             }
-            // A ribbon's driver-curve points, resolved to the exact native
-            // attribute. This replaces the compiler's last authoring pass:
-            // the resolution is compiled state (rewiring the relationship is
-            // structural, and the epoch digest already treats it that way),
-            // and the values ride in as exec overrides at evaluation time.
-            if (child.GetTypeName() == "RigExecRibbon") {
-                SdfPathVector curves;
-                if (const UsdRelationship rel = child.GetRelationship(
-                        TfToken("rigExec:driverCurve"))) {
-                    rel.GetTargets(&curves);
-                }
-                if (!curves.empty()) {
-                    newRibbonDriverPoints[child.GetPath()] =
-                        curves[0].IsPrimPath()
-                            ? curves[0].AppendProperty(TfToken("points"))
-                            : curves[0];
-                }
+            if (!curves.empty()) {
+                newRibbonDriverPoints[child.GetPath()] =
+                    curves[0].IsPrimPath()
+                        ? curves[0].AppendProperty(TfToken("points"))
+                        : curves[0];
             }
         }
     }
@@ -1380,6 +1853,9 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                         "rigExec:moves relationship");
                     return false;
                 }
+                // A solver carries no rigExec:moves; it poses joints through
+                // the rig-wide solver discovery above, so here it is just
+                // skipped like any other grouping scope.
                 continue;  // grouping scope
             }
             SdfPathVector targets;
@@ -1557,12 +2033,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                        unevaluated && !unevaluated->solve &&
                        !unevaluated->dispatchesInline) {
                 // A registered operator with neither a solve nor an inline
-                // branch has no evaluator at all. FBX Custom is the case:
-                // a carrier prim is legal, but attaching a write set to one
-                // would otherwise compile and silently do nothing -- the most
-                // dangerous possible behavior. Reading this off the table
-                // rather than the type name means a future operator cannot be
-                // registered without an evaluator and quietly pass.
+                // branch has no evaluator at all. Attaching a write set to
+                // one would otherwise compile and silently do nothing -- the
+                // most dangerous possible behavior. Reading this off the
+                // table rather than the type name means a future operator
+                // cannot be registered without an evaluator and quietly pass.
                 reportError(
                     record.schemaType.GetString() + " " +
                     prim.GetPath().GetString() +
@@ -1570,10 +2045,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 return false;
             }
 
-            // Matrix movers narrow the general rule (spec §4.2): moves,
-            // transform, and weightObject each have cardinality one; the
-            // move target is a native PointBased points property; the
-            // weight object canonicalizes to that same target.
+            // Matrix movers narrow the general rule (spec §4.2): moves and
+            // transform each have cardinality one, and the move target is a
+            // native PointBased points property. The optional common weight
+            // object was validated above with every other mover envelope.
             if (record.schemaType == "RigExecMatrixMover") {
                 std::string error;
                 if (!_ValidateMatrixMover(prim, record, &error)) {
@@ -1744,6 +2219,164 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                             "' has no matrix meaning (multiply or blend)");
                         return false;
                     }
+                }
+            }
+
+            // Universal MoverAPI envelope. A mover either broadcasts its
+            // normalized inputs:defaultWeight or binds one compatible total
+            // weight field; the relationship never multiplies the scalar.
+            {
+                for (const auto &commonInput : {
+                         std::make_pair("inputs:defaultWeight",
+                                        SdfValueTypeNames->Float),
+                         std::make_pair("inputs:enabled",
+                                        SdfValueTypeNames->Bool)}) {
+                    std::set<SdfPath> visitingConnections;
+                    std::string connectionError;
+                    if (!_ValidateScalarConnection(
+                            _stage,
+                            prim.GetAttribute(TfToken(commonInput.first)),
+                            commonInput.second, &visitingConnections,
+                            &connectionError)) {
+                        reportError(
+                            record.schemaType.GetString() + " " +
+                            prim.GetPath().GetString() + ": " +
+                            connectionError);
+                        return false;
+                    }
+                }
+                SdfPathVector weightObjects;
+                if (const UsdRelationship rel = prim.GetRelationship(
+                        TfToken("rigExec:weightObject"))) {
+                    rel.GetTargets(&weightObjects);
+                }
+                if (weightObjects.size() > 1) {
+                    reportError(
+                        record.schemaType.GetString() + " " +
+                        prim.GetPath().GetString() +
+                        " binds more than one rigExec:weightObject");
+                    return false;
+                }
+                if (!weightObjects.empty()) {
+                    // A mover with multiple write targets is one atomic
+                    // operation envelope, not an ambiguous spatial field per
+                    // target. It therefore binds a constant, one-element
+                    // field whose weightTarget is the mover itself; that
+                    // scalar broadcasts to every application/joint.
+                    const bool operationDomain = record.targets.size() != 1;
+                    const SdfPath target = operationDomain
+                        ? prim.GetPath()
+                        : record.targets[0];
+                    const UsdPrim owner = target.IsPropertyPath()
+                        ? _stage->GetPrimAtPath(target.GetPrimPath())
+                        : UsdPrim();
+                    const bool pointDomain =
+                        !operationDomain && target.IsPropertyPath() &&
+                        target.GetNameToken() == "points" && owner &&
+                        owner.IsA<UsdGeomPointBased>();
+                    size_t logicalCount = 1;
+                    if (pointDomain) {
+                        const UsdAttribute pointsAttr =
+                            _stage->GetAttributeAtPath(target);
+                        VtVec3fArray points;
+                        std::vector<double> sampleTimes;
+                        if (pointsAttr) {
+                            pointsAttr.GetTimeSamples(&sampleTimes);
+                        }
+                        const bool hasAuthoredDefault =
+                            pointsAttr &&
+                            pointsAttr.GetResolveInfo(UsdTimeCode::Default())
+                                    .GetSource() ==
+                                UsdResolveInfoSourceDefault;
+                        bool resolvedCardinality = false;
+                        if (hasAuthoredDefault &&
+                            pointsAttr.Get(
+                                &points, UsdTimeCode::Default())) {
+                            logicalCount = points.size();
+                            resolvedCardinality = true;
+                        }
+                        for (double sampleTime : sampleTimes) {
+                            VtVec3fArray sampled;
+                            if (!pointsAttr.Get(
+                                    &sampled, UsdTimeCode(sampleTime))) {
+                                continue;
+                            }
+                            if (!resolvedCardinality) {
+                                logicalCount = sampled.size();
+                                resolvedCardinality = true;
+                            } else if (sampled.size() != logicalCount) {
+                                reportError(
+                                    record.schemaType.GetString() + " " +
+                                    prim.GetPath().GetString() +
+                                    ": weighted point-domain cardinality "
+                                    "changes across the binding epoch at " +
+                                    target.GetString());
+                                return false;
+                            }
+                        }
+                        if (!resolvedCardinality && pointsAttr &&
+                            pointsAttr.Get(
+                                &points, UsdTimeCode::Default())) {
+                            // Schema fallback (usually an empty array) is the
+                            // only remaining base when neither a default nor
+                            // a sample is authored.
+                            logicalCount = points.size();
+                            resolvedCardinality = true;
+                        }
+                        if (!resolvedCardinality) {
+                            reportError(
+                                record.schemaType.GetString() + " " +
+                                prim.GetPath().GetString() +
+                                ": cannot resolve the weighted point "
+                                "domain's compile-time cardinality at " +
+                                target.GetString());
+                            return false;
+                        }
+                    }
+                    std::set<SdfPath> visitingWeights;
+                    std::string weightError;
+                    if (!_ValidateWeightObjectDomain(
+                            _stage, weightObjects[0], target, pointDomain,
+                            operationDomain, logicalCount, &visitingWeights,
+                            &weightError)) {
+                        reportError(
+                            record.schemaType.GetString() + " " +
+                            prim.GetPath().GetString() + ": " + weightError);
+                        return false;
+                    }
+                }
+            }
+
+            // Strict migration: these concrete mover envelope properties were
+            // replaced by MoverAPI inputs:defaultWeight. Once removed from the
+            // schema, an old layer opinion composes as a custom attribute and
+            // would otherwise be ignored silently.
+            {
+                const TfToken &type = record.schemaType;
+                const bool legacyWeight =
+                    type == "RigExecFloatMathMover" ||
+                    type == "RigExecVec3fMathMover" ||
+                    type == "RigExecMatrixMathMover";
+                const bool legacyStrength =
+                    type == "RigExecSmoothMover" ||
+                    type == "RigExecCurvenetMover" ||
+                    type == "RigExecVolumeCorrectMover";
+                const auto rejectAuthored =
+                    [&](const char *oldName) -> bool {
+                    const UsdAttribute old =
+                        prim.GetAttribute(TfToken(oldName));
+                    if (!old || !old.HasAuthoredValue()) {
+                        return false;
+                    }
+                    reportError(
+                        type.GetString() + " " +
+                        prim.GetPath().GetString() + " authors " + oldName +
+                        ", which was replaced by inputs:defaultWeight");
+                    return true;
+                };
+                if ((legacyWeight && rejectAuthored("inputs:weight")) ||
+                    (legacyStrength && rejectAuthored("inputs:strength"))) {
+                    return false;
                 }
             }
             // Read phases, validated from the AUTHORED stage.
@@ -2002,20 +2635,26 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // A rig has to publish SOMETHING (the check the joint requirement used
     // to stand in for).
     //
-    // Joints and movers are the two ways it can: a joint publishes a frame
-    // whether or not anything moves it, and a mover publishes whatever its
-    // targets are. Zero of both is a rig that evaluates to an empty
-    // generation every frame, which is far likelier to be an authoring
-    // mistake -- a Movers scope whose contents were renamed out from under
-    // it, a rig root pointed at the wrong prim -- than an intent.
+    // Controls, joints, volumes, and movers are the four ways it can: a control
+    // publishes its posed frame for the synthesized viewport guide, a joint
+    // publishes a frame whether or not anything moves it, a placed weight
+    // volume publishes its falloff guide while it is being authored, and a
+    // mover publishes whatever its targets are. Zero of all four is a rig that
+    // evaluates to an empty generation every frame, which is far likelier to
+    // be an authoring mistake -- a Movers scope whose contents were renamed
+    // out from under it, a rig root pointed at the wrong prim -- than an
+    // intent.
     // An inert mover is not an output, but it is evidence of intent: the rig
     // root found mover prims, they simply are not wired yet. Failing that is
     // the same mistake as failing the whole rig for one disconnected mover --
     // it makes the last wire you pull take the rig down. The error is for a
     // rig that found NOTHING, which is the misconfiguration it describes.
-    if (newJointPaths.empty() && newMovers.empty() && inertMovers == 0) {
+    if (newControlPaths.empty() && newJointPaths.empty() &&
+        newVolumeWeightPaths.empty() &&
+        newMovers.empty() && inertMovers == 0) {
         reportError("Rig publishes no outputs: " + _rigPath.GetString() +
-                    " has no RigExecJoint prims and no movers");
+                    " has no RigExecControl, RigExecJoint, or placed volume "
+                    "weight prims and no movers");
         return false;
     }
 
@@ -2112,17 +2751,17 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     std::map<SdfPath, std::pair<SdfPath, int>> newJointBinding;
     {
         std::map<SdfPath, SdfPath> jointClaim;  // joint -> claiming solver
-        const UsdPrim solverRoot = _stage->GetPrimAtPath(
-            _rigPath.AppendChild(TfToken("Solvers")));
-        if (solverRoot) {
+        {
+            const std::vector<UsdPrim> solvers =
+                _DiscoverAggregateSolvers(_stage, _rigPath);
             // Cardinality attributes must be static (compile-time
-            // structural) for EVERY aggregate solver in the subtree, not
+            // structural) for EVERY aggregate solver under the rig, not
             // only joint-bearing ones: a non-joint Twist/Ribbon feeding a
             // joint-bearing Blend still determines that Blend's element
             // count, so a time-sampled cardinality would silently shift a
             // blend-bound joint's frame. `uniform` is only
             // a hint; reject samples explicitly.
-            for (const UsdPrim &solver : UsdPrimRange(solverRoot)) {
+            for (const UsdPrim &solver : solvers) {
                 const TfToken t = solver.GetTypeName();
                 std::vector<const char *> cardinalityAttrs;
                 if (t == "RigExecTwistDistribution") {
@@ -2142,184 +2781,182 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     }
                 }
             }
-            for (const UsdPrim &solver : UsdPrimRange(solverRoot)) {
-                const UsdRelationship jointsRel =
-                    solver.GetRelationship(TfToken("rigExec:joints"));
-                if (!jointsRel) {
-                    continue;
-                }
-                SdfPathVector jointTargets;
-                jointsRel.GetTargets(&jointTargets);
-                if (jointTargets.empty()) {
-                    continue;
-                }
-                const std::string who = solver.GetTypeName().GetString() +
-                                        " " + solver.GetPath().GetString();
+            // A claim binds wherever the solver sits; a non-solver prim
+            // carrying rigExec:joints is rejected wherever it sits.
+            if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
+                for (const UsdPrim &solver : UsdPrimRange(rig)) {
+                    const UsdRelationship jointsRel =
+                        solver.GetRelationship(TfToken("rigExec:joints"));
+                    if (!jointsRel) {
+                        continue;
+                    }
+                    SdfPathVector jointTargets;
+                    jointsRel.GetTargets(&jointTargets);
+                    if (jointTargets.empty()) {
+                        continue;
+                    }
+                    const std::string who = solver.GetTypeName().GetString() +
+                                            " " + solver.GetPath().GetString();
 
-                // The claimant must be a real aggregate solver (it must
-                // publish computePointFrameArray for the joint to extract).
-                // A Scope or arbitrary prim carrying rigExec:joints would
-                // otherwise pass, and the binding would name a prim with no
-                // aggregate computation to extract an element from.
-                static const std::set<TfToken> kAggregateSolverTypes = {
-                    TfToken("RigExecFkChain"),
-                    TfToken("RigExecTwoBoneIk"),
-                    TfToken("RigExecBlendPointFrames"),
-                    TfToken("RigExecTwistDistribution"),
-                    TfToken("RigExecRibbon")};
-                if (!kAggregateSolverTypes.count(solver.GetTypeName())) {
-                    reportError(who + " authors rigExec:joints but is not a "
-                                      "recognized aggregate solver type");
-                    return false;
-                }
-
-                // jointElements parallel-array shape: empty, or exactly one
-                // entry per joint (no partial remap / silent truncation).
-                VtIntArray jointElements;
-                if (const UsdAttribute a = solver.GetAttribute(
-                        TfToken("rigExec:jointElements"))) {
-                    std::vector<double> times;
-                    if (a.GetTimeSamples(&times) && !times.empty()) {
-                        reportError(who + ": rigExec:jointElements must not "
-                                          "carry time samples");
+                    // The claimant must be a real aggregate solver (it must
+                    // publish computePointFrameArray for the joint to extract).
+                    // A Scope or arbitrary prim carrying rigExec:joints would
+                    // otherwise pass, and the binding would name a prim with no
+                    // aggregate computation to extract an element from.
+                    if (!_IsAggregateSolverType(solver.GetTypeName())) {
+                        reportError(who + " authors rigExec:joints but is not a "
+                                          "recognized aggregate solver type");
                         return false;
                     }
-                    a.Get(&jointElements);
-                }
-                if (!jointElements.empty() &&
-                    jointElements.size() != jointTargets.size()) {
-                    reportError(
-                        who + ": rigExec:jointElements length " +
-                        std::to_string(jointElements.size()) +
-                        " must equal rigExec:joints length " +
-                        std::to_string(jointTargets.size()));
-                    return false;
-                }
 
-                // Knowable aggregate element count per solver type
-                // (-1 = not cheaply knowable, e.g. a blend of another
-                // aggregate: element bounds are enforced only at runtime).
-                int knownCount = -1;
-                const TfToken type = solver.GetTypeName();
-                if (type == "RigExecTwoBoneIk") {
-                    knownCount = 3;
-                } else if (type == "RigExecFkChain") {
-                    SdfPathVector controls;
-                    if (const UsdRelationship c = solver.GetRelationship(
-                            TfToken("rigExec:controls"))) {
-                        c.GetTargets(&controls);
-                    }
-                    knownCount = static_cast<int>(controls.size());
-                } else if (type == "RigExecTwistDistribution") {
-                    // count/weights time samples already rejected above.
-                    VtFloatArray weights;
+                    // jointElements parallel-array shape: empty, or exactly one
+                    // entry per joint (no partial remap / silent truncation).
+                    VtIntArray jointElements;
                     if (const UsdAttribute a = solver.GetAttribute(
-                            TfToken("rigExec:weights"))) {
-                        a.Get(&weights);
+                            TfToken("rigExec:jointElements"))) {
+                        std::vector<double> times;
+                        if (a.GetTimeSamples(&times) && !times.empty()) {
+                            reportError(who + ": rigExec:jointElements must not "
+                                              "carry time samples");
+                            return false;
+                        }
+                        a.Get(&jointElements);
                     }
-                    if (!weights.empty()) {
-                        knownCount = static_cast<int>(weights.size());
-                    } else if (const UsdAttribute a = solver.GetAttribute(
-                                   TfToken("rigExec:count"))) {
-                        int c = 1;
-                        a.Get(&c);
-                        knownCount = std::max(c, 1);
+                    if (!jointElements.empty() &&
+                        jointElements.size() != jointTargets.size()) {
+                        reportError(
+                            who + ": rigExec:jointElements length " +
+                            std::to_string(jointElements.size()) +
+                            " must equal rigExec:joints length " +
+                            std::to_string(jointTargets.size()));
+                        return false;
                     }
-                } else if (type == "RigExecRibbon") {
-                    if (const UsdAttribute a = solver.GetAttribute(
-                            TfToken("rigExec:sampleCount"))) {
-                        int c = 5;
-                        a.Get(&c);
-                        // The transported-frame ribbon needs >= 2 samples;
-                        // below that it produces no frames, so no element
-                        // is bindable (matches the runtime cardinality).
-                        knownCount = c >= 2 ? c : 0;
-                    }
-                }
 
-                for (size_t i = 0; i < jointTargets.size(); ++i) {
-                    const SdfPath &jointPath = jointTargets[i];
-                    const int element = i < jointElements.size()
-                        ? jointElements[i] : static_cast<int>(i);
-                    if (element < 0) {
-                        reportError(who + ": negative element index " +
-                                    std::to_string(element) + " for " +
-                                    jointPath.GetString());
-                        return false;
-                    }
-                    if (knownCount >= 0 && element >= knownCount) {
-                        reportError(
-                            who + ": element " + std::to_string(element) +
-                            " for " + jointPath.GetString() +
-                            " is out of range (solver produces " +
-                            std::to_string(knownCount) + " frames)");
-                        return false;
-                    }
-                    const UsdPrim jointPrim =
-                        _stage->GetPrimAtPath(jointPath);
-                    if (!jointPrim) {
-                        reportError(who + " rigExec:joints targets missing "
-                                          "prim " + jointPath.GetString());
-                        return false;
-                    }
-                    if (jointPrim.GetTypeName() != "RigExecJoint") {
-                        reportError(
-                            who + " rigExec:joints target " +
-                            jointPath.GetString() + " is a " +
-                            jointPrim.GetTypeName().GetString() +
-                            ", not a RigExecJoint");
-                        return false;
-                    }
-                    // Every joint is tapped individually and a bound one also
-                    // carries a per-prim value override, both of which key on
-                    // a real prim; only the rig's nearest instanceable
-                    // ancestor is deinstanced. Reject an instance-proxy /
-                    // prototype-hosted joint up front.
-                    if (jointPrim.IsInstanceProxy() ||
-                        jointPrim.IsInPrototype()) {
-                        reportError(
-                            who + " rigExec:joints target " +
-                            jointPath.GetString() +
-                            " is instance-proxy/prototype hosted and cannot "
-                            "receive a solver binding");
-                        return false;
-                    }
-                    // Exclusive ownership: a solver-posed joint must not
-                    // also author its own posed:space connection (the solver
-                    // pose is supplied as an override and would silently win
-                    // over the connection the raw stage shows).
-                    //
-                    // There is no longer a companion check for a legacy
-                    // authored rigExec:frameSource. Nothing reads that name
-                    // now -- it is neither a schema property nor a
-                    // registered computation input -- so a leftover opinion
-                    // from an asset saved against the old schema is inert,
-                    // and failing the compile over it would reject a rig
-                    // that evaluates correctly.
-                    if (const UsdPrim srcJoint =
-                            _stage->GetPrimAtPath(jointPath)) {
-                        if (const UsdAttribute posed = srcJoint.GetAttribute(
-                                TfToken("posed:space"))) {
-                            SdfPathVector conns;
-                            posed.GetConnections(&conns);
-                            if (!conns.empty()) {
-                                reportError(who + ": joint " +
-                                            jointPath.GetString() +
-                                            " also connects posed:space");
-                                return false;
-                            }
+                    // Knowable aggregate element count per solver type
+                    // (-1 = not cheaply knowable, e.g. a blend of another
+                    // aggregate: element bounds are enforced only at runtime).
+                    int knownCount = -1;
+                    const TfToken type = solver.GetTypeName();
+                    if (type == "RigExecTwoBoneIk") {
+                        knownCount = 3;
+                    } else if (type == "RigExecFkChain") {
+                        SdfPathVector controls;
+                        if (const UsdRelationship c = solver.GetRelationship(
+                                TfToken("rigExec:controls"))) {
+                            c.GetTargets(&controls);
+                        }
+                        knownCount = static_cast<int>(controls.size());
+                    } else if (type == "RigExecTwistDistribution") {
+                        // count/weights time samples already rejected above.
+                        VtFloatArray weights;
+                        if (const UsdAttribute a = solver.GetAttribute(
+                                TfToken("rigExec:weights"))) {
+                            a.Get(&weights);
+                        }
+                        if (!weights.empty()) {
+                            knownCount = static_cast<int>(weights.size());
+                        } else if (const UsdAttribute a = solver.GetAttribute(
+                                       TfToken("rigExec:count"))) {
+                            int c = 1;
+                            a.Get(&c);
+                            knownCount = std::max(c, 1);
+                        }
+                    } else if (type == "RigExecRibbon") {
+                        if (const UsdAttribute a = solver.GetAttribute(
+                                TfToken("rigExec:sampleCount"))) {
+                            int c = 5;
+                            a.Get(&c);
+                            // The transported-frame ribbon needs >= 2 samples;
+                            // below that it produces no frames, so no element
+                            // is bindable (matches the runtime cardinality).
+                            knownCount = c >= 2 ? c : 0;
                         }
                     }
-                    const auto claimed = jointClaim.find(jointPath);
-                    if (claimed != jointClaim.end()) {
-                        reportError("joint " + jointPath.GetString() +
-                                    " is posed by two solvers (" +
-                                    claimed->second.GetString() + " and " +
-                                    solver.GetPath().GetString() + ")");
-                        return false;
+
+                    for (size_t i = 0; i < jointTargets.size(); ++i) {
+                        const SdfPath &jointPath = jointTargets[i];
+                        const int element = i < jointElements.size()
+                            ? jointElements[i] : static_cast<int>(i);
+                        if (element < 0) {
+                            reportError(who + ": negative element index " +
+                                        std::to_string(element) + " for " +
+                                        jointPath.GetString());
+                            return false;
+                        }
+                        if (knownCount >= 0 && element >= knownCount) {
+                            reportError(
+                                who + ": element " + std::to_string(element) +
+                                " for " + jointPath.GetString() +
+                                " is out of range (solver produces " +
+                                std::to_string(knownCount) + " frames)");
+                            return false;
+                        }
+                        const UsdPrim jointPrim =
+                            _stage->GetPrimAtPath(jointPath);
+                        if (!jointPrim) {
+                            reportError(who + " rigExec:joints targets missing "
+                                              "prim " + jointPath.GetString());
+                            return false;
+                        }
+                        if (jointPrim.GetTypeName() != "RigExecJoint") {
+                            reportError(
+                                who + " rigExec:joints target " +
+                                jointPath.GetString() + " is a " +
+                                jointPrim.GetTypeName().GetString() +
+                                ", not a RigExecJoint");
+                            return false;
+                        }
+                        // Every joint is tapped individually and a bound one also
+                        // carries a per-prim value override, both of which key on
+                        // a real prim; only the rig's nearest instanceable
+                        // ancestor is deinstanced. Reject an instance-proxy /
+                        // prototype-hosted joint up front.
+                        if (jointPrim.IsInstanceProxy() ||
+                            jointPrim.IsInPrototype()) {
+                            reportError(
+                                who + " rigExec:joints target " +
+                                jointPath.GetString() +
+                                " is instance-proxy/prototype hosted and cannot "
+                                "receive a solver binding");
+                            return false;
+                        }
+                        // Exclusive ownership: a solver-posed joint must not
+                        // also author its own posed:space connection (the solver
+                        // pose is supplied as an override and would silently win
+                        // over the connection the raw stage shows).
+                        //
+                        // There is no longer a companion check for a legacy
+                        // authored rigExec:frameSource. Nothing reads that name
+                        // now -- it is neither a schema property nor a
+                        // registered computation input -- so a leftover opinion
+                        // from an asset saved against the old schema is inert,
+                        // and failing the compile over it would reject a rig
+                        // that evaluates correctly.
+                        if (const UsdPrim srcJoint =
+                                _stage->GetPrimAtPath(jointPath)) {
+                            if (const UsdAttribute posed = srcJoint.GetAttribute(
+                                    TfToken("posed:space"))) {
+                                SdfPathVector conns;
+                                posed.GetConnections(&conns);
+                                if (!conns.empty()) {
+                                    reportError(who + ": joint " +
+                                                jointPath.GetString() +
+                                                " also connects posed:space");
+                                    return false;
+                                }
+                            }
+                        }
+                        const auto claimed = jointClaim.find(jointPath);
+                        if (claimed != jointClaim.end()) {
+                            reportError("joint " + jointPath.GetString() +
+                                        " is posed by two solvers (" +
+                                        claimed->second.GetString() + " and " +
+                                        solver.GetPath().GetString() + ")");
+                            return false;
+                        }
+                        jointClaim[jointPath] = solver.GetPath();
+                        newJointBinding[jointPath] = {solver.GetPath(), element};
                     }
-                    jointClaim[jointPath] = solver.GetPath();
-                    newJointBinding[jointPath] = {solver.GetPath(), element};
                 }
             }
         }
@@ -2338,39 +2975,39 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // frames, so a new solver type cannot quietly escape the check.
     {
         std::map<SdfPath, std::set<SdfPath>> dependsOn;
-        const UsdPrim solverRoot = _stage->GetPrimAtPath(
-            _rigPath.AppendChild(TfToken("Solvers")));
-        if (solverRoot) {
-            for (const UsdPrim &solver : UsdPrimRange(solverRoot)) {
-                for (const UsdRelationship &rel :
-                     solver.GetRelationships()) {
-                    if (rel.GetName() == "rigExec:joints") {
-                        continue;  // what it poses, not what it reads
+        const std::vector<UsdPrim> solvers =
+            _DiscoverAggregateSolvers(_stage, _rigPath);
+        std::set<SdfPath> solverPaths;
+        for (const UsdPrim &solver : solvers) {
+            solverPaths.insert(solver.GetPath());
+        }
+        for (const UsdPrim &solver : solvers) {
+            for (const UsdRelationship &rel :
+                 solver.GetRelationships()) {
+                if (rel.GetName() == "rigExec:joints") {
+                    continue;  // what it poses, not what it reads
+                }
+                SdfPathVector targets;
+                rel.GetTargets(&targets);
+                for (const SdfPath &target : targets) {
+                    const SdfPath targetPrim = target.GetPrimPath();
+                    // Indirect: reading a joint that another solver poses.
+                    const auto it = newJointBinding.find(targetPrim);
+                    if (it != newJointBinding.end() &&
+                        it->second.first != solver.GetPath()) {
+                        dependsOn[solver.GetPath()].insert(
+                            it->second.first);
                     }
-                    SdfPathVector targets;
-                    rel.GetTargets(&targets);
-                    for (const SdfPath &target : targets) {
-                        const SdfPath targetPrim = target.GetPrimPath();
-                        // Indirect: reading a joint that another solver poses.
-                        const auto it = newJointBinding.find(targetPrim);
-                        if (it != newJointBinding.end() &&
-                            it->second.first != solver.GetPath()) {
-                            dependsOn[solver.GetPath()].insert(
-                                it->second.first);
-                        }
-                        // Direct: reading another solver's aggregate.
-                        // RigExecBlendPointFrames takes rigExec:inputA /
-                        // inputB as solver paths, so a cycle can run through
-                        // a solver->solver edge without touching a joint at
-                        // all; deriving only the joint edges would miss it.
-                        if (targetPrim != solver.GetPath() &&
-                            targetPrim.HasPrefix(solverRoot.GetPath())) {
-                            const UsdPrim other =
-                                _stage->GetPrimAtPath(targetPrim);
-                            if (other && other.GetTypeName() != "Scope") {
-                                dependsOn[solver.GetPath()].insert(targetPrim);
-                            }
-                        }
+                    // Direct: reading another solver's aggregate.
+                    // RigExecBlendPointFrames takes rigExec:inputA /
+                    // inputB as solver paths, so a cycle can run through
+                    // a solver->solver edge without touching a joint at
+                    // all; deriving only the joint edges would miss it.
+                    // Membership, not a scope prefix, decides: solvers live
+                    // wherever the author put them.
+                    if (targetPrim != solver.GetPath() &&
+                        solverPaths.count(targetPrim)) {
+                        dependsOn[solver.GetPath()].insert(targetPrim);
                     }
                 }
             }
@@ -2525,12 +3162,31 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // curve weight.
             requireTargets("rigExec:sampleSource", 1,
                            "at most one points source");
-            if (w.GetTypeName() == "RigExecCurveWeight" &&
-                requireTargets("rigExec:curve", 1,
-                               "exactly one points source") != 1) {
-                volumeWeightError =
-                    weightPath.GetString() +
-                    ": rigExec:curve must name exactly one points source";
+            if (w.GetTypeName() == "RigExecCurveWeight") {
+                SdfPathVector curves;
+                if (const UsdRelationship rel = w.GetRelationship(
+                        TfToken("rigExec:curve"))) {
+                    rel.GetTargets(&curves);
+                }
+                if (curves.size() != 1) {
+                    volumeWeightError =
+                        weightPath.GetString() +
+                        ": rigExec:curve must name exactly one points source";
+                } else {
+                    const SdfPath pointsPath = curves[0].IsPropertyPath()
+                        ? curves[0]
+                        : curves[0].AppendProperty(TfToken("points"));
+                    const UsdAttribute points =
+                        _stage->GetAttributeAtPath(pointsPath);
+                    if (!points ||
+                        points.GetTypeName() != SdfValueTypeNames->Point3fArray) {
+                        volumeWeightError =
+                            weightPath.GetString() +
+                            ": rigExec:curve target " +
+                            curves[0].GetString() +
+                            " must resolve to a point3f[] points source";
+                    }
+                }
             }
         }
         if (_IsVolumeWeightType(w.GetTypeName())) {
@@ -2581,6 +3237,34 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
         return isCurrent;
     };
+
+    // A placed volume is a guide output even before it is bound to a mover.
+    // Register every discovered volume first; the recursive consumer walks
+    // below naturally deduplicate against this map. This also applies the same
+    // CurveWeight cardinality validation to standalone and consumed volumes.
+    for (const SdfPath &volumePath : newVolumeWeightPaths) {
+        registerVolumeWeights(volumePath);
+    }
+
+    // Gather volumetric epoch state for every common mover envelope, not only
+    // point-graph revisions. Geometry-domain constraints publish directly
+    // after the pose walk and therefore never appear in _graphChains, but a
+    // sphere/plane/curve field bound to one still needs the same placement tap
+    // and falloff override as a geometry mover.
+    for (const RigExecMoverRecord &mover : newMovers) {
+        const UsdPrim moverPrim = _stage->GetPrimAtPath(mover.moverPath);
+        if (!moverPrim) {
+            continue;
+        }
+        SdfPathVector objects;
+        if (const UsdRelationship rel = moverPrim.GetRelationship(
+                TfToken("rigExec:weightObject"))) {
+            rel.GetTargets(&objects);
+        }
+        if (objects.size() == 1) {
+            registerVolumeWeights(objects[0]);
+        }
+    }
 
     // The aggregate frame array of every solver that poses a joint, in its
     // own request so it can be evaluated first: the authoritative request
@@ -2723,6 +3407,14 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         _FrameConstraint constraint;
         constraint.moverPath = mover.moverPath;
         constraint.schemaType = mover.schemaType;
+        const SdfPathVector commonWeights =
+            getTargets(moverPrim, "rigExec:weightObject");
+        if (!commonWeights.empty()) {
+            // Phase-A validation already established at-most-one and the
+            // exact domain: the moved prim for a source constraint, or this
+            // mover prim for an atomic multi-target SingleChainIK.
+            constraint.weightObject = commonWeights[0];
+        }
 
         if (_IsSourceFrameConstraintType(mover.schemaType)) {
             constraint.targets = mover.targets;
@@ -2732,35 +3424,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // domain. Either way the frame key is the PRIM -- the solve is
             // identical and only the publish differs -- so the points
             // property is carried aside and targets[0] is normalized.
-            SdfPathVector weightTargets;
-            if (const UsdRelationship rel =
-                    moverPrim.GetRelationship(TfToken("rigExec:weightObject"))) {
-                rel.GetTargets(&weightTargets);
-            }
             if (!constraint.targets.empty() &&
                 constraint.targets[0].IsPropertyPath() &&
                 constraint.targets[0].GetNameToken() == "points") {
                 constraint.pointsTarget = constraint.targets[0];
                 constraint.targets[0] = constraint.targets[0].GetPrimPath();
-                if (weightTargets.size() > 1) {
-                    reportError(mover.schemaType.GetString() + " " +
-                                mover.moverPath.GetString() +
-                                " binds more than one rigExec:weightObject");
-                    restorePreviousEpoch();
-                    return false;
-                }
-                if (!weightTargets.empty()) {
-                    constraint.weightObject = weightTargets[0];
-                }
-            } else if (!weightTargets.empty()) {
-                reportError(
-                    mover.schemaType.GetString() + " " +
-                    mover.moverPath.GetString() +
-                    " binds rigExec:weightObject on a transform-domain "
-                    "constraint; a transform is a single element with "
-                    "nothing to vary over. Use inputs:defaultWeight");
-                restorePreviousEpoch();
-                return false;
             }
 
             SdfPathVector sources = getTargets(moverPrim, "rigExec:sources");
@@ -3013,6 +3681,118 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    // A property chain can revise an input consumed by another property
+    // chain. Resolve those producers first; namespace/map order is unrelated
+    // to dataflow and made `/Consumer` read its authored envelope before a
+    // lexically later `/Driver` had produced the revised one.
+    std::vector<SdfPath> newPropertyChainOrder;
+    {
+        std::map<SdfPath, std::set<SdfPath>> dependsOn;
+        for (const auto &[target, _] : newPropertyChains) {
+            dependsOn[target];
+        }
+
+        auto addAttributeDependency = [&](const SdfPath &consumer,
+                                          const UsdAttribute &attribute) {
+            std::set<SdfPath> visited;
+            std::function<void(const UsdAttribute &)> walk =
+                [&](const UsdAttribute &a) {
+                if (!a || !visited.insert(a.GetPath()).second) {
+                    return;
+                }
+                if (newPropertyChains.count(a.GetPath())) {
+                    dependsOn[consumer].insert(a.GetPath());
+                }
+                SdfPathVector connections;
+                a.GetConnections(&connections);
+                for (const SdfPath &sourcePath : connections) {
+                    walk(_stage->GetAttributeAtPath(sourcePath));
+                }
+            };
+            walk(attribute);
+        };
+        auto addPrimDependencies = [&](const SdfPath &consumer,
+                                       const UsdPrim &prim) {
+            if (!prim) {
+                return;
+            }
+            for (const UsdAttribute &attribute : prim.GetAttributes()) {
+                addAttributeDependency(consumer, attribute);
+            }
+        };
+        std::function<void(const SdfPath &, const SdfPath &,
+                           std::set<SdfPath> *)>
+            addWeightDependencies =
+                [&](const SdfPath &consumer, const SdfPath &weightPath,
+                    std::set<SdfPath> *visited) {
+                if (!visited->insert(weightPath).second) {
+                    return;
+                }
+                const UsdPrim weight = _stage->GetPrimAtPath(weightPath);
+                addPrimDependencies(consumer, weight);
+                for (const char *relationship :
+                     {"rigExec:inputWeights", "rigExec:baseWeight"}) {
+                    SdfPathVector inputs;
+                    if (const UsdRelationship rel =
+                            weight.GetRelationship(TfToken(relationship))) {
+                        rel.GetTargets(&inputs);
+                    }
+                    for (const SdfPath &input : inputs) {
+                        addWeightDependencies(consumer, input, visited);
+                    }
+                }
+            };
+
+        for (const auto &[target, revisions] : newPropertyChains) {
+            for (const _PropertyRevision &revision : revisions) {
+                const UsdPrim mover =
+                    _stage->GetPrimAtPath(revision.moverPath);
+                addPrimDependencies(target, mover);
+                SdfPathVector weights;
+                if (const UsdRelationship rel = mover.GetRelationship(
+                        TfToken("rigExec:weightObject"))) {
+                    rel.GetTargets(&weights);
+                }
+                std::set<SdfPath> visitedWeights;
+                for (const SdfPath &weight : weights) {
+                    addWeightDependencies(target, weight, &visitedWeights);
+                }
+            }
+        }
+
+        std::map<SdfPath, int> colour;
+        std::vector<SdfPath> stack;
+        std::function<bool(const SdfPath &)> visit =
+            [&](const SdfPath &target) {
+            colour[target] = 1;
+            stack.push_back(target);
+            for (const SdfPath &producer : dependsOn[target]) {
+                if (colour[producer] == 1) {
+                    std::string cycle;
+                    for (const SdfPath &path : stack) {
+                        cycle += path.GetString() + " -> ";
+                    }
+                    cycle += producer.GetString();
+                    reportError("property input dependency cycle: " + cycle);
+                    return false;
+                }
+                if (colour[producer] == 0 && !visit(producer)) {
+                    return false;
+                }
+            }
+            stack.pop_back();
+            colour[target] = 2;
+            newPropertyChainOrder.push_back(target);
+            return true;
+        };
+        for (const auto &[target, _] : dependsOn) {
+            if (colour[target] == 0 && !visit(target)) {
+                restorePreviousEpoch();
+                return false;
+            }
+        }
+    }
+
     // The compiled mover graph, built from the same mover execution walk
     // the generated prims come from. It runs alongside them for now: Evaluate
     // compares the two and diagnoses any disagreement, so the graph can be
@@ -3206,6 +3986,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _graphChains = std::move(newGraphChains);
     _graphDerivedChains = std::move(newGraphDerivedChains);
     _propertyChains = std::move(newPropertyChains);
+    _propertyChainOrder = std::move(newPropertyChainOrder);
 
     // Chain evaluation order.
     //
@@ -3459,14 +4240,10 @@ RigExecRigEvaluator::_ValidateMatrixMover(
         return false;
     }
 
-    SdfPathVector transforms, weightObjects;
+    SdfPathVector transforms;
     if (UsdRelationship rel =
             prim.GetRelationship(TfToken("rigExec:transform"))) {
         rel.GetTargets(&transforms);
-    }
-    if (UsdRelationship rel =
-            prim.GetRelationship(TfToken("rigExec:weightObject"))) {
-        rel.GetTargets(&weightObjects);
     }
     if (transforms.size() != 1) {
         *error = who + ": rigExec:transform must have exactly one target";
@@ -3497,29 +4274,6 @@ RigExecRigEvaluator::_ValidateMatrixMover(
     if (!isProvider) {
         *error = who + ": rigExec:transform target is not a catalogued "
                        "matrix provider";
-        return false;
-    }
-    if (weightObjects.size() != 1) {
-        *error = who + ": rigExec:weightObject must have exactly one target";
-        return false;
-    }
-    const UsdPrim weightPrim = _stage->GetPrimAtPath(weightObjects[0]);
-    if (!weightPrim) {
-        *error = who + ": missing weight object " +
-                 weightObjects[0].GetString();
-        return false;
-    }
-    // The weight object's canonical target must match the mover's exact
-    // points target (spec §4.2, §7.4).
-    SdfPathVector weightTargets;
-    if (UsdRelationship rel =
-            weightPrim.GetRelationship(TfToken("rigExec:weightTarget"))) {
-        rel.GetTargets(&weightTargets);
-    }
-    if (weightTargets.size() != 1 ||
-        _ResolveGeometryInput(_stage, weightTargets[0]) != record.targets[0]) {
-        *error = who + ": weight object target does not canonicalize to "
-                       "the mover's points target";
         return false;
     }
     return true;
@@ -3606,13 +4360,10 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
             *error = who + ": combine inputs disagree on element count";
             return false;
         }
-        float strength = 1.0f, invert = 0.0f;
-        if (UsdAttribute a = prim.GetAttribute(TfToken("inputs:strength"))) {
-            a.Get(&strength, time);
-        }
-        if (UsdAttribute a = prim.GetAttribute(TfToken("inputs:invert"))) {
-            a.Get(&invert, time);
-        }
+        const float strength = _ResolvedRead(
+            _resolvedInputs, prim, "inputs:strength", 1.0f, time);
+        const float invert = _ResolvedRead(
+            _resolvedInputs, prim, "inputs:invert", 0.0f, time);
         for (float &w : *weights) {
             w = (w + (1.0f - 2.0f * w) * invert) * strength;
         }
@@ -3678,12 +4429,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     }
 
     RigExecFalloffParams params;
-    auto readFloat = [&prim, time](const char *name, float fallback) {
-        float v = fallback;
-        if (UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-            a.Get(&v, time);
-        }
-        return v;
+    auto readFloat = [this, &prim, time](const char *name, float fallback) {
+        return _ResolvedRead(
+            _resolvedInputs, prim, name, fallback, time);
     };
     params.falloffMin = readFloat("inputs:falloffMin", 0.0f);
     params.falloffMax = readFloat("inputs:falloffMax", 1.0f);
@@ -3829,10 +4577,8 @@ RigExecRigEvaluator::_ResolveWeights(
             TfToken("rigExec:representation"))) {
         a.Get(&representation, time);
     }
-    float defaultWeight = 0.0f;
-    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:defaultWeight"))) {
-        a.Get(&defaultWeight, time);
-    }
+    const float defaultWeight = _ResolvedRead(
+        _resolvedInputs, prim, "rigExec:defaultWeight", 0.0f, time);
     TfToken rangePolicy("strict");
     if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:rangePolicy"))) {
         a.Get(&rangePolicy, time);
@@ -3946,16 +4692,12 @@ RigExecRigEvaluator::_ResolveWeights(
                 return false;
             }
         }
-        float driver = 1, scale = 1, bias = 0;
-        if (UsdAttribute a = prim.GetAttribute(TfToken("inputs:driver"))) {
-            a.Get(&driver, time);
-        }
-        if (UsdAttribute a = prim.GetAttribute(TfToken("inputs:scale"))) {
-            a.Get(&scale, time);
-        }
-        if (UsdAttribute a = prim.GetAttribute(TfToken("inputs:bias"))) {
-            a.Get(&bias, time);
-        }
+        const float driver = _ResolvedRead(
+            _resolvedInputs, prim, "inputs:driver", 1.0f, time);
+        const float scale = _ResolvedRead(
+            _resolvedInputs, prim, "inputs:scale", 1.0f, time);
+        const float bias = _ResolvedRead(
+            _resolvedInputs, prim, "inputs:bias", 0.0f, time);
         for (size_t i = 0; i < count; ++i) {
             float r = (base[i] * driver) * scale + bias;
             if (!std::isfinite(r)) {
@@ -4134,37 +4876,45 @@ RigExecRigEvaluator::_EvaluateChain(
         }
         const std::string type = mover->schemaType.GetString();
 
+        // Resolve the common envelope against the PRECEDING revision. A
+        // current-phase volume therefore measures exactly the points that
+        // enter this mover. A bound object supersedes inputs:defaultWeight.
+        const VtVec3fArray preceding = points;
+        std::vector<float> envelope(points.size(), 1.0f);
+        SdfPathVector weightObjects;
+        if (const UsdRelationship rel =
+                prim.GetRelationship(TfToken("rigExec:weightObject"))) {
+            rel.GetTargets(&weightObjects);
+        }
+        if (!weightObjects.empty()) {
+            const std::vector<GfVec3f> currentPoints(
+                preceding.begin(), preceding.end());
+            std::string error;
+            if (!_ResolveWeights(weightObjects[0], points.size(), time,
+                                 &envelope, &error, &currentPoints)) {
+                diagnostics->push_back(
+                    "MoverFailed " + mover->moverPath.GetString() + ": " +
+                    error);
+                continue;
+            }
+        } else {
+            const float scalar = _ResolvedRead(
+                _resolvedInputs, prim, "inputs:defaultWeight", 1.0f, time);
+            if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
+                diagnostics->push_back(
+                    "MoverFailed " + mover->moverPath.GetString() +
+                    ": inputs:defaultWeight must be finite and in [0, 1]");
+                continue;
+            }
+            std::fill(envelope.begin(), envelope.end(), scalar);
+        }
+
         if (type == "RigExecBlendShapeMover") {
             // p'_i = p_i + sum_k alpha_k(w_k) d_{k,i} (spec §7.3).
             SdfPathVector inputs;
             if (UsdRelationship rel =
                     prim.GetRelationship(TfToken("rigExec:blendInputs"))) {
                 rel.GetTargets(&inputs);
-            }
-            std::vector<float> mask(points.size(), 1.0f);
-            SdfPathVector weightObj;
-            if (UsdRelationship rel =
-                    prim.GetRelationship(TfToken("rigExec:weightObject"))) {
-                rel.GetTargets(&weightObj);
-            }
-            std::string error;
-            // `points` IS the in-flight buffer here, so a current-phase
-            // volume measures the same thing the graph measures (see the
-            // graph build loop in Evaluate). The copy is taken only when
-            // one is actually authored.
-            std::vector<GfVec3f> inFlight;
-            const std::vector<GfVec3f> *currentPoints = nullptr;
-            if (!weightObj.empty() && _currentPhaseWeights.count(weightObj[0])) {
-                inFlight.assign(points.begin(), points.end());
-                currentPoints = &inFlight;
-            }
-            if (!weightObj.empty() &&
-                !_ResolveWeights(weightObj[0], points.size(), time, &mask,
-                                 &error, currentPoints)) {
-                diagnostics->push_back(
-                    "MoverFailed " + mover->moverPath.GetString() + ": " +
-                    error);
-                continue;  // atomic failure returns preceding revision
             }
             // Active inputs accumulate in canonical input-path order
             // (spec §7.3); authored relationship order is non-semantic.
@@ -4328,7 +5078,7 @@ RigExecRigEvaluator::_EvaluateChain(
                         ? (*shapeLo)[i] - basePoints[i] : GfVec3f(0);
                     const GfVec3f delta =
                         deltaLo + (deltaHi - deltaLo) * t;
-                    next[i] += delta * mask[i];
+                    next[i] += delta;
                 }
             }
             if (!failed) {
@@ -4336,20 +5086,15 @@ RigExecRigEvaluator::_EvaluateChain(
             }
         } else if (type == "RigExecMatrixMover") {
             // p' = q + w (T q - q) (spec §7.4).
-            SdfPathVector transforms, weightObj;
+            SdfPathVector transforms;
             if (UsdRelationship rel =
                     prim.GetRelationship(TfToken("rigExec:transform"))) {
                 rel.GetTargets(&transforms);
             }
-            if (UsdRelationship rel =
-                    prim.GetRelationship(TfToken("rigExec:weightObject"))) {
-                rel.GetTargets(&weightObj);
-            }
-            if (transforms.size() != 1 || weightObj.size() != 1) {
+            if (transforms.size() != 1) {
                 diagnostics->push_back(
                     "MoverFailed " + mover->moverPath.GetString() +
-                    ": transform and weightObject must each have exactly "
-                    "one target");
+                    ": transform must have exactly one target");
                 continue;
             }
             TfToken phase("base");
@@ -4368,27 +5113,10 @@ RigExecRigEvaluator::_EvaluateChain(
                     transforms[0].GetString());
                 continue;
             }
-            std::vector<float> weights;
-            std::string error;
-            // See the blend branch above: the in-flight buffer is copied
-            // only for a volume that asked to measure against it.
-            std::vector<GfVec3f> inFlight;
-            const std::vector<GfVec3f> *currentPoints = nullptr;
-            if (_currentPhaseWeights.count(weightObj[0])) {
-                inFlight.assign(points.begin(), points.end());
-                currentPoints = &inFlight;
-            }
-            if (!_ResolveWeights(weightObj[0], points.size(), time, &weights,
-                                 &error, currentPoints)) {
-                diagnostics->push_back(
-                    "MoverFailed " + mover->moverPath.GetString() + ": " +
-                    error);
-                continue;
-            }
             const GfMatrix4d &m = matrixIt->second;
             for (size_t i = 0; i < points.size(); ++i) {
                 const GfVec3d moved = RigExecApplyWeightedMatrix(
-                    GfVec3d(points[i]), m, weights[i]);
+                    GfVec3d(points[i]), m, 1.0f);
                 points[i] = GfVec3f(moved);
             }
         } else if (type == "RigExecCurveMover") {
@@ -4468,9 +5196,6 @@ RigExecRigEvaluator::_EvaluateChain(
         } else if (type == "RigExecVolumeCorrectMover" ||
                    type == "RigExecSmoothMover") {
             const bool isVolume = type == "RigExecVolumeCorrectMover";
-            const float strength = _ResolvedRead(
-                _resolvedInputs, prim, "inputs:strength",
-                isVolume ? 0.0f : 0.5f, time);
             std::vector<GfVec3f> scratch(points.begin(), points.end());
             if (isVolume) {
                 VtVec3fArray base;
@@ -4479,7 +5204,7 @@ RigExecRigEvaluator::_EvaluateChain(
                 }
                 const double reference = RigExecBoundVolume(
                     base.cdata(), base.size());
-                RigExecApplyVolumeCorrect(&scratch, reference, strength);
+                RigExecApplyVolumeCorrect(&scratch, reference, 1.0f);
             } else {
                 const UsdPrim owner =
                     _stage->GetPrimAtPath(target.GetPrimPath());
@@ -4494,7 +5219,7 @@ RigExecRigEvaluator::_EvaluateChain(
                     &scratch,
                     std::vector<int>(counts.begin(), counts.end()),
                     std::vector<int>(indices.begin(), indices.end()),
-                    strength);
+                    1.0f);
             }
             std::copy(scratch.begin(), scratch.end(), points.begin());
         } else if (type == "RigExecCurvenetMover") {
@@ -4606,6 +5331,22 @@ RigExecRigEvaluator::_EvaluateChain(
                 std::vector<int>(indices.begin(), indices.end()), 1.0f);
             std::copy(scratch.begin(), scratch.end(), points.begin());
         }
+
+        // Every branch above computes the operation's full-strength
+        // candidate. The universal envelope is the one and only blend back
+        // over the preceding revision.
+        if (points.size() != preceding.size() ||
+            envelope.size() != points.size()) {
+            diagnostics->push_back(
+                "MoverFailed " + mover->moverPath.GetString() +
+                ": result cardinality changed; revision passed through");
+            points = preceding;
+            continue;
+        }
+        for (size_t i = 0; i < points.size(); ++i) {
+            points[i] = RigExecBlendEnvelope(
+                preceding[i], points[i], envelope[i]);
+        }
     }
     return points;
 }
@@ -4620,7 +5361,8 @@ namespace {
 template <class T>
 bool
 _ReadPropertyMathParams(
-    const UsdPrim &moverPrim, UsdTimeCode time,
+    const RigExecResolvedInputs &resolved, const UsdPrim &moverPrim,
+    UsdTimeCode time,
     RigExecPropertyMathParams<T> *params)
 {
     TfToken operation;
@@ -4631,20 +5373,12 @@ _ReadPropertyMathParams(
     if (!RigExecParsePropertyOp(operation, &params->op)) {
         return false;
     }
-    if (const UsdAttribute a =
-            moverPrim.GetAttribute(TfToken("inputs:value"))) {
-        a.Get(&params->value, time);
-    }
-    if (const UsdAttribute a = moverPrim.GetAttribute(TfToken("inputs:min"))) {
-        a.Get(&params->min, time);
-    }
-    if (const UsdAttribute a = moverPrim.GetAttribute(TfToken("inputs:max"))) {
-        a.Get(&params->max, time);
-    }
-    if (const UsdAttribute a =
-            moverPrim.GetAttribute(TfToken("inputs:weight"))) {
-        a.Get(&params->weight, time);
-    }
+    params->value = _ResolvedRead(
+        resolved, moverPrim, "inputs:value", params->value, time);
+    params->min = _ResolvedRead(
+        resolved, moverPrim, "inputs:min", params->min, time);
+    params->max = _ResolvedRead(
+        resolved, moverPrim, "inputs:max", params->max, time);
     return true;
 }
 
@@ -4680,7 +5414,7 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
     UsdTimeCode time,
     std::map<SdfPath, VtValue> *results,
     std::vector<RigExecValueOverride> *overrides,
-    std::vector<std::string> *diagnostics) const
+    std::vector<std::string> *diagnostics)
 {
     auto diag = [diagnostics](const std::string &message) {
         if (diagnostics) {
@@ -4688,7 +5422,12 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         }
     };
 
-    for (const auto &chain : _propertyChains) {
+    for (const SdfPath &orderedTarget : _propertyChainOrder) {
+        const auto chainIt = _propertyChains.find(orderedTarget);
+        if (chainIt == _propertyChains.end()) {
+            continue;
+        }
+        const auto &chain = *chainIt;
         // Named locals rather than a structured binding: the lambdas below
         // capture both, and capturing a structured binding is C++20.
         const SdfPath &target = chain.first;
@@ -4724,18 +5463,45 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 if (!moverPrim) {
                     continue;
                 }
-                bool enabled = true;
-                if (const UsdAttribute a =
-                        moverPrim.GetAttribute(TfToken("inputs:enabled"))) {
-                    a.Get(&enabled, time);
-                }
+                const bool enabled = _ResolvedRead(
+                    _resolvedInputs, moverPrim, "inputs:enabled", true, time);
                 if (!enabled) {
                     diag("diag " + revision.moverPath.GetString() +
                          ": disabled; revision passed through");
                     continue;  // ordinary pass-through (spec §6.6)
                 }
+                float envelope = 1.0f;
+                SdfPathVector weightObjects;
+                if (const UsdRelationship rel =
+                        moverPrim.GetRelationship(
+                            TfToken("rigExec:weightObject"))) {
+                    rel.GetTargets(&weightObjects);
+                }
+                if (!weightObjects.empty()) {
+                    std::vector<float> weights;
+                    std::string error;
+                    if (!_ResolveWeights(weightObjects[0], 1, time,
+                                         &weights, &error) ||
+                        weights.size() != 1) {
+                        diag("diag " + revision.moverPath.GetString() +
+                             ": " + error + "; revision passed through");
+                        continue;
+                    }
+                    envelope = weights[0];
+                } else {
+                    envelope = _ResolvedRead(
+                        _resolvedInputs, moverPrim, "inputs:defaultWeight",
+                        1.0f, time);
+                    if (!std::isfinite(envelope) || envelope < 0.0f ||
+                        envelope > 1.0f) {
+                        diag("diag " + revision.moverPath.GetString() +
+                             ": inputs:defaultWeight must be finite and in "
+                             "[0, 1]; revision passed through");
+                        continue;
+                    }
+                }
                 ValueT next = value;
-                if (!apply(moverPrim, value, &next)) {
+                if (!apply(moverPrim, value, envelope, &next)) {
                     diag("diag " + revision.moverPath.GetString() +
                          ": inputs unusable; revision passed through");
                     continue;
@@ -4755,6 +5521,10 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
             if (results) {
                 (*results)[target] = VtValue(value);
             }
+            // Publish immediately, not after every chain has run. Dependency
+            // ordering guarantees that any later chain which consumes this
+            // property reads the revised value.
+            _resolvedInputs.SetProperty(target, VtValue(value));
             if (overrides) {
                 overrides->push_back(RigExecValueOverride{
                     target.GetPrimPath(), TfToken(), target.GetNameToken(),
@@ -4765,19 +5535,22 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
 
         if (valueType == SdfValueTypeNames->Float) {
             runChain(float(0), [&](const UsdPrim &mover, float in,
-                                   float *out) {
+                                   float envelope, float *out) {
                 RigExecPropertyMathParams<float> params;
-                if (!_ReadPropertyMathParams(mover, time, &params) ||
+                if (!_ReadPropertyMathParams(
+                        _resolvedInputs, mover, time, &params) ||
                     !_IsFinite(params.value) || !_IsFinite(params.min) ||
-                    !_IsFinite(params.max) || !_IsFinite(params.weight)) {
+                    !_IsFinite(params.max)) {
                     return false;
                 }
+                params.weight = envelope;
                 *out = RigExecApplyFloatMath(in, params);
                 return true;
             });
         } else if (valueType == SdfValueTypeNames->Matrix4d) {
             runChain(GfMatrix4d(1.0), [&](const UsdPrim &mover,
                                           const GfMatrix4d &in,
+                                          float envelope,
                                           GfMatrix4d *out) {
                 TfToken operation;
                 if (const UsdAttribute a =
@@ -4788,31 +5561,28 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 if (!RigExecParsePropertyOp(operation, &op)) {
                     return false;
                 }
-                GfMatrix4d opValue(1.0);
-                if (const UsdAttribute a =
-                        mover.GetAttribute(TfToken("inputs:value"))) {
-                    a.Get(&opValue, time);
-                }
-                float weight = 1.0f;
-                if (const UsdAttribute a =
-                        mover.GetAttribute(TfToken("inputs:weight"))) {
-                    a.Get(&weight, time);
-                }
-                if (!_IsFinite(opValue) || !_IsFinite(weight)) {
+                const GfMatrix4d opValue = _ResolvedRead(
+                    _resolvedInputs, mover, "inputs:value",
+                    GfMatrix4d(1.0), time);
+                if (!_IsFinite(opValue)) {
                     return false;
                 }
-                return RigExecApplyMatrixMath(in, op, opValue, weight, out);
+                return RigExecApplyMatrixMath(
+                    in, op, opValue, envelope, out);
             });
         } else {
             // Every remaining type the compiler admits is GfVec3f-backed.
             runChain(GfVec3f(0), [&](const UsdPrim &mover, const GfVec3f &in,
+                                     float envelope,
                                      GfVec3f *out) {
                 RigExecPropertyMathParams<GfVec3f> params;
-                if (!_ReadPropertyMathParams(mover, time, &params) ||
+                if (!_ReadPropertyMathParams(
+                        _resolvedInputs, mover, time, &params) ||
                     !_IsFinite(params.value) || !_IsFinite(params.min) ||
-                    !_IsFinite(params.max) || !_IsFinite(params.weight)) {
+                    !_IsFinite(params.max)) {
                     return false;
                 }
+                params.weight = envelope;
                 *out = RigExecApplyVec3fMath(in, params);
                 return true;
             });
@@ -5523,8 +6293,9 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 return true;
             }
             const UsdPrim joint = _stage->GetPrimAtPath(path);
-            for (const char *name : {"posed:space", "avars:tx", "avars:ty",
-                                     "avars:tz"}) {
+            for (const char *name : {
+                     "posed:space", "avars:tx", "avars:ty", "avars:tz",
+                     "avars:sx", "avars:sy", "avars:sz"}) {
                 const UsdAttribute attr = joint.GetAttribute(TfToken(name));
                 SdfPathVector connections;
                 if (attr &&
@@ -5625,28 +6396,47 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             }
             continue;
         }
-        const double weight = _ResolvedRead(
-            _resolvedInputs, prim, "inputs:defaultWeight", 1.0f, time);
-        if (!std::isfinite(weight)) {
-            pose.diagnostics.push_back(
-                constraint.moverPath.GetString() +
-                " has a non-finite constraint weight; constraint passed "
-                "through");
-            for (const SdfPath &target : constraint.targets) {
-                recordFrame(target, constraint.moverPath);
+        double weight = 1.0;
+        if (!constraint.weightObject.IsEmpty() &&
+            constraint.pointsTarget.IsEmpty()) {
+            std::vector<float> resolvedWeight;
+            std::string error;
+            if (!_ResolveWeights(constraint.weightObject, 1, time,
+                                 &resolvedWeight, &error) ||
+                resolvedWeight.size() != 1) {
+                pose.diagnostics.push_back(
+                    constraint.moverPath.GetString() + ": " + error +
+                    "; constraint passed through");
+                for (const SdfPath &target : constraint.targets) {
+                    recordFrame(target, constraint.moverPath);
+                }
+                continue;
             }
-            continue;
+            weight = resolvedWeight[0];
+        } else if (constraint.weightObject.IsEmpty()) {
+            weight = _ResolvedRead(
+                _resolvedInputs, prim, "inputs:defaultWeight", 1.0f, time);
+            if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
+                pose.diagnostics.push_back(
+                    constraint.moverPath.GetString() +
+                    " has inputs:defaultWeight outside finite [0, 1]; "
+                    "constraint passed through");
+                for (const SdfPath &target : constraint.targets) {
+                    recordFrame(target, constraint.moverPath);
+                }
+                continue;
+            }
         }
         // A zero/negative envelope is an exact dormant pass-through. Do this
         // before resolving sources, effectors, or poles so malformed
         // disconnected inputs cannot make a disabled constraint fail.
         //
-        // Conditional on no weight object being bound: a bound field
-        // SUPERSEDES inputs:defaultWeight, so a zero envelope with a map that
-        // resolves to one must still deform, and short-circuiting the solve
-        // here would make that unreachable. A transform-domain constraint can
-        // never carry one, so for it this stays unconditional.
-        if (weight <= 0.0 && constraint.weightObject.IsEmpty()) {
+        // A geometry-domain object is per point and resolves after the solve,
+        // so it cannot short-circuit here. A transform object has already
+        // resolved its one element and may use the ordinary dormant path.
+        if (weight <= 0.0 &&
+            (constraint.pointsTarget.IsEmpty() ||
+             constraint.weightObject.IsEmpty())) {
             for (const SdfPath &target : constraint.targets) {
                 recordFrame(target, constraint.moverPath);
             }
@@ -5850,7 +6640,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             _ParseConstraintEulerOrder(orderToken);
 
         // The kernel-backed operators solve through the registry: one row
-        // per operator, so adding a seventh is a table entry rather than
+        // per operator, so adding an operator is a table entry rather than
         // another arm here. Aim falls through to the inline branch below,
         // which resolves a world-up binding the uniform context cannot carry.
         if (solveHandler && solveHandler->solve) {
@@ -6343,10 +7133,24 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             if (revision.weightTap >= 0 && weights.valid) {
                 RigExecResolvedWeightField &field =
                     pose.weightFields[revision.binding.weightObject];
-                field.target = target;
-                field.weights.assign(basePoints.size(), 0.0f);
-                for (size_t i = 0; i < basePoints.size(); ++i) {
-                    const float w = weights.Resolve(i, basePoints.size());
+                SdfPathVector declaredTargets;
+                if (const UsdPrim weightPrim = _stage->GetPrimAtPath(
+                        revision.binding.weightObject)) {
+                    if (const UsdRelationship rel =
+                            weightPrim.GetRelationship(
+                                TfToken("rigExec:weightTarget"))) {
+                        rel.GetTargets(&declaredTargets);
+                    }
+                }
+                const bool operationDomain =
+                    declaredTargets.size() == 1 &&
+                    declaredTargets[0] == revision.moverPath;
+                field.target = operationDomain ? revision.moverPath : target;
+                const size_t logicalCount =
+                    operationDomain ? size_t(1) : basePoints.size();
+                field.weights.assign(logicalCount, 0.0f);
+                for (size_t i = 0; i < logicalCount; ++i) {
+                    const float w = weights.Resolve(i, logicalCount);
                     field.weights[i] = w < 0.0f ? 0.0f : w;
                 }
             }
@@ -6383,6 +7187,26 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             const RigExecMoverParameters parameters =
                 RigExecAssembleParameters(moverPrim, revision.op,
                                           revision.binding, values, time);
+            if (parameters.enabled && !parameters.valid &&
+                revision.binding.weightObject.IsEmpty()) {
+                const float scalar = _ResolvedRead(
+                    _resolvedInputs, moverPrim, "inputs:defaultWeight",
+                    1.0f, time);
+                if (!std::isfinite(scalar) || scalar < 0.0f ||
+                    scalar > 1.0f) {
+                    pose.diagnostics.push_back(
+                        "MoverFailed " + revision.moverPath.GetString() +
+                        ": inputs:defaultWeight must be finite and in "
+                        "[0, 1]; revision passed through");
+                }
+            } else if (parameters.enabled && !parameters.valid &&
+                       !revision.binding.weightObject.IsEmpty() &&
+                       (!values.weights || !values.weights->valid)) {
+                pose.diagnostics.push_back(
+                    "MoverFailed " + revision.moverPath.GetString() +
+                    ": rigExec:weightObject produced an invalid common "
+                    "envelope; revision passed through");
+            }
             head = graph.AddRevision(
                 revision.op, head, parameters,
                 RigExecStatusForParameters(parameters, revision.moverPath));
@@ -6654,10 +7478,9 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         //
         // Routing a geometry-domain constraint through the mover graph as a
         // RigExecRevisionOp::Matrix revision is what would restore real
-        // coverage: it needs an input edge for the solved delta, because
-        // RigExecAssembleMatrixParameters demands a rigExec:transform and a
-        // rigExec:weightObject that a constraint has no equivalent of. That
-        // is the remaining work, and it is named rather than hidden.
+        // coverage: it needs an input edge for the solved delta instead of
+        // the MatrixMover transform-provider edge. The common envelope now
+        // already has the same packet semantics on both operations.
         pose.diagnostics.push_back(
             "cpu reference parity: " + pointsTarget.GetString() +
             " not covered; a geometry-domain constraint publishes directly "

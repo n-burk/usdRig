@@ -104,7 +104,8 @@ target_link_libraries(rigExec PUBLIC
 # rigs programmatically.
 # ---------------------------------------------------------------------------
 add_library(rigExecRigging SHARED
-    libs/rigExecRigging/rigBuilder.cpp)
+    libs/rigExecRigging/rigBuilder.cpp
+    libs/rigExecRigging/schemaAuthoring.cpp)
 target_include_directories(rigExecRigging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
@@ -219,6 +220,23 @@ add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 
+add_executable(testRigExecSchemaAuthoring
+    tests/testRigExecSchemaAuthoring.cpp)
+target_link_libraries(testRigExecSchemaAuthoring PRIVATE rigExecRigging)
+target_compile_definitions(testRigExecSchemaAuthoring PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSchemaAuthoring COMMAND testRigExecSchemaAuthoring)
+add_test(NAME testRigExecSchemaAuthoringMissing
+    COMMAND testRigExecSchemaAuthoring --missing-schema)
+set_tests_properties(testRigExecSchemaAuthoringMissing PROPERTIES
+    ENVIRONMENT "PXR_PLUGINPATH_NAME=")
+
+add_executable(testRigExecRigBuilder tests/testRigExecRigBuilder.cpp)
+target_link_libraries(testRigExecRigBuilder PRIVATE rigExecRigging)
+target_compile_definitions(testRigExecRigBuilder PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecRigBuilder COMMAND testRigExecRigBuilder)
+
 # The engine authors nothing: asserted by whole-scene equality rather than by
 # probing for the specific artifacts the deleted compiler used to leave.
 add_executable(testRigExecNoAuthoring tests/testRigExecNoAuthoring.cpp)
@@ -296,6 +314,48 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_python.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecPythonSchemaAuthoring
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_schema_authoring.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+
+    # Headless usdview-plugin tests (Qt-free modules under plugin/).
+    # testGizmoMath and testGizmoScreen are written by later tasks; they
+    # are registered here so CMakeLists.txt is touched by one task only.
+    add_test(NAME testRigExecUndo
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_undo.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testGizmoMath
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_math.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testGizmoScreen
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py")
+    add_test(NAME testGizmoSettings
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_settings.py")
+    add_test(NAME testGraphModel
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_graph_model.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testGraphScreen
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_graph_screen.py")
+    add_test(NAME testRigExecStageEdits
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_stage_edits.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testGizmoDrag
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_drag.py")
+    add_test(NAME testGizmoSnap
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_snap.py")
+    add_test(NAME testViewCubeMath
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_viewcube_math.py")
 
     # set_tests_properties takes exactly ONE value per property, so extra
     # assignments go through APPEND; ctest then splits the resulting list on
@@ -303,17 +363,25 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     # semicolon-free). pxr resolution and the native DLL directories are
     # handled by the test itself (_setup_environment); RIGEXEC_USD_INSTALL
     # pins the configured USD install so it does not have to guess.
-    set_tests_properties(testRigExecPython PROPERTIES ENVIRONMENT
-        "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
-    if (WIN32)
-        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
-            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
-    else()
-        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
-            "LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
-        set_property(TEST testRigExecPython APPEND PROPERTY ENVIRONMENT
-            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
-    endif()
+    foreach(_python_test testRigExecPython testRigExecPythonSchemaAuthoring
+                         testRigExecUndo testGizmoMath testGizmoScreen
+                         testGizmoSettings testGizmoDrag testGizmoSnap
+                         testViewCubeMath testRigExecStageEdits
+                         testGraphModel testGraphScreen)
+        set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
+            "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
+        set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+            "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+        if (WIN32)
+            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+                "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+        else()
+            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+                "LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
+            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+                "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
+        endif()
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -383,7 +451,8 @@ string(REPLACE "\"Type\": \"resource\"" "\"Type\": \"library\""
 foreach(_rigexec_boundable
         RigExecXformable RigExecControl RigExecJoint RigExecFkChain
         RigExecTwoBoneIk RigExecBlendPointFrames RigExecTwistDistribution
-        RigExecRibbon)
+        RigExecRibbon RigExecVolumeWeight RigExecSphereWeight
+        RigExecPlaneWeight RigExecCurveWeight)
     string(REPLACE
         "\"schemaIdentifier\": \"${_rigexec_boundable}\""
         "\"implementsComputeExtent\": true, \"schemaIdentifier\": \"${_rigexec_boundable}\""

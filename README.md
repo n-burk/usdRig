@@ -49,9 +49,9 @@ build/rigExecPose examples/ArmShotAnim.usda \
 bin/usdview.sh examples/ArmShotAnim.usda
 ```
 
-`build_rigexec.sh` configures the project, builds it, and runs all 12 CTest
-suites. In `usdview`, scrub frames 1001–1048 to see the arm deform. RigExec
-guide geometry is enabled automatically.
+`build_rigexec.sh` configures the project, builds it, and runs every enabled
+CTest suite. In `usdview`, scrub frames 1001–1048 to see the arm deform.
+RigExec guide geometry is enabled automatically.
 
 To verify the viewport path without opening the interactive viewer:
 
@@ -170,12 +170,62 @@ A rig may publish joints, driven transforms, revised properties, or any
 combination of them. Jointless rigs are valid, but a rig with neither a joint
 nor a mover has no output and is rejected.
 
+### Authoring from Python
+
+The `rigexec` package lives in [`python/rigexec`](python/rigexec); its native
+`_rigexec` extension is built from [`python/_rigexec.cpp`](python/_rigexec.cpp).
+CMake copies both into `build/python`, and installation puts them together in
+the configured Python library directory.
+
+Most tools should start with `Builder`. It registers the RigExec schema plugin,
+creates the standard rig namespaces, returns typed handles, and wires
+dependencies in the same calls:
+
+```python
+from pxr import Usd, UsdGeom
+import rigexec
+
+stage = Usd.Stage.CreateInMemory()
+points = UsdGeom.Points.Define(stage, "/Character/Points")
+points.CreatePointsAttr([(0, 0, 0), (1, 0, 0)])
+
+builder = rigexec.Builder.create(stage, "/Character/Rig")
+control = builder.add_control("Main")
+
+chain = builder.new_mover_chain(
+    "Deform", points.GetPath().AppendProperty("points"))
+move = chain.add_matrix_mover("MainMove", control)
+move.set_default_weight(1.0)
+```
+
+Dependencies may be RigExec handles, `Usd.Prim` objects, `Sdf.Path` objects, or
+absolute path strings. Handles expose focused methods such as `set_controls`,
+`set_joints`, `set_sources`, `set_moves`, and `set_blend_inputs`. Every mover
+also exposes the common `set_default_weight` fallback and optional
+`set_weight_object`; a bound object supersedes the scalar fallback. Use
+`chain.under(parent_mover)` to author a child mover that executes before its
+mover parent.
+
+For schema-level tools, `rigexec.schema` is the lower-level API:
+
+```python
+control = rigexec.schema.Control.define(stage, "/Character/RigControl")
+control.set_attribute("rigExec:channelRole", "tweak")
+
+mover = rigexec.schema.MatrixMover.define(stage, "/Character/DirectMover")
+mover.set_relationship("rigExec:moves", ["/Character/Points.points"])
+mover.set_read_phase("rigExec:transform", "final")
+```
+
+`schema.<Type>.define()` defines the concrete prim and applies its standard
+OpenUSD API schemas in one call. Attribute types and relationship kinds come
+from the composed schema definition; misspelled or undeclared properties raise
+an exception and are never created as custom USD properties.
+
 The full codeless schema is in
 [`libs/rigExecSchema/schema.usda`](libs/rigExecSchema/schema.usda). It currently
-contains 42 classes. Built-in constraints are Aim, Position, Rotation, Scale,
-Parent, and SingleChainIK. `RigExecCustomConstraint` is an extension metadata
-carrier rather than a generic evaluator, and there is intentionally no
-`FbxCharacter` schema.
+contains 41 classes. Built-in constraints are Aim, Position, Rotation, Scale,
+Parent, and SingleChainIK; there is intentionally no `FbxCharacter` schema.
 
 ## Building, testing, and installing
 
@@ -195,10 +245,11 @@ ctest --test-dir build --output-on-failure
 `CMAKE_PREFIX_PATH` is required so OpenUSD's transitive dependencies, including
 OpenSubdiv, resolve from the same installation.
 
-The 12 CTest suites cover math and solvers, constraints, curvenets, weight
-fields, the reference arm, mover graphs, Hydra publication, native bounds, and
-the no-authoring contract. Separate Python/`testusdview` tests exercise the
-real application integration. Useful checks include:
+The enabled CTest suites cover math and solvers, constraints, curvenets, weight
+fields, the reference arm, mover graphs, strict schema authoring, the Python
+facade, Hydra publication, native bounds, and the no-authoring contract.
+Separate `testusdview` tests exercise the real application integration. Useful
+checks include:
 
 ```sh
 bin/run_testusdview.sh
@@ -246,7 +297,7 @@ The package also exports `rigExec::rigExecMath` and
 
 | Platform | Status |
 |---|---|
-| macOS arm64 | Verified with AppleClang and Python 3.11: 12/12 CTest suites and the live `usdview` path pass |
+| macOS arm64 | Verified with AppleClang and Python 3.11: 17/17 enabled CTest suites and the live `usdview` path pass |
 | Windows x64 | Built and tested during project development with Visual Studio 2022 and Ninja |
 | Linux | Intended, but not yet verified; the current POSIX environment helper is macOS-oriented |
 | iOS/iPadOS | Core/static integration is design work only; no device build has been verified |
@@ -285,5 +336,8 @@ The package also exports `rigExec::rigExecMath` and
 - [Control and solver guides](docs/control-guides.md)
 - [Curvenet design and authoring](docs/curvenet.md)
 - [Volumetric weights](docs/volume-weights.md)
+- [Viewport gizmos in usdview](docs/viewport-gizmos.md)
+- [Graph editor in usdview](docs/graph-editor.md)
+- [ViewCube in usdview](docs/view-cube.md)
 - [OpenExec API notes](docs/exec-api-notes.md) and
   [ExecUsd API notes](docs/execusd-api-notes.md)
