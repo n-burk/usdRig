@@ -46,9 +46,14 @@ def _setup_environment():
     # pxr must resolve from the USD install, never a global copy. The layout
     # differs by platform: Windows installs to <usd>/Lib/site-packages, while
     # POSIX installs under <usd>/lib/python*/site-packages.
-    site_candidates = [usd_install / "Lib" / "site-packages"]
-    if not (usd_install / "Lib").is_dir():
-        site_candidates.extend(sorted(usd_install.glob("lib/python*/site-packages")))
+    # Probe the Windows layout by its full site-packages path, never by the
+    # bare Lib directory: some POSIX installs ship an unrelated Lib/ (here
+    # OpenSubdiv artifacts), which must not shadow the lib/python*/ layout.
+    site_candidates = []
+    win_site = usd_install / "Lib" / "site-packages"
+    if win_site.is_dir():
+        site_candidates.append(win_site)
+    site_candidates.extend(sorted(usd_install.glob("lib/python*/site-packages")))
     for site_packages in site_candidates:
         if site_packages.is_dir():
             sp = str(site_packages)
