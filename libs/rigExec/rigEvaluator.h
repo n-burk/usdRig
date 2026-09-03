@@ -422,8 +422,9 @@ private:
         /// by prim. The domain decides where the answer is published, not how
         /// it is solved.
         SdfPath pointsTarget;
-        /// Optional per-element weight field for the geometry domain. Empty
-        /// means the constant packet synthesized from inputs:defaultWeight.
+        /// Optional common envelope field. Geometry resolves one value per
+        /// point; the transform domain resolves one logical element. Empty
+        /// means the constant synthesized from inputs:defaultWeight.
         SdfPath weightObject;
     };
 
@@ -442,6 +443,12 @@ private:
     /// Exact scalar property target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_PropertyRevision>> _propertyChains;
 
+    /// Property targets in dependency order. A chain that revises an input of
+    /// another property mover (or of its bound weight object) runs first, so
+    /// the consumer sees the same override Exec will receive rather than the
+    /// target's authored fallback.
+    std::vector<SdfPath> _propertyChainOrder;
+
     /// Evaluates every property chain at \p time.
     ///
     /// Fills \p results with the final value per target and appends one
@@ -452,7 +459,7 @@ private:
         UsdTimeCode time,
         std::map<SdfPath, VtValue> *results,
         std::vector<RigExecValueOverride> *overrides,
-        std::vector<std::string> *diagnostics) const;
+        std::vector<std::string> *diagnostics);
     /// Providers whose base frame comes from their own USD transform rather
     /// than a computePointFrame tap: a plain Xform has no such computation.
     std::set<SdfPath> _xformDerivedProviders;

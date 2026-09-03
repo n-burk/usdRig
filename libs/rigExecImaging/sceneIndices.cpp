@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <tuple>
 
 namespace rigExec {
 
@@ -252,7 +253,7 @@ RigExecResultsSceneIndex::RigExecResultsSceneIndex(
     // viewport when it likes, and the plugin activates on stage open) would
     // otherwise believe nothing was ever driven, and the first loss or
     // Deactivate() would leave every driven subtree stale.
-    // Guide counts are seeded for the same reason: a late observer's initial
+    // Guide topology is seeded for the same reason: a late observer's initial
     // traversal finds the synthesized children, so this index must already
     // believe it announced them or a later drop to zero sends no removals
     // and the stale guides survive downstream.
@@ -262,7 +263,7 @@ RigExecResultsSceneIndex::RigExecResultsSceneIndex(
             if (published.hasXform) {
                 _announcedDrivenXforms.insert(path);
             }
-            // Through _DesiredGuideCount, not the raw payload size: it also
+            // Through _DesiredGuideTopology, not the raw payload size: it also
             // requires the parent to exist upstream, which is what a
             // traversal actually finds. Seeding the raw count for a prim
             // whose upstream parent is absent would later emit removals for
@@ -332,11 +333,10 @@ _Token(const TfToken &token)
 }
 
 // ---------------------------------------------------------------------------
-// Synthesized guide children (spec §10.3 extension): joints and aggregate
-// solvers draw as guide geometry — a sphere at each posed frame origin and
-// a cone along the frame's +X aim axis — matching the contract of
-// OpenExec's UsdIrImagingJointScopeAdapter (purpose guide, constant
-// displayColor/displayOpacity primvars).
+// Synthesized guide children (spec §10.3 extension): joints draw a sphere at
+// each posed origin plus a cone to every nested child, while aggregate
+// solvers draw a sphere/cone pair along each frame's +X aim axis. Both use
+// purpose guide and constant displayColor/displayOpacity primvars.
 // ---------------------------------------------------------------------------
 
 const std::string _guideSpherePrefix("rigGuideSphere_");
@@ -377,10 +377,30 @@ _GuideName(bool isCone, size_t index)
                    std::to_string(index));
 }
 
+// A guide element has a cone exactly when its derived/resolved length is
+// positive. Zero is a sphere-only leaf-joint representation, not a
+// degenerate cone.
+bool
+_GuideHasCone(const RigExecPublishedPrim &published, size_t index)
+{
+    return index < published.guideLengths.size() &&
+           std::isfinite(published.guideLengths[index]) &&
+           published.guideLengths[index] > 0.0;
+}
+
+bool
+_GuideHasSphere(const RigExecPublishedPrim &published, size_t index)
+{
+    return index < published.guideFrames.size() &&
+           (index >= published.guideDrawSpheres.size() ||
+            published.guideDrawSpheres[index]);
+}
+
 // The constant styling every synthesized guide carries, from the authored
 // guide:displayColor / guide:displayOpacity of the prim it hangs off, plus
 // the guide's own points when it is an explicit primitive rather than one
-// of Hydra's implicits, plus a constant width when it is a wire curve.
+// of Hydra's implicits, a constant width when it is a wire curve, and
+// optional normals when an explicit mesh provides them.
 //
 // \p wireWidth of zero authors no widths at all, which is the hairline
 // fallback and the only thing the joint sphere/cone guides ever want.
@@ -388,7 +408,9 @@ HdContainerDataSourceHandle
 _BuildGuideStylePrimvars(
     const RigExecPublishedPrim &published,
     const VtVec3fArray &points = VtVec3fArray(),
-    double wireWidth = 0.0)
+    double wireWidth = 0.0,
+    const VtVec3fArray &normals = VtVec3fArray(),
+    const TfToken &normalsInterpolation = TfToken())
 {
     TfTokenVector names{HdTokens->displayColor, HdTokens->displayOpacity};
     std::vector<HdDataSourceBaseHandle> values{
@@ -429,6 +451,20 @@ _BuildGuideStylePrimvars(
                     HdRetainedTypedSampledDataSource<VtFloatArray>::New(
                         VtFloatArray{static_cast<float>(wireWidth)}))
                 .SetInterpolation(_Token(HdPrimvarSchemaTokens->constant))
+                .Build());
+    }
+    if (!normals.empty()) {
+        names.push_back(HdTokens->normals);
+        values.push_back(
+            HdPrimvarSchema::Builder()
+                .SetPrimvarValue(
+                    HdRetainedTypedSampledDataSource<VtVec3fArray>::New(
+                        normals))
+                .SetInterpolation(_Token(
+                    normalsInterpolation.IsEmpty()
+                        ? HdPrimvarSchemaTokens->vertex
+                        : normalsInterpolation))
+                .SetRole(_Token(HdPrimvarSchemaTokens->normal))
                 .Build());
     }
     return HdRetainedContainerDataSource::New(
@@ -563,9 +599,9 @@ _BuildGuidePrim(
     names.push_back(HdPrimvarsSchemaTokens->primvars);
     values.push_back(_BuildGuideStylePrimvars(published));
     // Sizing follows Ir (UsdIrImagingJointScopeAdapter) in shape -- cone
-    // height from the guide length, drawn along the +X aim axis -- but the
-    // radius is authored rather than left to Hydra's fallback of 1.0, which
-    // is only the right size at arm scale. It MUST be set explicitly on both
+    // height from the derived link length, drawn along the link frame's +X
+    // axis -- but the radius is authored rather than left to Hydra's fallback
+    // of 1.0, which is only the right size at arm scale. It MUST be set on both
     // primitives: an absent radius silently becomes 1.0
     // (hdsi/implicitSurfaceSceneIndex.cpp), which is the bug this replaced.
     const HdDataSourceBaseHandle radiusSource =
@@ -593,9 +629,9 @@ _BuildGuidePrim(
 // ---------------------------------------------------------------------------
 // Synthesized control guides (spec §10.3 extension): a RigExecControl draws
 // ONE shape at its posed frame, chosen by guide:shape and guide:drawMode and
-// sized by guide:scaleX/Y/Z. Same synthesis, announcement, and dirtying
-// machinery as the joint sphere/cone children above — only the geometry and
-// the child naming differ.
+// sized by the evaluated frame-axis magnitudes times guide:scaleX/Y/Z. Same
+// synthesis, announcement, and dirtying machinery as the joint sphere/cone
+// children above — only the geometry and the child naming differ.
 // ---------------------------------------------------------------------------
 
 // The single fixed child name. No index suffix, unlike the joint guides:
@@ -612,7 +648,7 @@ const TfToken _controlGuideName("rigGuideCtrl");
 // planar pair — normal +Y, drawn in the local XZ plane — while cube is the
 // 3D box.
 //
-// Nothing in here depends on the pose or on the authored scale (both live in
+// Nothing in here depends on the pose or on the effective scale (both live in
 // the xform), so the whole table is built once and every control that draws
 // a given shape shares the same arrays.
 struct _ControlGuideShape {
@@ -869,16 +905,17 @@ _BuildControlGuidePrim(
     const HdContainerDataSourceHandle &parentDataSource,
     const GfMatrix4d &assetRootWorld)
 {
-    // S(scaleX, scaleY, scaleZ) * rigid frame * asset root placement.
+    // S(effectiveScale) * rigid frame * asset root placement.
     //
-    // USD is row-vector, so the leftmost factor applies first: the authored
-    // per-axis scale sizes the unit shape in ITS own axes, and only then is
-    // the result placed by the frame (the same ordering the cone's base
-    // offset uses in _BuildGuidePrim). Scaling after the frame would apply
-    // guide:scaleX along the world X axis rather than the control's.
+    // USD is row-vector, so the leftmost factor applies first: the effective
+    // per-axis scale sizes the unit shape in ITS own axes, and only
+    // then is the result placed by the frame (the same ordering the cone's
+    // base offset uses in _BuildGuidePrim). Scaling after the frame would
+    // apply the control's X scale along the world X axis rather than its own.
     //
-    // The frame is orthonormalized upstream (RigExec's bridge rigidizes it),
-    // so this scale is the guide's ONLY dimensional scale.
+    // The frame is orthonormalized upstream (RigExec's bridge rigidizes it).
+    // controlGuideScale already contains the removed evaluated frame-axis
+    // magnitudes multiplied by the positive authored guide multipliers.
     //
     // Composed with the ASSET ROOT's world transform, and declared final,
     // for exactly the reasons spelled out in _BuildGuidePrim: control frames
@@ -1080,8 +1117,9 @@ _BuildVolumeGuidePrim(
             .Build());
     _AppendInheritedGuideState(parentDataSource, &names, &values);
     names.push_back(HdPrimvarsSchemaTokens->primvars);
-    values.push_back(_BuildGuideStylePrimvars(published, element.points,
-                                              element.wireWidth));
+    values.push_back(_BuildGuideStylePrimvars(
+        published, element.points, element.wireWidth, element.normals,
+        element.normalsInterpolation));
 
     if (element.primType == HdPrimTypeTokens->basisCurves) {
         if (element.wireWidth > 0.0) {
@@ -1124,10 +1162,9 @@ _BuildVolumeGuidePrim(
                         .SetOrientation(
                             _Token(HdMeshTopologySchemaTokens->rightHanded))
                         .Build())
-                // A falloff plane is looked at from both sides by
-                // definition -- the band straddles it.
                 .SetDoubleSided(
-                    HdRetainedTypedSampledDataSource<bool>::New(true))
+                    HdRetainedTypedSampledDataSource<bool>::New(
+                        element.doubleSided))
                 .Build());
     } else if (element.primType == HdPrimTypeTokens->sphere) {
         // Unit radius: the iso-surface radius rides in the xform. Set
@@ -1526,7 +1563,10 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
                 const auto it =
                     snapshot->prims.find(primPath.GetParentPath());
                 if (it != snapshot->prims.end() && it->second.hasGuides &&
-                    guideIndex < it->second.guideFrames.size()) {
+                    guideIndex < it->second.guideFrames.size() &&
+                    (guideIsCone
+                         ? _GuideHasCone(it->second, guideIndex)
+                         : _GuideHasSphere(it->second, guideIndex))) {
                     HdSceneIndexPrim prim;
                     prim.primType = guideIsCone ? HdPrimTypeTokens->cone
                                                 : HdPrimTypeTokens->sphere;
@@ -1694,8 +1734,11 @@ RigExecResultsSceneIndex::GetChildPrimPaths(const SdfPath &primPath) const
     };
     if (it->second.hasGuides) {
         for (size_t i = 0; i < it->second.guideFrames.size(); ++i) {
-            for (const bool isCone : {false, true}) {
-                append(primPath.AppendChild(_GuideName(isCone, i)));
+            if (_GuideHasSphere(it->second, i)) {
+                append(primPath.AppendChild(_GuideName(false, i)));
+            }
+            if (_GuideHasCone(it->second, i)) {
+                append(primPath.AppendChild(_GuideName(true, i)));
             }
         }
     }
@@ -1719,32 +1762,45 @@ RigExecResultsSceneIndex::GetChildPrimPaths(const SdfPath &primPath) const
     return children;
 }
 
-// How many guide elements this prim should have in the current generation.
-// This is also exactly what a traversing observer will find, because
-// GetChildPrimPaths synthesizes the same set.
-size_t
-RigExecResultsSceneIndex::_DesiredGuideCount(const SdfPath &path) const
+namespace {
+constexpr uint8_t _GuideSphereBit = 1u;
+constexpr uint8_t _GuideConeBit = 2u;
+}
+
+// One topology mask per guide payload element. This is exactly what traversal
+// finds, including the upstream-parent gate.
+std::vector<uint8_t>
+RigExecResultsSceneIndex::_DesiredGuideTopology(const SdfPath &path) const
 {
     const RigExecImagingSnapshotConstPtr snapshot = _store->Get();
     if (!snapshot) {
-        return 0;
+        return {};
     }
     const auto it = snapshot->prims.find(path);
     if (it == snapshot->prims.end() || !it->second.hasGuides ||
         !_GetInputSceneIndex()->GetPrim(path).dataSource) {
-        return 0;
+        return {};
     }
-    return it->second.guideFrames.size();
+    std::vector<uint8_t> result(it->second.guideFrames.size(), 0u);
+    for (size_t i = 0; i < result.size(); ++i) {
+        if (_GuideHasSphere(it->second, i)) {
+            result[i] |= _GuideSphereBit;
+        }
+        if (_GuideHasCone(it->second, i)) {
+            result[i] |= _GuideConeBit;
+        }
+    }
+    return result;
 }
 
-// Records the guide count without emitting anything. Must run even while
-// unobserved: the COUNT is what tells a later observer how many children it
-// once had, and without it a drop to zero sends no removals at all.
+// Records the guide topology without emitting anything. Must run even while
+// unobserved: this history tells a later observer which children once existed,
+// including whether an element has a sphere, a cone, or both.
 void
 RigExecResultsSceneIndex::_RefreshAnnouncedGuides(const SdfPath &path)
 {
-    const size_t desired = _DesiredGuideCount(path);
-    if (desired == 0) {
+    const std::vector<uint8_t> desired = _DesiredGuideTopology(path);
+    if (desired.empty()) {
         _announcedGuides.erase(path);
     } else {
         _announcedGuides[path] = desired;
@@ -1753,7 +1809,7 @@ RigExecResultsSceneIndex::_RefreshAnnouncedGuides(const SdfPath &path)
 
 // The prim type this prim's control guide should have in the current
 // generation, or an empty token for none. Requires the parent upstream for
-// the same reason _DesiredGuideCount does: this is what a traversing
+// the same reason _DesiredGuideTopology does: this is what a traversing
 // observer finds, and GetChildPrimPaths synthesizes exactly this.
 TfToken
 RigExecResultsSceneIndex::_DesiredControlGuideType(const SdfPath &path) const
@@ -1923,8 +1979,8 @@ RigExecResultsSceneIndex::_SyncGuideChildren(
     HdSceneIndexObserver::AddedPrimEntries *added,
     HdSceneIndexObserver::RemovedPrimEntries *removed)
 {
-    const size_t desired = _DesiredGuideCount(path);
-    size_t announced = 0;
+    const std::vector<uint8_t> desired = _DesiredGuideTopology(path);
+    std::vector<uint8_t> announced;
     const auto it = _announcedGuides.find(path);
     if (it != _announcedGuides.end()) {
         announced = it->second;
@@ -1935,27 +1991,58 @@ RigExecResultsSceneIndex::_SyncGuideChildren(
         return static_cast<bool>(
             _GetInputSceneIndex()->GetPrim(childPath).dataSource);
     };
-    for (size_t i = announced; i < desired; ++i) {
+    const size_t common = std::min(announced.size(), desired.size());
+    for (size_t i = announced.size(); i < desired.size(); ++i) {
         const SdfPath spherePath = path.AppendChild(_GuideName(false, i));
-        if (!existsUpstream(spherePath)) {
+        if ((desired[i] & _GuideSphereBit) && !existsUpstream(spherePath)) {
             added->emplace_back(spherePath, HdPrimTypeTokens->sphere);
         }
-        const SdfPath conePath = path.AppendChild(_GuideName(true, i));
-        if (!existsUpstream(conePath)) {
-            added->emplace_back(conePath, HdPrimTypeTokens->cone);
+        if (desired[i] & _GuideConeBit) {
+            const SdfPath conePath =
+                path.AppendChild(_GuideName(true, i));
+            if (!existsUpstream(conePath)) {
+                added->emplace_back(conePath, HdPrimTypeTokens->cone);
+            }
         }
     }
-    for (size_t i = desired; i < announced; ++i) {
+    for (size_t i = desired.size(); i < announced.size(); ++i) {
         const SdfPath spherePath = path.AppendChild(_GuideName(false, i));
-        if (!existsUpstream(spherePath)) {
+        if ((announced[i] & _GuideSphereBit) &&
+            !existsUpstream(spherePath)) {
             removed->emplace_back(spherePath);
         }
-        const SdfPath conePath = path.AppendChild(_GuideName(true, i));
-        if (!existsUpstream(conePath)) {
-            removed->emplace_back(conePath);
+        if (announced[i] & _GuideConeBit) {
+            const SdfPath conePath =
+                path.AppendChild(_GuideName(true, i));
+            if (!existsUpstream(conePath)) {
+                removed->emplace_back(conePath);
+            }
         }
     }
-    if (desired == 0) {
+    // A surviving element can independently gain or lose its sphere or cone.
+    // Those are child-topology changes, not merely dirty values.
+    for (size_t i = 0; i < common; ++i) {
+        for (const auto &[bit, isCone, primType] : {
+                 std::tuple<uint8_t, bool, TfToken>(
+                     _GuideSphereBit, false, HdPrimTypeTokens->sphere),
+                 std::tuple<uint8_t, bool, TfToken>(
+                     _GuideConeBit, true, HdPrimTypeTokens->cone)}) {
+            if ((announced[i] & bit) == (desired[i] & bit)) {
+                continue;
+            }
+            const SdfPath childPath =
+                path.AppendChild(_GuideName(isCone, i));
+            if (existsUpstream(childPath)) {
+                continue;
+            }
+            if (desired[i] & bit) {
+                added->emplace_back(childPath, primType);
+            } else {
+                removed->emplace_back(childPath);
+            }
+        }
+    }
+    if (desired.empty()) {
         _announcedGuides.erase(path);
     } else {
         _announcedGuides[path] = desired;
@@ -1990,9 +2077,10 @@ RigExecResultsSceneIndex::_DirtyAnnouncedGuideChildren(
     };
     const auto guides = _announcedGuides.find(path);
     if (guides != _announcedGuides.end()) {
-        for (size_t i = 0; i < guides->second; ++i) {
-            for (const bool isCone : {false, true}) {
-                emit(path.AppendChild(_GuideName(isCone, i)));
+        for (size_t i = 0; i < guides->second.size(); ++i) {
+            emit(path.AppendChild(_GuideName(false, i)));
+            if (guides->second[i]) {
+                emit(path.AppendChild(_GuideName(true, i)));
             }
         }
     }
@@ -2192,24 +2280,36 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             _RefreshDrivenXform(entry.path);
 
             // Guide children follow the published set exactly. The ones that
-            // SURVIVE a count change also need dirtying: a representation
+            // SURVIVE a topology change also need dirtying: a representation
             // change reports structural and suppresses RigExecChangeGuides,
-            // so without this a guide whose frame, length, radius or styling
-            // changed in the same generation keeps its old value forever.
-            const size_t survivingGuides = std::min(
+            // so without this a guide whose frame, derived length, radius, or
+            // styling changed in the same generation keeps its old value.
+            const std::vector<uint8_t> announcedGuides =
                 _announcedGuides.count(entry.path)
-                    ? _announcedGuides[entry.path] : 0,
-                _DesiredGuideCount(entry.path));
+                    ? _announcedGuides[entry.path]
+                    : std::vector<uint8_t>();
+            const std::vector<uint8_t> desiredGuides =
+                _DesiredGuideTopology(entry.path);
+            const size_t survivingGuides =
+                std::min(announcedGuides.size(), desiredGuides.size());
             _SyncGuideChildren(entry.path, &addedGuides, &removedGuides);
             for (size_t i = 0; i < survivingGuides; ++i) {
-                for (const bool isCone : {false, true}) {
+                auto dirty = [&](bool isCone) {
                     const SdfPath childPath =
                         entry.path.AppendChild(_GuideName(isCone, i));
                     if (_GetInputSceneIndex()->GetPrim(childPath).dataSource) {
-                        continue;
+                        return;
                     }
                     entries.emplace_back(
                         childPath, HdDataSourceLocatorSet::UniversalSet());
+                };
+                if ((announcedGuides[i] & _GuideSphereBit) &&
+                    (desiredGuides[i] & _GuideSphereBit)) {
+                    dirty(false);
+                }
+                if ((announcedGuides[i] & _GuideConeBit) &&
+                    (desiredGuides[i] & _GuideConeBit)) {
+                    dirty(true);
                 }
             }
 
@@ -2269,8 +2369,9 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                     HdDataSourceLocatorSet::UniversalSet());
             }
 
-            // Same element count (count changes are structural): the
-            // synthesized children rebuild wholesale per generation.
+            // Reconcile even when the element count is unchanged: a joint
+            // length crossing zero adds or removes its cone while its sphere
+            // and frame survive.
             const auto announcedIt = _announcedGuides.find(entry.path);
             if (announcedIt == _announcedGuides.end()) {
                 // Never announced (late consumer): the adds carry the
@@ -2278,8 +2379,16 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                 _SyncGuideChildren(entry.path, &addedGuides,
                                    &removedGuides);
             } else {
-                for (size_t i = 0; i < announcedIt->second; ++i) {
-                    for (const bool isCone : {false, true}) {
+                const std::vector<uint8_t> announcedGuides =
+                    announcedIt->second;
+                const std::vector<uint8_t> desiredGuides =
+                    _DesiredGuideTopology(entry.path);
+                _SyncGuideChildren(entry.path, &addedGuides,
+                                   &removedGuides);
+                const size_t survivingGuides = std::min(
+                    announcedGuides.size(), desiredGuides.size());
+                for (size_t i = 0; i < survivingGuides; ++i) {
+                    auto dirty = [&](bool isCone) {
                         const SdfPath childPath =
                             entry.path.AppendChild(_GuideName(isCone, i));
                         // Authored prims occupying a guide name are not
@@ -2287,11 +2396,19 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
                         if (_GetInputSceneIndex()
                                 ->GetPrim(childPath)
                                 .dataSource) {
-                            continue;
+                            return;
                         }
                         entries.emplace_back(
                             childPath,
                             HdDataSourceLocatorSet::UniversalSet());
+                    };
+                    if ((announcedGuides[i] & _GuideSphereBit) &&
+                        (desiredGuides[i] & _GuideSphereBit)) {
+                        dirty(false);
+                    }
+                    if ((announcedGuides[i] & _GuideConeBit) &&
+                        (desiredGuides[i] & _GuideConeBit)) {
+                        dirty(true);
                     }
                 }
             }
@@ -2453,7 +2570,7 @@ RigExecResultsSceneIndex::_PrimsRemoved(
     const HdSceneIndexObserver::RemovedPrimEntries &entries)
 {
     // Same reasoning as _PrimsAdded: forget the history for a removed
-    // subtree even while unobserved, or a stale count outlives the prims.
+    // subtree even while unobserved, or stale topology outlives the prims.
     if (!_IsObserved()) {
         for (const auto &entry : entries) {
             for (auto it = _announcedGuides.begin();
@@ -2611,9 +2728,12 @@ RigExecResultsSceneIndex::_PrimsDirtied(
         if (announced == _announcedGuides.end()) {
             continue;
         }
-        for (size_t i = 0; i < announced->second; ++i) {
-            for (const bool isCone : {false, true}) {
-                forward(entry.primPath.AppendChild(_GuideName(isCone, i)));
+        for (size_t i = 0; i < announced->second.size(); ++i) {
+            if (announced->second[i] & _GuideSphereBit) {
+                forward(entry.primPath.AppendChild(_GuideName(false, i)));
+            }
+            if (announced->second[i] & _GuideConeBit) {
+                forward(entry.primPath.AppendChild(_GuideName(true, i)));
             }
         }
     }

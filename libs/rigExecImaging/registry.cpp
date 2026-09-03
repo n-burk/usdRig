@@ -3,6 +3,8 @@
 //
 #include "registry.h"
 
+#include "rigExecMath/avarScale.h"
+
 #include "pxr/base/gf/bbox3d.h"
 #include "pxr/base/gf/range3d.h"
 #include "pxr/base/gf/rotation.h"
@@ -11,6 +13,7 @@
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usdGeom/boundable.h"
@@ -530,12 +533,11 @@ _AccumulateGuideBounds(
 {
     bool any = false;
 
-    // Joint and solver guides: a sphere at each frame origin plus a cone
-    // reaching guideLength along that frame's +X aim axis. Bounding the
-    // cone by a second sphere at its tip is conservative by design -- it
-    // costs a little empty space at the tip and needs no cone math, and a
-    // frame-selection box that is slightly generous is invisible while one
-    // that clips is not.
+    // Joint and solver guides: a sphere where requested plus a cone reaching
+    // guideLength along that frame's +X axis. Joint link frames and lengths
+    // are derived from evaluated parent/child origins; solver elements derive
+    // them from frame landmarks. Bounding the cone by spheres at both ends is
+    // conservative by design and also covers sphere-less branch links.
     for (size_t i = 0; i < published.guideFrames.size(); ++i) {
         const PXR_NS::GfMatrix4d &frame = published.guideFrames[i];
         const double radius = i < published.guideRadii.size()
@@ -747,6 +749,22 @@ _AccumulateRestGuideBounds(
         }
         return value;
     };
+    auto floatNumber = [&prim, &time](const char *name, double fallback) {
+        float value = static_cast<float>(fallback);
+        if (const PXR_NS::UsdAttribute a =
+                prim.GetAttribute(PXR_NS::TfToken(name))) {
+            a.Get(&value, time);
+        }
+        return double(value);
+    };
+    auto token = [&prim, &time](const char *name, const char *fallback) {
+        PXR_NS::TfToken value(fallback);
+        if (const PXR_NS::UsdAttribute a =
+                prim.GetAttribute(PXR_NS::TfToken(name))) {
+            a.Get(&value, time);
+        }
+        return value;
+    };
     bool rigid = false;
     const PXR_NS::GfMatrix4d rest = _AuthoredRestSpace(prim, time, &rigid);
     if (!rigid) {
@@ -755,14 +773,6 @@ _AccumulateRestGuideBounds(
     const PXR_NS::TfToken type = prim.GetTypeName();
 
     if (type == "RigExecControl") {
-        auto token = [&prim](const char *name, const char *fallback) {
-            PXR_NS::TfToken value(fallback);
-            if (const PXR_NS::UsdAttribute a =
-                    prim.GetAttribute(PXR_NS::TfToken(name))) {
-                a.Get(&value);
-            }
-            return value;
-        };
         // Same predicate the scene index draws through: an unrecognized
         // shape/drawMode pair synthesizes nothing and must bound nothing.
         const PXR_NS::TfToken shape = token("guide:shape", "circle");
@@ -770,12 +780,26 @@ _AccumulateRestGuideBounds(
         if (!rigExec::RigExecControlGuideIsDrawn(shape, drawMode)) {
             return false;
         }
-        const PXR_NS::GfVec3d scale(number("guide:scaleX", 1.0),
-                                    number("guide:scaleY", 1.0),
-                                    number("guide:scaleZ", 1.0));
+        const PXR_NS::GfVec3d authoredScale(
+            number("guide:scaleX", 1.0), number("guide:scaleY", 1.0),
+            number("guide:scaleZ", 1.0));
+        PXR_NS::GfVec3d scale(1.0);
+        static const char *avarScaleNames[3] = {
+            "avars:sx", "avars:sy", "avars:sz"};
         for (int i = 0; i < 3; ++i) {
-            if (!std::isfinite(scale[i]) || scale[i] <= 0.0) {
+            if (!std::isfinite(authoredScale[i]) || authoredScale[i] <= 0.0) {
                 return false;  // draws nothing, so it bounds nothing
+            }
+            // No evaluated frame exists on this fallback path. Resolve the
+            // authored channel at the queried time with the SAME floor and
+            // non-finite policy as the runtime, then size the guide by its
+            // magnitude so a supported reflection remains visible.
+            const double avarMagnitude = std::abs(
+                rigExec::RigExecNormalizeAvarScale(
+                    number(avarScaleNames[i], 1.0)));
+            scale[i] = authoredScale[i] * avarMagnitude;
+            if (!std::isfinite(scale[i]) || scale[i] <= 0.0) {
+                return false;
             }
         }
         double halfWidth = 0.0;
@@ -797,19 +821,208 @@ _AccumulateRestGuideBounds(
     }
     if (type == "RigExecJoint") {
         const double radius = number("guide:radius", 1.0);
-        const double length = number("guide:length", 0.0);
-        if (!std::isfinite(radius) || radius <= 0.0 ||
-            !std::isfinite(length)) {
+        if (!std::isfinite(radius) || radius <= 0.0) {
             return false;
         }
         const PXR_NS::GfVec3d origin = rest.ExtractTranslation();
-        const PXR_NS::GfVec3d tip = origin + length * rest.GetRow3(0);
         const PXR_NS::GfVec3d extent(radius, radius, radius);
         range->UnionWith(origin - extent);
         range->UnionWith(origin + extent);
-        range->UnionWith(tip - extent);
-        range->UnionWith(tip + extent);
+
+        // A joint's outgoing links terminate at every descendant whose
+        // nearest RigExecJoint ancestor is this prim. Intervening grouping
+        // scopes therefore preserve the same hierarchy used by evaluation.
+        for (const PXR_NS::UsdPrim &candidate :
+             PXR_NS::UsdPrimRange(prim)) {
+            if (candidate == prim ||
+                candidate.GetTypeName() != "RigExecJoint") {
+                continue;
+            }
+            PXR_NS::UsdPrim ancestor = candidate.GetParent();
+            while (ancestor && ancestor != prim &&
+                   ancestor.GetTypeName() != "RigExecJoint") {
+                ancestor = ancestor.GetParent();
+            }
+            if (ancestor != prim) {
+                continue;
+            }
+            bool childRigid = false;
+            const PXR_NS::GfMatrix4d childRest =
+                _AuthoredRestSpace(candidate, time, &childRigid);
+            if (!childRigid) {
+                continue;
+            }
+            const PXR_NS::GfVec3d tip = childRest.ExtractTranslation();
+            if (!std::isfinite(tip[0]) || !std::isfinite(tip[1]) ||
+                !std::isfinite(tip[2]) ||
+                (tip - origin).GetLength() <= 1e-12) {
+                continue;
+            }
+            range->UnionWith(tip - extent);
+            range->UnionWith(tip + extent);
+        }
         return true;
+    }
+    if (type == "RigExecSphereWeight" ||
+        type == "RigExecPlaneWeight" ||
+        type == "RigExecCurveWeight") {
+        const PXR_NS::TfToken drawMode = token("guide:drawMode", "wire");
+        if (drawMode != PXR_NS::TfToken("wire") &&
+            drawMode != PXR_NS::TfToken("geometry")) {
+            return false;
+        }
+        const bool wire = drawMode == PXR_NS::TfToken("wire");
+        double halfWidth = 0.0;
+        if (wire) {
+            const double width = number("guide:wireWidth", 0.05);
+            if (std::isfinite(width) && width > 0.0) {
+                halfWidth = width * 0.5;
+            }
+        }
+        const double falloffMin =
+            floatNumber("inputs:falloffMin", 0.0);
+        const double falloffMax =
+            floatNumber("inputs:falloffMax", 1.0);
+        if (!std::isfinite(falloffMin) || !std::isfinite(falloffMax)) {
+            return false;
+        }
+
+        if (type == "RigExecPlaneWeight") {
+            const PXR_NS::TfToken axisName =
+                token("rigExec:planeAxis", "y");
+            const int axis = axisName == PXR_NS::TfToken("x") ? 0
+                : (axisName == PXR_NS::TfToken("y") ? 1
+                   : (axisName == PXR_NS::TfToken("z") ? 2 : -1));
+            const PXR_NS::TfToken bounds =
+                token("rigExec:planeBounds", "unbounded");
+            const double extentU = floatNumber("inputs:extentU", 1.0);
+            const double extentV = floatNumber("inputs:extentV", 1.0);
+            if (axis < 0 ||
+                (bounds != PXR_NS::TfToken("bounded") &&
+                 bounds != PXR_NS::TfToken("unbounded")) ||
+                !std::isfinite(extentU) || !std::isfinite(extentV) ||
+                extentU <= 0.0 || extentV <= 0.0) {
+                return false;
+            }
+            // Unbounded planes add four outward ticks ending at 1.25 times
+            // the rectangle half-extent. This is the exact local range of the
+            // guide elements built by _AppendPlaneVolumeGuide.
+            const double tickScale =
+                bounds == PXR_NS::TfToken("unbounded") ? 1.25 : 1.0;
+            PXR_NS::GfRange3d local;
+            for (const double distance : {falloffMin, falloffMax}) {
+                PXR_NS::GfVec3d min(-halfWidth), max(halfWidth);
+                min[axis] += distance;
+                max[axis] += distance;
+                min[(axis + 1) % 3] -= extentU * tickScale;
+                max[(axis + 1) % 3] += extentU * tickScale;
+                min[(axis + 2) % 3] -= extentV * tickScale;
+                max[(axis + 2) % 3] += extentV * tickScale;
+                local.UnionWith(PXR_NS::GfRange3d(min, max));
+            }
+            range->UnionWith(
+                PXR_NS::GfBBox3d(local, rest).ComputeAlignedRange());
+            return true;
+        }
+
+        PXR_NS::GfVec3d axisScale(
+            floatNumber("inputs:scaleX", 1.0),
+            floatNumber("inputs:scaleY", 1.0),
+            floatNumber("inputs:scaleZ", 1.0));
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(axisScale[axis]) || axisScale[axis] <= 0.0) {
+                return false;
+            }
+        }
+        if (type == "RigExecSphereWeight") {
+            bool found = false;
+            for (const double radius : {falloffMin, falloffMax}) {
+                if (!std::isfinite(radius) || radius <= 0.0) {
+                    continue;
+                }
+                PXR_NS::GfMatrix4d scale(1.0);
+                scale.SetScale(PXR_NS::GfVec3d(
+                    radius * axisScale[0], radius * axisScale[1],
+                    radius * axisScale[2]));
+                const PXR_NS::GfVec3d half(1.0 + halfWidth);
+                range->UnionWith(
+                    PXR_NS::GfBBox3d(PXR_NS::GfRange3d(-half, half),
+                                     scale * rest)
+                        .ComputeAlignedRange());
+                found = true;
+            }
+            return found;
+        }
+
+        // CurveWeight: accept the same two relationship spellings as the
+        // evaluator and bridge -- an exact point3f[] property or a prim whose
+        // native `points` attribute supplies at least two vertices.
+        PXR_NS::SdfPathVector targets;
+        if (const PXR_NS::UsdRelationship rel =
+                prim.GetRelationship(PXR_NS::TfToken("rigExec:curve"))) {
+            rel.GetTargets(&targets);
+        }
+        if (targets.size() != 1) {
+            return false;
+        }
+        const PXR_NS::SdfPath pointsPath = targets[0].IsPropertyPath()
+            ? targets[0]
+            : targets[0].AppendProperty(PXR_NS::TfToken("points"));
+        PXR_NS::VtVec3fArray curvePoints;
+        const PXR_NS::UsdAttribute points =
+            prim.GetStage()->GetAttributeAtPath(pointsPath);
+        if (!points || !points.Get(&curvePoints, time) ||
+            curvePoints.size() < 2) {
+            return false;
+        }
+        PXR_NS::GfMatrix4d divide(1.0);
+        divide.SetScale(PXR_NS::GfVec3d(
+            1.0 / axisScale[0], 1.0 / axisScale[1],
+            1.0 / axisScale[2]));
+        const PXR_NS::GfMatrix4d toLocal = rest.GetInverse() * divide;
+        PXR_NS::GfRange3d localCenters;
+        PXR_NS::GfVec3f previous(0.0f);
+        size_t distinctPointCount = 0;
+        for (const PXR_NS::GfVec3f &point : curvePoints) {
+            const PXR_NS::GfVec3f localPoint(
+                toLocal.Transform(PXR_NS::GfVec3d(point)));
+            if (!std::isfinite(localPoint[0]) ||
+                !std::isfinite(localPoint[1]) ||
+                !std::isfinite(localPoint[2])) {
+                return false;
+            }
+            // Match _AppendCurveVolumeGuide: consecutive coincident points
+            // do not form a drawable segment and are collapsed before the
+            // wire or mesh is built.
+            if (distinctPointCount == 0 ||
+                (localPoint - previous).GetLength() > 1e-6f) {
+                localCenters.UnionWith(PXR_NS::GfVec3d(localPoint));
+                previous = localPoint;
+                ++distinctPointCount;
+            }
+        }
+        if (distinctPointCount < 2) {
+            return false;
+        }
+        PXR_NS::GfMatrix4d scale(1.0);
+        scale.SetScale(axisScale);
+        const PXR_NS::GfMatrix4d toAsset = scale * rest;
+        bool found = false;
+        for (const double radius : {falloffMin, falloffMax}) {
+            if (!std::isfinite(radius) || radius <= 0.0) {
+                continue;
+            }
+            // The bridge's rings live inside this radius-expanded box. It is
+            // conservative at diagonal tangents, which is preferable to a
+            // cold framing bound that clips a valid authored guide.
+            const PXR_NS::GfVec3d pad(radius + halfWidth);
+            const PXR_NS::GfRange3d local(
+                localCenters.GetMin() - pad, localCenters.GetMax() + pad);
+            range->UnionWith(
+                PXR_NS::GfBBox3d(local, toAsset).ComputeAlignedRange());
+            found = true;
+        }
+        return found;
     }
     return false;
 }
@@ -917,10 +1130,12 @@ PXR_NAMESPACE_OPEN_SCOPE
 // it registers into a registry nobody subscribes to, which fails silently.
 TF_REGISTRY_FUNCTION(UsdGeomBoundable)
 {
-    // RigExecXformable covers every joint and control through its
-    // ancestors; the aggregate solvers draw guides too but inherit
-    // Boundable directly, so they are named individually.
+    // RigExecXformable covers joints and controls through its ancestors. The
+    // volume base gets its own registration so its shape-specific authored
+    // fallback can be framed cold; aggregate solvers draw guides too but
+    // inherit Boundable directly, so they are named individually.
     for (const char *name : {"RigExecXformable",
+                             "RigExecVolumeWeight",
                              "RigExecFkChain",
                              "RigExecTwoBoneIk",
                              "RigExecBlendPointFrames",

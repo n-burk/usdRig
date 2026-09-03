@@ -538,23 +538,6 @@ RigExecSolveSingleChainIk(
         return _Degenerate(currentFrames);
     }
 
-    // Blend directions, not joint positions. Re-accumulating the unchanged
-    // segment lengths is what makes partial global weights remain a valid
-    // rigid chain rather than stretching between two world-space poses.
-    std::vector<GfVec3d> blended(currentFrames.size());
-    blended[0] = original[0];
-    for (size_t i = 0; i < lengths.size(); ++i) {
-        const GfVec3d currentDirection =
-            (original[i + 1] - original[i]) / lengths[i];
-        const GfVec3d solvedSegment = solved[i + 1] - solved[i];
-        const GfVec3d solvedDirection =
-            solvedSegment / solvedSegment.GetLength();
-        const GfVec3d direction = _BlendDirection(
-            currentDirection, solvedDirection, weight, bases[i].up,
-            angularEpsilon);
-        blended[i + 1] = blended[i] + direction * lengths[i];
-    }
-
     // Construct the fully solved orientations first, then blend from the
     // authored frame orientations. This makes the limit as weight approaches
     // zero continuous even when a frame's local X is not its child direction.
@@ -580,10 +563,37 @@ RigExecSolveSingleChainIk(
     }
 
     std::vector<RigExecPointFrame> result(currentFrames.size());
-    for (size_t i = 0; i < result.size(); ++i) {
-        result[i] = _BlendEndFrame(
-            bases[i], solvedBases[i], blended[i], weight,
-            angularEpsilon);
+    if (weight >= 1.0) {
+        // `solved` plus `solvedBases` is the full-strength candidate.  Return
+        // it directly: rotating toward it again with weight 1 and
+        // re-accumulating normalized segment directions is mathematically
+        // equivalent but is not bit-exact at the endpoint.
+        for (size_t i = 0; i < result.size(); ++i) {
+            result[i] = _FrameFromBasis(
+                bases[i], solved[i], solvedBases[i].x, solvedBases[i].up);
+        }
+    } else {
+        // Blend directions, not joint positions. Re-accumulating the unchanged
+        // segment lengths is what makes partial global weights remain a valid
+        // rigid chain rather than stretching between two world-space poses.
+        std::vector<GfVec3d> blended(currentFrames.size());
+        blended[0] = original[0];
+        for (size_t i = 0; i < lengths.size(); ++i) {
+            const GfVec3d currentDirection =
+                (original[i + 1] - original[i]) / lengths[i];
+            const GfVec3d solvedSegment = solved[i + 1] - solved[i];
+            const GfVec3d solvedDirection =
+                solvedSegment / solvedSegment.GetLength();
+            const GfVec3d direction = _BlendDirection(
+                currentDirection, solvedDirection, weight, bases[i].up,
+                angularEpsilon);
+            blended[i + 1] = blended[i] + direction * lengths[i];
+        }
+        for (size_t i = 0; i < result.size(); ++i) {
+            result[i] = _BlendEndFrame(
+                bases[i], solvedBases[i], blended[i], weight,
+                angularEpsilon);
+        }
     }
 
     for (const RigExecPointFrame &frame : result) {

@@ -10,6 +10,7 @@
 #include "types.h"
 #include "frameExtraction.h"
 
+#include "rigExecMath/avarScale.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/solvers.h"
 
@@ -90,6 +91,9 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((avarTx, "avars:tx"))
     ((avarTy, "avars:ty"))
     ((avarTz, "avars:tz"))
+    ((avarSx, "avars:sx"))
+    ((avarSy, "avars:sy"))
+    ((avarSz, "avars:sz"))
     ((avarRx, "avars:rx"))
     ((avarRy, "avars:ry"))
     ((avarRz, "avars:rz"))
@@ -136,13 +140,13 @@ _ScalarInput(const VdfContext &ctx, const TfToken &name, double fallback)
     return value ? *value : fallback;
 }
 
-// Composes a local avar transform: rotations applied in avars:rotationOrder
-// sequence, then rspin about the +X aim axis, then the translation
+// Composes a local avar transform: per-axis scale, rotations applied in
+// avars:rotationOrder sequence, rspin about the +X aim axis, then translation
 // (row-vector convention: leftmost factor applies first).
 static GfMatrix4d
 _ComposeAvars(
-    double tx, double ty, double tz, double rx, double ry, double rz,
-    double rspin, const TfToken &order)
+    double tx, double ty, double tz, double sx, double sy, double sz,
+    double rx, double ry, double rz, double rspin, const TfToken &order)
 {
     static const GfVec3d axes[3] = {
         GfVec3d(1, 0, 0), GfVec3d(0, 1, 0), GfVec3d(0, 0, 1)};
@@ -152,6 +156,10 @@ _ComposeAvars(
         sequence = "XYZ";
     }
     GfMatrix4d m(1.0);
+    m.SetScale(GfVec3d(
+        rigExec::RigExecNormalizeAvarScale(sx),
+        rigExec::RigExecNormalizeAvarScale(sy),
+        rigExec::RigExecNormalizeAvarScale(sz)));
     for (const char axis : sequence) {
         const int index = axis == 'X' ? 0 : axis == 'Y' ? 1 : 2;
         if (angles[index] != 0.0) {
@@ -200,6 +208,7 @@ _JointRestSpace(const VdfContext &ctx)
         _ScalarInput(ctx, _tokens->restTx, 0),
         _ScalarInput(ctx, _tokens->restTy, 0),
         _ScalarInput(ctx, _tokens->restTz, 0),
+        1.0, 1.0, 1.0,
         _ScalarInput(ctx, _tokens->restRx, 0),
         _ScalarInput(ctx, _tokens->restRy, 0),
         _ScalarInput(ctx, _tokens->restRz, 0),
@@ -217,7 +226,7 @@ _ComputeJointRestFrame(const VdfContext &ctx)
 }
 
 static RigExecPointFrame
-_ComputeJointPointFrame(const VdfContext &ctx)
+_ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
 {
     // A solver-posed joint never reaches this callback: RigExecRigEvaluator
     // supplies its frame as a value override, because exec cannot traverse
@@ -268,6 +277,9 @@ _ComputeJointPointFrame(const VdfContext &ctx)
         _ScalarInput(ctx, _tokens->avarTx, 0),
         _ScalarInput(ctx, _tokens->avarTy, 0),
         _ScalarInput(ctx, _tokens->avarTz, 0),
+        readScaleAvars ? _ScalarInput(ctx, _tokens->avarSx, 1) : 1.0,
+        readScaleAvars ? _ScalarInput(ctx, _tokens->avarSy, 1) : 1.0,
+        readScaleAvars ? _ScalarInput(ctx, _tokens->avarSz, 1) : 1.0,
         _ScalarInput(ctx, _tokens->avarRx, 0),
         _ScalarInput(ctx, _tokens->avarRy, 0),
         _ScalarInput(ctx, _tokens->avarRz, 0),
@@ -276,6 +288,21 @@ _ComputeJointPointFrame(const VdfContext &ctx)
     // world = avars * (rest relative to parentRest) * parentPosed.
     return _FrameFromMatrix(
         avars * rest * parentRest.GetInverse() * parentPosed);
+}
+
+static RigExecPointFrame
+_ComputeJointPointFrame(const VdfContext &ctx)
+{
+    return _ComputeXformablePointFrame(ctx, /* readScaleAvars = */ true);
+}
+
+static RigExecPointFrame
+_ComputeVolumeWeightPointFrame(const VdfContext &ctx)
+{
+    // Volume shape is owned exclusively by inputs:scaleX/Y/Z. Its placement
+    // contract is rigid, so do not expose transform-scale avars as silent
+    // no-ops on RigExecVolumeWeight.
+    return _ComputeXformablePointFrame(ctx, /* readScaleAvars = */ false);
 }
 
 static GfMatrix4d
@@ -296,7 +323,15 @@ _ComputeJointMatrix(const VdfContext &ctx)
     return m;
 }
 
-#define RIGEXEC_REGISTER_XFORMABLE(SchemaName)                               \
+#define RIGEXEC_AVAR_SCALE_INPUTS                                            \
+    AttributeValue<double>(_tokens->avarSx),                                 \
+    AttributeValue<double>(_tokens->avarSy),                                 \
+    AttributeValue<double>(_tokens->avarSz),
+
+#define RIGEXEC_NO_AVAR_SCALE_INPUTS
+
+#define RIGEXEC_REGISTER_XFORMABLE(                                         \
+    SchemaName, PointFrameCallback, ScaleInputs)                             \
     EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(SchemaName)                        \
     {                                                                        \
         self.PrimComputation(_tokens->computeRestFrame)                      \
@@ -311,7 +346,7 @@ _ComputeJointMatrix(const VdfContext &ctx)
                 AttributeValue<double>(_tokens->restRz));                    \
                                                                              \
         self.PrimComputation(_tokens->computePointFrame)                     \
-            .Callback<RigExecPointFrame>(&_ComputeJointPointFrame)           \
+            .Callback<RigExecPointFrame>(PointFrameCallback)                 \
             .Inputs(                                                         \
                 Attribute(_tokens->posedSpace)                               \
                     .Connections<GfMatrix4d>(                                \
@@ -328,6 +363,7 @@ _ComputeJointMatrix(const VdfContext &ctx)
                 AttributeValue<double>(_tokens->avarTx),                     \
                 AttributeValue<double>(_tokens->avarTy),                     \
                 AttributeValue<double>(_tokens->avarTz),                     \
+                ScaleInputs                                                  \
                 AttributeValue<double>(_tokens->avarRx),                     \
                 AttributeValue<double>(_tokens->avarRy),                     \
                 AttributeValue<double>(_tokens->avarRz),                     \
@@ -350,13 +386,18 @@ _ComputeJointMatrix(const VdfContext &ctx)
                     .Required());                                            \
     }
 
-RIGEXEC_REGISTER_XFORMABLE(RigExecJoint)
-RIGEXEC_REGISTER_XFORMABLE(RigExecControl)
+RIGEXEC_REGISTER_XFORMABLE(
+    RigExecJoint, &_ComputeJointPointFrame, RIGEXEC_AVAR_SCALE_INPUTS)
+RIGEXEC_REGISTER_XFORMABLE(
+    RigExecControl, &_ComputeJointPointFrame, RIGEXEC_AVAR_SCALE_INPUTS)
 
 // The volumetric weight objects are RigExecXformables too (spec §4.1
 // volumetric extension), so they get the same placement contract: a
 // volume authored inside a joint follows it through the same
-// NamespaceAncestor chain, with nothing wired.
+// NamespaceAncestor chain, with nothing wired. Unlike controls and joints,
+// it deliberately does not bind avars:sx/sy/sz: volume shape is authored only
+// through inputs:scaleX/Y/Z, and its placement is rigidized by both evaluation
+// and imaging.
 //
 // Registered ONCE on the ABSTRACT base, unlike the two above. Exec
 // composes a prim's computation set by walking its full ancestor type
@@ -373,8 +414,12 @@ RIGEXEC_REGISTER_XFORMABLE(RigExecControl)
 // independent registration pass over a type the first pass has already
 // marked complete. Splitting by TYPE instead of by file keeps each
 // schema opened exactly once.
-RIGEXEC_REGISTER_XFORMABLE(RigExecVolumeWeight)
+RIGEXEC_REGISTER_XFORMABLE(
+    RigExecVolumeWeight, &_ComputeVolumeWeightPointFrame,
+    RIGEXEC_NO_AVAR_SCALE_INPUTS)
 #undef RIGEXEC_REGISTER_XFORMABLE
+#undef RIGEXEC_NO_AVAR_SCALE_INPUTS
+#undef RIGEXEC_AVAR_SCALE_INPUTS
 
 // ---------------------------------------------------------------------------
 // RigExecFkChain: applies control frames to a rest hierarchy. v0.1 treats

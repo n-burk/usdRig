@@ -15,8 +15,8 @@
 //   <rig>/Solvers/<name>     aggregate solvers (FK, IK, blend, twist, ribbon)
 //   <rig>/Weights/<name>     weight objects
 //   <rig>/Curvenets/<name>   RigExecCurvenet data prims
-//   <rig>/Movers/<chain>     mover chains; a chain's movers are SIBLINGS
-//                            under the chain scope, and the evaluator
+//   <rig>/Movers/<chain>     mover chains; top-level operations are siblings
+//                            and may themselves own child movers. The evaluator
 //                            executes them in REVERSE composed child order
 //                            (bottom-to-top stack walk) -- so ADD ORDER IS
 //                            REVERSE APPLICATION ORDER: the last added runs
@@ -45,36 +45,73 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace rigExec {
 
 /// Base of every handle the builder returns. A handle is a cheap value: it
-/// keeps the stage alive and names one prim. All setters author into the
-/// stage's session layer immediately (no deferred commit).
+/// keeps the stage alive and names one schema-typed prim. All setters author
+/// into the stage's current edit target immediately (no deferred commit).
 class RigExecHandleBase {
 public:
     RigExecHandleBase() = default;
     RigExecHandleBase(UsdStageRefPtr stage, SdfPath path)
-        : _stage(std::move(stage)), _path(std::move(path)) {}
-
-    bool IsValid() const { return static_cast<bool>(_stage) && !_path.IsEmpty(); }
-    UsdPrim GetPrim() const {
-        return _stage ? _stage->GetPrimAtPath(_path) : UsdPrim();
+        : _stage(std::move(stage)), _path(std::move(path)) {
+        const UsdPrim prim =
+            _stage && !_path.IsEmpty() ? _stage->GetPrimAtPath(_path) : UsdPrim();
+        if (prim) {
+            _schemaType = prim.GetTypeName();
+        }
     }
+
+    bool IsValid() const {
+        if (!_stage || _path.IsEmpty() || _schemaType.IsEmpty()) {
+            return false;
+        }
+        const UsdPrim prim = _stage->GetPrimAtPath(_path);
+        return prim && prim.GetTypeName() == _schemaType;
+    }
+    UsdPrim GetPrim() const {
+        return IsValid() ? _stage->GetPrimAtPath(_path) : UsdPrim();
+    }
+    UsdStageRefPtr GetStage() const { return _stage; }
     const SdfPath &GetPath() const { return _path; }
+    const TfToken &GetSchemaTypeName() const { return _schemaType; }
     std::string GetName() const { return _path.GetName(); }
 
-    /// Generic attribute authoring with an EXPLICIT Sdf type name (e.g.
-    /// "float", "token", "matrix4d") -- the escape hatch for schema
-    /// properties no typed setter covers. The engine reads every property
-    /// through a typed Get, so pass the schema's declared type.
+    /// Set a schema-declared attribute, retaining the explicit Sdf type-name
+    /// argument for source compatibility. The requested type must exactly
+    /// equal the active composed prim definition; undeclared/custom
+    /// attributes are rejected before any property spec is authored.
     void SetAttr(const char *name, const TfToken &typeName, VtValue value);
 
 protected:
     /// Author an ordered relationship target list (order is semantic for
     /// rigExec:sources / controls / joints / inputWeights / samples).
     void SetRel(const char *name, const std::vector<SdfPath> &targets);
-    /// Apply a single-apply API schema token.
+    /// Apply a registered single-apply API schema identifier. This is strict:
+    /// unavailable/inapplicable schemas and failed application throw.
     void ApplyApi(const TfToken &apiSchemaName);
 
     UsdStageRefPtr _stage;
     SdfPath _path;
+    TfToken _schemaType;
+};
+
+/// Common authored contract of every operation carrying RigExecMoverAPI.
+class RigExecMoverHandle : public RigExecHandleBase {
+public:
+    using RigExecHandleBase::RigExecHandleBase;
+
+    /// Shape-preserving enable/disable (inputs:enabled).
+    void SetEnabled(bool enabled);
+    /// Common normalized envelope. Zero passes the preceding value through;
+    /// one applies the mover in full. Used whenever no weight object is bound.
+    void SetDefaultWeight(float weight);
+    /// Optional target-compatible weight field. A bound object supersedes
+    /// inputs:defaultWeight; an empty path clears the binding.
+    void SetWeightObject(const SdfPath &path);
+    /// Replace the exact authored write set (rigExec:moves).
+    void SetMoves(const std::vector<SdfPath> &targets);
+    /// Author canonical rigExecReadPhase metadata on a declared input
+    /// relationship or attribute of this mover.
+    void SetReadPhase(
+        const TfToken &propertyName, const std::string &phase);
 };
 
 /// A RigExecControl: animator-facing xformable (spec section 4.1).
@@ -91,6 +128,10 @@ public:
     void SetAvarRotation(
         double rx, double ry, double rz,
         const TfToken &order = TfToken("XYZ"));
+    /// Author finite avars:sx/sy/sz (local scale; identity is 1,1,1).
+    /// Magnitudes below 1e-4 are raised to that floor with sign preserved.
+    void SetAvarScale(double sx, double sy, double sz);
+    void SetAvarSpin(double degrees);
     /// RigExecControlAPI rigExec:channelRole (pose | switch | tweak).
     void SetChannelRole(const TfToken &role);
 };
@@ -107,6 +148,9 @@ public:
     void SetAvarRotation(
         double rx, double ry, double rz,
         const TfToken &order = TfToken("XYZ"));
+    /// Same signed 1e-4 local-scale floor as RigExecControlHandle.
+    void SetAvarScale(double sx, double sy, double sz);
+    void SetAvarSpin(double degrees);
 };
 
 /// One aggregate solver's handle. Solvers publish computePointFrameArray and
@@ -142,6 +186,15 @@ public:
     void SetRootControl(const SdfPath &path);
     void SetEffectorControl(const SdfPath &path);
     void SetPoleControl(const SdfPath &path);
+    void SetUpperLength(double length);
+    void SetLowerLength(double length);
+    /// Deltas added to the rest-implied lengths. Used only when the
+    /// matching absolute length carries no authored opinion.
+    void SetUpperLengthOffset(double offset);
+    void SetLowerLengthOffset(double offset);
+    void SetPreferredBendRadians(double radians);
+    void SetStretch(float stretch);
+    void SetSoftness(float softness);
     /// uniformSegments | ... (schema allowedTokens).
     void SetStretchPolicy(const TfToken &policy);
     void SetUnreachablePolicy(const TfToken &policy);
@@ -194,22 +247,14 @@ public:
 /// constraint that revises a transform is ALSO a mover: it carries
 /// RigExecMoverAPI and its exact target on rigExec:moves, so it participates
 /// in composed post-order application like any other operation.
-class RigExecConstraintHandle : public RigExecHandleBase {
+class RigExecConstraintHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
     /// The exact prim or property the constraint revises (rigExec:moves).
     void SetTarget(const SdfPath &target);
-    /// Envelope blend [0,1] from incoming pose to constrained pose.
-    void SetDefaultWeight(float weight);
-    /// Optional per-element weight object (geometry domain only).
-    void SetWeightObject(const SdfPath &path);
-    /// Additive offsets applied after the source blend
-    /// (double3 inputs:translationOffset / rotationOffset [degrees] /
-    /// scaleOffset, which is additive -- identity (0,0,0)).
-    void SetTranslationOffset(double x, double y, double z);
-    void SetRotationOffset(double x, double y, double z);
-    void SetScaleOffset(double x, double y, double z);
+    /// Durable authoring lock metadata; it does not disable evaluation.
+    void SetLocked(bool locked);
 
 protected:
     void _SetSingleRel(const char *name, const SdfPath &target);
@@ -225,6 +270,9 @@ public:
     void SetSources(const std::vector<SdfPath> &paths);
     void SetSources(
         const std::vector<SdfPath> &paths, const std::vector<float> &weights);
+    /// Replace only the parallel weight array. An empty array restores equal
+    /// full weights; otherwise the current source count must match exactly.
+    void SetSourceWeights(const std::vector<float> &weights);
 };
 
 /// RigExecAimConstraint: rotates the target so its aim vector points at the
@@ -233,8 +281,12 @@ class RigExecAimConstraintHandle : public RigExecSourceConstraintHandle {
 public:
     using RigExecSourceConstraintHandle::RigExecSourceConstraintHandle;
 
+    void SetAffectRotation(bool x, bool y, bool z);
+    void SetRotationOffset(double x, double y, double z);
+    void SetRotationOrder(const TfToken &order);
     void SetAimVector(double x, double y, double z);  // local space
     void SetUpVector(double x, double y, double z);   // local space
+    void SetWorldUpVector(double x, double y, double z);  // world space
     /// Legacy single-source spelling (rigExec:aimTarget).
     void SetAimTarget(const SdfPath &path);
     void SetWorldUpObject(const SdfPath &path);
@@ -245,18 +297,28 @@ public:
 class RigExecPositionConstraintHandle : public RigExecSourceConstraintHandle {
 public:
     using RigExecSourceConstraintHandle::RigExecSourceConstraintHandle;
+
+    void SetAffectTranslation(bool x, bool y, bool z);
+    void SetTranslationOffset(double x, double y, double z);
 };
 
 /// RigExecRotationConstraint.
 class RigExecRotationConstraintHandle : public RigExecSourceConstraintHandle {
 public:
     using RigExecSourceConstraintHandle::RigExecSourceConstraintHandle;
+
+    void SetAffectRotation(bool x, bool y, bool z);
+    void SetRotationOffset(double x, double y, double z);
+    void SetRotationOrder(const TfToken &order);
 };
 
 /// RigExecScaleConstraint.
 class RigExecScaleConstraintHandle : public RigExecSourceConstraintHandle {
 public:
     using RigExecSourceConstraintHandle::RigExecSourceConstraintHandle;
+
+    void SetAffectScale(bool x, bool y, bool z);
+    void SetScaleOffset(double x, double y, double z);
 };
 
 /// RigExecParentConstraint (FBX parent: scale off by default).
@@ -264,10 +326,13 @@ class RigExecParentConstraintHandle : public RigExecSourceConstraintHandle {
 public:
     using RigExecSourceConstraintHandle::RigExecSourceConstraintHandle;
 
+    void SetAffectTranslation(bool x, bool y, bool z);
+    void SetAffectRotation(bool x, bool y, bool z);
+    void SetAffectScale(bool x, bool y, bool z);
+    void SetRotationOrder(const TfToken &order);
     /// Per-source additive offsets, parallel to rigExec:sources. The parent
     /// constraint is the one operator that reads these double3[] arrays
-    /// (inputs:translationOffsets / rotationOffsets [degrees]); the inherited
-    /// scalar setters author different attributes and have no effect here.
+    /// (inputs:translationOffsets / rotationOffsets [degrees]).
     void SetTranslationOffsets(const std::vector<GfVec3d> &offsets);
     void SetRotationOffsets(const std::vector<GfVec3d> &degrees);
 };
@@ -286,8 +351,12 @@ public:
     /// the inherited single-target SetTarget cannot express it.
     void SetMoves(const std::vector<SdfPath> &paths);
     void SetPoleVectorObjects(const std::vector<SdfPath> &paths);
+    void SetPoleVectorWeights(const std::vector<float> &weights);
+    void SetPoleVector(double x, double y, double z);
+    void SetTwistDegrees(double degrees);
     void SetSolverMode(const TfToken &mode);       // rotatePlane | ...
     void SetPoleVectorMode(const TfToken &mode);   // vector | ...
+    void SetEvaluationMode(const TfToken &mode);   // neverTS | autoDetect | alwaysTS
 };
 
 /// Common contract of weight objects: a total scalar field over the logical
@@ -313,6 +382,10 @@ public:
     void SetValues(const std::vector<float> &values);
     /// Sparse element indices, parallel to a sparse value list.
     void SetIndices(const std::vector<int> &indices);
+    /// Atomically validate and replace a sparse value/index pair.
+    void SetSparseValues(
+        const std::vector<float> &values,
+        const std::vector<int> &indices);
     /// Value for elements no entry covers.
     void SetDefaultWeight(float weight);
 };
@@ -343,6 +416,7 @@ public:
     void SetAvarRotation(
         double rx, double ry, double rz,
         const TfToken &order = TfToken("XYZ"));
+    void SetAvarSpin(double degrees);
 
     /// Distance at which the field is fully ON / OFF (local units).
     void SetFalloff(float falloffMin, float falloffMax);
@@ -454,22 +528,22 @@ public:
 
 /// RigExecMatrixMover: p' = q + w (T q - q). Moves points through one
 /// provider's matrix, blended by a per-point weight field.
-class RigExecMatrixMoverHandle : public RigExecHandleBase {
+class RigExecMatrixMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
+    using RigExecMoverHandle::SetReadPhase;
 
     /// The GfMatrix4d provider (computeMatrix) -- joint, control, or xform.
     void SetTransformProvider(const SdfPath &path);
-    /// Exactly one compatible weight object for the points target.
-    void SetWeightObject(const SdfPath &path);
     /// base | preceding | final.
     void SetReadPhase(const TfToken &phase);
 };
 
 /// RigExecLatticeMover: tensor-product lattice deformation through a cage.
-class RigExecLatticeMoverHandle : public RigExecHandleBase {
+class RigExecLatticeMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
+    using RigExecMoverHandle::SetReadPhase;
 
     /// Native mesh/points prim supplying the cage control points.
     void SetCage(const SdfPath &path);
@@ -482,20 +556,21 @@ public:
 
 /// RigExecBlendShapeMover: applies independently composed blend inputs to a
 /// points property.
-class RigExecBlendShapeMoverHandle : public RigExecHandleBase {
+class RigExecBlendShapeMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
     /// Add a blend channel (rigExec:blendInputs entry) under this mover.
     RigExecBlendInputHandle AddBlendInput(const std::string &name, float weight = 0.f);
-    /// Optional per-point weight multiplying the final delta.
-    void SetWeightObject(const SdfPath &path);
+    /// Replace the complete relationship to independently authored inputs.
+    void SetBlendInputs(const std::vector<SdfPath> &paths);
 };
 
 /// RigExecCurveMover: curve-driven movement (wire / spline-IK / ribbon).
-class RigExecCurveMoverHandle : public RigExecHandleBase {
+class RigExecCurveMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
+    using RigExecMoverHandle::SetReadPhase;
 
     void SetDriverCurve(const SdfPath &path);
     void SetDriverFrames(const std::vector<SdfPath> &paths);
@@ -507,9 +582,10 @@ public:
 };
 
 /// RigExecSurfaceMover: surface attachment / projection.
-class RigExecSurfaceMoverHandle : public RigExecHandleBase {
+class RigExecSurfaceMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
+    using RigExecMoverHandle::SetReadPhase;
 
     /// Native mesh prim supplying the driver surface.
     void SetSurface(const SdfPath &path);
@@ -520,68 +596,71 @@ public:
 };
 
 /// RigExecSmoothMover: uniform-weight Laplacian smoothing.
-class RigExecSmoothMoverHandle : public RigExecHandleBase {
+class RigExecSmoothMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
-    /// Blend of the Laplacian step per point, in [0, 1].
+    /// Source-compatible alias for SetDefaultWeight.
     void SetStrength(float strength);
 };
 
 /// RigExecVolumeCorrectMover: centroid scaling toward the rest bound volume.
-class RigExecVolumeCorrectMoverHandle : public RigExecHandleBase {
+class RigExecVolumeCorrectMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
-    /// Blend toward full bound-volume restoration, in [0, 1].
+    /// Source-compatible alias for SetDefaultWeight.
     void SetStrength(float strength);
 };
 
 /// RigExecCurvenetMover (Profile Mover): propagates a rigged curvenet's
 /// articulation over the target points.
-class RigExecCurvenetMoverHandle : public RigExecHandleBase {
+class RigExecCurvenetMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
     /// Exactly one RigExecCurvenet supplying the posed control points.
     void SetCurvenet(const SdfPath &path);
-    /// Blend of the solved surface against the incoming one, in [0, 1].
+    /// Source-compatible alias for SetDefaultWeight.
     void SetStrength(float strength);
 };
 
 /// RigExecFloatMathMover: add | multiply | clamp | remap | blend over an
-/// exact float property. r = op(incoming), mixed back as
-/// incoming + weight * (r - incoming).
-class RigExecFloatMathMoverHandle : public RigExecHandleBase {
+/// exact float property. The common MoverAPI envelope mixes the candidate
+/// result back over the incoming value.
+class RigExecFloatMathMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
     void SetOperation(const TfToken &op);  // add | multiply | clamp | remap | blend
     void SetValue(float value);
     /// Bounds for clamp / remap.
     void SetBounds(float min, float max);
+    /// Source-compatible alias for SetDefaultWeight.
     void SetWeight(float weight);
 };
 
 /// RigExecVec3fMathMover: component-wise operations over a float3 property.
-class RigExecVec3fMathMoverHandle : public RigExecHandleBase {
+class RigExecVec3fMathMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
     void SetOperation(const TfToken &op);
     void SetValue(GfVec3f value);
     void SetBounds(GfVec3f min, GfVec3f max);
+    /// Source-compatible alias for SetDefaultWeight.
     void SetWeight(float weight);
 };
 
 /// RigExecMatrixMathMover: multiply | blend over an exact matrix4d property.
-class RigExecMatrixMathMoverHandle : public RigExecHandleBase {
+class RigExecMatrixMathMoverHandle : public RigExecMoverHandle {
 public:
-    using RigExecHandleBase::RigExecHandleBase;
+    using RigExecMoverHandle::RigExecMoverHandle;
 
     /// multiply (post-multiply, row-vector convention) | blend (replace).
     void SetOperation(const TfToken &op);
     void SetValue(GfMatrix4d value);
+    /// Source-compatible alias for SetDefaultWeight.
     void SetWeight(float weight);
 };
 
@@ -607,12 +686,12 @@ public:
 
     // ---- Point-domain movers -------------------------------------------
 
-    /// p' = q + w (T q - q): moves points through a provider's matrix with a
-    /// per-point weight field.
+    /// Moves points through a provider's matrix. weightObject is optional;
+    /// without one, the MoverAPI defaultWeight envelope is used.
     RigExecMatrixMoverHandle AddMatrixMover(
         const std::string &name,
         const SdfPath &transformProvider,
-        const SdfPath &weightObject,
+        const SdfPath &weightObject = {},
         const SdfPath &target = {},
         const TfToken &readPhase = TfToken("base"));
 
@@ -628,14 +707,23 @@ public:
     /// Blend-shape application over independently composed inputs.
     RigExecBlendShapeMoverHandle AddBlendShapeMover(
         const std::string &name,
-        const SdfPath &weightObject /* may be empty */,
+        const SdfPath &weightObject = {},
         const SdfPath &target = {});
 
     /// Curve-driven movement (wire / spline-IK / ribbon modes).
     RigExecCurveMoverHandle AddCurveMover(
         const std::string &name,
         const SdfPath &driverCurve,
-        const SdfPath &driverFrames /* may be empty */,
+        const std::vector<SdfPath> &driverFrames,
+        const SdfPath &bindCoordinates /* may be empty */,
+        const TfToken &mode = TfToken("ribbon"),
+        const SdfPath &target = {},
+        const TfToken &readPhase = TfToken("base"));
+    /// Source-compatible spelling for zero or one driver-frame provider.
+    RigExecCurveMoverHandle AddCurveMover(
+        const std::string &name,
+        const SdfPath &driverCurve,
+        const SdfPath &driverFrame /* may be empty */,
         const SdfPath &bindCoordinates /* may be empty */,
         const TfToken &mode = TfToken("ribbon"),
         const SdfPath &target = {},
@@ -649,19 +737,21 @@ public:
         const SdfPath &target = {},
         const TfToken &readPhase = TfToken("base"));
 
-    /// Uniform-weight Laplacian smoothing (strength in [0,1]).
+    /// Uniform-weight Laplacian smoothing with the common mover envelope.
     RigExecSmoothMoverHandle AddSmoothMover(
-        const std::string &name, float strength, const SdfPath &target = {});
+        const std::string &name, float defaultWeight = 1.0f,
+        const SdfPath &target = {});
 
     /// Centroid scaling toward the authored rest bound volume.
     RigExecVolumeCorrectMoverHandle AddVolumeCorrectMover(
-        const std::string &name, float strength, const SdfPath &target = {});
+        const std::string &name, float defaultWeight = 1.0f,
+        const SdfPath &target = {});
 
     /// Profile-mover: propagates a rigged curvenet's articulation.
     RigExecCurvenetMoverHandle AddCurvenetMover(
         const std::string &name,
         const SdfPath &curvenetPrim,
-        float strength,
+        float defaultWeight = 1.0f,
         const SdfPath &target = {});
 
     // ---- Property-domain movers ----------------------------------------
@@ -672,7 +762,7 @@ public:
         const TfToken &operation,
         float value,
         const SdfPath &target = {},
-        float weight = 1.f);
+        float defaultWeight = 1.f);
 
     /// Component-wise add | multiply | clamp | remap | blend over a float3 property.
     RigExecVec3fMathMoverHandle AddVec3fMathMover(
@@ -680,7 +770,7 @@ public:
         const TfToken &operation,
         GfVec3f value,
         const SdfPath &target = {},
-        float weight = 1.f);
+        float defaultWeight = 1.f);
 
     /// multiply | blend over an exact matrix4d property.
     RigExecMatrixMathMoverHandle AddMatrixMathMover(
@@ -688,7 +778,7 @@ public:
         const TfToken &operation,
         GfMatrix4d value,
         const SdfPath &target = {},
-        float weight = 1.f);
+        float defaultWeight = 1.f);
 
     // ---- Pose constraints (movers too) ---------------------------------
 
@@ -702,10 +792,32 @@ public:
         const std::string &name, const SdfPath &target = {});
     RigExecParentConstraintHandle AddParentConstraint(
         const std::string &name, const SdfPath &target = {});
+    /// Infer and author the complete inclusive namespace chain. Every prim
+    /// from endJoint through firstJoint must already be a RigExecJoint.
     RigExecSingleChainIkConstraintHandle AddSingleChainIkConstraint(
-        const std::string &name, const SdfPath &target = {});
+        const std::string &name,
+        const SdfPath &firstJoint,
+        const SdfPath &endJoint,
+        const SdfPath &effector,
+        const std::vector<SdfPath> &poleVectorObjects = {});
+    /// Explicit form: the ordered moves list must exactly equal the inferred
+    /// first-to-end namespace chain.
+    RigExecSingleChainIkConstraintHandle AddSingleChainIkConstraint(
+        const std::string &name,
+        const std::vector<SdfPath> &moves,
+        const SdfPath &firstJoint,
+        const SdfPath &endJoint,
+        const SdfPath &effector,
+        const std::vector<SdfPath> &poleVectorObjects = {});
 
-    /// The chain's scope prim path (<rig>/Movers/<chainName>).
+    /// Return a child chain whose next movers are authored directly beneath
+    /// an existing mover. Descendants execute before their mover parent. An
+    /// empty override inherits this chain's default target.
+    RigExecMoverChain Under(
+        const RigExecHandleBase &mover,
+        const SdfPath &defaultTarget = {}) const;
+
+    /// The chain anchor: a Scope for a top-level chain or a mover for Under().
     const SdfPath &GetScopePath() const { return _scope; }
     UsdStageRefPtr GetStage() const { return _stage; }
 
@@ -717,9 +829,10 @@ private:
           _scope(std::move(scope)),
           _defaultTarget(std::move(defaultTarget)) {}
 
-    /// Define a typed mover prim as the NEXT SIBLING under the chain scope,
+    /// Define a typed mover prim as the next child under the chain anchor,
     /// apply RigExecMoverAPI, and set its target when given (an empty target
-    /// falls back to the chain's default target). Siblings execute in reverse
+    /// falls back to the chain's default target; no effective target throws).
+    /// Siblings execute in reverse
     /// composed child order -- so appending makes the new mover run FIRST.
     SdfPath _AddMoverPrim(
         const std::string &typeName,
@@ -814,12 +927,31 @@ public:
         const std::string &name, const SdfPath &target, const SdfPath &curve,
         float falloffMin = 0.f, float falloffMax = 1.f);
 
+    /// Define a placed volume at an explicit prim path beneath this rig. The
+    /// parent must already exist; unlike Add* these do not impose /Weights.
+    RigExecSphereWeightHandle DefineSphereWeight(
+        const SdfPath &path, const SdfPath &target, float falloffMin = 0.f,
+        float falloffMax = 1.f);
+    RigExecPlaneWeightHandle DefinePlaneWeight(
+        const SdfPath &path, const SdfPath &target, float falloffMin = 0.f,
+        float falloffMax = 1.f);
+    RigExecCurveWeightHandle DefineCurveWeight(
+        const SdfPath &path, const SdfPath &target, const SdfPath &curve,
+        float falloffMin = 0.f, float falloffMax = 1.f);
+
     /// Ordered fold of weight objects (multiply | add | max | min | ...).
     RigExecCombineWeightHandle AddCombineWeight(
         const std::string &name,
         const SdfPath &target,
         const std::vector<SdfPath> &inputWeights,
         const TfToken &mode = TfToken("multiply"));
+
+    // ---- Independently composable blend channels ------------------------
+
+    /// Create <rig>/BlendInputs/<name>. Link it to any blend-shape mover with
+    /// RigExecBlendShapeMoverHandle::SetBlendInputs.
+    RigExecBlendInputHandle AddBlendInput(
+        const std::string &name, float weight = 0.f);
 
     // ---- Curvenets (created under <rig>/Curvenets) ----------------------
 
@@ -842,11 +974,14 @@ private:
     /// Ensure a (Scope-typed) child namespace exists under the rig and return
     /// its path.
     SdfPath _EnsureScope(const char *scopeName);
-    /// Define a typed prim at \p parent/<name>, refusing to clobber an
-    /// existing prim of a different type.
+    /// Define a new typed prim at \p parent/<name>, rejecting every existing
+    /// prim and applying the standard authoring APIs transactionally.
     UsdPrim _DefineTyped(
         const SdfPath &parent, const std::string &typeName,
         const std::string &name);
+    /// Strict typed definition at an explicit path beneath this rig.
+    UsdPrim _DefineTypedAt(
+        const SdfPath &path, const std::string &typeName);
 
     UsdStageRefPtr _stage;
     SdfPath _root;

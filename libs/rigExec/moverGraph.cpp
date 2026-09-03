@@ -4,6 +4,7 @@
 #include "moverGraph.h"
 
 #include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/envelope.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/simdKernels.h"
 #include "rigExecMath/solvers.h"
@@ -115,9 +116,23 @@ _RunScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
             scratch.push_back(*previous);
         }
     }
+    const std::vector<GfVec3f> preceding = scratch;
     if (!kernel(*params, &scratch)) {
         passThrough();
         return;
+    }
+    if (scratch.size() != preceding.size()) {
+        passThrough();
+        return;
+    }
+    std::vector<float> envelope;
+    if (!params->weights.ResolveAll(scratch.size(), &envelope)) {
+        passThrough();
+        return;
+    }
+    for (size_t i = 0; i < scratch.size(); ++i) {
+        scratch[i] = RigExecBlendEnvelope(
+            preceding[i], scratch[i], envelope[i]);
     }
 
     VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
@@ -299,11 +314,22 @@ _RevisionNode::_ComputeRecomputed(const VdfContext &ctx,
         passThrough();
         return;
     }
+    std::vector<GfVec3f> preceding;
+    preceding.reserve(values.size());
+    for (; !previous.IsAtEnd(); ++previous) {
+        preceding.push_back(*previous);
+    }
+    std::vector<float> envelope;
+    if (!params->weights.ResolveAll(values.size(), &envelope)) {
+        passThrough();
+        return;
+    }
 
     VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
     size_t i = 0;
     for (; !out.IsAtEnd() && i < values.size(); ++out, ++i) {
-        *out = values[i];
+        *out = RigExecBlendEnvelope(
+            preceding[i], values[i], envelope[i]);
     }
 }
 
@@ -328,29 +354,21 @@ _RevisionNode::_ComputeBlendShape(const VdfContext &ctx) const
         passThrough();
         return;
     }
-    const bool hasMask = params->weights.valid;
-    if (hasMask && params->weights.representation == "dense" &&
-        params->weights.values.size() != count) {
+    // Resolve the common envelope up front so a cardinality failure passes
+    // through before any element is written (the in-place write cannot be
+    // rolled back).
+    std::vector<float> envelope;
+    if (!params->weights.ResolveAll(count, &envelope)) {
         passThrough();
         return;
-    }
-    // Resolve masks up front so a cardinality failure passes through before
-    // any element is written (the in-place write cannot be rolled back).
-    std::vector<float> masks(count, 1.0f);
-    if (hasMask) {
-        for (size_t i = 0; i < count; ++i) {
-            masks[i] = params->weights.Resolve(i, count);
-            if (masks[i] < 0.0f) {
-                passThrough();
-                return;
-            }
-        }
     }
 
     VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
     size_t i = 0;
     for (; !out.IsAtEnd() && i < count; ++out, ++i) {
-        *out = *out + params->blendDeltas[i] * masks[i];
+        const GfVec3f preceding = *out;
+        *out = RigExecBlendEnvelope(
+            preceding, preceding + params->blendDeltas[i], envelope[i]);
     }
 }
 
@@ -373,22 +391,12 @@ _RevisionNode::_ComputeMatrix(const VdfContext &ctx) const
         passThrough();
         return;
     }
-    // A dense field whose cardinality mismatches the target fails the
-    // application atomically (spec §7.4).
-    if (params->weights.representation == "dense" &&
-        params->weights.values.size() != count) {
+    // Resolve the common envelope first so a cardinality failure passes
+    // through before any output is written.
+    std::vector<float> weights(count);
+    if (!params->weights.ResolveAll(count, &weights)) {
         passThrough();
         return;
-    }
-    // Resolve weights first so a cardinality failure passes through before any
-    // output is written.
-    std::vector<float> weights(count);
-    for (size_t i = 0; i < count; ++i) {
-        weights[i] = params->weights.Resolve(i, count);
-        if (weights[i] < 0.0f) {
-            passThrough();
-            return;
-        }
     }
     static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
 
@@ -738,6 +746,23 @@ _PointsOf(const SdfPath &path)
     return path.IsPrimPath() ? path.AppendProperty(TfToken("points")) : path;
 }
 
+// Every scalar mover input consults the generation's resolved property set
+// before the authored stage. This is what lets a property-domain mover drive
+// another mover's common envelope without a second evaluation model.
+float
+_Float(const UsdPrim &prim, const char *attr, float fallback,
+       UsdTimeCode time, const RigExecResolvedInputs *resolved)
+{
+    float value = fallback;
+    if (const UsdAttribute a = prim.GetAttribute(TfToken(attr))) {
+        if (resolved && resolved->GetAttribute(a, time, &value)) {
+            return value;
+        }
+        a.Get(&value, time);
+    }
+    return value;
+}
+
 }  // namespace
 
 RigExecRevisionBinding
@@ -889,8 +914,7 @@ RigExecAssembleMatrixParameters(
         if (const UsdAttribute a =
                 moverPrim.GetAttribute(TfToken("inputs:enabled"))) {
             if (!resolved ||
-                !resolved->Get(moverPrim.GetPath().AppendProperty(
-                                   TfToken("inputs:enabled")), &enabled)) {
+                !resolved->GetAttribute(a, time, &enabled)) {
                 a.Get(&enabled, time);
             }
         }
@@ -901,8 +925,15 @@ RigExecAssembleMatrixParameters(
         return params;
     }
 
-    if (!transform || !weights || !weights->valid) {
+    if (!transform) {
         return params;  // MoverFailed
+    }
+    params.weights = weights
+        ? *weights
+        : RigExecWeightPacket::Constant(_Float(
+              moverPrim, "inputs:defaultWeight", 1.0f, time, resolved));
+    if (!params.weights.valid) {
+        return params;  // invalid common envelope => MoverFailed
     }
     // The matrix must be finite and affine (spec §7.4).
     for (int i = 0; i < 4; ++i) {
@@ -917,7 +948,6 @@ RigExecAssembleMatrixParameters(
         return params;
     }
     params.transform = *transform;
-    params.weights = *weights;
     params.valid = true;
     return params;
 }
@@ -941,27 +971,6 @@ RigExecStatusForParameters(
 }
 
 namespace {
-
-// Every static scalar read goes through here, and every one of them consults
-// the resolved set first. A property mover that revised inputs:strength is
-// then indistinguishable, from the kernel's side, from an author who typed
-// the revised number -- which is the whole point: the two paths must not
-// disagree about what the mover's input is.
-float
-_Float(const UsdPrim &prim, const char *attr, float fallback,
-       UsdTimeCode time, const RigExecResolvedInputs *resolved)
-{
-    float value = fallback;
-    if (const UsdAttribute a = prim.GetAttribute(TfToken(attr))) {
-        if (resolved &&
-            resolved->Get(prim.GetPath().AppendProperty(TfToken(attr)),
-                          &value)) {
-            return value;
-        }
-        a.Get(&value, time);
-    }
-    return value;
-}
 
 // Reads a typed array from an exact property path on the mover's stage.
 //
@@ -1003,9 +1012,7 @@ _Enabled(const UsdPrim &prim, UsdTimeCode time,
     if (prim) {
         if (const UsdAttribute a =
                 prim.GetAttribute(TfToken("inputs:enabled"))) {
-            if (resolved &&
-                resolved->Get(prim.GetPath().AppendProperty(
-                                  TfToken("inputs:enabled")), &enabled)) {
+            if (resolved && resolved->GetAttribute(a, time, &enabled)) {
                 return enabled;
             }
             a.Get(&enabled, time);
@@ -1081,11 +1088,20 @@ RigExecAssembleParameters(
 {
     if (op == RigExecRevisionOp::Matrix) {
         return RigExecAssembleMatrixParameters(
-            moverPrim, values.transform, values.weights, time);
+            moverPrim, values.transform, values.weights, time,
+            values.resolved);
     }
 
     RigExecMoverParameters params;
-    params.enabled = _Enabled(moverPrim, time, values.resolved);
+    const bool synthesizedDerived =
+        op == RigExecRevisionOp::RecomputeNormals ||
+        op == RigExecRevisionOp::RecomputeExtent;
+    // Derived maintenance has no authored mover. The owning gprim is only a
+    // convenient topology/property source and must not accidentally acquire
+    // mover semantics from custom attributes with familiar names.
+    params.enabled = synthesizedDerived
+        ? true
+        : _Enabled(moverPrim, time, values.resolved);
 
     switch (op) {
     case RigExecRevisionOp::BlendShape:
@@ -1127,25 +1143,28 @@ RigExecAssembleParameters(
         return params;
     }
 
+    // One envelope contract for every operation. A bound object is the total
+    // field and supersedes the scalar fallback; without one, synthesize the
+    // normalized constant packet supplied by RigExecMoverAPI.
+    params.weights = synthesizedDerived
+        ? RigExecWeightPacket::Constant(1.0f)
+        : (values.weights
+               ? *values.weights
+               : RigExecWeightPacket::Constant(_Float(
+                     moverPrim, "inputs:defaultWeight", 1.0f, time,
+                     values.resolved)));
+    if (!params.weights.valid) {
+        return params;  // MoverFailed, preserving the preceding revision
+    }
+
     switch (op) {
     case RigExecRevisionOp::BlendShape:
         params.blendDeltas = values.blendDeltas;
-        if (values.weights) {
-            // An invalid packet fails the mover atomically rather than
-            // applying an unmasked blend (matches _BuildBlendMoverParameters).
-            if (!values.weights->valid) {
-                break;
-            }
-            params.weights = *values.weights;
-        }
         params.valid = !params.blendDeltas.empty();
         break;
 
     case RigExecRevisionOp::VolumeCorrect:
-        params.strength = _Float(moverPrim, "inputs:strength", 0.0f, time, values.resolved);
-        if (!std::isfinite(params.strength)) {
-            break;  // MoverFailed, as in _BuildVolumeCorrectMoverParameters
-        }
+        params.strength = 1.0f;
         // The correction reference is the bound volume of the authored base.
         if (!values.basePoints.empty()) {
             params.referenceVolume = RigExecBoundVolume(
@@ -1155,10 +1174,7 @@ RigExecAssembleParameters(
         break;
 
     case RigExecRevisionOp::Smooth:
-        params.strength = _Float(moverPrim, "inputs:strength", 0.5f, time, values.resolved);
-        if (!std::isfinite(params.strength)) {
-            break;  // MoverFailed, as in _BuildSmoothMoverParameters
-        }
+        params.strength = 1.0f;
         params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
         params.topologyIndices =
             _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
@@ -1166,10 +1182,7 @@ RigExecAssembleParameters(
         break;
 
     case RigExecRevisionOp::Curvenet: {
-        params.strength = _Float(moverPrim, "inputs:strength", 1.0f, time, values.resolved);
-        if (!std::isfinite(params.strength)) {
-            break;  // MoverFailed rather than a NaN surface
-        }
+        params.strength = 1.0f;
         const UsdPrim netPrim =
             binding.curvenet.IsEmpty()
                 ? UsdPrim()

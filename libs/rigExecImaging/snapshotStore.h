@@ -57,6 +57,13 @@ struct RigExecVolumeGuideElement {
     VtVec3fArray points;   ///< empty for the implicits
     VtIntArray counts;     ///< curveVertexCounts, or faceVertexCounts
     VtIntArray indices;    ///< faceVertexIndices; empty for curves
+    /// Optional mesh normals. `normalsInterpolation` is empty when normals
+    /// are absent; curve tubes use faceVarying normals so their closed end
+    /// caps can stay flat without splitting the manifold's ring vertices.
+    VtVec3fArray normals;
+    TfToken normalsInterpolation;
+    /// Open plane surfaces need both faces; closed curve tubes do not.
+    bool doubleSided = false;
     /// Wire width in the element's own LOCAL (pre-xform) units. Zero or
     /// negative publishes no widths at all -- the hairline fallback, and
     /// what the non-wire draw modes always want.
@@ -65,7 +72,10 @@ struct RigExecVolumeGuideElement {
     bool operator==(const RigExecVolumeGuideElement &other) const {
         return xform == other.xform && primType == other.primType &&
                points == other.points && counts == other.counts &&
-               indices == other.indices && wireWidth == other.wireWidth;
+               indices == other.indices && normals == other.normals &&
+               normalsInterpolation == other.normalsInterpolation &&
+               doubleSided == other.doubleSided &&
+               wireWidth == other.wireWidth;
     }
     bool operator!=(const RigExecVolumeGuideElement &other) const {
         return !(*this == other);
@@ -113,14 +123,20 @@ struct RigExecPublishedPrim {
 
     /// Guide drawing payload (joints and aggregate solvers draw as guide
     /// geometry like OpenExec's IrJointScope): one rig-space frame matrix,
-    /// cone length, and primitive radius per guide element, plus constant
-    /// styling from the authored guide attributes.
+    /// derived cone length, primitive radius, and topology mask per guide
+    /// element, plus constant styling from the authored guide attributes.
     bool hasGuides = false;
     std::vector<GfMatrix4d> guideFrames;
     std::vector<double> guideLengths;
     /// Radius of both the sphere and the cone, per element. Parallel to
     /// guideFrames, so a lookup valid for one is valid for all three.
     std::vector<double> guideRadii;
+    /// Whether each element owns an origin sphere. Solvers set this for
+    /// every frame. A joint sets it only on its first outgoing child link,
+    /// so a branching joint still draws exactly one sphere; a leaf publishes
+    /// one sphere-only element. Missing entries retain the historical
+    /// sphere-per-frame behavior for manually constructed snapshots.
+    std::vector<bool> guideDrawSpheres;
     GfVec3f guideColor{1.0f, 0.3f, 0.3f};
     float guideOpacity = 0.5f;
     /// The prim's RESOLVED UsdGeomImageable purpose, stamped onto whatever
@@ -135,11 +151,12 @@ struct RigExecPublishedPrim {
     /// authored guide attributes.
     ///
     /// Separate from the guideFrames vector above rather than folded into
-    /// it, because the two are different drawings: the joint payload is N
-    /// sphere+cone pairs whose only authored dimension is a radius, while
-    /// this is a single shape whose prim type depends on the authored
-    /// shape/drawMode pair. Sharing the array would make "which element is
-    /// which kind" a thing every consumer had to decide.
+    /// it, because the two are different drawings: the joint payload is one
+    /// sphere plus zero-or-more child-link cones whose only authored
+    /// dimension is a radius, while this is a single shape whose prim type
+    /// depends on the authored shape/drawMode pair. Sharing the array would
+    /// make "which element is which kind" a thing every consumer had to
+    /// decide.
     ///
     /// guideColor/guideOpacity above are shared: both payloads read the
     /// same guide:displayColor / guide:displayOpacity attributes, and a
@@ -151,9 +168,11 @@ struct RigExecPublishedPrim {
     TfToken controlGuideShape;
     /// wire|geometry.
     TfToken controlGuideDrawMode;
-    /// Per-axis draw scale. Authored as three separate doubles (deliberately
-    /// not a vec3, per direction); stored as one vector because nothing
-    /// downstream has a reason to take the axes apart again.
+    /// Effective per-axis draw scale: positive evaluated frame-axis
+    /// magnitudes times guide:scaleX/Y/Z. The guide multipliers are authored
+    /// as three separate doubles (deliberately not a vec3, per direction);
+    /// the product is stored as one vector because nothing downstream has a
+    /// reason to take the axes apart again.
     GfVec3d controlGuideScale{1.0, 1.0, 1.0};
     /// Width for the wire draw mode, in the guide's LOCAL pre-scale units.
     /// Zero or negative publishes no widths at all (hairline fallback);
@@ -183,9 +202,10 @@ struct RigExecPublishedPrim {
     /// A third payload rather than a reuse of either existing one, for
     /// the reason the control payload is separate from the joint payload:
     /// these are N shapes whose PRIM TYPE varies per element, while the
-    /// joint payload is a fixed sphere/cone pair and the control payload
-    /// is exactly one shape. Folding them together would make "which
-    /// element is which kind" a question every consumer had to answer.
+    /// joint payload is a sphere plus zero-or-more uniform cone links and
+    /// the control payload is exactly one shape. Folding them together would
+    /// make "which element is which kind" a question every consumer had to
+    /// answer.
     ///
     /// guideColor/guideOpacity/guidePurpose above are shared, as they are
     /// between the other two payloads: a prim is a volume weight or a
@@ -445,6 +465,7 @@ private:
             (before->guideFrames != after.guideFrames ||
              before->guideLengths != after.guideLengths ||
              before->guideRadii != after.guideRadii ||
+             before->guideDrawSpheres != after.guideDrawSpheres ||
              before->guidePurpose != after.guidePurpose || styleChanged)) {
             changes |= RigExecChangeGuides;
         }

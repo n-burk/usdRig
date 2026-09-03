@@ -85,6 +85,16 @@ struct RigExecWeightPacket {
     /// Effective weight for logical element i of a count-element target,
     /// or -1 for a cardinality mismatch.
     float Resolve(size_t i, size_t count) const;
+
+    /// A normalized constant envelope. Non-finite or out-of-range values
+    /// produce an invalid packet, which makes the consuming mover pass its
+    /// preceding revision through atomically.
+    static RigExecWeightPacket Constant(float weight);
+
+    /// Resolves the complete normalized field for a count-element target.
+    /// Returns false for an invalid packet, a cardinality mismatch, or a
+    /// non-finite/out-of-range element; resolved is unchanged on failure.
+    bool ResolveAll(size_t count, std::vector<float> *resolved) const;
 };
 
 /// Baked distance-to-weight remap for one volumetric weight object
@@ -153,12 +163,17 @@ struct RigExecMoverParameters {
     bool enabled = true;
     bool valid = false;    ///< false => MoverFailed pass-through
     GfMatrix4d transform{1.0};
+    /// Common MoverAPI envelope. A bound rigExec:weightObject supplies this
+    /// packet; otherwise it is the constant packet synthesized from
+    /// inputs:defaultWeight. It is applied after the operation computes its
+    /// full-strength candidate.
     RigExecWeightPacket weights;
     /// Dense per-point combined blend delta (already channel-scaled).
     std::vector<GfVec3f> blendDeltas;
 
-    /// Operation scalars: volumeCorrect reference volume / strength;
-    /// surface weight reuses strength.
+    /// Operation scalars: volumeCorrect reference volume and the internal
+    /// full-step strength consumed by smooth/volume/surface/curvenet kernels.
+    /// The user-facing blend is always the common weights packet above.
     double referenceVolume = 0.0;
     float strength = 0.0f;
 

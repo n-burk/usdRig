@@ -21,6 +21,7 @@
 
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 
+#include <cstdint>
 #include <memory>
 #include <set>
 #include <vector>
@@ -196,10 +197,11 @@ public:
     /// generation. Runs whether or not this index is observed.
     void _RefreshDrivenXform(const SdfPath &path);
 
-    /// Guide element count this prim should have in the current generation.
-    size_t _DesiredGuideCount(const SdfPath &path) const;
+    /// Guide elements this prim should have in the current generation.
+    /// One byte per payload element: bit 0 is its sphere and bit 1 its cone.
+    std::vector<uint8_t> _DesiredGuideTopology(const SdfPath &path) const;
 
-    /// Records the guide count without emitting. Runs whether or not this
+    /// Records the guide topology without emitting. Runs whether or not this
     /// index is observed.
     void _RefreshAnnouncedGuides(const SdfPath &path);
 
@@ -276,9 +278,10 @@ private:
         HdSceneIndexObserver::RemovedPrimEntries *removed);
 
     std::shared_ptr<RigExecSnapshotStore> _store;
-    /// Guide-element counts already announced per published prim
-    /// (mutated only on the serialized publication path).
-    std::map<SdfPath, size_t> _announcedGuides;
+    /// Guide topology already announced per published prim: one sphere/cone
+    /// bit mask per payload element (mutated only on the serialized
+    /// publication path).
+    std::map<SdfPath, std::vector<uint8_t>> _announcedGuides;
     /// Control prims whose rigGuideCtrl child has been announced, and the
     /// prim type it was announced with.
     ///

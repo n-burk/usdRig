@@ -2,32 +2,11 @@
 // RigExec property-domain math kernels.
 //
 #include "propertyMath.h"
+#include "envelope.h"
 
 #include <algorithm>
 
 namespace rigExec {
-
-namespace {
-
-// Non-finite inputs are the one case where "compute anyway" is worse than
-// passing through: a NaN authored on a dial propagates into every consumer of
-// the overridden attribute, and exec has no way to report that back. The
-// evaluator fails such a mover with a diagnostic; these helpers keep the
-// kernels themselves total.
-template <class T>
-T
-_Lerp(const T &a, const T &b, float w)
-{
-    return a + (b - a) * double(w);
-}
-
-float
-_LerpF(float a, float b, float w)
-{
-    return a + (b - a) * w;
-}
-
-}  // namespace
 
 bool
 RigExecParsePropertyOp(const TfToken &token, RigExecPropertyOp *op)
@@ -78,7 +57,7 @@ RigExecApplyFloatMath(
         result = params.value;
         break;
     }
-    return _LerpF(base, result, params.weight);
+    return RigExecBlendEnvelope(base, result, params.weight);
 }
 
 GfVec3f
@@ -110,7 +89,7 @@ RigExecApplyVec3fMath(
     }
     GfVec3f mixed;
     for (size_t i = 0; i < 3; ++i) {
-        mixed[i] = _LerpF(base[i], result[i], params.weight);
+        mixed[i] = RigExecBlendEnvelope(base[i], result[i], params.weight);
     }
     return mixed;
 }
@@ -140,8 +119,8 @@ RigExecApplyMatrixMath(
     }
     for (size_t r = 0; r < 4; ++r) {
         for (size_t c = 0; c < 4; ++c) {
-            (*result)[r][c] =
-                _Lerp(base[r][c], operated[r][c], weight);
+            (*result)[r][c] = RigExecBlendEnvelope(
+                base[r][c], operated[r][c], double(weight));
         }
     }
     return true;
