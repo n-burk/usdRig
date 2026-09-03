@@ -96,6 +96,11 @@ class Handle(object):
     and `worldCenterScreen` is its projection.  A planar handle also
     carries `worldNormal`.
 
+    `worldOrigin` is the point `GizmoMatrix()` places, for EVERY handle
+    kind -- the gizmo origin even for a plane, whose `worldCenter` is
+    offset to its square.  Code needing the pivot must read it, not
+    `worldCenter` (snapping design sections 3 and 4.2).
+
     Rings carry `frontPoints`, the runs of projected points on the
     camera side of the ring centre, and `frontWorld`, those points in
     world space.  Maya hides the back half of each ring so the three
@@ -110,7 +115,8 @@ class Handle(object):
 
     def __init__(self, name, kind, axisIndex, points, worldAxis,
                  worldLength, color, center, grabbable=True,
-                 worldCenter=None, worldCenterScreen=None, worldNormal=None,
+                 worldCenter=None, worldOrigin=None,
+                 worldCenterScreen=None, worldNormal=None,
                  frontPoints=None, frontWorld=None, visible=True,
                  radiusPixels=0.0, sizePixels=0.0):
         self.name = name
@@ -123,6 +129,10 @@ class Handle(object):
         self.center = center
         self.grabbable = grabbable
         self.worldCenter = worldCenter
+        # Older callers pass no origin, so it defaults to the centre;
+        # BuildHandles always stamps the true gizmo origin instead.
+        self.worldOrigin = (worldOrigin if worldOrigin is not None
+                            else worldCenter)
         self.worldCenterScreen = worldCenterScreen
         self.worldNormal = worldNormal
         self.frontPoints = frontPoints if frontPoints is not None else []
@@ -149,6 +159,23 @@ def ProjectPoint(viewProj, viewport, p):
     ndcX, ndcY = clip[0] / clip[3], clip[1] / clip[3]
     return ((ndcX + 1.0) * 0.5 * viewport[2] + viewport[0],
             (1.0 - ndcY) * 0.5 * viewport[3] + viewport[1])
+
+
+def ProjectPointWithW(viewProj, viewport, p):
+    """World -> ((x, y) or None, clip-space w).
+
+    The screen half is ProjectPoint unchanged; the w half is what the
+    perspective-correct edge parameter divides by (snapping design
+    section 3), so it is returned even when the point is behind the
+    eye and the screen half is None.
+    """
+    clip = Gf.Vec4d(p[0], p[1], p[2], 1.0) * viewProj
+    w = clip[3]
+    if w <= 1e-9:
+        return None, w
+    ndcX, ndcY = clip[0] / w, clip[1] / w
+    return (((ndcX + 1.0) * 0.5 * viewport[2] + viewport[0],
+             (1.0 - ndcY) * 0.5 * viewport[3] + viewport[1]), w)
 
 
 def CameraBasis(camera):
@@ -283,6 +310,7 @@ def BuildHandles(tool, gizmoMatrix, camera, viewport, pixelRatio,
     def _Make(name, kind, axisIndex, points, worldAxis, worldLength, color,
               **extra):
         extra.setdefault("worldCenter", origin)
+        extra.setdefault("worldOrigin", origin)
         extra.setdefault("worldCenterScreen", center)
         extra.setdefault("sizePixels", pixels)
         return Handle(name, kind, axisIndex, points, worldAxis, worldLength,
@@ -368,15 +396,22 @@ def BuildHandles(tool, gizmoMatrix, camera, viewport, pixelRatio,
 
 
 def _PointSegmentDistance(p, a, b):
+    """Screen distance to a segment, plus the clamped foot parameter.
+
+    The t half is what the snap edge parameter inverts with the
+    endpoints' clip w (snapping design section 3); callers needing
+    only the distance take [0].
+    """
     ax, ay = a
     bx, by = b
     dx, dy = bx - ax, by - ay
     length2 = dx * dx + dy * dy
     if length2 < 1e-12:
-        return math.hypot(p[0] - ax, p[1] - ay)
+        return math.hypot(p[0] - ax, p[1] - ay), 0.0
     t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / length2
     t = max(0.0, min(1.0, t))
-    return math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy))
+    return (math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy)),
+            t)
 
 
 def _PointInPolygon(p, points):
@@ -401,7 +436,7 @@ def _PolylineDistance(p, points, closed):
         return math.hypot(p[0] - points[0][0], p[1] - points[0][1])
     last = len(points) if closed else len(points) - 1
     return min(_PointSegmentDistance(p, points[i],
-                                     points[(i + 1) % len(points)])
+                                     points[(i + 1) % len(points)])[0]
                for i in range(last))
 
 
@@ -412,7 +447,8 @@ def _HandleDistance(handle, p):
         return math.hypot(p[0] - handle.points[0][0],
                           p[1] - handle.points[0][1])
     if kind == "axis":
-        return _PointSegmentDistance(p, handle.points[0], handle.points[1])
+        return _PointSegmentDistance(
+            p, handle.points[0], handle.points[1])[0]
     if kind == "plane":
         if _PointInPolygon(p, handle.points):
             return 0.0

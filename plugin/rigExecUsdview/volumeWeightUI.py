@@ -544,13 +544,15 @@ def ComputeScrubScale(prim, time=None):
     Returns the stage-unit scale a scrub on this weight's parameters
     should be measured against.
 
-    It has to be the WEIGHTED GEOMETRY's size, not the weight prim's: a
-    volume weight is a UsdGeomBoundable with no authored extent and no
-    registered extent computation, so ComputeCentreAndSize on the weight
-    itself always falls through to the 1.0 fallback.  Deriving the
-    sensitivity from that made every scrub 0.005 units per pixel
-    regardless of scene scale -- roughly 4000 pixels of drag to double a
-    falloff radius on a character measured in tens of units.
+    Prefer the WEIGHTED GEOMETRY's size, not the weight guide's. Volume
+    weights now have a registered authored-fallback extent so they remain
+    framable before evaluation, but that extent changes with the very
+    falloff/scale parameter being scrubbed. Feeding it back into sensitivity
+    would make one continuous drag accelerate as the guide grows. The target
+    instead supplies a stable scene scale -- and avoids the old resource-only
+    fallback of 0.005 units per pixel on characters measured in tens of
+    units. An unbound weight still falls back to its own guide size (or 1.0
+    when no compute-extent plugin is available).
     """
     target = GetWeightTargetPrim(prim)
     if target is not None:

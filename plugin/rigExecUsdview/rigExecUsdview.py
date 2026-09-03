@@ -102,9 +102,13 @@ class RigExecUsdviewContainer(PluginContainer):
         self._active = False
         self._rigPaths = []
         self._cachedStage = None
+        self._stageNoticeKey = None
+        self._activating = False
         self._undoStack = None
         self._viewportTools = None
         self._viewportToolsFailed = False
+        self._viewCube = None
+        self._viewCubeFailed = False
 
         # Release the stage BEFORE the interpreter finalizes.
         #
@@ -154,9 +158,18 @@ class RigExecUsdviewContainer(PluginContainer):
             "Viewport Tools",
             lambda api: self._ToggleViewportTools())
 
+        # The Maya-style view cube. Same lazy-import reasoning again;
+        # the menu item toggles it rather than opening a window,
+        # because the cube lives inside the viewport.
+        self._viewCubeCommand = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.viewCube",
+            "View Cube",
+            lambda api: self._ToggleViewCube())
+
         dataModel = self._api.dataModel
-        # Plugins load before the stage opens: activate on stage
-        # replacement and re-evaluate on every timeline change.
+        # Plugins load before the stage opens: bind stage observation on
+        # replacement, discover roots added later by authoring, and
+        # re-evaluate on every timeline change.
         dataModel.signalStageReplaced.connect(self._OnStageReplaced)
         dataModel.currentFrameChanged.connect(self._OnFrameChanged)
         # The stage may already be present when the plugin loads late.
@@ -170,6 +183,7 @@ class RigExecUsdviewContainer(PluginContainer):
         menu.addItem(self._curvenets)
         menu.addItem(self._graphEditor)
         menu.addItem(self._viewportToolsCommand)
+        menu.addItem(self._viewCubeCommand)
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring
@@ -320,6 +334,45 @@ class RigExecUsdviewContainer(PluginContainer):
         controller.SetVisible(not controller.IsVisible())
         return controller
 
+    def _EnsureViewCube(self):
+        """
+        Install the view cube on the stage view, once it exists.
+
+        Plugins load BEFORE the stage view is built, so this is driven
+        off stage replacement rather than off registerPlugins. Returns
+        None in any context without Qt or without a viewport, which is
+        how the headless tests get away with loading this container.
+        """
+        if self._viewCube is not None:
+            return self._viewCube
+        if self._viewCubeFailed:
+            # A headless or Qt-less session fails identically on every
+            # stage replacement; warning each time would bury the one
+            # message that mattered.
+            return None
+        try:
+            try:
+                import viewCubeUI
+            except ImportError:
+                sys.path.insert(
+                    0, os.path.dirname(os.path.abspath(__file__)))
+                import viewCubeUI
+            self._viewCube = viewCubeUI.InstallViewCube(self._api)
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: view cube unavailable: %s"
+                    % error)
+            self._viewCube = None
+            self._viewCubeFailed = True
+        return self._viewCube
+
+    def _ToggleViewCube(self):
+        """Menu item: show or hide the view cube."""
+        controller = self._EnsureViewCube()
+        if controller is None:
+            return None
+        controller.SetVisible(not controller.IsVisible())
+        return controller
+
     def _FrameValue(self, frame=None):
         """
         \\p frame as a plain double, defaulting to the data model's
@@ -357,10 +410,95 @@ class RigExecUsdviewContainer(PluginContainer):
         except Exception:
             pass
         self._active = False
+        self._RevokeStageNotice()
         try:
             self._ReleaseCachedStage()
         except Exception:
             pass
+
+    def _RevokeStageNotice(self):
+        """Stop observing edits on the previously opened stage."""
+        key = getattr(self, "_stageNoticeKey", None)
+        if key is not None:
+            try:
+                key.Revoke()
+            except Exception:
+                pass
+        self._stageNoticeKey = None
+
+    def _ObserveStage(self, stage):
+        """Observe the stage even when it does not contain a rig yet."""
+        self._RevokeStageNotice()
+        if stage:
+            self._stageNoticeKey = Tf.Notice.Register(
+                Usd.Notice.ObjectsChanged,
+                self._OnStageObjectsChanged,
+                stage)
+
+    @staticmethod
+    def _FindRigPaths(stage):
+        if not stage:
+            return []
+        return sorted(
+            (prim.GetPath() for prim in stage.Traverse()
+             if prim.GetTypeName() == "RigExecRoot"),
+            key=lambda path: str(path))
+
+    @staticmethod
+    def _RootsHaveActivationCandidates(stage, rigPaths):
+        """Whether every live-authored root has something it can publish.
+
+        Defining a root, its grouping scopes, and its first output produces
+        separate synchronous USD notices.  Waiting through the first two
+        avoids knowingly compiling an empty intermediate rig (and warning the
+        artist about the perfectly ordinary act of building it).  This is
+        only a readiness hint: native Compile remains the authority and still
+        validates the complete composed contract.
+        """
+        outputTypes = {
+            "RigExecControl", "RigExecJoint",
+            "RigExecSphereWeight", "RigExecPlaneWeight",
+            "RigExecCurveWeight",
+        }
+        for rigPath in rigPaths:
+            root = stage.GetPrimAtPath(rigPath)
+            moversPath = rigPath.AppendChild("Movers")
+            found = False
+            for prim in Usd.PrimRange(root):
+                if prim.GetTypeName() in outputTypes:
+                    found = True
+                    break
+                if (prim.GetPath().HasPrefix(moversPath) and
+                        prim.GetRelationship("rigExec:moves")):
+                    found = True
+                    break
+            if not found:
+                return False
+        return True
+
+    def _OnStageObjectsChanged(self, notice, stage):
+        """Activate when a rig is authored into an already-open stage.
+
+        The no-argument launcher opens a rootless blank layer.  A stage-
+        replacement-only plugin never sees the RigExecRoot subsequently
+        created in that layer, so its joints cannot enter the Hydra chain
+        until the file is reopened or the user manually reactivates.
+
+        Retry while roots exist but activation is still down.  Creating the
+        root itself is normally one edit and creating its first output is a
+        later edit: the first compile is correctly rejected as empty, and the
+        second notice is what makes the now-valid rig start drawing.
+        """
+        if getattr(self, "_activating", False):
+            return
+        rigPaths = self._FindRigPaths(stage)
+        if not (rigPaths != self._rigPaths or
+                (rigPaths and not self._active)):
+            return
+        if rigPaths and not self._RootsHaveActivationCandidates(
+                stage, rigPaths):
+            return
+        self._ActivateCurrentStage()
 
     def _ReleaseCachedStage(self, liveStage=None):
         """
@@ -393,57 +531,71 @@ class RigExecUsdviewContainer(PluginContainer):
         self._cachedStage = None
 
     def _OnStageReplaced(self):
-        # The stage view exists by now (plugins load before it is built),
-        # so this is where the gizmo toolbar can attach; it re-resolves
-        # its target on the selection and edit notices that follow.
+        self._ObserveStage(self._api.dataModel.stage)
+        self._ActivateCurrentStage()
+        # After activation, so the first gizmo target is resolved
+        # against a stage the evaluator has already published.
         self._EnsureViewportTools()
-        stage = self._api.dataModel.stage
-        self._active = False
-        self._rigPaths = []
-        # A scene-index store outlives a stage replacement.  Clear the old
-        # activation before inspecting or attempting the new stage so a
-        # no-rig stage, load failure, or compile failure cannot inherit a
-        # previous stage's path-addressed deformation.
-        #
-        # Deactivate BEFORE erasing: the imaging registry resolves the
-        # stage out of the cache, so pulling it first would leave the
-        # registry holding a handle to something it can no longer look up.
-        if self._lib:
-            self._lib.RigExecImaging_Deactivate()
-        self._ReleaseCachedStage(stage)
-        if not stage:
-            return
-        # An empty path passed to the C surface means every RigExecRoot on the
-        # stage.  Keep the paths here for diagnostics/UI rather than silently
-        # selecting the first character.
-        for prim in stage.Traverse():
-            if prim.GetTypeName() == "RigExecRoot":
-                self._rigPaths.append(prim.GetPath())
-        if not self._rigPaths:
-            return
-        if self._EnsureLibrary() is None:
-            return
+        self._EnsureViewCube()
 
-        cacheId = UsdUtils.StageCache.Get().Insert(stage).ToLongInt()
-        self._cachedStage = stage
-        status = self._lib.RigExecImaging_Activate(
-            cacheId, b"", self._FrameValue())
-        if status == 0:
-            self._active = True
-            # RigExec controls/joints/guides are purpose=guide — Storm only draws
-            # them when the viewer has guide purpose enabled.  Auto-enable it
-            # the moment a RigExecRoot is found so a fresh launch shows the rig.
-            try:
-                vs = self._api.dataModel.viewSettings
-                if not vs.displayGuide:
-                    vs.displayGuide = True
-            except Exception:
-                pass
-        else:
-            Tf.Warn("rigExecUsdview: activation failed (%d)" % status)
-            # The cache is the current stage's strong owner. Retain it so a
-            # malformed rig disables RigExec without invalidating usdview's
-            # stage; replacement or _Shutdown performs the eventual erase.
+    def _ActivateCurrentStage(self):
+        stage = self._api.dataModel.stage
+        if getattr(self, "_activating", False):
+            return
+        self._activating = True
+        try:
+            self._active = False
+            self._rigPaths = []
+            # A scene-index store outlives a stage replacement.  Clear the old
+            # activation before inspecting or attempting the new stage so a
+            # no-rig stage, load failure, or compile failure cannot inherit a
+            # previous stage's path-addressed deformation.
+            #
+            # Deactivate BEFORE erasing: the imaging registry resolves the
+            # stage out of the cache, so pulling it first would leave the
+            # registry holding a handle to something it can no longer look up.
+            if self._lib:
+                self._lib.RigExecImaging_Deactivate()
+            self._ReleaseCachedStage(stage)
+            if not stage:
+                return
+            # An empty path passed to the C surface means every RigExecRoot on
+            # the stage. Keep the paths here for diagnostics/UI rather than
+            # silently selecting the first character.
+            self._rigPaths = self._FindRigPaths(stage)
+            if not self._rigPaths:
+                return
+            if self._EnsureLibrary() is None:
+                return
+
+            cacheId = UsdUtils.StageCache.Get().Insert(stage).ToLongInt()
+            self._cachedStage = stage
+            status = self._lib.RigExecImaging_Activate(
+                cacheId, b"", self._FrameValue())
+            if status == 0:
+                self._active = True
+                # Activate() installs the native evaluator's stage notice.
+                # Re-register ours afterwards so root removal/addition reaches
+                # this root-set guard before the evaluator tries to recompile
+                # a session whose root has just disappeared. Ordinary edits
+                # fall through here and are then handled by the native notice.
+                self._ObserveStage(stage)
+                # RigExec controls/joints/guides are purpose=guide — Storm only
+                # draws them when the viewer has guide purpose enabled.
+                try:
+                    vs = self._api.dataModel.viewSettings
+                    if not vs.displayGuide:
+                        vs.displayGuide = True
+                except Exception:
+                    pass
+            else:
+                Tf.Warn("rigExecUsdview: activation failed (%d)" % status)
+                # The cache is the current stage's strong owner. Retain it so
+                # a malformed rig disables RigExec without invalidating
+                # usdview's stage; replacement or _Shutdown eventually erases
+                # it. A later edit notice retries the compile.
+        finally:
+            self._activating = False
 
     def _OnFrameChanged(self, frame):
         # The SIGNAL's frame, never dataModel.currentFrame -- see

@@ -264,11 +264,19 @@ def AuthorKnot(spline, time, value):
     value -- re-keying a channel the artist has already shaped must not
     silently throw that shape away.
 
+    Value-only on re-key: a dual knot's preValue (arrival) is left
+    alone, so a viewport gizmo drag reshapes the departure the artist
+    sees at that frame without rewriting history. Use SetKeyPreValues
+    to shape the arrival, ClearDualKnots to go back to single.
+
     This is the one place new knots are born, so gizmoMath.SetAnimated
     calls it too and a gizmo drag and a graph insert produce the same
     key.
     """
     frame = float(time)
+    if not math.isfinite(frame) or not math.isfinite(float(value)):
+        raise ValueError("AuthorKnot requires finite time and value: %r, %r"
+                         % (time, value))
     knot = spline.GetKnot(frame)
     if knot is None:
         knot = Ts.Knot(typeName=spline.GetValueTypeName(), time=frame,
@@ -291,6 +299,8 @@ def SnapTime(time):
     way for the same reason.
     """
     value = float(time)
+    if not math.isfinite(value):
+        raise ValueError("SnapTime requires a finite time: %r" % (time,))
     return math.copysign(math.floor(abs(value) + 0.5), value)
 
 
@@ -419,8 +429,23 @@ def MoveKeys(spline, times, dt, dv, snapFrames=True):
     Times that name no key are ignored: the canvas can ask to move a
     selection that a concurrent stage change has already invalidated.
     """
+    if not math.isfinite(float(dt)) or not math.isfinite(float(dv)):
+        raise ValueError("MoveKeys requires finite dt and dv: %r, %r"
+                         % (dt, dv))
     knots = spline.GetKnots()
-    moving = sorted(t for t in set(float(x) for x in times) if t in knots)
+    # Non-finite times are ignored rather than fatal, but they must not
+    # be converted to float NaN keys that pollute the moving set.
+    moving = []
+    for raw in set(times):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        if value in knots:
+            moving.append(value)
+    moving = sorted(moving)
     if not moving:
         return []
     movingSet = set(moving)
@@ -477,19 +502,90 @@ def SetKeyValues(spline, times, value):
     selection and writes it to all of them (spec 2.4). Unlike MoveKeys'
     `dv` this is not a delta, so a selection with different values ends
     up flat. Times that name no key are ignored, as everywhere else.
+
+    Value-only: a dual knot's preValue (the arrival square) is left
+    alone, so Value shapes the departure and PreValue shapes the
+    arrival independently. A key drag (MoveKeys `dv`) moves BOTH by the
+    delta, translating the discontinuity as a unit.
     """
+    if not math.isfinite(float(value)):
+        raise ValueError("SetKeyValues requires a finite value: %r" % (value,))
     knots = spline.GetKnots()
     changed = []
-    for time in sorted(set(float(t) for t in times)):
+    for raw in set(times):
+        try:
+            time = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(time):
+            continue
         if time not in knots:
             continue
         knot = spline.GetKnot(time)
-        if knot.IsDualValued():
-            knot.SetPreValue(value)
         knot.SetValue(value)
         spline.SetKnot(knot)
         changed.append(time)
-    return changed
+    return sorted(changed)
+
+
+def SetKeyPreValues(spline, times, preValue):
+    """
+    Give every key in `times` the ABSOLUTE `preValue`; return times set.
+
+    The graph editor's PreValue field: the arrival square of a dual
+    knot. Calling it on a single knot MAKES it dual via
+    Ts.Knot.SetPreValue (verified: a fresh knot reports
+    IsDualValued False, True after SetPreValue). Times that name no key
+    are ignored, as everywhere else.
+    """
+    if not math.isfinite(float(preValue)):
+        raise ValueError("SetKeyPreValues requires a finite preValue: %r"
+                         % (preValue,))
+    knots = spline.GetKnots()
+    changed = []
+    for raw in set(times):
+        try:
+            time = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(time):
+            continue
+        if time not in knots:
+            continue
+        knot = spline.GetKnot(time)
+        knot.SetPreValue(preValue)
+        spline.SetKnot(knot)
+        changed.append(time)
+    return sorted(changed)
+
+
+def ClearDualKnots(spline, times):
+    """
+    Make the keys at `times` single-valued again; return times cleared.
+
+    Ts.Knot.ClearPreValue drops the arrival square: a dual knot whose
+    pre and value happen to agree is STILL dual until this runs
+    (verified: SetPreValue(value) keeps IsDualValued True). Times that
+    name no key, or name an already-single key, are ignored.
+    """
+    knots = spline.GetKnots()
+    cleared = []
+    for raw in set(times):
+        try:
+            time = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(time):
+            continue
+        if time not in knots:
+            continue
+        knot = spline.GetKnot(time)
+        if not knot.IsDualValued():
+            continue
+        knot.ClearPreValue()
+        spline.SetKnot(knot)
+        cleared.append(time)
+    return sorted(cleared)
 
 
 def SetKeyTimes(spline, times, time):
@@ -512,11 +608,23 @@ def SetKeyTimes(spline, times, time):
     snapping, because a numeric field IS the exact value.
     """
     knots = spline.GetKnots()
-    selected = sorted(t for t in set(float(t) for t in times)
-                      if t in knots)
+    selected = []
+    for raw in set(times):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        if value in knots:
+            selected.append(value)
+    selected = sorted(selected)
     if not selected:
         return False
     target = float(time)
+    if not math.isfinite(target):
+        raise ValueError("SetKeyTimes requires a finite target time: %r"
+                         % (time,))
     if target in knots and target not in set(selected):
         return False
     MoveKeys(spline, selected, target - selected[0], 0.0,
@@ -539,6 +647,8 @@ def InsertKey(spline, time):
     with the attribute's resolved value instead.
     """
     frame = float(time)
+    if not math.isfinite(frame):
+        raise ValueError("InsertKey requires a finite time: %r" % (time,))
     knot = spline.GetKnot(frame)
     if knot is not None:
         return knot
@@ -558,11 +668,17 @@ def DeleteKeys(spline, times):
     """
     knots = spline.GetKnots()
     removed = []
-    for time in sorted(set(float(t) for t in times)):
+    for raw in set(times):
+        try:
+            time = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(time):
+            continue
         if time in knots:
             spline.RemoveKnot(time)
             removed.append(time)
-    return removed
+    return sorted(removed)
 
 
 TANGENT_AUTO = "auto"
@@ -644,7 +760,17 @@ def SetTangentType(spline, times, mode, side=SIDE_BOTH):
     if side not in (SIDE_IN, SIDE_OUT, SIDE_BOTH):
         raise ValueError("unknown tangent side %r" % (side,))
 
-    for time in sorted(set(float(t) for t in times)):
+    # Non-finite times are ignored, matching DeleteKeys/MoveKeys.
+    cleaned = []
+    for raw in set(times):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        cleaned.append(value)
+    for time in sorted(cleaned):
         if spline.GetKnot(time) is None:
             continue
         if mode == TANGENT_STEP:
@@ -687,7 +813,17 @@ def SetTangent(spline, time, side, slope, width=None):
     """
     if side not in (SIDE_IN, SIDE_OUT, SIDE_BOTH):
         raise ValueError("unknown tangent side %r" % (side,))
-    knot = spline.GetKnot(float(time))
+    if not math.isfinite(float(slope)):
+        raise ValueError("SetTangent requires a finite slope: %r" % (slope,))
+    if width is not None and not math.isfinite(float(width)):
+        raise ValueError("SetTangent requires a finite width: %r" % (width,))
+    try:
+        time = float(time)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(time):
+        return None
+    knot = spline.GetKnot(time)
     if knot is None:
         return None
     if side in (SIDE_IN, SIDE_BOTH):
@@ -716,7 +852,13 @@ def BreakTangents(spline, times):
     the pair is broken, because the two sides still agree at this moment
     and nothing in the spline would otherwise say so (see IsUnified).
     """
-    for time in sorted(set(float(t) for t in times)):
+    for raw in set(times):
+        try:
+            time = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(time):
+            continue
         knot = spline.GetKnot(time)
         if knot is None:
             continue
@@ -740,7 +882,13 @@ def UnifyTangents(spline, times):
     and unifying one automatic side with one dragged side has to keep the
     dragged slope, which only Custom can hold.
     """
-    for time in sorted(set(float(t) for t in times)):
+    for raw in set(times):
+        try:
+            time = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(time):
+            continue
         knot = spline.GetKnot(time)
         if knot is None:
             continue
@@ -753,6 +901,52 @@ def UnifyTangents(spline, times):
         knot.SetPostTanAlgorithm(Ts.TangentAlgorithmCustom)
         _MarkBroken(knot, False)
         spline.SetKnot(knot)
+
+
+# Ts curve types (ts/types.h:101-105): Bezier has free tangent widths,
+# Hermite is like Bezier but with fixed tangent width (1/3 of the
+# segment). InterpCurve segments evaluate as one or the other depending
+# on the spline's curve type, so switching reshapes weighted curves but
+# leaves flat/auto curves near-identical.
+CURVE_BEZIER = "bezier"
+CURVE_HERMITE = "hermite"
+CURVE_TYPES = (CURVE_BEZIER, CURVE_HERMITE)
+
+CURVE_TYPE_MODES = {
+    CURVE_BEZIER: Ts.CurveTypeBezier,
+    CURVE_HERMITE: Ts.CurveTypeHermite,
+}
+
+CURVE_TYPE_NAMES = dict((mode, name)
+                        for name, mode in CURVE_TYPE_MODES.items())
+
+
+def CurveTypeName(spline):
+    """Our name ("bezier"/"hermite") for `spline`'s Ts curve type."""
+    if spline is None:
+        return None
+    try:
+        mode = spline.GetCurveType()
+    except Exception:
+        return None
+    return CURVE_TYPE_NAMES.get(mode)
+
+
+def SetCurveType(spline, name):
+    """
+    Set `spline`'s curve type from our name, preserving all knots.
+
+    `bezier` is Ts's default (free tangent widths); `hermite` fixes the
+    width, so a weighted Bezier reshapes on switch while flat curves
+    barely move. Unknown names raise ValueError. Knots, tangents,
+    interpolations and extrapolations are untouched -- only the segment
+    evaluator changes.
+    """
+    if name not in CURVE_TYPE_MODES:
+        raise ValueError(
+            "unknown curve type %r; expected one of %s"
+            % (name, ", ".join(CURVE_TYPES)))
+    spline.SetCurveType(CURVE_TYPE_MODES[name])
 
 
 # Maya's Infinity menu -> TsExtrapMode. Verified against

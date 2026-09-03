@@ -606,11 +606,14 @@ def _SnapTranslation(base, delta, step, absolute):
     base + delta with Step Snap applied where the channel values live.
 
     Relative (Maya's `J` hold) quantises the DELTA, so a drag advances in
-    whole steps from wherever it started; absolute (Maya's `X` grid hold,
-    move only) quantises the RESULT, so the value lands on the grid
-    however the drag started. Snapping the WORLD delta instead would put
-    the channels off the grid whenever the channel frame is rotated,
-    which is the whole reason this lives here and not in the controller.
+    whole steps from wherever it started; absolute quantises the RESULT,
+    so the channel value lands on the grid however the drag started.
+    Snapping the WORLD delta instead would put the channels off the grid
+    whenever the channel frame is rotated, which is the whole reason this
+    lives here and not in the controller. No UI binds the absolute form
+    any more: the world grid goes through gizmoSnap.GridPoint and a plain
+    ApplyTranslate with no keyword (snapping design, sections 1-2), and
+    this parameter stays only because it is still correct and tested.
     """
     if not step:
         return [base[i] + delta[i] for i in range(3)]

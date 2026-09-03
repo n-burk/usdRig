@@ -30,6 +30,17 @@ ORIENT_OBJECT = "object"
 ORIENT_PARENT = "parent"
 ORIENT_GIMBAL = "gimbal"
 
+# Maya-style snap modes for the viewport gizmo (snapping design
+# section 1). The tokens alone let gizmoSnap re-export one spelling;
+# the labels, per-tool choices, sticky field and grid size below are
+# the Task 2 half, added together so no _FIELDS entry lacks its
+# MayaDefaults default (a KeyError in every ToolSettings).
+SNAP_OFF = "off"
+SNAP_GRID = "grid"
+SNAP_POINT = "point"
+SNAP_EDGE = "edge"
+SNAP_SURFACE = "surface"
+
 _ORIENT_LABELS = {
     ORIENT_WORLD: "World",
     ORIENT_OBJECT: "Object",
@@ -43,6 +54,23 @@ _ORIENT_CHOICES = {
     TOOL_ROTATE: (ORIENT_OBJECT, ORIENT_WORLD, ORIENT_GIMBAL),
 }
 
+_SNAP_LABELS = {
+    SNAP_OFF: "Off",
+    SNAP_GRID: "Grid",
+    SNAP_POINT: "Point",
+    SNAP_EDGE: "Edge",
+    SNAP_SURFACE: "Surface",
+}
+
+# Move offers every mode; Rotate offers off and the absolute degree
+# grid; Scale and Select are absent so SnapChoices returns () for
+# them, exactly as _ORIENT_CHOICES omits TOOL_SELECT (spec 4.5).
+_SNAP_CHOICES = {
+    TOOL_TRANSLATE: (SNAP_OFF, SNAP_GRID, SNAP_POINT, SNAP_EDGE,
+                     SNAP_SURFACE),
+    TOOL_ROTATE: (SNAP_OFF, SNAP_GRID),
+}
+
 # The manipulator's on-screen size, in LOGICAL pixels (design spec 8.1).
 # The bounds exist because '+' / '-' scale by 10% without an operator
 # watching: an unbounded shrink walks the handles down to a point that
@@ -51,12 +79,20 @@ MANIPULATOR_SIZE_DEFAULT = 90.0
 MANIPULATOR_SIZE_MIN = 20.0
 MANIPULATOR_SIZE_MAX = 400.0
 
+# The world grid spacing for Move snapping, in world units (snapping
+# design 1.8 and 4.5). A session-wide GizmoSettings value beside
+# manipulatorSize, not a per-tool field, so Reset(tool) leaves the
+# grid where it was: resetting Move must not move the world grid.
+GRID_SIZE_DEFAULT = 1.0
+GRID_SIZE_MIN = 1e-4
+GRID_SIZE_MAX = 1e5
+
 # The fields every ToolSettings carries. Every tool carries all of them
 # even where Maya shows only some (Free Rotate is a Rotate-only row),
 # so the drag code can read settings.freeRotate without first asking
 # which tool it belongs to.
 _FIELDS = ("orientation", "stepSnap", "stepSize", "freeRotate",
-           "preventNegativeScale", "preserveChildren")
+           "preventNegativeScale", "preserveChildren", "snapMode")
 
 
 def OrientationLabel(orientation):
@@ -71,6 +107,21 @@ def OrientationChoices(tool):
     the panel can simply omit the row.
     """
     return _ORIENT_CHOICES.get(tool, ())
+
+
+def SnapLabel(snapMode):
+    """The menu text for a snap token."""
+    return _SNAP_LABELS.get(snapMode, str(snapMode).title())
+
+
+def SnapChoices(tool):
+    """
+    The Snap To entries offered for `tool`, in sticky-menu order
+    (the default first). Move offers all five; Rotate offers off and
+    grid; Scale and Select offer none, so the panel omits both snap
+    rows there rather than building an empty combo.
+    """
+    return _SNAP_CHOICES.get(tool, ())
 
 
 class ToolSettings(object):
@@ -141,6 +192,7 @@ def MayaDefaults(tool, owner=None):
         "freeRotate": True,
         "preventNegativeScale": False,
         "preserveChildren": False,
+        "snapMode": SNAP_OFF,
     }
     return ToolSettings(tool, owner, **values)
 
@@ -159,12 +211,21 @@ class GizmoSettings(object):
         object.__setattr__(
             self, "_tools", dict((t, MayaDefaults(t, self)) for t in TOOLS))
         object.__setattr__(self, "manipulatorSize", MANIPULATOR_SIZE_DEFAULT)
+        object.__setattr__(self, "gridSize", GRID_SIZE_DEFAULT)
 
     def __setattr__(self, name, value):
         if name == "manipulatorSize":
             value = max(MANIPULATOR_SIZE_MIN,
                         min(MANIPULATOR_SIZE_MAX, float(value)))
             if value == self.manipulatorSize:
+                return
+            object.__setattr__(self, name, value)
+            self.Notify()
+            return
+        if name == "gridSize":
+            value = max(GRID_SIZE_MIN,
+                        min(GRID_SIZE_MAX, float(value)))
+            if value == self.gridSize:
                 return
             object.__setattr__(self, name, value)
             self.Notify()

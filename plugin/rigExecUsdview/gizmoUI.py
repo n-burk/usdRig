@@ -43,6 +43,12 @@
 #         means anything WHILE dragging, so a live drag claims it in
 #         ShortcutOverride and the rest of the time J still toggles the
 #         framed view.
+#   C/V -- usdview's Auto Compute Clipping Planes and Show USD
+#         Validation (ordinary window shortcuts, application-wide).
+#         Same sharing rule as J: a live drag claims them in
+#         ShortcutOverride wherever the cursor is, and outside a drag
+#         only the Move tool with a target arms them; everywhere else
+#         they stay usdview's (toolbar spec 8.5).
 #   Escape -- appEventFilter.py:113 swallows every Escape KeyPress to
 #         reset focus from the mouse position, so a KeyPress for it
 #         never reaches the view. Same treatment as J: a live drag
@@ -64,7 +70,7 @@ import math
 import os
 import sys
 
-from pxr import Gf, Tf, Usd
+from pxr import Gf, Tf, Usd, UsdGeom
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
@@ -79,6 +85,7 @@ try:
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
+    import gizmoSnap
     import rigExecUndo
 except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -86,6 +93,7 @@ except ImportError:                    # loader that did not add our dir
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
+    import gizmoSnap
     import rigExecUndo
 
 
@@ -128,6 +136,13 @@ SPHERE_OPACITY = 0.5
 # because the silhouette lands exactly on the axis ring of the same
 # radius and is covered by it whenever that ring faces the camera.
 SPHERE_FILL_OPACITY = 0.30
+
+# The snap candidate marker: orange reads against the axis primaries,
+# the selection yellow and the pale hover highlight alike, so the
+# landing preview never hides inside the manipulator's own colours.
+COLOR_SNAP = (1.0, 0.55, 0.1)
+# Opacity of the leader from the grabbed handle to the candidate.
+LEADER_OPACITY = 0.35
 
 # An arrowhead this many times its base radius long, which is the
 # proportion Maya's move cones use.
@@ -236,6 +251,7 @@ class GizmoOverlay(QtWidgets.QWidget):
             for handle in handles:
                 if handle.kind == "center":
                     self._DrawCenter(painter, handle, ratio)
+            self._DrawSnap(painter, ratio)
         finally:
             painter.end()
 
@@ -339,6 +355,39 @@ class GizmoOverlay(QtWidgets.QWidget):
         painter.setPen(pen)
         painter.drawEllipse(point, radius, radius)
 
+    def _DrawSnap(self, painter, ratio):
+        """
+        The snap landing preview: a diamond plus a crosshair, with the
+        kind-specific extra SnapMarker() computed (spec 4.5).
+        """
+        marker = self._controller.SnapMarker()
+        if marker is None:
+            return
+        center, extras, leader = marker
+        pen = QtGui.QPen(_Color(COLOR_SNAP))
+        pen.setWidthF(LINE_WIDTH)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.NoBrush)
+        size, arm = 6.0, 11.0
+        painter.drawPolygon(QtGui.QPolygonF([
+            QtCore.QPointF(center.x(), center.y() - size),
+            QtCore.QPointF(center.x() + size, center.y()),
+            QtCore.QPointF(center.x(), center.y() + size),
+            QtCore.QPointF(center.x() - size, center.y())]))
+        painter.drawLine(QtCore.QPointF(center.x() - arm, center.y()),
+                         QtCore.QPointF(center.x() + arm, center.y()))
+        painter.drawLine(QtCore.QPointF(center.x(), center.y() - arm),
+                         QtCore.QPointF(center.x(), center.y() + arm))
+        for start, end in extras:
+            painter.drawLine(start, end)
+        if leader is not None:
+            faint = QtGui.QPen(_Color(COLOR_SNAP, LEADER_OPACITY))
+            faint.setWidthF(1.0)
+            painter.setPen(faint)
+            painter.drawLine(leader, center)
+
     def _DrawPie(self, painter, ratio):
         """
         Maya's rotation-amount wedge, from where the ring was grabbed to
@@ -441,6 +490,9 @@ class ViewportToolbar(QtWidgets.QToolBar):
         self.addSeparator()
         self._BuildWrite()
         self.addSeparator()
+        self._BuildSnap()
+        # No separator of its own: Snap shares this one with Undo,
+        # saving 7 px the default-width row cannot spare.
         self._BuildUndo()
         self.addSeparator()
         self._BuildSettingsButton()
@@ -481,7 +533,10 @@ class ViewportToolbar(QtWidgets.QToolBar):
                 lambda checked=False, t=tool: self._onTool(t))
 
     def _BuildChannels(self):
-        self.addWidget(QtWidgets.QLabel(" Channels "))
+        # No section label: the row already overflows at usdview's
+        # default viewport width (glFrame 598 logical px), and the
+        # Pose/Pivot tooltips below name the group already. The two
+        # labels cost ~78 px that pushed Undo/Redo into the chevron.
         group = QtActionWidgets.QActionGroup(self)
         group.setExclusive(True)
         tips = {
@@ -500,7 +555,9 @@ class ViewportToolbar(QtWidgets.QToolBar):
                 lambda checked=False, c=channels: self._onChannels(c))
 
     def _BuildWrite(self):
-        self.addWidget(QtWidgets.QLabel(" Write "))
+        # No section label either (see _BuildChannels): the
+        # Animation/Default tooltips carry the meaning, and the
+        # separators still delimit the groups.
         group = QtActionWidgets.QActionGroup(self)
         group.setExclusive(True)
         tips = {
@@ -517,6 +574,48 @@ class ViewportToolbar(QtWidgets.QToolBar):
             self._writeActions[mode] = self._AddChecked(
                 group, label, tips[mode], mode == self._controller.WriteMode(),
                 lambda checked=False, m=mode: self._onWrite(m))
+
+    def _BuildSnap(self):
+        # One button, not four toggles: the row already overflows at
+        # usdview's default viewport width, and no test would catch
+        # that (the end-to-end test resizes wide first). The menu holds
+        # the mutually exclusive modes; the button text names the one
+        # actually in force, holds included.
+        self._snapButton = QtWidgets.QToolButton(self)
+        self._snapButton.setPopupMode(
+            QtWidgets.QToolButton.InstantPopup)
+        self._snapButton.setToolTip(
+            "Where the Move pivot lands: hold X (grid), C (edge) or "
+            "V (point) for one drag, or keep a mode on here. Rotate "
+            "offers Grid on a Gimbal ring only.")
+        self._snapMenu = QtWidgets.QMenu(self._snapButton)
+        group = QtActionWidgets.QActionGroup(self._snapMenu)
+        group.setExclusive(True)
+        self._snapActions = {}
+        for mode in (gizmoSettings.SNAP_OFF, gizmoSettings.SNAP_GRID,
+                     gizmoSettings.SNAP_POINT, gizmoSettings.SNAP_EDGE,
+                     gizmoSettings.SNAP_SURFACE):
+            action = QtActionWidgets.QAction(
+                gizmoSettings.SnapLabel(mode), self._snapMenu)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked=False, m=mode: self._onSnap(m))
+            group.addAction(action)
+            self._snapMenu.addAction(action)
+            self._snapActions[mode] = action
+        self._snapButton.setMenu(self._snapMenu)
+        self.addWidget(self._snapButton)
+        # Pin the width to the widest label ("Snap: Surface"): the
+        # button text shortens to bare "Snap" when off (see
+        # _SyncSnap), and without this the row reflows and Redo drops
+        # into the chevron the moment the artist picks Surface. Sized
+        # from the button's own sizeHint so style padding and the
+        # popup arrow are counted exactly.
+        self._snapButton.setText(
+            "Snap: %s" % gizmoSettings.SnapLabel(
+                gizmoSettings.SNAP_SURFACE))
+        self._snapButton.setMinimumWidth(
+            self._snapButton.sizeHint().width())
 
     def _BuildUndo(self):
         # Qt.ApplicationShortcut so undo works with focus in the prim
@@ -568,6 +667,10 @@ class ViewportToolbar(QtWidgets.QToolBar):
     def _onWrite(self, mode):
         self._controller.SetWriteMode(mode)
 
+    def _onSnap(self, mode):
+        self._controller.settings.For(
+            self._controller.Tool()).snapMode = mode
+
     # -- refresh --------------------------------------------------------
 
     def Sync(self):
@@ -579,6 +682,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
             action.setChecked(channels == controller.Channels())
         for mode, action in self._writeActions.items():
             action.setChecked(mode == controller.WriteMode())
+        self._SyncSnap()
         stack = controller.undoStack
         # Greyed out during a drag as well as when empty: the actions
         # are application shortcuts and would otherwise fire with a
@@ -594,6 +698,23 @@ class ViewportToolbar(QtWidgets.QToolBar):
             if stack.CanRedo()
             else "Nothing to redo (Ctrl+Shift+Z, Shift+Z, Ctrl+Y)")
         self._status.SetStatus(controller.Status())
+
+    def _SyncSnap(self):
+        """Mirror the sticky snap mode onto the Snap: button."""
+        controller = self._controller
+        mode = controller.SnapMode()
+        # Bare "Snap" when off saves 19 px the default-width row
+        # needs; the width stays pinned to "Snap: Surface" (see
+        # _BuildSnap) so arming a mode never reflows the row.
+        self._snapButton.setText(
+            "Snap" if mode == gizmoSettings.SNAP_OFF
+            else "Snap: %s" % gizmoSettings.SnapLabel(mode))
+        choices = gizmoSettings.SnapChoices(controller.Tool())
+        self._snapButton.setEnabled(bool(choices))
+        sticky = controller.settings.For(controller.Tool()).snapMode
+        for snap, action in self._snapActions.items():
+            action.setVisible(snap in choices)
+            action.setChecked(snap == sticky)
 
     def StatusLabel(self):
         """The status row widget (a ViewportStatusBar, not in the bar)."""
@@ -717,6 +838,41 @@ class ToolSettingsPanel(QtWidgets.QWidget):
             self._stepSize.valueChanged.connect(self._onStepSize)
             self._form.addRow("Step Size", self._stepSize)
 
+            snapChoices = gizmoSettings.SnapChoices(tool)
+            if snapChoices:
+                self._snapMode = QtWidgets.QComboBox()
+                self._snapMode.setToolTip(
+                    "Where the pivot lands. Hold X (grid), C (edge) "
+                    "or V (point) for the same thing during one "
+                    "drag.")
+                for choice in snapChoices:
+                    self._snapMode.addItem(
+                        gizmoSettings.SnapLabel(choice), choice)
+                self._snapMode.currentIndexChanged.connect(
+                    self._onSnapMode)
+                self._form.addRow("Snap To", self._snapMode)
+                if gizmoSettings.SNAP_GRID in snapChoices:
+                    self._gridSize = QtWidgets.QDoubleSpinBox()
+                    self._gridSize.setRange(
+                        gizmoSettings.GRID_SIZE_MIN,
+                        gizmoSettings.GRID_SIZE_MAX)
+                    self._gridSize.setDecimals(4)
+                    self._gridSize.setSingleStep(0.5)
+                    self._gridSize.setToolTip(
+                        "World units per grid line for Move grid "
+                        "snapping. Rotate's grid is degrees and uses "
+                        "Step Size instead.")
+                    self._gridSize.valueChanged.connect(
+                        self._onGridSize)
+                    self._form.addRow("Grid Size", self._gridSize)
+            if tool == TOOL_ROTATE and snapChoices:
+                note = QtWidgets.QLabel(
+                    "Point, edge and surface snapping are Move-only. "
+                    "Grid lands the dragged Gimbal ring's channel on "
+                    "a multiple of Step Size.")
+                note.setWordWrap(True)
+                self._form.addRow(note)
+
             if tool == TOOL_ROTATE:
                 self._freeRotate = QtWidgets.QCheckBox("Free Rotate")
                 self._freeRotate.setToolTip(
@@ -781,6 +937,15 @@ class ToolSettingsPanel(QtWidgets.QWidget):
                     self._orientation.setCurrentIndex(index)
                 self._stepSnap.setChecked(bool(settings.stepSnap))
                 self._stepSize.setValue(float(settings.stepSize))
+                snapChoices = gizmoSettings.SnapChoices(self._tool)
+                if snapChoices:
+                    index = self._snapMode.findData(
+                        settings.snapMode)
+                    if index >= 0:
+                        self._snapMode.setCurrentIndex(index)
+                    if gizmoSettings.SNAP_GRID in snapChoices:
+                        self._gridSize.setValue(
+                            float(controller.settings.gridSize))
                 if self._tool == TOOL_ROTATE:
                     self._freeRotate.setChecked(bool(settings.freeRotate))
                 if self._tool == TOOL_SCALE:
@@ -834,6 +999,15 @@ class ToolSettingsPanel(QtWidgets.QWidget):
     def _onStepSize(self, value):
         if not self._updating:
             self._Settings().stepSize = float(value)
+
+    def _onSnapMode(self, index):
+        if self._updating or index < 0:
+            return
+        self._Settings().snapMode = self._snapMode.itemData(index)
+
+    def _onGridSize(self, value):
+        if not self._updating:
+            self._controller.settings.gridSize = float(value)
 
     def _onFreeRotate(self, checked):
         if not self._updating:
@@ -892,6 +1066,14 @@ class ViewportHotkeyFilter(QtCore.QObject):
     def eventFilter(self, obj, event):
         try:
             kind = event.type()
+            if kind == QtCore.QEvent.WindowDeactivate:
+                # Cmd-Tab with a hold down: usdview never sees the
+                # release at all, so drop the holds (and the latch)
+                # here. _ClearHolds is idempotent; the Sync keeps the
+                # Snap: button from naming a hold that is gone.
+                self._controller._ClearHolds()
+                self._controller.toolbar.Sync()
+                return False
             if kind not in (QtCore.QEvent.KeyPress,
                             QtCore.QEvent.KeyRelease,
                             QtCore.QEvent.ShortcutOverride):
@@ -941,6 +1123,23 @@ class GizmoController(QtCore.QObject):
         self._hover = None
         self._holdSnap = False
         self._holdGrid = False
+        self._holdEdge = False
+        self._holdPoint = False
+        self._snapMode = gizmoSettings.SNAP_OFF
+        self._snapReason = ""
+        self._hoverPoint = None
+        self._hoverSnap = None
+        self._hoverSnapKind = None
+        self._hoverPickPoint = None
+        self._hoverNote = ""
+        self._lastSnapNote = ""
+        self._hoverRigStage = None
+        self._hoverRigRoot = None
+        self._hoverRigWritten = frozenset()
+        self._hoverRigWrittenByTarget = frozenset()
+        self._hoverRigAllWritten = False
+        self._hoverRigAllWrittenByTarget = False
+        self._snapGeom = {}
         self._ctrl = False
         self._claimedKey = None
         self._hotkeys = None
@@ -1190,6 +1389,13 @@ class GizmoController(QtCore.QObject):
         """
         stage = self.usdviewApi.stage
         prim = self._FocusPrim() if stage else None
+        # The hover preview resolved against the old target: the next
+        # hover move re-picks. Cleared before toolbar.Sync() below, so
+        # the status never names a stale candidate.
+        self._hoverSnap = None
+        self._hoverSnapKind = None
+        self._hoverPickPoint = None
+        self._hoverNote = ""
         self._warnings = []
         if not stage:
             self._target, self._reason = None, "no stage"
@@ -1375,6 +1581,208 @@ class GizmoController(QtCore.QObject):
                                          drag.angle)
         return polygon, drag.handle.color
 
+    def SnapCandidate(self):
+        """
+        The live snap candidate, or None (spec 4.5).
+
+        The drag's while dragging, the hover preview otherwise. Never
+        published through Handles(): the Select tool asserts
+        HandleScreenPositions() == {}.
+        """
+        if self._drag is not None:
+            return self._drag.snap
+        return self._hoverSnap
+
+    def SnapMarker(self):
+        """
+        (center, extras, leader) for the overlay's snap marker, in
+        LOGICAL pixels, or None when there is no candidate to draw.
+
+        Re-projected from the stored WORLD point on every paint, not
+        from the pixel captured at pick time: a tumble or dolly with
+        no mouse move must carry the marker with the geometry, and
+        the pick-time pixel is stale the moment the camera moves.
+        """
+        candidate = self.SnapCandidate()
+        if candidate is None:
+            return None
+        ratio = self._Ratio()
+        center = self._ProjectLogical(candidate.point, ratio)
+        if center is None:
+            return None
+        screen = (center.x() * ratio, center.y() * ratio)
+        return (center,
+                self._SnapMarkerExtras(candidate, center, ratio),
+                self._SnapMarkerLeader(candidate, ratio, screen))
+
+    def _SnapMarkerExtras(self, candidate, center, ratio):
+        """The kind-specific lines of the snap marker (spec 4.5)."""
+        kind = getattr(candidate, "kind", None)
+        if kind == gizmoSettings.SNAP_SURFACE:
+            normal = Gf.Vec3d(candidate.normal)
+            if normal.GetLength() < 1e-12:
+                return []
+            end = self._ProjectLength(candidate.point, normal,
+                                      18.0, ratio)
+            return [(center, end)] if end is not None else []
+        if kind == gizmoSettings.SNAP_EDGE:
+            lines = []
+            for world in getattr(candidate, "edgeEnds", None) or ():
+                end = self._ProjectLogical(world, ratio)
+                if end is not None:
+                    lines.append((center, end))
+            return lines
+        if kind == gizmoSettings.SNAP_GRID:
+            lines = []
+            for axis in (Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 1, 0),
+                         Gf.Vec3d(0, 0, 1)):
+                end = self._ProjectLength(candidate.point, axis,
+                                          16.0, ratio)
+                if end is not None:
+                    lines.append((center, end))
+            return lines
+        return []
+
+    def _SnapMarkerLeader(self, candidate, ratio, screen):
+        """
+        The grabbed (or hovered) handle's centre, or None when there
+        is none or it already coincides with the candidate: the faint
+        line between the two while they differ (spec 4.5).
+
+        `screen` is the candidate's freshly re-projected PHYSICAL
+        pixel from SnapMarker, not the pick-time one it carries.
+        """
+        start = None
+        if self._drag is not None and self._drag.handle is not None:
+            # The press-time handle's centre is frozen (gizmoDrag.py:
+            # 63-68) while _RebuildHandles reprojects the live pivot
+            # every Translate move, so read the LIVE handle -- the
+            # same lookup the hover branch below already does.
+            live = self._Handle(self._drag.handle.name) \
+                or self._drag.handle
+            start = getattr(live, "center", None)
+        elif self._hover is not None:
+            handle = self._Handle(self._hover)
+            if handle is not None:
+                start = handle.center
+        if start is None:
+            return None
+        if math.hypot(screen[0] - start[0],
+                       screen[1] - start[1]) < 2.0 * ratio:
+            return None
+        return QtCore.QPointF(start[0] / ratio, start[1] / ratio)
+
+    def _ProjectLogical(self, worldPoint, ratio, camera=None,
+                          viewport=None):
+        """A world point as a logical QPointF, or None."""
+        if camera is None or viewport is None:
+            camera, viewport, _ = self._Camera()
+            if camera is None:
+                return None
+        try:
+            screen = gizmoScreen.ProjectPoint(
+                gizmoScreen.ViewProjection(camera), viewport,
+                worldPoint)
+        except Exception:
+            return None
+        if screen is None:
+            return None
+        return QtCore.QPointF(screen[0] / ratio, screen[1] / ratio)
+
+    def _ProjectLength(self, worldPoint, direction, pixels, ratio):
+        """
+        worldPoint pushed along direction by `pixels` LOGICAL screen
+        pixels, as a logical QPointF, or None. What sizes the surface
+        normal tick and the grid axis ticks in screen space.
+        """
+        camera, viewport, _ = self._Camera()
+        if camera is None:
+            return None
+        try:
+            perPixel = gizmoScreen.WorldPerPixel(
+                camera, viewport, worldPoint)
+        except Exception:
+            return None
+        if perPixel is None:
+            return None
+        unit = Gf.Vec3d(direction)
+        if unit.GetLength() < 1e-12:
+            return None
+        # WorldPerPixel is per PHYSICAL pixel
+        # (gizmoScreen.py:189-200: computeWindowViewport is
+        # physical, stageView.py:1586-1587), so the logical-pixel
+        # constant crosses the device ratio on the way in -- the
+        # file's own convention (gizmoSnap.SNAP_PIXELS * ratio,
+        # 2.0 * ratio).
+        end = Gf.Vec3d(worldPoint) + \
+            unit.GetNormalized() * (perPixel * pixels * ratio)
+        return self._ProjectLogical(end, ratio, camera, viewport)
+
+    def _ActiveSnap(self):
+        """
+        (mode, reason) in force with the live holds: ActiveSnapMode
+        over the current tool, so a mid-drag V outranks the sticky
+        mode and a Rotate V reports itself Move-only instead of
+        snapping (gizmoDrag.py:170-171, always a tuple).
+        """
+        settings = self.settings.For(self._tool)
+        return gizmoDrag.ActiveSnapMode(
+            settings, self._tool, self._holdGrid, self._holdPoint,
+            self._holdEdge)
+
+    def SnapMode(self):
+        """The snap mode actually in force -- a bare SNAP_* string."""
+        return self._ActiveSnap()[0]
+
+    def SnapReason(self):
+        """Why a requested mode was downgraded, or the empty string."""
+        return self._ActiveSnap()[1]
+
+    def _SnapClause(self):
+        """
+        "  snap: ..." / "  grid: ...", or "" when no snap is active
+        or armed (spec 4.5). Appended, never substituted: the rotate
+        branch must keep "deg", the tool branch "outranked" and
+        "unavailable". The rotate grid clause is degrees on the
+        dragged gimbal channel ("grid: 15 deg"), never the Move
+        world-grid wording.
+        """
+        drag = self._drag
+        if drag is not None:
+            mode, reason = self._snapMode, self._snapReason
+            detail = getattr(drag, "snapReason", "") or ""
+            candidate = drag.snap
+            note = self._lastSnapNote
+        else:
+            mode, reason = self._ActiveSnap()
+            detail = ""
+            candidate = self._hoverSnap
+            note = self._hoverNote
+        if mode == gizmoSettings.SNAP_OFF:
+            reason = detail or reason
+            return "  snap: %s" % reason if reason else ""
+        if mode == gizmoSettings.SNAP_GRID:
+            if self._tool == TOOL_ROTATE:
+                # Rotate's grid is an ABSOLUTE degree grid on the
+                # dragged gimbal channel and ignores gridSize (spec
+                # 1.8, 4.3), so neither Move wording is true here.
+                # `detail` on this tool is only ever _Rotate's
+                # downgrade reason, which spec 4.3 words with the
+                # "snap: " prefix.
+                if detail:
+                    return "  snap: %s" % detail
+                if drag is None and self._gimbalAxes is None:
+                    return "  snap: Grid needs a Gimbal ring"
+                return "  grid: %g deg" % (
+                    self.settings.For(TOOL_ROTATE).stepSize,)
+            return "  %s" % (detail or "grid: world")
+        if candidate is not None and \
+                getattr(candidate, "kind", None) == mode:
+            return "  snap: %s" % gizmoSettings.SnapLabel(mode)
+        if note:
+            return "  snap: %s" % note
+        return "  snap: no target"
+
     # -- status ---------------------------------------------------------
 
     def Status(self):
@@ -1391,14 +1799,16 @@ class GizmoController(QtCore.QObject):
             return "%s is unavailable for %s (%s)" % (
                 verb, target.label, target.kind)
         if self._drag is not None and self._drag.tool == TOOL_ROTATE:
-            return "%s %s  %.1f deg" % (verb, target.label,
-                                        self._drag.angle)
-        text = "%s %s  [%s / %s]" % (
+            return "%s %s  %.1f deg%s" % (verb, target.label,
+                                          self._drag.angle,
+                                          self._SnapClause())
+        text = "%s %s  [%s / %s]%s" % (
             verb, target.label,
             "Pivot" if self._channels == gizmoMath.CHANNELS_PIVOT
             else "Pose",
             "Default" if self._writeMode == gizmoMath.WRITE_DEFAULT
-            else "Animation")
+            else "Animation",
+            self._SnapClause())
         skipped = self.SkippedChildren()
         if skipped:
             text += "  (%d child%s not preserved)" % (
@@ -1499,6 +1909,14 @@ class GizmoController(QtCore.QObject):
     def _onSettingsChanged(self):
         self._PrimePreserveChildren()
         self._RebuildHandles()
+        # Re-pick, never redraw stale: switching the Snap: dropdown
+        # without moving the cursor must move the marker (spec 4.5).
+        self._RefreshHoverSnap()
+        # The button text and the status clause both read the sticky
+        # mode, so a dropdown or panel write that leaves them showing
+        # the old one lies until the next hover move. _RefreshHoverSnap
+        # above only syncs when the candidate changed.
+        self.toolbar.Sync()
         if self._panel is not None:
             self._panel.Sync()
 
@@ -1522,6 +1940,8 @@ class GizmoController(QtCore.QObject):
         # author one frame behind (rigExecUsdview._FrameValue).
         self._frame = frame if isinstance(frame, Usd.TimeCode) \
             else Usd.TimeCode(float(frame))
+        # Points are cached per frame: a scrub moves every one.
+        self._snapGeom.clear()
         self._AbortDrag()
         self.RefreshTarget()
 
@@ -1529,6 +1949,10 @@ class GizmoController(QtCore.QObject):
         self._AbortDrag()
         self.undoStack.Clear()
         self._solverPosed.Clear()
+        # New stage, new paths: both snap caches die (the hover one
+        # would trip on stage identity anyway).
+        self._snapGeom.clear()
+        self._hoverRigStage = None
         self._frame = self.usdviewApi.frame
         self._ObserveStage(self.usdviewApi.dataModel.stage)
         self.RefreshTarget()
@@ -1545,6 +1969,21 @@ class GizmoController(QtCore.QObject):
         plus a reprojection of the whole manipulator, so the filter has
         to come BEFORE any of that, not inside it.
         """
+        # The hover preview's rig-written sets are only as fresh as
+        # the last authoring notice: the curvenet and volume-weight
+        # panels author rigExec:moves / rigExec:weightTarget in this
+        # session, and a stale set makes the marker offer a vertex
+        # the drag (which rebuilds its sets in _BeginDrag) then
+        # refuses as rig-deformed. Likewise the snap geometry cache
+        # may only keep prims no notice path touches. Both go ABOVE
+        # the in-drag guard: a notice arriving mid-drag must not be
+        # dropped, and the drag path is unaffected (it reads
+        # drag.rigWritten, and its own cache entries survive unless
+        # the notice names their prim).
+        self._hoverRigStage = None
+        if self._snapGeom:
+            self._DropSnapGeom(notice.GetResyncedPaths(),
+                               notice.GetChangedInfoOnlyPaths())
         # Inside a drag the target is already being refreshed by the
         # drag itself, and re-resolving it here would throw away the
         # base values every Apply* is computed from.
@@ -1703,6 +2142,7 @@ class GizmoController(QtCore.QObject):
 
     def _UpdateHover(self, point):
         """Maya's pre-selection highlight; `point` None clears it."""
+        self._hoverPoint = point
         if point is None or not self._visible or self._tool == TOOL_SELECT:
             name = None
         else:
@@ -1711,6 +2151,58 @@ class GizmoController(QtCore.QObject):
         if name != self._hover:
             self._hover = name
             self._Repaint()
+        self._RefreshHoverSnap()
+
+    def _HoverSnapKey(self):
+        """What the hover preview shows, for change detection."""
+        candidate = self._hoverSnap
+        if candidate is None:
+            return (None, self._hoverNote)
+        return (getattr(candidate, "kind", None),
+                str(candidate.point), str(candidate.primPath),
+                candidate.index, self._hoverNote)
+
+    def _RefreshHoverSnap(self):
+        """
+        The armed-mode hover preview (spec 4.5): "hold V and see what
+        lights up". The same mode-keyed throttle as the drag path, so
+        switching the Snap: dropdown without moving the cursor
+        re-picks instead of redrawing a stale marker. toolbar.Sync()
+        only when the candidate actually changed.
+        """
+        if self._drag is not None:
+            return
+        mode = self.SnapMode()
+        if mode in (gizmoSettings.SNAP_OFF, gizmoSettings.SNAP_GRID) \
+                or self._hoverPoint is None or self._target is None:
+            if self._hoverSnap is not None or self._hoverNote:
+                self._hoverSnap = None
+                self._hoverSnapKind = None
+                self._hoverPickPoint = None
+                self._hoverNote = ""
+                self._Repaint()
+                self.toolbar.Sync()
+            return
+        point = self._hoverPoint
+        if self._hoverSnapKind == mode \
+                and self._hoverPickPoint is not None:
+            travel = math.hypot(
+                point[0] - self._hoverPickPoint[0],
+                point[1] - self._hoverPickPoint[1])
+            if travel <= gizmoSnap.PICK_MOVE_PIXELS:
+                return
+        before = self._HoverSnapKey()
+        self._hoverNote = ""
+        try:
+            candidate = self._ResolveSnap(point[0], point[1], mode)
+        except Exception:
+            candidate = None
+        self._hoverSnap = candidate
+        self._hoverSnapKind = mode
+        self._hoverPickPoint = (point[0], point[1])
+        if self._HoverSnapKey() != before:
+            self._Repaint()
+            self.toolbar.Sync()
 
     def _OnRelease(self, event):
         if self._drag is None:
@@ -1724,7 +2216,8 @@ class GizmoController(QtCore.QObject):
     # -- keys -----------------------------------------------------------
 
     # The keys a live drag owns outright, wherever the cursor is.
-    _DRAG_KEYS = (QtCore.Qt.Key_Escape, QtCore.Qt.Key_J, QtCore.Qt.Key_X)
+    _DRAG_KEYS = (QtCore.Qt.Key_Escape, QtCore.Qt.Key_J, QtCore.Qt.Key_X,
+                  QtCore.Qt.Key_C, QtCore.Qt.Key_V)
 
     # Everything else, which needs the cursor over the viewport.
     _TOOL_KEYS = {QtCore.Qt.Key_Q: TOOL_SELECT,
@@ -1781,26 +2274,38 @@ class GizmoController(QtCore.QObject):
 
         The gates, in order: the viewport tools must be visible, the
         event must belong to usdview's main window, and the focus widget
-        must not be a text field. A live drag then owns Escape / J / X
-        wherever the cursor is; the tool, size and pivot keys need the
-        cursor over the viewport, or the event delivered straight at the
-        view (which is what QTest does and a real keyboard never does).
+        must not be a text field. A live drag then owns Escape / J / X /
+        C / V wherever the cursor is; the tool, size, pivot and the
+        outside-drag C / V keys need the cursor over the viewport, or
+        the event delivered straight at the view (which is what QTest
+        does and a real keyboard never does).
         """
         if not self._visible or self._view is None:
             return False
         if not self._InMainWindow(receiver):
             return False
         key = event.key()
-        # Release the latch BEFORE the typing gate: a key pressed over
-        # the viewport and released after the focus moved into a text
-        # field would otherwise stay latched and stop working.
-        if (kind == QtCore.QEvent.KeyRelease and key == self._claimedKey
-                and not event.isAutoRepeat()):
-            self._claimedKey = None
+        # Release the latch AND the holds BEFORE the typing gate: a
+        # key pressed over the viewport and released after the focus
+        # moved into a text field would otherwise stay latched, and
+        # -- since _ToolKey arms C / V outside a drag, where no
+        # _ClearHolds ever runs -- stay HELD, point-snapping the next
+        # drag into a silent no-op. The claim still happens below the
+        # gate: a KeyRelease delivered to a line edit is never ours
+        # to consume.
+        if kind == QtCore.QEvent.KeyRelease and not event.isAutoRepeat():
+            if key == self._claimedKey:
+                self._claimedKey = None
+            handled = self._ReleaseHold(event, key)
+            if self._TypingFocus():
+                return False
+            return self._Claim(event, handled)
         if self._TypingFocus():
             return False
         if kind == QtCore.QEvent.KeyRelease:
-            return self._Claim(event, self._ReleaseHold(event, key))
+            # Auto-repeat only: the block above took the real one,
+            # and _ReleaseHold ignores repeats anyway.
+            return False
         if self._drag is not None and key in self._DRAG_KEYS:
             return self._Claim(event, self._Act(kind, key, self._DragKey))
         if event.modifiers() & (QtCore.Qt.ControlModifier
@@ -1866,6 +2371,16 @@ class GizmoController(QtCore.QObject):
                 self._holdGrid = True
                 self._ReapplyDrag()
             return True
+        if key == QtCore.Qt.Key_C:
+            if not self._holdEdge:
+                self._holdEdge = True
+                self._ReapplyDrag()
+            return True
+        if key == QtCore.Qt.Key_V:
+            if not self._holdPoint:
+                self._holdPoint = True
+                self._ReapplyDrag()
+            return True
         return False
 
     def _ToolKey(self, key):
@@ -1882,6 +2397,28 @@ class GizmoController(QtCore.QObject):
                 if self._channels == gizmoMath.CHANNELS_PIVOT
                 else gizmoMath.CHANNELS_PIVOT)
             return True
+        if key in (QtCore.Qt.Key_C, QtCore.Qt.Key_V):
+            # usdview binds both -- C is Auto Compute Clipping
+            # Planes (mainWindowUI.py:1598, appController.py:833),
+            # V is Show USD Validation (mainWindowUI.py:1481,
+            # appController.py:824) -- so they follow the J sharing
+            # rule, NOT the tool-key rule above, which carries no
+            # tool condition and would swallow both keys under every
+            # tool. Only the Move tool with a target arms them;
+            # everywhere else the key stays usdview's (spec 8.5).
+            want = gizmoSettings.SNAP_EDGE \
+                if key == QtCore.Qt.Key_C \
+                else gizmoSettings.SNAP_POINT
+            if self._target is None or want not in \
+                    gizmoSettings.SnapChoices(self._tool):
+                return False
+            if key == QtCore.Qt.Key_C:
+                self._holdEdge = True
+            else:
+                self._holdPoint = True
+            self._RefreshHoverSnap()
+            self.toolbar.Sync()
+            return True
         return False
 
     def _ReleaseHold(self, event, key):
@@ -1895,12 +2432,590 @@ class GizmoController(QtCore.QObject):
             self._holdGrid = False
             self._ReapplyDrag()
             return self._drag is not None
+        if key == QtCore.Qt.Key_C and self._holdEdge:
+            self._holdEdge = False
+            self._ReapplyDrag()
+            self._RefreshHoverSnap()
+            self.toolbar.Sync()
+            return self._drag is not None
+        if key == QtCore.Qt.Key_V and self._holdPoint:
+            self._holdPoint = False
+            self._ReapplyDrag()
+            self._RefreshHoverSnap()
+            self.toolbar.Sync()
+            return self._drag is not None
         return False
 
     def _ReapplyDrag(self):
         """Re-run the live drag so a held modifier takes effect at once."""
         if self._drag is not None:
             self._UpdateDrag(self._drag.current)
+
+    # -- snap pick and resolver -----------------------------------------
+
+    def _SnapPick(self, x, y):
+        """
+        (primPath, point, normal) under the cursor, guides excluded,
+        or None.
+
+        Duplicates curvenetUI.SurfacePicker.Pick
+        (curvenetUI.py:530-553) rather than importing it, which would
+        pull a whole Qt panel into this module's import graph -- but
+        bypasses view.pick(): the plugin forces displayGuide on
+        (rigExecUsdview.py:583-588), so pick() returns a RigExec
+        guide for every hit (snapping design section 3). The fresh
+        RenderParams carries the view settings with showGuides =
+        False; view._renderParams is never mutated, since pick()
+        reuses it for the artist's own picks. showGuides=False drops
+        joints and solvers but NOT controls, whose schema purpose is
+        already "default": a control still wins this pick, and
+        _ResolveSnap rejects it by prim type instead. Any failure
+        degrades to None rather than killing the drag.
+        """
+        view = self._view
+        if view is None:
+            return None
+        try:
+            # Function-level like stageView.py's own pick(), which
+            # keeps the GL import off the create-first-image path.
+            from pxr import UsdImagingGL
+            from OpenGL import GL
+        except ImportError as error:
+            Tf.Warn("rigExecUsdview: snap pick unavailable: %s"
+                    % error)
+            return None
+        try:
+            stage = self.usdviewApi.stage
+            if stage is None:
+                return None
+            inBounds, frustum = view.computePickFrustum(x, y)
+            if not inBounds:
+                return None
+            dataModel = self.usdviewApi.dataModel
+            viewSettings = dataModel.viewSettings
+            params = UsdImagingGL.RenderParams()
+            try:
+                params.frame = dataModel.currentFrame
+            except AttributeError:
+                params.frame = self._frame
+            params.complexity = viewSettings.complexity.value
+            try:
+                params.drawMode = view._renderModeDict[
+                    viewSettings.renderMode]
+            except (AttributeError, KeyError):
+                # Read-only fallback: pick() keeps the artist's own
+                # draw mode here, and reading never disturbs it.
+                params.drawMode = view._renderParams.drawMode
+            params.showGuides = False
+            params.showProxy = viewSettings.displayProxy
+            params.showRender = viewSettings.displayRender
+            params.enableSceneMaterials = \
+                viewSettings.enableSceneMaterials
+            params.enableSceneLights = viewSettings.enableSceneLights
+            renderer = view._getRenderer()
+            if renderer is None:
+                return None
+            view.makeCurrent()
+            GL.glDepthMask(GL.GL_TRUE)
+            pickParams = UsdImagingGL.Engine.PickParams()
+            pickParams.resolveMode = "resolveNearestToCenter"
+            hits = renderer.TestIntersection(
+                pickParams, frustum.ComputeViewMatrix(),
+                frustum.ComputeProjectionMatrix(),
+                stage.GetPseudoRoot(), params)
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: snap pick failed: %s" % error)
+            return None
+        if not hits:
+            return None
+        hit = hits[0]
+        path = getattr(hit, "hitPrimPath", None)
+        point = getattr(hit, "hitPoint", None)
+        if path is None or point is None:
+            return None
+        normal = getattr(hit, "hitNormal", None)
+        if normal is None:
+            normal = Gf.Vec3d(0, 0, 1)
+        else:
+            normal = Gf.Vec3d(normal[0], normal[1], normal[2])
+        return (path, Gf.Vec3d(point[0], point[1], point[2]),
+                normal)
+
+    @staticmethod
+    def _RigRoot(target):
+        """The target's rig root, or None when it has none."""
+        try:
+            return target.RigRootPath() if target is not None \
+                else None
+        except Exception:
+            return None
+
+    def _RigWrittenSets(self, stage, rigRoot):
+        """
+        (rigWritten, rigWrittenByTarget, allWritten,
+        allWrittenByTarget): prim paths whose points a mover writes
+        (spec 4.4 step 3a), plus whether EVERY visible PointBased prim
+        is in each set.
+
+        Collected over the whole stage the way
+        rigExecUsdview._FindRigPaths does
+        (rigExecUsdview.py:438-445), not through the hit prim's
+        ancestry: the deformed Geom prims are siblings of the rig, so
+        an ancestry walk would miss them. rigWrittenByTarget is the
+        subset whose writing prim sits at or under rigRoot, empty when
+        that is None. The flags are what _NoTargetNote reads: the
+        "(rig-driven geometry excluded)" hint is only true when there
+        is no other geometry to land on.
+        """
+        written, byTarget = set(), set()
+        if stage is None:
+            return frozenset(), frozenset(), False, False
+        # PrimRange is path order, so a writing prim (/Mover) sorts
+        # AFTER the geometry it writes (/Mesh): membership is tested
+        # after the traversal, not inside it.
+        visiblePaths = []
+        try:
+            invisible = UsdGeom.Tokens.invisible
+            for prim in Usd.PrimRange(stage.GetPseudoRoot()):
+                primPath = prim.GetPath()
+                for name in ("rigExec:moves",
+                             "rigExec:weightTarget"):
+                    relationship = prim.GetRelationship(name)
+                    if relationship is None:
+                        continue
+                    for target in relationship.GetTargets():
+                        try:
+                            writtenPath = target.GetPrimPath()
+                        except Exception:
+                            continue
+                        written.add(writtenPath)
+                        if rigRoot is not None and (
+                                primPath == rigRoot
+                                or primPath.HasPrefix(rigRoot)):
+                            byTarget.add(writtenPath)
+                if prim.IsA(UsdGeom.PointBased) and \
+                        UsdGeom.Imageable(prim).ComputeVisibility() \
+                        != invisible:
+                    visiblePaths.append(primPath)
+        except Exception as error:
+            Tf.Warn("rigExecUsdview: rig-written scan failed: %s"
+                    % error)
+        written, byTarget = frozenset(written), frozenset(byTarget)
+        return (written, byTarget,
+                bool(visiblePaths) and all(
+                    p in written for p in visiblePaths),
+                bool(visiblePaths) and all(
+                    p in byTarget for p in visiblePaths))
+
+    def _HoverRigSets(self):
+        """
+        The rig-written sets for the hover preview, cached per
+        (stage, rig root): the traversal is stage-wide, so redoing it
+        on every hover move would crawl on a production asset. The
+        drag path rebuilds its own sets in _BeginDrag instead, where
+        one traversal per press is affordable and always fresh.
+        """
+        stage = self.usdviewApi.stage
+        rigRoot = self._RigRoot(self._target)
+        if stage is not self._hoverRigStage \
+                or rigRoot != self._hoverRigRoot:
+            written, byTarget, allWritten, allByTarget = \
+                self._RigWrittenSets(stage, rigRoot)
+            self._hoverRigWritten = written
+            self._hoverRigWrittenByTarget = byTarget
+            self._hoverRigAllWritten = allWritten
+            self._hoverRigAllWrittenByTarget = allByTarget
+            self._hoverRigStage = stage
+            self._hoverRigRoot = rigRoot
+        return self._hoverRigWritten, \
+            self._hoverRigWrittenByTarget, \
+            self._hoverRigAllWritten, \
+            self._hoverRigAllWrittenByTarget
+
+    def _ResolveSnap(self, x, y, mode):
+        """
+        The DragState.snapResolver injection (spec 4.1, 4.4): a pick
+        into a gizmoSnap.SnapCandidate, or None.
+
+        The mode travels on every call, never bound at the press: the
+        holds change mid-drag, so a captured mode would make a mid-drag
+        V or C inert. Rejections: the dragged prim and its ancestors
+        and descendants (the stage renders as already written, so the
+        object would glue itself to the cursor ray); anything at or
+        under the target's rig root, but only when that root is not
+        None -- xform targets have none, and Sdf.Path.HasPrefix(None)
+        raises, so this guards the way
+        gizmoMath.NoticeAffectsTarget already does
+        (gizmoMath.py:342); RigExec-typed prims (the guides
+        showGuides=False cannot drop -- controls keep purpose
+        "default"); rig-deformed prims for Point/Edge, and
+        own-rig-deformed ones for Surface. WHY a miss happened lands
+        on _lastSnapNote (drag) or _hoverNote (hover) for the status
+        clause.
+        """
+        stage = self.usdviewApi.stage
+        if self._drag is not None:
+            target = self._drag.target
+            rigWritten = self._drag.rigWritten
+            rigWrittenByTarget = self._drag.rigWrittenByTarget
+            allWritten = self._drag.allRigWritten
+            allByTarget = self._drag.allRigWrittenByTarget
+            camera = self._drag.camera
+            viewport = self._drag.viewport
+            noteSink = "_lastSnapNote"
+        else:
+            target = self._target
+            rigWritten, rigWrittenByTarget, allWritten, \
+                allByTarget = self._HoverRigSets()
+            camera, viewport, _ = self._Camera()
+            noteSink = "_hoverNote"
+            if camera is None:
+                return None
+        # Surface is rejected only by its own set, so its misses
+        # read the Surface flag; every other miss reads the Point /
+        # Edge one (spec 4.4 step 3a).
+        noTarget = self._NoTargetNote(
+            allByTarget if mode == gizmoSettings.SNAP_SURFACE
+            else allWritten)
+        setattr(self, noteSink, "")
+        if target is None:
+            return None
+        hit = self._SnapPick(x, y)
+        if hit is None:
+            setattr(self, noteSink, noTarget)
+            return None
+        hitPath, hitPoint, hitNormal = hit
+        try:
+            primPath = target.prim.GetPath()
+        except Exception:
+            return None
+        if hitPath == primPath or hitPath.HasPrefix(primPath) \
+                or primPath.HasPrefix(hitPath):
+            setattr(self, noteSink, noTarget)
+            return None
+        rigRoot = self._RigRoot(target)
+        if rigRoot is not None and (hitPath == rigRoot
+                                    or hitPath.HasPrefix(rigRoot)):
+            setattr(self, noteSink,
+                    "%s is on the dragged rig" % hitPath)
+            return None
+        # RigExec's guides are synthesized Hydra widgets, never stage
+        # geometry. showGuides=False drops joints and solvers, whose
+        # schema fallback is purpose "guide", but NOT controls, whose
+        # fallback is the stock UsdGeomImageable "default"
+        # (libs/rigExecSchema/schema.usda:121-196,
+        # libs/rigExecImaging/sceneIndices.cpp:939-944). Point and
+        # Edge already refuse them for not being PointBased; Surface
+        # would otherwise land the pivot on a drawn control circle.
+        hitPrim = stage.GetPrimAtPath(hitPath) if stage else None
+        if hitPrim is not None and hitPrim.IsValid() and \
+                str(hitPrim.GetTypeName()).startswith("RigExec"):
+            setattr(self, noteSink, "%s is a rig guide" % hitPath)
+            return None
+        if mode in (gizmoSettings.SNAP_POINT, gizmoSettings.SNAP_EDGE) \
+                and hitPath in rigWritten:
+            setattr(self, noteSink,
+                    "%s is rig-deformed" % hitPath)
+            return None
+        if mode == gizmoSettings.SNAP_SURFACE \
+                and hitPath in rigWrittenByTarget:
+            setattr(self, noteSink,
+                    "%s is rig-deformed" % hitPath)
+            return None
+        if mode == gizmoSettings.SNAP_SURFACE:
+            return self._SurfaceCandidate(
+                hitPath, hitPoint, hitNormal, camera, viewport,
+                noteSink, allByTarget)
+        if mode == gizmoSettings.SNAP_POINT:
+            return self._PointCandidate(
+                hitPath, x, y, camera, viewport, noteSink,
+                allWritten)
+        if mode == gizmoSettings.SNAP_EDGE:
+            return self._EdgeCandidate(
+                hitPath, x, y, camera, viewport, noteSink,
+                allWritten)
+        return None
+
+    @staticmethod
+    def _NoTargetNote(allRigWritten):
+        # State the consequence rather than hiding it, but only when
+        # it is true: the parenthetical claims EVERY visible PointBased
+        # prim is rig-written, so it reads the flag, not the set (spec
+        # 4.4 step 3a).
+        if allRigWritten:
+            return "no target (rig-driven geometry excluded)"
+        return "no target"
+
+    def _PrimWorldPoints(self, hitPath):
+        """
+        The hit prim's authored points in world, or None.
+
+        XformCache, not ComputeRigFrames: the latter composes frames
+        from rest/avars only and drops the prim's own xformOps, and it
+        takes a path SET, not the cache (gizmoMath.py:445, 465).
+        Rig-deformed prims never reach here -- the resolver rejects
+        them first, since their authored array is not what Hydra
+        draws.
+        """
+        try:
+            stage = self.usdviewApi.stage
+            prim = stage.GetPrimAtPath(hitPath) if stage else None
+            if prim is None or not prim.IsValid() \
+                    or not prim.IsA(UsdGeom.PointBased):
+                return None
+            points = UsdGeom.PointBased(prim).GetPointsAttr().Get(
+                self._frame)
+            if not points:
+                return None
+            matrix = UsdGeom.XformCache(
+                self._frame).GetLocalToWorldTransform(prim)
+            return [matrix.Transform(Gf.Vec3d(p)) for p in points]
+        except Exception:
+            return None
+
+    def _SnapPairs(self, hitPath, pointCount):
+        """
+        (i, j) index pairs for the hit prim's snap segments, or None.
+
+        Mesh edges from the face counts/indices, curve segments from
+        consecutive CVs -- the topology half _EdgeCandidate used to
+        rebuild on every move. Cached beside the world points in
+        _SnapGeom (gizmoSnap.MeshEdges / CurveSegments).
+        """
+        try:
+            stage = self.usdviewApi.stage
+            prim = stage.GetPrimAtPath(hitPath) if stage else None
+            if prim is None or not prim.IsValid():
+                return None
+            if prim.IsA(UsdGeom.Mesh):
+                mesh = UsdGeom.Mesh(prim)
+                pairs = gizmoSnap.MeshEdges(
+                    mesh.GetFaceVertexCountsAttr().Get(),
+                    mesh.GetFaceVertexIndicesAttr().Get())
+            elif prim.IsA(UsdGeom.BasisCurves):
+                pairs = gizmoSnap.CurveSegments(
+                    UsdGeom.BasisCurves(prim).
+                    GetCurveVertexCountsAttr().Get(), pointCount)
+            else:
+                return None
+        except Exception:
+            return None
+        return pairs or None
+
+    def _SnapGeom(self, hitPath, camera, viewport, ratio,
+                  wantPairs):
+        """
+        The cached geometry the candidates resolve against, or None.
+
+        WHY a cache at all: the per-prim world points, the mesh edge
+        list and the segment list are constant for a whole drag but
+        were rebuilt from scratch on every move -- 21 ms (Point) and
+        58 ms (Edge) per resolve on a 4225-point mesh against the
+        spec's 4 ms budget, and the same code ran on plain hover with
+        a mode merely armed. The world half is keyed (prim, frame);
+        the screen projection alongside it rekeys on the camera view
+        matrix plus the viewport, so a hover camera move rebuilds
+        only the projection while a drag (fixed camera) builds once
+        per press. Queries gather the 3x3 cells around the cursor, so
+        only that subset reaches NearestPoint / NearestSegment; the
+        returned index maps back to the prim's own numbering.
+        Invalidated in _onObjectsChanged (the notice's own paths),
+        _onFrameChanged and _onStageReplaced: skipping that is a
+        stale-list IndexError.
+        """
+        key = str(hitPath)
+        entry = self._snapGeom.get(key)
+        if entry is None or entry.get("frame") != self._frame:
+            world = self._PrimWorldPoints(hitPath)
+            if not world:
+                self._snapGeom.pop(key, None)
+                return None
+            if len(self._snapGeom) >= 64:
+                self._snapGeom.clear()
+            entry = {"frame": self._frame, "world": world,
+                     "pairs": None, "segments": None,
+                     "viewKey": None, "proj": None,
+                     "cells": None, "segCells": None}
+            self._snapGeom[key] = entry
+        world = entry["world"]
+        if wantPairs and entry["pairs"] is None:
+            pairs = self._SnapPairs(hitPath, len(world))
+            if not pairs:
+                return None
+            entry["pairs"] = pairs
+            entry["segments"] = [(world[i], world[j])
+                                 for (i, j) in pairs]
+            # The projection below may already be built -- a Point
+            # resolve on this prim ran first -- and it buckets only
+            # the segments it knew. Force it to run again so the new
+            # segments join segCells.
+            entry["viewKey"] = None
+        viewProj = gizmoScreen.ViewProjection(camera)
+        viewKey = (str(viewProj), viewport[0], viewport[1],
+                   viewport[2], viewport[3], ratio)
+        if entry.get("viewKey") != viewKey:
+            cell = gizmoSnap.SNAP_PIXELS * ratio
+            proj = []
+            cells = {}
+            for index, point in enumerate(world):
+                try:
+                    screen, _ = gizmoScreen.ProjectPointWithW(
+                        viewProj, viewport, point)
+                except Exception:
+                    screen = None
+                proj.append(screen)
+                if screen is not None:
+                    cells.setdefault(
+                        (math.floor(screen[0] / cell),
+                         math.floor(screen[1] / cell)),
+                        []).append(index)
+            segCells = {}
+            if entry["segments"] is not None:
+                for segIndex, (i, j) in enumerate(
+                        entry["pairs"]):
+                    screenA, screenB = proj[i], proj[j]
+                    if screenA is None or screenB is None:
+                        continue
+                    x0, x1 = sorted((screenA[0], screenB[0]))
+                    y0, y1 = sorted((screenA[1], screenB[1]))
+                    for cx in range(math.floor(x0 / cell),
+                                    math.floor(x1 / cell) + 1):
+                        for cy in range(math.floor(y0 / cell),
+                                        math.floor(y1 / cell) + 1):
+                            segCells.setdefault(
+                                (cx, cy), []).append(segIndex)
+            entry["viewKey"] = viewKey
+            entry["proj"] = proj
+            entry["cells"] = cells
+            entry["segCells"] = segCells
+        return entry
+
+    @staticmethod
+    def _SnapCells(cells, x, y, cell):
+        """
+        The pooled 3x3 cells around the cursor, deduped, in prim
+        order: NearestPoint / NearestSegment keep the first winner
+        on a tie (gizmoSnap.py:232, 292), so ascending order is what
+        keeps the subset answer identical to the full scan.
+        """
+        found = []
+        cx, cy = math.floor(x / cell), math.floor(y / cell)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                found.extend(cells.get((cx + dx, cy + dy), ()))
+        return sorted(dict.fromkeys(found))
+
+    def _DropSnapGeom(self, resynced, changed):
+        """
+        Forget the cached geometry a notice may have moved.
+
+        A resync above a prim rebuilds its subtree and an info-only
+        change to one of its properties (including the points array
+        itself, which arrives as a property path) moves its points,
+        so either drops the entry; every untouched prim keeps its
+        one build per (prim, frame, camera). String prefixes, not
+        Sdf paths: the notice paths may be property paths, where a
+        "/Target.points" change must drop "/Target".
+        """
+        if not self._snapGeom:
+            return
+        touched = set(str(p) for p in list(resynced)
+                      + list(changed))
+        # A notice path may be a property path ("/Target.points"),
+        # whose prim prefix is what the cache is keyed on.
+        for path in list(touched):
+            touched.add(path.split(".")[0])
+        for key in list(self._snapGeom):
+            for path in touched:
+                if path == key or key.startswith(path + "/") \
+                        or path.startswith(key + "/"):
+                    del self._snapGeom[key]
+                    break
+
+    def _PointCandidate(self, hitPath, x, y, camera, viewport,
+                        noteSink, allRigWritten):
+        ratio = self._Ratio()
+        entry = self._SnapGeom(hitPath, camera, viewport, ratio,
+                               False)
+        if entry is None:
+            setattr(self, noteSink,
+                    self._NoTargetNote(allRigWritten))
+            return None
+        cell = gizmoSnap.SNAP_PIXELS * ratio
+        nearby = self._SnapCells(entry["cells"], x, y, cell)
+        if not nearby:
+            setattr(self, noteSink,
+                    self._NoTargetNote(allRigWritten))
+            return None
+        try:
+            found = gizmoSnap.NearestPoint(
+                [entry["world"][i] for i in nearby], (x, y),
+                gizmoScreen.ViewProjection(camera), viewport,
+                gizmoSnap.SNAP_PIXELS * ratio)
+        except Exception:
+            found = None
+        if found is None:
+            setattr(self, noteSink,
+                    self._NoTargetNote(allRigWritten))
+            return None
+        index, point, screen = found
+        return gizmoSnap.SnapCandidate(
+            point, Gf.Vec3d(0, 0, 0), gizmoSettings.SNAP_POINT,
+            hitPath, nearby[index], screen)
+
+    def _EdgeCandidate(self, hitPath, x, y, camera, viewport,
+                       noteSink, allRigWritten):
+        ratio = self._Ratio()
+        entry = self._SnapGeom(hitPath, camera, viewport, ratio,
+                               True)
+        if entry is None:
+            setattr(self, noteSink,
+                    self._NoTargetNote(allRigWritten))
+            return None
+        cell = gizmoSnap.SNAP_PIXELS * ratio
+        nearby = self._SnapCells(entry["segCells"], x, y, cell)
+        if not nearby:
+            setattr(self, noteSink,
+                    self._NoTargetNote(allRigWritten))
+            return None
+        segments = entry["segments"]
+        try:
+            found = gizmoSnap.NearestSegment(
+                [segments[k] for k in nearby], (x, y),
+                gizmoScreen.ViewProjection(camera), viewport,
+                gizmoSnap.SNAP_PIXELS * ratio)
+        except Exception:
+            found = None
+        if found is None:
+            setattr(self, noteSink,
+                    self._NoTargetNote(allRigWritten))
+            return None
+        segIndex, point, screen = found
+        original = nearby[segIndex]
+        candidate = gizmoSnap.SnapCandidate(
+            point, Gf.Vec3d(0, 0, 0), gizmoSettings.SNAP_EDGE,
+            hitPath, original, screen)
+        # The picked segment's world ends, for the marker's two
+        # adjacent halves (spec 4.5).
+        candidate.edgeEnds = segments[original]
+        return candidate
+
+    def _SurfaceCandidate(self, hitPath, hitPoint, hitNormal,
+                          camera, viewport, noteSink,
+                          allRigWritten):
+        try:
+            screen = gizmoScreen.ProjectPoint(
+                gizmoScreen.ViewProjection(camera), viewport,
+                hitPoint)
+        except Exception:
+            screen = None
+        if screen is None:
+            setattr(self, noteSink,
+                    self._NoTargetNote(allRigWritten))
+            return None
+        return gizmoSnap.SnapCandidate(
+            Gf.Vec3d(hitPoint), Gf.Vec3d(hitNormal),
+            gizmoSettings.SNAP_SURFACE, hitPath, -1, screen)
 
     # -- drag -----------------------------------------------------------
 
@@ -1935,6 +3050,22 @@ class GizmoController(QtCore.QObject):
             origin2d=handle.center,
             gimbal=self._gimbalAxes is not None, recorder=recorder)
         drag.ctrl = self._ctrl
+        written, byTarget, allWritten, allByTarget = \
+            self._RigWrittenSets(
+                self.usdviewApi.stage, self._RigRoot(target))
+        drag.rigWritten = written
+        drag.rigWrittenByTarget = byTarget
+        drag.allRigWritten = allWritten
+        drag.allRigWrittenByTarget = allByTarget
+        # The bound method itself, never a lambda capturing the mode:
+        # the holds change mid-drag, so a captured mode would make a
+        # mid-drag V or C inert (spec item 13).
+        drag.snapResolver = self._ResolveSnap
+        mode, reason = gizmoDrag.ActiveSnapMode(
+            settings, self._tool, self._holdGrid,
+            self._holdPoint, self._holdEdge)
+        self._snapMode, self._snapReason = mode, reason
+        self._lastSnapNote = ""
         self._drag = drag
         self.toolbar.Sync()
         self._Repaint()
@@ -1945,10 +3076,16 @@ class GizmoController(QtCore.QObject):
         if drag is None:
             return
         try:
+            settings = self.settings.For(drag.tool)
+            mode, reason = gizmoDrag.ActiveSnapMode(
+                settings, drag.tool, self._holdGrid,
+                self._holdPoint, self._holdEdge)
+            self._snapMode, self._snapReason = mode, reason
             gizmoDrag.ApplyDrag(
-                drag, point, self.settings.For(drag.tool),
+                drag, point, settings,
                 holdSnap=self._holdSnap, holdGrid=self._holdGrid,
-                ctrl=drag.ctrl)
+                ctrl=drag.ctrl, snapMode=mode,
+                gridSize=self.settings.gridSize)
             drag.target.Refresh()
         except Exception as error:
             Tf.Warn("rigExecUsdview: gizmo drag failed: %s" % error)
@@ -1959,7 +3096,8 @@ class GizmoController(QtCore.QObject):
 
     def _ClearHolds(self):
         """
-        Drop the J / X holds and the key latch at the end of a drag.
+        Drop the snap holds (J / X / C / V) and the key latch at the
+        end of a drag.
 
         A KeyRelease can land on a widget this filter never sees (the
         focus moves under the cursor while a key is down), and a hold
@@ -1967,6 +3105,8 @@ class GizmoController(QtCore.QObject):
         """
         self._holdSnap = False
         self._holdGrid = False
+        self._holdEdge = False
+        self._holdPoint = False
         self._claimedKey = None
 
     def _EndDrag(self):

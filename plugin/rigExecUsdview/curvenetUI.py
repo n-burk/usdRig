@@ -33,6 +33,7 @@ from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 CURVENET_TYPE = "RigExecCurvenet"
 MOVER_TYPE = "RigExecCurvenetMover"
+MOVER_API = "RigExecMoverAPI"
 
 
 def FindRigPrim(stage):
@@ -427,11 +428,18 @@ def BindCurvenet(stage, curvenet, mesh, rig):
         movers.GetPath().AppendChild("Geometry"), "Scope")
     name = MakeUniqueName(geometry, "ProfileMover")
     mover = stage.DefinePrim(geometry.GetPath().AppendChild(name), MOVER_TYPE)
-    mover.CreateRelationship("rigExec:curvenet").SetTargets(
-        [curvenet.GetPath()])
-    mover.CreateRelationship("rigExec:moves").SetTargets(
+    if not mover.ApplyAPI(MOVER_API):
+        stage.RemovePrim(mover.GetPath())
+        raise RuntimeError("could not apply %s to %s" %
+                           (MOVER_API, mover.GetPath()))
+
+    # Fetch the schema-declared properties after applying the API. Using
+    # CreateRelationship/CreateAttribute here would permit custom properties,
+    # which could silently preserve a retired or misspelled contract.
+    mover.GetRelationship("rigExec:curvenet").SetTargets([curvenet.GetPath()])
+    mover.GetRelationship("rigExec:moves").SetTargets(
         [mesh.GetPath().AppendProperty("points")])
-    mover.CreateAttribute("inputs:strength", Sdf.ValueTypeNames.Float).Set(1.0)
+    mover.GetAttribute("inputs:defaultWeight").Set(1.0)
     return mover
 
 
