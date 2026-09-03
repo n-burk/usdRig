@@ -4,6 +4,7 @@
 // reconstruction policies; IK reach/stretch; blend endpoints; twist
 // distribution; weighted matrix movement.
 //
+#include "rigExecMath/avarScale.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/propertyMath.h"
@@ -13,6 +14,7 @@
 #include "pxr/base/gf/rotation.h"
 
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <limits>
 
@@ -32,6 +34,41 @@ static bool
 Near(const GfVec3d &a, const GfVec3d &b, double tol = 1e-10)
 {
     return (a - b).GetLength() <= tol;
+}
+
+static bool
+SameBits(double a, double b)
+{
+    return std::memcmp(&a, &b, sizeof(double)) == 0;
+}
+
+static bool
+SameBits(float a, float b)
+{
+    return std::memcmp(&a, &b, sizeof(float)) == 0;
+}
+
+static bool
+SameVec3fBits(const GfVec3f &a, const GfVec3f &b)
+{
+    return SameBits(a[0], b[0]) && SameBits(a[1], b[1]) &&
+           SameBits(a[2], b[2]);
+}
+
+static bool
+SameFrameBits(const RigExecPointFrame &a, const RigExecPointFrame &b)
+{
+    if (a.flags != b.flags) {
+        return false;
+    }
+    for (size_t point = 0; point < a.points.size(); ++point) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!SameBits(a.points[point][axis], b.points[point][axis])) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 static const std::array<GfVec3d, 4> kUnitRest = {
@@ -1029,6 +1066,126 @@ TestFbxConstraintFailures()
 }
 
 static void
+TestConstraintEnvelopeExactEndpoints()
+{
+    // Zero is a dormant common envelope, including signed-zero payloads and
+    // malformed operation-specific inputs that must not be inspected.
+    RigExecPointFrame preceding = ConstraintFrame();
+    preceding.points[0][1] = -0.0;
+    preceding.points[2][2] = -0.0;
+    preceding.flags |= RigExecPointFrameAffine;
+    RigExecConstraintSource malformed;
+    malformed.normalizedWeight = std::numeric_limits<double>::quiet_NaN();
+
+    RigExecPositionConstraintParams position;
+    position.weight = -1.0;
+    CHECK(SameFrameBits(
+        RigExecApplyPositionConstraint(preceding, {malformed}, position),
+        preceding));
+    RigExecRotationConstraintParams rotation;
+    rotation.weight = 0.0;
+    CHECK(SameFrameBits(
+        RigExecApplyRotationConstraint(preceding, {malformed}, rotation),
+        preceding));
+    RigExecScaleConstraintParams scale;
+    scale.weight = 0.0;
+    CHECK(SameFrameBits(
+        RigExecApplyScaleConstraint(preceding, {malformed}, scale),
+        preceding));
+    RigExecParentConstraintParams parent;
+    parent.weight = 0.0;
+    CHECK(SameFrameBits(
+        RigExecApplyParentConstraint(preceding, {malformed}, parent),
+        preceding));
+    RigExecAimConstraintParams aim;
+    aim.weight = 0.0;
+    CHECK(SameFrameBits(
+        RigExecApplyAimConstraint(
+            preceding, GfVec3d(std::nan(""), 0, 0), aim),
+        preceding));
+    CHECK(SameFrameBits(
+        RigExecApplyAimConstraint(
+            preceding, GfVec3d(std::nan(""), 0, 0), 0.0, 1),
+        preceding));
+
+    // These exactly representable inputs make a + 1*(b-a) round away from b.
+    // Full-strength Position and Parent must select b itself.
+    constexpr double inputTranslation = 0x1.6d2667059ba63p+15;
+    constexpr double targetTranslation = -0x1.c3b1534cb93f1p-15;
+    const RigExecPointFrame translatedInput =
+        ConstraintFrame(GfVec3d(inputTranslation, 0, 0));
+    RigExecConstraintSource translatedSource;
+    translatedSource.frame =
+        ConstraintFrame(GfVec3d(targetTranslation, 0, 0));
+    position = RigExecPositionConstraintParams{};
+    const RigExecPointFrame positioned = RigExecApplyPositionConstraint(
+        translatedInput, {translatedSource}, position);
+    CHECK(SameBits(positioned.Origin()[0], targetTranslation));
+
+    parent = RigExecParentConstraintParams{};
+    const RigExecPointFrame parented = RigExecApplyParentConstraint(
+        translatedInput, {translatedSource}, parent);
+    CHECK(SameBits(parented.Origin()[0], targetTranslation));
+
+    // The same cancellation exists in pose scale channels.
+    constexpr double inputScale = 0x1.8e6763ad2707ap-4;
+    constexpr double targetScale = 0x1.dd56d4ae13c38p-8;
+    const RigExecPointFrame scaledInput = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0), GfVec3d(inputScale, 2, 3));
+    RigExecConstraintSource scaledSource;
+    scaledSource.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0), GfVec3d(targetScale, 4, 5));
+    scale = RigExecScaleConstraintParams{};
+    const RigExecPointFrame scaled = RigExecApplyScaleConstraint(
+        scaledInput, {scaledSource}, scale);
+    CHECK(SameBits(scaled.X()[0], targetScale));
+
+    parent = RigExecParentConstraintParams{};
+    parent.scaleAxes = {true, true, true};
+    const RigExecPointFrame parentScaled = RigExecApplyParentConstraint(
+        scaledInput, {scaledSource}, parent);
+    CHECK(SameBits(parentScaled.X()[0], targetScale));
+
+    // A full shortest-arc rotation selects the source Euler candidate, not the
+    // equivalent input+delta representation (+190 degrees in this case). Its
+    // constrained X axis therefore carries the source candidate's exact bits.
+    RigExecConstraintSource rotationSource;
+    rotationSource.frame = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0, 0, -170));
+    rotation = RigExecRotationConstraintParams{};
+    const RigExecPointFrame fromOppositeBranch =
+        RigExecApplyRotationConstraint(
+            ConstraintFrame(GfVec3d(0), GfVec3d(0, 0, 170)),
+            {rotationSource}, rotation);
+    CHECK(SameBits(
+        fromOppositeBranch.X()[0], rotationSource.frame.X()[0]));
+    CHECK(SameBits(
+        fromOppositeBranch.X()[1], rotationSource.frame.X()[1]));
+
+    // Aim uses the same masked Euler envelope after constructing its fully
+    // aimed candidate. Keep the aim itself dormant here and use an offset to
+    // cross the same Euler branch, so this pins Aim's endpoint as well.
+    const RigExecPointFrame aimInput = ConstraintFrame(
+        GfVec3d(0), GfVec3d(0, 0, 170));
+    aim = RigExecAimConstraintParams{};
+    aim.preserveInputUp = false;
+    aim.rotationOffsetDegrees = GfVec3d(0, 0, -340);
+    const RigExecPointFrame aimOffset = RigExecApplyAimConstraint(
+        aimInput, aimInput.Origin() +
+            (aimInput.X() - aimInput.Origin()) * 5.0,
+        aim);
+    CHECK(SameBits(aimOffset.X()[0], rotationSource.frame.X()[0]));
+    CHECK(SameBits(aimOffset.X()[1], rotationSource.frame.X()[1]));
+
+    // The legacy aim overload has the same endpoint rule: its authored aim
+    // landmark selects the normalized target direction without rotating that
+    // direction through a numerically approximate full-angle operation.
+    const RigExecPointFrame legacyAimed = RigExecApplyAimConstraint(
+        ConstraintFrame(), GfVec3d(0, 5, 0), 1.0, 1);
+    CHECK(legacyAimed.X() - legacyAimed.Origin() == GfVec3d(0, 1, 0));
+}
+
+static void
 TestGeometryKernels()
 {
     // Volume correction: doubling a unit cube's bound restores it fully
@@ -1179,6 +1336,24 @@ TestSimdParity()
             GfVec3d(in[i]), m, weights[i]);
         CHECK((GfVec3d(simd[i]) - scalar).GetLength() <= 1e-6 * scale);
     }
+
+    // Endpoint selection must bypass interpolation exactly. With the old
+    // q + (moved - q) expression, a full-weight collapse from 1e20 to 1
+    // loses the candidate to cancellation (typically producing zero).
+    GfMatrix4d collapse(0.0);
+    collapse[3][0] = 1.0;
+    collapse[3][1] = -2.0;
+    collapse[3][2] = 3.0;
+    collapse[3][3] = 1.0;
+    const GfVec3f endpointIn[] = {
+        GfVec3f(1.0e20f, -1.0e20f, 1.0e20f),
+        GfVec3f(1.0e20f, -1.0e20f, 1.0e20f)};
+    GfVec3f endpointOut[2];
+    const float endpointWeights[] = {0.0f, 1.0f};
+    RigExecApplyWeightedMatrixSimd(
+        endpointIn, endpointOut, endpointWeights, 2, collapse);
+    CHECK(SameVec3fBits(endpointOut[0], endpointIn[0]));
+    CHECK(SameVec3fBits(endpointOut[1], GfVec3f(1.0f, -2.0f, 3.0f)));
 }
 
 static void
@@ -1294,6 +1469,27 @@ TestPropertyMath()
                                   &out));
 }
 
+static void
+TestAvarScaleNormalization()
+{
+    const double floor = RigExecAvarScaleFloor;
+    CHECK(floor == 1e-4);
+    CHECK(SameBits(RigExecNormalizeAvarScale(2.0), 2.0));
+    CHECK(SameBits(RigExecNormalizeAvarScale(-2.0), -2.0));
+    CHECK(SameBits(RigExecNormalizeAvarScale(floor), floor));
+    CHECK(SameBits(RigExecNormalizeAvarScale(-floor), -floor));
+    CHECK(SameBits(RigExecNormalizeAvarScale(0.5 * floor), floor));
+    CHECK(SameBits(RigExecNormalizeAvarScale(-0.5 * floor), -floor));
+    CHECK(SameBits(RigExecNormalizeAvarScale(0.0), floor));
+    CHECK(SameBits(RigExecNormalizeAvarScale(-0.0), -floor));
+    CHECK(RigExecNormalizeAvarScale(
+              std::numeric_limits<double>::infinity()) == 1.0);
+    CHECK(RigExecNormalizeAvarScale(
+              -std::numeric_limits<double>::infinity()) == 1.0);
+    CHECK(RigExecNormalizeAvarScale(
+              std::numeric_limits<double>::quiet_NaN()) == 1.0);
+}
+
 int
 main()
 {
@@ -1318,10 +1514,12 @@ main()
     TestFbxParentConstraintKernel();
     TestFbxAimConstraintKernel();
     TestFbxConstraintFailures();
+    TestConstraintEnvelopeExactEndpoints();
     TestGeometryKernels();
     TestSimdParity();
     TestWeightedMatrix();
     TestPropertyMath();
+    TestAvarScaleNormalization();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

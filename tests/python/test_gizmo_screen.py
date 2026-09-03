@@ -406,6 +406,35 @@ def TestMayaDragMath():
                % (sweep, (end,)))
 
 
+def TestWorldOrigin():
+    camera = _Camera()
+    for tool in (gs.TOOL_TRANSLATE, gs.TOOL_ROTATE, gs.TOOL_SCALE):
+        handles = gs.BuildHandles(tool, Gf.Matrix4d(1.0), camera,
+                                  VIEWPORT, 1.0)
+        _Check(len(handles) > 0, "%s has handles" % tool)
+        for handle in handles:
+            _Check(_Close(handle.worldOrigin[0], 0.0)
+                   and _Close(handle.worldOrigin[1], 0.0)
+                   and _Close(handle.worldOrigin[2], 0.0),
+                   "%s %s worldOrigin is the gizmo origin: %s"
+                   % (tool, handle.name, handle.worldOrigin))
+    moved = Gf.Matrix4d(1.0).SetTranslate(Gf.Vec3d(2, 3, 4))
+    expect = moved.ExtractTranslation()
+    handles = {h.name: h for h in gs.BuildHandles(
+        gs.TOOL_TRANSLATE, moved, camera, VIEWPORT, 1.0)}
+    for name, handle in handles.items():
+        _Check(_Close(handle.worldOrigin[0], expect[0])
+               and _Close(handle.worldOrigin[1], expect[1])
+               and _Close(handle.worldOrigin[2], expect[2]),
+               "%s worldOrigin follows GizmoMatrix: %s vs %s"
+               % (name, handle.worldOrigin, expect))
+    plane = handles["xy"]
+    _Check((Gf.Vec3d(plane.worldCenter)
+            - Gf.Vec3d(plane.worldOrigin)).GetLength() > 1e-6,
+           "a plane handle's worldCenter still differs from it: "
+           "%s vs %s" % (plane.worldCenter, plane.worldOrigin))
+
+
 def main():
     groups = [
         ("projection", TestProjection),
@@ -417,6 +446,7 @@ def main():
         ("maya rotate handles", TestMayaRotateHandles),
         ("maya scale handles", TestMayaScaleHandles),
         ("maya drag math", TestMayaDragMath),
+        ("world origin", TestWorldOrigin),
     ]
     for name, fn in groups:
         fn()

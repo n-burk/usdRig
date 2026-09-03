@@ -12,9 +12,11 @@ down -Z into an 800x600 viewport, conformed so pixels are square -- so
 What is asserted is the DECISION, not the arithmetic gizmoScreen and
 gizmoMath already test: which Target entry point a handle writes
 through, which axes it names, that a ring keeps counting past 180, that
-the ball composes its steps, and -- since the snapping itself now
-happens inside the target, where the channel values are -- that J and X
-arrive there as the right `snapStep` / `snapAbsolute` keywords.
+the ball composes its steps, that J arrives at the target as the right
+`snapStep` keyword while the WORLD snaps (X grid, point, edge, surface)
+arrive as plain world deltas through gizmoSnap -- X no longer sends any
+keyword, because channel-space rounding puts round channels at arbitrary
+world positions under a posed parent (snapping design section 2).
 
 Usage: test_gizmo_drag.py [ignored]
 """
@@ -27,11 +29,13 @@ import rigexec_test_env
 
 rigexec_test_env.SetupPluginTest()
 
-from pxr import Gf  # noqa: E402
+from pxr import Gf, Usd, UsdGeom  # noqa: E402
 
 import gizmoDrag as gd  # noqa: E402
 import gizmoScreen as gs  # noqa: E402
 import gizmoSettings as gset  # noqa: E402
+import gizmoMath as gm  # noqa: E402
+import gizmoSnap as snap  # noqa: E402
 
 VIEWPORT = (0, 0, 800, 600)
 RATIO = 1.0
@@ -63,9 +67,11 @@ class FakeTarget(object):
     A Target that records what it was asked to do instead of authoring.
 
     Every Apply* records its keyword arguments as well as its
-    positionals, because the snapping contract IS those keywords now:
-    gizmoMath quantises the channel values, and all this module has to
-    get right is which step reaches it and whether it is absolute.
+    positionals, because the relative-snapping contract IS those keywords
+    now: gizmoMath quantises the channel values, and all this module has
+    to get right for J is which step reaches it. The world snaps instead
+    arrive as plain world deltas with no step, which the recorded delta
+    shows.
     """
 
     supportsTranslate = True
@@ -84,6 +90,12 @@ class FakeTarget(object):
 
     def ObjectFrame(self):
         return Gf.Matrix4d(1.0)
+
+    def RotationState(self):
+        # The base class carries this (gizmoMath.py:850-855), so the
+        # double does too; DragState reads it once at the press for
+        # Rotate's absolute grid.
+        return ("xyz", [0.0, 0.0, 0.0])
 
     def ApplyTranslate(self, worldDelta, *, snapStep=None,
                        snapAbsolute=False):
@@ -243,9 +255,8 @@ def TestCentreTranslate():
 
 def TestTranslateSnapping():
     """
-    Maya's two move snaps reach the target as keywords, and the WORLD
-    delta is handed over untouched -- quantising it here would put the
-    channels off the grid the moment the channel frame is rotated.
+    J reaches the target as a keyword; X snaps the WORLD delta through
+    gizmoSnap and sends no keyword at all (snapping design section 2).
     """
     axis = _Named(_Handles(gs.TOOL_TRANSLATE), "x")
     press = (axis.points[0][0] + 20.0, axis.points[0][1])
@@ -271,41 +282,429 @@ def TestTranslateSnapping():
            "the Step Snap option matches the J hold: %s"
            % (target.LastKwargs(),))
 
-    grid = gd.ApplyDrag(state, current, settings, holdGrid=True)
-    _Check(target.LastKwargs() == {"snapStep": 0.25, "snapAbsolute": True},
-           "X is the absolute grid: %s" % (target.LastKwargs(),))
+    # The grid path rounds the WORLD position onto the lattice, so
+    # the assertion names the landed station: with a 0.1 grid the
+    # 0.28813 unsnapped X delta lands the pivot on 0.3. The old
+    # gridSize-1.0 form snapped back to the pivot and proved only
+    # "different from raw", which a branch returning (0, 0, 0) for
+    # every grid drag would satisfy trivially.
+    grid = gd.ApplyDrag(state, current, settings, holdGrid=True,
+                        gridSize=0.1)
+    _Check(target.LastKwargs() == {"snapStep": None, "snapAbsolute": False},
+           "X sends no keyword, it snaps the world delta: %s"
+           % (target.LastKwargs(),))
+    pivot0 = Gf.Vec3d(axis.worldOrigin)
+    landed = pivot0 + grid
+    _Check(_Close(landed[0], 0.3, 1e-9)
+           and _Close(landed[1], 0.0, 1e-9)
+           and _Close(landed[2], 0.0, 1e-9),
+           "the 0.28813 drag lands the pivot on the 0.1 grid: %s"
+           % (landed,))
 
     both = gd.ApplyDrag(state, current, settings, holdSnap=True,
-                        holdGrid=True)
-    _Check(target.LastKwargs()["snapAbsolute"] is True,
-           "X wins when both are held: %s" % (target.LastKwargs(),))
+                        holdGrid=True, gridSize=0.1)
+    _Check(target.LastKwargs() == {"snapStep": None, "snapAbsolute": False},
+           "X wins when both are held, so still no keyword: %s"
+           % (target.LastKwargs(),))
 
-    _Check(raw == held == grid == both,
-           "the world delta is never touched by the snapping: %s %s %s %s"
-           % (raw, held, grid, both))
+    _Check(raw == held,
+           "J and the option never touch the world delta: %s %s"
+           % (raw, held))
+    _Check(grid == both and grid != raw,
+           "the grid path snaps the world delta; J and the option "
+           "do not: %s %s %s" % (raw, grid, both))
 
     settings.stepSize = 0.0
-    gd.ApplyDrag(state, current, settings, holdSnap=True, holdGrid=True)
+    gd.ApplyDrag(state, current, settings, holdSnap=True)
     _Check(target.LastKwargs() == {"snapStep": None, "snapAbsolute": False},
            "a zero step is no step, not a division by zero: %s"
            % (target.LastKwargs(),))
+    # Grid reads gridSize, not stepSize: with a zero step the grid still
+    # writes a multiple of 1e-4.
+    fine = gd.ApplyDrag(state, current, settings, holdGrid=True,
+                        gridSize=1e-4)
+    _Check(target.LastKwargs() == {"snapStep": None, "snapAbsolute": False},
+           "the grid path still sends no keyword: %s"
+           % (target.LastKwargs(),))
+    _Check(abs(fine[0] / 1e-4 - round(fine[0] / 1e-4)) < 1e-6,
+           "the grid delta is a multiple of 1e-4: %s" % (fine,))
 
 
 def TestTranslateSnapChoice():
-    """TranslateSnap on its own, which is the whole of the J / X rule."""
+    """TranslateSnap on its own, which is now only the J rule."""
     settings = _Settings(gs.TOOL_TRANSLATE)
     settings.stepSize = 2.0
     _Check(gd.TranslateSnap(settings, False, False) == (None, False),
            "nothing held, nothing snapped")
     _Check(gd.TranslateSnap(settings, True, False) == (2.0, False),
            "J is relative")
-    _Check(gd.TranslateSnap(settings, False, True) == (2.0, True),
-           "X is absolute")
-    _Check(gd.TranslateSnap(settings, True, True) == (2.0, True),
-           "X wins over J")
+    _Check(gd.TranslateSnap(settings, False, True) == (None, False),
+           "X no longer influences TranslateSnap: the grid goes "
+           "through gizmoSnap.GridPoint")
+    _Check(gd.TranslateSnap(settings, True, True) == (2.0, False),
+           "J alone decides when both are held")
     settings.stepSnap = True
     _Check(gd.TranslateSnap(settings, False, False) == (2.0, False),
            "the option is the same as the J hold")
+
+
+def TestActiveSnapMode():
+    """ActiveSnapMode precedence, the way TranslateSnapChoice pins J."""
+    move = _Settings(gs.TOOL_TRANSLATE)
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, False, False,
+                             False) == (gset.SNAP_OFF, ""),
+           "nothing held, sticky off: off")
+    for sticky in (gset.SNAP_GRID, gset.SNAP_POINT, gset.SNAP_EDGE,
+                   gset.SNAP_SURFACE):
+        move.snapMode = sticky
+        mode, reason = gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, False,
+                                         False, False)
+        _Check(mode == sticky and reason == "",
+               "sticky %s alone is %s" % (sticky, mode))
+    move.snapMode = gset.SNAP_OFF
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, True, False,
+                             False)[0] == gset.SNAP_GRID,
+           "X alone is grid")
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, False, True,
+                             False)[0] == gset.SNAP_POINT,
+           "V alone is point")
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, False, False,
+                             True)[0] == gset.SNAP_EDGE,
+           "C alone is edge")
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, True, True,
+                             False)[0] == gset.SNAP_POINT,
+           "V outranks X")
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, True, False,
+                             True)[0] == gset.SNAP_EDGE,
+           "C outranks X")
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, False, True,
+                             True)[0] == gset.SNAP_POINT,
+           "V outranks C")
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, True, True,
+                             True)[0] == gset.SNAP_POINT,
+           "V outranks both")
+    # A hold outranks a conflicting sticky mode; press order is never
+    # read, only the booleans.
+    move.snapMode = gset.SNAP_POINT
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, True, False,
+                             False)[0] == gset.SNAP_GRID,
+           "X beats a sticky point")
+    move.snapMode = gset.SNAP_GRID
+    _Check(gd.ActiveSnapMode(move, gs.TOOL_TRANSLATE, False, True,
+                             False)[0] == gset.SNAP_POINT,
+           "V beats a sticky grid")
+    # Rotate offers only off and grid: point/edge/surface holds are
+    # inert with a reason, never a silent fall-through to grid.
+    mode, reason = gd.ActiveSnapMode(move, gs.TOOL_ROTATE, True, False,
+                                     False)
+    _Check(mode == gset.SNAP_GRID and reason == "",
+           "rotate keeps its grid hold")
+    for holdGrid, holdPoint, holdEdge, label in (
+            (False, True, False, "point"),
+            (False, False, True, "edge"),
+            (True, True, False, "point"),
+            (False, True, True, "point")):
+        mode, reason = gd.ActiveSnapMode(move, gs.TOOL_ROTATE, holdGrid,
+                                         holdPoint, holdEdge)
+        _Check(mode == gset.SNAP_OFF and reason != "",
+               "rotate %s is off with a reason: %s" % (label, reason))
+    _Check("Point" in gd.ActiveSnapMode(
+        move, gs.TOOL_ROTATE, False, True, False)[1],
+        "the rotate reason names the held mode")
+    # Scale offers nothing: every hold is off with a reason.
+    for holdGrid, holdPoint, holdEdge in ((True, False, False),
+                                         (False, True, False),
+                                         (False, False, True)):
+        mode, reason = gd.ActiveSnapMode(move, gs.TOOL_SCALE, holdGrid,
+                                         holdPoint, holdEdge)
+        _Check(mode == gset.SNAP_OFF and reason != "",
+               "scale holds are inert: %s" % (reason,))
+    # A sticky mode the tool does not offer is inert too, with a reason.
+    move.snapMode = gset.SNAP_POINT
+    mode, reason = gd.ActiveSnapMode(move, gs.TOOL_ROTATE, False, False,
+                                     False)
+    _Check(mode == gset.SNAP_OFF and reason != "",
+           "sticky point on rotate is inert: %s" % (reason,))
+
+
+def TestSnapThrottle():
+    """The pick throttle: travel AND mode key the cache (spec 4.4)."""
+    centre = _Named(_Handles(gs.TOOL_TRANSLATE), "center")
+    press = centre.points[0]
+    calls = []
+
+    def _Resolver(x, y, mode):
+        calls.append((x, y, mode))
+        return snap.SnapCandidate(Gf.Vec3d(5, 5, 5),
+                                  Gf.Vec3d(0, 0, 1), mode,
+                                  None, 7, (x, y))
+
+    target = FakeTarget()
+    state = _State(gs.TOOL_TRANSLATE, centre, press, target)
+    state.snapResolver = _Resolver
+    settings = _Settings(gs.TOOL_TRANSLATE)
+    first = (press[0] + 20.0, press[1])
+    gd.ApplyDrag(state, first, settings, snapMode=gset.SNAP_POINT)
+    _Check(len(calls) == 1, "the first move picks: %d" % len(calls))
+    _Check(state.snap is not None
+           and state.snap.kind == gset.SNAP_POINT,
+           "the candidate is cached with its kind")
+    _Check(len(target.calls) == 1, "a candidate writes once")
+    # RATIO is 1.0 here, so PHYSICAL px are cursor units: 1 px reuses.
+    gd.ApplyDrag(state, (first[0] + 1.0, first[1]), settings,
+                 snapMode=gset.SNAP_POINT)
+    _Check(len(calls) == 1, "1 px away reuses without a pick: %d"
+           % len(calls))
+    gd.ApplyDrag(state, (first[0] + 5.0, first[1]), settings,
+                 snapMode=gset.SNAP_POINT)
+    _Check(len(calls) == 2, "5 px from the last pick picks again: %d"
+           % len(calls))
+    # Same cursor, different mode: the cached point must not pose as an
+    # edge.
+    at = (first[0] + 5.0, first[1])
+    gd.ApplyDrag(state, at, settings, snapMode=gset.SNAP_EDGE)
+    _Check(len(calls) == 3, "a mode change picks immediately: %d"
+           % len(calls))
+    _Check(state.snap.kind == gset.SNAP_EDGE,
+           "the new candidate carries the new mode: %s" % state.snap)
+
+    # A mode switch at an UNMOVED cursor after a mode that found
+    # nothing must still re-pick: state.snap is None there, so the
+    # cached-kind check never runs and only the snapKind key forces
+    # the pick (gizmoDrag.py:346; spec 4.4, the _ReapplyDrag re-run).
+    misses = []
+
+    def _Sparse(x, y, mode):
+        misses.append(mode)
+        if mode == gset.SNAP_POINT:
+            return None
+        return snap.SnapCandidate(Gf.Vec3d(2, 2, 2),
+                                  Gf.Vec3d(0, 0, 1), mode,
+                                  None, 3, (x, y))
+
+    target2 = FakeTarget()
+    state2 = _State(gs.TOOL_TRANSLATE, centre, press, target2)
+    state2.snapResolver = _Sparse
+    still = (press[0] + 20.0, press[1])
+    gd.ApplyDrag(state2, still, settings, snapMode=gset.SNAP_POINT)
+    _Check(misses == [gset.SNAP_POINT] and state2.snap is None,
+           "V found nothing and the miss is cached: %s" % (misses,))
+    _Check(len(target2.calls) == 0, "no candidate means no write")
+    gd.ApplyDrag(state2, still, settings, snapMode=gset.SNAP_EDGE)
+    _Check(misses == [gset.SNAP_POINT, gset.SNAP_EDGE],
+           "C at the same cursor re-picks over a cached miss: %s"
+           % (misses,))
+    _Check(state2.snap is not None
+           and state2.snap.kind == gset.SNAP_EDGE,
+           "the re-pick carries the new mode: %s" % (state2.snap,))
+    _Check(len(target2.calls) == 1, "the re-pick writes once")
+
+
+def TestSnapMissWritesNothing():
+    """No candidate is no write at all (snapping design 1.4)."""
+    centre = _Named(_Handles(gs.TOOL_TRANSLATE), "center")
+    press = centre.points[0]
+    current = (press[0] + 40.0, press[1] - 20.0)
+    settings = _Settings(gs.TOOL_TRANSLATE)
+
+    def _Miss(x, y, mode):
+        return None
+
+    def _Boom(x, y, mode):
+        raise RuntimeError("the pick failed")
+
+    for label, resolver in (("no resolver", None),
+                            ("no candidate", _Miss),
+                            ("the pick raised", _Boom)):
+        target = FakeTarget()
+        state = _State(gs.TOOL_TRANSLATE, centre, press, target)
+        state.snapResolver = resolver
+        out = gd.ApplyDrag(state, current, settings,
+                           snapMode=gset.SNAP_POINT)
+        _Check(target.calls == [],
+               "%s: the object does not move, Maya does not fall "
+               "back to free dragging: %s" % (label, target.calls))
+        _Check(out == Gf.Vec3d(0, 0, 0),
+               "%s: and nothing is reported applied: %s"
+               % (label, out))
+        _Check(state.snap is None,
+               "%s: the miss leaves no cached candidate: %s"
+               % (label, state.snap))
+
+
+def _FixedResolver(point):
+    """A stub resolver that always offers the same off-axis world point."""
+    def _Resolve(x, y, mode):
+        return snap.SnapCandidate(Gf.Vec3d(point), Gf.Vec3d(0, 0, 1),
+                                  mode, None, 3, (x, y))
+    return _Resolve
+
+
+def TestSnapCandidateWrite():
+    """
+    What a point/edge/surface candidate actually WRITES (spec 3, 4.2,
+    1.4): measured from worldOrigin, constrained to the handle, and
+    nothing at all when there is no candidate.
+    """
+    camera = _TiltedCamera()
+    handles = _Handles(gs.TOOL_TRANSLATE, camera=camera)
+    settings = _Settings(gs.TOOL_TRANSLATE)
+    world = Gf.Vec3d(2.5, -1.25, 3.75)
+
+    # A PLANAR handle carries its SQUARE's centre in worldCenter
+    # (gizmoScreen.py:316-324); the pivot is worldOrigin, so a write
+    # measured from worldCenter lands the offset square on the target.
+    plane = _Named(handles, "xy")
+    offset = (Gf.Vec3d(plane.worldCenter)
+              - Gf.Vec3d(plane.worldOrigin)).GetLength()
+    _Check(offset > 1e-3,
+           "the fixture is only meaningful while the square is offset: "
+           "%.6f" % offset)
+
+    def _Miss(x, y, mode):
+        return None
+
+    def _Drag(handle, press, mode, resolver, ctrl=False):
+        target = FakeTarget()
+        state = _State(gs.TOOL_TRANSLATE, handle, press, target,
+                       camera=camera)
+        state.snapResolver = resolver
+        out = gd.ApplyDrag(state, (press[0] + 40.0, press[1] - 20.0),
+                           settings, snapMode=mode, ctrl=ctrl)
+        return target, out
+
+    resolve = _FixedResolver(world)
+
+    # The centre takes the candidate whole: the write is the pivot's
+    # travel to the world point, in every mode.
+    centre = _Named(handles, "center")
+    pivot0 = Gf.Vec3d(centre.worldOrigin)
+    for mode in (gset.SNAP_POINT, gset.SNAP_EDGE, gset.SNAP_SURFACE):
+        target, out = _Drag(centre, centre.points[0], mode, resolve)
+        _Check(target.LastKwargs() == {"snapStep": None,
+                                       "snapAbsolute": False},
+               "%s writes with no keyword: %s" % (mode, target.Last()))
+        _Check((out - (world - pivot0)).GetLength() < 1e-9,
+               "%s lands the pivot on the candidate: %s"
+               % (mode, out))
+
+    # An axis keeps only the along-axis component of that travel.
+    axis = _Named(handles, "x")
+    pivot0 = Gf.Vec3d(axis.worldOrigin)
+    direction = Gf.Vec3d(axis.worldAxis).GetNormalized()
+    press = ((axis.points[0][0] + axis.points[1][0]) * 0.5,
+             (axis.points[0][1] + axis.points[1][1]) * 0.5)
+    target, out = _Drag(axis, press, gset.SNAP_POINT, resolve)
+    expected = direction * Gf.Dot(world - pivot0, direction)
+    _Check((out - expected).GetLength() < 1e-9,
+           "the axis drag stops level with the target: %s" % (out,))
+
+    # A plane drops the normal component; the write is measured from
+    # the pivot, not the offset square (see the offset guard above,
+    # without which the two readings would coincide).
+    pivot0 = Gf.Vec3d(plane.worldOrigin)
+    normal = Gf.Vec3d(plane.worldNormal).GetNormalized()
+    target, out = _Drag(plane, plane.worldCenterScreen,
+                        gset.SNAP_POINT, resolve)
+    travel = world - pivot0
+    expected = travel - normal * Gf.Dot(travel, normal)
+    _Check((out - expected).GetLength() < 1e-9,
+           "the planar write lands in the plane from the pivot: %s"
+           % (out,))
+
+    # Ctrl+axis is a plane on the snap path too (spec 4.2).
+    travel = world - Gf.Vec3d(axis.worldOrigin)
+    target, out = _Drag(axis, press, gset.SNAP_POINT, resolve,
+                        ctrl=True)
+    expected = travel - direction * Gf.Dot(travel, direction)
+    _Check(abs(Gf.Dot(out, direction)) < 1e-9,
+           "ctrl+axis keeps no along-axis component: %s" % (out,))
+    _Check((out - expected).GetLength() < 1e-9,
+           "ctrl+axis lands in the perpendicular plane: %s" % (out,))
+
+    # And no candidate is no write, in every mode.
+    for mode in (gset.SNAP_POINT, gset.SNAP_EDGE, gset.SNAP_SURFACE):
+        target, out = _Drag(centre, centre.points[0], mode, _Miss)
+        _Check(target.calls == [] and out == Gf.Vec3d(0, 0, 0),
+               "%s miss writes nothing: %s %s"
+               % (mode, target.calls, out))
+
+
+def TestGridReason():
+    """The grid status clause follows GridPoint's own branch (spec 4.3)."""
+    clause = "grid: relative (frame not world-aligned)"
+    handles = _Handles(gs.TOOL_TRANSLATE)
+    _Check(gd._GridReason(_Named(handles, "x"), False) == "",
+           "a world-aligned axis is the world grid")
+    _Check(gd._GridReason(_Named(handles, "xy"), False) == "",
+           "a world-aligned plane is the world grid")
+    _Check(gd._GridReason(_Named(handles, "center"), False) == "",
+           "the centre rounds all three world components")
+    tilted = Gf.Matrix4d(1.0)
+    tilted.SetRotate(Gf.Rotation(Gf.Vec3d(0, 1, 0), 45.0))
+    turned = gs.BuildHandles(gs.TOOL_TRANSLATE, tilted, _Camera(),
+                             VIEWPORT, RATIO)
+    _Check(gd._GridReason(_Named(turned, "x"), False) == clause,
+           "a tilted axis quantises the travel from the pivot")
+    _Check(gd._GridReason(_Named(turned, "x"), True) == clause,
+           "ctrl+axis reads the same axis either way")
+    _Check(gd._GridReason(_Named(turned, "xy"), False) == clause,
+           "a tilted plane quantises the travel from the pivot")
+    # And the drag itself carries the clause on state.snapReason.
+    axis = _Named(turned, "x")
+    press = ((axis.points[0][0] + axis.points[1][0]) * 0.5,
+             (axis.points[0][1] + axis.points[1][1]) * 0.5)
+    state = _State(gs.TOOL_TRANSLATE, axis, press, FakeTarget())
+    gd.ApplyDrag(state, (press[0] + 40.0, press[1] - 20.0),
+                 _Settings(gs.TOOL_TRANSLATE), holdGrid=True)
+    _Check(state.snapReason == clause,
+           "the tilted grid drag says relative: %r"
+           % state.snapReason)
+    straight = _Named(handles, "x")
+    press = ((straight.points[0][0] + straight.points[1][0]) * 0.5,
+             (straight.points[0][1] + straight.points[1][1]) * 0.5)
+    state = _State(gs.TOOL_TRANSLATE, straight, press, FakeTarget())
+    gd.ApplyDrag(state, (press[0] + 40.0, press[1] - 20.0),
+                 _Settings(gs.TOOL_TRANSLATE), holdGrid=True)
+    _Check(state.snapReason == "",
+           "the aligned grid drag reports nothing: %r"
+           % state.snapReason)
+
+
+def TestGridWorldNotChannels():
+    """The assertion that proves X exists (spec section 6 item 5)."""
+    stage = Usd.Stage.CreateInMemory()
+    parent = UsdGeom.Xform.Define(stage, "/P")
+    UsdGeom.XformCommonAPI(parent).SetRotate(Gf.Vec3f(0, 45, 0))
+    child = UsdGeom.Xform.Define(stage, "/P/Child")
+    UsdGeom.XformCommonAPI(child).SetTranslate(Gf.Vec3d(1.4, 0, 0))
+    time = Usd.TimeCode.Default()
+    writer = gm.Writer(stage, time, gm.WRITE_DEFAULT)
+    target, reason = gm.MakeTarget(stage, child.GetPrim(),
+                                   gm.CHANNELS_POSE, writer)
+    _Check(target is not None, "xform target: %s" % reason)
+    target.BeginDrag()
+    matrix = target.GizmoMatrix()
+    camera = _Camera()
+    handles = gs.BuildHandles(gs.TOOL_TRANSLATE, matrix, camera,
+                              VIEWPORT, RATIO)
+    centre = _Named(handles, "center")
+    press = centre.points[0]
+    current = (press[0] + 50.0, press[1] - 25.0)
+    state = gd.DragState(gs.TOOL_TRANSLATE, centre, target, press,
+                         camera, VIEWPORT)
+    settings = _Settings(gs.TOOL_TRANSLATE)
+    gd.ApplyDrag(state, current, settings, holdGrid=True, gridSize=1.0)
+    cache = UsdGeom.XformCache(time)
+    world = cache.GetLocalToWorldTransform(
+        child.GetPrim()).ExtractTranslation()
+    for index in range(3):
+        _Check(abs(world[index] - round(world[index])) < 1e-6,
+               "world lands on the grid: %s" % (world,))
+    local = UsdGeom.XformCommonAPI(child).GetXformVectors(time)[0]
+    off = [abs(local[i] - round(local[i])) > 1e-6 for i in range(3)]
+    _Check(any(off),
+           "the channels do not: %s (world %s)" % (local, world))
 
 
 # ---------------------------------------------------------------------
@@ -492,6 +891,75 @@ def TestRotateSnapping():
            "and the ball reports the snapped angle: %.4f" % held)
 
 
+def TestRotateGrid():
+    """Rotate's grid is absolute, and only on a Gimbal ring (spec 4.3)."""
+    axes = [Gf.Vec3d(1, 0, 0), Gf.Vec3d(0, 1, 0), Gf.Vec3d(0, 0, 1)]
+    handles = _Handles(gs.TOOL_ROTATE, gimbalAxes=axes)
+    settings = _Settings(gs.TOOL_ROTATE)
+    settings.stepSize = 15.0
+
+    target = FakeTarget()
+    target.calls = []
+    ring = _Named(handles, "x")
+    press = ring.frontPoints[0][0]
+    current = (press[0] + 25.0, press[1] + 25.0)
+    state = _State(gs.TOOL_ROTATE, ring, press, target, gimbal=True)
+    # A non-zero Euler base proves the grid is absolute, not relative:
+    # ApplyRotateChannel(1, 40, snapStep=15) from base 3 lands 48, not
+    # 45 (snapping design 4.3), while the grid lands base + angle on 45.
+    state.rotationBase = [3.0, 0.0, 0.0]
+    angle = gd.ApplyDrag(state, current, settings,
+                         snapMode=gset.SNAP_GRID, gridSize=100.0)
+    kind, index, applied = target.Last()[:3]
+    _Check(kind == "rotateChannel",
+           "the gimbal grid writes the channel: %s" % (target.Last(),))
+    _Check(target.LastKwargs() == {"snapStep": None},
+           "with no step keyword: %s" % (target.LastKwargs(),))
+    _Check(_Close((3.0 + applied) % 15.0, 0.0, 1e-6)
+           or _Close((3.0 + applied) % 15.0, 15.0, 1e-6),
+           "the LANDED channel is on the step: base 3 + %.4f"
+           % applied)
+    _Check(_Close(state.angle, angle) and _Close(angle, applied),
+           "the state carries the absolute angle for the wedge")
+    _Check(state.snapReason == "",
+           "no reason on the offered path: %r" % state.snapReason)
+
+    # The same hold on a world-axis ring is inert: no single channel to
+    # quantise, so the status names the ring it needs.
+    target = FakeTarget()
+    ring = _Named(_Handles(gs.TOOL_ROTATE), "z")
+    press = ring.points[0]
+    state = _State(gs.TOOL_ROTATE, ring, press, target, gimbal=False)
+    gd.ApplyDrag(state, (press[0], press[1] + 40.0), settings,
+                 snapMode=gset.SNAP_GRID)
+    _Check(target.Last()[0] == "rotate",
+           "the world ring stays on the world route: %s"
+           % (target.Last(),))
+    _Check(state.snapReason == "Grid needs a Gimbal ring",
+           "and records why: %r" % state.snapReason)
+
+    # The ball is inert the same way.
+    target = FakeTarget()
+    ball = _Named(_Handles(gs.TOOL_ROTATE), "free")
+    state = _State(gs.TOOL_ROTATE, ball, ball.center, target)
+    gd.ApplyDrag(state, (ball.center[0] + 37.0, ball.center[1]),
+                 settings, snapMode=gset.SNAP_GRID)
+    _Check(state.snapReason == "Grid needs a Gimbal ring",
+           "the ball needs a ring too: %r" % state.snapReason)
+
+    # Point is Move-only, even on a gimbal ring.
+    target = FakeTarget()
+    ring = _Named(handles, "x")
+    press = ring.frontPoints[0][0]
+    state = _State(gs.TOOL_ROTATE, ring, press, target, gimbal=True)
+    state.rotationBase = [0.0, 0.0, 0.0]
+    gd.ApplyDrag(state, (press[0] + 25.0, press[1] + 25.0), settings,
+                 snapMode=gset.SNAP_POINT)
+    _Check(state.snapReason != ""
+           and "Move only" in state.snapReason,
+           "point on rotate names itself inert: %r" % state.snapReason)
+
+
 # ---------------------------------------------------------------------
 # Scale
 # ---------------------------------------------------------------------
@@ -607,12 +1075,19 @@ def main():
         ("centre translate", TestCentreTranslate),
         ("translate snapping", TestTranslateSnapping),
         ("translate snap choice", TestTranslateSnapChoice),
+        ("active snap mode", TestActiveSnapMode),
+        ("snap throttle", TestSnapThrottle),
+        ("snap miss writes nothing", TestSnapMissWritesNothing),
+        ("snap candidate write", TestSnapCandidateWrite),
+        ("grid reason", TestGridReason),
+        ("grid world not channels", TestGridWorldNotChannels),
         ("ring rotate", TestRingRotate),
         ("rotate accumulates past 180", TestRotateAccumulatesPast180),
         ("view ring rotate", TestViewRingRotate),
         ("gimbal ring rotate", TestGimbalRingRotate),
         ("trackball rotate", TestTrackballRotate),
         ("rotate snapping", TestRotateSnapping),
+        ("rotate grid", TestRotateGrid),
         ("axis scale", TestAxisScale),
         ("plane scale", TestPlaneScale),
         ("centre scale", TestCentreScale),

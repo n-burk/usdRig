@@ -30,11 +30,13 @@
 
 #include "pxr/imaging/hd/sceneIndex.h"
 #include "pxr/imaging/hd/xformSchema.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdUtils/stageCache.h"
 #include "pxr/usdImaging/usdImaging/sceneIndices.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -68,6 +70,110 @@ ReadXform(const HdSceneIndexBaseRefPtr &sceneIndex, const SdfPath &path,
     }
     *out = schema.GetMatrix()->GetTypedValue(0.0);
     return true;
+}
+
+bool
+FindSpiderJointChain(const UsdStageRefPtr &stage, SdfPath *rigPath,
+                     SdfPath *parentPath, SdfPath *childPath)
+{
+    SdfPathVector rigs;
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (prim.GetTypeName() == TfToken("RigExecRoot")) {
+            rigs.push_back(prim.GetPath());
+        }
+    }
+    Check(rigs.size() == 1, "spider stage has exactly one RigExecRoot");
+    if (rigs.size() != 1) {
+        return false;
+    }
+
+    SdfPathVector joints;
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (prim.GetTypeName() == TfToken("RigExecJoint") &&
+            prim.GetPath().HasPrefix(rigs.front())) {
+            joints.push_back(prim.GetPath());
+        }
+    }
+    Check(joints.size() == 2,
+          "spider rig has exactly two descendant RigExecJoints");
+    if (joints.size() != 2) {
+        return false;
+    }
+
+    *rigPath = rigs.front();
+    if (joints[1].HasPrefix(joints[0])) {
+        *parentPath = joints[0];
+        *childPath = joints[1];
+    } else if (joints[0].HasPrefix(joints[1])) {
+        *parentPath = joints[1];
+        *childPath = joints[0];
+    } else {
+        Check(false, "spider joints form one nested chain");
+        return false;
+    }
+    return true;
+}
+
+void
+ProbeSpiderJointLink(const std::string &examples)
+{
+    const std::string path = examples + "/components/spider_leg.usd";
+    const UsdStageRefPtr stage = UsdStage::Open(path);
+    Check(stage != nullptr, "spider joint stage opens");
+    if (!stage) {
+        return;
+    }
+
+    SdfPath rig;
+    SdfPath joint;
+    SdfPath child;
+    if (!FindSpiderJointChain(stage, &rig, &joint, &child)) {
+        return;
+    }
+    Check(joint.HasPrefix(rig) && child.HasPrefix(joint),
+          "spider child is nested beneath its parent joint");
+
+    UsdImagingCreateSceneIndicesInfo info;
+    info.stage = stage;
+    const UsdImagingSceneIndices sceneIndices =
+        UsdImagingCreateSceneIndices(info);
+    const HdSceneIndexBaseRefPtr terminal = sceneIndices.finalSceneIndex;
+    Check(terminal != nullptr, "spider-joint terminal index exists");
+    if (!terminal) {
+        return;
+    }
+
+    const long long cacheId =
+        UsdUtilsStageCache::Get().Insert(stage).ToLongInt();
+    Check(RigExecImaging_Activate(cacheId, "", 0.0) == 0,
+          "spider-joint RigExec activation");
+
+    const SdfPath sphere =
+        joint.AppendChild(TfToken("rigGuideSphere_0"));
+    const SdfPath cone =
+        joint.AppendChild(TfToken("rigGuideCone_0"));
+    const SdfPath childSphere =
+        child.AppendChild(TfToken("rigGuideSphere_0"));
+    const SdfPathVector children = terminal->GetChildPrimPaths(joint);
+    Check(std::find(children.begin(), children.end(), sphere) !=
+              children.end(),
+          "spider parent announces its sphere guide");
+    Check(std::find(children.begin(), children.end(), cone) != children.end(),
+          "spider parent announces its child-link cone");
+    GfMatrix4d parentXform(1.0), coneXform(1.0), childXform(1.0);
+    Check(ReadXform(terminal, sphere, &parentXform),
+          "spider parent sphere exists in the real chain");
+    Check(ReadXform(terminal, cone, &coneXform),
+          "spider child-link cone exists in the real chain");
+    Check(ReadXform(terminal, childSphere, &childXform),
+          "spider child sphere exists in the real chain");
+    const GfVec3d midpoint =
+        0.5 * (parentXform.ExtractTranslation() +
+               childXform.ExtractTranslation());
+    Check(GfIsClose(coneXform.ExtractTranslation(), midpoint, 1e-6),
+          "spider child-link cone spans parent and child origins");
+
+    RigExecImaging_Deactivate();
 }
 
 }  // namespace
@@ -224,6 +330,8 @@ main(int argc, char **argv)
           "joint guide sits exactly at the asset's placement");
 
     RigExecImaging_Deactivate();
+
+    ProbeSpiderJointLink(examples);
 
     std::printf("%s\n", failures == 0 ? "probeImagingPipeline: PASS"
                                       : "probeImagingPipeline: FAILURES");

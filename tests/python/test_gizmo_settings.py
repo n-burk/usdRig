@@ -64,7 +64,8 @@ def TestMayaDefaults():
                  gset.TOOL_SCALE):
         settings = gset.MayaDefaults(tool)
         for field in ("orientation", "stepSnap", "stepSize", "freeRotate",
-                      "preventNegativeScale", "preserveChildren"):
+                      "preventNegativeScale", "preserveChildren",
+                      "snapMode"):
             _Check(hasattr(settings, field),
                    "%s settings carry %s" % (tool, field))
 
@@ -86,6 +87,61 @@ def TestOrientationChoices():
         _Check(gset.MayaDefaults(tool).orientation
                in gset.OrientationChoices(tool),
                "%s default orientation is offered" % tool)
+
+
+def TestSnapChoices():
+    """Snap To offers all five for Move, off+grid for Rotate, none else."""
+    _Check(gset.SnapChoices(gset.TOOL_TRANSLATE) == (
+        gset.SNAP_OFF, gset.SNAP_GRID, gset.SNAP_POINT, gset.SNAP_EDGE,
+        gset.SNAP_SURFACE), "move snap choices: %s"
+        % (gset.SnapChoices(gset.TOOL_TRANSLATE),))
+    _Check(gset.SnapChoices(gset.TOOL_ROTATE) == (
+        gset.SNAP_OFF, gset.SNAP_GRID), "rotate snap choices: %s"
+        % (gset.SnapChoices(gset.TOOL_ROTATE),))
+    _Check(gset.SnapChoices(gset.TOOL_SCALE) == ()
+           and gset.SnapChoices(gset.TOOL_SELECT) == (),
+           "scale and select offer no snap modes")
+    for token in (gset.SNAP_OFF, gset.SNAP_GRID, gset.SNAP_POINT,
+                  gset.SNAP_EDGE, gset.SNAP_SURFACE):
+        _Check(gset.SnapLabel(token)[0].isupper(),
+               "%s has a display label" % token)
+    # Every default is off, and the tools that offer any choices can show
+    # the value they start on. Scale and select offer none, so they are
+    # asserted separately and never fed to the loop -- the same reason
+    # the orientation loop excludes TOOL_SELECT.
+    for tool in (gset.TOOL_SELECT, gset.TOOL_TRANSLATE, gset.TOOL_ROTATE,
+                 gset.TOOL_SCALE):
+        _Check(gset.MayaDefaults(tool).snapMode == gset.SNAP_OFF,
+               "%s snap starts off" % tool)
+    for tool in (gset.TOOL_TRANSLATE, gset.TOOL_ROTATE):
+        _Check(gset.MayaDefaults(tool).snapMode
+               in gset.SnapChoices(tool),
+               "%s default snap is offered" % tool)
+
+
+def TestGridSize():
+    """Grid Size is session-wide, clamped, notified, and never reset."""
+    settings = gset.GizmoSettings()
+    _Check(settings.gridSize == 1.0, "the grid starts at 1.0")
+    settings.gridSize = 2.0
+    _Check(settings.gridSize == 2.0, "the grid took the new value")
+    settings.gridSize = 0.0
+    _Check(settings.gridSize == gset.GRID_SIZE_MIN,
+           "the grid is clamped up: %s" % settings.gridSize)
+    settings.gridSize = 1e-4
+    _Check(settings.gridSize == 1e-4, "the floor itself sticks")
+    seen = []
+    settings.AddListener(lambda: seen.append(len(seen)))
+    settings.gridSize = 4.0
+    _Check(len(seen) == 1, "a grid size change notifies")
+    settings.gridSize = 4.0
+    _Check(len(seen) == 1, "an unchanged grid write is silent")
+    settings.For(gset.TOOL_TRANSLATE).snapMode = gset.SNAP_GRID
+    settings.Reset(gset.TOOL_TRANSLATE)
+    _Check(settings.gridSize == 4.0,
+           "Reset(tool) leaves the world grid alone")
+    _Check(settings.For(gset.TOOL_TRANSLATE).snapMode == gset.SNAP_OFF,
+           "but the sticky mode does reset")
 
 
 def TestPerToolIndependence():
@@ -176,6 +232,8 @@ def main():
         ("orientation constants", TestOrientationConstants),
         ("maya defaults", TestMayaDefaults),
         ("orientation choices", TestOrientationChoices),
+        ("snap choices", TestSnapChoices),
+        ("grid size", TestGridSize),
         ("per-tool independence", TestPerToolIndependence),
         ("manipulator size", TestManipulatorSize),
         ("reset", TestReset),

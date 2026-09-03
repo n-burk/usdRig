@@ -45,14 +45,14 @@ def _bootstrap():
     usd_install = pathlib.Path(
         os.environ.get("RIGEXEC_USD_INSTALL")
         or (repo_root.parent / "usd-install"))
-    build_dir = repo_root / "build"
+    build_dir = pathlib.Path(
+        os.environ.get("RIGEXEC_BUILD_DIR") or (repo_root / "build"))
 
     # pxr must resolve from the USD install, never a global copy. The layout
     # differs by platform: Windows installs to <usd>/Lib/site-packages, while
     # POSIX installs under <usd>/lib/python*/site-packages.
     site_candidates = [usd_install / "Lib" / "site-packages"]
-    if not (usd_install / "Lib").is_dir():
-        site_candidates.extend(sorted(usd_install.glob("lib/python*/site-packages")))
+    site_candidates.extend(sorted(usd_install.glob("lib/python*/site-packages")))
 
     # _rigexec plus the copied rigexec package live in <build>/python for
     # single-config generators and under a per-configuration subdirectory for

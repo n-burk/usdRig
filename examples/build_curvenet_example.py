@@ -223,7 +223,6 @@ def Xform "CurvenetAsset"
         {
             def RigExecJoint "Bend"
             {
-                double guide:length = 1.2
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 3, 0, 1) )
             }
         }
@@ -269,7 +268,7 @@ def Xform "CurvenetAsset"
                 )
                 {
                     rel rigExec:curvenet = </CurvenetAsset/Geom/Net>
-                    float inputs:strength = 1
+                    float inputs:defaultWeight = 1
                     rel rigExec:moves = </CurvenetAsset/Geom/Tube.points>
                 }
             }
@@ -295,8 +294,6 @@ def Xform "CurvenetAsset"
             uniform token rigExec:basis = "bezier"
             int[] rigExec:splineIndices = [%(splines)s]
             uniform int rigExec:samplesPerSpline = 5
-            color3f guide:displayColor = (0.95, 0.35, 1)
-            double guide:radius = 0.05
             point3f[] points = [%(netpoints)s]
             float[] widths = [%(netwidths)s]
         }

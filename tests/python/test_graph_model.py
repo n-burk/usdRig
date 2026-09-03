@@ -750,6 +750,154 @@ def TestSetKeyValuesAndTimes():
            "a selection that names no key is refused")
 
 
+def TestCurveTypes():
+    # Ts ships Bezier and Hermite (ts/types.h:101-105); the editor must
+    # switch between them and author to each.
+    spline = _Spline()
+    _Check(gm.CurveTypeName(spline) == "bezier",
+           "new splines are Bezier: %s" % gm.CurveTypeName(spline))
+    gm.SetCurveType(spline, "hermite")
+    _Check(gm.CurveTypeName(spline) == "hermite",
+           "switched to Hermite")
+    _Check(spline.GetCurveType() == Ts.CurveTypeHermite,
+           "the Ts mode moved too: %s" % spline.GetCurveType())
+    _Check(_Times(spline) == [0.0, 10.0, 20.0, 30.0],
+           "switching keeps every key")
+    _Check(_Close(spline.GetKnot(10.0).GetValue(), 10.0),
+           "and every value")
+    gm.SetCurveType(spline, "bezier")
+    _Check(gm.CurveTypeName(spline) == "bezier",
+           "and back to Bezier")
+    try:
+        gm.SetCurveType(spline, "catmullrom")
+    except ValueError:
+        pass
+    else:
+        _Check(False, "an unknown curve type must raise")
+
+    # Every edit op preserves the type: the gesture copies with
+    # Ts.Spline(spline) and writes the copy back whole.
+    spline = _Spline()
+    gm.SetCurveType(spline, "hermite")
+    gm.MoveKeys(spline, [10.0], 1.0, 0.0, snapFrames=False)
+    _Check(gm.CurveTypeName(spline) == "hermite",
+           "a key drag keeps Hermite")
+    gm.SetTangentType(spline, [10.0], gm.TANGENT_FLAT)
+    _Check(gm.CurveTypeName(spline) == "hermite",
+           "a tangent button keeps Hermite")
+    gm.AuthorKnot(spline, 15.0, 3.0)
+    _Check(gm.CurveTypeName(spline) == "hermite"
+           and spline.GetKnot(15.0) is not None,
+           "a new key on a Hermite spline is a Hermite key")
+    gm.SetExtrapolation(spline, pre="cycle")
+    _Check(gm.CurveTypeName(spline) == "hermite",
+           "an infinity change keeps Hermite")
+
+    # A Hermite spline round-trips through the session layer with undo,
+    # exactly like a Bezier one.
+    stage, control, _ = _RigStage()
+    attr = control.GetAttribute("avars:tx")
+    hermite = _Spline()
+    gm.SetCurveType(hermite, "hermite")
+    attr.SetSpline(hermite)
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    stack = rigExecUndo.UndoStack()
+    _Check(gm.CurveTypeName(gm.SplineFor(attr)) == "hermite",
+           "SplineFor preserves the stored Hermite type")
+    edited = Ts.Spline(attr.GetSpline())
+    gm.MoveKeys(edited, [10.0], 2.0, 0.0)
+    _Check(gm.ApplySpline(stage, attr.GetPath(), edited, stack, "Move"),
+           "the Hermite move was pushed")
+    _Check(gm.CurveTypeName(attr.GetSpline()) == "hermite",
+           "the stage still resolves Hermite after the move")
+    _Check(stack.Undo()
+           and gm.CurveTypeName(attr.GetSpline()) == "hermite",
+           "undo keeps the Hermite type")
+
+
+def TestDualKnots():
+    # A fresh knot is single; SetPreValue makes it dual (verified against
+    # this Ts build), and ClearPreValue is the only way back -- setting
+    # pre == value keeps IsDualValued True.
+    spline = _Spline()
+    _Check(not spline.GetKnot(10.0).IsDualValued(),
+           "new keys are single-valued")
+    _Check(gm.SetKeyPreValues(spline, [10.0], 4.0) == [10.0],
+           "Pre authors the arrival square")
+    knot = spline.GetKnot(10.0)
+    _Check(knot.IsDualValued()
+           and _Close(knot.GetPreValue(), 4.0)
+           and _Close(knot.GetValue(), 10.0),
+           "a single knot went dual with its departure untouched")
+    _Check(gm.SetKeyPreValues(spline, [7.5], 1.0) == [],
+           "a pre on a missing key is ignored, not fatal")
+
+    # Value shapes the departure only; Pre shapes the arrival only.
+    gm.SetKeyValues(spline, [10.0], 7.0)
+    knot = spline.GetKnot(10.0)
+    _Check(_Close(knot.GetValue(), 7.0)
+           and _Close(knot.GetPreValue(), 4.0),
+           "Value left the arrival alone")
+    gm.SetKeyPreValues(spline, [10.0], 6.0)
+    knot = spline.GetKnot(10.0)
+    _Check(_Close(knot.GetPreValue(), 6.0)
+           and _Close(knot.GetValue(), 7.0),
+           "Pre left the departure alone")
+
+    # A drag translates the discontinuity as a unit ...
+    gm.MoveKeys(spline, [10.0], 0.0, 2.0, snapFrames=False)
+    knot = spline.GetKnot(10.0)
+    _Check(_Close(knot.GetValue(), 9.0)
+           and _Close(knot.GetPreValue(), 8.0),
+           "MoveKeys dv moved both squares together")
+    # ... while re-keying reshapes only the departure the viewport shows.
+    gm.AuthorKnot(spline, 10.0, 1.0)
+    knot = spline.GetKnot(10.0)
+    _Check(_Close(knot.GetValue(), 1.0)
+           and _Close(knot.GetPreValue(), 8.0),
+           "AuthorKnot left history alone")
+
+    # Equal values are still dual until cleared.
+    gm.SetKeyPreValues(spline, [10.0], 1.0)
+    _Check(spline.GetKnot(10.0).IsDualValued(),
+           "pre == value is still dual")
+    _Check(gm.ClearDualKnots(spline, [10.0, 7.5]) == [10.0],
+           "clear reports only the dual key it singled")
+    _Check(not spline.GetKnot(10.0).IsDualValued(),
+           "and the arrival square is gone")
+    _Check(gm.ClearDualKnots(spline, [10.0]) == [],
+           "clearing a single key is a no-op")
+
+    # Non-finite arrivals are refused, not authored.
+    try:
+        gm.SetKeyPreValues(spline, [20.0], float("nan"))
+    except ValueError:
+        pass
+    else:
+        _Check(False, "a NaN pre must raise")
+    _Check(not spline.GetKnot(20.0).IsDualValued(),
+           "and the refused key stayed single")
+
+    # Duals round-trip through the session layer with undo.
+    stage, control, _ = _RigStage()
+    attr = control.GetAttribute("avars:tx")
+    attr.SetSpline(_Spline())
+    stage.SetEditTarget(Usd.EditTarget(stage.GetSessionLayer()))
+    stack = rigExecUndo.UndoStack()
+    edited = Ts.Spline(attr.GetSpline())
+    gm.SetKeyPreValues(edited, [10.0], 2.0)
+    _Check(gm.ApplySpline(stage, attr.GetPath(), edited, stack, "Dual"),
+           "the dual was pushed")
+    knot = attr.GetSpline().GetKnot(10.0)
+    _Check(knot.IsDualValued()
+           and _Close(knot.GetPreValue(), 2.0)
+           and _Close(knot.GetValue(), 10.0),
+           "the stage resolves both squares")
+    _Check(stack.Undo()
+           and not attr.GetSpline().GetKnot(10.0).IsDualValued(),
+           "undo singled the key again")
+
+
 def main():
     _RegisterSchema()
     groups = [
@@ -767,6 +915,8 @@ def main():
         ("apply spline", TestApplySpline),
         ("apply empty spline", TestApplyEmptySpline),
         ("set key values + times", TestSetKeyValuesAndTimes),
+        ("curve types", TestCurveTypes),
+        ("dual knots", TestDualKnots),
     ]
     for name, fn in groups:
         fn()

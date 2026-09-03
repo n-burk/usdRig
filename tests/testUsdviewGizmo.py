@@ -132,6 +132,34 @@ class _Driver(object):
         QtTest.QTest.keyClick(self.view, key, modifiers)
         self.Pump()
 
+    def KeyDown(self, key, modifiers=None):
+        # A HOLD, not Key()'s click: Key() is QTest.keyClick, a press
+        # immediately followed by a release, so the hold is armed and
+        # cleared before the next mouse move (probed: _holdGrid is
+        # False after a mid-drag keyClick(Key_X) and True across a
+        # move after keyPress(Key_X)). Every hold assertion hand-rolls
+        # Press / Move / KeyDown / Move / KeyUp / Release, never Drag().
+        try:
+            from PySide6 import QtTest
+        except ImportError:
+            from PySide2 import QtTest
+        if modifiers is None:
+            modifiers = self.QtCore.Qt.NoModifier
+        self.view.setFocus()
+        QtTest.QTest.keyPress(self.view, key, modifiers)
+        self.Pump()
+
+    def KeyUp(self, key, modifiers=None):
+        try:
+            from PySide6 import QtTest
+        except ImportError:
+            from PySide2 import QtTest
+        if modifiers is None:
+            modifiers = self.QtCore.Qt.NoModifier
+        self.view.setFocus()
+        QtTest.QTest.keyRelease(self.view, key, modifiers)
+        self.Pump()
+
     def Select(self, path):
         prim = self.api.stage.GetPrimAtPath(path)
         _Check(prim, "the stage has a prim at %s" % path)
@@ -191,6 +219,32 @@ def _Values(prim, names, frame):
     return [prim.GetAttribute(n).Get(frame) for n in names]
 
 
+def _World(stage, path, frame):
+    """The world-space translation of the prim at `path`."""
+    cache = UsdGeom.XformCache(frame)
+    return cache.GetLocalToWorldTransform(
+        stage.GetPrimAtPath(path)).ExtractTranslation()
+
+
+def _ProjectLogical(controller, world):
+    """
+    A world point as LOGICAL pixels, which is what _Driver.Send takes.
+
+    Through the controller's own camera -- the one the live drag
+    resolves against. ProjectPoint is physical, so the ratio comes
+    back off on the way out, the inverse of _Position's way in
+    (gizmoUI.py:2075-2091).
+    """
+    import gizmoScreen
+    camera, viewport, ratio = controller._Camera()
+    screen = gizmoScreen.ProjectPoint(
+        gizmoScreen.ViewProjection(camera), viewport,
+        Gf.Vec3d(*world))
+    if screen is None:
+        return None
+    return (screen[0] / ratio, screen[1] / ratio)
+
+
 def _Changed(before, after, tolerance=1e-6):
     return [i for i in range(len(before))
             if abs((before[i] or 0.0) - (after[i] or 0.0)) > tolerance]
@@ -224,6 +278,22 @@ def testUsdviewInputFunction(appController):
     d.Pump()
     _Check(d.QtWidgets.QApplication.activeWindow() is not None,
            "the main window is active, so application shortcuts dispatch")
+
+    # The toolbar fits usdview's DEFAULT width: at the designer
+    # default (mainWindowUI.py:37, 1145x1002) the viewport frame is
+    # 598 logical px, and the Snap: button once pushed Undo/Redo into
+    # the overflow chevron. Asserted here, before the resize below --
+    # at 1800 px everything fits and the check would be vacuous.
+    d.Pump()
+    bar = controller.toolbar
+    _Check(bar.width() > 0, "the toolbar is laid out already")
+    for action in (bar.undoAction, bar.redoAction):
+        widget = bar.widgetForAction(action)
+        _Check(widget is not None and widget.isVisibleTo(bar),
+               "%r stays out of the overflow chevron at the default "
+               "width (toolbar %d px, sizeHint %d)" % (
+                   action.text(), bar.width(),
+                   bar.sizeHint().width()))
 
     # Widen the window so the toolbar is not folded into QToolBar's
     # overflow chevron, which is where testusdview's default width puts
@@ -705,6 +775,369 @@ def testUsdviewInputFunction(appController):
     _Check(not stage.GetPrimAtPath(childPath),
            "the test's temporary child prim is gone from the stage")
 
+    # --- 6c. Snapping: holds, sticky modes and landings ------------------
+    # Spec section 6 items 12 and 13 first, then 8-11, 14 and 15: the
+    # C/V hold assertions come before any other C or V in the file,
+    # because one leaked keystroke flips usdview's auto-clipping or
+    # opens its validation window for the rest of the run. Every mesh
+    # and curve in this asset is rig-deformed (design section 3), so
+    # the moved object and everything it lands on are scratch prims
+    # authored into the SESSION layer and removed afterwards, the way
+    # this file already defines and removes GizmoTestChild.
+    import gizmoSnap
+    probe = UsdGeom.Xform.Define(stage, "/Shot/SnapProbe")
+    UsdGeom.XformCommonAPI(probe).SetTranslate(Gf.Vec3d(4, 10, 2))
+    corners = [(0, 9.5, 3), (8, 9.5, 3), (8, 10.5, 3),
+               (0, 10.5, 3)]
+    snapTarget = UsdGeom.Mesh.Define(stage, "/Shot/SnapTarget")
+    snapTarget.CreatePointsAttr([Gf.Vec3f(*p) for p in corners])
+    snapTarget.CreateFaceVertexCountsAttr([4])
+    snapTarget.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+    snapTarget.CreateExtentAttr([Gf.Vec3f(*corners[0]),
+                                 Gf.Vec3f(*corners[2])])
+    snapTarget.CreateDoubleSidedAttr(True)
+    # Defined now, pointed after the reframe below: the points must
+    # lie on the reframed view rays (see there), so they are authored
+    # once the camera they align to exists.
+    snapDecoy = UsdGeom.Points.Define(stage, "/Shot/SnapDecoy")
+    UsdGeom.Imageable(snapDecoy.GetPrim()).CreateVisibilityAttr(
+        ).Set(UsdGeom.Tokens.invisible)
+    d.Pump()
+
+    # The RigExec guides draw in front of Geom from every practical
+    # camera and win every view.pick (design section 3); the snap
+    # pick already excludes them with showGuides = False, so hiding
+    # them here is a debuggability measure only. Restored below.
+    viewSettings = d.api.dataModel.viewSettings
+    guideWas = viewSettings.displayGuide
+    viewSettings.displayGuide = False
+    d.Pump()
+
+    # Re-frame on the scratch geometry: under the camera the earlier
+    # sections leave, the target's x = 0 corners project outside
+    # testusdview's viewport and computePickFrustum reports
+    # inImageBounds = False, so the resolver answers None there.
+    # frameSelection re-aims as well as dollies (freeCamera.center),
+    # so the teardown restores that too -- the plan's triple alone
+    # would leave the shot grab below framing the wrong place.
+    camera = d.api.dataModel.viewSettings.freeCamera
+    _Check(camera is not None, "the view is on the free camera")
+    # _selSize rides along: _frameSelection sets it
+    # (freeCamera.py:325) and it feeds the clipping computation
+    # once auto-clip is on, so leaving it reframed is leaving
+    # view state behind.
+    savedCamera = (camera.rotTheta, camera.rotPhi, camera.dist,
+                   Gf.Vec3d(camera.center), camera._selSize)
+    d.Select("/Shot/SnapTarget")
+    appController._frameSelection()
+    d.Pump()
+    d.Select("/Shot/SnapProbe")
+    controller.SetTool(gizmoUI.TOOL_TRANSLATE)
+    d.Pump()
+    _Check(controller.Target() is not None
+           and controller.Target().kind == "xform-pose",
+           "the probe is a plain xform target: %s"
+           % controller.Reason())
+
+    # The decoy shares each corner's pixel. +Z is not the view
+    # direction under this tumbled camera, so a +Z offset lands
+    # ~8 px from its corner and can never win the pick; each
+    # decoy point instead sits 0.5 along the real view ray
+    # through its corner. The eye is read here -- authoring time,
+    # after the reframe -- through the controller's own camera,
+    # the one the live drag resolves against.
+    viewCam, _, _ = controller._Camera()
+    _Check(viewCam is not None,
+           "the controller resolves a camera for the decoy ray")
+    eye = viewCam.transform.ExtractTranslation()
+    decoyPts = []
+    for (x, y, z) in corners:
+        along = (eye - Gf.Vec3d(x, y, z)).GetNormalized()
+        onRay = Gf.Vec3d(x, y, z) + 0.5 * along
+        decoyPts.append(Gf.Vec3f(onRay[0], onRay[1], onRay[2]))
+    snapDecoy.CreatePointsAttr(decoyPts)
+    d.Pump()
+
+    # The landings aim at projected pixels, so the setup first proves
+    # the corners are on screen and unambiguous -- the isolation
+    # discipline testUsdviewCurvenetMove.py:84-97 follows. A collapsed
+    # framing would stack every corner onto one pixel and "pass" on
+    # whichever the ranker happened to keep.
+    _, viewport, ratio = controller._Camera()
+    left, top = viewport[0] / ratio, viewport[1] / ratio
+    width, height = viewport[2] / ratio, viewport[3] / ratio
+    pixels = [_ProjectLogical(controller, c) for c in corners]
+    for corner, pixel in zip(corners, pixels):
+        _Check(pixel is not None and left + 24 < pixel[0]
+               < left + width - 24 and top + 24 < pixel[1]
+               < top + height - 24,
+               "corner %s is on screen with a margin, not %s "
+               "(viewport %.0fx%.0f)" % (corner, pixel, width,
+                                         height))
+    for i in range(len(pixels)):
+        for j in range(i + 1, len(pixels)):
+            gap = math.hypot(pixels[i][0] - pixels[j][0],
+                             pixels[i][1] - pixels[j][1])
+            _Check(gap > gizmoSnap.SNAP_PIXELS,
+                   "corners %s and %s are %.1f logical px apart, "
+                   "clear of the %.0f px snap radius"
+                   % (corners[i], corners[j], gap,
+                      gizmoSnap.SNAP_PIXELS))
+
+    # --- 12. The C/V holds never reach usdview -------------------------
+    # _showUsdValidation never resets _usdValidationWidget to None
+    # (appController.py:2721-2726) and a C that gets through flips
+    # autoComputeClippingPlanes for every later projection, so both
+    # halves are required: the usdview half alone passes if the key
+    # never dispatched, the gizmo half alone passes if the gizmo
+    # acted but let the shortcut fire too.
+    clip = (appController._ui.actionAuto_Compute_Clipping_Planes
+            .isChecked())
+    _Check(appController._usdValidationWidget is None,
+           "no validation window before the V hold")
+    before = _World(stage, "/Shot/SnapProbe", frame)
+    center = controller.HandleScreenPositions()["center"][0]
+    away = (center[0] + 20, center[1] - 12)
+    d.Press(center)
+    _Check(controller.IsDragging(), "the centre grab started a drag")
+    d.Move(away, button=d.QtCore.Qt.NoButton,
+           buttons=d.QtCore.Qt.LeftButton)
+    d.KeyDown(d.QtCore.Qt.Key_V)
+    _Check(controller.SnapMode() == gizmoSettings.SNAP_POINT,
+           "a held V arms point snap mid-drag: %s"
+           % controller.SnapMode())
+    _Check(appController._usdValidationWidget is None,
+           "the held V never reached usdview's Show USD Validation")
+    d.KeyUp(d.QtCore.Qt.Key_V)
+    d.KeyDown(d.QtCore.Qt.Key_C)
+    _Check(controller.SnapMode() == gizmoSettings.SNAP_EDGE,
+           "a held C arms edge snap mid-drag: %s"
+           % controller.SnapMode())
+    _Check(appController._ui.actionAuto_Compute_Clipping_Planes
+           .isChecked() == clip,
+           "the held C never reached usdview's auto-clipping toggle")
+    d.KeyUp(d.QtCore.Qt.Key_C)
+    d.Release(away)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    _Check((_World(stage, "/Shot/SnapProbe", frame) - before)
+           .GetLength() > 1e-6,
+           "the hold drag moved the probe, so the assertions above "
+           "ran against a live drag")
+    controller.Undo()
+    d.Pump()
+    _Check((_World(stage, "/Shot/SnapProbe", frame) - before)
+           .GetLength() < 1e-9,
+           "the undo put the probe back where the holds found it")
+
+    # --- 13. Hold precedence and release order --------------------------
+    # Through KeyDown/KeyUp and SnapMode(), never Key(): Key() is a
+    # click, so the hold would clear before the next line reads it.
+    center = controller.HandleScreenPositions()["center"][0]
+    away = (center[0] + 20, center[1] - 12)
+    d.Press(center)
+    _Check(controller.IsDragging(), "the centre grab started a drag")
+    d.Move(away, button=d.QtCore.Qt.NoButton,
+           buttons=d.QtCore.Qt.LeftButton)
+    d.KeyDown(d.QtCore.Qt.Key_X)
+    _Check(controller.SnapMode() == gizmoSettings.SNAP_GRID,
+           "a held X arms grid snap mid-drag: %s"
+           % controller.SnapMode())
+    d.KeyDown(d.QtCore.Qt.Key_V)
+    _Check(controller.SnapMode() == gizmoSettings.SNAP_POINT,
+           "point outranks grid whatever the press order: %s"
+           % controller.SnapMode())
+    d.KeyUp(d.QtCore.Qt.Key_X)
+    _Check(controller.SnapMode() == gizmoSettings.SNAP_POINT,
+           "releasing the outranked hold keeps point armed: %s"
+           % controller.SnapMode())
+    d.KeyUp(d.QtCore.Qt.Key_V)
+    _Check(controller.SnapMode() == gizmoSettings.SNAP_OFF,
+           "releasing the winner with no sticky mode leaves the "
+           "next drag unsnapped: %s" % controller.SnapMode())
+    d.Release(away)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    controller.Undo()
+    d.Pump()
+
+    # --- 8. Point snap lands the pivot on the vertex --------------------
+    # Through the sticky mode: items 12 and 13 already prove the
+    # mid-drag holds arm, and the mode resolves the same way once in
+    # force. The centre handle constrains nothing, so the pivot lands
+    # on the candidate unchanged (design 4.2).
+    moveSettings = controller.settings.For(gizmoUI.TOOL_TRANSLATE)
+    moveSettings.snapMode = gizmoSettings.SNAP_POINT
+    d.Pump()
+    seenPrims = []
+    center = controller.HandleScreenPositions()["center"][0]
+    aim = _ProjectLogical(controller, (8, 9.5, 3))
+    d.Press(center)
+    _Check(controller.IsDragging(), "the centre grab started a drag")
+    d.Move(aim, button=d.QtCore.Qt.NoButton,
+           buttons=d.QtCore.Qt.LeftButton)
+    candidate = controller.SnapCandidate()
+    _Check(candidate is not None,
+           "a point candidate resolves at the (8, 9.5, 3) pixel")
+    seenPrims.append(str(candidate.primPath))
+    landed = _World(stage, "/Shot/SnapProbe", frame)
+    _Check((landed - Gf.Vec3d(8, 9.5, 3)).GetLength() < 1e-4,
+           "point snap put the pivot on the (8, 9.5, 3) corner: %s"
+           % (landed,))
+
+    # --- 14. The snap clause reaches the status line --------------------
+    # Appended, never substituted: the branch's own words survive it.
+    status = controller.StatusBar().FullText()
+    _Check("Move SnapProbe" in status and "snap: Point" in status,
+           "the status keeps its branch and gains the snap clause: "
+           "%r" % status)
+    d.Release(aim)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    controller.Undo()
+    d.Pump()
+
+    # --- 9. Edge snap lands on the edge, not its endpoints --------------
+    # Aimed at the midpoint of the bottom edge, whose endpoints are a
+    # whole edge away: a point snap would sit on one of them, and no
+    # snap at all would leave the probe off the edge entirely.
+    moveSettings.snapMode = gizmoSettings.SNAP_EDGE
+    d.Pump()
+    center = controller.HandleScreenPositions()["center"][0]
+    aim = _ProjectLogical(controller, (4, 9.5, 3))
+    d.Press(center)
+    _Check(controller.IsDragging(), "the centre grab started a drag")
+    d.Move(aim, button=d.QtCore.Qt.NoButton,
+           buttons=d.QtCore.Qt.LeftButton)
+    candidate = controller.SnapCandidate()
+    _Check(candidate is not None,
+           "an edge candidate resolves at the bottom-edge pixel")
+    seenPrims.append(str(candidate.primPath))
+    landed = _World(stage, "/Shot/SnapProbe", frame)
+    _Check(abs(landed[1] - 9.5) < 0.02
+           and abs(landed[2] - 3) < 0.02
+           and 0.0 < landed[0] < 8.0,
+           "edge snap landed ON the bottom edge (y = 9.5, z = 3, "
+           "0 < x < 8), not %s" % (landed,))
+    ends = min((landed - Gf.Vec3d(0, 9.5, 3)).GetLength(),
+               (landed - Gf.Vec3d(8, 9.5, 3)).GetLength())
+    _Check(ends > 1.0,
+           "the edge landing is mid-edge, %.2f from the nearer "
+           "endpoint: %s" % (ends, landed))
+    d.Release(aim)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    controller.Undo()
+    d.Pump()
+
+    # --- 10. Surface snap lands on the quad ------------------------------
+    # Aimed at the quad centre, where no vertex or edge is near: only
+    # the surface hit lands here.
+    moveSettings.snapMode = gizmoSettings.SNAP_SURFACE
+    d.Pump()
+    center = controller.HandleScreenPositions()["center"][0]
+    aim = _ProjectLogical(controller, (4, 10, 3))
+    d.Press(center)
+    _Check(controller.IsDragging(), "the centre grab started a drag")
+    d.Move(aim, button=d.QtCore.Qt.NoButton,
+           buttons=d.QtCore.Qt.LeftButton)
+    candidate = controller.SnapCandidate()
+    _Check(candidate is not None,
+           "a surface candidate resolves at the quad-centre pixel")
+    seenPrims.append(str(candidate.primPath))
+    landed = _World(stage, "/Shot/SnapProbe", frame)
+    _Check(abs(landed[2] - 3) < 1e-3
+           and -0.05 < landed[0] < 8.05
+           and 9.45 < landed[1] < 10.55,
+           "surface snap landed on the quad (|z - 3| < 1e-3 and "
+           "inside its bounds), not %s" % (landed,))
+    d.Release(aim)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    controller.Undo()
+    d.Pump()
+
+    # --- 11. Invisible prims are never candidates ------------------------
+    # This pixel looks straight at both the mesh corner and the decoy
+    # point 0.5 along the view ray through it (see the setup): what
+    # the resolver reports tells which one the pick honours.
+    moveSettings.snapMode = gizmoSettings.SNAP_POINT
+    d.Pump()
+    center = controller.HandleScreenPositions()["center"][0]
+    aim = _ProjectLogical(controller, (0, 9.5, 3))
+    d.Press(center)
+    _Check(controller.IsDragging(), "the centre grab started a drag")
+    d.Move(aim, button=d.QtCore.Qt.NoButton,
+           buttons=d.QtCore.Qt.LeftButton)
+    candidate = controller.SnapCandidate()
+    _Check(candidate is not None,
+           "a point candidate resolves at the (0, 9.5, 3) pixel")
+    _Check(candidate.primPath == Sdf.Path("/Shot/SnapTarget"),
+           "the candidate is the visible mesh, not %s"
+           % candidate.primPath)
+    _Check((candidate.point - Gf.Vec3d(0, 9.5, 3)).GetLength()
+           < 1e-4,
+           "the candidate is the mesh corner (0, 9.5, 3), not the "
+           "decoy point on the same ray: %s" % (candidate.point,))
+    seenPrims.append(str(candidate.primPath))
+    landed = _World(stage, "/Shot/SnapProbe", frame)
+    _Check((landed - Gf.Vec3d(0, 9.5, 3)).GetLength() < 1e-4,
+           "the pivot followed the candidate to (0, 9.5, 3): %s"
+           % (landed,))
+    d.Release(aim)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    controller.Undo()
+    d.Pump()
+    _Check(all(p != "/Shot/SnapDecoy" for p in seenPrims),
+           "no snap in this section ever named the decoy: %s"
+           % (seenPrims,))
+
+    # --- 15. One snapped drag is one undo step ---------------------------
+    # From a cleared stack, so what is left afterwards counts the
+    # drag's edits exactly. The probe was placed by authoring, so its
+    # pre-snap spec stays behind: what Ctrl+Z must restore is the
+    # VALUE, the way section 6 checks the xformOp value above.
+    controller.undoStack.Clear()
+    d.Pump()
+    before = _World(stage, "/Shot/SnapProbe", frame)
+    moveSettings.snapMode = gizmoSettings.SNAP_POINT
+    d.Pump()
+    center = controller.HandleScreenPositions()["center"][0]
+    aim = _ProjectLogical(controller, (8, 9.5, 3))
+    d.Press(center)
+    _Check(controller.IsDragging(), "the centre grab started a drag")
+    d.Move(aim, button=d.QtCore.Qt.NoButton,
+           buttons=d.QtCore.Qt.LeftButton)
+    after = _World(stage, "/Shot/SnapProbe", frame)
+    _Check((after - before).GetLength() > 0.5,
+           "the snapped drag moved the probe: %s -> %s"
+           % (before, after))
+    d.Release(aim)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    _Check(controller.undoStack.CanUndo(),
+           "the released snap drag pushed an edit")
+    d.Key(d.QtCore.Qt.Key_Z, d.QtCore.Qt.ControlModifier)
+    restored = _World(stage, "/Shot/SnapProbe", frame)
+    _Check((restored - before).GetLength() < 1e-9,
+           "Ctrl+Z restored the pre-snap probe position: %s -> %s"
+           % (after, restored))
+    _Check(not controller.undoStack.CanUndo(),
+           "one snapped drag was one undo step: nothing left "
+           "to undo")
+
+    moveSettings.snapMode = gizmoSettings.SNAP_OFF
+    d.Pump()
+    viewSettings.displayGuide = guideWas
+    camera.rotTheta, camera.rotPhi, camera.dist = savedCamera[:3]
+    camera.center = savedCamera[3]
+    camera._selSize = savedCamera[4]
+    for path in ("/Shot/SnapDecoy", "/Shot/SnapTarget",
+                 "/Shot/SnapProbe"):
+        stage.RemovePrim(Sdf.Path(path))
+    d.Pump()
+    _Check(not stage.GetPrimAtPath("/Shot/SnapProbe"),
+           "the snap scratch prims are gone from the stage")
+    # Section 7 must start with a live target: with the probe gone
+    # and nothing re-selected, its "Select draws no handles" holds
+    # with nothing selected -- true under Move too -- instead of
+    # proving Select suppresses the target's handles.
+    d.Select(XFORM)
+
     # --- 7. The Select tool draws nothing and grabs nothing --------------
     controller.SetTool(gizmoUI.TOOL_SELECT)
     d.Pump()
@@ -730,4 +1163,4 @@ def testUsdviewInputFunction(appController):
         d.view.window().grab().save(shot)
 
     print("RIGEXEC_GIZMO_OK translate/rotate/scale, undo/redo, default, "
-          "pivot, xform, maya parity")
+          "pivot, xform, maya parity, snapping")

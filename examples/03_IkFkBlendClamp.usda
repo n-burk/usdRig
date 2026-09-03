@@ -154,7 +154,6 @@ def Xform "BlendArmAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 3
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 10, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -162,7 +161,6 @@ def Xform "BlendArmAsset"
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    double guide:length = 3
                     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 10, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
@@ -170,7 +168,6 @@ def Xform "BlendArmAsset"
                         prepend apiSchemas = ["NodeGraphNodeAPI"]
                     )
                     {
-                        double guide:length = 1
                         matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
                         uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                     }

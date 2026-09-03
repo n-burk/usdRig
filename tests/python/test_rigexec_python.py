@@ -47,8 +47,7 @@ def _setup_environment():
     # differs by platform: Windows installs to <usd>/Lib/site-packages, while
     # POSIX installs under <usd>/lib/python*/site-packages.
     site_candidates = [usd_install / "Lib" / "site-packages"]
-    if not (usd_install / "Lib").is_dir():
-        site_candidates.extend(sorted(usd_install.glob("lib/python*/site-packages")))
+    site_candidates.extend(sorted(usd_install.glob("lib/python*/site-packages")))
     for site_packages in site_candidates:
         if site_packages.is_dir():
             sp = str(site_packages)

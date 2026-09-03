@@ -20,12 +20,15 @@ from pxr.Usdviewq.qt import QtWidgets
 
 VOLUME = "/VolumeAsset/Rig/Joints/Shoulder/ShoulderVolume"
 MESH = "/VolumeAsset/Geom/Strip"
+CURVE_VOLUME = "/VolumeAsset/Rig/Weights/TipTube"
+CURVE_CHILD = CURVE_VOLUME + "/rigGuideVol_0"
 
 # How much redder a pixel must get before it counts as changed by the overlay,
 # and how much of the frame must change. See the pixel comparison at the end of
 # testUsdviewInputFunction for how both were calibrated.
 _REDDER_BY = 20.0
 _MIN_CHANGED_FRACTION = 0.005
+_MIN_CURVE_CHANGED_FRACTION = 0.001
 
 
 def _Redness(color):
@@ -45,6 +48,8 @@ def _LoadDll():
 
     dll = ctypes.CDLL(ImagingLibraryPath())
     dll.RigExecImaging_GetGeneration.restype = ctypes.c_longlong
+    dll.RigExecImaging_SetTime.argtypes = [ctypes.c_double]
+    dll.RigExecImaging_SetTime.restype = ctypes.c_int
     dll.RigExecImaging_SetWeightOverlay.argtypes = [ctypes.c_char_p]
     dll.RigExecImaging_SetWeightOverlay.restype = ctypes.c_int
     return dll
@@ -93,6 +98,76 @@ def _TerminalPrimvar(observer, primPath, name):
             interp.GetValue(0.0) if interp else None)
 
 
+def _CheckCurveGeometry(appController, dll, observer, sceneIndexName):
+    """Proves CurveWeight geometry mode reaches both the terminal SI and Storm."""
+    model = appController._dataModel
+    stage = model.stage
+    drawMode = stage.GetPrimAtPath(CURVE_VOLUME).GetAttribute("guide:drawMode")
+    if not drawMode:
+        raise AssertionError("CurveWeight has no guide:drawMode")
+
+    def setMode(value):
+        # Session-only: the checked-in example remains the ordinary wire case.
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            drawMode.Set(value)
+        if dll.RigExecImaging_SetTime(1024.0) != 0:
+            raise AssertionError("RigExecImaging_SetTime failed")
+        appController._processEvents()
+        QtWidgets.QApplication.processEvents()
+
+    def capture():
+        appController._stageView.updateGL()
+        QtWidgets.QApplication.processEvents()
+        image = appController._stageView.grabFrameBuffer()
+        return [image.pixelColor(x, y).rgba()
+                for y in range(0, image.height(), 2)
+                for x in range(0, image.width(), 2)]
+
+    # `none` gives a same-camera baseline containing every other guide and the
+    # asset. Geometry must add exactly this CurveWeight's solid tube.
+    setMode("none")
+    _, hiddenSource = observer.GetPrim(Sdf.Path(CURVE_CHILD))
+    if hiddenSource:
+        raise AssertionError("CurveWeight child survived drawMode=none")
+    hidden = capture()
+
+    setMode("geometry")
+    primType, source = observer.GetPrim(Sdf.Path(CURVE_CHILD))
+    if not source:
+        raise AssertionError("CurveWeight geometry child is absent")
+    if str(primType) != "mesh":
+        raise AssertionError(
+            "CurveWeight geometry is %s, expected mesh" % primType)
+    names = source.GetNames()
+    if "mesh" not in names or "primvars" not in names:
+        raise AssertionError(
+            "CurveWeight terminal mesh is incomplete: %s" % names)
+    primvars = source.Get("primvars")
+    if "normals" not in primvars.GetNames():
+        raise AssertionError("CurveWeight terminal mesh has no normals")
+    normals = primvars.Get("normals")
+    interpolation = normals.Get("interpolation").GetValue(0.0)
+    if str(interpolation) != "faceVarying":
+        raise AssertionError(
+            "CurveWeight normals are %s, expected faceVarying"
+            % interpolation)
+
+    visible = capture()
+    changed = sum(1 for shown, hiddenPixel in zip(visible, hidden)
+                  if shown != hiddenPixel)
+    fraction = float(changed) / max(len(visible), 1)
+    if fraction < _MIN_CURVE_CHANGED_FRACTION:
+        raise AssertionError(
+            "solid CurveWeight did not reach Storm: only %.3f%% of sampled "
+            "pixels changed" % (100.0 * fraction))
+
+    # The overlay comparison below expects guide geometry to remain identical
+    # between its two captures, so restore the example's authored wire mode.
+    setMode("wire")
+    print("RIGEXEC_CURVE_GEOMETRY_OK changed=%.3f%% si=%s"
+          % (100.0 * fraction, sceneIndexName))
+
+
 def testUsdviewInputFunction(appController):
     dll = _LoadDll()
 
@@ -103,6 +178,11 @@ def testUsdviewInputFunction(appController):
     appController._dataModel.currentFrame = Usd.TimeCode(1024)
 
     observer, sceneIndexName = _Observer()
+
+    # Before testing the color overlay, exercise CurveWeight's distinct solid
+    # draw path in the real usdview scene-index chain and framebuffer.
+    appController._dataModel.viewSettings.showHUD = False
+    _CheckCurveGeometry(appController, dll, observer, sceneIndexName)
 
     # --- overlay OFF: the mesh must carry no displayColor of ours ---
     dll.RigExecImaging_SetWeightOverlay(b"")

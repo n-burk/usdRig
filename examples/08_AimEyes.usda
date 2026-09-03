@@ -56,7 +56,6 @@ def Xform "EyesAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 1
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1, 10, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
             }
@@ -65,7 +64,6 @@ def Xform "EyesAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                double guide:length = 1
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 10, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
             }

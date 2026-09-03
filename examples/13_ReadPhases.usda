@@ -117,13 +117,11 @@ def Xform "ReadPhaseAsset"
         {
             def RigExecJoint "Lift"
             {
-                double guide:length = 1
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
             }
 
             def RigExecJoint "Twist"
             {
-                double guide:length = 1
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
             }
         }

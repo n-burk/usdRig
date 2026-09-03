@@ -612,11 +612,13 @@ def TestScrubScale(ui):
     The mouse-drag sensitivity has to be measured against the WEIGHTED
     GEOMETRY, not against the weight prim.
 
-    A volume weight is a UsdGeomBoundable with no authored extent and no
-    registered extent computation, so its own world bound is always
-    empty and ComputeCentreAndSize falls through to the 1.0 fallback.
-    Deriving sensitivity from that pins every scrub at 0.005 units per
-    pixel at any scene scale.
+    A volume weight now has a registered guide extent in an installed/build
+    plugin, but its own size changes with the parameter being scrubbed. Using
+    it would make sensitivity feed back and accelerate through one drag. The
+    weighted target remains the stable scene-scale authority. This headless
+    test may register either the loadable build plugin (nonempty own bound) or
+    the source resource plugin (honest 1.0 fallback), so the assertion is
+    deliberately independent of that packaging detail.
     """
     frame = Usd.TimeCode(0.0)
     stage = Usd.Stage.CreateInMemory()
@@ -636,9 +638,8 @@ def TestScrubScale(ui):
            "GetWeightTargetPrim returned %s" % target)
 
     ownSize = ui.ComputeCentreAndSize(bound, frame)[1]
-    _Check(_Close(ownSize, 1.0),
-           "the weight prim's own bound is %s, not the 1.0 fallback -- "
-           "this test's premise no longer holds" % ownSize)
+    _Check(ownSize > 0.0,
+           "the weight prim produced a non-positive own size %s" % ownSize)
 
     scale = ui.ComputeScrubScale(bound, frame)
     _Check(_Close(scale, 80.0),
@@ -648,14 +649,19 @@ def TestScrubScale(ui):
     print("  sensitivity: %s per pixel, not %s"
           % (max(scale, 1.0) / 200.0, max(ownSize, 1.0) / 200.0))
 
-    # An unbound weight must degrade gracefully, not raise.
+    # An unbound weight must degrade gracefully to its own guide/fallback
+    # size, not raise. The exact number depends on whether this process loaded
+    # the build plugin's compute-extent callback or source-only resources.
     unbound = ui.CreateVolumeWeightPrim(
         stage, "RigExecSphereWeight", [], frame)
     _Check(ui.GetWeightTargetPrim(unbound) is None,
            "an unbound weight reported a target prim")
-    _Check(_Close(ui.ComputeScrubScale(unbound, frame), 1.0),
-           "unbound scrub scale is %s" % ui.ComputeScrubScale(unbound, frame))
-    print("  unbound weight falls back to 1.0 without raising")
+    unboundOwnSize = ui.ComputeCentreAndSize(unbound, frame)[1]
+    _Check(_Close(ui.ComputeScrubScale(unbound, frame), unboundOwnSize),
+           "unbound scrub scale is %s, own guide/fallback size is %s"
+           % (ui.ComputeScrubScale(unbound, frame), unboundOwnSize))
+    print("  unbound weight falls back to its own size %s without raising"
+          % unboundOwnSize)
 
 
 def main():

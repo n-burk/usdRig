@@ -10,6 +10,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/tapSet.h"
 #include "rigExec/types.h"
+#include "rigExecMath/avarScale.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/solvers.h"
@@ -17,6 +18,8 @@
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/ts/knot.h"
+#include "pxr/base/ts/spline.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
@@ -25,7 +28,9 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 using namespace rigExec;
@@ -59,17 +64,18 @@ MatrixLandmarks(const GfMatrix4d &m)
 }
 
 static double
-GetAvar(const UsdPrim &prim, const char *name, UsdTimeCode time)
+GetAvar(const UsdPrim &prim, const char *name, UsdTimeCode time,
+        double fallback = 0)
 {
-    double value = 0;
+    double value = fallback;
     if (UsdAttribute a = prim.GetAttribute(TfToken(name))) {
         a.Get(&value, time);
     }
     return value;
 }
 
-// The Ir-contract local avar transform: XYZ-ordered rotations (degrees),
-// then rspin about +X, then translation (row-vector convention).
+// The local avar transform: scale, XYZ-ordered rotations (degrees), then
+// rspin about +X, then translation (row-vector convention).
 static GfMatrix4d
 ComposeAvars(const UsdPrim &prim, UsdTimeCode time)
 {
@@ -79,6 +85,13 @@ ComposeAvars(const UsdPrim &prim, UsdTimeCode time)
         GetAvar(prim, "avars:rx", time), GetAvar(prim, "avars:ry", time),
         GetAvar(prim, "avars:rz", time)};
     GfMatrix4d m(1.0);
+    m.SetScale(GfVec3d(
+        RigExecNormalizeAvarScale(
+            GetAvar(prim, "avars:sx", time, 1)),
+        RigExecNormalizeAvarScale(
+            GetAvar(prim, "avars:sy", time, 1)),
+        RigExecNormalizeAvarScale(
+            GetAvar(prim, "avars:sz", time, 1))));
     for (int i = 0; i < 3; ++i) {
         if (angles[i] != 0.0) {
             m = m * GfMatrix4d(GfRotation(axes[i], angles[i]), GfVec3d(0));
@@ -853,6 +866,595 @@ TestBlendDeltasUseBase()
     }
 }
 
+// -------------------------------------------------------------------------
+// Universal mover envelope
+// -------------------------------------------------------------------------
+
+static RigExecRigPose
+EvaluateEnvelopeFixture(const UsdStageRefPtr &stage)
+{
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    const bool compiled = evaluator.Compile(&errors);
+    if (!compiled) {
+        for (const std::string &error : errors) {
+            std::printf("universal-weight compile error: %s\n", error.c_str());
+        }
+    }
+    CHECK(compiled);
+    if (!compiled) {
+        return RigExecRigPose();
+    }
+    RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    CHECK(pose.moverGraphParityMismatches == 0);
+    return pose;
+}
+
+static VtVec3fArray
+EnvelopePoints(const RigExecRigPose &pose, const SdfPath &target)
+{
+    const auto it = pose.movedProperties.find(target);
+    CHECK(it != pose.movedProperties.end());
+    if (it == pose.movedProperties.end()) {
+        return {};
+    }
+    CHECK(it->second.IsHolding<VtVec3fArray>());
+    return it->second.IsHolding<VtVec3fArray>()
+        ? it->second.UncheckedGet<VtVec3fArray>()
+        : VtVec3fArray();
+}
+
+// Scale avars are part of the control's local affine transform, not guide
+// display metadata. Verify animated non-uniform scale survives the point-frame
+// representation, combines with rotation/translation, and reaches a
+// MatrixMover's native points target.
+static void
+TestControlAvarScaleDrivesMatrixMover()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath controlPath("/Asset/Rig/Controls/C");
+    const SdfPath target("/Asset/Geom/P.points");
+    const VtVec3fArray base = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0),
+        GfVec3f(0, 0, 1), GfVec3f(1, 2, 3)};
+
+    // Volume placement is intentionally rigid and exposes inputs:scaleX/Y/Z
+    // instead. Future schema regeneration must not leak the control/joint
+    // avars onto this sibling RigExecXformable subtype.
+    const UsdPrim volumeDefinitionProbe = stage->DefinePrim(
+        SdfPath("/VolumeDefinitionProbe"), TfToken("RigExecSphereWeight"));
+    CHECK(!volumeDefinitionProbe.GetAttribute(TfToken("avars:sx")));
+    CHECK(!volumeDefinitionProbe.GetAttribute(TfToken("avars:sy")));
+    CHECK(!volumeDefinitionProbe.GetAttribute(TfToken("avars:sz")));
+
+    const UsdPrim points =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    points.CreateAttribute(
+              TfToken("points"), SdfValueTypeNames->Point3fArray, false)
+        .Set(base);
+    stage->DefinePrim(rigPath, TfToken("RigExecRoot"));
+    const UsdPrim control =
+        stage->DefinePrim(controlPath, TfToken("RigExecControl"));
+
+    // Two samples prove that scale is a timed computation input. T/R remain
+    // authored constants so the non-commutative S * R * T order is explicit.
+    const GfVec3d scaleAtZero(1, 1, 1);
+    const GfVec3d scaleAtTen(2, 3, 4);
+    static const char *scaleNames[3] = {
+        "avars:sx", "avars:sy", "avars:sz"};
+    for (int axis = 0; axis < 3; ++axis) {
+        const UsdAttribute attr = control.CreateAttribute(
+            TfToken(scaleNames[axis]), SdfValueTypeNames->Double, false);
+        CHECK(attr.Set(scaleAtZero[axis], UsdTimeCode(0)));
+        CHECK(attr.Set(scaleAtTen[axis], UsdTimeCode(10)));
+    }
+    control.CreateAttribute(
+               TfToken("avars:rz"), SdfValueTypeNames->Double, false)
+        .Set(90.0);
+    control.CreateAttribute(
+               TfToken("avars:tx"), SdfValueTypeNames->Double, false)
+        .Set(5.0);
+    control.CreateAttribute(
+               TfToken("avars:ty"), SdfValueTypeNames->Double, false)
+        .Set(-2.0);
+    control.CreateAttribute(
+               TfToken("avars:tz"), SdfValueTypeNames->Double, false)
+        .Set(7.0);
+
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+    mover.CreateRelationship(TfToken("rigExec:moves"), false)
+        .SetTargets({target});
+    mover.CreateRelationship(TfToken("rigExec:transform"), false)
+        .SetTargets({controlPath});
+    mover.CreateAttribute(
+             TfToken("inputs:defaultWeight"), SdfValueTypeNames->Float, false)
+        .Set(1.0f);
+
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    const bool compiled = evaluator.Compile(&errors);
+    if (!compiled) {
+        for (const std::string &error : errors) {
+            std::printf("control-scale compile error: %s\n", error.c_str());
+        }
+    }
+    CHECK(compiled);
+    if (!compiled) {
+        return;
+    }
+
+    auto expectedMatrix = [](const GfVec3d &scale) {
+        GfMatrix4d result(1.0);
+        result.SetScale(scale);
+        result = result * GfMatrix4d(
+                              GfRotation(GfVec3d(0, 0, 1), 90.0),
+                              GfVec3d(0));
+        GfMatrix4d translation(1.0);
+        translation.SetTranslate(GfVec3d(5, -2, 7));
+        return result * translation;
+    };
+
+    auto checkAtTime = [&](RigExecRigEvaluator &activeEvaluator, double time,
+                           const GfVec3d &scale) {
+        const RigExecRigPose pose =
+            activeEvaluator.Evaluate(UsdTimeCode(time));
+        CHECK(pose.valid);
+        CHECK(pose.moverGraphParityMismatches == 0);
+
+        const GfMatrix4d expected = expectedMatrix(scale);
+        const auto expectedFrame = MatrixLandmarks(expected);
+        const auto frameIt = pose.controlFrames.find(controlPath);
+        CHECK(frameIt != pose.controlFrames.end());
+        if (frameIt != pose.controlFrames.end()) {
+            for (size_t i = 0; i < expectedFrame.size(); ++i) {
+                CHECK(Near(frameIt->second.points[i], expectedFrame[i], 1e-9));
+            }
+        }
+
+        const VtVec3fArray moved = EnvelopePoints(pose, target);
+        CHECK(moved.size() == base.size());
+        for (size_t i = 0; i < moved.size() && i < base.size(); ++i) {
+            CHECK(Near(GfVec3d(moved[i]),
+                       expected.TransformAffine(GfVec3d(base[i])), 1e-5));
+        }
+    };
+
+    for (const auto &[time, scale] :
+         std::vector<std::pair<double, GfVec3d>>{
+             {0.0, scaleAtZero}, {10.0, scaleAtTen}}) {
+        checkAtTime(evaluator, time, scale);
+    }
+
+    // Match the user's authored stage exactly: each scale channel has one
+    // spline knot. Ts holds that value outside the knot range, so the same
+    // non-unit affine must reach the MatrixMover before, at, and after it.
+    const GfVec3d singleKnotScale(2.5, 1.25, 3.75);
+    const TfType doubleType = TfType::Find<double>();
+    for (int axis = 0; axis < 3; ++axis) {
+        const UsdAttribute attr = control.GetAttribute(
+            TfToken(scaleNames[axis]));
+        CHECK(attr.ClearAtTime(UsdTimeCode(0)));
+        CHECK(attr.ClearAtTime(UsdTimeCode(10)));
+        TsSpline spline(doubleType);
+        TsKnot knot(doubleType);
+        knot.SetTime(12.0);
+        knot.SetValue(singleKnotScale[axis]);
+        knot.SetNextInterpolation(TsInterpLinear);
+        spline.SetKnot(knot);
+        CHECK(attr.SetSpline(spline));
+        CHECK(attr.HasSpline());
+    }
+
+    RigExecRigEvaluator splineEvaluator(stage, rigPath);
+    errors.clear();
+    const bool splineCompiled = splineEvaluator.Compile(&errors);
+    if (!splineCompiled) {
+        for (const std::string &error : errors) {
+            std::printf(
+                "single-knot control-scale compile error: %s\n",
+                error.c_str());
+        }
+    }
+    CHECK(splineCompiled);
+    if (!splineCompiled) {
+        return;
+    }
+    for (const double time : {-20.0, 12.0, 100.0}) {
+        checkAtTime(splineEvaluator, time, singleKnotScale);
+    }
+
+    // Raw USD can bypass both strict authoring surfaces, so the computation
+    // itself applies the same contract. Tiny values retain reflection sign;
+    // non-finite values become identity scale instead of poisoning the frame.
+    auto checkRawScale = [&](const GfVec3d &raw,
+                             const GfVec3d &normalized) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const UsdAttribute attr = control.GetAttribute(
+                TfToken(scaleNames[axis]));
+            CHECK(attr.Clear());
+            CHECK(attr.Set(raw[axis]));
+        }
+        RigExecRigEvaluator rawEvaluator(stage, rigPath);
+        errors.clear();
+        const bool rawCompiled = rawEvaluator.Compile(&errors);
+        if (!rawCompiled) {
+            for (const std::string &error : errors) {
+                std::printf("raw control-scale compile error: %s\n",
+                            error.c_str());
+            }
+        }
+        CHECK(rawCompiled);
+        if (rawCompiled) {
+            checkAtTime(rawEvaluator, 0.0, normalized);
+        }
+    };
+
+    checkRawScale(
+        GfVec3d(0.0, -0.0, -0.5 * RigExecAvarScaleFloor),
+        GfVec3d(RigExecAvarScaleFloor, -RigExecAvarScaleFloor,
+                -RigExecAvarScaleFloor));
+    checkRawScale(
+        GfVec3d(std::numeric_limits<double>::quiet_NaN(),
+                std::numeric_limits<double>::infinity(),
+                -std::numeric_limits<double>::infinity()),
+        GfVec3d(1.0));
+}
+
+// Authors either a dense point field or a constant one-element field.  The
+// mover's inputs:defaultWeight is deliberately authored to a DIFFERENT value
+// in the callers: a related object supersedes the scalar fallback rather than
+// multiplying it.
+static UsdPrim
+MakeEnvelopeWeight(
+    const UsdStageRefPtr &stage, const SdfPath &path,
+    const SdfPath &target, const VtFloatArray &values,
+    float constantValue = 0.0f)
+{
+    const UsdPrim weight =
+        stage->DefinePrim(path, TfToken("RigExecStaticWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    const bool constant = values.empty();
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken(constant ? "constant" : "dense"));
+    weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                           SdfValueTypeNames->Float, false)
+        .Set(constant ? constantValue : 0.0f);
+    if (!constant) {
+        weight.CreateAttribute(TfToken("rigExec:values"),
+                               SdfValueTypeNames->FloatArray, false)
+            .Set(values);
+    }
+    return weight;
+}
+
+// MatrixMover is the critical regression: a uniform move no longer needs a
+// boilerplate constant RigExecStaticWeight.  When a spatial object is bound,
+// its total field replaces the uniform fallback point by point.
+static void
+TestMatrixMoverUniversalEnvelope()
+{
+    const SdfPath target("/Asset/Geom/P.points");
+    const VtVec3fArray base = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+
+    auto evaluate = [&](float defaultWeight,
+                        const VtFloatArray *spatial) -> RigExecRigPose {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdPrim points =
+            stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+        points.CreateAttribute(TfToken("points"),
+                               SdfValueTypeNames->Point3fArray, false)
+            .Set(base);
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim joint = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/J"), TfToken("RigExecJoint"));
+        GfMatrix4d posed(1.0);
+        posed.SetTranslate(GfVec3d(0, 10, 0));
+        joint.CreateAttribute(TfToken("posed:space"),
+                              SdfValueTypeNames->Matrix4d, false)
+            .Set(posed);
+
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateRelationship(TfToken("rigExec:transform"), false)
+            .SetTargets({joint.GetPath()});
+        mover.CreateAttribute(TfToken("inputs:defaultWeight"),
+                              SdfValueTypeNames->Float, false)
+            .Set(defaultWeight);
+        if (spatial) {
+            const UsdPrim weight = MakeEnvelopeWeight(
+                stage, SdfPath("/Asset/Rig/Weights/W"), target, *spatial);
+            mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+                .SetTargets({weight.GetPath()});
+        }
+        return EvaluateEnvelopeFixture(stage);
+    };
+
+    for (const float weight : {0.0f, 0.5f, 1.0f}) {
+        // No rigExec:weightObject is authored in this arm of the test.
+        const RigExecRigPose pose = evaluate(weight, nullptr);
+        const VtVec3fArray moved = EnvelopePoints(pose, target);
+        CHECK(moved.size() == base.size());
+        for (size_t i = 0; i < moved.size() && i < base.size(); ++i) {
+            CHECK(Near(GfVec3d(moved[i]),
+                       GfVec3d(base[i]) + GfVec3d(0, 10.0 * weight, 0)));
+        }
+    }
+
+    const VtFloatArray spatial{0.0f, 0.5f, 1.0f};
+    const RigExecRigPose fieldPose = evaluate(0.25f, &spatial);
+    const VtVec3fArray fieldMoved = EnvelopePoints(fieldPose, target);
+    CHECK(fieldMoved.size() == base.size());
+    for (size_t i = 0; i < fieldMoved.size() && i < base.size(); ++i) {
+        CHECK(Near(GfVec3d(fieldMoved[i]),
+                   GfVec3d(base[i]) + GfVec3d(0, 10.0 * spatial[i], 0)));
+    }
+
+    // The common envelope is normalized.  Bad scalar values fail this one
+    // application atomically and preserve the preceding value.
+    for (const float invalid : {
+             -0.01f, 1.01f, std::numeric_limits<float>::quiet_NaN()}) {
+        const RigExecRigPose pose = evaluate(invalid, nullptr);
+        const VtVec3fArray moved = EnvelopePoints(pose, target);
+        CHECK(moved == base);
+        CHECK(std::any_of(
+            pose.diagnostics.begin(), pose.diagnostics.end(),
+            [](const std::string &diagnostic) {
+                return diagnostic.find("defaultWeight") != std::string::npos ||
+                       diagnostic.find("weight") != std::string::npos;
+            }));
+    }
+}
+
+// BlendShape already had an optional spatial mask.  This pins the migration:
+// the mask remains spatial, BlendInput.inputs:weight remains the channel
+// amplitude, and the mover-wide scalar is now only inputs:defaultWeight.
+static void
+TestBlendShapeUniversalEnvelope()
+{
+    const SdfPath target("/Asset/Geom/P.points");
+    const VtVec3fArray base = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+
+    auto evaluate = [&](float defaultWeight,
+                        const VtFloatArray *spatial) -> VtVec3fArray {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdPrim points =
+            stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+        points.CreateAttribute(TfToken("points"),
+                               SdfValueTypeNames->Point3fArray, false)
+            .Set(base);
+        VtVec3fArray full = base;
+        for (GfVec3f &point : full) {
+            point += GfVec3f(0, 0, 4);
+        }
+        const UsdPrim targetShape = stage->DefinePrim(
+            SdfPath("/Asset/Targets/Full"), TfToken("Points"));
+        targetShape.CreateAttribute(TfToken("points"),
+                                    SdfValueTypeNames->Point3fArray, false)
+            .Set(full);
+
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim input = stage->DefinePrim(
+            SdfPath("/Asset/Rig/BlendInputs/B"), TfToken("RigExecBlendInput"));
+        // This weight survives the migration: it is a blend-channel
+        // amplitude, not a mover envelope.
+        input.CreateAttribute(TfToken("inputs:weight"),
+                              SdfValueTypeNames->Float, false)
+            .Set(1.0f);
+        const UsdPrim sample = stage->DefinePrim(
+            SdfPath("/Asset/Rig/BlendInputs/B/Full"),
+            TfToken("RigExecBlendSample"));
+        sample.CreateAttribute(TfToken("rigExec:activation"),
+                               SdfValueTypeNames->Float, false)
+            .Set(1.0f);
+        sample.CreateRelationship(TfToken("rigExec:targetPoints"), false)
+            .SetTargets({targetShape.GetPath().AppendProperty(
+                TfToken("points"))});
+        input.CreateRelationship(TfToken("rigExec:samples"), false)
+            .SetTargets({sample.GetPath()});
+
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/B"),
+            TfToken("RigExecBlendShapeMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateRelationship(TfToken("rigExec:blendInputs"), false)
+            .SetTargets({input.GetPath()});
+        mover.CreateAttribute(TfToken("inputs:defaultWeight"),
+                              SdfValueTypeNames->Float, false)
+            .Set(defaultWeight);
+        if (spatial) {
+            const UsdPrim weight = MakeEnvelopeWeight(
+                stage, SdfPath("/Asset/Rig/Weights/W"), target, *spatial);
+            mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+                .SetTargets({weight.GetPath()});
+        }
+        return EnvelopePoints(EvaluateEnvelopeFixture(stage), target);
+    };
+
+    for (const float weight : {0.0f, 0.5f, 1.0f}) {
+        const VtVec3fArray moved = evaluate(weight, nullptr);
+        CHECK(moved.size() == base.size());
+        for (size_t i = 0; i < moved.size() && i < base.size(); ++i) {
+            CHECK(Near(GfVec3d(moved[i]),
+                       GfVec3d(base[i]) + GfVec3d(0, 0, 4.0 * weight)));
+        }
+    }
+
+    const VtFloatArray spatial{0.0f, 0.5f, 1.0f};
+    const VtVec3fArray fieldMoved = evaluate(0.25f, &spatial);
+    CHECK(fieldMoved.size() == base.size());
+    for (size_t i = 0; i < fieldMoved.size() && i < base.size(); ++i) {
+        CHECK(Near(GfVec3d(fieldMoved[i]),
+                   GfVec3d(base[i]) + GfVec3d(0, 0, 4.0 * spatial[i])));
+    }
+}
+
+// A mover that formerly called its envelope inputs:strength now uses exactly
+// the same scalar/field contract as Matrix and BlendShape.
+static void
+TestSmoothMoverUniversalEnvelope()
+{
+    const SdfPath target("/Asset/Geom/M.points");
+    const VtVec3fArray base = {
+        GfVec3f(0, 0, 0), GfVec3f(2, 0, 0),
+        GfVec3f(2, 2, 0), GfVec3f(0, 2, 0)};
+    const GfVec3d center(1, 1, 0);
+
+    auto makeStage = [&](float defaultWeight,
+                         const VtFloatArray *spatial) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdPrim mesh =
+            stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+        mesh.CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray, false).Set(base);
+        mesh.CreateAttribute(TfToken("faceVertexCounts"),
+                             SdfValueTypeNames->IntArray, false)
+            .Set(VtIntArray{4});
+        mesh.CreateAttribute(TfToken("faceVertexIndices"),
+                             SdfValueTypeNames->IntArray, false)
+            .Set(VtIntArray{0, 1, 2, 3});
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/S"), TfToken("RigExecSmoothMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateAttribute(TfToken("inputs:defaultWeight"),
+                              SdfValueTypeNames->Float, false)
+            .Set(defaultWeight);
+        if (spatial) {
+            const UsdPrim weight = MakeEnvelopeWeight(
+                stage, SdfPath("/Asset/Rig/Weights/W"), target, *spatial);
+            mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+                .SetTargets({weight.GetPath()});
+        }
+        return stage;
+    };
+
+    for (const float weight : {0.0f, 0.5f, 1.0f}) {
+        const VtVec3fArray moved = EnvelopePoints(
+            EvaluateEnvelopeFixture(makeStage(weight, nullptr)), target);
+        CHECK(moved.size() == base.size());
+        for (size_t i = 0; i < moved.size() && i < base.size(); ++i) {
+            const GfVec3d expected =
+                GfVec3d(base[i]) + (center - GfVec3d(base[i])) * weight;
+            CHECK(Near(GfVec3d(moved[i]), expected));
+        }
+    }
+
+    const VtFloatArray spatial{0.0f, 0.5f, 1.0f, 0.25f};
+    const VtVec3fArray fieldMoved = EnvelopePoints(
+        EvaluateEnvelopeFixture(makeStage(0.75f, &spatial)), target);
+    CHECK(fieldMoved.size() == base.size());
+    for (size_t i = 0; i < fieldMoved.size() && i < base.size(); ++i) {
+        const GfVec3d expected =
+            GfVec3d(base[i]) + (center - GfVec3d(base[i])) * spatial[i];
+        CHECK(Near(GfVec3d(fieldMoved[i]), expected));
+    }
+
+    // The old type-specific spelling must fail closed rather than compose as
+    // an ignored custom attribute.
+    const UsdStageRefPtr legacy = makeStage(1.0f, nullptr);
+    legacy->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/S"))
+        .CreateAttribute(TfToken("inputs:strength"),
+                         SdfValueTypeNames->Float, true)
+        .Set(0.5f);
+    RigExecRigEvaluator legacyEvaluator(legacy, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(!legacyEvaluator.Compile(&errors));
+    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &e) {
+        return e.find("inputs:strength") != std::string::npos &&
+               e.find("inputs:defaultWeight") != std::string::npos;
+    }));
+}
+
+// The scalar property domain uses the same contract.  A one-element constant
+// weight object is meaningful here and supersedes the fallback just as a
+// dense field does for points.
+static void
+TestPropertyMoverUniversalEnvelope()
+{
+    const SdfPath target("/Asset/Channels.value");
+    auto makeStage = [&](float defaultWeight, const float *objectWeight) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdPrim channels =
+            stage->DefinePrim(SdfPath("/Asset/Channels"), TfToken("Scope"));
+        channels.CreateAttribute(TfToken("value"), SdfValueTypeNames->Float,
+                                 true).Set(2.0f);
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/Add"),
+            TfToken("RigExecFloatMathMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateAttribute(TfToken("rigExec:operation"),
+                              SdfValueTypeNames->Token, false)
+            .Set(TfToken("add"));
+        mover.CreateAttribute(TfToken("inputs:value"),
+                              SdfValueTypeNames->Float, false)
+            .Set(8.0f);
+        mover.CreateAttribute(TfToken("inputs:defaultWeight"),
+                              SdfValueTypeNames->Float, false)
+            .Set(defaultWeight);
+        if (objectWeight) {
+            const UsdPrim weight = MakeEnvelopeWeight(
+                stage, SdfPath("/Asset/Rig/Weights/W"), target,
+                VtFloatArray(), *objectWeight);
+            mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+                .SetTargets({weight.GetPath()});
+        }
+        return stage;
+    };
+
+    auto valueAt = [&](const UsdStageRefPtr &stage) {
+        const RigExecRigPose pose = EvaluateEnvelopeFixture(stage);
+        const auto it = pose.movedProperties.find(target);
+        CHECK(it != pose.movedProperties.end());
+        if (it == pose.movedProperties.end()) {
+            return 0.0f;
+        }
+        CHECK(it->second.IsHolding<float>());
+        return it->second.IsHolding<float>()
+            ? it->second.UncheckedGet<float>() : 0.0f;
+    };
+
+    for (const float weight : {0.0f, 0.5f, 1.0f}) {
+        // Full operation is 2 + 8 = 10; the common envelope mixes from 2.
+        CHECK(std::abs(valueAt(makeStage(weight, nullptr)) -
+                       (2.0f + 8.0f * weight)) < 1e-6f);
+    }
+    const float field = 0.75f;
+    CHECK(std::abs(valueAt(makeStage(0.25f, &field)) - 8.0f) < 1e-6f);
+
+    // inputs:weight used to be the property-mover envelope.  It is not an
+    // alias: only BlendInput keeps that spelling for channel amplitude.
+    const UsdStageRefPtr legacy = makeStage(1.0f, nullptr);
+    legacy->GetPrimAtPath(SdfPath("/Asset/Rig/Movers/Add"))
+        .CreateAttribute(TfToken("inputs:weight"),
+                         SdfValueTypeNames->Float, true)
+        .Set(0.5f);
+    RigExecRigEvaluator legacyEvaluator(legacy, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(!legacyEvaluator.Compile(&errors));
+    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &e) {
+        return e.find("inputs:weight") != std::string::npos &&
+               e.find("inputs:defaultWeight") != std::string::npos;
+    }));
+}
+
 // Negative compile: a weight object whose target does not canonicalize to
 // the consuming matrix mover's points target fails compilation
 // (spec §4.2, §7.4).
@@ -885,6 +1487,7 @@ TestDerivedTargetAndFanoutRejected(const std::string &examplesDir)
         SdfPath("/ArmAsset/Rig/Movers/Geometry/BadSmooth"),
         TfToken("RigExecSmoothMover"));
     CHECK(mover);
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
     mover.CreateRelationship(TfToken("rigExec:moves"))
         .SetTargets({SdfPath("/ArmAsset/Geom/ArmBody.normals")});
     {
@@ -1851,6 +2454,7 @@ TestMoverOrderIsComposedAndDynamic()
         TfToken("RigExecFloatMathMover"));
     CHECK(added);
     if (added) {
+        CHECK(added.ApplyAPI(TfToken("RigExecMoverAPI")));
         added.CreateAttribute(TfToken("rigExec:operation"),
                               SdfValueTypeNames->Token, /*custom=*/false)
             .Set(TfToken("add"));
@@ -1962,7 +2566,8 @@ TestPointChainConsumesPrecedingRevision(const std::string &examplesDir)
 // through RigExecResolvedInputs instead. Both routes are filled from the one
 // property-chain result, before anything reads an input.
 //
-// Here a float mover drives the smooth mover's inputs:strength from 0.6 to 0,
+// Here a float mover drives the smooth mover's inputs:defaultWeight from 0.6
+// to 0,
 // and the smoothing has to actually stop. The CPU oracle resolves its own
 // inputs independently, so parity is what proves the two routes agree rather
 // than both being wrong together.
@@ -1971,9 +2576,9 @@ TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
 {
     const SdfPath rigPath("/LatticeAsset/Rig");
     const SdfPath slab("/LatticeAsset/Geom/Slab.points");
-    const SdfPath strength(
+    const SdfPath envelope(
         "/LatticeAsset/Rig/Movers/Geometry/VolumeCorrect/Smooth"
-        ".inputs:strength");
+        ".inputs:defaultWeight");
     const UsdTimeCode when(1024);
 
     UsdStageRefPtr stage =
@@ -1993,7 +2598,7 @@ TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
     }
     const VtVec3fArray before = baseIt->second.Get<VtVec3fArray>();
 
-    // A property mover that drives the smooth mover's strength from the
+    // A property mover that drives the smooth mover's envelope from the
     // authored 0.6 to 0. It is a sibling of VolumeCorrect with an authored
     // reorder, so the competing-writer rule is satisfied and the walk order
     // is unambiguous.
@@ -2011,6 +2616,7 @@ TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
     if (!mover) {
         return;
     }
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
     mover.CreateAttribute(TfToken("rigExec:operation"),
                           SdfValueTypeNames->Token, /*custom=*/false)
         .Set(TfToken("blend"));
@@ -2018,7 +2624,7 @@ TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
                           /*custom=*/false)
         .Set(0.0f);
     mover.CreateRelationship(TfToken("rigExec:moves"), /*custom=*/false)
-        .SetTargets({strength});
+        .SetTargets({envelope});
 
     RigExecRigEvaluator evaluator(edited, rigPath);
     std::vector<std::string> errors;
@@ -2032,14 +2638,14 @@ TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
     CHECK(pose.valid);
 
     // The property chain ran and published 0...
-    const auto strengthIt = pose.movedProperties.find(strength);
-    CHECK(strengthIt != pose.movedProperties.end());
-    if (strengthIt != pose.movedProperties.end()) {
-        CHECK(std::abs(strengthIt->second.Get<float>()) < 1e-6f);
+    const auto envelopeIt = pose.movedProperties.find(envelope);
+    CHECK(envelopeIt != pose.movedProperties.end());
+    if (envelopeIt != pose.movedProperties.end()) {
+        CHECK(std::abs(envelopeIt->second.Get<float>()) < 1e-6f);
     }
 
     // ...and the smoothing CHANGED, because the smooth mover's packet read
-    // the revised strength rather than the authored 0.6.
+    // the revised envelope rather than the authored 0.6.
     const auto afterIt = pose.movedProperties.find(slab);
     CHECK(afterIt != pose.movedProperties.end());
     if (afterIt == pose.movedProperties.end()) {
@@ -2052,7 +2658,7 @@ TestPropertyMoverReachesStaticPacketReads(const std::string &examplesDir)
         worst = std::max(worst, double((before[i] - after[i]).GetLength()));
     }
     if (worst <= 1e-5) {
-        std::printf("  driving inputs:strength to 0 did not change the "
+        std::printf("  driving inputs:defaultWeight to 0 did not change the "
                     "smoothing: the property mover's value is not reaching "
                     "the packet assembler\n");
     }
@@ -2242,6 +2848,430 @@ TestBadReadPhasesRejected(const std::string &examplesDir)
     CHECK(compileWith("/ReadPhaseAsset/Rig/Movers/Cage", &errors));
 }
 
+// A property result that drives a DynamicWeight input must reach both Exec's
+// tapped weight packet and the evaluator's independent CPU resolver. Before
+// this regression the tap saw driver=1 while _ResolveWeights reread authored
+// driver=0, so the otherwise correct deformation was rejected by parity.
+static void
+TestPropertyMoverDrivesDynamicWeight()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const SdfPath target("/Asset/Geom/P.points");
+    const UsdPrim points =
+        stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+    points.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0)});
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim joint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/J"), TfToken("RigExecJoint"));
+    GfMatrix4d posed(1.0);
+    posed.SetTranslate(GfVec3d(10, 0, 0));
+    joint.CreateAttribute(TfToken("posed:space"), SdfValueTypeNames->Matrix4d)
+        .Set(posed);
+
+    const UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/W"), TfToken("RigExecDynamicWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+        .SetTargets({target});
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("constant"));
+    weight.CreateAttribute(TfToken("inputs:driver"),
+                           SdfValueTypeNames->Float, false)
+        .Set(0.0f);
+
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+    mover.CreateRelationship(TfToken("rigExec:moves"), false)
+        .SetTargets({target});
+    mover.CreateRelationship(TfToken("rigExec:transform"), false)
+        .SetTargets({joint.GetPath()});
+    mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+        .SetTargets({weight.GetPath()});
+
+    const UsdPrim driver = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Driver"),
+        TfToken("RigExecFloatMathMover"));
+    CHECK(driver.ApplyAPI(TfToken("RigExecMoverAPI")));
+    driver.CreateAttribute(TfToken("rigExec:operation"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("add"));
+    driver.CreateAttribute(TfToken("inputs:value"),
+                           SdfValueTypeNames->Float, false)
+        .Set(1.0f);
+    driver.CreateRelationship(TfToken("rigExec:moves"), false)
+        .SetTargets({weight.GetPath().AppendProperty(
+            TfToken("inputs:driver"))});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CHECK(evaluator.Compile(nullptr));
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    CHECK(pose.moverGraphParityMismatches == 0);
+    const auto driven = pose.movedProperties.find(
+        weight.GetPath().AppendProperty(TfToken("inputs:driver")));
+    CHECK(driven != pose.movedProperties.end());
+    if (driven != pose.movedProperties.end()) {
+        CHECK(driven->second.Get<float>() == 1.0f);
+    }
+    const VtVec3fArray moved = EnvelopePoints(pose, target);
+    CHECK(moved.size() == 1);
+    if (moved.size() == 1) {
+        CHECK(moved[0] == GfVec3f(10, 0, 0));
+    }
+}
+
+// Property-chain dependencies, not path order, decide the prepass order. The
+// driver target sorts after /Asset/Channels.value, which is the adversarial
+// order that formerly left Consumer at its authored zero envelope.
+static void
+TestPropertyChainDependencyOrderAndExactEndpoint()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const UsdPrim channels =
+        stage->DefinePrim(SdfPath("/Asset/Channels"), TfToken("Scope"));
+    const SdfPath valuePath("/Asset/Channels.value");
+    channels.CreateAttribute(TfToken("value"), SdfValueTypeNames->Float, true)
+        .Set(2.0f);
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+    const UsdPrim consumer = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Consumer"),
+        TfToken("RigExecFloatMathMover"));
+    CHECK(consumer.ApplyAPI(TfToken("RigExecMoverAPI")));
+    consumer.CreateAttribute(TfToken("rigExec:operation"),
+                             SdfValueTypeNames->Token, false)
+        .Set(TfToken("add"));
+    consumer.CreateAttribute(TfToken("inputs:value"),
+                             SdfValueTypeNames->Float, false)
+        .Set(8.0f);
+    consumer.CreateAttribute(TfToken("inputs:defaultWeight"),
+                             SdfValueTypeNames->Float, false)
+        .Set(0.0f);
+    consumer.CreateRelationship(TfToken("rigExec:moves"), false)
+        .SetTargets({valuePath});
+
+    const UsdPrim driver = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Driver"),
+        TfToken("RigExecFloatMathMover"));
+    CHECK(driver.ApplyAPI(TfToken("RigExecMoverAPI")));
+    driver.CreateAttribute(TfToken("rigExec:operation"),
+                           SdfValueTypeNames->Token, false)
+        .Set(TfToken("add"));
+    driver.CreateAttribute(TfToken("inputs:value"),
+                           SdfValueTypeNames->Float, false)
+        .Set(1.0f);
+    driver.CreateRelationship(TfToken("rigExec:moves"), false)
+        .SetTargets({consumer.GetPath().AppendProperty(
+            TfToken("inputs:defaultWeight"))});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CHECK(evaluator.Compile(nullptr));
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    const auto result = pose.movedProperties.find(valuePath);
+    CHECK(result != pose.movedProperties.end());
+    if (result != pose.movedProperties.end()) {
+        CHECK(result->second.Get<float>() == 10.0f);
+    }
+
+    // Full envelope selects the candidate directly. Arithmetic lerp used to
+    // cancel 1e20 + (1 - 1e20) to zero at w=1.
+    channels.GetAttribute(TfToken("value")).Set(1e20f);
+    consumer.GetAttribute(TfToken("rigExec:operation")).Set(TfToken("blend"));
+    consumer.GetAttribute(TfToken("inputs:value")).Set(1.0f);
+    const RigExecRigPose exact = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(exact.valid);
+    const auto exactResult = exact.movedProperties.find(valuePath);
+    CHECK(exactResult != exact.movedProperties.end());
+    if (exactResult != exact.movedProperties.end()) {
+        CHECK(exactResult->second.Get<float>() == 1.0f);
+    }
+}
+
+static UsdStageRefPtr
+MakeConnectedMatrixWeightStage(bool dynamicWeight)
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const SdfPath target("/Asset/Geom/P.points");
+    const UsdPrim points =
+        stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+    points.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0)});
+    const UsdPrim inputs =
+        stage->DefinePrim(SdfPath("/Asset/Inputs"), TfToken("Scope"));
+    inputs.CreateAttribute(TfToken("a"), SdfValueTypeNames->Float, true)
+        .Set(0.25f);
+    inputs.CreateAttribute(TfToken("b"), SdfValueTypeNames->Float, true)
+        .Set(0.75f);
+    inputs.CreateAttribute(TfToken("wrong"), SdfValueTypeNames->Int, true)
+        .Set(1);
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim joint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/J"), TfToken("RigExecJoint"));
+    GfMatrix4d posed(1.0);
+    posed.SetTranslate(GfVec3d(10, 0, 0));
+    joint.CreateAttribute(TfToken("posed:space"), SdfValueTypeNames->Matrix4d)
+        .Set(posed);
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+    CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+    mover.CreateRelationship(TfToken("rigExec:moves"), false)
+        .SetTargets({target});
+    mover.CreateRelationship(TfToken("rigExec:transform"), false)
+        .SetTargets({joint.GetPath()});
+    if (dynamicWeight) {
+        const UsdPrim weight = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Weights/W"), TfToken("RigExecDynamicWeight"));
+        weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+            .SetTargets({target});
+        weight.CreateAttribute(TfToken("rigExec:representation"),
+                               SdfValueTypeNames->Token, false)
+            .Set(TfToken("constant"));
+        weight.CreateAttribute(TfToken("inputs:driver"),
+                               SdfValueTypeNames->Float, false)
+            .SetConnections({SdfPath("/Asset/Inputs.a")});
+        mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+            .SetTargets({weight.GetPath()});
+    } else {
+        mover.CreateAttribute(TfToken("inputs:defaultWeight"),
+                              SdfValueTypeNames->Float, false)
+            .SetConnections({SdfPath("/Asset/Inputs.a")});
+    }
+    return stage;
+}
+
+// Ordinary USD scalar connections are the same input authority as a property
+// mover override, and their provider identity is binding-epoch state.
+static void
+TestConnectedWeightsRewireAndValidate()
+{
+    for (const bool dynamicWeight : {false, true}) {
+        const UsdStageRefPtr stage =
+            MakeConnectedMatrixWeightStage(dynamicWeight);
+        const SdfPath inputPath = dynamicWeight
+            ? SdfPath("/Asset/Rig/Weights/W.inputs:driver")
+            : SdfPath("/Asset/Rig/Movers/M.inputs:defaultWeight");
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        CHECK(evaluator.Compile(nullptr));
+        const RigExecRigPose first =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(first.valid);
+        CHECK(first.moverGraphParityMismatches == 0);
+        VtVec3fArray moved =
+            EnvelopePoints(first, SdfPath("/Asset/Geom/P.points"));
+        CHECK(moved.size() == 1);
+        if (moved.size() == 1) {
+            CHECK(Near(GfVec3d(moved[0]), GfVec3d(2.5, 0, 0)));
+        }
+        const size_t before = evaluator.GetBindingEpochDigest();
+        stage->GetAttributeAtPath(inputPath).SetConnections(
+            {SdfPath("/Asset/Inputs.b")});
+        const RigExecRigPose rewired =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(rewired.valid);
+        CHECK(rewired.moverGraphParityMismatches == 0);
+        CHECK(evaluator.GetBindingEpochDigest() != before);
+        moved = EnvelopePoints(rewired, SdfPath("/Asset/Geom/P.points"));
+        CHECK(moved.size() == 1);
+        if (moved.size() == 1) {
+            CHECK(Near(GfVec3d(moved[0]), GfVec3d(7.5, 0, 0)));
+        }
+
+        auto rejects = [&](const SdfPathVector &sources) {
+            const UsdStageRefPtr bad =
+                MakeConnectedMatrixWeightStage(dynamicWeight);
+            bad->GetAttributeAtPath(inputPath).SetConnections(sources);
+            RigExecRigEvaluator badEvaluator(
+                bad, SdfPath("/Asset/Rig"));
+            std::vector<std::string> errors;
+            return !badEvaluator.Compile(&errors) && !errors.empty();
+        };
+        CHECK(rejects(
+            {SdfPath("/Asset/Inputs.a"), SdfPath("/Asset/Inputs.b")}));
+        CHECK(rejects({SdfPath("/Asset/Inputs.wrong")}));
+        CHECK(rejects({SdfPath("/Asset/Inputs.missing")}));
+    }
+}
+
+// Frozen weight descriptor mistakes fail Compile, never a later mover
+// application. Dense array length is epoch identity so a valid-to-invalid edit
+// is caught without an explicit Compile call.
+static void
+TestWeightDescriptorValidationAndEpoch()
+{
+    auto makeStage = [](const VtFloatArray &values, bool sampledPoints = false) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const SdfPath target("/Asset/Geom/P.points");
+        const UsdPrim points =
+            stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+        const UsdAttribute pointsAttr = points.CreateAttribute(
+            TfToken("points"), SdfValueTypeNames->Point3fArray);
+        const VtVec3fArray base = {
+            GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+        pointsAttr.Set(
+            base, sampledPoints ? UsdTimeCode(1) : UsdTimeCode::Default());
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim joint = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/J"), TfToken("RigExecJoint"));
+        GfMatrix4d posed(1.0);
+        posed.SetTranslate(GfVec3d(1, 0, 0));
+        joint.CreateAttribute(
+                 TfToken("posed:space"), SdfValueTypeNames->Matrix4d)
+            .Set(posed);
+        const UsdPrim weight = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Weights/W"), TfToken("RigExecStaticWeight"));
+        weight.CreateRelationship(TfToken("rigExec:weightTarget"), false)
+            .SetTargets({target});
+        weight.CreateAttribute(TfToken("rigExec:representation"),
+                               SdfValueTypeNames->Token, false)
+            .Set(TfToken("dense"));
+        weight.CreateAttribute(TfToken("rigExec:values"),
+                               SdfValueTypeNames->FloatArray, false)
+            .Set(values);
+        weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                               SdfValueTypeNames->Float, false)
+            .Set(0.0f);
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateRelationship(TfToken("rigExec:transform"), false)
+            .SetTargets({joint.GetPath()});
+        mover.CreateRelationship(TfToken("rigExec:weightObject"), false)
+            .SetTargets({weight.GetPath()});
+        return stage;
+    };
+
+    {
+        const UsdStageRefPtr bad = makeStage(VtFloatArray{1, 1});
+        RigExecRigEvaluator evaluator(bad, SdfPath("/Asset/Rig"));
+        CHECK(!evaluator.Compile(nullptr));
+    }
+    {
+        // Numeric packet contents are value state, unlike the dense array's
+        // descriptor cardinality.  A strict violation therefore compiles and
+        // fails just this mover revision back to the preceding points.
+        const UsdStageRefPtr badValue =
+            makeStage(VtFloatArray{1, 2, 1});
+        RigExecRigEvaluator evaluator(badValue, SdfPath("/Asset/Rig"));
+        CHECK(evaluator.Compile(nullptr));
+        const RigExecRigPose pose =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        CHECK(EnvelopePoints(pose, SdfPath("/Asset/Geom/P.points")) ==
+              VtVec3fArray({
+                  GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)}));
+    }
+    {
+        // A points property authored only at a time sample is a valid domain;
+        // the epoch freezes its sampled cardinality instead of requiring a
+        // default opinion.
+        const UsdStageRefPtr sampled =
+            makeStage(VtFloatArray{1, 1, 1}, true);
+        RigExecRigEvaluator evaluator(sampled, SdfPath("/Asset/Rig"));
+        CHECK(evaluator.Compile(nullptr));
+        CHECK(evaluator.Evaluate(UsdTimeCode(1)).valid);
+    }
+    {
+        const UsdStageRefPtr stage = makeStage(VtFloatArray{1, 1, 1});
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        CHECK(evaluator.Compile(nullptr));
+        CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
+        stage->GetAttributeAtPath(
+                 SdfPath("/Asset/Rig/Weights/W.rigExec:values"))
+            .Set(VtFloatArray{1, 1});
+        CHECK(!evaluator.Evaluate(UsdTimeCode::Default()).valid);
+        stage->GetAttributeAtPath(
+                 SdfPath("/Asset/Rig/Weights/W.rigExec:values"))
+            .Set(VtFloatArray{1, 1, 1});
+        CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
+
+        const UsdAttribute points = stage->GetAttributeAtPath(
+            SdfPath("/Asset/Geom/P.points"));
+        points.Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0)});
+        CHECK(!evaluator.Evaluate(UsdTimeCode::Default()).valid);
+        points.Set(VtVec3fArray{
+            GfVec3f(0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)});
+        CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
+    }
+    {
+        const UsdStageRefPtr stage = makeStage(VtFloatArray{1, 1, 1});
+        const UsdPrim inputs =
+            stage->DefinePrim(SdfPath("/Asset/Inputs"), TfToken("Scope"));
+        inputs.CreateAttribute(TfToken("w"), SdfValueTypeNames->Float, true)
+            .Set(1.0f);
+        stage->GetAttributeAtPath(
+                 SdfPath("/Asset/Rig/Weights/W.rigExec:defaultWeight"))
+            .SetConnections({SdfPath("/Asset/Inputs.w")});
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        CHECK(!evaluator.Compile(nullptr));
+    }
+}
+
+// Synthesized normals/extent maintenance has no authored mover. Custom
+// lookalike attributes on the owner mesh must not disable or envelope it.
+static void
+TestDerivedMaintenanceIgnoresOwnerLookalikes(
+    const std::string &examplesDir)
+{
+    auto evaluate = [&](bool authorLookalikes) {
+        const UsdStageRefPtr stage =
+            UsdStage::Open(examplesDir + "/ArmRig.usda");
+        if (!stage) {
+            return RigExecRigPose();
+        }
+        if (authorLookalikes) {
+            stage->SetEditTarget(stage->GetSessionLayer());
+            const UsdPrim body =
+                stage->GetPrimAtPath(SdfPath("/ArmAsset/Geom/ArmBody"));
+            body.CreateAttribute(TfToken("inputs:defaultWeight"),
+                                 SdfValueTypeNames->Float, true)
+                .Set(0.0f);
+            body.CreateAttribute(TfToken("inputs:enabled"),
+                                 SdfValueTypeNames->Bool, true)
+                .Set(false);
+            const UsdPrim trapWeight = stage->DefinePrim(
+                SdfPath("/ArmAsset/Rig/Weights/DerivedTrap"),
+                TfToken("RigExecStaticWeight"));
+            trapWeight.CreateRelationship(
+                          TfToken("rigExec:weightTarget"), false)
+                .SetTargets({SdfPath("/ArmAsset/Geom/ArmBody.points")});
+            trapWeight.CreateAttribute(TfToken("rigExec:representation"),
+                                       SdfValueTypeNames->Token, false)
+                .Set(TfToken("constant"));
+            trapWeight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                                       SdfValueTypeNames->Float, false)
+                .Set(0.0f);
+            body.CreateRelationship(TfToken("rigExec:weightObject"), false)
+                .SetTargets({trapWeight.GetPath()});
+        }
+        RigExecRigEvaluator evaluator(stage, SdfPath("/ArmAsset/Rig"));
+        if (!evaluator.Compile(nullptr)) {
+            return RigExecRigPose();
+        }
+        return evaluator.Evaluate(UsdTimeCode::Default());
+    };
+    const RigExecRigPose baseline = evaluate(false);
+    const RigExecRigPose lookalikes = evaluate(true);
+    CHECK(baseline.valid);
+    CHECK(lookalikes.valid);
+    for (const char *property : {"normals", "extent"}) {
+        const SdfPath path = SdfPath("/ArmAsset/Geom/ArmBody")
+                                 .AppendProperty(TfToken(property));
+        const auto expected = baseline.movedProperties.find(path);
+        const auto actual = lookalikes.movedProperties.find(path);
+        CHECK(expected != baseline.movedProperties.end());
+        CHECK(actual != lookalikes.movedProperties.end());
+        if (expected != baseline.movedProperties.end() &&
+            actual != lookalikes.movedProperties.end()) {
+            CHECK(expected->second == actual->second);
+        }
+    }
+}
+
 // Lifting the joint requirement is not the same as removing the gate: a rig
 // with neither joints nor movers publishes nothing at all, which is an
 // authoring mistake and must still be reported as one.
@@ -2315,6 +3345,11 @@ main(int argc, char **argv)
     TestShotAnimation(examplesDir);
     TestGeometryMovers(examplesDir);
     TestBlendDeltasUseBase();
+    TestControlAvarScaleDrivesMatrixMover();
+    TestMatrixMoverUniversalEnvelope();
+    TestBlendShapeUniversalEnvelope();
+    TestSmoothMoverUniversalEnvelope();
+    TestPropertyMoverUniversalEnvelope();
     TestWeightTargetMismatchFailsCompile(examplesDir);
     TestDerivedTargetAndFanoutRejected(examplesDir);
     TestNonMeshAuthoredNormalsRejected(examplesDir);
@@ -2337,6 +3372,11 @@ main(int argc, char **argv)
     TestBadReadPhasesRejected(examplesDir);
     TestPointChainConsumesPrecedingRevision(examplesDir);
     TestPropertyMoverReachesStaticPacketReads(examplesDir);
+    TestPropertyMoverDrivesDynamicWeight();
+    TestPropertyChainDependencyOrderAndExactEndpoint();
+    TestConnectedWeightsRewireAndValidate();
+    TestWeightDescriptorValidationAndEpoch();
+    TestDerivedMaintenanceIgnoresOwnerLookalikes(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

@@ -504,6 +504,40 @@ def testUsdviewInputFunction(appController):
     panel.SetVisibleCurves([ref.Label() for ref in panel.Curves()])
     d.Pump()
 
+    # --- 10b. Curve types ------------------------------------------------
+    # Bezier (free widths) and Hermite (fixed widths) are Ts's two spline
+    # types (ts/types.h:101-105). Like Infinity, SetCurveType applies to
+    # the curves the editor is SHOWING.
+    import graphModel as _gm
+    panel.SetVisibleCurves([TX])
+    d.Pump()
+    _Check(_gm.CurveTypeName(d.Spline("avars:tx")) == "bezier",
+           "the file's curves are Bezier")
+    _Check(panel.CurveType() == "bezier",
+           "and the panel reads the focus curve as Bezier: %s"
+           % (panel.CurveType(),))
+    _Check(panel.SetCurveType("hermite"), "Set Curve Type ran")
+    d.Pump()
+    _Check(d.Spline("avars:tx").GetCurveType() == Ts.CurveTypeHermite,
+           "the session spline is now Hermite")
+    _Check(panel.CurveType() == "hermite",
+           "and the panel follows: %s" % (panel.CurveType(),))
+    _Check(panel.curveTypeCombo.currentData() == "hermite",
+           "including the combo box")
+    _Check(sorted(k.GetTime() for k in
+                  d.Spline("avars:tx").GetKnots().values())
+           == list(FILE_FRAMES),
+           "switching kept every key")
+    _Check(d.Spline("avars:tx").GetKnot(1024.0) is not None
+           and abs(d.Spline("avars:tx").GetKnot(1024.0).GetValue()
+                   - d.Value("avars:tx", 1024)) < 1e-9,
+           "and the key still resolves where the viewport reads it")
+    d.Rewind(stack)
+    _Check(_gm.CurveTypeName(d.Spline("avars:tx")) == "bezier",
+           "undo put the curve type back to Bezier")
+    panel.SetVisibleCurves([ref.Label() for ref in panel.Curves()])
+    d.Pump()
+
     # --- 11. Scrubbing the frame ruler ----------------------------------
     appController.setFrame(1010)
     d.Pump()
@@ -556,4 +590,4 @@ def testUsdviewInputFunction(appController):
 
     print("RIGEXEC_GRAPH_OK curves, property filter, key drag + undo, "
           "insert, delete, tangent types, handle drag, break/unify, "
-          "infinity, scrub, marquee")
+          "infinity, curve types, scrub, marquee")
