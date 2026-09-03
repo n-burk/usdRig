@@ -1635,6 +1635,89 @@ TestInvalidContractsFailClosed()
     }
 }
 
+static void
+TestIncompleteSolverLeavesJointsVisible()
+{
+    // Removing a solver's control relationships must not make its joints
+    // disappear: with no aggregate element to extract, each bound joint
+    // keeps its natural rest-chain frame (and stays drawable) while a
+    // diagnostic names the gap. A present-but-degenerate solve is the
+    // opposite case and still propagates; this test covers only the
+    // incomplete solver, whose kernel returns an empty aggregate.
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Joints"), TfToken("Scope"));
+
+    // Controls exist but nothing wires them to the solver.
+    for (const char *name : {"Root", "Eff", "Pole"}) {
+        stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+    }
+
+    const SdfPath shoulder("/Asset/Rig/Joints/Shoulder");
+    const SdfPath elbow("/Asset/Rig/Joints/Shoulder/Elbow");
+    const SdfPath wrist("/Asset/Rig/Joints/Shoulder/Elbow/Wrist");
+    const double restTx[3] = {1.0, 2.0, 3.0};
+    const SdfPath joints[3] = {shoulder, elbow, wrist};
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim prim =
+            stage->DefinePrim(joints[i], TfToken("RigExecJoint"));
+        CHECK(prim);
+        prim.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+            .Set(restTx[i]);
+    }
+
+    // Solver claims the joints but wires no root/effector/pole controls.
+    const UsdPrim ik = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/LegIK"), TfToken("RigExecTwoBoneIk"));
+    CHECK(ik);
+    ik.CreateRelationship(TfToken("rigExec:joints"))
+        .SetTargets({shoulder, elbow, wrist});
+    ik.CreateAttribute(TfToken("rigExec:upperLength"),
+                       SdfValueTypeNames->Double)
+        .Set(3.0);
+    ik.CreateAttribute(TfToken("rigExec:lowerLength"),
+                       SdfValueTypeNames->Double)
+        .Set(3.0);
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const std::string &error : errors) {
+        std::printf("  compile message: %s\n", error.c_str());
+    }
+    CHECK(errors.empty());
+
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    // Every bound joint stays on its rest chain. rest:tx/ty/tz is the
+    // bind-world position (world = rest when the parent is at rest), so
+    // each joint sits exactly at its authored rest.
+    const GfVec3d expected[3] = {
+        GfVec3d(1, 0, 0), GfVec3d(2, 0, 0), GfVec3d(3, 0, 0)};
+    for (int i = 0; i < 3; ++i) {
+        const auto frame = pose.jointFramesFinal.find(joints[i]);
+        CHECK(frame != pose.jointFramesFinal.end());
+        if (frame == pose.jointFramesFinal.end()) {
+            continue;
+        }
+        CHECK(frame->second.IsValid());
+        CHECK(!frame->second.IsDegenerate());
+        CHECK(Near(frame->second.Origin(), expected[i]));
+        // The matrix is what imaging draws: omitted means invisible.
+        CHECK(pose.jointMatricesFinal.count(joints[i]) == 1);
+    }
+    CHECK(std::any_of(
+        pose.diagnostics.begin(), pose.diagnostics.end(),
+        [](const std::string &diagnostic) {
+            return diagnostic.find("fell back to its rest chain") !=
+                   std::string::npos;
+        }));
+}
+
 int
 main()
 {
@@ -1664,6 +1747,7 @@ main()
     TestRotationOrderCapabilityIsRecorded();
     TestLegacyWeightSpellingIsRejected();
     TestInvalidContractsFailClosed();
+    TestIncompleteSolverLeavesJointsVisible();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
