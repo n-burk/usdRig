@@ -4787,6 +4787,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     }
 
     std::vector<RigExecValueOverride> jointOverrides = baseOverrides;
+    // Joints whose solver published no element for them (an incomplete
+    // solver: its required inputs are unwired, so the kernel returned an
+    // empty aggregate). They keep their natural rest-chain frame below, so
+    // a rig mid-edit stays visible instead of vanishing.
+    std::set<SdfPath> fallbackJoints;
     if (_solverFrameTaps && !_jointSolverBinding.empty()) {
         // Iterated to a fixed point, NOT computed once.
         //
@@ -4835,6 +4840,20 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 if (it == aggregates.end()) {
                     continue;
                 }
+                // No element for this joint means the solver never ran: its
+                // required inputs are unwired and the kernel returned an
+                // empty aggregate. Emit no override so the joint keeps its
+                // natural rest-chain frame (and stays visible); the
+                // diagnostic below names the gap. A PRESENT-but-degenerate
+                // element is different -- the solver ran and failed
+                // atomically -- and keeps propagating as an override
+                // (spec §6.6: no silent substitution of a real failure).
+                if (binding.second < 0 ||
+                    static_cast<size_t>(binding.second) >=
+                        it->second.GetSize()) {
+                    fallbackJoints.insert(jointPath);
+                    continue;
+                }
                 next.push_back(RigExecValueOverride{
                     jointPath, _computePointFrame, TfToken(),
                     VtValue(RigExecExtractElementFrame(
@@ -4874,6 +4893,23 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 return pose;  // pose.valid stays false
             }
         }
+    }
+
+    // An incomplete solver is an authoring gap, not a silent one: name every
+    // joint that fell back so a rig mid-edit explains itself.
+    for (const SdfPath &jointPath : fallbackJoints) {
+        const auto binding = _jointSolverBinding.find(jointPath);
+        const std::string solver =
+            binding != _jointSolverBinding.end()
+                ? binding->second.first.GetString()
+                : std::string("<unknown>");
+        const int element =
+            binding != _jointSolverBinding.end() ? binding->second.second
+                                                 : -1;
+        pose.diagnostics.push_back(
+            "solver " + solver + " published no element " +
+            std::to_string(element) + " for joint " + jointPath.GetString() +
+            "; joint fell back to its rest chain");
     }
 
     // Baked falloff tables ride along with the joint overrides. They are
