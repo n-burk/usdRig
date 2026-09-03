@@ -147,7 +147,9 @@ moved silently.
 | `+` / `-` | grow / shrink the manipulator by 10% |
 | `D`, `Insert` | toggle Pivot editing |
 | `J` (hold) | Step Snap for the duration of the drag |
-| `X` (hold) | snap the result to a grid of the step size (Move) |
+| `X` (hold) | snap the world pivot to the grid (Move; Rotate: Gimbal ring only) |
+| `C` (hold) | snap the pivot to the nearest edge under the cursor (Move) |
+| `V` (hold) | snap the pivot to the nearest vertex under the cursor (Move) |
 | `Escape` | abort the drag in progress |
 | `Ctrl+Z` | undo |
 | `Ctrl+Shift+Z`, `Shift+Z`, `Ctrl+Y` | redo |
@@ -161,20 +163,18 @@ same typing gate as the tool keys, so it does nothing while a text field
 has keyboard focus: that `Escape` belongs to the field. Move the focus
 off the field to get it back.
 
-`J` and `X` are both step snapping and they mean different things. `J`
-quantises the movement, so an object that started off the step grid moves
-in whole steps and stays off it — Maya's Discrete Move. `X` quantises the
-result, so the object lands on the grid however the drag started — Maya's
-grid snap. Holding both, `X` wins, because it fully determines where the
-object ends up and the relative step then says nothing. Snapping is always
-applied to the channel values that get written, never to the world delta,
-so an object under a rotated parent still moves in whole steps.
+`J` is relative step snapping while `X`, `C` and `V` snap the world
+pivot to the grid, an edge and a vertex instead. All of that lives under
+Snapping below, including why `X` still outranks `J` when both are held.
 
-Two keys are shared with usdview rather than taken from it. `J` is
+Four keys are shared with usdview rather than taken from it. `J` is
 usdview's Toggle Framed View; since Maya's `J` only means anything while
 dragging, a live drag claims it and the rest of the time it still frames
-the view. `Escape` is usdview's own focus reset, and is likewise claimed
-only while a drag is live. `W` is declared in usdview as Watch Window,
+the view. `C` (Auto Compute Clipping Planes) and `V` (Show USD
+Validation) work the same way, except that outside a drag they arm edge
+and point snapping only while the Move tool is active with a target —
+everywhere else they stay usdview's. `Escape` is usdview's own focus
+reset, and is likewise claimed only while a drag is live. `W` is declared in usdview as Watch Window,
 but that action is disabled and connected to nothing, so it was free to
 take.
 
@@ -184,6 +184,99 @@ take.
   Qt before anything sees it, so Ctrl-clicking an axis cannot start a
   drag there. The gesture that works everywhere is to grab the axis
   first and then hold `Ctrl`.
+
+## Snapping
+
+The Move tool snaps the way Maya's does: four modes, each of which puts
+the manipulator PIVOT on a world-space target — never the grabbed handle
+and never the cursor.
+
+- **Grid** — the world grid through the origin, spaced `Grid Size` apart.
+- **Point** — the nearest vertex or curve CV of the prim under the
+  cursor, within 12 pixels of it.
+- **Edge** — the nearest point on the nearest edge segment of that prim:
+  mesh edges, or consecutive CVs of a curve.
+- **Surface** — the point on the prim under the cursor where the cursor
+  ray hits it.
+
+A mode is armed either for one drag, by holding `X` (grid), `V` (point)
+or `C` (edge), or stickily, from the `Snap:` button on the toolbar —
+bare `Snap` when off — mirrored as `Snap To` in the Tool Settings
+window. Surface has no hold key, Maya gives it none, so it is
+dropdown-only. A held key outranks the sticky mode, and when several
+holds are down the more specific target wins — Point over Edge over Grid
+— regardless of the order they were pressed; releasing the winner falls
+through to the next hold still down, then to the sticky mode.
+
+The grabbed handle constrains where on the target the pivot may land. An
+axis drag slides along its axis and stops level with the target; a plane
+handle — or an axis with `Ctrl`, which drags in a plane — lands in its
+plane; the centre handle lands on the target unchanged. A snapped drag
+is still one undo step, exactly like an unsnapped one.
+
+With a point, edge or surface snap armed and nothing suitable under the
+cursor, the object does not move. That is Maya's behaviour, not a bug:
+there is no fallback to free dragging. (The grid is infinite, so Grid
+always has somewhere to land.) Rig-driven geometry is never a target at
+all: its authored points are not what the renderer draws, so Point and
+Edge refuse it, and Surface does too wherever the drag itself would
+re-pose the geometry under the ray. On a scene whose only geometry is
+one rigged character, dragging that rig's controls therefore leaves
+these modes with nothing to land on, and the status line says so rather
+than a bare complaint.
+
+Rotate's grid is a different thing: an absolute degree grid of `Step
+Size`, on a Gimbal ring only. The dragged Euler channel lands on a
+multiple of the step. It is Gimbal-ring-only because that is the one
+rotate route that writes a single channel; a world-axis ring or the
+free-rotate ball reaches the drawn rotation by moving all three
+channels, so there is no single resulting channel to quantise and Grid
+stays inert there. Point, edge and surface snapping are Move-only:
+holding one while rotating is inert. Scale gains nothing — its Step Snap
+already quantises the resulting channel, which is the only snap Maya
+offers it.
+
+`Grid Size` lives in the Tool Settings window beside `Snap To`, and is
+session-wide rather than per-tool: resetting the Move tool does not move
+the world grid. Rotate's grid ignores it — degrees already have `Step
+Size`. `J` is the other half of this story: relative step snapping, the
+movement advancing in whole steps so an object that started off the grid
+stays off it (Maya's Discrete Move), while `X` snaps the WORLD pivot
+however the drag started — under a posed parent the world position lands
+on round numbers while the channel values do not, which is the opposite
+of what the old channel-space `X` did. Holding both, `X` still outranks
+`J`, because it fully determines where the object ends up and the
+relative step then says nothing. (`Target`'s `snapAbsolute` parameter
+stays — it is the correct name for channel-absolute and remains tested —
+but nothing in the UI binds it any more.)
+
+While a snap is armed, the status line says which and what happened:
+`grid: world` for the Move grid, or `grid: relative (frame not
+world-aligned)` when the handle points nowhere near a world axis and the
+travel from the pivot is quantised instead; `grid: 15 deg` for Rotate's
+grid; `snap: Point`, `snap: Edge` or `snap: Surface` for a landing; and,
+when there is nothing to land on or the request makes no sense, the
+reason — `snap: no target`, `snap: <prim> is rig-deformed`, `snap: Point
+is Move only`, `snap: Grid needs a Gimbal ring`. The landing also gets
+an orange marker: a diamond and crosshair, with a short normal tick for
+a surface, the two halves of the picked segment for an edge, and
+world-axis ticks for the grid, plus a faint leader joining it to the
+handle while the two differ. The marker shows on hover too while a mode
+is armed, so holding `V` lights up what the pivot would land on before
+anything is grabbed.
+
+Out of scope, each a follow-up: nominating one construction surface
+(Maya's Make Live), snap to view planes, to a projected centre or to a
+network, Snap Align Objects, face-centre snapping, multi-prim snapping,
+and reorienting the object to the surface normal on a Move snap (Maya
+does not do that either).
+
+To try it: `bin/run_python_tests.sh` covers the snap maths, the drag
+rules (precedence, the per-handle constraint, the no-target no-write
+rule) and the per-tool choices; `bin/run_testusdview_gizmo.sh` drives
+sticky and held snaps at projected pixels on `examples/ArmShotAnim.usda`
+and asserts what landed, including that usdview's own `C` and `V` still
+fire outside a Move drag.
 
 ## When there is no gizmo
 
@@ -207,18 +300,20 @@ under the constraint; that is a documented limitation, not an error.
 Multi-prim editing and a C++ frame-query export were excluded by the
 design. From Maya's tool options, everything that only means something
 for polygon components is excluded as well: Preserve UVs, Tweak mode,
-Soft Select, Symmetry, Transform Constraints, Smart Duplicate, and
-snapping to a live surface, a curve or a point. Maya's Component, Normal,
-Along Live Object and Custom axis orientations are excluded for the same
-reason.
+Soft Select, Symmetry, Transform Constraints and Smart Duplicate.
+Maya's Component, Normal, Along Live Object and Custom axis orientations
+are excluded for the same reason. The snapping follow-ups — Make Live,
+view-plane and network snaps, Snap Align, face centres, multi-prim
+snapping — are listed under Snapping above.
 
 ## Tests
 
 - `bin/run_python_tests.sh` — headless and Qt-free: the frame replica
   against the native evaluator, the channel math for all three tools,
   edit targets and write modes, undo snapshots, screen projection and
-  hit testing, the drag rules that turn a mouse move into an `Apply*`
-  call, and the per-tool settings defaults.
+  hit testing, the snap maths and the drag rules that turn a mouse move
+  into an `Apply*` call (including the snap precedence and throttle),
+  and the per-tool settings defaults.
 - `bin/run_testusdview_gizmo.sh` — `tests/testUsdviewGizmo.py` under
   `testusdview` on `examples/ArmShotAnim.usda`. It drives synthetic mouse
   and key events through the gizmo's own projected handle positions and
@@ -227,5 +322,7 @@ reason.
   outranked-default warning, `rest:*` in Pivot mode, an xform's op stack,
   and the Maya behaviours (planar handles, `Ctrl` + axis, middle-drag
   repeat, step snap, the view ring, gimbal rings, free rotate, the scale
-  ratio rule, Preserve Children and the hotkeys). It prints `RIGEXEC_GIZMO_OK` and
+  ratio rule, Preserve Children, the hotkeys and the snap modes — sticky
+  and held landings, the status clause, one undo step). It prints
+  `RIGEXEC_GIZMO_OK ... snapping` and
   saves a window grab to `$RIGEXEC_GIZMO_SHOT` when that is set.

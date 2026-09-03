@@ -274,8 +274,10 @@ Options (toolbar "Tool Settings" for the active tool):
 - Step Snap (Maya "Discrete move", default off) with Step Size (default
   1.0 units): deltas are quantised to multiples of the step, relative to
   the drag start. Holding `J` enables it for the duration of the drag.
-  Holding `X` snaps the resulting translation to a grid of the step size
-  (absolute, in the drag frame).
+  Holding `X` snaps the WORLD pivot to the grid of the session-wide Grid
+  Size (default 1.0 units), however the drag started (Maya's grid snap);
+  `Target`'s `snapAbsolute` stays for channel-absolute but nothing in the
+  UI binds it any more.
 - Preserve Children (default off): for a plain xform whose children are
   XformCommonAPI-compatible xformables with a zero pivot, the children's
   world transforms are re-authored after the drag so they do not move.
@@ -341,7 +343,8 @@ Preserve Children; Edit Pivot.
 
 `Q` select, `W` move, `E` rotate, `R` scale; `+` / `-` manipulator
 size; `D` (toggle) and `Insert` edit pivot; `J` hold step snap, `X` hold
-grid snap (move only); `Ctrl+Z` undo; `Ctrl+Shift+Z`, `Shift+Z`
+world grid snap (Move; Rotate: absolute degree grid on a Gimbal ring
+only); `Ctrl+Z` undo; `Ctrl+Shift+Z`, `Shift+Z`
 (Maya) and `Ctrl+Y` redo; `Escape` aborts a drag. Tool hotkeys are
 active only while the stage view has focus so they cannot shadow text
 fields; undo / redo are application-wide. Any key already bound by

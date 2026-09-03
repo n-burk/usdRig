@@ -257,11 +257,12 @@ positions — so publication demonstrably flows from the graph, not the taps.
 `_Build*MoverParameters` kernels. **They drifted, and one of the drifts shipped
 as visibly broken geometry.**
 
-`07_SurfaceDrape` rendered undeformed in usdview. `_BuildSurfaceMoverParameters`
-hardcodes `strength = 1.0f` ("v0.1 attach/project maps fully"); assemble did
-`_Float(moverPrim, "inputs:strength", 0.5f)` — and `RigExecSurfaceMover`
-declares no such attribute, so the graph silently took the 0.5 default and
-projected half way (base y=0.8 → graph 0.4 vs lowered 0.0).
+`07_SurfaceDrape` rendered undeformed in usdview. Before mover weights were
+unified, `_BuildSurfaceMoverParameters` hardcoded full application while the
+assembler read a nonexistent type-specific strength with a 0.5 fallback, so
+the graph projected only half way (base y=0.8 → graph 0.4 vs lowered 0.0).
+The common `RigExecMoverAPI.inputs:defaultWeight` envelope now supplies this
+blend uniformly to both paths.
 
 **Why the suite missed it:** a parity mismatch is a *diagnostic string on the
 pose*, not a test failure, and `TestMoverGraphParity` only covered 3 of 9 rigs.

@@ -15,8 +15,9 @@ SCHEMA="$RIG/build/usd/rigExecSchema/resources"
 TESTS=("$@")
 if [ ${#TESTS[@]} -eq 0 ]; then
     TESTS=(test_rigexec_undo test_gizmo_math test_gizmo_screen
-           test_gizmo_settings test_gizmo_drag test_rigexec_stage_edits
-           test_graph_model test_graph_screen)
+           test_gizmo_settings test_gizmo_drag test_gizmo_snap
+           test_viewcube_math test_rigexec_stage_edits test_graph_model
+           test_graph_screen)
 fi
 
 # Only these two read argv[1], to Plug-register the generated schema.

@@ -55,7 +55,7 @@ The coupling is entirely in the activation/publication path:
 | 2 | `registry.cpp:51` `Activate` | constructs `RigExecImagingBridge(stage, rigPath, store)` | Session created adapter-side, handed downstream in a data source |
 | 3 | `registry.cpp:66-70` | `TfNotice::Register(UsdNotice::ObjectsChanged, stage)` for edit-driven re-eval | `_PrimsDirtied` on the rig's data-source locators |
 | 4 | `registry.h:111` `RigExecImaging_SetTime` | app pushes the frame in | Time-varying `rigExec/time` leaf; `UsdImagingStageSceneIndex::SetTime` dirties it |
-| 5 | `bridge.h:109` `_stage` + `bridge.cpp:159-199` `_FillGuides` | `_stage->GetPrimAtPath(jointPath)` to read `guide:length`, `guide:radius`, `guide:displayColor`, `guide:displayOpacity` | `RigExecImagingGuideSchema` data source from a joint adapter |
+| 5 | `bridge.h:109` `_stage` + `bridge.cpp` `_FillGuides` | joint hierarchy plus `_stage->GetPrimAtPath(jointPath)` to read `guide:radius`, `guide:displayColor`, `guide:displayOpacity` | `RigExecImagingGuideSchema` data source from a joint adapter plus evaluated child-frame inputs |
 | 6 | `bridge.cpp:109` | `RigExecRigEvaluator(stage, rigPath)` | **Irreducible** — see §2 |
 | 7 | `plugin/rigExecUsdview/rigExecUsdview.py` | ctypes + `UsdUtils.StageCache` + frame signal | Deleted entirely |
 
@@ -177,9 +177,9 @@ results scene index goes away.
 `RigExecImagingJointAdapter::GetImagingSubprims()` returns
 `{guideSphere, guideCone}` (n-element solvers: `{guideSphere_i, guideCone_i}`),
 each typed `HdPrimTypeTokens->sphere` / `->cone`, with `purpose = guide`,
-`HdConeSchema.height` driven by a `UsdImagingDataSourceAttribute<double>` over
-`guide:length`, and `displayColor`/`displayOpacity` as constant primvars over
-the authored attributes. Placement stays the evaluator's job — the results
+`HdConeSchema.height` derived from the evaluated parent/child origin distance,
+and `displayColor`/`displayOpacity` as constant primvars over the authored
+attributes. Placement stays the evaluator's job — the results
 scene index overlays each guide subprim's `xform/matrix` from the snapshot's
 `guideFrames`, exactly as it already overlays driven provider transforms.
 
@@ -477,7 +477,7 @@ lines) returns two subprims per joint scope:
 GetImagingSubprims()      -> { baseSphere, zAxisCone }
 GetImagingSubprimType()   -> HdPrimTypeTokens->sphere / ->cone
 GetImagingSubprimData()   -> HdSphereSchema / HdConeSchema(axis=Z,
-                               height = UsdImagingDataSourceAttribute<double>(guide:length)),
+                               height = evaluated child-origin distance),
                              HdPurposeSchema(purpose = guide),
                              displayColor/displayOpacity as constant primvars
                                over UsdImagingDataSourceAttribute

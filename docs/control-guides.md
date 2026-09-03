@@ -3,7 +3,7 @@
 Controls (`RigExecControl`) gain synthesized viewport guide drawing through the
 existing Hydra 2.0 results scene index, exactly parallel to the joint/solver
 sphere+cone guides (spec §10.3 extension), with authorable shape, draw mode,
-and per-axis scale.
+and positive per-axis guide-scale multipliers.
 
 Build target: OpenUSD PR #4156 (usdNoodles branch), installed to the
 `CMakeLists.txt` default `../usd-install` (or the path supplied through
@@ -15,8 +15,10 @@ Build target: OpenUSD PR #4156 (usdNoodles branch), installed to the
   (Storm, via the RigExec filtering scene indices — never authored to the stage).
 - `guide:shape`: one of `sphere`, `circle`, `box`, `cube`, `diamond`, `pyramid`.
 - `guide:drawMode`: `wire` or `geometry`.
-- Per-axis draw scale as **separate double properties** (`guide:scaleX`,
-  `guide:scaleY`, `guide:scaleZ`) — deliberately NOT a vec3, per direction.
+- Positive per-axis guide-scale multipliers as **separate double properties**
+  (`guide:scaleX`, `guide:scaleY`, `guide:scaleZ`) — deliberately NOT a vec3,
+  per direction. Final drawn size is the evaluated control-frame axis
+  magnitude multiplied by this authored guide multiplier.
 - Style parity with joint guides: `guide:displayColor`, `guide:displayOpacity`,
   purpose `guide`, visibility and `primOrigin` inherited from the control prim
   so picking a guide selects its control.
@@ -29,10 +31,20 @@ Build target: OpenUSD PR #4156 (usdNoodles branch), installed to the
 - All unit shapes are centered at the frame origin with half-extent 1:
   sphere/circle radius 1, box/cube spanning ±1, diamond (octahedron) vertices
   at ±1 on each axis, pyramid base corners (±1, −1, ±1) with apex (0, 1, 0).
-- Guides are rigid: the control's posed frame is orthonormalized exactly like
-  `_AppendGuideFrame` does for joints; `guide:scaleX/Y/Z` is the only
-  dimensional scale. A non-finite or non-positive scale on any axis draws
-  nothing (mirrors the joint `guide:radius` rule).
+- Guide placement is rigid: the control's posed frame is orthonormalized
+  exactly like `_AppendGuideFrame` does for joints. Its three removed axis
+  magnitudes are retained as guide dimensions, so each final axis size is
+  `abs(evaluated frame axis) * guide:scaleAxis`. The authored guide multiplier
+  must be finite and positive on every axis; otherwise the guide draws nothing
+  (mirrors the joint `guide:radius` rule).
+- Control and joint `avars:sx/sy/sz` use a signed nonzero floor: every finite
+  magnitude below `1e-4` resolves to `copysign(1e-4, value)`, including signed
+  zero. Negative values therefore keep reflection semantics while a collapsed
+  axis remains invertible and publishable. Strict authoring rejects non-finite
+  values; raw non-finite USD resolves to identity scale on that axis. This
+  floor applies before the evaluated frame magnitudes above are measured and
+  is distinct from `guide:scaleX/Y/Z`, whose non-positive values still hide
+  the guide.
 - Wire curves author a constant widths primvar from `guide:wireWidth`
   (default 0.05, local pre-scale units). usdview's interactive pick window
   is a single physical pixel, so an unwidthed hairline is effectively
@@ -98,16 +110,17 @@ bool hasControlGuide = false;
 GfMatrix4d controlGuideFrame;   // rigidized, ASSET-space
 TfToken controlGuideShape;      // sphere|circle|box|cube|diamond|pyramid
 TfToken controlGuideDrawMode;   // wire|geometry
-GfVec3d controlGuideScale;      // internal storage; authored as 3 doubles
+GfVec3d controlGuideScale;      // |evaluated axes| * authored guide multipliers
 ```
 
 `_FillControlGuides(pose, snapshot)` (called from both `Evaluate` snapshot
 paths, like `_FillGuides`): for each `pose.controlFrames` entry, rigidize the
 frame (factor the orthonormalize/determinant/finite-check block out of
-`_AppendGuideFrame` into a shared helper), read
-`guide:shape/drawMode/scaleX/scaleY/scaleZ` at `pose.time`, reject invalid
-scales, reuse `_ReadGuideStyle` for color/opacity. `snapshot->assetRoot` must
-be set on this path too.
+`_AppendGuideFrame` into a shared helper) while retaining its three axis
+magnitudes. Read `guide:shape/drawMode/scaleX/scaleY/scaleZ` at `pose.time`,
+reject invalid authored multipliers, and publish their product with those
+evaluated magnitudes as `controlGuideScale`; reuse `_ReadGuideStyle` for
+color/opacity. `snapshot->assetRoot` must be set on this path too.
 
 Snapshot diff (`RigExecComputeChanges`): fold the new fields into the
 existing guide comparisons — `hasControlGuide`/shape/drawMode changes follow
@@ -134,9 +147,12 @@ the structural (resync) arm; frame/scale/color/opacity changes set
     meshes, `doubleSided = true`, no authored normals (flat shading is fine
     for guides). Meshes and curves publish local unit `HdExtentSchema`
     min/max; scale lives in the xform.
-- Xform: `S(guide:scaleX, scaleY, scaleZ) × rigidFrame × assetRoot placement`,
-  anchored exactly the way `_BuildGuidePrim` places sphere/cone guides
-  (ASSET-space frames; asset root, not the guide's namespace parent).
+- Xform: `S(abs(frameAxisX) * guide:scaleX, abs(frameAxisY) * guide:scaleY,
+  abs(frameAxisZ) * guide:scaleZ) × rigidFrame × assetRoot placement`, anchored
+  exactly the way `_BuildGuidePrim` places sphere/cone guides (ASSET-space
+  frames; asset root, not the guide's namespace parent). Signed avar scale
+  affects frame handedness; the synthesized guide uses positive dimensions
+  and a proper rigid placement.
 - Style/pick parity with `_BuildGuidePrim`: purpose `guide` render tag,
   constant `displayColor`/`displayOpacity` primvars, hand-inherited
   visibility and `primOrigin` from the parent control.
@@ -157,7 +173,8 @@ time forwarding):
    generated schema classes. Extent(t) is the guide's drawn bounds baked
    into asset-relative space: answered from the active imaging snapshot
    when one exists, else a rest-pose fallback computed purely from
-   authored attrs (`rest:space` chain × unit shape × per-axis scale).
+   authored attrs (`rest:space` chain × unit shape × normalized avar-scale
+   magnitude × positive per-axis guide multiplier).
    `UsdGeomBBoxCache` — what usdview, Solaris, and mayaUsd consult — then
    answers natively in every host, and the usdview monkeypatch is deleted
    (the C API bounds exports remain for hosts that want live bounds
@@ -249,9 +266,13 @@ time forwarding):
 
 - A control-guides section: author each shape × mode on controls of an
   example rig; assert synthesized child exists with the expected prim type,
-  curve-count/vertex-count or face-count topology, per-axis scale visible in
-  the xform's basis lengths, purpose guide, constant color/opacity, parent
-  visibility inheritance, and `primOrigin` resolving to the control path.
+  curve-count/vertex-count or face-count topology, evaluated-axis magnitude ×
+  authored guide scale visible in the xform's basis lengths, purpose guide,
+  constant color/opacity, parent visibility inheritance, and `primOrigin`
+  resolving to the control path.
+- Zero, signed zero, and sub-`1e-4` avar scales resolve to the signed floor and
+  keep the guide publishable; ordinary negative avar scale preserves reflected
+  deformation while the guide uses its positive magnitude.
 - Zero/negative `guide:scaleY` (e.g.) draws nothing.
 - `testRigExecNoAuthoring` (whole-scene equality) must keep passing — the
   guides are synthesized, never authored.
