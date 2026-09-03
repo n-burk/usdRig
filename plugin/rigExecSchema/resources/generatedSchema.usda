@@ -482,6 +482,11 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         }
     )
     double rigExec:lowerLength = 1
+    double rigExec:lowerLengthOffset = 0 (
+        customData = {
+            string userDocBrief = "Delta added to the IMPLIED lower length."
+        }
+    )
     rel rigExec:poleControl
     double rigExec:preferredBendRadians = 0
     rel rigExec:rootControl
@@ -492,6 +497,11 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         allowedTokens = ["clampWithSoftness"]
     )
     double rigExec:upperLength = 1
+    double rigExec:upperLengthOffset = 0 (
+        customData = {
+            string userDocBrief = "Delta added to the IMPLIED upper length."
+        }
+    )
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {

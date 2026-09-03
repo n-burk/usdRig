@@ -238,7 +238,7 @@ The schema domain is named RigExec. These proposed product names do not claim to
 | RigExecControl | Typed prim | Animator-authored control value with canonical pose points, channel semantics, and limits. Publishes computePointFrame, computeMatrix. |
 | RigExecJoint | Typed prim | Bind/rest identity and posed result. Publishes computePointFrame, computeMatrix. |
 | RigExecFkChain | Typed solver | Applies control frames/offsets to a rest hierarchy. Publishes aggregate computePointFrameArray; addressable joint providers publish scalar frames. |
-| RigExecTwoBoneIk | Typed solver/operation | Analytic two-bone IK with pole, stretch, softness, and preferred bend. It may publish frames as a provider or atomically move named joint targets. |
+| RigExecTwoBoneIk | Typed solver/operation | Analytic two-bone IK with pole, stretch, softness, and preferred bend. It may publish frames as a provider or atomically move named joint targets. An unauthored rigExec:upperLength/rigExec:lowerLength is measured from the bound joints' rest positions (root to mid, mid to end) plus rigExec:upperLengthOffset/rigExec:lowerLengthOffset; an authored absolute is exact and ignores its offset. |
 | RigExecBlendPointFrames | Typed solver/operation | IK/FK or general frame blend. It may publish an array or move declared frame targets. |
 | RigExecAimConstraint | Typed operation | Moves a transform target by replacing aim/up orientation while preserving declared position/scale components. |
 | RigExecFloatMathMover, RigExecVec3fMathMover, RigExecMatrixMathMover | Typed operations | Statically typed add, multiply, clamp, remap, or blend over an exact property target. |
