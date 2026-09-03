@@ -1718,6 +1718,130 @@ TestIncompleteSolverLeavesJointsVisible()
         }));
 }
 
+static void
+TestTwoBoneIkImpliedLengths()
+{
+    // An unauthored absolute length is measured from the bound joints'
+    // rest positions, plus the authored offset; an authored absolute is
+    // exact and implies nothing. Joints rest on the X axis at 0/3/7, so
+    // the implied bones are 3 and 4 (reach 7).
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls"), TfToken("Scope"));
+
+    const auto makeControl = [&](const char *name, double tx, double tz) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+        CHECK(prim);
+        prim.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+            .Set(tx);
+        prim.CreateAttribute(TfToken("rest:tz"), SdfValueTypeNames->Double)
+            .Set(tz);
+        prim.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+            .Set(0.0);
+        return prim;
+    };
+    makeControl("Root", 0.0, 0.0);
+    const UsdPrim effCtl = makeControl("Eff", 7.0, 0.0);
+    makeControl("Pole", 3.5, 2.0);
+
+    const SdfPath shoulder("/Asset/Rig/Joints/Shoulder");
+    const SdfPath elbow("/Asset/Rig/Joints/Shoulder/Elbow");
+    const SdfPath wrist("/Asset/Rig/Joints/Shoulder/Elbow/Wrist");
+    const double restTx[3] = {0.0, 3.0, 7.0};
+    const SdfPath joints[3] = {shoulder, elbow, wrist};
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim prim =
+            stage->DefinePrim(joints[i], TfToken("RigExecJoint"));
+        CHECK(prim);
+        prim.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+            .Set(restTx[i]);
+    }
+
+    const UsdPrim ik = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/LegIK"), TfToken("RigExecTwoBoneIk"));
+    CHECK(ik);
+    ik.CreateRelationship(TfToken("rigExec:rootControl"))
+        .SetTargets({SdfPath("/Asset/Rig/Controls/Root")});
+    ik.CreateRelationship(TfToken("rigExec:effectorControl"))
+        .SetTargets({SdfPath("/Asset/Rig/Controls/Eff")});
+    ik.CreateRelationship(TfToken("rigExec:poleControl"))
+        .SetTargets({SdfPath("/Asset/Rig/Controls/Pole")});
+    ik.CreateRelationship(TfToken("rigExec:joints"))
+        .SetTargets({shoulder, elbow, wrist});
+    // No lengths authored: both are implied.
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+
+    const auto origins = [&](UsdTimeCode time, GfVec3d out[3]) {
+        const RigExecRigPose pose = evaluator.Evaluate(time);
+        CHECK(pose.valid);
+        for (int i = 0; i < 3; ++i) {
+            const auto it = pose.jointFramesFinal.find(joints[i]);
+            CHECK(it != pose.jointFramesFinal.end());
+            out[i] = it != pose.jointFramesFinal.end()
+                ? it->second.Origin()
+                : GfVec3d(0);
+        }
+        return pose;
+    };
+    const auto hasDiagnostic = [](const RigExecRigPose &pose,
+                                  const std::string &text) {
+        return std::any_of(
+            pose.diagnostics.begin(), pose.diagnostics.end(),
+            [&](const std::string &diagnostic) {
+                return diagnostic.find(text) != std::string::npos;
+            });
+    };
+
+    // Implied 3/4, goal at full reach: elbow exactly mid-chain.
+    GfVec3d atRest[3];
+    const RigExecRigPose restPose =
+        origins(UsdTimeCode::Default(), atRest);
+    CHECK(Near(atRest[0], GfVec3d(0, 0, 0)));
+    CHECK(Near(atRest[1], GfVec3d(3, 0, 0)));
+    CHECK(Near(atRest[2], GfVec3d(7, 0, 0)));
+    CHECK(hasDiagnostic(restPose, "implied rigExec:upperLength=3"));
+    CHECK(hasDiagnostic(restPose, "implied rigExec:lowerLength=4"));
+
+    // Offset only touches its own bone: +1 on lower reaches (8, 0, 0)
+    // with segments 3 and 5. Offsets are values, so no recompile.
+    ik.CreateAttribute(TfToken("rigExec:lowerLengthOffset"),
+                       SdfValueTypeNames->Double)
+        .Set(1.0);
+    effCtl.GetAttribute(TfToken("avars:tx")).Set(1.0);
+    GfVec3d offset[3];
+    const RigExecRigPose offsetPose =
+        origins(UsdTimeCode::Default(), offset);
+    CHECK(Near(offset[2], GfVec3d(8, 0, 0)));
+    CHECK(std::abs((offset[1] - offset[0]).GetLength() - 3.0) < 1e-4);
+    CHECK(std::abs((offset[2] - offset[1]).GetLength() - 5.0) < 1e-4);
+    CHECK(hasDiagnostic(offsetPose, "implied rigExec:lowerLength=5"));
+
+    // Authored absolutes win over rests: 2.5/2.5 with no stretch clamps
+    // the (7, 0, 0) goal to a reach of 5. Authoring the lengths changes
+    // the epoch, which Evaluate recompiles by itself.
+    ik.CreateAttribute(TfToken("rigExec:upperLength"),
+                       SdfValueTypeNames->Double)
+        .Set(2.5);
+    ik.CreateAttribute(TfToken("rigExec:lowerLength"),
+                       SdfValueTypeNames->Double)
+        .Set(2.5);
+    ik.CreateAttribute(TfToken("inputs:stretch"), SdfValueTypeNames->Float)
+        .Set(0.0f);
+    effCtl.GetAttribute(TfToken("avars:tx")).Set(0.0);
+    GfVec3d authored[3];
+    const RigExecRigPose authoredPose =
+        origins(UsdTimeCode::Default(), authored);
+    CHECK(Near(authored[1], GfVec3d(2.5, 0, 0)));
+    CHECK(Near(authored[2], GfVec3d(5, 0, 0)));
+    CHECK(!hasDiagnostic(authoredPose, "implied rigExec:"));
+}
 int
 main()
 {
@@ -1748,6 +1872,7 @@ main()
     TestLegacyWeightSpellingIsRejected();
     TestInvalidContractsFailClosed();
     TestIncompleteSolverLeavesJointsVisible();
+    TestTwoBoneIkImpliedLengths();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
