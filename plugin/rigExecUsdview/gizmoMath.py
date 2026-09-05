@@ -14,7 +14,8 @@
 #
 #   avars = S * R(rotationOrder) * Rspin(+X) * T
 #   rest  = orthonormalize(compose(rest:t, rest:r, XYZ) * rest:space)
-#   posed = avars * rest * parentRest^-1 * parentPosed
+#   default = defaultOffsets * rest * parentRest^-1 * parentDefault
+#   posed = avars * posedDefault * parentDefault^-1 * parentPosed
 #
 # where "parent" is the nearest namespace-ancestor RigExecXformable and the
 # whole rig is in ASSET space: the world transform of the RigExecRoot's
@@ -40,6 +41,16 @@ REST_T = ("rest:tx", "rest:ty", "rest:tz")
 REST_R = ("rest:rx", "rest:ry", "rest:rz")
 REST_SPACE = "rest:space"
 POSED_SPACE = "posed:space"
+DEFAULT_T = ("default:tx", "default:ty", "default:tz")
+DEFAULT_R = ("default:rx", "default:ry", "default:rz")
+DEFAULT_SPACE = "default:space"
+AVAR_DEFAULT_SPACE = "avars:defaultSpace"
+POSED_DEFAULT_SPACE = "posed:defaultSpace"
+PARENT_SPACE = "parent:space"
+PARENT_DEFAULT_SPACE = "parent:defaultSpace"
+AVAR_UNIT_SCALE = "avars:unitScaleFactor"
+_COMPUTED_SPACES = (DEFAULT_SPACE, AVAR_DEFAULT_SPACE, POSED_DEFAULT_SPACE,
+                    PARENT_SPACE, PARENT_DEFAULT_SPACE)
 
 # The concrete RigExecVolumeWeight subclasses. Used only as the fallback
 # for ReadsScaleAvars and IsRigXformable when the schema plugin is not
@@ -346,6 +357,16 @@ def NoticeAffectsTarget(resyncedPaths, changedPaths, targetPath,
 
 def ScalarAvar(prim, name, time, fallback):
     attr = prim.GetAttribute(name)
+    visiting = set()
+    while attr and attr.GetPath() not in visiting:
+        visiting.add(attr.GetPath())
+        connections = attr.GetConnections()
+        if len(connections) != 1:
+            break
+        source = prim.GetStage().GetAttributeAtPath(connections[0])
+        if not source:
+            break
+        attr = source
     if attr:
         value = attr.Get(time)
         if value is not None:
@@ -381,16 +402,68 @@ def RestSpace(prim, time):
     return rest.GetOrthonormalized(False)
 
 
+def DefaultLocal(prim, time):
+    return ComposeAvarMatrix(
+        *(tuple(ScalarAvar(prim, n, time, 0.0) for n in DEFAULT_T)
+          + (1.0, 1.0, 1.0)
+          + tuple(ScalarAvar(prim, n, time, 0.0) for n in DEFAULT_R)
+          + (0.0, "XYZ")))
+
+
+def _ComputedSpace(prim, name, time, solverPosed, visiting=None, frameCache=None):
+    """Evaluate the schema space expressions, including connected identity."""
+    visiting = set() if visiting is None else visiting
+    path = prim.GetPath().AppendProperty(name)
+    if path in visiting:
+        raise ValueError("cyclic space connection at %s" % path)
+    visiting.add(path)
+    try:
+        attr = prim.GetAttribute(name)
+        connections = attr.GetConnections() if attr else []
+        if len(connections) == 1:
+            source = prim.GetStage().GetAttributeAtPath(connections[0])
+            if source:
+                return _ComputedSpace(source.GetPrim(), source.GetName(),
+                                      time, solverPosed, visiting, frameCache)
+        raw = _MatrixAttr(prim, name, time)
+        if name not in _COMPUTED_SPACES or not IsRigXformable(prim):
+            return raw
+        if raw != _IDENTITY:
+            return raw
+        if name == AVAR_DEFAULT_SPACE:
+            return _ComputedSpace(prim, DEFAULT_SPACE, time, solverPosed, visiting, frameCache)
+        if name == POSED_DEFAULT_SPACE:
+            return _ComputedSpace(prim, AVAR_DEFAULT_SPACE, time, solverPosed, visiting, frameCache)
+        parent = _FindParentXformable(prim, FindRigRoot(prim))
+        if name == PARENT_DEFAULT_SPACE:
+            return (_ComputedSpace(parent, DEFAULT_SPACE, time, solverPosed, visiting, frameCache)
+                    if parent else Gf.Matrix4d(1.0))
+        if name == PARENT_SPACE:
+            if not parent:
+                return Gf.Matrix4d(1.0)
+            parentFrames = ComputeRigFrames(prim.GetStage(), parent, time, solverPosed, frameCache)
+            if parentFrames.reason:
+                raise ValueError("space source %s: %s" % (parent.GetPath(), parentFrames.reason))
+            return parentFrames.posed
+        parentRest = RestSpace(parent, time) if parent else Gf.Matrix4d(1.0)
+        return (DefaultLocal(prim, time) * RestSpace(prim, time)
+                * parentRest.GetInverse()
+                * _ComputedSpace(prim, PARENT_DEFAULT_SPACE, time, solverPosed, visiting, frameCache))
+    finally:
+        visiting.remove(path)
+
+
 def AvarsMatrix(prim, time):
     order = prim.GetAttribute(AVAR_ORDER)
     orderValue = order.Get(time) if order else None
     # Mirrors _ComputeXformablePointFrame's readScaleAvars argument: a
     # volume weight substitutes identity scale rather than reading avars.
     scaled = ReadsScaleAvars(prim)
+    units = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
     return ComposeAvarMatrix(
-        ScalarAvar(prim, AVAR_T[0], time, 0.0),
-        ScalarAvar(prim, AVAR_T[1], time, 0.0),
-        ScalarAvar(prim, AVAR_T[2], time, 0.0),
+        ScalarAvar(prim, AVAR_T[0], time, 0.0) * units,
+        ScalarAvar(prim, AVAR_T[1], time, 0.0) * units,
+        ScalarAvar(prim, AVAR_T[2], time, 0.0) * units,
         ScalarAvar(prim, AVAR_S[0], time, 1.0) if scaled else 1.0,
         ScalarAvar(prim, AVAR_S[1], time, 1.0) if scaled else 1.0,
         ScalarAvar(prim, AVAR_S[2], time, 1.0) if scaled else 1.0,
@@ -408,22 +481,18 @@ class RigFrames(object):
 
       rest       orthonormal rest frame (the evaluator's computeRestFrame)
       posed      avars * P   (the evaluator's computePointFrame)
-      P          rest * parentRest^-1 * parentPosed: the frame the avars
+      P          posedDefault * parentDefault^-1 * parentPosed: the frame the avars
                  are expressed in -- Pose mode edits happen relative to it
       Q          orthonormalize(rest:space) * parentRest^-1 * parentPosed:
                  the frame the rest offsets are expressed in -- Pivot mode
-                 edits. rest:space is ORTHONORMALIZED here, not passed
-                 through raw, so that restLocal * Q reproduces P: the
-                 evaluator's rest frame is orthonormalize(restLocal *
-                 rest:space), and for a rigid rest:space (the only kind a
-                 rest frame is meant to carry) that equals restLocal *
-                 orthonormalize(rest:space). Orthonormalization does not
-                 commute with a non-rigid left factor, so a rest:space
-                 carrying scale or shear leaves the pivot gizmo drawn on
-                 the orthonormalized frame while the evaluator keeps the
-                 scale -- the same approximation the evaluator itself
-                 makes when it throws that scale away.
+                 edits act before local default offsets. With identity
+                 default channels, restLocal * Q reproduces P. A default
+                 offset moves the avar origin while the rest pivot remains
+                 in the bind frame. Raw rest:space is orthonormalized here,
+                 matching the evaluator's rigid rest-frame convention.
       restLocal  compose(rest:t, rest:r)
+      default    computed default:space, including connected overrides
+      unitScale  distance per translation avar unit; inverted on drag writes
       reason     "" when the prim is editable through its avars, else why
                  not (solver-posed, posed:space authority, no rig root)
     """
@@ -439,22 +508,87 @@ class RigFrames(object):
         self.restLocal = Gf.Matrix4d(1.0)
         self.parentRest = Gf.Matrix4d(1.0)
         self.parentPosed = Gf.Matrix4d(1.0)
+        self.parentDefault = Gf.Matrix4d(1.0)
+        self.default = Gf.Matrix4d(1.0)
+        self.unitScale = 1.0
+        self.pivotReason = ""
         self.assetToWorld = Gf.Matrix4d(1.0)
 
 
-def ComputeRigFrames(stage, prim, time, solverPosed=None):
+_publishedControlFrameReader = None
+
+
+def SetPublishedControlFrameReader(reader):
+    """Install the host's snapshot reader: (stage, path, time) -> matrix/None."""
+    global _publishedControlFrameReader
+    _publishedControlFrameReader = reader
+
+
+def ComputeRigFrames(stage, prim, time, solverPosed=None, _frameCache=None):
+    _frameCache = {} if _frameCache is None else _frameCache
+    if prim.GetPath() in _frameCache:
+        cached = _frameCache[prim.GetPath()]
+        if cached is None:
+            raise ValueError("cyclic posed-space dependency at %s" % prim.GetPath())
+        return cached
+    _frameCache[prim.GetPath()] = None
+    try:
+        frames = _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache)
+        _frameCache[prim.GetPath()] = frames
+        return frames
+    except ValueError:
+        del _frameCache[prim.GetPath()]
+        raise
+
+
+def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
     frames = RigFrames(prim)
     frames.rigRoot = FindRigRoot(prim)
     if frames.rigRoot is None:
         frames.reason = "%s is not under a RigExecRoot" % prim.GetName()
+        return frames
+    if prim.GetTypeName() == "RigExecCurvenetAdjustment":
+        # The adjustment scope depends on preceding point revisions. Its
+        # cached native frame is the authority; authored USD alone cannot
+        # reconstruct it without evaluating those revisions a second time.
+        matrix = (_publishedControlFrameReader(stage, prim.GetPath(), time)
+                  if _publishedControlFrameReader is not None else None)
+        if matrix is None:
+            frames.reason = "Activate RigExec at this frame to edit the curvenet adjustment"
+            return frames
+        avars = AvarsMatrix(prim, time)
+        if not all(math.isfinite(avars[r][c]) for r in range(4) for c in range(4)) \
+                or abs(avars.GetDeterminant()) < 1e-12:
+            frames.reason = "The adjustment's avar matrix is not invertible"
+            return frames
+        posedAttr = prim.GetAttribute(POSED_SPACE)
+        if posedAttr and (posedAttr.HasAuthoredConnections()
+                          or _MatrixAttr(prim, POSED_SPACE, time) != _IDENTITY):
+            frames.reason = "posed:space drives this adjustment; edit its source"
+            return frames
+        frames.posed = Gf.Matrix4d(matrix)
+        frames.P = avars.GetInverse() * frames.posed
+        frames.default = frames.P
+        frames.Q = frames.P
+        frames.rest = frames.P
+        frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
+        if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
+            frames.reason = "The adjustment has a zero or non-finite translation unit scale"
+        frames.pivotReason = "Curvenet adjustment pivots follow the preceding deformation"
+        assetRoot = frames.rigRoot.GetParent()
+        if assetRoot and not assetRoot.IsPseudoRoot():
+            frames.assetToWorld = UsdGeom.XformCache(time).GetLocalToWorldTransform(assetRoot)
         return frames
     if solverPosed is None:
         solverPosed = SolverPosedPaths(frames.rigRoot)
 
     parent = _FindParentXformable(prim, frames.rigRoot)
     if parent is not None:
-        parentFrames = ComputeRigFrames(stage, parent, time, solverPosed)
-        if parentFrames.reason:
+        parentFrames = ComputeRigFrames(stage, parent, time, solverPosed, _frameCache)
+        parentSpace = prim.GetAttribute(PARENT_SPACE)
+        explicitParent = parentSpace and (parentSpace.HasAuthoredConnections()
+                                         or _MatrixAttr(prim, PARENT_SPACE, time) != _IDENTITY)
+        if parentFrames.reason and not explicitParent:
             frames.reason = "parent %s: %s" % (
                 parent.GetName(), parentFrames.reason)
         frames.parentRest = parentFrames.rest
@@ -474,16 +608,37 @@ def ComputeRigFrames(stage, prim, time, solverPosed=None):
 
     frames.restLocal = RestLocal(prim, time)
     frames.rest = RestSpace(prim, time)
-    toParent = frames.parentRest.GetInverse() * frames.parentPosed
-    frames.P = frames.rest * toParent
+    try:
+        frames.default = _ComputedSpace(prim, DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
+        frames.parentDefault = _ComputedSpace(prim, PARENT_DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
+        frames.parentPosed = _ComputedSpace(prim, PARENT_SPACE, time, solverPosed, frameCache=_frameCache)
+        effectiveDefault = _ComputedSpace(prim, POSED_DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
+    except ValueError as error:
+        frames.reason = str(error)
+        return frames
+    frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
+    if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
+        frames.reason = "%s has a zero or non-finite translation unit scale" % prim.GetName()
+    toParent = frames.parentDefault.GetInverse() * frames.parentPosed
+    frames.P = effectiveDefault * toParent
+    # Rest editing still acts in the bind frame before local default offsets.
     frames.Q = _MatrixAttr(prim, REST_SPACE, time)\
-        .GetOrthonormalized(False) * toParent
+        .GetOrthonormalized(False) * frames.parentRest.GetInverse() \
+        * frames.parentDefault * toParent
+    for name in (DEFAULT_SPACE, AVAR_DEFAULT_SPACE, POSED_DEFAULT_SPACE):
+        attr = prim.GetAttribute(name)
+        if attr and (attr.HasAuthoredConnections()
+                     or _MatrixAttr(prim, name, time) != _IDENTITY):
+            frames.pivotReason = ("%s.%s selects a default space independently "
+                                  "of rest; edit that source for pivot changes"
+                                  % (prim.GetName(), name))
     frames.posed = AvarsMatrix(prim, time) * frames.P
 
     assetRoot = frames.rigRoot.GetParent()
     if assetRoot and not assetRoot.IsPseudoRoot():
         frames.assetToWorld = UsdGeom.XformCache(time)\
             .GetLocalToWorldTransform(assetRoot)
+    _frameCache[prim.GetPath()] = frames
     return frames
 
 
@@ -1016,7 +1171,7 @@ class RigPoseTarget(_RigTarget):
     def ApplyTranslate(self, worldDelta, *, snapStep=None,
                        snapAbsolute=False):
         local = _Linear(self._Pw()).GetInverse().TransformDir(
-            Gf.Vec3d(worldDelta))
+            Gf.Vec3d(worldDelta)) / self.frames.unitScale
         base = [self._base[n] for n in AVAR_T]
         self._WriteVector(AVAR_T, _SnapTranslation(
             base, local, snapStep, snapAbsolute))
@@ -1532,6 +1687,8 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None):
         frames = ComputeRigFrames(stage, prim, writer.time, posed)
         if frames.reason:
             return None, frames.reason
+        if channels == CHANNELS_PIVOT and frames.pivotReason:
+            return None, frames.pivotReason
         names = (AVAR_T + AVAR_R + AVAR_S if channels == CHANNELS_POSE
                  else REST_T + REST_R)
         connected = _ConnectedAvar(prim, names)

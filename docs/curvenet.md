@@ -357,10 +357,12 @@ in the engine can pose it. Index sharing carries the net topology,
 exactly as the paper encodes it. Knots are `splineIndices[4k]` and
 `splineIndices[4k+3]`; handles are the two between.
 
-The schema deliberately has no `guide:*` styling properties. The usdview
-authoring panel owns its session-layer spline and knot displays, including
-their colors and widths, so persistent attributes on the curvenet would have
-no consumer.
+The schema has no `guide:*` styling properties. The usdview authoring panel
+owns its session-layer design-pose displays. Independently, the imaging bridge
+publishes sampled posed curves beneath the native point pool, using the same
+evaluated points that drive the Profile Mover. Its generated BasisCurves child
+follows the native prim's world transform and inherited visibility/purpose;
+authored children occupying a generated name retain ownership.
 
 ```
 class RigExecCurvenetMover : Typed            # the Profile Mover
@@ -376,18 +378,54 @@ Its final influence is the common mover envelope: a bound weight object, or
 `restPose = "projection"` is the plain §4 formulation; `"preceding"` is
 §5, warping the curvenet onto whatever the chain handed in.
 
-Later, for the talks:
+Animation controls and scalar parametrization extend the native net:
 
 ```
 class RigExecCurvenetAdjustment : RigExecXformable   # 2023 talk
     rel rigExec:curvenet ; int rigExec:knotIndex ; bool rigExec:includeTangents
+    token rigExec:pointKind = "knot"                # | "tangent"
 class RigExecCurvenetAdjusterMover : Typed           # writes the curvenet's own points
+    rel rigExec:adjustments                         # knot controls and their tangent children
 class RigExecCurvenetWeight : RigExecWeightObject    # 2026 talk
 ```
 
 The adjuster writing the *curvenet's* points and the Profile Mover
 reading them is one chain in the existing graph — Presto's stack falls
 out of the model rather than being bolted on.
+
+### Deformation-relative adjustments
+
+`RigExecCurvenetAdjustment` inherits the control channels. The Adjuster Mover
+reads their local rest/default/avar deltas in the frame of its incoming point
+revision. At intersections, orientation fits the rest and incoming incident
+tangents. Along curves, transported rotations from the neighboring
+intersections are blended by inverse arc distance. Isolated curves use a
+best-fit tangent rotation; a straight isolated curve has no observable twist,
+so it uses the shortest rotation. Transport uses 16 intervals per spline.
+
+A knot control optionally moves its incident Bezier handles. A tangent
+adjustment is a child of the knot control, names one of that knot's handles,
+and uses its parent's adjusted frame. The mover relationship names the knot
+controls; their tangent children are included automatically. Catmull-Rom
+controls address endpoint entries 1 and 2 of each tuple and have no separate
+Bezier handles.
+
+```python
+control = builder.add_curvenet_adjustment("Cheek", net, knot_index=4)
+control.set_avar_translation(0, 0.1, 0)
+tangent = control.add_tangent("Outgoing", index=20)
+tangent.set_avar_translation(0, 0.05, 0)
+chain.add_curvenet_adjuster_mover("Adjust", [control], target=net.path + ".points")
+```
+
+The ordinary reverse-stack ordering applies: add the adjuster before earlier
+deformers when building the chain. The shared mover envelope blends the
+candidate points over the incoming revision. Control frames are cached with
+the VDF revision and published with the evaluated geometry. Invalid bindings,
+duplicate point controls, bad tangent parents, and nonfinite transforms fail
+atomically. Rest edits, local-channel edits, and timeline changes refresh only
+dependent revisions. The math and evaluator regressions are
+`testRigExecCurvenetAdjustments` and `testRigExecCurvenetAdjuster`.
 
 ### Where the code goes
 
@@ -558,10 +596,14 @@ errors that matter are all at bind time, not at solve time.
 **Drawing the net.** The panel regenerates a `UsdGeomBasisCurves` under
 the curvenet prim in the **session layer** on every edit, with
 `purpose = "guide"`. Session-layer means it never touches the artist's
-file and nothing downstream can come to depend on it. It draws the net as
-*authored*, not as posed — publishing the posed net through the imaging
-side would follow the guide-synthesis pattern and is the natural next
-step, but authoring feedback is what the tool is for.
+file. This display shows the design pose for authoring. The imaging bridge
+also publishes the evaluated net as generated BasisCurves beneath the native
+point pool; it refreshes with every changed point revision and follows the
+pool's composed transform. The authoring display remains useful for editing
+the neutral topology independently of the posed guide.
+
+For curvenet scalar fields and transported sculpt detail, see
+[Curvenet weights and detail](curvenet-weights-and-detail.md).
 
 ## What the implementation found
 
@@ -634,16 +676,21 @@ lines of arithmetic that can honestly be written twice, while a second
 the same bugs. The parity pass says so instead of reporting a mismatch it
 cannot explain.
 
-## What is not implemented
+## Implementation limits
 
-- **Curvenet Adjustments and the Adjuster Mover** (2023 talk): the
-  auto-oriented per-knot manipulator. The mover chain already supports it
-  — a mover writing the curvenet's own points, read by the Profile Mover
-  — and the evaluator runs curvenet chains first for exactly that reason.
-- **Curvenet parametrization** (2026 talk): weight maps authored on
-  curvenet points and interpolated to the surface. It reuses this
-  Laplacian and the sample-to-surface projection matrix directly.
-- **Catmull-Rom** is implemented in the sampler and selectable on the
-  schema, but no example uses it and no test covers it beyond sampling.
-- **Blend-shape superposition** on top of a curvenet deformation (§5).
-- Publishing the *posed* net to the viewport through the imaging side.
+Adjustment controls publish their deformation-relative frames from the point
+graph for guides and viewport manipulation. They cannot currently feed the
+earlier pose pass: compilation rejects solver/constraint inputs, MatrixMover
+transform providers, inherited control frames and connected computed spaces
+that depend on an Adjustment frame. Reading an authored scalar avar remains
+supported. Feeding evaluated knot frames back into pose operators requires a
+combined point-and-pose dependency schedule. Active viewport adjustment gizmos
+read the exact published stage/time and refuse stale frames; their automatic
+knot pivots follow the preceding deformation.
+
+The sampled posed net is a diagnostic guide at the generation's sample nearest
+zero; mesh points, normals, bounds, and driven transforms have motion samples.
+The authoring panel continues to edit the design-pose point pool. A Profile
+Mover bind is rebuilt when its neutral geometry or spline topology changes;
+pose-only edits reuse its cut mesh and factorization. These are computational
+limits and authoring conventions, rather than inert schema features.

@@ -154,6 +154,28 @@ main()
         poleControl.GetPath());
     CHECK(Targets(twoBone.GetPrim(), "rigExec:rootControl") ==
           SdfPathVector({rootControl.GetPath()}));
+    const RigExecJointHandle midJoint = builder.AddJoint("MidRestJoint");
+    const SdfPathVector restJoints = {
+        rootJoint.GetPath(), midJoint.GetPath(), endJoint.GetPath()};
+    twoBone.SetRestJoints(restJoints);
+    CHECK(Targets(twoBone.GetPrim(), "rigExec:restJoints") == restJoints);
+    CHECK(Targets(twoBone.GetPrim(), "rigExec:joints").empty());
+    CHECK(Throws([&] {
+        twoBone.SetRestJoints(SdfPathVector{rootJoint.GetPath()});
+    }));
+    CHECK(Throws([&] {
+        twoBone.SetRestJoints(SdfPathVector{
+            rootJoint.GetPath(), rootJoint.GetPath(), endJoint.GetPath()});
+    }));
+    CHECK(Throws([&] {
+        twoBone.SetRestJoints(SdfPathVector{
+            rootJoint.GetPath(), rootControl.GetPath(), endJoint.GetPath()});
+    }));
+    CHECK(Targets(twoBone.GetPrim(), "rigExec:restJoints") == restJoints);
+    twoBone.SetRestJoints(std::vector<RigExecJointHandle>{
+        rootJoint, midJoint, endJoint});
+    twoBone.SetRestJoints(SdfPathVector{});
+    CHECK(Targets(twoBone.GetPrim(), "rigExec:restJoints").empty());
     twoBone.SetUpperLengthOffset(0.5);
     twoBone.SetLowerLengthOffset(-0.25);
     double upperOffset = 0.0, lowerOffset = 0.0;

@@ -2,6 +2,7 @@
 // RigExec compiled mover graph (spec §7.2). See moverGraph.h.
 //
 #include "moverGraph.h"
+#include "curvenetAdjuster.h"
 
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/envelope.h"
@@ -14,18 +15,22 @@
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/relationship.h"
+#include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/exec/vdf/connectorSpecs.h"
 #include "pxr/exec/vdf/context.h"
+#include "pxr/exec/vdf/dataManagerVector.h"
+#include "pxr/exec/vdf/executor.h"
 #include "pxr/exec/vdf/inputVector.h"
+#include "pxr/exec/vdf/input.h"
 #include "pxr/exec/vdf/mask.h"
 #include "pxr/exec/vdf/node.h"
 #include "pxr/exec/vdf/readIterator.h"
 #include "pxr/exec/vdf/readWriteIterator.h"
+#include "pxr/exec/vdf/pullBasedExecutorEngine.h"
 #include "pxr/exec/vdf/request.h"
 #include "pxr/exec/vdf/schedule.h"
 #include "pxr/exec/vdf/scheduler.h"
-#include "pxr/exec/vdf/simpleExecutor.h"
 #include "pxr/exec/vdf/tokens.h"
 
 #include <algorithm>
@@ -56,7 +61,8 @@ namespace {
 class _RevisionNode final : public VdfNode
 {
 public:
-    _RevisionNode(VdfNetwork *network, RigExecRevisionOp op)
+    _RevisionNode(VdfNetwork *network, RigExecRevisionOp op,
+                  size_t *executionCount)
         : VdfNode(
               network,
               VdfInputSpecs()
@@ -66,10 +72,13 @@ public:
               VdfOutputSpecs()
                   .Connector<GfVec3f>(_tokens->out))
         , _op(op)
+        , _executionCount(executionCount)
     {
     }
 
     void Compute(const VdfContext &ctx) const override;
+    const RigExecMoverStatus &GetStatus() const { return _resultStatus; }
+    const std::vector<GfMatrix4d> &GetControlFrames() const { return _controlFrames; }
 
 private:
     void _ComputeMatrix(const VdfContext &ctx) const;
@@ -77,7 +86,10 @@ private:
     void _ComputeRecomputed(const VdfContext &ctx,
                             const TfToken &expectedKind) const;
 
+    mutable RigExecMoverStatus _resultStatus;
+    mutable std::vector<GfMatrix4d> _controlFrames;
     RigExecRevisionOp _op;
+    size_t *const _executionCount;
 };
 
 bool
@@ -95,11 +107,12 @@ _StatusAllowsApply(const VdfContext &ctx)
 template <typename Kernel>
 void
 _RunScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
-                  Kernel &&kernel)
+                  RigExecMoverStatus *resultStatus, Kernel &&kernel)
 {
     const RigExecMoverParameters *params =
         ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
-    auto passThrough = [&ctx]() {
+    auto passThrough = [&ctx, resultStatus]() {
+        if (_StatusAllowsApply(ctx)) resultStatus->state = TfToken("moverFailed");
         ctx.SetOutputToReferenceInput(_tokens->previous);
     };
     if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
@@ -145,6 +158,10 @@ _RunScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
 void
 _RevisionNode::Compute(const VdfContext &ctx) const
 {
+    ++*_executionCount;
+    const auto *status = ctx.GetInputValuePtr<RigExecMoverStatus>(_tokens->status);
+    _resultStatus = status ? *status : RigExecMoverStatus{TfToken("moverFailed"), {}};
+    _controlFrames.clear();
     switch (_op) {
     case RigExecRevisionOp::Matrix:
         _ComputeMatrix(ctx);
@@ -154,7 +171,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
         return;
     case RigExecRevisionOp::VolumeCorrect:
         _RunScratchKernel(
-            ctx, TfToken("volumeCorrect"),
+            ctx, TfToken("volumeCorrect"), &_resultStatus,
             [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
                 RigExecApplyVolumeCorrect(pts, p.referenceVolume, p.strength);
                 return true;
@@ -162,7 +179,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
         return;
     case RigExecRevisionOp::Smooth:
         _RunScratchKernel(
-            ctx, TfToken("smooth"),
+            ctx, TfToken("smooth"), &_resultStatus,
             [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
                 RigExecApplyLaplacianSmooth(
                     pts, p.topologyCounts, p.topologyIndices, p.strength);
@@ -171,7 +188,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
         return;
     case RigExecRevisionOp::Lattice:
         _RunScratchKernel(
-            ctx, TfToken("lattice"),
+            ctx, TfToken("lattice"), &_resultStatus,
             [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
                 if (p.restPoints.size() != pts->size()) {
                     return false;  // cardinality mismatch fails atomically
@@ -183,7 +200,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
         return;
     case RigExecRevisionOp::SurfaceProject:
         _RunScratchKernel(
-            ctx, TfToken("surfaceProject"),
+            ctx, TfToken("surfaceProject"), &_resultStatus,
             [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
                 RigExecApplySurfaceProject(
                     pts, p.auxPoints, p.topologyCounts, p.topologyIndices,
@@ -193,7 +210,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
         return;
     case RigExecRevisionOp::EmitGuidePoints:
         _RunScratchKernel(
-            ctx, TfToken("emitGuidePoints"),
+            ctx, TfToken("emitGuidePoints"), &_resultStatus,
             [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
                 if (p.frames.GetSize() != pts->size()) {
                     return false;
@@ -206,7 +223,7 @@ _RevisionNode::Compute(const VdfContext &ctx) const
         return;
     case RigExecRevisionOp::Ribbon:
         _RunScratchKernel(
-            ctx, TfToken("ribbon"),
+            ctx, TfToken("ribbon"), &_resultStatus,
             [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
                 if (p.bindCoords.size() != pts->size()) {
                     return false;
@@ -240,9 +257,25 @@ _RevisionNode::Compute(const VdfContext &ctx) const
                 return true;
             });
         return;
+    case RigExecRevisionOp::CurvenetAdjuster:
+        _RunScratchKernel(ctx, TfToken("curvenetAdjuster"), &_resultStatus,
+            [this](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
+                const auto preceding = *pts;
+                if (!RigExecApplyCurvenetAdjustments(pts, p.restPoints,
+                    p.topologyIndices, p.curvenetAdjustmentBasis,
+                    p.curvenetAdjustments, &_controlFrames)) return false;
+                for (size_t i = 0; i < _controlFrames.size(); ++i) {
+                    const int point = p.curvenetAdjustments[i].pointIndex;
+                    const float weight = p.weights.Resolve(point, pts->size());
+                    _controlFrames[i].SetTranslateOnly(GfVec3d(
+                        preceding[point] + ((*pts)[point]-preceding[point])*weight));
+                }
+                return true;
+            });
+        return;
     case RigExecRevisionOp::Curvenet:
         _RunScratchKernel(
-            ctx, TfToken("curvenet"),
+            ctx, TfToken("curvenet"), &_resultStatus,
             [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
                 if (!p.curvenetBinding) {
                     return false;
@@ -285,7 +318,8 @@ _RevisionNode::_ComputeRecomputed(const VdfContext &ctx,
 {
     const RigExecMoverParameters *params =
         ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
-    auto passThrough = [&ctx]() {
+    auto passThrough = [&ctx, this]() {
+        if (_StatusAllowsApply(ctx)) _resultStatus.state = TfToken("moverFailed");
         ctx.SetOutputToReferenceInput(_tokens->previous);
     };
     if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
@@ -342,7 +376,8 @@ _RevisionNode::_ComputeBlendShape(const VdfContext &ctx) const
     VdfReadIterator<GfVec3f> previous(ctx, _tokens->previous);
     const size_t count = previous.ComputeSize();
 
-    auto passThrough = [&ctx]() {
+    auto passThrough = [&ctx, this]() {
+        if (_StatusAllowsApply(ctx)) _resultStatus.state = TfToken("moverFailed");
         ctx.SetOutputToReferenceInput(_tokens->previous);
     };
     if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
@@ -363,12 +398,27 @@ _RevisionNode::_ComputeBlendShape(const VdfContext &ctx) const
         return;
     }
 
+    std::vector<GfVec3f> transported;
+    const std::vector<GfVec3f> *deltas = &params->blendDeltas;
+    if (params->blendSurfaceFrame) {
+        std::vector<GfVec3f> posed;
+        posed.reserve(count);
+        for (; !previous.IsAtEnd(); ++previous) posed.push_back(*previous);
+        if (!RigExecTransportSurfaceOffsets(params->restPoints, posed,
+                params->topologyCounts, params->topologyIndices,
+                params->blendDeltas, &transported)) {
+            passThrough();
+            return;
+        }
+        deltas = &transported;
+    }
+
     VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
     size_t i = 0;
     for (; !out.IsAtEnd() && i < count; ++out, ++i) {
         const GfVec3f preceding = *out;
         *out = RigExecBlendEnvelope(
-            preceding, preceding + params->blendDeltas[i], envelope[i]);
+            preceding, preceding + (*deltas)[i], envelope[i]);
     }
 }
 
@@ -383,7 +433,8 @@ _RevisionNode::_ComputeMatrix(const VdfContext &ctx) const
     VdfReadIterator<GfVec3f> previous(ctx, _tokens->previous);
     const size_t count = previous.ComputeSize();
 
-    auto passThrough = [&ctx]() {
+    auto passThrough = [&ctx, this]() {
+        if (_StatusAllowsApply(ctx)) _resultStatus.state = TfToken("moverFailed");
         ctx.SetOutputToReferenceInput(_tokens->previous);
     };
     if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
@@ -443,7 +494,7 @@ RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
            bindCoords == o.bindCoords && driverFrames == o.driverFrames &&
            widths == o.widths && curvenet == o.curvenet &&
            curvenetPoints == o.curvenetPoints &&
-           blendInputs == o.blendInputs &&
+           blendInputs == o.blendInputs && blendSamples == o.blendSamples &&
            phases == o.phases && transformPhase == o.transformPhase;
 }
 
@@ -470,6 +521,9 @@ RigExecRevisionOpForSchema(const TfToken &schemaType, const TfToken &curveMode)
     }
     if (schemaType == "RigExecCurvenetMover") {
         return RigExecRevisionOp::Curvenet;
+    }
+    if (schemaType == "RigExecCurvenetAdjusterMover") {
+        return RigExecRevisionOp::CurvenetAdjuster;
     }
     if (schemaType == "RigExecCurveMover") {
         // The curve mover's frozen signature branches on its authored mode.
@@ -539,7 +593,6 @@ RigExecCurvenetBindCache::TakeDiagnostics()
     return out;
 }
 
-const char *const RigExecReadPhaseMetadataName = "rigExecReadPhase";
 
 std::string
 RigExecReadPhase::GetAsString() const
@@ -814,8 +867,26 @@ RigExecResolveRevisionBinding(
         }
         binding.transform = provider;
     } else if (schemaType == "RigExecBlendShapeMover") {
+        if (moverPrim.GetStage()->GetPrimAtPath(ownerPath).IsA<UsdGeomMesh>()) {
+            binding.topologyCounts = ownerPath.AppendProperty(TfToken("faceVertexCounts"));
+            binding.topologyIndices = ownerPath.AppendProperty(TfToken("faceVertexIndices"));
+        }
         binding.blendInputs = _Targets(moverPrim, "rigExec:blendInputs");
         std::sort(binding.blendInputs.begin(), binding.blendInputs.end());
+        for (const SdfPath &input : binding.blendInputs) {
+            const UsdPrim channel = moverPrim.GetStage()->GetPrimAtPath(input);
+            for (const SdfPath &samplePath : _Targets(channel, "rigExec:samples")) {
+                const UsdPrim sample = moverPrim.GetStage()->GetPrimAtPath(samplePath);
+                const SdfPathVector points = _Targets(sample, "rigExec:targetPoints");
+                if (points.size() != 1) continue; // compile validates cardinality
+                RigExecReadPhase phase;
+                std::string error;
+                RigExecResolveReadPhase(
+                    sample.GetRelationship(TfToken("rigExec:targetPoints")),
+                    "rigExec:pointsReadPhase", &phase, &error);
+                binding.blendSamples[input].push_back({samplePath, _PointsOf(points[0]), phase});
+            }
+        }
         binding.base = target;
     } else if (schemaType == "RigExecVolumeCorrectMover") {
         binding.base = target;
@@ -851,6 +922,9 @@ RigExecResolveRevisionBinding(
             binding.topologyIndices =
                 surfacePrim.AppendProperty(TfToken("faceVertexIndices"));
         }
+    } else if (schemaType == "RigExecCurvenetAdjusterMover") {
+        binding.base = target;
+        binding.curvenet = target.GetPrimPath();
     } else if (schemaType == "RigExecCurvenetMover") {
         // The Profile Mover reads the target's own topology to cut it, and
         // its authored base points are the projection pose the cut is
@@ -1091,6 +1165,10 @@ RigExecAssembleParameters(
             moverPrim, values.transform, values.weights, time,
             values.resolved);
     }
+    if (op == RigExecRevisionOp::CurvenetAdjuster) {
+        return RigExecAssembleCurvenetAdjusterParameters(
+            moverPrim, binding.target, values.weights, time, values.resolved);
+    }
 
     RigExecMoverParameters params;
     const bool synthesizedDerived =
@@ -1136,6 +1214,8 @@ RigExecAssembleParameters(
         break;
     case RigExecRevisionOp::Matrix:
         break;  // handled above
+    case RigExecRevisionOp::CurvenetAdjuster:
+        break;  // handled above
     }
 
     if (!params.enabled) {
@@ -1158,10 +1238,20 @@ RigExecAssembleParameters(
     }
 
     switch (op) {
-    case RigExecRevisionOp::BlendShape:
+    case RigExecRevisionOp::BlendShape: {
         params.blendDeltas = values.blendDeltas;
+        const TfToken space = _Token(moverPrim, "rigExec:deltaSpace", "target");
+        if (space != "target" && space != "surfaceFrame") break;
+        params.blendSurfaceFrame = space == "surfaceFrame";
+        if (params.blendSurfaceFrame) {
+            params.restPoints = values.basePoints;
+            params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
+            params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
+            if (params.topologyCounts.empty()) break;
+        }
         params.valid = !params.blendDeltas.empty();
         break;
+    }
 
     case RigExecRevisionOp::VolumeCorrect:
         params.strength = 1.0f;
@@ -1372,13 +1462,37 @@ RigExecAssembleParameters(
         break;
 
     case RigExecRevisionOp::Matrix:
+    case RigExecRevisionOp::CurvenetAdjuster:
         break;
     }
 
     return params;
 }
 
-RigExecMoverGraph::RigExecMoverGraph() = default;
+struct RigExecMoverGraph::_Runtime {
+    struct _RevisionSources {
+        VdfInputVector<RigExecMoverParameters> *parameters;
+        VdfInputVector<RigExecMoverStatus> *status;
+        VdfMaskedOutput previous;
+    };
+
+    VdfExecutor<VdfPullBasedExecutorEngine,
+        VdfDataManagerVector<VdfDataManagerDeallocationMode::Immediate>> executor;
+    std::unique_ptr<VdfSchedule> schedule;
+    std::map<VdfMaskedOutput, VdfInputVector<GfVec3f> *> sources;
+    std::map<VdfMaskedOutput, _RevisionSources> revisions;
+    VdfMaskedOutputVector outputs;
+    VdfMaskedOutputVector dirty;
+    size_t executionCount = 0;
+    size_t scheduleBuildCount = 0;
+
+    void TopologyChanged() {
+        schedule.reset();
+        executor.InvalidateTopologicalState();
+    }
+};
+
+RigExecMoverGraph::RigExecMoverGraph() : _runtime(new _Runtime) {}
 RigExecMoverGraph::~RigExecMoverGraph() = default;
 
 VdfMaskedOutput
@@ -1392,8 +1506,12 @@ RigExecMoverGraph::AddPointSource(
         source->SetValue(i, points[i]);
     }
     TF_UNUSED(target);
-    return VdfMaskedOutput(
+    const VdfMaskedOutput output(
         source->GetOutput(), VdfMask::AllOnes(count ? count : 1));
+    _runtime->sources.emplace(output, source);
+    _runtime->outputs.push_back(output);
+    _runtime->TopologyChanged();
+    return output;
 }
 
 VdfMaskedOutput
@@ -1403,9 +1521,8 @@ RigExecMoverGraph::AddRevision(
     const RigExecMoverParameters &parameters,
     const RigExecMoverStatus &status)
 {
-    // The mover's own packet and status are constants for one generation: they
-    // are computed by the mover prim's registered computations on the authored
-    // stage and handed in, so the graph holds no scene lookups of its own.
+    // The packet and status are mutable graph inputs. The evaluator refreshes
+    // them after scene edits without replacing any of the connected nodes.
     VdfInputVector<RigExecMoverParameters> *const paramSource =
         new VdfInputVector<RigExecMoverParameters>(&_network, 1);
     paramSource->SetValue(0, parameters);
@@ -1414,7 +1531,8 @@ RigExecMoverGraph::AddRevision(
         new VdfInputVector<RigExecMoverStatus>(&_network, 1);
     statusSource->SetValue(0, status);
 
-    _RevisionNode *const revision = new _RevisionNode(&_network, op);
+    _RevisionNode *const revision =
+        new _RevisionNode(&_network, op, &_runtime->executionCount);
 
     const VdfMask one = VdfMask::AllOnes(1);
     _network.Connect(
@@ -1425,29 +1543,180 @@ RigExecMoverGraph::AddRevision(
         previous.GetOutput(), revision, _tokens->previous, previous.GetMask());
 
     ++_revisionCount;
-    return VdfMaskedOutput(revision->GetOutput(_tokens->out),
-                           previous.GetMask());
+    const VdfMaskedOutput output(revision->GetOutput(_tokens->out),
+                                 previous.GetMask());
+    _runtime->revisions.emplace(
+        output, _Runtime::_RevisionSources{paramSource, statusSource, previous});
+    _runtime->outputs.push_back(output);
+    _runtime->TopologyChanged();
+    return output;
+}
+
+bool
+RigExecMoverGraph::UpdatePointSource(
+    const VdfMaskedOutput &source, const VtVec3fArray &points)
+{
+    const auto it = _runtime->sources.find(source);
+    if (it == _runtime->sources.end() ||
+        it->second->GetSize() != points.size()) {
+        return false;
+    }
+    bool changed = false;
+    for (size_t i = 0; i < points.size(); ++i) {
+        if (!it->second->IsValueEqual(i, points[i])) {
+            it->second->SetValue(i, points[i]);
+            changed = true;
+        }
+    }
+    if (changed) {
+        // Nonlocal kernels (smooth, surface, volume) require the full input
+        // when any point changes. Do not propagate an element mask through
+        // them until their individual dependency masks are implemented.
+        _runtime->dirty.push_back(source);
+    }
+    return true;
+}
+
+bool
+RigExecMoverGraph::UpdateRevision(
+    const VdfMaskedOutput &revision,
+    const RigExecMoverParameters &parameters,
+    const RigExecMoverStatus &status)
+{
+    const auto it = _runtime->revisions.find(revision);
+    if (it == _runtime->revisions.end()) {
+        return false;
+    }
+    const auto &sources = it->second;
+    const VdfMask one = VdfMask::AllOnes(1);
+    if (!sources.parameters->IsValueEqual(0, parameters)) {
+        sources.parameters->SetValue(0, parameters);
+        _runtime->dirty.emplace_back(sources.parameters->GetOutput(), one);
+    }
+    if (!sources.status->IsValueEqual(0, status)) {
+        sources.status->SetValue(0, status);
+        _runtime->dirty.emplace_back(sources.status->GetOutput(), one);
+    }
+    return true;
+}
+
+bool
+RigExecMoverGraph::ReconnectRevision(
+    const VdfMaskedOutput &revision, const VdfMaskedOutput &previous)
+{
+    const auto it = _runtime->revisions.find(revision);
+    if (it == _runtime->revisions.end() || revision == previous ||
+        revision.GetMask() != previous.GetMask() ||
+        (!_runtime->sources.count(previous) &&
+         !_runtime->revisions.count(previous))) return false;
+    if (it->second.previous == previous) return true;
+    // Invalidate on the old topology before disconnecting; downstream cached
+    // values must not survive a changed predecessor with an equal packet.
+    _runtime->dirty.push_back(revision);
+    _runtime->executor.InvalidateValues(_runtime->dirty);
+    _runtime->dirty.clear();
+    VdfNode *const node = &revision.GetOutput()->GetNode();
+    VdfInput *const input = node->GetInput(_tokens->previous);
+    while (input->GetNumConnections()) {
+        _network.Disconnect(&input->GetNonConstConnection(0));
+    }
+    _network.Connect(previous, node, _tokens->previous);
+    it->second.previous = previous;
+    _runtime->dirty.push_back(revision);
+    _runtime->TopologyChanged();
+    return true;
+}
+
+bool
+RigExecMoverGraph::RemoveRevision(const VdfMaskedOutput &revision)
+{
+    const auto it = _runtime->revisions.find(revision);
+    if (it == _runtime->revisions.end()) return false;
+    _runtime->dirty.push_back(revision);
+    _runtime->executor.InvalidateValues(_runtime->dirty);
+    _runtime->dirty.clear();
+    VdfNode *const node = &revision.GetOutput()->GetNode();
+    VdfNode *const parameters = it->second.parameters;
+    VdfNode *const status = it->second.status;
+    _runtime->TopologyChanged();
+    for (VdfOutput *output : {revision.GetOutput(),
+            it->second.parameters->GetOutput(), it->second.status->GetOutput()}) {
+        _runtime->executor.ClearDataForOutput(
+            output->GetId(), output->GetNode().GetId());
+    }
+    _runtime->outputs.erase(std::remove(_runtime->outputs.begin(),
+        _runtime->outputs.end(), revision), _runtime->outputs.end());
+    _runtime->revisions.erase(it);
+    _network.DisconnectAndDelete(node);
+    _network.DisconnectAndDelete(parameters);
+    _network.DisconnectAndDelete(status);
+    --_revisionCount;
+    return true;
 }
 
 VtVec3fArray
 RigExecMoverGraph::Evaluate(const VdfMaskedOutput &output) const
 {
-    VdfRequest request(output);
-    VdfSchedule schedule;
-    VdfScheduler::Schedule(request, &schedule, /* topologicalSort */ true);
+    if (_runtime->sources.find(output) == _runtime->sources.end() &&
+        _runtime->revisions.find(output) == _runtime->revisions.end()) {
+        return {};
+    }
+    if (!_runtime->schedule) {
+        _runtime->schedule = std::make_unique<VdfSchedule>();
+        // Requesting the checkpoints preserves them across READWRITE buffer
+        // passing. The compute request below still pulls only this output's
+        // dependencies, so unrelated branches remain untouched.
+        VdfScheduler::Schedule(
+            VdfRequest(_runtime->outputs), _runtime->schedule.get(), true);
+        _runtime->executor.Resize(_network);
+        ++_runtime->scheduleBuildCount;
+    }
+    if (!_runtime->dirty.empty()) {
+        _runtime->executor.InvalidateValues(_runtime->dirty);
+        _runtime->dirty.clear();
+    }
+    _runtime->executor.Run(*_runtime->schedule, VdfRequest(output));
 
-    VdfSimpleExecutor executor;
-    executor.Run(schedule);
-
+    const VdfVector *const value = _runtime->executor.GetOutputValue(
+        *output.GetOutput(), output.GetMask());
+    if (!value) {
+        return {};
+    }
     VdfVector::ReadAccessor<GfVec3f> values =
-        executor.GetOutputValue(*output.GetOutput(), output.GetMask())
-            ->GetReadAccessor<GfVec3f>();
+        value->GetReadAccessor<GfVec3f>();
 
     VtVec3fArray result(values.GetNumValues());
     for (size_t i = 0; i < values.GetNumValues(); ++i) {
         result[i] = values[i];
     }
     return result;
+}
+
+size_t
+RigExecMoverGraph::GetRevisionExecutionCount() const
+{
+    return _runtime->executionCount;
+}
+
+std::vector<GfMatrix4d>
+RigExecMoverGraph::GetRevisionControlFrames(const VdfMaskedOutput &revision) const
+{
+    const auto it = _runtime->revisions.find(revision);
+    return it == _runtime->revisions.end() ? std::vector<GfMatrix4d>()
+        : static_cast<const _RevisionNode &>(revision.GetOutput()->GetNode()).GetControlFrames();
+}
+
+RigExecMoverStatus
+RigExecMoverGraph::GetRevisionStatus(const VdfMaskedOutput &revision) const
+{
+    if (!_runtime->revisions.count(revision)) return {};
+    return static_cast<const _RevisionNode &>(revision.GetOutput()->GetNode()).GetStatus();
+}
+
+size_t
+RigExecMoverGraph::GetScheduleBuildCount() const
+{
+    return _runtime->scheduleBuildCount;
 }
 
 }  // namespace rigExec

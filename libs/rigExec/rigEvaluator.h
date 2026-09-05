@@ -17,8 +17,11 @@
 #include "types.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/tf/notice.h"
+#include "pxr/base/tf/weakBase.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/layer.h"
+#include "pxr/usd/usd/notice.h"
 
 #include <map>
 #include <set>
@@ -150,34 +153,29 @@ struct RigExecRigPose {
     /// (spec §6.6: disabled/failed movers pass through with diagnostics).
     std::vector<std::string> diagnostics;
 
-    /// Chains where the compiled mover graph disagreed with the
-    /// generated-prim result, and chains where it agreed.
-    ///
-    /// Machine-checkable on purpose. While the graph publishes and the
-    /// generated-prim chains run alongside as the reference, the ONLY thing
-    /// standing between a packet-assembly drift and shipped-wrong geometry
-    /// is this comparison -- and a regression already reached usdview because
-    /// the signal was a diagnostic string tests had to grep. A count that
-    /// must be zero, and a count that must be non-zero, cannot be missed the
-    /// same way: "checked nothing" and "everything agreed" stop looking
-    /// alike.
+    /// Independent scalar-reference comparisons, when cpuParityMode is on.
+    /// Both are zero when no reference checks ran; callers must check the
+    /// agreement count to distinguish that from a verified generation.
     size_t moverGraphParityMismatches = 0;
     size_t moverGraphParityAgreements = 0;
 
-    /// Refinement rounds the solver->joint overrides needed to reach a fixed
-    /// point, and whether they reached one at all.
-    ///
-    /// More than one round means some solver consumed a joint that another
-    /// solver poses (RigExecTwistDistribution reading rigExec:start/end is
-    /// the case that exists today). Exposed as a number because parity cannot
-    /// police it: both the graph and the lowered path read the same override,
-    /// so a stale one makes them agree on the same wrong answer.
+    /// Dependency levels evaluated to resolve solver->joint overrides.
+    /// Retains the public name used by clients of the former fixed-point
+    /// evaluator; resolution now follows the compiled DAG once per level.
     size_t solverOverrideRounds = 0;
     bool solverOverridesConverged = true;
+    /// Aggregate solver computations requested by the dependency schedule.
+    size_t solverEvaluations = 0;
+
+    /// Work performed by the persistent geometry graphs this generation.
+    /// Unchanged inputs execute no revisions and rebuild no schedules.
+    size_t moverGraphRevisionsCreated = 0;
+    size_t moverGraphRevisionsExecuted = 0;
+    size_t moverGraphSchedulesBuilt = 0;
 };
 
 /// Compiles and evaluates one RigExecRoot prim.
-class RigExecRigEvaluator {
+class RigExecRigEvaluator : public TfWeakBase {
 public:
     RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath);
     ~RigExecRigEvaluator();
@@ -201,8 +199,9 @@ public:
     /// recompilation on the next Evaluate (spec §4.2, §6.3).
     size_t GetBindingEpochDigest() const { return _structureDigest; }
 
-    /// When set, Evaluate also runs the CPU reference kernels for the
-    /// lowered point chains into RigExecRigPose::movedPropertiesCpu.
+    /// When set, Evaluate verifies geometry against the CPU reference and
+    /// publishes that reference in RigExecRigPose::movedPropertiesCpu.
+    /// Disabled for interactive use so every deformation runs only once.
     bool cpuParityMode = false;
 
     /// The stage the rig evaluates against.
@@ -226,7 +225,8 @@ private:
         const std::map<SdfPath, GfMatrix4d> &baseProviderMatrices,
         const std::map<SdfPath, GfMatrix4d> &finalProviderMatrices,
         UsdTimeCode time,
-        std::vector<std::string> *diagnostics) const;
+        std::vector<std::string> *diagnostics,
+        const std::map<SdfPath, GfMatrix4d> &geometryConstraintDeltas) const;
 
     /// CPU-side resolution of one weight object's field, the parity
     /// oracle's mirror of the exec computeWeightPacket kernels.
@@ -259,6 +259,8 @@ private:
         std::vector<GfVec3f> *points) const;
 
     size_t _ComputeStructureDigest() const;
+    void _OnObjectsChanged(const UsdNotice::ObjectsChanged &notice,
+                           const UsdStageWeakPtr &sender);
 
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
@@ -288,13 +290,40 @@ private:
     /// already walks; Evaluate() indexes the solver's frame array with it
     /// directly instead of going through the joint's computePointFrame.
     std::map<SdfPath, std::pair<SdfPath, int>> _jointSolverBinding;
-    /// computePointFrameArray taps for the solvers that pose joints, in
-    /// their own request (_solverFrameTaps): they must evaluate BEFORE the
-    /// authoritative request, whose joint values are overridden with frames
-    /// extracted from them. Distinct from the observational
-    /// _solverArrayTaps, which only feed guide drawing.
-    std::unique_ptr<RigExecTapSet> _solverFrameTaps;
-    std::map<SdfPath, RigExecTapId> _jointSolverArrayTaps;
+    /// Each dependency level evaluates once. Earlier aggregate and joint
+    /// outputs are supplied as overrides, so downstream requests reuse them.
+    struct _SolverBatch {
+        std::unique_ptr<RigExecTapSet> taps;
+        std::map<SdfPath, RigExecTapId> solvers;
+        std::set<SdfPath> dependencies;
+        std::set<SdfPath> frameInputs;
+        size_t level = 0;
+        RigExecSnapshot snapshot;
+        std::vector<RigExecValueOverride> inputs;
+        UsdTimeCode time = UsdTimeCode::Default();
+        bool dirty = true;
+    };
+    std::vector<_SolverBatch> _solverBatches;
+    std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _solverJoints;
+    /// Authored input prim -> batches reading it. Override-only Exec requests
+    /// do not re-arm repeated value-invalidation callbacks in this USD build.
+    std::map<SdfPath, std::set<size_t>> _solverInputBatches;
+    /// Interleaves dependency-ready aggregate batches with the authored
+    /// constraint walk. Frame inputs to solvers consume the current pose.
+    struct _PoseStep {
+        bool solverBatch = false;
+        size_t index = 0;
+    };
+    std::vector<_PoseStep> _poseSteps;
+    /// Seed only transform providers before solving; geometry/aggregate taps
+    /// are evaluated after the complete pose dependency schedule.
+    std::unique_ptr<RigExecTapSet> _poseSeedTaps;
+    std::map<SdfPath, RigExecTapId> _poseSeedFrames;
+    std::map<SdfPath, RigExecTapId> _poseSeedRests;
+    /// Direct posed providers read by transform expressions, including
+    /// parent:space reached through connected default-space expressions.
+    std::map<SdfPath, std::set<SdfPath>> _poseProviderInputs;
+    std::map<SdfPath, std::unique_ptr<RigExecTapSet>> _connectedPoseTaps;
     /// One TwoBoneIk solver with an unauthored absolute length: the bone
     /// is measured from the bound joints' rest positions at Evaluate time
     /// (root to mid for upper, mid to end for lower), plus the authored
@@ -321,8 +350,7 @@ private:
     std::vector<RigExecTapId> _jointFinalMatrixTaps;
     std::map<SdfPath, RigExecTapId> _solverArrayTaps;
 
-    /// Compiled mover-graph inputs, running alongside the generated-prim
-    /// chains while the graph path is being proven equal to them.
+    /// Compiled mover-graph input bindings.
     ///
     /// The revision bindings are pure path resolution off the authored stage
     /// (they replace the rigExec:resolved* relationships the compiler used to
@@ -346,6 +374,15 @@ private:
     };
     /// Exact points target -> its revisions, in mover execution order.
     std::map<SdfPath, std::vector<_GraphRevision>> _graphChains;
+    struct _LiveGraph {
+        RigExecMoverGraph graph;
+        VdfMaskedOutput source;
+        std::vector<VdfMaskedOutput> revisions;
+        std::vector<std::pair<SdfPath, RigExecRevisionOp>> identities;
+    };
+    /// Graph topology and computed checkpoints survive value/rest edits.
+    /// Structural edits splice retained nodes by mover identity and operation.
+    std::map<SdfPath, std::unique_ptr<_LiveGraph>> _liveGraphs;
     /// What this generation's property chains resolved, consulted by every
     /// static input read the evaluator and the packet assemblers make.
     ///
@@ -518,6 +555,8 @@ private:
     std::map<SdfPath, GfMatrix4d> _volumeWeightMatrices;
 
     size_t _structureDigest = 0;
+    TfNotice::Key _noticeKey;
+    bool _structureDirty = true;
     bool _compiled = false;
 };
 

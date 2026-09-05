@@ -522,6 +522,55 @@ TestSphereVolumeGuides()
     CHECK(_GetPointsPrimvar(results->GetPrim(_kMeshPath)).size() == 4);
 }
 
+// A math mover that drives an influence radius must move its guide and its
+// field together, including same-frame edits to the operator's inputs.
+static void
+TestVolumeGuidesFollowPropertyMovers()
+{
+    Fixture f;
+    const UsdPrim radiusMover = f.stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Radius"), TfToken("RigExecFloatMathMover"));
+    CHECK(radiusMover.ApplyAPI(TfToken("RigExecMoverAPI")));
+    CHECK(radiusMover.GetAttribute(TfToken("rigExec:operation"))
+              .Set(TfToken("multiply")));
+    const UsdAttribute factor =
+        radiusMover.GetAttribute(TfToken("inputs:value"));
+    CHECK(factor.Set(2.0f));
+    CHECK(radiusMover.GetRelationship(TfToken("rigExec:moves"))
+              .SetTargets({_kVolumePath.AppendProperty(
+                  TfToken("inputs:falloffMax"))}));
+
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    registry.Deactivate();
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(f.stage, _kRigPath, UsdTimeCode(1), &errors));
+    for (float scale : {2.0f, 3.0f}) {
+        if (scale != 2.0f) CHECK(factor.Set(scale));
+        const RigExecImagingSnapshotConstPtr snapshot =
+            registry.GetStore()->Get();
+        CHECK(snapshot);
+        if (!snapshot) continue;
+        const auto volume = snapshot->prims.find(_kVolumePath);
+        CHECK(volume != snapshot->prims.end());
+        if (volume == snapshot->prims.end()) continue;
+        CHECK(volume->second.volumeGuides.size() == 1);
+        if (volume->second.volumeGuides.size() != 1) continue;
+        const float radius = float(volume->second.volumeGuides[0]
+                                       .xform.GetRow3(0).GetLength());
+        CHECK(Near(radius, 2.0f * scale));
+        const auto mesh = snapshot->prims.find(_kMeshPath);
+        CHECK(mesh != snapshot->prims.end());
+        if (mesh != snapshot->prims.end()) {
+            CHECK(mesh->second.points.size() == 4);
+            if (mesh->second.points.size() == 4) {
+                CHECK(Near(mesh->second.points[3][1],
+                           2.0f * (1.0f - 1.0f / scale)));
+            }
+        }
+    }
+    registry.Deactivate();
+}
+
 // A placed volume is useful while it is being authored, before any mover has
 // been wired to consume it. Prove the complete standalone path: a rig whose
 // ONLY outputs are SphereWeight, PlaneWeight, and a valid CurveWeight must
@@ -1524,6 +1573,7 @@ main(int argc, char **argv)
     TestOverlayValueChangeDirtiesDisplayColor();
     TestStandaloneVolumeGuides();
     TestSphereVolumeGuides();
+    TestVolumeGuidesFollowPropertyMovers();
     TestPlaneAndCurveVolumeGuides();
     TestCurveGeometryVolumeGuides();
     TestPlaneGuideSizeIsExtentsNotBand();

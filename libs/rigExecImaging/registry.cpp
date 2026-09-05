@@ -48,6 +48,67 @@ _HashEpochPart(uint64_t hash, const std::string &value)
     return _HashEpochPart(hash, value.data(), value.size());
 }
 
+// Read dependencies may live outside the assets whose outputs we publish.
+// Follow authored relationships and attribute connections transitively, also
+// inspecting ancestors because provider frames can inherit their inputs.
+std::set<SdfPath>
+_CollectReadRoots(const UsdStageRefPtr &stage,
+                  const std::set<SdfPath> &assetRoots)
+{
+    std::set<SdfPath> roots = assetRoots;
+    std::vector<SdfPath> pending(assetRoots.begin(), assetRoots.end());
+    std::set<SdfPath> scannedPrims;
+    std::set<SdfPath> scannedSubtrees;
+    const auto enqueue = [&](const SdfPath &target) {
+        const SdfPath path = target.GetPrimPath();
+        if (!path.IsAbsolutePath() || !path.IsPrimPath()) return;
+        roots.insert(path);
+        for (const SdfPath &scope : scannedSubtrees) {
+            if (path.HasPrefix(scope)) return;
+        }
+        pending.push_back(path);
+    };
+    const auto scan = [&](const UsdPrim &prim) {
+        if (!prim || !scannedPrims.insert(prim.GetPath()).second) return;
+        for (const UsdRelationship &rel : prim.GetRelationships()) {
+            SdfPathVector targets;
+            rel.GetTargets(&targets);
+            for (const SdfPath &target : targets) enqueue(target);
+        }
+        for (const UsdAttribute &attr : prim.GetAttributes()) {
+            SdfPathVector connections;
+            attr.GetConnections(&connections);
+            for (const SdfPath &target : connections) enqueue(target);
+        }
+    };
+    while (!pending.empty()) {
+        const SdfPath path = pending.back();
+        pending.pop_back();
+        if (!scannedSubtrees.insert(path).second) continue;
+        const UsdPrim root = stage->GetPrimAtPath(path);
+        if (!root) continue;
+        for (const UsdPrim &prim : UsdPrimRange(root)) scan(prim);
+        for (UsdPrim parent = root.GetParent(); parent && !parent.IsPseudoRoot();
+             parent = parent.GetParent()) {
+            scan(parent);
+        }
+    }
+    // Keep only maximal scopes; scanning a notice then costs the number of
+    // independent dependency regions, not the number of connected properties.
+    std::set<SdfPath> compact;
+    for (const SdfPath &path : roots) {
+        bool covered = false;
+        for (const SdfPath &root : compact) {
+            if (path.HasPrefix(root)) {
+                covered = true;
+                break;
+            }
+        }
+        if (!covered) compact.insert(path);
+    }
+    return compact;
+}
+
 }  // namespace
 
 RigExecImagingRegistry &
@@ -101,22 +162,24 @@ RigExecImagingRegistry::_EvaluateSessions(
     bool firstRoot = true;
 
     for (RigSession &session : *sessions) {
-        const RigExecImagingBridge::PublishResult result =
-            session.bridge->EvaluateAndPublishResult(time);
-        if (!result.ok) {
-            if (errors) {
-                errors->push_back(
-                    "initial/evaluated generation failed for rig " +
-                    session.rigPath.GetString());
+        RigExecImagingSnapshotConstPtr rigSnapshot = session.store->Get();
+        if (session.dirty || !rigSnapshot || !rigSnapshot->Describes(stage, time)) {
+            const RigExecImagingBridge::PublishResult result =
+                session.bridge->EvaluateAndPublishResult(time);
+            ++session.evaluationCount;
+            if (!result.ok) {
+                if (errors) {
+                    errors->push_back(
+                        "initial/evaluated generation failed for rig " +
+                        session.rigPath.GetString());
+                }
+                return false;
             }
-            return false;
-        }
-        if (result.epoch) {
-            session.epoch = result.epoch;
+            if (result.epoch) session.epoch = result.epoch;
+            session.dirty = false;
+            rigSnapshot = session.store->Get();
         }
 
-        const RigExecImagingSnapshotConstPtr rigSnapshot =
-            session.store->Get();
         if (!rigSnapshot || !rigSnapshot->Describes(stage, time)) {
             if (errors) {
                 errors->push_back(
@@ -145,6 +208,8 @@ RigExecImagingRegistry::_EvaluateSessions(
         combinedEpoch->publishedPrims.insert(
             session.epoch->publishedPrims.begin(),
             session.epoch->publishedPrims.end());
+        combined->xformResetPaths.insert(rigSnapshot->xformResetPaths.begin(),
+                                        rigSnapshot->xformResetPaths.end());
 
         if (firstRoot) {
             commonAssetRoot = session.assetRoot;
@@ -250,33 +315,27 @@ RigExecImagingRegistry::Activate(
     //
     // Registering this early also arms _OnObjectsChanged across the whole
     // compile-and-evaluate window, so _assetRoots -- what arms it -- stays
-    // empty until the commit below, and a failure restores the previously
+    // empty until the commit below, and a failure retains the previously
     // active stage's listener. Nothing in that window may author to \p stage
     // regardless: _OnObjectsChanged takes the same non-recursive _mutex this
     // function holds. Neither Compile() nor evaluation authors anything by
     // construction (that is what testRigExecNoAuthoring asserts), which is
     // what makes this safe.
-    const UsdStageRefPtr previousStage = _stage;
-    const bool hadSessions = !_sessions.empty();
     const std::set<SdfPath> previousAssetRoots = _assetRoots;
     _assetRoots.clear();
-    TfNotice::Revoke(_changeKey);
-    _changeKey = TfNotice::Register(
+    TfNotice::Key candidateChangeKey = TfNotice::Register(
         TfCreateWeakPtr(this), &RigExecImagingRegistry::_OnObjectsChanged,
         stage);
 
     // Activation is transactional: a rig that fails to compile or evaluate
     // leaves the previously published generation, and the listener feeding
     // it, exactly as they were rather than tearing the viewport down.
+    // Keep the previous key registered until commit: re-registering it on
+    // rollback would put it ahead of the retained ExecUsdSystem listener,
+    // causing the next edit to publish before exec invalidates its cache.
     const auto abandon = [&]() {
-        TfNotice::Revoke(_changeKey);
-        _changeKey = TfNotice::Key();
+        TfNotice::Revoke(candidateChangeKey);
         _assetRoots = previousAssetRoots;
-        if (hadSessions && previousStage) {
-            _changeKey = TfNotice::Register(
-                TfCreateWeakPtr(this),
-                &RigExecImagingRegistry::_OnObjectsChanged, previousStage);
-        }
     };
 
     // Prepare a complete replacement without touching the active stage,
@@ -321,6 +380,8 @@ RigExecImagingRegistry::Activate(
 
     // Commit the fully compiled and evaluated stage in one transaction.
     // Repopulating _assetRoots is what arms _OnObjectsChanged.
+    TfNotice::Revoke(_changeKey);
+    _changeKey = candidateChangeKey;
     _sessions = std::move(candidate);
     _stage = stage;
     _generatedScopes.clear();
@@ -329,6 +390,7 @@ RigExecImagingRegistry::Activate(
         _generatedScopes.insert(session.bridge->GetGeneratedScope());
         _assetRoots.insert(session.assetRoot);
     }
+    _RefreshReadRoots();
     for (Chain &chain : _chains) {
         if (chain.pruning) {
             chain.pruning->SetOwnedScopes(_generatedScopes);
@@ -345,6 +407,9 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     std::lock_guard<std::mutex> lock(_mutex);
     if (_sessions.empty() || !_stage) {
         return false;
+    }
+    if (_readRootsDirty) {
+        _RefreshReadRoots();
     }
     std::shared_ptr<RigExecImagingSnapshot> snapshot;
     RigExecBindingResolvingSceneIndex::BindingEpochConstPtr epoch;
@@ -377,6 +442,30 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     return true;
 }
 
+void
+RigExecImagingRegistry::_RefreshReadRoots()
+{
+    _readRoots.clear();
+    for (RigSession &session : _sessions) {
+        if (session.readRootsDirty) {
+            session.readRoots = _CollectReadRoots(_stage, {session.assetRoot});
+            session.readRootsDirty = false;
+        }
+        _readRoots.insert(session.readRoots.begin(), session.readRoots.end());
+    }
+    _readRootsDirty = false;
+}
+
+size_t
+RigExecImagingRegistry::GetSessionEvaluationCount(const SdfPath &rigPath)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rigPath) return session.evaluationCount;
+    }
+    return 0;
+}
+
 bool
 RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
 {
@@ -407,6 +496,7 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
         // weight object, and a bridge that does not own it draws no overlay.
         for (RigSession &session : _sessions) {
             session.bridge->SetWeightOverlay(resolved);
+            session.dirty = true;
         }
         time = _lastTime;
     }
@@ -421,26 +511,27 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
 
 void
 RigExecImagingRegistry::_OnObjectsChanged(
-    const UsdNotice::ObjectsChanged &notice, const UsdStageWeakPtr &)
+    const UsdNotice::ObjectsChanged &notice, const UsdStageWeakPtr &sender)
 {
-    std::set<SdfPath> assetRoots;
+    RigExecTapSet::PrepareStageChange(UsdStageRefPtr(sender), notice);
+    std::set<SdfPath> readRoots;
     {
         std::lock_guard<std::mutex> lock(_mutex);
-        if (_sessions.empty() || _assetRoots.empty()) {
+        if (_sessions.empty() || _assetRoots.empty() ||
+            sender != UsdStageWeakPtr(_stage)) {
             return;
         }
-        assetRoots = _assetRoots;
+        readRoots = _readRoots;
     }
-    // Any edit touching the asset can factor into the final frame
-    // (solvers, joints, movers, controls, weights, driver geometry,
+    // Any edit touching the asset or its transitive reads can factor into
+    // the final frame (solvers, joints, movers, controls, weights, driver geometry,
     // guide styling): re-evaluate at the current time. The evaluator's
     // epoch digest turns structural edits into recompiles; value edits
     // flow through exec invalidation on the shared layers.
-    auto touchesAsset = [&assetRoots](const SdfPath &path) {
+    auto touchesInput = [&readRoots](const SdfPath &path) {
         const SdfPath primPath = path.GetPrimPath();
-        for (const SdfPath &assetRoot : assetRoots) {
-            if (primPath.HasPrefix(assetRoot) ||
-                assetRoot.HasPrefix(primPath)) {
+        for (const SdfPath &root : readRoots) {
+            if (primPath.HasPrefix(root) || root.HasPrefix(primPath)) {
                 return true;
             }
         }
@@ -448,14 +539,14 @@ RigExecImagingRegistry::_OnObjectsChanged(
     };
     bool relevant = false;
     for (const SdfPath &path : notice.GetResyncedPaths()) {
-        if (touchesAsset(path)) {
+        if (touchesInput(path)) {
             relevant = true;
             break;
         }
     }
     if (!relevant) {
         for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
-            if (touchesAsset(path)) {
+            if (touchesInput(path)) {
                 relevant = true;
                 break;
             }
@@ -465,6 +556,36 @@ RigExecImagingRegistry::_OnObjectsChanged(
         UsdTimeCode time;
         {
             std::lock_guard<std::mutex> lock(_mutex);
+            // A value-only edit keeps the cached dependency regions. Resyncs
+            // and connection/relationship edits may introduce a new external
+            // input even when the evaluator's binding epoch stays unchanged.
+            _readRootsDirty = _readRootsDirty ||
+                !notice.GetResyncedPaths().empty();
+            for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+                for (const TfToken &field : notice.GetChangedFields(path)) {
+                    if (field == "connectionPaths" || field == "targetPaths") {
+                        _readRootsDirty = true;
+                    }
+                }
+            }
+            for (RigSession &session : _sessions) {
+                const auto affects = [&session](const SdfPath &path) {
+                    const SdfPath prim = path.GetPrimPath();
+                    for (const SdfPath &root : session.readRoots) {
+                        if (prim.HasPrefix(root) || root.HasPrefix(prim)) return true;
+                    }
+                    return false;
+                };
+                bool affected = false;
+                for (const SdfPath &path : notice.GetResyncedPaths())
+                    affected = affected || affects(path);
+                for (const SdfPath &path : notice.GetChangedInfoOnlyPaths())
+                    affected = affected || affects(path);
+                if (affected) {
+                    session.dirty = true;
+                    session.readRootsDirty = session.readRootsDirty || _readRootsDirty;
+                }
+            }
             time = _lastTime;
         }
         SetTime(time);
@@ -478,6 +599,8 @@ RigExecImagingRegistry::Deactivate()
     TfNotice::Revoke(_changeKey);
     _changeKey = TfNotice::Key();
     _assetRoots.clear();
+    _readRoots.clear();
+    _readRootsDirty = false;
     _generatedScopes.clear();
     _sessions.clear();
     _stage.Reset();
@@ -618,7 +741,8 @@ _AccumulateGuideBounds(
                                       local.GetMax() + pad);
         }
         range->UnionWith(
-            PXR_NS::GfBBox3d(local, element.xform).ComputeAlignedRange());
+            PXR_NS::GfBBox3d(local, element.xform *
+                published.volumeGuideAnchorToAsset).ComputeAlignedRange());
         any = true;
     }
     return any;
@@ -1214,6 +1338,25 @@ RigExecImaging_GetGeneration()
     const rigExec::RigExecImagingSnapshotConstPtr snapshot =
         RigExecImagingRegistry::GetInstance().GetStore()->Get();
     return snapshot ? static_cast<long long>(snapshot->generation) : 0;
+}
+
+int
+RigExecImaging_GetControlFrameAssetSpace(
+    long long stageCacheId, const char *primPath, double frame,
+    int isDefault, double outMatrix[16])
+{
+    if (!primPath || !outMatrix || !PXR_NS::SdfPath::IsValidPathString(primPath) ||
+        (!isDefault && !std::isfinite(frame))) return 0;
+    const auto stage = PXR_NS::UsdUtilsStageCache::Get().Find(
+        PXR_NS::UsdStageCache::Id::FromLongInt(stageCacheId));
+    const auto snapshot = RigExecImagingRegistry::GetInstance().GetStore()->Get();
+    const auto time = isDefault ? PXR_NS::UsdTimeCode::Default() : PXR_NS::UsdTimeCode(frame);
+    if (!stage || !snapshot || !snapshot->Describes(stage, time)) return 0;
+    const auto it = snapshot->prims.find(PXR_NS::SdfPath(primPath));
+    if (it == snapshot->prims.end() || !it->second.hasControlFrame) return 0;
+    for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c)
+        outMatrix[r*4+c] = it->second.controlFrame[r][c];
+    return 1;
 }
 
 int

@@ -25,6 +25,56 @@ therefore animate in stock `usdview` without RigExec editing its source stage.
 RigExec uses an unchanged OpenUSD build. It does not fork or patch OpenExec,
 VDF, Hydra, or USD.
 
+### Interactive updates
+
+Geometry mover graphs, schedules, and intermediate results persist across
+evaluations. Editing a value or a rest pose refreshes the inputs and dirties
+the affected downstream revisions. Unchanged branches retain their results;
+derived normals and bounds update from the final points. A point-count change
+replaces that target's graph when its VDF element masks must change.
+
+Two-bone IK measures unauthored lengths from live joint rest frames. When IK
+feeds a blend that owns the output joints, give the IK solver a separate
+ordered `rigExec:restJoints` relationship (root, mid, end), or call
+`ik.set_rest_joints([root, mid, end])` in Python. Explicit upper/lower lengths
+still take precedence. Rest orientation edits also reach the IK pole fallback.
+
+Controls, constraints, and solvers run in one compiled dependency order, so a
+constraint can drive an IK goal and a later constraint can consume the solved
+joints in the same evaluation. Each solver caches its result until its time,
+USD dependencies, or supplied inputs change. Solver guide frames use the same
+resolved outputs as the posed joints. Tap batches share one OpenExec system
+per stage.
+
+Constraints targeting native `points` lower to matrix revisions in the same
+point chain as deformers. Their deltas compose in mover order and participate
+in dirty suffix evaluation, envelope handling, normals, and bounds maintenance.
+
+Structural edits splice the persistent point chains: existing mover nodes
+survive insertions, removals, rewiring, and reordering. Cardinality changes
+replace only the affected target graph. Prim deletion safely retires the
+stage's OpenExec requests before the stock adapter processes a missing prim;
+the point graphs and their unaffected cached results remain available.
+
+Default-space channels and translation units are evaluated and editable; see
+[space composition](docs/xformable-default-spaces.md). Twist distribution
+supports animated fractional `inputs:twistTurns`. Blend samples support base,
+preceding, final, and named checkpoints, including independent target fan-out.
+Use `rigExec:deltaSpace = "surfaceFrame"` to transport sculpt detail with the
+preceding mesh deformation.
+
+[Curvenet authoring](docs/curvenet.md) includes adjustments, posed guides, and
+cached surface weight parametrization. [Bake and inverse APIs](docs/python-bake-inverse.md)
+provide standard USD export and a bounded numeric inverse solver.
+
+`RigExecRigPose` exposes per-evaluation graph creation, execution, and schedule
+counts (`mover_graph_revisions_created`, `mover_graph_revisions_executed`, and
+`mover_graph_schedules_built` in Python). Enable `cpuParityMode` in C++, or
+`rig.cpu_parity_mode` in Python, to run the independent scalar reference checks.
+They are disabled by default for interactive evaluation.
+`solver_evaluations` counts refreshed solver aggregates; it is zero when all
+solvers reuse their cached snapshots.
+
 ## Quick start
 
 You need:
@@ -97,7 +147,8 @@ composed OpenUSD stage
         v
 in-memory RigExec compilation
   |-- OpenExec computations: controls, joints, solvers, transforms
-  `-- VDF mover graph: geometry and property revision chains
+  |-- VDF mover graph: geometry revision chains
+  `-- evaluator-side ordered scalar, vector and matrix property chains
         |
         v
 immutable evaluation snapshot
@@ -166,9 +217,10 @@ The easiest way to author a first rig is to copy
 6. Run `rigExecPose` while editing; it exits non-zero on compile or evaluation
    failure and can print joints, moved targets, and diagnostics.
 
-A rig may publish joints, driven transforms, revised properties, or any
-combination of them. Jointless rigs are valid, but a rig with neither a joint
-nor a mover has no output and is rejected.
+A rig may publish control guides, joints, placed volume guides, driven
+transforms, revised properties, or any combination of them. Control-only and
+placed-volume-only rigs are valid. Disconnected movers are accepted while
+being authored; compilation rejects a rig with none of these objects.
 
 ### Authoring from Python
 
@@ -224,7 +276,7 @@ an exception and are never created as custom USD properties.
 
 The full codeless schema is in
 [`libs/rigExecSchema/schema.usda`](libs/rigExecSchema/schema.usda). It currently
-contains 41 classes. Built-in constraints are Aim, Position, Rotation, Scale,
+contains 44 classes, including 37 concrete types. Built-in constraints are Aim, Position, Rotation, Scale,
 Parent, and SingleChainIK; there is intentionally no `FbxCharacter` schema.
 
 ## Building, testing, and installing
@@ -289,8 +341,8 @@ find_package(rigExec CONFIG REQUIRED)
 target_link_libraries(myTarget PRIVATE rigExec::rigExec)
 ```
 
-The package also exports `rigExec::rigExecMath` and
-`rigExec::rigExecImaging`, plus `rigExec_PLUGINPATHS`, `rigExec_PYTHON_DIR`, and
+The package also exports `rigExec::rigExecMath`, `rigExec::rigExecStandalone`,
+and `rigExec::rigExecImaging`, plus `rigExec_PLUGINPATHS`, `rigExec_PYTHON_DIR`, and
 `rigExec_LIBRARY_DIR` for host setup.
 
 ## Platform status
@@ -298,21 +350,36 @@ The package also exports `rigExec::rigExecMath` and
 | Platform | Status |
 |---|---|
 | macOS arm64 | Verified with AppleClang and Python 3.11: 17/17 enabled CTest suites and the live `usdview` path pass |
-| Windows x64 | Built and tested during project development with Visual Studio 2022 and Ninja |
+| Windows x64 | Release build with Visual Studio 2022 and Ninja; 35/35 CTest suites pass for the September 2026 changes |
 | Linux | Intended, but not yet verified; the current POSIX environment helper is macOS-oriented |
 | iOS/iPadOS | Core/static integration is design work only; no device build has been verified |
 
 ## Current limitations
 
-- Structural edits currently trigger a full in-memory recompile rather than an
-  incremental graph update.
-- Multi-target blend-mover fan-out is rejected; it is not silently evaluated
-  with shared target parameters.
-- The standalone Esf backend and `.rigpack` format are not implemented.
-- Inverse solves and baked export are not implemented.
+- Structural edits still validate the binding plan before splicing affected
+  point chains. Prim deletion lazily rebuilds shared OpenExec requests to work
+  around an invalid-prim callback in the pinned dependency. A host that owns
+  other, separate ExecUsd systems must manage those systems' deletion lifecycle.
+- Geometry checkpoints trade memory for fast edits: storage grows with point
+  count times the number of revisions. Parameter assembly and property/pose
+  constraint walks still inspect their operations on each evaluation.
+- Dirty propagation currently operates on source and revision outputs. Sparse
+  per-point dirty masks and a configurable checkpoint eviction policy remain
+  future performance work.
+- The numeric inverse API is a dense solver for small selected parameter sets;
+  scene-edit transactions and an inverse manipulation UI are separate work.
+- Curvenet adjustment frames are available to viewport gizmos. Using these
+  point-graph outputs as earlier pose or MatrixMover inputs is rejected during
+  compilation; authored scalar adjustment channels remain readable.
+- The experimental [standalone backend and rigpack](docs/standalone-pack.md)
+  execute supported providers through Esf without a USD stage. Whole-rig mover
+  lowering and imaging profiles remain outside that backend's current scope.
 - PRMan-class production render delegates have not been qualified.
 - This project is pinned to OpenUSD 26.08; newer OpenUSD releases require a
   separate compatibility pass.
+
+See the [September 2026 code review](docs/code-review-2026-09-05.md) for
+verified fixes, regression coverage, and remaining scope limits.
 
 ## Repository map
 
@@ -321,6 +388,7 @@ The package also exports `rigExec::rigExecMath` and
 | [`libs/rigExecMath`](libs/rigExecMath) | Point-frame math, solvers, deformation kernels, and weight fields |
 | [`libs/rigExecSchema`](libs/rigExecSchema) | Codeless RigExec USD schema definitions |
 | [`libs/rigExec`](libs/rigExec) | OpenExec registrations, mover graph, taps, and evaluator |
+| [`libs/rigExecStandalone`](libs/rigExecStandalone) | Independent Esf provider runtime and typed rigpack export/load |
 | [`libs/rigExecImaging`](libs/rigExecImaging) | Hydra scene-index publication and activation API |
 | [`plugin/rigExecUsdview`](plugin/rigExecUsdview) | usdview activation and authoring panels |
 | [`plugin/museAssistant`](plugin/museAssistant) | Optional live usdview assistant; see its [setup guide](plugin/museAssistant/README.md) |

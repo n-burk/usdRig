@@ -20,9 +20,11 @@
 #include "pxr/usd/usd/timeCode.h"
 
 #include <atomic>
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -114,12 +116,16 @@ struct RigExecPublishedPrim {
     GfVec3d extentMin{0};
     GfVec3d extentMax{0};
 
-    /// Explicit motion samples (spec 10.5 subset): frame-relative shutter
-    /// offsets and the retained point sets captured at each offset under
-    /// this generation fence. Empty means single-sample publication; when
-    /// present, `points` holds the base (offset-nearest-zero) sample.
+    /// Explicit frame-relative shutter samples under this generation fence.
+    /// Empty arrays mean single-sample publication; scalar values retain the
+    /// offset-nearest-zero sample. Every populated array matches sampleOffsets.
     std::vector<float> sampleOffsets;
     std::vector<VtVec3fArray> pointsSamples;
+    std::vector<VtVec3fArray> normalsSamples;
+    std::vector<GfMatrix4d> xformSamples;
+    std::vector<GfMatrix4d> xformBaseSamples;
+    std::vector<GfVec3d> extentMinSamples;
+    std::vector<GfVec3d> extentMaxSamples;
 
     /// Guide drawing payload (joints and aggregate solvers draw as guide
     /// geometry like OpenExec's IrJointScope): one rig-space frame matrix,
@@ -162,6 +168,10 @@ struct RigExecPublishedPrim {
     /// same guide:displayColor / guide:displayOpacity attributes, and a
     /// prim never carries both payloads (a control is not a joint).
     bool hasControlGuide = false;
+    /// The original evaluated control matrix for native manipulators. Kept
+    /// before guide rigidization/scaling, including when guide drawing is off.
+    bool hasControlFrame = false;
+    GfMatrix4d controlFrame{1.0};
     /// Rigidized, ASSET-space, like guideFrames.
     GfMatrix4d controlGuideFrame{1.0};
     /// sphere|circle|box|cube|diamond|pyramid.
@@ -212,6 +222,11 @@ struct RigExecPublishedPrim {
     /// joint or a control, never two of them.
     bool hasVolumeGuides = false;
     std::vector<RigExecVolumeGuideElement> volumeGuides;
+    /// Curvenet guides reuse the self-describing geometry payload, anchored
+    /// to their native Points prim rather than the character asset. Empty
+    /// retains the asset-space convention used by influence volumes.
+    SdfPath volumeGuideAnchor;
+    GfMatrix4d volumeGuideAnchorToAsset{1.0};
 };
 
 /// One complete immutable generation (spec §8.2: consumers see complete
@@ -230,6 +245,10 @@ struct RigExecImagingSnapshot {
     /// Do not set this by hand: RigExecSnapshotStore::Publish derives it from
     /// the prims. Setting it wrong loses transforms silently.
     bool hasDrivenXforms = false;
+    /// Authored reset boundaries beneath driven transforms, captured before
+    /// Hydra flattening erases that information. Stage-less publishers must
+    /// supply their own boundaries; an empty set means ordinary inheritance.
+    std::set<SdfPath> xformResetPaths;
 
     /// The rig's asset root (the rig prim's parent) for a single-rig
     /// generation.  Empty for a merged multi-root generation; guide consumers
@@ -366,6 +385,21 @@ public:
                 }
             }
         }
+        std::set<SdfPath> resetChanges;
+        if (previous) {
+            for (const auto &path : previous->xformResetPaths)
+                if (!snapshot || !snapshot->xformResetPaths.count(path)) resetChanges.insert(path);
+        }
+        if (snapshot) {
+            for (const auto &path : snapshot->xformResetPaths)
+                if (!previous || !previous->xformResetPaths.count(path)) resetChanges.insert(path);
+        }
+        for (const auto &path : resetChanges) {
+            auto entry = std::find_if(dirtied.begin(), dirtied.end(),
+                [&path](const auto &dirty) { return dirty.path == path; });
+            if (entry == dirtied.end()) dirtied.push_back({path, RigExecChangeXform});
+            else entry->changes |= RigExecChangeXform;
+        }
         std::atomic_store(
             &_current, RigExecImagingSnapshotConstPtr(std::move(snapshot)));
         return dirtied;
@@ -395,6 +429,7 @@ private:
             before->hasGuides != after.hasGuides ||
             before->guideFrames.size() != after.guideFrames.size() ||
             before->hasControlGuide != after.hasControlGuide ||
+            before->hasControlFrame != after.hasControlFrame ||
             // The overlay begins or ends owning a displayColor primvar,
             // which is a change to the owned leaf set and not to a value
             // in it -- the same rule points ownership follows above. It
@@ -437,6 +472,9 @@ private:
             return RigExecChangeStructural;
         }
         uint8_t changes = RigExecChangeNone;
+        if (after.hasControlFrame && before->controlFrame != after.controlFrame) {
+            changes |= RigExecChangeGuides;
+        }
         // Styling is shared by both guide payloads (one prim never carries
         // both), so it is compared once here and folded into whichever one
         // this prim publishes.
@@ -445,7 +483,10 @@ private:
         // Both halves matter: the consumer publishes a delta built from the
         // pair, so a moving base with a static revision still moves the prim.
         if (after.hasXform && (before->xform != after.xform ||
-                               before->xformBase != after.xformBase)) {
+                               before->xformBase != after.xformBase ||
+                               before->sampleOffsets != after.sampleOffsets ||
+                               before->xformSamples != after.xformSamples ||
+                               before->xformBaseSamples != after.xformBaseSamples)) {
             changes |= RigExecChangeXform;
         }
         if (after.hasPoints &&
@@ -454,11 +495,16 @@ private:
              before->pointsSamples != after.pointsSamples)) {
             changes |= RigExecChangePoints;
         }
-        if (after.hasNormals && before->normals != after.normals) {
+        if (after.hasNormals && (before->normals != after.normals ||
+            before->sampleOffsets != after.sampleOffsets ||
+            before->normalsSamples != after.normalsSamples)) {
             changes |= RigExecChangeNormals;
         }
         if (after.hasExtent && (before->extentMin != after.extentMin ||
-                                before->extentMax != after.extentMax)) {
+                                before->extentMax != after.extentMax ||
+                                before->sampleOffsets != after.sampleOffsets ||
+                                before->extentMinSamples != after.extentMinSamples ||
+                                before->extentMaxSamples != after.extentMaxSamples)) {
             changes |= RigExecChangeExtent;
         }
         if (after.hasGuides &&
@@ -489,6 +535,8 @@ private:
         // for the identical consequence.
         if (after.hasVolumeGuides &&
             (before->volumeGuides != after.volumeGuides ||
+             before->volumeGuideAnchor != after.volumeGuideAnchor ||
+             before->volumeGuideAnchorToAsset != after.volumeGuideAnchorToAsset ||
              before->guidePurpose != after.guidePurpose || styleChanged)) {
             changes |= RigExecChangeGuides;
         }

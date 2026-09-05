@@ -215,6 +215,160 @@ def TestRigFramesReplica():
                                                   frames.posed))
 
 
+def TestDefaultSpacesAndUnits():
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    parent.GetAttribute("default:tx").Set(2.0)
+    parent.GetAttribute("default:rz").Set(25.0)
+    child.GetAttribute("default:ty").Set(4.0)
+    child.GetAttribute("default:rx").Set(15.0)
+    child.GetAttribute("avars:unitScaleFactor").Set(2.5)
+    native = _NativeModule()
+    rig = native.Rig(stage, "/Asset/Rig") if native else None
+    if rig:
+        rig.compile()
+
+    def check_native():
+        frames = gizmoMath.ComputeRigFrames(stage, child, time)
+        _Check(frames.reason == "", frames.reason)
+        if rig:
+            matrix = Gf.Matrix4d(*rig.evaluate(-1.0).control_frame(
+                str(child.GetPath())).to_matrix4())
+            _Check(_MatClose(matrix, frames.posed, 1e-5),
+                   "default spaces replica vs native:\n%s\n%s"
+                   % (matrix, frames.posed))
+        return frames
+
+    check_native()
+    for name, amount in (("default:space", 30.0),
+                         ("avars:defaultSpace", 40.0),
+                         ("posed:defaultSpace", 50.0),
+                         ("parent:defaultSpace", 20.0),
+                         ("parent:space", 60.0)):
+        matrix = _Rot(Gf.Vec3d(0, 1, 0), amount)
+        matrix.SetTranslateOnly(Gf.Vec3d(amount, 2, 1))
+        child.GetAttribute(name).Set(matrix)
+        check_native()
+    driver = stage.DefinePrim("/Asset/Rig/Driver", "Scope")
+    source = driver.CreateAttribute("space", Sdf.ValueTypeNames.Matrix4d)
+    source.Set(Gf.Matrix4d(1.0))
+    child.GetAttribute("posed:defaultSpace").SetConnections([source.GetPath()])
+    check_native()
+    source.Set(_Rot(Gf.Vec3d(0, 0, 1), 33.0))
+    check_native()
+
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    for units in (2.5, -0.5):
+        child.GetAttribute("avars:unitScaleFactor").Set(units)
+        before = check_native()
+        target, reason = gizmoMath.MakeTarget(
+            stage, child, gizmoMath.CHANNELS_POSE, writer)
+        _Check(target is not None, reason)
+        origin = (before.posed * before.assetToWorld).ExtractTranslation()
+        delta = Gf.Vec3d(0.7, -1.3, 2.1)
+        _Drag(target, lambda: target.ApplyTranslate(delta))
+        after = check_native()
+        moved = (after.posed * after.assetToWorld).ExtractTranslation()
+        _Check((moved - origin - delta).GetLength() < 1e-6,
+               "unit-scaled world translation preserves the requested delta")
+    pivot, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(pivot is None and "independently of rest" in reason,
+           "explicit default-space pivot edits identify the authoritative source")
+    child.GetAttribute("avars:unitScaleFactor").Set(0.0)
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is None and "unit scale" in reason,
+           "zero unit scale cannot be inverted for a translation drag")
+    # A matrix connection can expose a solver-owned frame from a different
+    # namespace. Refuse that unavailable pose rather than use its authored rest.
+    joint = stage.DefinePrim("/Asset/Rig/J", "RigExecJoint")
+    relay = stage.DefinePrim("/Asset/Rig/J/Relay", "RigExecControl")
+    solver = stage.DefinePrim("/Asset/Rig/Solver", "RigExecFkChain")
+    solver.GetRelationship("rigExec:joints").SetTargets([joint.GetPath()])
+    goal = stage.DefinePrim("/Asset/Rig/Goal", "RigExecControl")
+    goal.GetAttribute("parent:space").SetConnections(
+        [relay.GetAttribute("parent:space").GetPath()])
+    target, reason = gizmoMath.MakeTarget(
+        stage, goal, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is None and "space source" in reason and "solver" in reason,
+           "connected solver-space origin must not use an unsolved replica")
+    # A directly selected parent matrix removes namespace pose inheritance.
+    replacement = Gf.Matrix4d(1.0)
+    replacement.SetTranslateOnly(Gf.Vec3d(10, 2, 0))
+    relay.GetAttribute("parent:space").Set(replacement)
+    target, reason = gizmoMath.MakeTarget(
+        stage, relay, gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None and reason == "",
+           "explicit parent space remains editable below a solver-owned joint")
+
+
+def TestCurvenetAdjustmentFrames():
+    native = _NativeModule()
+    if native is None:
+        return
+    import rigexec
+    stage = Usd.Stage.CreateInMemory()
+    UsdGeom.Xform.Define(stage, "/Asset").AddTranslateOp().Set(Gf.Vec3d(100, 0, 0))
+    builder = rigexec.Builder.create(stage, "/Asset/Rig")
+    net = builder.add_curvenet("Net", [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0),
+                                       (0, 1, 0), (0, 2, 0), (0, 3, 0)])
+    net.add_spline(0, 1, 2, 3)
+    net.add_spline(0, 4, 5, 6)
+    netToAsset = _Rot(Gf.Vec3d(0, 1, 0), 20)
+    netToAsset.SetTranslateOnly(Gf.Vec3d(10, 20, 30))
+    UsdGeom.Xformable(stage.GetPrimAtPath(net.path)).AddTransformOp().Set(netToAsset)
+    knot = builder.add_curvenet_adjustment("Knot", net.path, 0)
+    knot.set_avar_translation(1, 0, 0)
+    knot.set_avar_scale(2, 1, 1)
+    prim = stage.GetPrimAtPath(knot.path)
+    prim.GetAttribute("avars:unitScaleFactor").Set(2.5)
+    warp = builder.add_control("Warp")
+    warp.set_avar_rotation(0, 0, 90)
+    warp.set_avar_translation(5, 6, 7)
+    chain = builder.new_mover_chain("Shape", net.path + ".points")
+    chain.add_curvenet_adjuster_mover("Adjust", [knot.path])
+    chain.add_matrix_mover("Warp", warp.path)
+    rig = native.Rig(stage, "/Asset/Rig")
+    rig.compile()
+    time = Usd.TimeCode(1)
+
+    def published(queryStage, queryPath, queryTime):
+        if queryStage != stage or str(queryPath) != knot.path or queryTime != time:
+            return None
+        return Gf.Matrix4d(*rig.evaluate(1).control_frame(knot.path).to_matrix4())
+
+    gizmoMath.SetPublishedControlFrameReader(published)
+    try:
+        frames = gizmoMath.ComputeRigFrames(stage, prim, time)
+        _Check(frames.reason == "", frames.reason)
+        _Check(_MatClose(frames.posed, published(stage, prim.GetPath(), time)),
+               "adjustment uses the evaluated knot frame with scale")
+        _Check((frames.posed.ExtractTranslation() - netToAsset.Transform(
+            Gf.Vec3d(5, 8.5, 7))).GetLength() < 1e-5,
+            "native adjustment control frame is in asset space")
+        _Check(_MatClose(gizmoMath.AvarsMatrix(prim, time) * frames.P, frames.posed),
+               "adjustment avar scope reconstructs the published frame")
+        _Check(_Close(frames.unitScale, 2.5), "adjustment translation units")
+        writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+        target, reason = gizmoMath.MakeTarget(stage, prim, gizmoMath.CHANNELS_POSE, writer)
+        _Check(target is not None, reason)
+        origin = (frames.posed * frames.assetToWorld).ExtractTranslation()
+        delta = Gf.Vec3d(0.7, -1.3, 2.1)
+        _Drag(target, lambda: target.ApplyTranslate(delta))
+        after = gizmoMath.ComputeRigFrames(stage, prim, time)
+        moved = (after.posed * after.assetToWorld).ExtractTranslation()
+        _Check((moved - origin - delta).GetLength() < 1e-5,
+               "posed knot drag follows preceding deformation and unit scale")
+        pivot, reason = gizmoMath.MakeTarget(stage, prim, gizmoMath.CHANNELS_PIVOT, writer)
+        _Check(pivot is None and "preceding deformation" in reason,
+               "automatic knot pivot identifies its source")
+        stale = gizmoMath.ComputeRigFrames(stage, prim, Usd.TimeCode(2))
+        _Check("Activate" in stale.reason, "stale published frames cannot drive a drag")
+    finally:
+        gizmoMath.SetPublishedControlFrameReader(None)
+
+
 def TestVolumeWeightScale():
     """
     A RigExecVolumeWeight must NOT take its scale from avars.
@@ -1565,6 +1719,8 @@ def main():
         ("euler round trip", TestEulerRoundTrip),
         ("compose avars", TestComposeAvarMatrix),
         ("rig frames replica", TestRigFramesReplica),
+        ("default spaces and units", TestDefaultSpacesAndUnits),
+        ("curvenet adjustment frames", TestCurvenetAdjustmentFrames),
         ("volume weight scale", TestVolumeWeightScale),
         ("rig frames reasons", TestRigFramesReasons),
         ("writer", TestWriter),

@@ -12,16 +12,107 @@
 #include "pxr/exec/ef/timeInterval.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/base/tf/notice.h"
+#include "pxr/base/tf/weakBase.h"
+
+#include <map>
+#include <mutex>
+#include <set>
 
 namespace rigExec {
 
+// Requests share the stock compiler and value cache for a stage. Replacing a
+// tap list therefore changes requests, not the underlying execution network.
+// The weak table does not extend stage or evaluator lifetimes.
+class RigExecTapContext : public TfWeakBase {
+public:
+    explicit RigExecTapContext(const UsdStageRefPtr &stage) : _stage(stage) {}
+    ~RigExecTapContext() { TfNotice::Revoke(_notice); }
+
+    static std::shared_ptr<RigExecTapContext> Find(
+        const UsdStageRefPtr &stage, bool create) {
+        static std::mutex mutex;
+        static std::map<UsdStageWeakPtr, std::weak_ptr<RigExecTapContext>> contexts;
+        std::lock_guard<std::mutex> lock(mutex);
+        for (auto it = contexts.begin(); it != contexts.end();) {
+            if (it->second.expired()) it = contexts.erase(it);
+            else ++it;
+        }
+        const auto found = contexts.find(UsdStageWeakPtr(stage));
+        if (found != contexts.end()) {
+            if (auto context = found->second.lock()) return context;
+        }
+        if (!create) return {};
+        auto context = std::make_shared<RigExecTapContext>(stage);
+        contexts[UsdStageWeakPtr(stage)] = context;
+        return context;
+    }
+
+    ExecUsdSystem *GetSystem() {
+        if (!_system) {
+            _system = std::make_unique<ExecUsdSystem>(UsdStageConstRefPtr(_stage));
+            // TfNotice dispatches newest registrations first. This listener
+            // must precede Esf's listener so deletion can revoke it safely.
+            TfNotice::Revoke(_notice);
+            _notice = TfNotice::Register(TfCreateWeakPtr(this),
+                &RigExecTapContext::_OnObjectsChanged, UsdStageWeakPtr(_stage));
+        }
+        return _system.get();
+    }
+
+    void PrepareStageChange(const UsdNotice::ObjectsChanged &notice) {
+        if (!_system) return;
+        bool removed = false;
+        for (const SdfPath &path : notice.GetResyncedPaths()) {
+            if (path.IsPrimPath() && !_stage->GetPrimAtPath(path)) {
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) return;
+        // Requests must die before their system. Their immutable extracted
+        // snapshots are unaffected. Revocation cancels pending Tf callbacks.
+        for (RigExecTapSet *taps : clients) {
+            taps->_request.reset();
+            taps->_prepared = false;
+            taps->_dirty = true;
+        }
+        _system.reset();
+    }
+
+    std::set<RigExecTapSet *> clients;
+private:
+    void _OnObjectsChanged(const UsdNotice::ObjectsChanged &notice,
+                           const UsdStageWeakPtr &) {
+        PrepareStageChange(notice);
+    }
+    UsdStageRefPtr _stage;
+    std::unique_ptr<ExecUsdSystem> _system;
+    TfNotice::Key _notice;
+};
+
 RigExecTapSet::RigExecTapSet(const UsdStageRefPtr &stage)
     : _stage(stage)
-    , _system(std::make_unique<ExecUsdSystem>(UsdStageConstRefPtr(stage)))
+    , _context(RigExecTapContext::Find(stage, true))
 {
+    _context->clients.insert(this);
 }
 
-RigExecTapSet::~RigExecTapSet() = default;
+RigExecTapSet::~RigExecTapSet()
+{
+    _request.reset();
+    _context->clients.erase(this);
+}
+
+ExecUsdSystem *RigExecTapSet::GetSystem() { return _context->GetSystem(); }
+
+void RigExecTapSet::PrepareStageChange(
+    const UsdStageRefPtr &stage, const UsdNotice::ObjectsChanged &notice)
+{
+    if (auto context = RigExecTapContext::Find(stage, false)) {
+        context->PrepareStageChange(notice);
+    }
+}
 
 RigExecTapId
 RigExecTapSet::Add(const RigExecValueAddress &address)
@@ -77,7 +168,8 @@ RigExecTapSet::Prepare()
         }
     }
 
-    _request = std::make_unique<ExecUsdRequest>(_system->BuildRequest(
+    ExecUsdSystem *const system = GetSystem();
+    _request = std::make_unique<ExecUsdRequest>(system->BuildRequest(
         std::move(keys),
         [this](const ExecRequestIndexSet &, const EfTimeInterval &) {
             // Invalidation callbacks only record dirtiness; evaluation
@@ -86,11 +178,12 @@ RigExecTapSet::Prepare()
         },
         [this](const ExecRequestIndexSet &) {
             _dirty = true;
+            _prepared = false;
         }));
     if (!_request->IsValid()) {
         return false;
     }
-    _system->PrepareRequest(*_request);
+    system->PrepareRequest(*_request);
     _prepared = true;
     return true;
 }
@@ -123,7 +216,8 @@ RigExecTapSet::Evaluate(
         return snapshot;
     }
 
-    _system->ChangeTime(time);
+    ExecUsdSystem *const system = GetSystem();
+    system->ChangeTime(time);
 
     ExecUsdValueOverrideVector execOverrides;
     execOverrides.reserve(overrides.size());
@@ -147,8 +241,8 @@ RigExecTapSet::Evaluate(
     }
 
     ExecUsdCacheView view = execOverrides.empty()
-        ? _system->Compute(*_request)
-        : _system->ComputeWithOverrides(*_request, std::move(execOverrides));
+        ? system->Compute(*_request)
+        : system->ComputeWithOverrides(*_request, std::move(execOverrides));
 
     // Snapshot copies values immediately: the cache view must not outlive
     // its system or request (spec §6.1).

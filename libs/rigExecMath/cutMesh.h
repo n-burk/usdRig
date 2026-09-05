@@ -179,6 +179,10 @@ public:
     /// empty.
     GfVec3d Normal(const GfVec3d &point) const;
 
+    /// Closest-point triangle's sparse barycentric coordinates in mesh vertices.
+    bool Project(const GfVec3d &point,
+                 std::vector<std::pair<int, double>> *weights) const;
+
 private:
     struct _Impl;
     std::unique_ptr<_Impl> _impl;

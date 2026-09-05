@@ -280,16 +280,17 @@ namespace {
 // Snapshot-backed sampled points source (spec 10.5): reports the retained
 // frame-relative offsets and returns only cached values; pulls can never
 // trigger evaluation.
-class _SampledPointsDataSource final
-    : public HdTypedSampledDataSource<VtVec3fArray> {
+template <class T>
+class _MotionDataSource final : public HdTypedSampledDataSource<T> {
 public:
-    HD_DECLARE_DATASOURCE(_SampledPointsDataSource);
+    HD_DECLARE_DATASOURCE(_MotionDataSource);
+    using Time = HdSampledDataSource::Time;
 
     VtValue GetValue(Time shutterOffset) override {
         return VtValue(GetTypedValue(shutterOffset));
     }
 
-    VtVec3fArray GetTypedValue(Time shutterOffset) override {
+    T GetTypedValue(Time shutterOffset) override {
         if (_offsets.empty()) {
             return _base;
         }
@@ -314,17 +315,25 @@ public:
     }
 
 private:
-    _SampledPointsDataSource(
-        VtVec3fArray base, std::vector<float> offsets,
-        std::vector<VtVec3fArray> samples)
+    _MotionDataSource(T base, std::vector<float> offsets, std::vector<T> samples)
         : _base(std::move(base))
         , _offsets(std::move(offsets))
         , _samples(std::move(samples)) {}
 
-    VtVec3fArray _base;
+    T _base;
     std::vector<float> _offsets;
-    std::vector<VtVec3fArray> _samples;
+    std::vector<T> _samples;
 };
+
+template <class T>
+typename HdTypedSampledDataSource<T>::Handle
+_MotionValue(const T &base, const std::vector<float> &offsets,
+             const std::vector<T> &samples)
+{
+    if (!samples.empty() && samples.size() == offsets.size())
+        return _MotionDataSource<T>::New(base, offsets, samples);
+    return HdRetainedTypedSampledDataSource<T>::New(base);
+}
 
 HdTokenDataSourceHandle
 _Token(const TfToken &token)
@@ -1304,7 +1313,7 @@ _TryInvert(const GfMatrix4d &m, GfMatrix4d *inverse)
 // The xform matrix a prim's data source carries, or identity when it has
 // none. Upstream of us that value is already world-space (flattened).
 GfMatrix4d
-_ReadXform(const HdContainerDataSourceHandle &dataSource)
+_ReadXform(const HdContainerDataSourceHandle &dataSource, float shutterOffset = 0.0f)
 {
     if (!dataSource) {
         return GfMatrix4d(1.0);
@@ -1314,7 +1323,7 @@ _ReadXform(const HdContainerDataSourceHandle &dataSource)
         return GfMatrix4d(1.0);
     }
     const HdMatrixDataSourceHandle matrix = schema.GetMatrix();
-    return matrix ? matrix->GetTypedValue(0.0) : GfMatrix4d(1.0);
+    return matrix ? matrix->GetTypedValue(shutterOffset) : GfMatrix4d(1.0);
 }
 
 // Builds the sparse stronger root container for one published prim
@@ -1338,16 +1347,8 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
         // points maps to the flat primvars/points/primvarValue leaf; a
         // stock built-in is always flat (spec §10.3.1).
         primvarNames.push_back(HdTokens->points);
-        const HdSampledDataSourceHandle pointsSource =
-            published.sampleOffsets.size() ==
-                    published.pointsSamples.size() &&
-                !published.sampleOffsets.empty()
-                ? HdSampledDataSourceHandle(_SampledPointsDataSource::New(
-                      published.points, published.sampleOffsets,
-                      published.pointsSamples))
-                : HdSampledDataSourceHandle(
-                      HdRetainedTypedSampledDataSource<VtVec3fArray>::New(
-                          published.points));
+        const HdSampledDataSourceHandle pointsSource = _MotionValue(
+            published.points, published.sampleOffsets, published.pointsSamples);
         primvarValues.push_back(
             HdPrimvarSchema::Builder()
                 .SetPrimvarValue(pointsSource)
@@ -1367,8 +1368,8 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
         primvarValues.push_back(
             HdPrimvarSchema::Builder()
                 .SetPrimvarValue(
-                    HdRetainedTypedSampledDataSource<VtVec3fArray>::New(
-                        published.normals))
+                    _MotionValue(published.normals, published.sampleOffsets,
+                                 published.normalsSamples))
                 .SetInterpolation(_Token(HdPrimvarSchemaTokens->vertex))
                 .SetRole(_Token(HdPrimvarSchemaTokens->normal))
                 .Build());
@@ -1424,10 +1425,10 @@ _BuildStrongRoot(const RigExecPublishedPrim &published)
         names.push_back(HdExtentSchemaTokens->extent);
         values.push_back(
             HdExtentSchema::Builder()
-                .SetMin(HdRetainedTypedSampledDataSource<GfVec3d>::New(
-                    published.extentMin))
-                .SetMax(HdRetainedTypedSampledDataSource<GfVec3d>::New(
-                    published.extentMax))
+                .SetMin(_MotionValue(published.extentMin, published.sampleOffsets,
+                                     published.extentMinSamples))
+                .SetMax(_MotionValue(published.extentMax, published.sampleOffsets,
+                                     published.extentMaxSamples))
                 .Build());
     }
 
@@ -1481,7 +1482,7 @@ RigExecResultsSceneIndex::_ComputeDrivenXform(
     const SdfPath &primPath,
     const HdContainerDataSourceHandle &inputDataSource,
     const RigExecImagingSnapshot &snapshot,
-    GfMatrix4d *result) const
+    GfMatrix4d *result, float shutterOffset) const
 {
     // Fast path. This runs for EVERY prim on EVERY pull, so a rig that drives
     // no transforms at all (a points-only rig, the common case) must not pay
@@ -1490,16 +1491,11 @@ RigExecResultsSceneIndex::_ComputeDrivenXform(
         return false;
     }
 
-    const GfMatrix4d own = _ReadXform(inputDataSource);
+    const GfMatrix4d own = _ReadXform(inputDataSource, shutterOffset);
 
-    // KNOWN LIMITATION: resetXformStack is not honoured here, and cannot be.
-    // A prim that resets the stack ignores its ancestors, so a driven
-    // ancestor should not reach it -- but HdFlattenedXformDataSourceProvider
-    // consumes the authored flag and stamps resetXformStack=true on EVERY
-    // flattened prim to mark the matrix as already world-space. Downstream of
-    // flattening the authored boundary is simply not recoverable, so a
-    // resetXformStack descendant of a constraint-driven Xform will be carried
-    // along with it rather than staying put.
+    // Source-stage reset boundaries travel in the immutable snapshot because
+    // flattening stamps resetXformStack=true on every world-space matrix.
+    // Stop after a boundary's own revision; its ancestors cannot reach it.
     GfMatrix4d composed(1.0);
     bool driven = false;
     for (SdfPath current = primPath;
@@ -1507,13 +1503,27 @@ RigExecResultsSceneIndex::_ComputeDrivenXform(
          current = current.GetParentPath()) {
         const auto it = snapshot.prims.find(current);
         if (it == snapshot.prims.end() || !it->second.hasXform) {
+            if (snapshot.xformResetPaths.count(current)) break;
             continue;
         }
         const GfMatrix4d worldOld =
             current == primPath
                 ? own
                 : _ReadXform(
-                      _GetInputSceneIndex()->GetPrim(current).dataSource);
+                      _GetInputSceneIndex()->GetPrim(current).dataSource, shutterOffset);
+        const auto &published = it->second;
+        GfMatrix4d revised = published.xform, base = published.xformBase;
+        if (!published.sampleOffsets.empty() &&
+            published.xformSamples.size() == published.sampleOffsets.size() &&
+            published.xformBaseSamples.size() == published.sampleOffsets.size()) {
+            size_t sample = 0;
+            for (size_t i = 1; i < published.sampleOffsets.size(); ++i) {
+                if (std::abs(published.sampleOffsets[i] - shutterOffset) <
+                    std::abs(published.sampleOffsets[sample] - shutterOffset)) sample = i;
+            }
+            revised = published.xformSamples[sample];
+            base = published.xformBaseSamples[sample];
+        }
 
         // Skip an ancestor we cannot invert -- do NOT abandon the walk.
         // A collapsed dimension means no uniform right-delta exists for THAT
@@ -1523,13 +1533,15 @@ RigExecResultsSceneIndex::_ComputeDrivenXform(
         GfMatrix4d worldOldInverse(1.0);
         GfMatrix4d baseInverse(1.0);
         if (!_TryInvert(worldOld, &worldOldInverse) ||
-            !_TryInvert(it->second.xformBase, &baseInverse)) {
+            !_TryInvert(base, &baseInverse)) {
+            if (snapshot.xformResetPaths.count(current)) break;
             continue;
         }
 
-        composed = composed * (worldOldInverse * it->second.xform *
+        composed = composed * (worldOldInverse * revised *
                                baseInverse * worldOld);
         driven = true;
+        if (snapshot.xformResetPaths.count(current)) break;
     }
     if (!driven) {
         return false;
@@ -1642,9 +1654,10 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
                     prim.dataSource = _BuildVolumeGuidePrim(
                         it->second, volumeIndex, parent.dataSource,
                         _ResolveAssetRootWorld(
-                            it->second.assetRoot.IsEmpty()
-                                ? snapshot->assetRoot
-                                : it->second.assetRoot,
+                            !it->second.volumeGuideAnchor.IsEmpty()
+                                ? it->second.volumeGuideAnchor
+                                : (it->second.assetRoot.IsEmpty()
+                                    ? snapshot->assetRoot : it->second.assetRoot),
                             *snapshot));
                     return prim;
                 }
@@ -1671,11 +1684,44 @@ RigExecResultsSceneIndex::GetPrim(const SdfPath &primPath) const
     GfMatrix4d drivenXform(1.0);
     if (_ComputeDrivenXform(primPath, prim.dataSource, *snapshot,
                             &drivenXform)) {
+        std::vector<float> offsets;
+        for (SdfPath current = primPath; !current.IsEmpty() &&
+                 !current.IsAbsoluteRootPath(); current = current.GetParentPath()) {
+            const auto it = snapshot->prims.find(current);
+            if (it != snapshot->prims.end() && it->second.hasXform) {
+                offsets.insert(offsets.end(), it->second.sampleOffsets.begin(),
+                               it->second.sampleOffsets.end());
+            }
+        }
+        // Preserve upstream motion as well as RigExec's explicit samples.
+        const auto appendUpstreamSamples = [&offsets](const HdContainerDataSourceHandle &root) {
+            const auto matrix = HdXformSchema::GetFromParent(root).GetMatrix();
+            if (!matrix) return;
+            std::vector<float> samples;
+            if (matrix->GetContributingSampleTimesForInterval(
+                    offsets.empty() ? 0.0f : *std::min_element(offsets.begin(), offsets.end()),
+                    offsets.empty() ? 0.0f : *std::max_element(offsets.begin(), offsets.end()),
+                    &samples)) offsets.insert(offsets.end(), samples.begin(), samples.end());
+        };
+        appendUpstreamSamples(prim.dataSource);
+        for (SdfPath current = primPath.GetParentPath(); !current.IsEmpty() &&
+                 !current.IsAbsoluteRootPath(); current = current.GetParentPath()) {
+            const auto it = snapshot->prims.find(current);
+            if (it != snapshot->prims.end() && it->second.hasXform)
+                appendUpstreamSamples(_GetInputSceneIndex()->GetPrim(current).dataSource);
+        }
+        std::sort(offsets.begin(), offsets.end());
+        offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+        std::vector<GfMatrix4d> samples;
+        for (float offset : offsets) {
+            GfMatrix4d value = _ReadXform(prim.dataSource, offset);
+            _ComputeDrivenXform(primPath, prim.dataSource, *snapshot, &value, offset);
+            samples.push_back(value);
+        }
         static const TfToken xformName = HdXformSchemaTokens->xform;
         const HdDataSourceBaseHandle xformSource =
             HdXformSchema::Builder()
-                .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
-                    drivenXform))
+                .SetMatrix(_MotionValue(drivenXform, offsets, samples))
                 // TRUE: this matrix is fully composed, exactly like the one
                 // flattening produced upstream. Marking it false would invite
                 // a later flattener to compose the parent in a second time,
@@ -2272,7 +2318,7 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             const bool wasDriven =
                 _announcedDrivenXforms.count(entry.path) != 0;
             const bool isDriven = _IsDrivenXform(entry.path);
-            if (wasDriven || isDriven) {
+            if (wasDriven || isDriven || (entry.changes & RigExecChangeXform)) {
                 _DirtySubtree(entry.path,
                               HdDataSourceLocatorSet::UniversalSet(),
                               &entries);
@@ -2457,7 +2503,7 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             // container each generation, and a consumer that caches the
             // container handles needs the rebuilt chain invalidated, not just
             // the leaf (HdContainerDataSourceEditor::ComputeDirtyLocators).
-            _announcedDrivenXforms.insert(entry.path);
+            _RefreshDrivenXform(entry.path);
             static const HdDataSourceLocatorSet xformSubtree =
                 HdContainerDataSourceEditor::ComputeDirtyLocators(
                     HdDataSourceLocatorSet{

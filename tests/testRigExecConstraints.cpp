@@ -500,6 +500,7 @@ TestDynamicWeightDenseBaseFormulaAndParity()
         .SetTargets({dynamic.GetPath()});
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
     const bool compiled = evaluator.Compile(&errors);
     CHECK(compiled);
@@ -1494,8 +1495,8 @@ TestGeometryDomainTargetCompiles()
     }
 }
 
-// Geometry-domain constraints publish their solved delta directly onto the
-// target points. A bound dense object is the total per-point envelope on this
+// Geometry-domain constraints apply solved deltas through point revisions.
+// A bound dense object is the total per-point envelope on this
 // path and must supersede, not multiply, a conflicting scalar fallback.
 static void
 TestGeometryConstraintDenseEnvelopeSupersedesScalar()
@@ -1592,7 +1593,11 @@ static void
 TestTransformAndGeometrySpellingsAgree()
 {
     const VtVec3fArray rest{{1, 0, 0}, {0, 2, 0}, {0, 0, 3}, {1, 1, 1}};
-    for (const float envelope : {1.0f}) {
+    for (const GfMatrix4d &base : {Matrix(), Matrix(GfVec3d(10, 0, 0),
+            GfRotation(GfVec3d(0, 0, 1), 90.0)), Matrix(GfVec3d(1,2,3),
+            GfRotation(GfVec3d(1,0,0), 25.0), GfVec3d(2,3,4))})
+    for (const char *type : {"RigExecRotationConstraint", "RigExecPositionConstraint",
+                             "RigExecParentConstraint"}) {
         std::vector<GfVec3d> viaTransform;
         std::vector<GfVec3d> viaPoints;
         for (const bool geometry : {false, true}) {
@@ -1604,19 +1609,20 @@ TestTransformAndGeometrySpellingsAgree()
             mesh.CreateAttribute(TfToken("points"),
                                  SdfValueTypeNames->Point3fArray)
                 .Set(rest);
+            UsdGeomXformable(mesh).MakeMatrixXform().Set(base);
             MakeXform(stage, SdfPath("/Asset/Source"),
-                      Matrix(GfVec3d(0, 0, 0),
+                      Matrix(GfVec3d(2, 3, 4),
                              GfRotation(GfVec3d(0, 1, 0), 90.0)));
             stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
             stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
             const SdfPath pointsPath =
                 SdfPath("/Asset/Geom/M").AppendProperty(TfToken("points"));
             const UsdPrim rot = MakeConstraint(
-                stage, "Rot", "RigExecRotationConstraint",
+                stage, "Rot", type,
                 {geometry ? pointsPath : SdfPath("/Asset/Geom/M")});
             rot.CreateRelationship(TfToken("rigExec:sources"))
                 .SetTargets({SdfPath("/Asset/Source")});
-            rot.GetAttribute(TfToken("inputs:defaultWeight")).Set(envelope);
+            rot.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
 
             RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
             std::vector<std::string> errors;
@@ -1631,7 +1637,7 @@ TestTransformAndGeometrySpellingsAgree()
                     const VtVec3fArray moved =
                         it->second.Get<VtVec3fArray>();
                     for (const GfVec3f &p : moved) {
-                        viaPoints.push_back(GfVec3d(p));
+                        viaPoints.push_back(base.TransformAffine(GfVec3d(p)));
                     }
                 }
             } else {
@@ -1686,6 +1692,7 @@ TestGeometryEnvelopeIsChordLerp()
     rot.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.5f);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
@@ -1705,21 +1712,16 @@ TestGeometryEnvelopeIsChordLerp()
     CHECK(Near(GfVec3d(moved[0]), GfVec3d(0.5, 0, -0.5), 1e-4));
     CHECK(Near(GfVec3d(moved[1]), GfVec3d(1.5, 0, 1.5), 1e-4));
 
-    // The scalar oracle does not cover this publish, and says so rather
-    // than reporting an untested agreement. Pinned so that routing the
-    // geometry domain through the mover graph -- which is what would restore
-    // real coverage -- has to remove this assertion deliberately.
-    CHECK(pose.movedPropertiesCpu.find(pointsPath) ==
-          pose.movedPropertiesCpu.end());
-    CHECK(std::any_of(pose.diagnostics.begin(), pose.diagnostics.end(),
-                      [](const std::string &d) {
-                          return d.find("not covered") != std::string::npos;
-                      }));
+    // The constraint now participates in the ordinary point revision graph,
+    // with a scalar application oracle and the same envelope contract.
+    CHECK(pose.movedPropertiesCpu.count(pointsPath) == 1);
+    CHECK(pose.moverGraphParityAgreements == 1);
+    CHECK(pose.moverGraphParityMismatches == 0);
 }
 
 // Competing writers are keyed by the exact target, and that is correct.
 //
-// Two writers of the SAME points set are ambiguous and rejected. But a
+// Two writers of the SAME points set compose in mover order. A
 // transform-domain constraint on /M and a geometry-domain one on /M.points
 // are NOT competing: they write different output domains, and the prim's
 // matrix composes over its points by construction. Keying them together --
@@ -2183,7 +2185,7 @@ TestIncompleteSolverLeavesJointsVisible()
 }
 
 static void
-TestTwoBoneIkImpliedLengths()
+TestTwoBoneIkImpliedLengths(bool throughBlend)
 {
     // An unauthored absolute length is measured from the bound joints'
     // rest positions, plus the authored offset; an authored absolute is
@@ -2210,6 +2212,9 @@ TestTwoBoneIkImpliedLengths()
     makeControl("Root", 0.0, 0.0);
     const UsdPrim effCtl = makeControl("Eff", 7.0, 0.0);
     makeControl("Pole", 3.5, 2.0);
+    if (throughBlend) {
+        makeControl("Mid", 3.0, 0.0);
+    }
 
     const SdfPath shoulder("/Asset/Rig/Joints/Shoulder");
     const SdfPath elbow("/Asset/Rig/Joints/Shoulder/Elbow");
@@ -2233,8 +2238,31 @@ TestTwoBoneIkImpliedLengths()
         .SetTargets({SdfPath("/Asset/Rig/Controls/Eff")});
     ik.CreateRelationship(TfToken("rigExec:poleControl"))
         .SetTargets({SdfPath("/Asset/Rig/Controls/Pole")});
-    ik.CreateRelationship(TfToken("rigExec:joints"))
-        .SetTargets({shoulder, elbow, wrist});
+    if (throughBlend) {
+        // Only the blend owns the output joints. IK must read their rests
+        // through an independent input, or implied lengths stay at defaults.
+        ik.CreateRelationship(TfToken("rigExec:restJoints"))
+            .SetTargets({shoulder, elbow, wrist});
+        const UsdPrim fk = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Solvers/FK"), TfToken("RigExecFkChain"));
+        fk.CreateRelationship(TfToken("rigExec:controls"))
+            .SetTargets({SdfPath("/Asset/Rig/Controls/Root"),
+                         SdfPath("/Asset/Rig/Controls/Mid"),
+                         effCtl.GetPath()});
+        const UsdPrim blend = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Solvers/Blend"),
+            TfToken("RigExecBlendPointFrames"));
+        blend.CreateRelationship(TfToken("rigExec:inputA"))
+            .SetTargets({fk.GetPath()});
+        blend.CreateRelationship(TfToken("rigExec:inputB"))
+            .SetTargets({ik.GetPath()});
+        blend.GetAttribute(TfToken("inputs:weight")).Set(1.0f);
+        blend.CreateRelationship(TfToken("rigExec:joints"))
+            .SetTargets({shoulder, elbow, wrist});
+    } else {
+        ik.CreateRelationship(TfToken("rigExec:joints"))
+            .SetTargets({shoulder, elbow, wrist});
+    }
     // No lengths authored: both are implied.
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
@@ -2273,6 +2301,51 @@ TestTwoBoneIkImpliedLengths()
     CHECK(hasDiagnostic(restPose, "implied rigExec:upperLength=3"));
     CHECK(hasDiagnostic(restPose, "implied rigExec:lowerLength=4"));
 
+    // Edit the existing rest channels on this same evaluator. The root and
+    // goal controls remain fixed; only the chain's binding rest changes.
+    // Both the new bend and the new segment lengths must be visible without
+    // rebuilding the structural graph or requiring a time change.
+    const size_t restEpoch = evaluator.GetBindingEpochDigest();
+    const UsdAttribute elbowRest = stage->GetAttributeAtPath(
+        elbow.AppendProperty(TfToken("rest:tx")));
+    const UsdAttribute wristRest = stage->GetAttributeAtPath(
+        wrist.AppendProperty(TfToken("rest:tx")));
+    elbowRest.Set(4.0);
+    wristRest.Set(9.0);
+    GfVec3d edited[3];
+    const RigExecRigPose editedPose =
+        origins(UsdTimeCode::Default(), edited);
+    CHECK(std::abs((edited[1] - edited[0]).GetLength() - 4.0) < 1e-4);
+    CHECK(std::abs((edited[2] - edited[1]).GetLength() - 5.0) < 1e-4);
+    CHECK(Near(edited[2], GfVec3d(7, 0, 0)));
+    CHECK(!Near(edited[1], atRest[1]));
+    CHECK(hasDiagnostic(editedPose, "implied rigExec:upperLength=4"));
+    CHECK(hasDiagnostic(editedPose, "implied rigExec:lowerLength=5"));
+    CHECK(evaluator.GetBindingEpochDigest() == restEpoch);
+
+    // Rest samples also update when scrubbing in either direction. Editing
+    // an already sampled time must invalidate the cached rest request too.
+    elbowRest.Set(3.0, UsdTimeCode(1));
+    elbowRest.Set(5.0, UsdTimeCode(2));
+    wristRest.Set(7.0, UsdTimeCode(1));
+    wristRest.Set(11.0, UsdTimeCode(2));
+    GfVec3d sampled[3];
+    origins(UsdTimeCode(2), sampled);
+    CHECK(std::abs((sampled[1] - sampled[0]).GetLength() - 5.0) < 1e-4);
+    CHECK(std::abs((sampled[2] - sampled[1]).GetLength() - 6.0) < 1e-4);
+    elbowRest.Set(4.0, UsdTimeCode(2));
+    origins(UsdTimeCode(2), sampled);
+    CHECK(std::abs((sampled[1] - sampled[0]).GetLength() - 4.0) < 1e-4);
+    CHECK(std::abs((sampled[2] - sampled[1]).GetLength() - 7.0) < 1e-4);
+    origins(UsdTimeCode(1), sampled);
+    CHECK(Near(sampled[1], GfVec3d(3, 0, 0)));
+    CHECK(Near(sampled[2], GfVec3d(7, 0, 0)));
+    CHECK(evaluator.GetBindingEpochDigest() == restEpoch);
+    elbowRest.Clear();
+    wristRest.Clear();
+    elbowRest.Set(3.0);
+    wristRest.Set(7.0);
+
     // Offset only touches its own bone: +1 on lower reaches (8, 0, 0)
     // with segments 3 and 5. Offsets are values, so no recompile.
     ik.CreateAttribute(TfToken("rigExec:lowerLengthOffset"),
@@ -2305,6 +2378,614 @@ TestTwoBoneIkImpliedLengths()
     CHECK(Near(authored[1], GfVec3d(2.5, 0, 0)));
     CHECK(Near(authored[2], GfVec3d(5, 0, 0)));
     CHECK(!hasDiagnostic(authoredPose, "implied rigExec:"));
+}
+
+static void
+TestTwoBoneIkRestFrameInputs()
+{
+    for (bool explicitRestInputs : {false, true}) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const auto provider = [&](const char *path, const char *type,
+                                  double tx) {
+            const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken(type));
+            prim.GetAttribute(TfToken("rest:tx")).Set(tx);
+            prim.GetAttribute(TfToken("rest:rx")).Set(0.0);
+            return prim;
+        };
+        const UsdPrim root = provider("/Root", "RigExecControl", 0.0);
+        const UsdPrim goal = provider("/Goal", "RigExecControl", 6.0);
+        const UsdPrim pole = provider("/Pole", "RigExecControl", 2.0);
+        const UsdPrim jointRoot = provider("/JointRoot", "RigExecJoint", 0.0);
+        const UsdPrim jointMid = provider("/JointMid", "RigExecJoint", 3.0);
+        const UsdPrim jointEnd = provider("/JointEnd", "RigExecJoint", 7.0);
+        const UsdPrim ik = stage->DefinePrim(
+            SdfPath("/IK"), TfToken("RigExecTwoBoneIk"));
+        ik.GetRelationship(TfToken("rigExec:rootControl"))
+            .SetTargets({root.GetPath()});
+        ik.GetRelationship(TfToken("rigExec:effectorControl"))
+            .SetTargets({goal.GetPath()});
+        ik.GetRelationship(TfToken("rigExec:poleControl"))
+            .SetTargets({pole.GetPath()});
+        ik.GetAttribute(TfToken("rigExec:upperLength")).Set(3.0);
+        ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(4.0);
+        if (explicitRestInputs) {
+            ik.GetRelationship(TfToken("rigExec:restJoints"))
+                .SetTargets({jointRoot.GetPath(), jointMid.GetPath(),
+                             jointEnd.GetPath()});
+        } else {
+            // Custom remaps are accepted by evaluator bindings even for IK.
+            ik.GetRelationship(TfToken("rigExec:joints"))
+                .SetTargets({jointEnd.GetPath(), jointRoot.GetPath(),
+                             jointMid.GetPath()});
+            ik.CreateAttribute(TfToken("rigExec:jointElements"),
+                               SdfValueTypeNames->IntArray)
+                .Set(VtIntArray{2, 0, 1});
+        }
+        RigExecTapSet taps(stage);
+        const RigExecTapId tap = taps.Add(RigExecValueAddress::Prim(
+            ik.GetPath(), TfToken("computePointFrameArray")));
+        CHECK(taps.Prepare());
+        const auto solve = [&]() {
+            const RigExecSnapshot snapshot = taps.Evaluate(UsdTimeCode::Default());
+            CHECK(snapshot.IsValid() && snapshot.IsComplete());
+            return snapshot.Get<RigExecPointFrameArray>(tap);
+        };
+        const auto before = solve();
+        CHECK(before.frames.size() == 3 && before.rests.size() == 3);
+        if (before.frames.size() != 3 || before.rests.size() != 3) {
+            continue;
+        }
+        CHECK(Near(before.rests[1][0], GfVec3d(3, 0, 0)));
+        CHECK(Near(before.rests[2][0], GfVec3d(7, 0, 0)));
+        CHECK(before.frames[1].Origin()[1] > 1.0);
+        CHECK(std::abs(before.frames[1].Origin()[2]) < 1e-6);
+
+        // The collinear pole selects the root JOINT's rest up. The root
+        // control is unchanged, so this catches a missing rest dependency.
+        jointRoot.GetAttribute(TfToken("rest:rx")).Set(90.0);
+        jointMid.GetAttribute(TfToken("rest:tx")).Set(4.0);
+        const auto edited = solve();
+        CHECK(edited.frames.size() == 3 && edited.rests.size() == 3);
+        if (edited.frames.size() != 3 || edited.rests.size() != 3) {
+            continue;
+        }
+        CHECK(edited.frames[1].Origin()[2] > 1.0);
+        CHECK(std::abs(edited.frames[1].Origin()[1]) < 1e-6);
+        CHECK(Near(edited.rests[0][2] - edited.rests[0][0], GfVec3d(0, 0, 1)));
+        CHECK(Near(edited.rests[1][0], GfVec3d(4, 0, 0)));
+        // Authored lengths remain authoritative despite moving the mid rest.
+        CHECK(std::abs((edited.frames[1].Origin() -
+                        edited.frames[0].Origin()).GetLength() - 3.0) < 1e-6);
+    }
+}
+
+static void
+TestAggregateSolverValueUpdates()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const auto control = [&](const char *path, double tx) {
+        const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.GetAttribute(TfToken("rest:tx")).Set(tx);
+        prim.GetAttribute(TfToken("avars:ty")).Set(0.0);
+        return prim;
+    };
+    const UsdPrim start = control("/Start", 0.0);
+    const UsdPrim mid = control("/Mid", 2.0);
+    const UsdPrim end = control("/End", 4.0);
+    const UsdPrim fk = stage->DefinePrim(SdfPath("/FK"), TfToken("RigExecFkChain"));
+    fk.GetRelationship(TfToken("rigExec:controls"))
+        .SetTargets({start.GetPath(), mid.GetPath(), end.GetPath()});
+    const UsdPrim twist = stage->DefinePrim(
+        SdfPath("/Twist"), TfToken("RigExecTwistDistribution"));
+    twist.GetRelationship(TfToken("rigExec:start")).SetTargets({start.GetPath()});
+    twist.GetRelationship(TfToken("rigExec:end")).SetTargets({end.GetPath()});
+    twist.GetAttribute(TfToken("rigExec:weights")).Set(VtFloatArray{0, 0.5f, 1});
+    const UsdPrim blend = stage->DefinePrim(
+        SdfPath("/Blend"), TfToken("RigExecBlendPointFrames"));
+    blend.GetRelationship(TfToken("rigExec:inputA")).SetTargets({fk.GetPath()});
+    blend.GetRelationship(TfToken("rigExec:inputB")).SetTargets({twist.GetPath()});
+    blend.GetAttribute(TfToken("inputs:weight")).Set(0.5f);
+
+    RigExecTapSet taps(stage);
+    const RigExecTapId tap = taps.Add(RigExecValueAddress::Prim(
+        blend.GetPath(), TfToken("computePointFrameArray")));
+    CHECK(taps.Prepare());
+    const auto middle = [&]() {
+        const auto snapshot = taps.Evaluate(UsdTimeCode::Default());
+        CHECK(snapshot.IsValid() && snapshot.IsComplete());
+        const auto frames = snapshot.Get<RigExecPointFrameArray>(tap);
+        CHECK(frames.GetSize() == 3);
+        return frames.GetSize() == 3 ? frames.frames[1].Origin() : GfVec3d(0);
+    };
+    CHECK(Near(middle(), GfVec3d(2, 0, 0)));
+    // FK follows live control rest inputs, twist follows live sample weights,
+    // and the dependent blend must invalidate on each value edit.
+    mid.GetAttribute(TfToken("rest:tx")).Set(3.0);
+    CHECK(Near(middle(), GfVec3d(2.5, 0, 0)));
+    twist.GetAttribute(TfToken("rigExec:weights")).Set(VtFloatArray{0, 0.25f, 1});
+    CHECK(Near(middle(), GfVec3d(2, 0, 0)));
+    end.GetAttribute(TfToken("rest:tx")).Set(8.0);
+    CHECK(Near(middle(), GfVec3d(2.5, 0, 0)));
+    blend.GetAttribute(TfToken("inputs:weight")).Set(1.0f);
+    CHECK(Near(middle(), GfVec3d(2, 0, 0)));
+    end.GetAttribute(TfToken("avars:ty")).Set(4.0);
+    CHECK(Near(middle(), GfVec3d(2, 1, 0)));
+}
+
+static void
+TestDeepSolverDependencySchedule()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Source"), TfToken("RigExecControl"));
+    source.GetAttribute(TfToken("avars:tx")).Set(2.0);
+    const int depth = 96;
+    SdfPath previousSolver, previousJoint, finalSolver;
+    int inheritedOffset = 0;
+    for (int i = 0; i < depth; ++i) {
+        const SdfPath jointPath("/Asset/Rig/Joints/J" + std::to_string(i));
+        const UsdPrim joint = stage->DefinePrim(jointPath, TfToken("RigExecJoint"));
+        const UsdPrim child = stage->DefinePrim(
+            jointPath.AppendChild(TfToken("Input")), TfToken("RigExecControl"));
+        child.GetAttribute(TfToken("rest:tx")).Set(1.0);
+        child.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        const SdfPath solverPath("/Asset/Rig/Solvers/S" + std::to_string(i));
+        if (i > 0 && i % 8 == 0) {
+            // Direct aggregate dependencies interleave with joint-mediated
+            // dependencies; duplicate input edges must schedule only once.
+            const UsdPrim blend = stage->DefinePrim(
+                solverPath, TfToken("RigExecBlendPointFrames"));
+            blend.GetRelationship(TfToken("rigExec:inputA"))
+                .SetTargets({previousSolver});
+            blend.GetRelationship(TfToken("rigExec:inputB"))
+                .SetTargets({previousSolver});
+            blend.GetAttribute(TfToken("inputs:weight")).Set(0.5f);
+            blend.GetRelationship(TfToken("rigExec:joints"))
+                .SetTargets({jointPath});
+        } else {
+            const UsdPrim twist = stage->DefinePrim(
+                solverPath, TfToken("RigExecTwistDistribution"));
+            const SdfPath input = i == 0 ? source.GetPath()
+                : previousJoint.AppendChild(TfToken("Input"));
+            twist.GetRelationship(TfToken("rigExec:start")).SetTargets({input});
+            twist.GetRelationship(TfToken("rigExec:end")).SetTargets({input});
+            twist.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointPath});
+            if (i > 0) {
+                ++inheritedOffset;
+            }
+        }
+        previousJoint = jointPath;
+        previousSolver = solverPath;
+        finalSolver = solverPath;
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+    const size_t epoch = evaluator.GetBindingEpochDigest();
+    const auto evaluate = [&](double sourceX) {
+        source.GetAttribute(TfToken("avars:tx")).Set(sourceX);
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid && pose.solverOverridesConverged);
+        CHECK(pose.solverEvaluations == size_t(depth));
+        CHECK(pose.solverOverrideRounds == size_t(depth));
+        CHECK(evaluator.GetBindingEpochDigest() == epoch);
+        const auto joint = pose.jointFramesFinal.find(previousJoint);
+        CHECK(joint != pose.jointFramesFinal.end());
+        if (joint != pose.jointFramesFinal.end()) {
+            CHECK(Near(joint->second.Origin(), GfVec3d(sourceX + inheritedOffset, 0, 0)));
+        }
+        const auto guide = pose.solverFrames.find(finalSolver);
+        CHECK(guide != pose.solverFrames.end() && guide->second.size() == 1);
+        if (guide != pose.solverFrames.end() && guide->second.size() == 1) {
+            CHECK(Near(guide->second[0].Origin(), GfVec3d(sourceX + inheritedOffset, 0, 0)));
+        }
+    };
+    evaluate(2.0);
+    evaluate(5.0);
+    evaluate(-3.0);
+
+    // An unchanged pull reuses every solver result. Editing a rest input
+    // halfway along the graph dirties only the downstream dependency levels.
+    const RigExecRigPose unchanged = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(unchanged.valid && unchanged.solverEvaluations == 0);
+    stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Joints/J46/Input.rest:tx"))
+        .Set(2.0);
+    const RigExecRigPose tail = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(tail.valid);
+    CHECK(tail.solverEvaluations == size_t(depth - 47));
+    CHECK(evaluator.GetBindingEpochDigest() == epoch);
+    const auto tailJoint = tail.jointFramesFinal.find(previousJoint);
+    CHECK(tailJoint != tail.jointFramesFinal.end());
+    if (tailJoint != tail.jointFramesFinal.end()) {
+        CHECK(Near(tailJoint->second.Origin(), GfVec3d(-3 + inheritedOffset + 1, 0, 0)));
+    }
+    stage->GetAttributeAtPath(SdfPath("/Asset/Rig/Joints/J95/Input.rest:tx"))
+        .Set(11.0);
+    const RigExecRigPose unrelated = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(unrelated.valid && unrelated.solverEvaluations == 0);
+
+    // Rewire an existing endpoint attribute without changing output count.
+    // The same evaluator must rebuild its DAG and remove upstream levels
+    // from this solver's prerequisite set.
+    const UsdPrim rewired = stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/S47"));
+    rewired.GetRelationship(TfToken("rigExec:start"))
+        .SetTargets({source.GetPath()});
+    rewired.GetRelationship(TfToken("rigExec:end"))
+        .SetTargets({source.GetPath()});
+    const RigExecRigPose afterRewire = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(afterRewire.valid);
+    CHECK(evaluator.GetBindingEpochDigest() != epoch);
+    CHECK(afterRewire.solverOverrideRounds < size_t(depth));
+    const auto rewiredJoint = afterRewire.jointFramesFinal.find(
+        SdfPath("/Asset/Rig/Joints/J47"));
+    CHECK(rewiredJoint != afterRewire.jointFramesFinal.end());
+    if (rewiredJoint != afterRewire.jointFramesFinal.end()) {
+        CHECK(Near(rewiredJoint->second.Origin(), GfVec3d(-3, 0, 0)));
+    }
+
+    // Restore the edge using Evaluate's automatic topology refresh before
+    // closing a real feedback cycle below.
+    rewired.GetRelationship(TfToken("rigExec:start"))
+        .SetTargets({SdfPath("/Asset/Rig/Joints/J46/Input")});
+    rewired.GetRelationship(TfToken("rigExec:end"))
+        .SetTargets({SdfPath("/Asset/Rig/Joints/J46/Input")});
+    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
+
+    // A cycle hidden through a control's namespace parent must be rejected
+    // at compilation, rather than discovered after many refinement rounds.
+    const UsdPrim first = stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/S0"));
+    first.GetRelationship(TfToken("rigExec:start"))
+        .SetTargets({previousJoint.AppendChild(TfToken("Input"))});
+    const RigExecRigPose cyclic = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(!cyclic.valid);
+    CHECK(HasDiagnostic(cyclic, "solver dependency cycle"));
+}
+
+static void
+TestSolverTransitiveConnectionInvalidation()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *name, double x, double y) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+        prim.GetAttribute(TfToken("rest:tx")).Set(x);
+        prim.GetAttribute(TfToken("rest:ty")).Set(y);
+        return prim.GetPath();
+    };
+    const SdfPath root = control("Root", 0, 0);
+    const SdfPath goal = control("Goal", 8, 0);
+    const SdfPath pole = control("Pole", 0, 1);
+    SdfPathVector joints;
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim joint = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/J" + std::to_string(i)),
+            TfToken("RigExecJoint"));
+        joint.GetAttribute(TfToken("rest:tx")).Set(double(2 * i));
+        joints.push_back(joint.GetPath());
+    }
+    const UsdPrim ik = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+    ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root});
+    ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal});
+    ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole});
+    ik.GetRelationship(TfToken("rigExec:joints")).SetTargets(joints);
+    // Implied lengths ensure this request uses Exec value overrides, whose
+    // repeated invalidation callbacks alone do not renew their interest.
+    const auto driver = [&](const char *name) {
+        return stage->DefinePrim(SdfPath(std::string("/Drivers/") + name), TfToken("Scope"))
+            .CreateAttribute(TfToken("value"), SdfValueTypeNames->Float);
+    };
+    const UsdAttribute relay = driver("Relay");
+    const UsdAttribute a = driver("A");
+    const UsdAttribute b = driver("B");
+    const UsdAttribute c = driver("C");
+    a.Set(0.0f);
+    b.Set(0.5f);
+    c.Set(0.25f);
+    relay.SetConnections({a.GetPath()});
+    const UsdAttribute stretch = ik.GetAttribute(TfToken("inputs:stretch"));
+    stretch.SetConnections({relay.GetPath()});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+    const auto evaluate = [&](double expected) {
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        const auto end = pose.jointFramesFinal.find(joints[2]);
+        CHECK(end != pose.jointFramesFinal.end());
+        if (end != pose.jointFramesFinal.end()) {
+            CHECK(Near(end->second.Origin(), GfVec3d(expected, 0, 0)));
+        }
+        return pose;
+    };
+    evaluate(4);
+    const size_t epoch = evaluator.GetBindingEpochDigest();
+    a.Set(1.0f);
+    evaluate(8);
+    a.Set(0.5f);
+    CHECK(evaluate(6).solverEvaluations == 1);
+    CHECK(evaluator.GetBindingEpochDigest() == epoch);
+
+    // Same-valued rewires must update the watch set even when the output
+    // value itself stays unchanged. Exercise both an intermediate relay
+    // and the solver's own input connection.
+    relay.SetConnections({b.GetPath()});
+    evaluate(6);
+    CHECK(evaluator.GetBindingEpochDigest() != epoch);
+    a.Set(0.0f);
+    CHECK(evaluate(6).solverEvaluations == 0);
+    b.Set(0.25f);
+    CHECK(evaluate(5).solverEvaluations == 1);
+    const size_t relayEpoch = evaluator.GetBindingEpochDigest();
+    stretch.SetConnections({c.GetPath()});
+    evaluate(5);
+    CHECK(evaluator.GetBindingEpochDigest() != relayEpoch);
+    b.Set(0.0f);
+    CHECK(evaluate(5).solverEvaluations == 0);
+    c.Set(0.75f);
+    CHECK(evaluate(7).solverEvaluations == 1);
+    c.Set(0.5f);
+    CHECK(evaluate(6).solverEvaluations == 1);
+}
+
+static void
+TestConstraintSolverDependencySchedule()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *name, const GfVec3d &rest) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+        prim.GetAttribute(TfToken("rest:tx")).Set(rest[0]);
+        prim.GetAttribute(TfToken("rest:ty")).Set(rest[1]);
+        return prim;
+    };
+    const auto joint = [&](const char *name) {
+        return stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Joints/") + name),
+            TfToken("RigExecJoint"));
+    };
+    const auto fk = [&](const char *name, const UsdPrim &input, const UsdPrim &output) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Solvers/") + name),
+            TfToken("RigExecFkChain"));
+        prim.GetRelationship(TfToken("rigExec:controls")).SetTargets({input.GetPath()});
+        prim.GetRelationship(TfToken("rigExec:joints")).SetTargets({output.GetPath()});
+        return prim;
+    };
+    const UsdPrim driver = control("Driver", GfVec3d(4, 0, 0));
+    const UsdPrim root = control("Root", GfVec3d(0));
+    const UsdPrim goal = control("Goal", GfVec3d(1, 0, 0));
+    const UsdPrim pole = control("Pole", GfVec3d(0, 5, 0));
+    const UsdPrim follow = control("Follow", GfVec3d(0));
+    const UsdPrim other = control("Other", GfVec3d(20, 0, 0));
+    const UsdPrim sourceJoint = joint("Source");
+    const UsdPrim rootJoint = joint("Root");
+    const UsdPrim midJoint = joint("Mid");
+    const UsdPrim endJoint = joint("End");
+    const UsdPrim finalJoint = joint("Final");
+    fk("Source", driver, sourceJoint);
+    fk("Final", follow, finalJoint);
+    fk("Independent", other, joint("Independent"));
+    const UsdPrim ik = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+    ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:joints"))
+        .SetTargets({rootJoint.GetPath(), midJoint.GetPath(), endJoint.GetPath()});
+    ik.GetAttribute(TfToken("rigExec:upperLength")).Set(5.0);
+    ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(5.0);
+    // Reverse sibling order runs DriveGoal then FollowEnd. Solvers must be
+    // interleaved: Source FK -> DriveGoal -> IK -> FollowEnd -> Final FK.
+    const UsdPrim followConstraint = MakeConstraint(
+        stage, "FollowEnd", "RigExecPositionConstraint", {follow.GetPath()});
+    followConstraint.GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({endJoint.GetPath()});
+    const UsdPrim driveConstraint = MakeConstraint(
+        stage, "DriveGoal", "RigExecPositionConstraint", {goal.GetPath()});
+    driveConstraint.GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({sourceJoint.GetPath()});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const size_t epoch = evaluator.GetBindingEpochDigest();
+    auto checkPose = [&](double expected, size_t solverCount) {
+        const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
+        if (!pose.valid) {
+            for (const auto &error : pose.diagnostics) std::printf("pose: %s\n", error.c_str());
+        }
+        CHECK(pose.valid);
+        CHECK(pose.solverEvaluations == solverCount);
+        for (const SdfPath &path : {endJoint.GetPath(), finalJoint.GetPath()}) {
+            const auto frame = pose.jointFramesFinal.find(path);
+            CHECK(frame != pose.jointFramesFinal.end());
+            if (frame != pose.jointFramesFinal.end()) {
+                CHECK(Near(frame->second.Origin(), GfVec3d(expected, 0, 0)));
+            }
+        }
+        CHECK(evaluator.GetBindingEpochDigest() == epoch);
+    };
+    checkPose(4, 4);
+    checkPose(4, 0);
+    driver.GetAttribute(TfToken("avars:tx")).Set(2.0);
+    checkPose(6, 3);
+    driver.GetAttribute(TfToken("avars:tx")).Set(3.0);
+    checkPose(7, 3);
+    driveConstraint.GetAttribute(TfToken("inputs:translationOffset"))
+        .Set(GfVec3d(1, 0, 0));
+    checkPose(8, 2);
+    checkPose(8, 0);
+
+    // A final-frame feedback edge is a cycle, not a previous-generation read.
+    driveConstraint.GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({endJoint.GetPath()});
+    errors.clear();
+    CHECK(!evaluator.Compile(&errors));
+    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
+        return error.find("pose dependency cycle") != std::string::npos;
+    }));
+    driveConstraint.GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({sourceJoint.GetPath()});
+    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
+}
+
+static void
+TestConstrainedSolverInputAncestor()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/Driver"), Matrix(GfVec3d(2, 0, 0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *path, double x, double y) {
+        const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.GetAttribute(TfToken("rest:tx")).Set(x);
+        prim.GetAttribute(TfToken("rest:ty")).Set(y);
+        return prim;
+    };
+    const UsdPrim group = control("/Asset/Rig/Controls/Group", 0, 0);
+    group.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    const UsdPrim goal = control("/Asset/Rig/Controls/Group/Goal", 4, 0);
+    goal.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    const UsdPrim root = control("/Asset/Rig/Controls/Root", 0, 0);
+    const UsdPrim pole = control("/Asset/Rig/Controls/Pole", 0, 5);
+    SdfPathVector joints;
+    for (const char *name : {"J0", "J1", "J2"}) {
+        const UsdPrim joint = stage->DefinePrim(
+            group.GetPath().AppendChild(TfToken(name)), TfToken("RigExecJoint"));
+        joint.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        joints.push_back(joint.GetPath());
+    }
+    const UsdPrim ik = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+    ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:joints")).SetTargets(joints);
+    ik.GetAttribute(TfToken("rigExec:upperLength")).Set(5.0);
+    ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(5.0);
+    const UsdPrim constraint = MakeConstraint(
+        stage, "MoveGroup", "RigExecPositionConstraint", {group.GetPath()});
+    constraint.GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/Driver")});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    if (pose.valid) {
+        CHECK(Near(pose.controlFrames.at(goal.GetPath()).Origin(), GfVec3d(6, 0, 0)));
+        CHECK(Near(pose.jointFramesFinal.at(joints[0]).Origin(), GfVec3d(0)));
+        CHECK(Near(pose.jointFramesFinal.at(joints[2]).Origin(), GfVec3d(6, 0, 0)));
+        CHECK(Near(pose.jointFramesBase.at(joints[2]).Origin(), GfVec3d(6, 0, 0)));
+    }
+}
+
+static void
+TestConnectedParentSpaceSolverInputs()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    MakeXform(stage, SdfPath("/Asset/DriverTarget"), Matrix(GfVec3d(4, 0, 0)));
+    const UsdPrim target = MakeXform(stage, SdfPath("/Asset/JointTarget"), Matrix(GfVec3d(5, 0, 0)));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const auto control = [&](const char *path, double x, double y = 0) {
+        const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken("RigExecControl"));
+        prim.GetAttribute(TfToken("rest:tx")).Set(x);
+        prim.GetAttribute(TfToken("rest:ty")).Set(y);
+        prim.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        return prim;
+    };
+    const UsdPrim driver = control("/Asset/Rig/Controls/Driver", 1);
+    const UsdPrim altDriver = control("/Asset/Rig/Controls/AltDriver", 2);
+    const UsdPrim source = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Source"), TfToken("RigExecJoint"));
+    const UsdPrim altSource = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/AltSource"), TfToken("RigExecJoint"));
+    for (const auto &binding : {std::make_pair(driver, source), std::make_pair(altDriver, altSource)}) {
+        const UsdPrim fk = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Solvers").AppendChild(binding.first.GetName()), TfToken("RigExecFkChain"));
+        fk.GetRelationship(TfToken("rigExec:controls")).SetTargets({binding.first.GetPath()});
+        fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({binding.second.GetPath()});
+    }
+    const UsdPrim relay = control("/Asset/Rig/Joints/Source/Relay", 0);
+    const UsdPrim altRelay = control("/Asset/Rig/Joints/AltSource/Relay", 0);
+    const UsdPrim bridge = control("/Asset/Rig/Controls/Bridge", 0);
+    bridge.GetAttribute(TfToken("default:space"))
+        .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
+    const UsdPrim goal = control("/Asset/Rig/Controls/Goal", 2);
+    goal.GetAttribute(TfToken("parent:space"))
+        .SetConnections({bridge.GetPath().AppendProperty(TfToken("posed:defaultSpace"))});
+    const UsdPrim root = control("/Asset/Rig/Controls/Root", 0);
+    const UsdPrim pole = control("/Asset/Rig/Controls/Pole", 0, 5);
+    SdfPathVector joints;
+    for (const char *name : {"J0", "J1", "J2"}) {
+        const SdfPath path = SdfPath("/Asset/Rig/Joints").AppendChild(TfToken(name));
+        stage->DefinePrim(path, TfToken("RigExecJoint"));
+        joints.push_back(path);
+    }
+    const UsdPrim ik = stage->DefinePrim(SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+    ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
+    ik.GetRelationship(TfToken("rigExec:joints")).SetTargets(joints);
+    ik.GetAttribute(TfToken("rigExec:upperLength")).Set(5.0);
+    ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(5.0);
+    const UsdPrim moveJoint = MakeConstraint(stage, "MoveJoint", "RigExecPositionConstraint", {source.GetPath()});
+    moveJoint.GetRelationship(TfToken("rigExec:sources")).SetTargets({target.GetPath()});
+    const UsdPrim moveDriver = MakeConstraint(stage, "MoveDriver", "RigExecPositionConstraint", {driver.GetPath()});
+    moveDriver.GetRelationship(TfToken("rigExec:sources")).SetTargets({SdfPath("/Asset/DriverTarget")});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const size_t epoch = evaluator.GetBindingEpochDigest();
+    auto check = [&](double expected, size_t evaluations) {
+        const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(pose.valid);
+        CHECK(pose.solverEvaluations == evaluations);
+        if (pose.valid) {
+            CHECK(Near(pose.controlFrames.at(goal.GetPath()).Origin(), GfVec3d(expected, 0, 0)));
+            CHECK(Near(pose.jointFramesFinal.at(joints[2]).Origin(), GfVec3d(expected, 0, 0)));
+        }
+        return pose;
+    };
+    const auto first = check(7, 3);
+    if (first.valid) {
+        CHECK(Near(first.jointFramesBase.at(source.GetPath()).Origin(), GfVec3d(4, 0, 0)));
+        CHECK(Near(first.jointFramesFinal.at(source.GetPath()).Origin(), GfVec3d(5, 0, 0)));
+    }
+    check(7, 0);
+    goal.GetAttribute(TfToken("rest:tx")).Set(3.0);
+    check(8, 1);
+    target.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(6, 0, 0)));
+    check(9, 1);
+    CHECK(evaluator.GetBindingEpochDigest() == epoch);
+    bridge.GetAttribute(TfToken("default:space"))
+        .SetConnections({altRelay.GetPath().AppendProperty(TfToken("parent:space"))});
+    check(5, 3);
+    CHECK(evaluator.GetBindingEpochDigest() != epoch);
+    target.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(7, 0, 0)));
+    check(5, 0);
+    altDriver.GetAttribute(TfToken("avars:tx")).Set(1.0);
+    check(6, 2);
+    altDriver.GetAttribute(TfToken("avars:tx")).Set(2.0);
+    check(7, 2);
+    // Connected space ancestry participates in cycle validation.
+    bridge.GetAttribute(TfToken("default:space"))
+        .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
+    moveDriver.GetRelationship(TfToken("rigExec:sources")).SetTargets({joints[2]});
+    errors.clear();
+    CHECK(!evaluator.Compile(&errors));
+    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
+        return error.find("pose dependency cycle") != std::string::npos;
+    }));
 }
 
 int
@@ -2341,7 +3022,15 @@ main()
     TestInvalidContractsFailClosed();
     TestSolverBindsJointsUnderAnyScope();
     TestIncompleteSolverLeavesJointsVisible();
-    TestTwoBoneIkImpliedLengths();
+    TestTwoBoneIkImpliedLengths(false);
+    TestTwoBoneIkImpliedLengths(true);
+    TestTwoBoneIkRestFrameInputs();
+    TestAggregateSolverValueUpdates();
+    TestDeepSolverDependencySchedule();
+    TestSolverTransitiveConnectionInvalidation();
+    TestConstraintSolverDependencySchedule();
+    TestConstrainedSolverInputAncestor();
+    TestConnectedParentSpaceSolverInputs();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

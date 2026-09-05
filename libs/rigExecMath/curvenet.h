@@ -19,6 +19,7 @@
 #include "pxr/base/gf/vec3f.h"
 
 #include <functional>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -92,8 +93,12 @@ struct RigExecCurvenetTopology {
     size_t GetSplineCount() const { return splineIndices.size() / 4; }
 
     /// The two knot pool indices of spline \p s (its endpoints).
-    int GetSplineStartKnot(size_t s) const { return splineIndices[4 * s]; }
-    int GetSplineEndKnot(size_t s) const { return splineIndices[4 * s + 3]; }
+    int GetSplineStartKnot(size_t s) const {
+        return splineIndices[4 * s + (basis == RigExecCurvenetBasis::Bezier ? 0 : 1)];
+    }
+    int GetSplineEndKnot(size_t s) const {
+        return splineIndices[4 * s + (basis == RigExecCurvenetBasis::Bezier ? 3 : 2)];
+    }
 };
 
 /// Builds the derived structure from a spline-index array.
@@ -154,6 +159,10 @@ struct RigExecCurvenetSampling {
     /// Pool point index a sample coincides with, or -1. Knots land exactly
     /// on samples, which is what lets adjustments address them.
     std::vector<int> knotOfSample;
+    /// Linear control-pool stencil at the sampled positions. Catmull-Rom
+    /// coefficients use the fixed neutral chord-length parameterization.
+    std::vector<std::array<int, 4>> stencilIndices;
+    std::vector<std::array<double, 4>> stencilWeights;
 
     size_t GetSampleCount() const { return positions.size(); }
     size_t GetCurveCount() const {

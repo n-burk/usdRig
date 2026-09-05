@@ -65,6 +65,8 @@ add_library(rigExecMath STATIC
     libs/rigExecMath/weightFields.cpp
     libs/rigExecMath/simdKernels.cpp
     libs/rigExecMath/curvenet.cpp
+    libs/rigExecMath/curvenetWeights.cpp
+    libs/rigExecMath/curvenetAdjustments.cpp
     libs/rigExecMath/sparseSolve.cpp
     libs/rigExecMath/cutMesh.cpp
     libs/rigExecMath/profileMover.cpp
@@ -83,6 +85,8 @@ add_library(rigExec SHARED
     libs/rigExec/types.cpp
     libs/rigExec/computations.cpp
     libs/rigExec/moverKernels.cpp
+    libs/rigExec/curvenetWeightComputations.cpp
+    libs/rigExec/curvenetAdjuster.cpp
     libs/rigExec/moverGraph.cpp
     libs/rigExec/tapSet.cpp
     libs/rigExec/rigEvaluator.cpp
@@ -103,6 +107,16 @@ target_link_libraries(rigExec PUBLIC
 # nothing; this library is what tools (and the Python bindings) use to build
 # rigs programmatically.
 # ---------------------------------------------------------------------------
+add_library(rigExecStandalone SHARED
+    libs/rigExecStandalone/sceneDb.cpp
+    libs/rigExecStandalone/adapter.cpp
+    libs/rigExecStandalone/system.cpp
+    libs/rigExecStandalone/pack.cpp)
+target_include_directories(rigExecStandalone PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecStandalone PUBLIC rigExec exec esf usd sdf)
+
 add_library(rigExecRigging SHARED
     libs/rigExecRigging/rigBuilder.cpp
     libs/rigExecRigging/schemaAuthoring.cpp)
@@ -184,9 +198,28 @@ target_compile_definitions(testRigExecConstraints PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 
+add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
+target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
+target_compile_definitions(testRigExecStandalone PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecStandalone COMMAND testRigExecStandalone)
+
+add_executable(testRigExecPack tests/testRigExecPack.cpp)
+target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)
+target_compile_definitions(testRigExecPack PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecPack COMMAND testRigExecPack)
+
 add_executable(testRigExecCurvenet tests/testRigExecCurvenet.cpp)
 target_link_libraries(testRigExecCurvenet PRIVATE rigExecMath)
 add_test(NAME testRigExecCurvenet COMMAND testRigExecCurvenet)
+
+add_executable(testRigExecCurvenetAdjustments tests/testRigExecCurvenetAdjustments.cpp)
+target_link_libraries(testRigExecCurvenetAdjustments PRIVATE rigExecMath)
+add_test(NAME testRigExecCurvenetAdjustments COMMAND testRigExecCurvenetAdjustments)
+
+add_executable(testRigExecCurvenetAdjuster tests/testRigExecCurvenetAdjuster.cpp)
+target_link_libraries(testRigExecCurvenetAdjuster PRIVATE rigExec rigExecRigging)
+target_compile_definitions(testRigExecCurvenetAdjuster PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecCurvenetAdjuster COMMAND testRigExecCurvenetAdjuster)
 
 add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
 target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)
@@ -219,6 +252,18 @@ add_test(NAME testRigExecWeightOverlay COMMAND testRigExecWeightOverlay
 add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
+
+add_executable(testRigExecInteractive tests/testRigExecInteractive.cpp)
+target_link_libraries(testRigExecInteractive PRIVATE rigExec)
+target_compile_definitions(testRigExecInteractive PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecInteractive COMMAND testRigExecInteractive)
+
+add_executable(testRigExecDefaultSpaces tests/testRigExecDefaultSpaces.cpp)
+target_link_libraries(testRigExecDefaultSpaces PRIVATE rigExec)
+target_compile_definitions(testRigExecDefaultSpaces PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecDefaultSpaces COMMAND testRigExecDefaultSpaces)
 
 add_executable(testRigExecSchemaAuthoring
     tests/testRigExecSchemaAuthoring.cpp)
@@ -265,6 +310,11 @@ target_compile_definitions(probeCodingError PRIVATE ${_rigexec_schema_resource_d
 add_executable(probeImagingPipeline tests/probeImagingPipeline.cpp)
 target_link_libraries(probeImagingPipeline PRIVATE rigExecImaging usdImaging usdGeom)
 target_compile_definitions(probeImagingPipeline PRIVATE ${_rigexec_schema_resource_define})
+
+# The non-public Esf/Exec seam must qualify separately on each stock USD
+# package. A failed link is a compatibility gate, not a reason to change USD.
+add_executable(probeEsfCompatibility EXCLUDE_FROM_ALL tests/probeEsfCompatibility.cpp)
+target_link_libraries(probeEsfCompatibility PRIVATE exec esfUsd usd)
 
 endif()  # RIGEXEC_BUILD_TESTS
 
@@ -318,6 +368,12 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_schema_authoring.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecBake COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_bake.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecInverse COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_inverse.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
     # Headless usdview-plugin tests (Qt-free modules under plugin/).
     # testGizmoMath and testGizmoScreen are written by later tasks; they
@@ -364,6 +420,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     # handled by the test itself (_setup_environment); RIGEXEC_USD_INSTALL
     # pins the configured USD install so it does not have to guess.
     foreach(_python_test testRigExecPython testRigExecPythonSchemaAuthoring
+                         testRigExecBake testRigExecInverse
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
@@ -389,7 +446,7 @@ endif()
 # ---------------------------------------------------------------------------
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecRigging rigExecImaging
+install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
@@ -397,7 +454,7 @@ install(TARGETS rigExecMath rigExec rigExecRigging rigExecImaging
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
 # through, so dot-directories and local tooling state are excluded explicitly.
-foreach(_lib rigExecMath rigExec rigExecRigging rigExecImaging)
+foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING

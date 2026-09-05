@@ -8,6 +8,7 @@
 #define RIGEXEC_TYPES_H
 
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/curvenetAdjustments.h"
 
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
@@ -17,6 +18,9 @@
 #include <vector>
 
 namespace rigExec {
+
+/// Retain the shared computation/type registration library in headless hosts.
+void RigExecLoadComputations();
 
 struct RigExecProfileMoverBinding;
 
@@ -170,6 +174,7 @@ struct RigExecMoverParameters {
     RigExecWeightPacket weights;
     /// Dense per-point combined blend delta (already channel-scaled).
     std::vector<GfVec3f> blendDeltas;
+    bool blendSurfaceFrame = false;
 
     /// Operation scalars: volumeCorrect reference volume and the internal
     /// full-step strength consumed by smooth/volume/surface/curvenet kernels.
@@ -203,11 +208,13 @@ struct RigExecMoverParameters {
     /// cut. Held as an incomplete type so the geometry solver's headers stay
     /// out of every exec translation unit.
     std::shared_ptr<const RigExecProfileMoverBinding> curvenetBinding;
+    RigExecCurvenetBasis curvenetAdjustmentBasis = RigExecCurvenetBasis::Bezier;
+    std::vector<RigExecCurvenetAdjustmentCommand> curvenetAdjustments;
 
     bool operator==(const RigExecMoverParameters &o) const {
         return kind == o.kind && enabled == o.enabled && valid == o.valid &&
                transform == o.transform && weights == o.weights &&
-               blendDeltas == o.blendDeltas &&
+               blendDeltas == o.blendDeltas && blendSurfaceFrame == o.blendSurfaceFrame &&
                referenceVolume == o.referenceVolume &&
                strength == o.strength &&
                topologyCounts == o.topologyCounts &&
@@ -215,7 +222,9 @@ struct RigExecMoverParameters {
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&
                restPoints == o.restPoints && divisions == o.divisions &&
                bindCoords == o.bindCoords && frames == o.frames &&
-               widths == o.widths && curvenetBinding == o.curvenetBinding;
+               widths == o.widths && curvenetBinding == o.curvenetBinding &&
+               curvenetAdjustmentBasis == o.curvenetAdjustmentBasis &&
+               curvenetAdjustments == o.curvenetAdjustments;
     }
     bool operator!=(const RigExecMoverParameters &o) const {
         return !(*this == o);

@@ -99,6 +99,10 @@ except ImportError as _exc:  # pragma: no cover - environment diagnostic
 
 __version__ = _native.__version__
 
+from .bake import export_baked
+from .inverse import InverseResult, solve_parameters
+from .curvenet import create_curvenet_weight
+
 # ---------------------------------------------------------------------------
 # Re-exported native surface.
 # ---------------------------------------------------------------------------
@@ -150,6 +154,8 @@ SurfaceMover = _native.SurfaceMover
 SmoothMover = _native.SmoothMover
 VolumeCorrectMover = _native.VolumeCorrectMover
 CurvenetMover = _native.CurvenetMover
+CurvenetAdjustment = _native.CurvenetAdjustment
+CurvenetAdjusterMover = _native.CurvenetAdjusterMover
 FloatMathMover = _native.FloatMathMover
 Vec3fMathMover = _native.Vec3fMathMover
 MatrixMathMover = _native.MatrixMathMover
@@ -166,12 +172,14 @@ __all__ = [
     "SingleChainIkConstraint",
     "Weight", "StaticWeight", "DynamicWeight", "VolumeWeight", "SphereWeight",
     "PlaneWeight", "CurveWeight", "CombineWeight",
-    "BlendInput", "BlendSample", "Curvenet",
+    "BlendInput", "BlendSample", "Curvenet", "CurvenetAdjustment", "CurvenetAdjusterMover",
     "MatrixMover", "LatticeMover", "BlendShapeMover", "CurveMover",
     "SurfaceMover", "SmoothMover", "VolumeCorrectMover", "CurvenetMover",
     "FloatMathMover", "Vec3fMathMover", "MatrixMathMover",
     "MoverChain",
     "load_schema_plugin", "identity",
+    "export_baked", "InverseResult", "solve_parameters",
+    "create_curvenet_weight",
 ]
 
 # ---------------------------------------------------------------------------
@@ -285,6 +293,9 @@ _CONCRETE_SCHEMA_NAMES = (
     "CurveWeight",
     "Curvenet",
     "CurvenetMover",
+    "CurvenetAdjustment",
+    "CurvenetAdjusterMover",
+    "CurvenetWeight",
     "DynamicWeight",
     "FkChain",
     "FloatMathMover",

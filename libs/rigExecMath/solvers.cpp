@@ -292,9 +292,11 @@ RigExecDistributeTwist(
     const RigExecPointFrame &end,
     const std::array<GfVec3d, 4> &startRest,
     const std::array<GfVec3d, 4> &endRest,
-    const std::vector<double> &weights)
+    const std::vector<double> &weights,
+    double twistTurns)
 {
     std::vector<RigExecPointFrame> result;
+    if (!std::isfinite(twistTurns)) return result;
     result.reserve(weights.size());
 
     RigExecTransformParams ps, pe;
@@ -330,6 +332,8 @@ RigExecDistributeTwist(
     // Unwrapped twist angle about localAim.
     double twistAngle = 2.0 * std::atan2(
         GfDot(twist.GetImaginary(), localAim), twist.GetReal());
+    twistAngle += 2.0 * std::acos(-1.0) * twistTurns;
+    if (!std::isfinite(twistAngle)) return result;
 
     for (size_t k = 0; k < weights.size(); ++k) {
         const double w = std::min(std::max(weights[k], 0.0), 1.0);

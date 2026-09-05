@@ -277,6 +277,8 @@ _TriangleGrid _BuildTriangleGrid(const _MeshView &view)
 
 struct _Projection {
     int face = -1;
+    int triangle = -1;
+    double weights[3] = {0,0,0};
     GfVec3d position{0, 0, 0};
     double distance = 0.0;
 };
@@ -297,6 +299,8 @@ _Projection _ClosestPoint(const _MeshView &view, const _TriangleGrid &grid,
             best.distance = d;
             best.position = p;
             best.face = view.triangleFace[t];
+            best.triangle = t;
+            for (int i = 0; i < 3; ++i) best.weights[i] = bary[i];
         }
     };
 
@@ -491,6 +495,19 @@ RigExecMeshSurfaceQuery::RigExecMeshSurfaceQuery(
 }
 
 RigExecMeshSurfaceQuery::~RigExecMeshSurfaceQuery() = default;
+
+bool RigExecMeshSurfaceQuery::Project(const GfVec3d &point,
+    std::vector<std::pair<int,double>> *weights) const
+{
+    if (!weights) return false;
+    weights->clear();
+    const _Projection hit = _ClosestPoint(_impl->view, _impl->grid, point);
+    if (hit.triangle < 0) return false;
+    for (int i = 0; i < 3; ++i)
+        if (hit.weights[i] != 0.0)
+            weights->emplace_back(_impl->view.triangleVertex[3*hit.triangle+i], hit.weights[i]);
+    return true;
+}
 
 GfVec3d RigExecMeshSurfaceQuery::Normal(const GfVec3d &point) const
 {

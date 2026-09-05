@@ -10,6 +10,8 @@
 
 namespace rigExec {
 
+void RigExecLoadComputations() {}
+
 float
 RigExecWeightPacket::Resolve(size_t i, size_t count) const
 {

@@ -133,6 +133,9 @@ CONCRETE_SCHEMA_TYPES = (
     "RigExecCurveWeight",
     "RigExecCurvenet",
     "RigExecCurvenetMover",
+    "RigExecCurvenetAdjustment",
+    "RigExecCurvenetAdjusterMover",
+    "RigExecCurvenetWeight",
     "RigExecDynamicWeight",
     "RigExecFkChain",
     "RigExecFloatMathMover",
@@ -188,8 +191,46 @@ class SchemaFacadeTests(_ContractTestCase):
     def setUp(self):
         self.stage = Usd.Stage.CreateInMemory()
 
+    def test_curvenet_weight_authoring(self):
+        builder = rigexec.Builder.create(self.stage, "/Rig")
+        net = builder.add_curvenet("Net", [(0, 0, 0), (1, 0, 0),
+                                          (2, 0, 0), (3, 0, 0)])
+        net_prim = self.stage.GetPrimAtPath(net.path)
+        net_prim.GetAttribute("rigExec:splineIndices").Set([0, 1, 2, 3])
+        mesh = UsdGeom.Mesh.Define(self.stage, "/Mesh")
+        mesh.CreatePointsAttr([(0, 0, 0), (3, 0, 0), (0, 1, 0)])
+        mesh.CreateFaceVertexCountsAttr([3])
+        mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+        result = rigexec.create_curvenet_weight(
+            self.stage, "/Rig/Weights/Net", net, mesh, [0, 0.3, 0.7, 1], [1, 2])
+        self.assertTrue(result.valid)
+        prim = self.stage.GetPrimAtPath(result.path)
+        self.assertEqual(prim.GetTypeName(), "RigExecCurvenetWeight")
+        expected = {
+            "rigExec:weightTarget": "/Mesh.points",
+            "rigExec:curvenetPoints": net.path + ".points",
+            "rigExec:curvenetSplineIndices": net.path + ".rigExec:splineIndices",
+            "rigExec:meshFaceCounts": "/Mesh.faceVertexCounts",
+            "rigExec:meshFaceIndices": "/Mesh.faceVertexIndices",
+        }
+        for name, target in expected.items():
+            self.assertEqual(_targets(prim.GetRelationship(name)), [target])
+        self.assertEqual(list(prim.GetAttribute("rigExec:autoSmooth").Get()), [1, 2])
+        self.assertEqual(prim.GetAttribute("rigExec:rangePolicy").Get(), "clamp")
+        self.assertAlmostEqual(prim.GetAttribute("inputs:weights").Get()[2], 0.7)
+        for name in ("rigExec:basis", "rigExec:samplesPerSpline"):
+            self.assertEqual(prim.GetAttribute(name).GetConnections(),
+                             [net_prim.GetPath().AppendProperty(name)])
+        original = self.stage.GetRootLayer().ExportToString()
+        for weights, smooth in (([0, 1], []), ([0, float("nan"), 1, 0], []),
+                                ([0, 0, 1, 1], [4]), ([0, 0, 1, 1], [1, 1])):
+            with self.assertRaises(ValueError):
+                rigexec.create_curvenet_weight(self.stage, "/Rig/Weights/Invalid", net,
+                                               mesh, weights, smooth)
+            self.assertEqual(self.stage.GetRootLayer().ExportToString(), original)
+
     def test_all_concrete_types_define_and_get(self):
-        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 34)
+        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 37)
         self.assertEqual(
             set(rigexec.schema.names()), set(CONCRETE_SCHEMA_TYPES))
         self.assertFalse(hasattr(rigexec.schema, "CustomConstraint"))

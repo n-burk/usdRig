@@ -651,8 +651,15 @@ PYBIND11_MODULE(_rigexec, m) {
         })
         .def_property_readonly("mover_graph_parity_mismatches",
             [](const rigExec::RigExecRigPose &p) { return p.moverGraphParityMismatches; })
+        .def_readonly("mover_graph_revisions_created",
+            &rigExec::RigExecRigPose::moverGraphRevisionsCreated)
+        .def_readonly("mover_graph_revisions_executed",
+            &rigExec::RigExecRigPose::moverGraphRevisionsExecuted)
+        .def_readonly("mover_graph_schedules_built",
+            &rigExec::RigExecRigPose::moverGraphSchedulesBuilt)
         .def_property_readonly("solver_override_rounds",
             [](const rigExec::RigExecRigPose &p) { return p.solverOverrideRounds; })
+        .def_readonly("solver_evaluations", &rigExec::RigExecRigPose::solverEvaluations)
         .def_property_readonly("solver_overrides_converged",
             [](const rigExec::RigExecRigPose &p) { return p.solverOverridesConverged; })
 
@@ -683,6 +690,11 @@ PYBIND11_MODULE(_rigexec, m) {
            "The final rest-to-pose affine map of one joint (16 numbers, row-major).")
 
         // Control frames.
+        .def("control_paths", [](const rigExec::RigExecRigPose &p) {
+                std::vector<std::string> out;
+                for (const auto &kv : p.controlFrames) out.push_back(_PathStr(kv.first));
+                return out;
+            })
         .def("control_frame", [](const rigExec::RigExecRigPose &p, std::string path) {
                 auto it = p.controlFrames.find(SdfPath(path));
                 if (it == p.controlFrames.end()) {
@@ -692,6 +704,11 @@ PYBIND11_MODULE(_rigexec, m) {
             }, py::arg("path"))
 
         // Provider xforms.
+        .def("provider_paths", [](const rigExec::RigExecRigPose &p) {
+                std::vector<std::string> out;
+                for (const auto &kv : p.providerXforms) out.push_back(_PathStr(kv.first));
+                return out;
+            })
         .def("provider_xform", [](const rigExec::RigExecRigPose &p, std::string path) {
                 auto it = p.providerXforms.find(SdfPath(path));
                 if (it == p.providerXforms.end()) {
@@ -965,6 +982,12 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("paths"));
 
     py::class_<rigExec::RigExecTwoBoneIkHandle, rigExec::RigExecSolverHandle>(m, "TwoBoneIk")
+        .def("set_rest_joints", [](rigExec::RigExecTwoBoneIkHandle &h,
+                                    const py::iterable &joints) {
+            h.SetRestJoints(_PythonToDependencyPaths(
+                joints, h.GetStage(), TfToken("RigExecJoint")));
+        }, py::arg("paths"),
+           "Set ordered rest inputs [root, mid, end] without binding outputs.")
         .def("set_root_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
             h.SetRootControl(_PythonToDependencyPath(p, h.GetStage()));
         }, py::arg("path"))
@@ -1013,6 +1036,7 @@ PYBIND11_MODULE(_rigexec, m) {
             h.SetEnd(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
         }, py::arg("path"))
         .def("set_count", &rigExec::RigExecTwistDistributionHandle::SetCount, py::arg("count"))
+        .def("set_twist_turns", &rigExec::RigExecTwistDistributionHandle::SetTwistTurns, py::arg("turns"))
         .def("set_weights", [](rigExec::RigExecTwistDistributionHandle &h, std::vector<float> w) { h.SetWeights(w); }, py::arg("weights"))
         .def("set_distribution", [](rigExec::RigExecTwistDistributionHandle &h, std::string v) { h.SetDistribution(TfToken(v)); }, py::arg("mode"))
         .def("set_joint_elements", [](rigExec::RigExecTwistDistributionHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
@@ -1246,6 +1270,14 @@ PYBIND11_MODULE(_rigexec, m) {
             return h.AddSample(name, activation);
         }, py::arg("name"), py::arg("activation") = 1.0f);
 
+    py::class_<rigExec::RigExecCurvenetAdjustmentHandle, rigExec::RigExecControlHandle>(m, "CurvenetAdjustment")
+        .def("set_curvenet", [](rigExec::RigExecCurvenetAdjustmentHandle &h, py::object p) {
+            h.SetCurvenet(_PythonToDependencyPath(p,h.GetStage(),TfToken("RigExecCurvenet"),false));
+        }, py::arg("curvenet"))
+        .def("set_knot_index", &rigExec::RigExecCurvenetAdjustmentHandle::SetKnotIndex, py::arg("index"))
+        .def("set_include_tangents", &rigExec::RigExecCurvenetAdjustmentHandle::SetIncludeTangents, py::arg("include"))
+        .def("add_tangent", &rigExec::RigExecCurvenetAdjustmentHandle::AddTangent, py::arg("name"), py::arg("index"));
+
     // Curvenet.
     py::class_<rigExec::RigExecCurvenetHandle, RigExecHandleBase>(m, "Curvenet")
         .def("set_points", [](rigExec::RigExecCurvenetHandle &h, std::vector<std::array<double, 3>> pts) {
@@ -1338,6 +1370,14 @@ PYBIND11_MODULE(_rigexec, m) {
 
     py::class_<rigExec::RigExecVolumeCorrectMoverHandle, rigExec::RigExecMoverHandle>(m, "VolumeCorrectMover")
         .def("set_strength", &rigExec::RigExecVolumeCorrectMoverHandle::SetStrength, py::arg("strength"));
+
+    py::class_<rigExec::RigExecCurvenetAdjusterMoverHandle, rigExec::RigExecMoverHandle>(m, "CurvenetAdjusterMover")
+        .def("set_adjustments", [](rigExec::RigExecCurvenetAdjusterMoverHandle &h, py::iterable inputs) {
+            std::vector<SdfPath> paths;
+            for (const auto &p:inputs) paths.push_back(_PythonToDependencyPath(
+                py::reinterpret_borrow<py::object>(p),h.GetStage(),TfToken("RigExecCurvenetAdjustment"),false));
+            h.SetAdjustments(paths);
+        },py::arg("adjustments"));
 
     py::class_<rigExec::RigExecCurvenetMoverHandle, rigExec::RigExecMoverHandle>(m, "CurvenetMover")
         .def("set_curvenet", [](rigExec::RigExecCurvenetMoverHandle &h, py::object p) { h.SetCurvenet(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecCurvenet"), false)); }, py::arg("path"))
@@ -1453,6 +1493,14 @@ PYBIND11_MODULE(_rigexec, m) {
                 _PythonToDependencyPath(target, c.GetStage()));
         }, py::arg("name"), py::arg("default_weight") = 1.0f,
            py::arg("target") = py::none())
+        .def("add_curvenet_adjuster_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                py::iterable inputs, float defaultWeight, py::object target) {
+            std::vector<SdfPath> paths;
+            for (const auto &p:inputs) paths.push_back(_PythonToDependencyPath(
+                py::reinterpret_borrow<py::object>(p),c.GetStage(),TfToken("RigExecCurvenetAdjustment"),false));
+            return c.AddCurvenetAdjusterMover(name,paths,defaultWeight,
+                _PythonToDependencyPath(target,c.GetStage()));
+        },py::arg("name"),py::arg("adjustments"),py::arg("default_weight")=1.0f,py::arg("target")=py::none())
         .def("add_curvenet_mover", [](rigExec::RigExecMoverChain &c, std::string name,
                                        py::object curvenetPrim, float defaultWeight,
                                        py::object target) {
@@ -1787,6 +1835,11 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("add_blend_input", &rigExec::RigExecRigBuilder::AddBlendInput,
              py::arg("name"), py::arg("weight") = 0.0f)
 
+        .def("add_curvenet_adjustment", [](rigExec::RigExecRigBuilder &b, std::string name,
+                py::object curvenet, int index) {
+            return b.AddCurvenetAdjustment(name,_PythonToDependencyPath(curvenet,
+                b.GetStage(),TfToken("RigExecCurvenet"),false),index);
+        },py::arg("name"),py::arg("curvenet"),py::arg("knot_index"))
         // Curvenets.
         .def("add_curvenet", [](rigExec::RigExecRigBuilder &b, std::string name, std::vector<std::array<double, 3>> points) {
             std::vector<GfVec3f> v;

@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 using rigExec::RigExecPointFrame;
 using rigExec::RigExecPointFrameArray;
@@ -41,7 +42,17 @@ TF_DEFINE_PRIVATE_TOKENS(
     (computePointFrame)
     (computeMatrix)
     (computeRestFrame)
+    (computeDefaultFrame)
     (computePointFrameArray)
+    (computedDefaultSpace)
+    (computedParentDefaultSpace)
+    (computedParentSpace)
+    (computedAvarDefaultSpace)
+    (computedPosedDefaultSpace)
+    (rawSpace)
+    (connectedSpace)
+    (fallbackSpace)
+    (parentDefaultFrame)
 
     // Input names.
     (parentFrame)
@@ -58,6 +69,8 @@ TF_DEFINE_PRIVATE_TOKENS(
     (startRest)
     (endFrame)
     (endRest)
+    (jointRests)
+    (restJointFrames)
 
     // Attribute tokens.
     ((controls, "rigExec:controls"))
@@ -75,6 +88,10 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((endRel, "rigExec:end"))
     ((weights, "rigExec:weights"))
     ((count, "rigExec:count"))
+    ((twistTurns, "inputs:twistTurns"))
+    ((joints, "rigExec:joints"))
+    ((jointElements, "rigExec:jointElements"))
+    ((restJoints, "rigExec:restJoints"))
     ((inputsWeight, "inputs:weight"))
     ((inputsStretch, "inputs:stretch"))
     ((inputsSoftness, "inputs:softness"))
@@ -88,6 +105,18 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((restRx, "rest:rx"))
     ((restRy, "rest:ry"))
     ((restRz, "rest:rz"))
+    ((defaultSpace, "default:space"))
+    ((defaultTx, "default:tx"))
+    ((defaultTy, "default:ty"))
+    ((defaultTz, "default:tz"))
+    ((defaultRx, "default:rx"))
+    ((defaultRy, "default:ry"))
+    ((defaultRz, "default:rz"))
+    ((posedDefaultSpace, "posed:defaultSpace"))
+    ((avarDefaultSpace, "avars:defaultSpace"))
+    ((avarUnitScaleFactor, "avars:unitScaleFactor"))
+    ((parentSpace, "parent:space"))
+    ((parentDefaultSpace, "parent:defaultSpace"))
     ((avarTx, "avars:tx"))
     ((avarTy, "avars:ty"))
     ((avarTz, "avars:tz"))
@@ -225,6 +254,60 @@ _ComputeJointRestFrame(const VdfContext &ctx)
     return _FrameFromMatrix(_JointRestSpace(ctx));
 }
 
+static GfMatrix4d
+_SpaceFromFrame(const RigExecPointFrame *frame)
+{
+    GfMatrix4d result(1.0);
+    if (frame) {
+        if (!frame->IsValid() || frame->IsDegenerate() ||
+            !rigExec::RigExecPointsToMatrix(_IdentityLandmarks(), frame->points, &result)) {
+            // Missing ancestors select identity; an existing invalid frame
+            // must retain failure through the matrix-typed space expressions.
+            // FrameFromMatrix will classify this sentinel as degenerate.
+            result[3][0] = std::numeric_limits<double>::quiet_NaN();
+        }
+    }
+    return result;
+}
+
+// Matrix spaces preserve the existing posed:space convention: a connection
+// (including identity) is authoritative, a non-identity authored value is an
+// explicit space, and the schema identity selects the computed fallback.
+static GfMatrix4d
+_ComputeSpaceExpression(const VdfContext &ctx)
+{
+    if (const auto *connected =
+            ctx.GetInputValuePtr<GfMatrix4d>(_tokens->connectedSpace)) {
+        return *connected;
+    }
+    if (const auto *raw = ctx.GetInputValuePtr<GfMatrix4d>(_tokens->rawSpace)) {
+        if (*raw != GfMatrix4d(1.0)) return *raw;
+    }
+    const auto *fallback =
+        ctx.GetInputValuePtr<GfMatrix4d>(_tokens->fallbackSpace);
+    return fallback ? *fallback : GfMatrix4d(1.0);
+}
+
+static GfMatrix4d
+_ComputeDefaultSpace(const VdfContext &ctx)
+{
+    const GfMatrix4d rest = _SpaceFromFrame(
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->selfRestFrame));
+    const GfMatrix4d parentRest = _SpaceFromFrame(
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->parentRestFrame));
+    const auto *parentDefault =
+        ctx.GetInputValuePtr<GfMatrix4d>(_tokens->parentDefaultSpace);
+    const GfMatrix4d offset = _ComposeAvars(
+        _ScalarInput(ctx, _tokens->defaultTx, 0),
+        _ScalarInput(ctx, _tokens->defaultTy, 0),
+        _ScalarInput(ctx, _tokens->defaultTz, 0), 1, 1, 1,
+        _ScalarInput(ctx, _tokens->defaultRx, 0),
+        _ScalarInput(ctx, _tokens->defaultRy, 0),
+        _ScalarInput(ctx, _tokens->defaultRz, 0), 0, TfToken("XYZ"));
+    return offset * rest * parentRest.GetInverse() *
+           (parentDefault ? *parentDefault : GfMatrix4d(1.0));
+}
+
 static RigExecPointFrame
 _ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
 {
@@ -244,39 +327,22 @@ _ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
     if (authored && *authored != GfMatrix4d(1.0)) {
         return _FrameFromMatrix(*authored);
     }
-    // 3. Fallback: follow the namespace-parent joint's posed space with
-    // the local rest offset, avars applied as a local delta (Ir's
-    // "follows the parent's posed space" behavior).
-    const GfMatrix4d rest = _JointRestSpace(ctx);
-    GfMatrix4d parentRest(1.0), parentPosed(1.0);
-    if (const RigExecPointFrame *frame =
-            ctx.GetInputValuePtr<RigExecPointFrame>(
-                _tokens->parentRestFrame)) {
-        if (frame->IsValid()) {
-            static const std::array<GfVec3d, 4> identity = {
-                GfVec3d(0), GfVec3d(1, 0, 0), GfVec3d(0, 1, 0),
-                GfVec3d(0, 0, 1)};
-            rigExec::RigExecPointsToMatrix(
-                identity, frame->points, &parentRest);
-        }
-    }
-    if (const RigExecPointFrame *frame =
-            ctx.GetInputValuePtr<RigExecPointFrame>(
-                _tokens->parentPosedFrame)) {
-        if (frame->IsValid()) {
-            static const std::array<GfVec3d, 4> identity = {
-                GfVec3d(0), GfVec3d(1, 0, 0), GfVec3d(0, 1, 0),
-                GfVec3d(0, 0, 1)};
-            rigExec::RigExecPointsToMatrix(
-                identity, frame->points, &parentPosed);
-        }
-    }
+    // 3. Start from the effective default pose, follow the selected parent,
+    // then apply local avars. With unmodified default channels this reduces
+    // exactly to avars * rest * parentRest^-1 * parentPosed.
+    const auto *defaultSpace =
+        ctx.GetInputValuePtr<GfMatrix4d>(_tokens->posedDefaultSpace);
+    const auto *parentDefault =
+        ctx.GetInputValuePtr<GfMatrix4d>(_tokens->parentDefaultSpace);
+    const auto *parentPosed =
+        ctx.GetInputValuePtr<GfMatrix4d>(_tokens->parentSpace);
+    const double units = _ScalarInput(ctx, _tokens->avarUnitScaleFactor, 1);
     const TfToken *order =
         ctx.GetInputValuePtr<TfToken>(_tokens->avarRotationOrder);
     const GfMatrix4d avars = _ComposeAvars(
-        _ScalarInput(ctx, _tokens->avarTx, 0),
-        _ScalarInput(ctx, _tokens->avarTy, 0),
-        _ScalarInput(ctx, _tokens->avarTz, 0),
+        _ScalarInput(ctx, _tokens->avarTx, 0) * units,
+        _ScalarInput(ctx, _tokens->avarTy, 0) * units,
+        _ScalarInput(ctx, _tokens->avarTz, 0) * units,
         readScaleAvars ? _ScalarInput(ctx, _tokens->avarSx, 1) : 1.0,
         readScaleAvars ? _ScalarInput(ctx, _tokens->avarSy, 1) : 1.0,
         readScaleAvars ? _ScalarInput(ctx, _tokens->avarSz, 1) : 1.0,
@@ -285,9 +351,10 @@ _ComputeXformablePointFrame(const VdfContext &ctx, bool readScaleAvars)
         _ScalarInput(ctx, _tokens->avarRz, 0),
         _ScalarInput(ctx, _tokens->avarRspin, 0),
         order ? *order : TfToken("XYZ"));
-    // world = avars * (rest relative to parentRest) * parentPosed.
     return _FrameFromMatrix(
-        avars * rest * parentRest.GetInverse() * parentPosed);
+        avars * (defaultSpace ? *defaultSpace : GfMatrix4d(1.0)) *
+        (parentDefault ? parentDefault->GetInverse() : GfMatrix4d(1.0)) *
+        (parentPosed ? *parentPosed : GfMatrix4d(1.0)));
 }
 
 static RigExecPointFrame
@@ -330,6 +397,19 @@ _ComputeJointMatrix(const VdfContext &ctx)
 
 #define RIGEXEC_NO_AVAR_SCALE_INPUTS
 
+#define RIGEXEC_SPACE_EXPRESSION(AttributeToken, FallbackComputation)        \
+    self.AttributeExpression(AttributeToken)                               \
+        .Callback<GfMatrix4d>(&_ComputeSpaceExpression)                      \
+        .Inputs(                                                            \
+            Computation<GfMatrix4d>(                                        \
+                ExecBuiltinComputations->computeResolvedValue)             \
+                .InputName(_tokens->rawSpace),                              \
+            Connections<GfMatrix4d>(                                        \
+                ExecBuiltinComputations->computeValue)                     \
+                .InputName(_tokens->connectedSpace),                        \
+            Prim().Computation<GfMatrix4d>(FallbackComputation)              \
+                .InputName(_tokens->fallbackSpace));
+
 #define RIGEXEC_REGISTER_XFORMABLE(                                         \
     SchemaName, PointFrameCallback, ScaleInputs)                             \
     EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(SchemaName)                        \
@@ -344,6 +424,66 @@ _ComputeJointMatrix(const VdfContext &ctx)
                 AttributeValue<double>(_tokens->restRx),                     \
                 AttributeValue<double>(_tokens->restRy),                     \
                 AttributeValue<double>(_tokens->restRz));                    \
+        self.PrimComputation(_tokens->computedDefaultSpace)                 \
+            .Callback<GfMatrix4d>(&_ComputeDefaultSpace)                     \
+            .Inputs(                                                        \
+                Computation<RigExecPointFrame>(_tokens->computeRestFrame)   \
+                    .InputName(_tokens->selfRestFrame),                     \
+                NamespaceAncestor<RigExecPointFrame>(                       \
+                    _tokens->computeRestFrame)                              \
+                    .InputName(_tokens->parentRestFrame),                   \
+                AttributeValue<GfMatrix4d>(_tokens->parentDefaultSpace),     \
+                AttributeValue<double>(_tokens->defaultTx),                 \
+                AttributeValue<double>(_tokens->defaultTy),                 \
+                AttributeValue<double>(_tokens->defaultTz),                 \
+                AttributeValue<double>(_tokens->defaultRx),                 \
+                AttributeValue<double>(_tokens->defaultRy),                 \
+                AttributeValue<double>(_tokens->defaultRz));                \
+        self.PrimComputation(_tokens->computeDefaultFrame)                  \
+            .Callback<RigExecPointFrame>(+[](const VdfContext &ctx) {        \
+                return _FrameFromMatrix(ctx.GetInputValue<GfMatrix4d>(       \
+                    _tokens->defaultSpace));                                \
+            })                                                              \
+            .Inputs(AttributeValue<GfMatrix4d>(_tokens->defaultSpace));       \
+        self.PrimComputation(_tokens->computedParentDefaultSpace)           \
+            .Callback<GfMatrix4d>(+[](const VdfContext &ctx) {               \
+                return _SpaceFromFrame(                                     \
+                    ctx.GetInputValuePtr<RigExecPointFrame>(                \
+                        _tokens->parentDefaultFrame));                      \
+            })                                                              \
+            .Inputs(NamespaceAncestor<RigExecPointFrame>(                   \
+                _tokens->computeDefaultFrame)                               \
+                .InputName(_tokens->parentDefaultFrame));                   \
+        self.PrimComputation(_tokens->computedParentSpace)                  \
+            .Callback<GfMatrix4d>(+[](const VdfContext &ctx) {               \
+                return _SpaceFromFrame(                                     \
+                    ctx.GetInputValuePtr<RigExecPointFrame>(                \
+                        _tokens->parentPosedFrame));                        \
+            })                                                              \
+            .Inputs(NamespaceAncestor<RigExecPointFrame>(                   \
+                _tokens->computePointFrame)                                 \
+                .InputName(_tokens->parentPosedFrame));                     \
+        self.PrimComputation(_tokens->computedAvarDefaultSpace)             \
+            .Callback<GfMatrix4d>(+[](const VdfContext &ctx) {               \
+                return ctx.GetInputValue<GfMatrix4d>(_tokens->defaultSpace); \
+            })                                                              \
+            .Inputs(AttributeValue<GfMatrix4d>(_tokens->defaultSpace));       \
+        self.PrimComputation(_tokens->computedPosedDefaultSpace)            \
+            .Callback<GfMatrix4d>(+[](const VdfContext &ctx) {               \
+                return ctx.GetInputValue<GfMatrix4d>(                        \
+                    _tokens->avarDefaultSpace);                             \
+            })                                                              \
+            .Inputs(AttributeValue<GfMatrix4d>(_tokens->avarDefaultSpace));   \
+        RIGEXEC_SPACE_EXPRESSION(                                           \
+            _tokens->defaultSpace, _tokens->computedDefaultSpace)            \
+        RIGEXEC_SPACE_EXPRESSION(                                           \
+            _tokens->avarDefaultSpace, _tokens->computedAvarDefaultSpace)    \
+        RIGEXEC_SPACE_EXPRESSION(                                           \
+            _tokens->posedDefaultSpace, _tokens->computedPosedDefaultSpace)  \
+        RIGEXEC_SPACE_EXPRESSION(                                           \
+            _tokens->parentSpace, _tokens->computedParentSpace)              \
+        RIGEXEC_SPACE_EXPRESSION(                                           \
+            _tokens->parentDefaultSpace, _tokens->computedParentDefaultSpace)\
                                                                              \
         self.PrimComputation(_tokens->computePointFrame)                     \
             .Callback<RigExecPointFrame>(PointFrameCallback)                 \
@@ -353,13 +493,10 @@ _ComputeJointMatrix(const VdfContext &ctx)
                         ExecBuiltinComputations->computeValue)               \
                     .InputName(_tokens->posedConnected),                     \
                 AttributeValue<GfMatrix4d>(_tokens->posedSpace),             \
-                AttributeValue<GfMatrix4d>(_tokens->restSpace),              \
-                AttributeValue<double>(_tokens->restTx),                     \
-                AttributeValue<double>(_tokens->restTy),                     \
-                AttributeValue<double>(_tokens->restTz),                     \
-                AttributeValue<double>(_tokens->restRx),                     \
-                AttributeValue<double>(_tokens->restRy),                     \
-                AttributeValue<double>(_tokens->restRz),                     \
+                AttributeValue<GfMatrix4d>(_tokens->posedDefaultSpace),      \
+                AttributeValue<GfMatrix4d>(_tokens->parentDefaultSpace),     \
+                AttributeValue<GfMatrix4d>(_tokens->parentSpace),            \
+                AttributeValue<double>(_tokens->avarUnitScaleFactor),       \
                 AttributeValue<double>(_tokens->avarTx),                     \
                 AttributeValue<double>(_tokens->avarTy),                     \
                 AttributeValue<double>(_tokens->avarTz),                     \
@@ -368,13 +505,7 @@ _ComputeJointMatrix(const VdfContext &ctx)
                 AttributeValue<double>(_tokens->avarRy),                     \
                 AttributeValue<double>(_tokens->avarRz),                     \
                 AttributeValue<double>(_tokens->avarRspin),                  \
-                AttributeValue<TfToken>(_tokens->avarRotationOrder),         \
-                NamespaceAncestor<RigExecPointFrame>(                        \
-                    _tokens->computePointFrame)                              \
-                    .InputName(_tokens->parentPosedFrame),                   \
-                NamespaceAncestor<RigExecPointFrame>(                        \
-                    _tokens->computeRestFrame)                               \
-                    .InputName(_tokens->parentRestFrame));                   \
+                AttributeValue<TfToken>(_tokens->avarRotationOrder));        \
                                                                              \
         self.PrimComputation(_tokens->computeMatrix)                         \
             .Callback<GfMatrix4d>(&_ComputeJointMatrix)                      \
@@ -418,6 +549,7 @@ RIGEXEC_REGISTER_XFORMABLE(
     RigExecVolumeWeight, &_ComputeVolumeWeightPointFrame,
     RIGEXEC_NO_AVAR_SCALE_INPUTS)
 #undef RIGEXEC_REGISTER_XFORMABLE
+#undef RIGEXEC_SPACE_EXPRESSION
 #undef RIGEXEC_NO_AVAR_SCALE_INPUTS
 #undef RIGEXEC_AVAR_SCALE_INPUTS
 
@@ -510,8 +642,11 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
     params.stretch = stretch ? *stretch : 1.0;
     params.softness = softness ? *softness : 0.0;
 
-    // Rest landmark sets for the three outputs. The mid rest derives from
-    // the root rest translated along its rest aim by the upper length.
+    // Controls supply rest fallbacks while the solver is being wired. Once
+    // a joint is bound, its live rest frame is the reference for that output.
+    // In particular, the root joint's rest up controls the degenerate-pole
+    // fallback: reading only the root control's rest made a joint rest edit
+    // invisible to the solve even though the evaluator updated bone lengths.
     const RigExecPointFrame *rootRest =
         ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->rootRest);
     const RigExecPointFrame *effectorRest =
@@ -525,6 +660,34 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
         p += restAim * params.upperLength;
     }
     rests[2] = effectorRest ? effectorRest->points : _IdentityLandmarks();
+
+    VdfReadIterator<RigExecPointFrame> explicitRestIt(
+        ctx, _tokens->restJointFrames);
+    const bool explicitRests = explicitRestIt.ComputeSize() != 0;
+    if (explicitRests && explicitRestIt.ComputeSize() != 3) {
+        ctx.Warn("TwoBoneIk: restJoints must provide root, mid, and end rests");
+        return result;
+    }
+    VdfReadIterator<RigExecPointFrame> jointRestIt(
+        ctx, explicitRests ? _tokens->restJointFrames : _tokens->jointRests);
+    VdfReadIterator<int> elementIt(ctx, _tokens->jointElements);
+    const bool remapped = !explicitRests && elementIt.ComputeSize() != 0;
+    if (remapped && elementIt.ComputeSize() != jointRestIt.ComputeSize()) {
+        ctx.Warn("TwoBoneIk: joint/rest element cardinality mismatch");
+        return result;
+    }
+    size_t jointIndex = 0;
+    for (; !jointRestIt.IsAtEnd(); ++jointRestIt, ++jointIndex) {
+        const int element = remapped ? *elementIt : int(jointIndex);
+        if (remapped) {
+            ++elementIt;
+        }
+        if (element < 0 || element >= 3) {
+            ctx.Warn("TwoBoneIk: joint element %d is out of range", element);
+            return result;
+        }
+        rests[element] = jointRestIt->points;
+    }
 
     const auto frames = rigExec::RigExecSolveTwoBoneIk(
         *root, *effector, *pole, rests, params);
@@ -556,6 +719,13 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwoBoneIk)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computePointFrame)
                 .InputName(_tokens->poleFrame)
                 .Required(),
+            Relationship(_tokens->joints)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->jointRests),
+            Relationship(_tokens->restJoints)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->restJointFrames),
+            AttributeValue<int>(_tokens->jointElements),
             AttributeValue<double>(_tokens->upperLength),
             AttributeValue<double>(_tokens->lowerLength),
             AttributeValue<double>(_tokens->preferredBendRadians),
@@ -701,7 +871,8 @@ _ComputeTwistDistribution(const VdfContext &ctx)
     }
 
     result.frames =
-        rigExec::RigExecDistributeTwist(*start, *end, sRest, eRest, weights);
+        rigExec::RigExecDistributeTwist(*start, *end, sRest, eRest, weights,
+            _ScalarInput(ctx, _tokens->twistTurns, 0));
     result.rests.assign(result.frames.size(), sRest);
     return result;
 }
@@ -726,5 +897,6 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwistDistribution)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->endRest),
             AttributeValue<float>(_tokens->weights),
-            AttributeValue<int>(_tokens->count));
+            AttributeValue<int>(_tokens->count),
+            AttributeValue<double>(_tokens->twistTurns));
 }

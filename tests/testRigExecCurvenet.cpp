@@ -13,6 +13,7 @@
 //   * the two sides of a curve are independent -- the hinge of Fig. 11.
 //
 #include "rigExecMath/curvenet.h"
+#include "rigExecMath/curvenetWeights.h"
 #include "rigExecMath/cutMesh.h"
 #include "rigExecMath/profileMover.h"
 #include "rigExecMath/sparseSolve.h"
@@ -1168,6 +1169,58 @@ static void TestUnreachedComponentIsReported()
     }
 }
 
+static void TestCatmullRomTopologyAndWeights()
+{
+    const Grid grid = MakeGrid(4,4,1.0);
+    const std::vector<GfVec3f> net{{0,2,0},{1,2,0},{2,2,0},{3,2,0},{4,2,0}};
+    const std::vector<int> splines{0,1,2,3, 1,2,3,4};
+    RigExecCurvenetTopology topology;
+    std::string error;
+    CHECK(RigExecBuildCurvenetTopology(splines,net.size(),RigExecCurvenetBasis::CatmullRom,
+                                       net,nullptr,&topology,&error));
+    CHECK(topology.curves.size() == 1);
+    CHECK(topology.GetSplineStartKnot(0) == 1);
+    CHECK(topology.GetSplineEndKnot(1) == 3);
+    const auto sampling = RigExecSampleCurvenet(topology,net,{5,5});
+    CHECK(sampling.positions.front() == GfVec3d(net[1]));
+    CHECK(sampling.positions.back() == GfVec3d(net[3]));
+    for (size_t s = 0; s < sampling.GetSampleCount(); ++s) {
+        GfVec3d point(0); double sum = 0;
+        for (int k=0;k<4;++k) {
+            point += sampling.stencilWeights[s][k]*GfVec3d(net[sampling.stencilIndices[s][k]]);
+            sum += sampling.stencilWeights[s][k];
+        }
+        CHECK(GfIsClose(point,sampling.positions[s],1e-10));
+        CHECK(std::abs(sum-1.0)<1e-10);
+    }
+    RigExecProfileMoverBinding profile;
+    CHECK_MSG(RigExecBindProfileMover(topology,net,grid.points,grid.counts,grid.indices,5,&profile,&error),
+              "%s",error.c_str());
+    std::vector<GfVec3f> result;
+    CHECK(RigExecEvaluateProfileMover(profile,net,grid.points,1.0,&result,&error));
+    for (size_t p=0;p<result.size();++p) CHECK(GfIsClose(result[p],grid.points[p],1e-5));
+
+    RigExecCurvenetWeightBinding binding;
+    CHECK_MSG(RigExecBindCurvenetWeights(topology,net,grid.points,grid.counts,grid.indices,{},5,&binding,&error),
+              "%s",error.c_str());
+    std::vector<float> maps(10,0.7f);
+    std::fill(maps.begin(),maps.begin()+5,0.3f);
+    std::vector<float> weights;
+    CHECK(RigExecEvaluateCurvenetWeights(binding,maps,2,0,&weights,&error));
+    CHECK(weights.size() == 2*grid.points.size());
+    for (size_t p=0;p<grid.points.size();++p) {
+        CHECK(std::abs(weights[p]-0.3f)<1e-5f);
+        CHECK(std::abs(weights[p]+weights[grid.points.size()+p]-1.0f)<1e-5f);
+    }
+    CHECK(RigExecEvaluateCurvenetWeights(binding,std::vector<float>(5,1.0f),1,0,&weights,&error));
+    for (float w:weights) CHECK(std::abs(w-1.0f)<1e-5f);
+    CHECK(RigExecBindCurvenetWeights(topology,net,grid.points,grid.counts,grid.indices,{2},5,&binding,&error));
+    CHECK(RigExecEvaluateCurvenetWeights(binding,{0,0,0,1,1},1,0,&weights,&error));
+    CHECK(weights[grid.Vertex(0,2)] < weights[grid.Vertex(4,2)]);
+    CHECK(std::abs(weights[grid.Vertex(2,2)]-0.5f)<1e-4f);
+    CHECK(!RigExecBindCurvenetWeights(topology,net,grid.points,grid.counts,grid.indices,{0,1,2,3,4},5,&binding,&error));
+}
+
 int main()
 {
     // Unbuffered: a crash in one of these stages otherwise prints nothing at
@@ -1200,6 +1253,7 @@ int main()
     TestCrackFromCurveEndingInsideAFace();
     std::printf("TestUnreachedComponentIsReported\n");
     TestUnreachedComponentIsReported();
+    TestCatmullRomTopologyAndWeights();
 
     if (failures == 0) {
         std::printf("testRigExecCurvenet: OK\n");

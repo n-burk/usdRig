@@ -195,7 +195,7 @@ The status column uses only the required factual buckets. Shipping code is **EXI
 | Transient value overrides | EXISTS | ComputeWithOverrides in 26.05+ | Retain in the low-level runtime and parity suite; interactive consumers are deferred. |
 | Experimental ExecIr inversion bridge | EXISTS | 26.08 ships limited FK/switch controller plumbing and marks it unstable | Align behind adapter; do not serialize its types. |
 | Native/general inversion API | PLANNED | ExecIr documentation describes future native inversion work | Keep controller seam replaceable and parity-tested. |
-| General RigExec inverse solvers | BUILD | No general/native public inversion facility | Deferred beyond v0.1; preserve a pure-computation boundary without UI commitments. |
+| General RigExec inverse solvers | BUILD | No general/native public inversion facility | `rigexec.solve_parameters` implements a bounded pure callback solver with analytic-Jacobian or finite-difference input; UI and authored-channel adapters remain consumers. |
 | Connection dataflow | EXISTS | 26.08 supports only one valid same-typed attribute connection | Use one-to-one connections; relationships for variable arity; validate limitations. |
 | Computation composition across applied/concrete schemas | BUILD | Current source marks cross-registration definition composition TBD | One authoritative schema registration owns each computation name. |
 | Dynamic property/primvar discovery in callbacks | BUILD | Registration inputs are static; property/namespace-child inputs are TODO | Each mover schema statically declares the exact native properties it reads; the compiler binds those paths and rejects undeclared runtime discovery. |
@@ -1083,15 +1083,15 @@ ParamsToMatrix builds L=R(q)H(s,h)/t; MatrixToPoints applies it to the rest land
 
 At structural import, the USD adapter reads the full UsdGeomXformable local transform, normalizes declared inputs, and converts to points; callbacks never query the stage. Current execGeom covers limited xformOp:transform behavior, not arbitrary op/reset stacks ([source](https://github.com/PixarAnimationStudios/OpenUSD/blob/v26.08/pxr/exec/execGeom/xformable.cpp)), so this adapter is **BUILD**.
 
-## 5.5 Deferred inverse parameter solve
+## 5.5 Pure inverse parameter solve
 
-Inverse solving is documented only as a future pure-computation boundary; it is not a v0.1 phase deliverable, performance gate, UI, or manipulation feature. Let authored avars be vector a, forward rig evaluation be F(a), selected landmark projection be S, and desired points be d. An analytic controller inverse would be preferred. A future numeric fallback could solve:
+`rigexec.solve_parameters` provides the pure-computation boundary without an editing UI. Let authored avars be vector a, forward rig evaluation be F(a), selected landmark projection be S, and desired points be d. An analytic controller inverse is preferred. The numeric fallback solves:
 
 minΔa‖W(SF(a+Δa)−d)‖22+λ‖CΔa‖22+μ‖Δa‖22
 
-subject to channel limits. W weights selected points/axes, C regularizes semantic channels or distance from a declared reference pose, and μ is Levenberg damping. The solver uses analytic Jacobians for built-in IK/frame kernels and finite differences only for explicitly declared prototype nodes. Termination is (point error \< 10^-5 × characterScale) or (relative improvement \< 10^-6) or the profile’s fixed iteration limit.
+subject to channel limits. W weights selected points/axes, C regularizes semantic channels or distance from a declared reference pose, and μ is Levenberg damping. The Python API accepts an analytic Jacobian or uses bounded central finite differences on an explicitly supplied prototype callback. Its current reference regularization uses C=I; damping stabilizes the normal-equation step. Termination is (weighted point error \< 10^-5 × characterScale) or (relative improvement \< 10^-6) or the profile’s fixed iteration limit. Only reaching the target reports `converged`; bounded/unreachable, stalled, iteration-limit and non-finite outcomes report a reason and retain the best parameters. The dense implementation is intended for small channel subsets, with no full-rig scaling promise.
 
-Desired landmarks enter through declared typed inputs or low-level evaluation overrides. Forward/inverse callbacks remain pure. Hit testing, gesture state, commits, and undo are deferred consumers.
+Desired landmarks enter through the callback's explicit arguments, declared typed inputs or low-level evaluation overrides. Forward/inverse callbacks remain pure. Hit testing, gesture state, commits, and undo are separate consumers. See [Python bake and inverse APIs](python-bake-inverse.md).
 
 ## 5.6 Native USD time evaluation and interpolation
 

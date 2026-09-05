@@ -12,7 +12,7 @@ import ctypes
 import os
 import sys
 
-from pxr import Tf, Usd, UsdUtils
+from pxr import Gf, Tf, Usd, UsdUtils
 from pxr.Usdviewq.plugin import PluginContainer
 
 
@@ -68,6 +68,13 @@ def _LoadRigExecImaging():
     lib.RigExecImaging_SetTime.restype = ctypes.c_int
     lib.RigExecImaging_Deactivate.argtypes = []
     lib.RigExecImaging_Deactivate.restype = None
+    try:
+        lib.RigExecImaging_GetControlFrameAssetSpace.argtypes = [
+            ctypes.c_longlong, ctypes.c_char_p, ctypes.c_double, ctypes.c_int,
+            ctypes.POINTER(ctypes.c_double)]
+        lib.RigExecImaging_GetControlFrameAssetSpace.restype = ctypes.c_int
+    except AttributeError:
+        pass  # Older libraries cannot supply deformation-relative gizmos.
 
     # The influence overlay is optional: an older rigExecImaging.dll
     # does not export it, and touching a missing symbol on a CDLL raises
@@ -316,6 +323,8 @@ class RigExecUsdviewContainer(PluginContainer):
                 sys.path.insert(
                     0, os.path.dirname(os.path.abspath(__file__)))
                 import gizmoUI
+            import gizmoMath
+            gizmoMath.SetPublishedControlFrameReader(self._ReadPublishedControlFrame)
             self._viewportTools = gizmoUI.InstallViewportTools(
                 self._api, self._UndoStack(),
                 openGraphEditor=self._OpenGraphEditor)
@@ -325,6 +334,20 @@ class RigExecUsdviewContainer(PluginContainer):
             self._viewportTools = None
             self._viewportToolsFailed = True
         return self._viewportTools
+
+    def _ReadPublishedControlFrame(self, stage, path, time):
+        if not self._active or self._lib is None or stage != self._cachedStage:
+            return None
+        read = getattr(self._lib, "RigExecImaging_GetControlFrameAssetSpace", None)
+        if read is None:
+            return None
+        values = (ctypes.c_double * 16)()
+        cacheId = UsdUtils.StageCache.Get().GetId(stage).ToLongInt()
+        isDefault = time.IsDefault()
+        if not read(cacheId, str(path).encode("utf-8"),
+                    0.0 if isDefault else time.GetValue(), int(isDefault), values):
+            return None
+        return Gf.Matrix4d(*[tuple(values[r*4:(r+1)*4]) for r in range(4)])
 
     def _ToggleViewportTools(self):
         """Menu item: show or hide the toolbar and its manipulators."""

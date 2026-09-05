@@ -250,7 +250,12 @@ class "RigExecXformable" (
     double default:ry = 0
     double default:rz = 0
     matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        doc = "Local-to-world zero position for posing."
+        doc = """Local-to-world zero position for posing. Its computed fallback
+        is compose(default translation/XYZ rotation) * rest * inverse(parent
+        rest) * parent:defaultSpace. The rest is unaffected by default edits.
+        A connection is authoritative, including identity. Otherwise a
+        non-identity authored matrix overrides the computed fallback; an
+        identity value selects that fallback."""
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         doc = """Final local-to-world transform. For a joint this is
@@ -259,7 +264,11 @@ class "RigExecXformable" (
         connected directly. Unwired xformables follow the parent chain
         with rest offsets and avars."""
     )
-    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """Controller-adjusted zero pose; falls back to avars:defaultSpace.
+        Used by the local-avars pose path before parent motion. A connection
+        overrides the fallback, as does a non-identity authored matrix."""
+    )
     double avars:tx = 0
     double avars:ty = 0
     double avars:tz = 0
@@ -270,10 +279,27 @@ class "RigExecXformable" (
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
     )
-    matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
-    double avars:unitScaleFactor = 1
-    matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
-    matrix4d parent:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """Zero pose supplied to avar evaluation; falls back to the
+        computed default:space. A connection or non-identity authored matrix
+        selects another zero pose."""
+    )
+    double avars:unitScaleFactor = 1 (
+        doc = "Multiplier converting translation avars into local distance units before the selected default and parent transforms. Rotations and scales are unaffected."
+    )
+    matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """Selected parent's posed local-to-world space. Falls back to
+        the nearest namespace provider's computePointFrame; identity when
+        there is none. Connections (including identity) or a non-identity
+        authored matrix select a different parent space."""
+    )
+    matrix4d parent:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        doc = """Selected parent's default local-to-world space. Falls back
+        to the nearest namespace provider's computeDefaultFrame. Connections
+        (including identity) or a non-identity authored matrix override it.
+        The avar pose is avars * posed:defaultSpace * inverse(parent:defaultSpace)
+        * parent:space, in row-vector convention."""
+    )
 }
 
 class RigExecJoint "RigExecJoint" (
@@ -411,6 +437,13 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     rel rigExec:rootControl
     rel rigExec:effectorControl
     rel rigExec:poleControl
+    rel rigExec:restJoints (
+        doc = """Optional ordered rest-input joints [root, mid, end]. Their
+        live rest frames define the solve's references and implied segment
+        lengths without claiming output ownership. Use this when an IK/FK
+        blend poses the joints. Empty uses this solver's rigExec:joints;
+        authored absolute lengths still override measured rest lengths."""
+    )
     double rigExec:upperLength = 1
     double rigExec:lowerLength = 1
     double rigExec:upperLengthOffset = 0 (
@@ -546,6 +579,13 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
     rel rigExec:end
     uniform int rigExec:count = 1
     uniform float[] rigExec:weights = []
+    double inputs:twistTurns = 0 (
+        doc = """Signed additional aim-axis revolutions beyond the principal
+        endpoint twist. Integer values preserve endpoint orientations while
+        carrying multi-revolution winding; fractional values support animated
+        winding and add the corresponding rotation at the end. The additional
+        angle at sample k is 360 * inputs:twistTurns * weight[k] degrees."""
+    )
     uniform token rigExec:distribution = "minimumEnergy" (
         allowedTokens = ["minimumEnergy"]
     )
@@ -961,6 +1001,32 @@ class "RigExecWeightObject" (
     uniform token rigExec:rangePolicy = "strict" (
         allowedTokens = ["strict", "clamp"]
     )
+}
+
+class RigExecCurvenetWeight "RigExecCurvenetWeight" (
+    inherits = </RigExecWeightObject>
+    customData = { string className = "CurvenetWeight" }
+    doc = """Surface parametrization from scalar maps on a curvenet. Native
+    property relationships carry mesh/net arrays into computeWeightPacket;
+    L + kappa B^T B is factorized per layout and reused for animated weights.
+    weightTarget must be the mesh's exact points property. The four array
+    relationships each target exactly one native property. Basis/sample count
+    may connect to the corresponding curvenet attributes."""
+)
+{
+    uniform token rigExec:representation = "dense" (allowedTokens = ["dense"])
+    uniform token rigExec:rangePolicy = "clamp" (allowedTokens = ["strict", "clamp"])
+    rel rigExec:curvenetPoints
+    rel rigExec:curvenetSplineIndices
+    rel rigExec:meshFaceCounts
+    rel rigExec:meshFaceIndices
+    float[] inputs:weights = []
+    int[] rigExec:autoSmooth = [] (
+        doc = "Control-pool indices whose values are interpolated from anchored neighbors."
+    )
+    uniform token rigExec:basis = "catmullRom" (allowedTokens = ["bezier", "catmullRom"])
+    uniform int rigExec:samplesPerSpline = 5
+    float rigExec:unreachedValue = 0
 }
 
 class RigExecStaticWeight "RigExecStaticWeight" (
@@ -1387,6 +1453,10 @@ class RigExecBlendShapeMover "RigExecBlendShapeMover" (
 )
 {
     rel rigExec:blendInputs
+    uniform token rigExec:deltaSpace = "target" (
+        allowedTokens = ["target", "surfaceFrame"]
+        doc = "Target-space offsets by default; surfaceFrame rotates rest offsets into corresponding orthonormal vertex frames of the preceding mesh revision. Detail strength is independent of surface stretch."
+    )
 }
 
 class RigExecBlendInput "RigExecBlendInput" (
@@ -1587,6 +1657,35 @@ class RigExecCurvenet "RigExecCurvenet" (
         section 3: the count per spline is this value times the ratio of the
         spline's control polygon length to the surface's mean edge length."""
     )
+}
+
+class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
+    inherits = </RigExecControl>
+    customData = { string className = "CurvenetAdjustment" }
+    doc = """An animation control on a curvenet knot. The Adjuster Mover
+    transports this control's local avar frame with preceding deformation.
+    Tangent adjustments are children of their incident knot adjustment and
+    use the parent's adjusted frame. No authored rest placement is needed."""
+)
+{
+    rel rigExec:curvenet
+    uniform int rigExec:knotIndex = -1
+    uniform token rigExec:pointKind = "knot" (
+        allowedTokens = ["knot", "tangent"]
+    )
+    uniform bool rigExec:includeTangents = true
+}
+
+class RigExecCurvenetAdjusterMover "RigExecCurvenetAdjusterMover" (
+    inherits = </Typed>
+    customData = { string className = "CurvenetAdjusterMover" }
+    doc = """Applies deformation-relative knot and tangent animation controls
+    to exactly one native RigExecCurvenet points property. Listed knot
+    adjustments include their tangent adjustment children automatically.
+    The common MoverAPI envelope blends over the preceding point revision."""
+)
+{
+    rel rigExec:adjustments
 }
 
 class RigExecCurvenetMover "RigExecCurvenetMover" (

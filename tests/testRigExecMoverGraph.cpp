@@ -21,6 +21,7 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cstdio>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -244,11 +245,16 @@ TestBlendCardinalityMismatchPassesThrough()
         RigExecRevisionOp::BlendShape, base, params, MakeOkStatus());
 
     const VtVec3fArray out = graph.Evaluate(head);
+    CHECK(graph.GetRevisionStatus(head).state == "moverFailed");
     CHECK(out.size() == 4);
     if (out.size() == 4) {
         CHECK(Near(out[0], GfVec3f(0, 0, 0)));
         CHECK(Near(out[2], GfVec3f(0, 1, 0)));
     }
+    params.blendDeltas.assign(4, GfVec3f(0, 1, 0));
+    CHECK(graph.UpdateRevision(head, params, MakeOkStatus()));
+    CHECK(graph.Evaluate(head)[0] == GfVec3f(0, 1, 0));
+    CHECK(graph.GetRevisionStatus(head).state == "ok");
 }
 
 // Each op only accepts its own packet kind; anything else passes through,
@@ -266,6 +272,7 @@ TestKindMismatchPassesThrough()
         MakeMatrixParams(GfVec3d(0, 5, 0), 1.0f), MakeOkStatus());
 
     const VtVec3fArray out = graph.Evaluate(head);
+    CHECK(graph.GetRevisionStatus(head).state == "moverFailed");
     CHECK(out.size() == 4);
     if (out.size() == 4) {
         CHECK(Near(out[0], GfVec3f(0, 0, 0)));
@@ -583,6 +590,335 @@ TestAssembleNonMatrixParameters()
     }
 }
 
+// Cache intermediate revisions so edits resume at their dependency boundary,
+// including status-only transitions and an unrelated chain in the same graph.
+static void
+TestIncrementalRevisionUpdates()
+{
+    RigExecMoverGraph graph;
+    const VtVec3fArray initial = MakePoints();
+    const VdfMaskedOutput source =
+        graph.AddPointSource(SdfPath("/M.points"), initial);
+    const RigExecMoverParameters firstParams =
+        MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f);
+    const RigExecMoverParameters secondParams =
+        MakeMatrixParams(GfVec3d(0, 3, 0), 1.0f);
+    const VdfMaskedOutput first = graph.AddRevision(
+        RigExecRevisionOp::Matrix, source, firstParams, MakeOkStatus());
+    const VdfMaskedOutput second = graph.AddRevision(
+        RigExecRevisionOp::Matrix, first, secondParams, MakeOkStatus());
+    const VdfMaskedOutput otherSource =
+        graph.AddPointSource(SdfPath("/Other.points"), initial);
+    const VdfMaskedOutput other = graph.AddRevision(
+        RigExecRevisionOp::Matrix, otherSource, firstParams, MakeOkStatus());
+
+    auto checkFirst = [&](const VdfMaskedOutput &output, const GfVec3f &expected) {
+        const VtVec3fArray result = graph.Evaluate(output);
+        CHECK(result.size() == initial.size());
+        if (!result.empty()) {
+            CHECK(Near(result[0], expected));
+        }
+    };
+    checkFirst(second, GfVec3f(0, 5, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 2);
+    CHECK(graph.GetScheduleBuildCount() == 1);
+    checkFirst(first, GfVec3f(0, 2, 0));
+    checkFirst(second, GfVec3f(0, 5, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 2);
+
+    CHECK(graph.UpdatePointSource(source, initial));
+    CHECK(graph.UpdateRevision(second, secondParams, MakeOkStatus()));
+    checkFirst(second, GfVec3f(0, 5, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 2);
+
+    RigExecMoverParameters changed =
+        MakeMatrixParams(GfVec3d(0, 6, 0), 1.0f);
+    CHECK(graph.UpdateRevision(second, changed, MakeOkStatus()));
+    checkFirst(second, GfVec3f(0, 8, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 3);
+
+    RigExecMoverStatus disabled;
+    disabled.state = TfToken("disabled");
+    CHECK(graph.UpdateRevision(second, changed, disabled));
+    checkFirst(second, GfVec3f(0, 2, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 4);
+    CHECK(graph.UpdateRevision(second, changed, MakeOkStatus()));
+    checkFirst(second, GfVec3f(0, 8, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 5);
+
+    checkFirst(other, GfVec3f(0, 2, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 6);
+    VtVec3fArray edited = initial;
+    edited[0] = GfVec3f(1, 0, 0);
+    CHECK(graph.UpdatePointSource(source, edited));
+    checkFirst(second, GfVec3f(1, 8, 0));
+    checkFirst(other, GfVec3f(0, 2, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 8);
+    CHECK(graph.GetScheduleBuildCount() == 1);
+    CHECK(graph.GetRevisionCount() == 3);
+
+    CHECK(!graph.UpdatePointSource(source, VtVec3fArray(1)));
+    CHECK(!graph.UpdatePointSource(second, initial));
+    CHECK(!graph.UpdateRevision(source, changed, MakeOkStatus()));
+    CHECK(graph.Evaluate(VdfMaskedOutput()).empty());
+    checkFirst(second, GfVec3f(1, 8, 0));
+    CHECK(graph.GetRevisionExecutionCount() == 8);
+}
+
+static void
+TestLongChainDirtySuffix()
+{
+    RigExecMoverGraph graph;
+    const VtVec3fArray initial({GfVec3f(0, 0, 0)});
+    const VdfMaskedOutput source =
+        graph.AddPointSource(SdfPath("/M.points"), initial);
+    VdfMaskedOutput head = source;
+    std::vector<VdfMaskedOutput> revisions;
+    const size_t count = 2048;
+    const RigExecMoverParameters step =
+        MakeMatrixParams(GfVec3d(0, 1, 0), 1.0f);
+    for (size_t i = 0; i < count; ++i) {
+        head = graph.AddRevision(
+            RigExecRevisionOp::Matrix, head, step, MakeOkStatus());
+        revisions.push_back(head);
+    }
+    const VtVec3fArray first = graph.Evaluate(head);
+    CHECK(first.size() == 1);
+    if (!first.empty()) {
+        CHECK(Near(first[0], GfVec3f(0, float(count), 0)));
+    }
+    CHECK(graph.GetRevisionExecutionCount() == count);
+    CHECK(graph.GetScheduleBuildCount() == 1);
+    CHECK(graph.UpdateRevision(revisions[count - 2],
+        MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f), MakeOkStatus()));
+    const VtVec3fArray changed = graph.Evaluate(head);
+    CHECK(changed.size() == 1);
+    if (!changed.empty()) {
+        CHECK(Near(changed[0], GfVec3f(0, float(count + 1), 0)));
+    }
+    CHECK(graph.GetRevisionExecutionCount() == count + 2);
+    CHECK(graph.GetScheduleBuildCount() == 1);
+    CHECK(graph.GetRevisionCount() == count);
+}
+
+// Extending topology should invalidate the schedule while preserving already
+// computed prefixes. Updates made before the first evaluation are supported.
+static void
+TestAppendAfterEvaluation()
+{
+    RigExecMoverGraph graph;
+    const VdfMaskedOutput source = graph.AddPointSource(
+        SdfPath("/M.points"), VtVec3fArray({GfVec3f(0, 0, 0)}));
+    CHECK(graph.UpdatePointSource(source, VtVec3fArray({GfVec3f(1, 0, 0)})));
+    const auto step = MakeMatrixParams(GfVec3d(0, 1, 0), 1.0f);
+    const VdfMaskedOutput first = graph.AddRevision(
+        RigExecRevisionOp::Matrix, source, step, MakeOkStatus());
+    CHECK(graph.Evaluate(first).size() == 1);
+    const VdfMaskedOutput second = graph.AddRevision(
+        RigExecRevisionOp::Matrix, first, step, MakeOkStatus());
+    CHECK(graph.UpdateRevision(second,
+        MakeMatrixParams(GfVec3d(0, 2, 0), 1.0f), MakeOkStatus()));
+    const VtVec3fArray result = graph.Evaluate(second);
+    CHECK(result.size() == 1);
+    if (!result.empty()) {
+        CHECK(Near(result[0], GfVec3f(1, 3, 0)));
+    }
+    CHECK(graph.GetRevisionExecutionCount() == 2);
+    CHECK(graph.GetScheduleBuildCount() == 2);
+}
+
+// Every operation consumes mutable packets. Compare an edited persistent
+// graph with a freshly built graph, and require the edit to visibly change
+// its result so a pass-through or accidentally unused input cannot pass.
+static void
+TestEveryOperationUpdatesInteractively()
+{
+    auto check = [&](RigExecRevisionOp op, const VtVec3fArray &base,
+                     const RigExecMoverParameters &before,
+                     const RigExecMoverParameters &after) {
+        RigExecMoverGraph graph;
+        const auto source = graph.AddPointSource(SdfPath("/M.points"), base);
+        const auto head = graph.AddRevision(op, source, before, MakeOkStatus());
+        const VtVec3fArray initial = graph.Evaluate(head);
+        CHECK(graph.UpdateRevision(head, after, MakeOkStatus()));
+        const VtVec3fArray updated = graph.Evaluate(head);
+        RigExecMoverGraph fresh;
+        const auto freshSource = fresh.AddPointSource(SdfPath("/M.points"), base);
+        const VtVec3fArray expected = fresh.Evaluate(
+            fresh.AddRevision(op, freshSource, after, MakeOkStatus()));
+        CHECK(updated.size() == base.size());
+        CHECK(updated == expected);
+        CHECK(updated != initial);
+        CHECK(graph.GetRevisionExecutionCount() == 2);
+        CHECK(graph.GetScheduleBuildCount() == 1);
+        CHECK(graph.UpdateRevision(head, after, MakeOkStatus()));
+        CHECK(graph.Evaluate(head) == updated);
+        CHECK(graph.GetRevisionExecutionCount() == 2);
+    };
+    auto packet = [](const char *kind) {
+        RigExecMoverParameters p;
+        p.kind = TfToken(kind);
+        p.valid = true;
+        p.strength = 1.0f;
+        p.weights = RigExecWeightPacket::Constant(1.0f);
+        return p;
+    };
+    const VtVec3fArray tetra = MakePoints();
+    {
+        auto a = packet("blendShape");
+        a.blendDeltas.assign(4, GfVec3f(0, 0, 0));
+        auto b = a;
+        b.blendDeltas[0] = GfVec3f(0, 3, 0);
+        check(RigExecRevisionOp::BlendShape, tetra, a, b);
+    }
+    {
+        auto a = packet("volumeCorrect");
+        a.referenceVolume = 1;
+        auto b = a;
+        b.referenceVolume = 8;
+        check(RigExecRevisionOp::VolumeCorrect, tetra, a, b);
+    }
+    {
+        auto a = packet("smooth");
+        a.topologyCounts = {3};
+        a.topologyIndices = {0, 1, 2};
+        auto b = a;
+        b.topologyIndices = {1, 2, 3};
+        check(RigExecRevisionOp::Smooth, tetra, a, b);
+    }
+    {
+        auto a = packet("lattice");
+        a.divisions = GfVec3i(2, 2, 2);
+        a.restPoints.assign(tetra.begin(), tetra.end());
+        for (int z = 0; z < 2; ++z) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    a.auxPoints.emplace_back(float(x), float(y), float(z));
+                }
+            }
+        }
+        a.auxPointsB = a.auxPoints;
+        a.auxPointsB[0] += GfVec3f(0, 0, 2);
+        auto b = a;
+        // Moving a rest point changes its cage bind coordinates immediately.
+        b.restPoints[0] = GfVec3f(0.5f, 0.5f, 0.5f);
+        check(RigExecRevisionOp::Lattice, tetra, a, b);
+    }
+    {
+        auto a = packet("surfaceProject");
+        a.auxPoints = {GfVec3f(0, 0, 0), GfVec3f(5, 0, 0), GfVec3f(0, 5, 0)};
+        a.topologyCounts = {3};
+        a.topologyIndices = {0, 1, 2};
+        auto b = a;
+        for (auto &point : b.auxPoints) point[2] += 2;
+        check(RigExecRevisionOp::SurfaceProject, tetra, a, b);
+    }
+    {
+        auto a = packet("emitGuidePoints");
+        a.frames.frames.resize(4);
+        a.frames.rests.resize(4, a.frames.frames[0].points);
+        auto b = a;
+        for (auto &point : b.frames.frames[0].points) point[1] += 3;
+        check(RigExecRevisionOp::EmitGuidePoints, tetra, a, b);
+        a.kind = b.kind = TfToken("ribbon");
+        a.bindCoords.assign(4, GfVec2f(0, 0));
+        b = a;
+        // A rest-frame edit changes the rest-relative driver transformation.
+        for (auto &point : b.frames.rests[0]) point[1] += 3;
+        check(RigExecRevisionOp::Ribbon, tetra, a, b);
+    }
+    {
+        auto a = packet("recomputeNormals");
+        a.auxPoints.assign(tetra.begin(), tetra.end());
+        a.topologyCounts = {3};
+        a.topologyIndices = {0, 1, 2};
+        auto b = a;
+        b.auxPoints[2] = GfVec3f(0, 0, 1);
+        check(RigExecRevisionOp::RecomputeNormals, tetra, a, b);
+        a.kind = TfToken("recomputeExtent");
+        b = a;
+        b.widths = {2.0f};
+        check(RigExecRevisionOp::RecomputeExtent,
+              VtVec3fArray({GfVec3f(0), GfVec3f(0)}), a, b);
+    }
+    {
+        auto a = packet("curvenet");
+        std::vector<GfVec3f> mesh;
+        for (int y = 0; y <= 4; ++y) {
+            for (int x = 0; x <= 4; ++x) mesh.emplace_back(float(x), float(y), 0);
+        }
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                const int i = y * 5 + x;
+                a.topologyCounts.push_back(4);
+                a.topologyIndices.insert(a.topologyIndices.end(),
+                                         {i, i + 1, i + 6, i + 5});
+            }
+        }
+        a.auxPoints = {GfVec3f(2.5f, 2.5f, 0), GfVec3f(0, 2.5f, 0),
+                       GfVec3f(4, 2.5f, 0), GfVec3f(2.5f, 0, 0),
+                       GfVec3f(2.5f, 4, 0)};
+        std::vector<int> splines;
+        for (int tip = 1; tip <= 4; ++tip) {
+            const GfVec3f origin = a.auxPoints[0];
+            const GfVec3f delta = a.auxPoints[tip] - origin;
+            const int handle = int(a.auxPoints.size());
+            a.auxPoints.push_back(origin + delta / 3.0f);
+            a.auxPoints.push_back(origin + delta * (2.0f / 3.0f));
+            splines.insert(splines.end(), {0, handle, handle + 1, tip});
+        }
+        rigExec::RigExecCurvenetTopology topology;
+        std::string error;
+        CHECK(rigExec::RigExecBuildCurvenetTopology(
+            splines, a.auxPoints.size(), rigExec::RigExecCurvenetBasis::Bezier,
+            a.auxPoints, nullptr, &topology, &error));
+        auto binding = std::make_shared<rigExec::RigExecProfileMoverBinding>();
+        CHECK(rigExec::RigExecBindProfileMover(
+            topology, a.auxPoints, mesh, a.topologyCounts,
+            a.topologyIndices, 5, binding.get(), &error));
+        a.curvenetBinding = binding;
+        auto b = a;
+        for (auto &point : b.auxPoints) point[2] += 1;
+        VtVec3fArray base(mesh.size());
+        std::copy(mesh.begin(), mesh.end(), base.begin());
+        check(RigExecRevisionOp::Curvenet, base, a, b);
+    }
+}
+
+static void
+TestLongResolvedInputConnections()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    const UsdPrim prim = stage->DefinePrim(SdfPath("/Inputs"));
+    std::vector<UsdAttribute> chain;
+    const size_t count = 2048;
+    for (size_t i = 0; i < count; ++i) {
+        chain.push_back(prim.CreateAttribute(
+            TfToken("value" + std::to_string(i)), SdfValueTypeNames->Float));
+        if (i > 0) chain[i - 1].SetConnections({chain[i].GetPath()});
+    }
+    chain.front().Set(1.0f);
+    chain.back().Set(2.0f);
+    rigExec::RigExecResolvedInputs resolved;
+    float value = 0;
+    CHECK(resolved.GetAttribute(chain.front(), UsdTimeCode::Default(), &value));
+    CHECK(value == 2.0f);
+    chain.back().Set(3.0f);
+    CHECK(resolved.GetAttribute(chain.front(), UsdTimeCode::Default(), &value));
+    CHECK(value == 3.0f);
+    resolved.SetProperty(chain[count / 2].GetPath(), VtValue(4.0f));
+    CHECK(resolved.GetAttribute(chain.front(), UsdTimeCode::Default(), &value));
+    CHECK(value == 4.0f);
+    resolved.Clear();
+    chain.back().Clear();
+    CHECK(resolved.GetAttribute(chain.front(), UsdTimeCode::Default(), &value));
+    CHECK(value == 1.0f);
+    // Malformed cycles terminate and preserve the established fallback rule.
+    chain.back().SetConnections({chain.front().GetPath()});
+    CHECK(resolved.GetAttribute(chain.front(), UsdTimeCode::Default(), &value));
+    CHECK(value == 1.0f);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -607,6 +943,11 @@ main(int argc, char **argv)
     TestAssembleAndEvaluateWithoutDerivedStage();
     TestAssembleDisabledAndFailed();
     TestAssembleNonMatrixParameters();
+    TestIncrementalRevisionUpdates();
+    TestLongChainDirtySuffix();
+    TestAppendAfterEvaluation();
+    TestEveryOperationUpdatesInteractively();
+    TestLongResolvedInputConnections();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

@@ -80,6 +80,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((targetPoints, "rigExec:targetPoints"))
     ((samples, "rigExec:samples"))
     ((inputsWeight, "inputs:weight"))
+    ((deltaSpace, "rigExec:deltaSpace"))
     ((moverRel, "rigExec:mover"))
     ((weightObjectRel, "rigExec:weightObject"))
     ((inputsEnabled, "inputs:enabled"))
@@ -821,6 +822,17 @@ _BuildBlendMoverParameters(const VdfContext &ctx)
     if (base.empty()) {
         return params;
     }
+    const TfToken *deltaSpace = ctx.GetInputValuePtr<TfToken>(_tokens->deltaSpace);
+    if (deltaSpace && *deltaSpace != "target" && *deltaSpace != "surfaceFrame") return params;
+    params.blendSurfaceFrame = deltaSpace && *deltaSpace == "surfaceFrame";
+    if (params.blendSurfaceFrame) {
+        params.restPoints = base;
+        for (VdfReadIterator<int> it(ctx, _tokens->topologyCounts); !it.IsAtEnd(); ++it)
+            params.topologyCounts.push_back(*it);
+        for (VdfReadIterator<int> it(ctx, _tokens->topologyIndices); !it.IsAtEnd(); ++it)
+            params.topologyIndices.push_back(*it);
+        if (params.topologyCounts.empty()) return params;
+    }
     // Summed by the shared kernel (moverGraph.h): RigExecRigEvaluator builds
     // the same packet from tapped channels with no derived stage, and the two
     // must agree exactly.
@@ -1456,6 +1468,13 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendShapeMover)
         .Callback<RigExecMoverParameters>(&_BuildBlendMoverParameters)
         .Inputs(
             RIGEXEC_MOVER_COMMON_INPUTS,
+            AttributeValue<TfToken>(_tokens->deltaSpace),
+            Relationship(_tokens->resolvedTopologyCounts)
+                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
+                .InputName(_tokens->topologyCounts),
+            Relationship(_tokens->resolvedTopologyIndices)
+                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
+                .InputName(_tokens->topologyIndices),
             Relationship(_tokens->resolvedBlendInputs)
                 .TargetedObjects<RigExecBlendChannel>(
                     _tokens->computeBlendChannel)

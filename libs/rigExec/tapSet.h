@@ -14,6 +14,7 @@
 #include "pxr/usd/sdf/path.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usd/timeCode.h"
+#include "pxr/usd/usd/notice.h"
 
 #include <atomic>
 #include <memory>
@@ -27,6 +28,8 @@ PXR_NAMESPACE_CLOSE_SCOPE
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
+
+class RigExecTapContext;
 
 /// Backend-neutral value address (spec §9.1, v0.1 subset).
 ///
@@ -162,11 +165,17 @@ public:
     /// Returns and clears the dirty flag raised by invalidation callbacks.
     bool ConsumeDirty() { return _dirty.exchange(false); }
 
-    ExecUsdSystem *GetSystem() { return _system.get(); }
+    ExecUsdSystem *GetSystem();
+
+    /// Retire requests before stock Esf processes a removed prim. Consumers
+    /// that evaluate synchronously inside a USD notice call this first.
+    static void PrepareStageChange(const UsdStageRefPtr &stage,
+                                  const UsdNotice::ObjectsChanged &notice);
 
 private:
+    friend class RigExecTapContext;
     UsdStageRefPtr _stage;
-    std::unique_ptr<ExecUsdSystem> _system;
+    std::shared_ptr<RigExecTapContext> _context;
     std::unique_ptr<ExecUsdRequest> _request;
     std::vector<RigExecValueAddress> _addresses;
     /// Compiler-private resolutions parallel to _addresses; an empty path

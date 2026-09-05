@@ -1310,6 +1310,66 @@ TestGeometryKernels()
 }
 
 static void
+TestSurfaceOffsets()
+{
+    const std::vector<GfVec3f> rest = {{0,0,0}, {4,0,0}, {4,1,0}, {0,1,0}};
+    const std::vector<int> counts = {4}, indices = {0,1,2,3};
+    const std::vector<GfVec3f> deltas = {{1,2,3}, {0,0,2}, {-3,1,0}, {0,2,0}};
+    GfMatrix4d rotation(1.0);
+    rotation.SetRotate(GfRotation(GfVec3d(1,0,0), 90));
+    GfMatrix4d scale(1.0);
+    scale.SetScale(GfVec3d(0.25,9,2));
+    GfMatrix4d transform = scale * rotation;
+    transform.SetTranslateOnly(GfVec3d(30,-20,10));
+    std::vector<GfVec3f> posed, result;
+    for (const auto &p : rest) posed.push_back(GfVec3f(transform.TransformAffine(GfVec3d(p))));
+    CHECK(RigExecTransportSurfaceOffsets(rest, posed, counts, indices, deltas, &result));
+    CHECK(result.size() == deltas.size());
+    for (size_t i = 0; i < result.size(); ++i) {
+        CHECK(Near(GfVec3d(result[i]), rotation.TransformDir(GfVec3d(deltas[i])), 1e-5));
+        CHECK(std::abs(result[i].GetLength() - deltas[i].GetLength()) < 1e-5);
+    }
+    // The posed longest edge switches from X to Y after nonuniform scaling;
+    // correspondence must still use the edge selected on the REST surface.
+    CHECK(Near(GfVec3d(result[3]), GfVec3d(0,0,2), 1e-5));
+    CHECK(RigExecTransportSurfaceOffsets(rest, rest, counts, indices, deltas, &result));
+    for (size_t i = 0; i < result.size(); ++i) CHECK(Near(GfVec3d(result[i]), GfVec3d(deltas[i]), 1e-6));
+
+    const std::vector<GfVec3f> square = {{0,0,0},{1,0,0},{1,1,0},{0,1,0}};
+    const std::vector<GfVec3f> skewed = {{0,0,0},{1,1,0},{1,2,0},{0,1,0}};
+    const std::vector<GfVec3f> one = {{1,0,0},{0,0,0},{0,0,0},{0,0,0}};
+    CHECK(RigExecTransportSurfaceOffsets(square, skewed, counts, indices, one, &result));
+    CHECK(Near(GfVec3d(result[0]), GfVec3d(std::sqrt(0.5),std::sqrt(0.5),0), 1e-6));
+    std::vector<GfVec3f> reordered;
+    CHECK(RigExecTransportSurfaceOffsets(square, skewed, counts, {1,2,3,0}, one, &reordered));
+    CHECK(result == reordered);
+
+    auto isolatedRest = rest, isolatedPosed = posed, isolatedDeltas = deltas;
+    isolatedRest.push_back(GfVec3f(7)); isolatedPosed.push_back(GfVec3f(9));
+    isolatedDeltas.push_back(GfVec3f(0));
+    CHECK(RigExecTransportSurfaceOffsets(isolatedRest, isolatedPosed, counts, indices,
+                                         isolatedDeltas, &result));
+    CHECK(result.back() == GfVec3f(0));
+    const std::vector<GfVec3f> sentinel = {{123,456,789}};
+    result = sentinel;
+    isolatedDeltas.back() = GfVec3f(1,0,0);
+    CHECK(!RigExecTransportSurfaceOffsets(isolatedRest, isolatedPosed, counts, indices,
+                                          isolatedDeltas, &result));
+    CHECK(result == sentinel); // failure after other vertices never partially writes
+    CHECK(!RigExecTransportSurfaceOffsets(rest, std::vector<GfVec3f>(4,GfVec3f(0)),
+                                          counts, indices, deltas, &result));
+    CHECK(!RigExecTransportSurfaceOffsets(rest, posed, {3}, indices, deltas, &result));
+    CHECK(!RigExecTransportSurfaceOffsets(rest, posed, counts, {0,1,2,8}, deltas, &result));
+    CHECK(!RigExecTransportSurfaceOffsets(rest, posed, {-1}, {}, deltas, &result));
+    CHECK(!RigExecTransportSurfaceOffsets(rest, posed, counts, indices, {}, &result));
+    auto invalid = deltas;
+    invalid[0][1] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!RigExecTransportSurfaceOffsets(rest, posed, counts, indices, invalid, &result));
+    CHECK(result == sentinel);
+    CHECK(RigExecTransportSurfaceOffsets({}, {}, {}, {}, {}, &result) && result.empty());
+}
+
+static void
 TestSimdParity()
 {
     // The SIMD weighted-matrix kernel must match the scalar reference
@@ -1516,6 +1576,7 @@ main()
     TestFbxConstraintFailures();
     TestConstraintEnvelopeExactEndpoints();
     TestGeometryKernels();
+    TestSurfaceOffsets();
     TestSimdParity();
     TestWeightedMatrix();
     TestPropertyMath();

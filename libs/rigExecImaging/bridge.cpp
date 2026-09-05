@@ -4,14 +4,18 @@
 #include "bridge.h"
 
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/curvenet.h"
 
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/tokens.h"
+#include "pxr/usd/usdGeom/xformCache.h"
+#include "pxr/usd/usdGeom/xformable.h"
 
 #include <algorithm>
 #include <array>
@@ -683,6 +687,22 @@ RigExecImagingBridge::_FillProviderXforms(
         published.hasXform = true;
         snapshot->hasDrivenXforms = true;
     }
+    // Flattening stamps resetXformStack=true on every output, so the results
+    // index cannot recover authored reset boundaries from Hydra. Capture
+    // them while the bridge still owns the source stage, under driven roots.
+    std::set<SdfPath> scanned;
+    for (const auto &[providerPath, matrix] : pose.providerXforms) {
+        bool covered = false;
+        for (const auto &root : scanned) covered = covered || providerPath.HasPrefix(root);
+        if (covered) continue;
+        const auto root = _stage->GetPrimAtPath(providerPath);
+        if (!root) continue;
+        scanned.insert(providerPath);
+        for (const auto &prim : UsdPrimRange(root)) {
+            const UsdGeomXformable xform(prim);
+            if (xform && xform.GetResetXformStack()) snapshot->xformResetPaths.insert(prim.GetPath());
+        }
+    }
 }
 
 void
@@ -811,6 +831,14 @@ RigExecImagingBridge::_FillControlGuides(
     snapshot->assetRoot = _rigPath.GetParentPath();
 
     for (const auto &[controlPath, frame] : pose.controlFrames) {
+        GfMatrix4d evaluated(1.0);
+        static const RigExecPointFrame identity;
+        if (frame.IsValid() && RigExecPointsToMatrix(identity.points, frame.points, &evaluated)) {
+            auto &published = snapshot->prims[controlPath];
+            published.assetRoot = _rigPath.GetParentPath();
+            published.hasControlFrame = true;
+            published.controlFrame = evaluated;
+        }
         GfMatrix4d placement(1.0);
         GfVec3d evaluatedScale(1.0);
         if (!_RigidGuideMatrix(frame, &placement, &evaluatedScale)) {
@@ -943,6 +971,14 @@ RigExecImagingBridge::_FillVolumeGuides(
         auto readFloat = [&prim, &pose](const char *name, float fallback) {
             float value = fallback;
             if (UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+                // Property movers can drive volume dimensions. The field
+                // consumes these evaluated values, so its iso-surfaces must
+                // use the same values instead of the authored source.
+                const auto moved = pose.movedProperties.find(a.GetPath());
+                if (moved != pose.movedProperties.end() &&
+                    moved->second.IsHolding<float>()) {
+                    return moved->second.UncheckedGet<float>();
+                }
                 a.Get(&value, pose.time);
             }
             return value;
@@ -1056,6 +1092,86 @@ RigExecImagingBridge::_FillVolumeGuides(
         published.assetRoot = _rigPath.GetParentPath();
         published.hasVolumeGuides = true;
         published.volumeGuides = std::move(elements);
+        _ReadGuideStyle(prim, pose.time, &published);
+    }
+}
+
+void
+RigExecImagingBridge::_FillCurvenetGuides(
+    const RigExecRigPose &pose, RigExecImagingSnapshot *snapshot) const
+{
+    const SdfPath assetPath = _rigPath.GetParentPath();
+    const UsdPrim asset = _stage->GetPrimAtPath(assetPath);
+    if (!asset) return;
+    UsdGeomXformCache xforms(pose.time);
+    for (const UsdPrim &prim : UsdPrimRange(asset)) {
+        if (prim.GetTypeName() != "RigExecCurvenet") continue;
+        const UsdAttribute pointsAttr = prim.GetAttribute(TfToken("points"));
+        VtVec3fArray points;
+        const auto moved = pose.movedProperties.find(pointsAttr.GetPath());
+        if (moved != pose.movedProperties.end() &&
+            moved->second.IsHolding<VtVec3fArray>()) {
+            points = moved->second.UncheckedGet<VtVec3fArray>();
+        } else if (!pointsAttr.Get(&points, pose.time)) {
+            continue;
+        }
+        VtIntArray indices;
+        if (!prim.GetAttribute(TfToken("rigExec:splineIndices"))
+                 .Get(&indices, pose.time) || indices.empty()) continue;
+        TfToken basis("bezier");
+        prim.GetAttribute(TfToken("rigExec:basis")).Get(&basis, pose.time);
+        if (basis != "bezier" && basis != "catmullRom") continue;
+        int density = 5;
+        prim.GetAttribute(TfToken("rigExec:samplesPerSpline"))
+            .Get(&density, pose.time);
+        if (density < 1) continue;
+        const std::vector<GfVec3f> pool(points.begin(), points.end());
+        RigExecCurvenetTopology topology;
+        std::string error;
+        if (!RigExecBuildCurvenetTopology(
+                std::vector<int>(indices.begin(), indices.end()), pool.size(),
+                basis == "bezier" ? RigExecCurvenetBasis::Bezier
+                                   : RigExecCurvenetBasis::CatmullRom,
+                pool, nullptr, &topology, &error)) continue;
+        const RigExecCurvenetSampling sampled = RigExecSampleCurvenet(
+            topology, pool, std::vector<int>(topology.GetSplineCount(), density));
+        RigExecVolumeGuideElement element;
+        element.primType = HdPrimTypeTokens->basisCurves;
+        element.wireWidth = 0.02;
+        for (size_t c = 0; c < sampled.GetCurveCount(); ++c) {
+            const int begin = sampled.curveBegin[c];
+            const int count = sampled.GetCurveSampleCount(c);
+            if (count < 2) continue;
+            element.counts.push_back(count + (topology.curves[c].closed ? 1 : 0));
+            for (int i = 0; i < count; ++i)
+                element.points.push_back(GfVec3f(sampled.positions[begin + i]));
+            if (topology.curves[c].closed)
+                element.points.push_back(GfVec3f(sampled.positions[begin]));
+        }
+        if (element.points.empty()) continue;
+        RigExecPublishedPrim &published = snapshot->prims[prim.GetPath()];
+        published.assetRoot = assetPath;
+        published.hasVolumeGuides = true;
+        published.volumeGuides = {std::move(element)};
+        published.volumeGuideAnchor = prim.GetPath();
+        // Bounds are exposed in asset space; drawing resolves the native
+        // anchor through the same driven-transform composition as its Points.
+        GfMatrix4d toAsset(1.0);
+        for (UsdPrim ancestor = prim; ancestor && ancestor != asset;
+             ancestor = ancestor.GetParent()) {
+            bool reset = false;
+            GfMatrix4d local = xforms.GetLocalTransformation(ancestor, &reset);
+            const auto revised = pose.providerXforms.find(ancestor.GetPath());
+            if (revised != pose.providerXforms.end()) local = revised->second;
+            toAsset = toAsset * local;
+            if (reset) {
+                toAsset = toAsset * xforms.GetLocalToWorldTransform(asset).GetInverse();
+                break;
+            }
+        }
+        published.volumeGuideAnchorToAsset = toAsset;
+        published.guideColor = GfVec3f(0.15f, 0.8f, 0.45f);
+        published.guideOpacity = 1.0f;
         _ReadGuideStyle(prim, pose.time, &published);
     }
 }
@@ -1206,6 +1322,7 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     _FillGuides(pose, snapshot.get());
     _FillControlGuides(pose, snapshot.get());
     _FillVolumeGuides(pose, snapshot.get());
+    _FillCurvenetGuides(pose, snapshot.get());
     _FillWeightOverlay(pose, snapshot.get());
 
     // 3. A structural recompile publishes a replacement binding epoch
@@ -1241,6 +1358,13 @@ RigExecImagingBridge::PreflightMotionProfile(
         }
         return false;
     }
+    for (size_t i = 0; i < shutterOffsets.size(); ++i) {
+        if (!std::isfinite(shutterOffsets[i]) ||
+            (i && shutterOffsets[i] <= shutterOffsets[i - 1])) {
+            if (whyNot) *whyNot = "shutter offsets must be finite and strictly increasing";
+            return false;
+        }
+    }
     // motionBlurSupport = false permits one sample (spec §10.3.1); the
     // capability bit never supplies offsets, and an absent bit leaves the
     // application's explicit render profile authoritative.
@@ -1264,7 +1388,7 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
     // (spec §10.5): capability mismatch or an invalid profile never
     // computes and never publishes.
     if (!PreflightMotionProfile(shutterOffsets, support) ||
-        baseTime.IsDefault()) {
+        baseTime.IsDefault() || !std::isfinite(baseTime.GetValue())) {
         return result;
     }
     // The offset nearest zero supplies the primary (non-sampled) outputs.
@@ -1280,7 +1404,6 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
     // publishes (spec 8.2, 10.5): all samples are captured, then one
     // complete immutable generation swaps in.
     auto snapshot = std::make_shared<RigExecImagingSnapshot>();
-    std::map<SdfPath, std::vector<VtVec3fArray>> pointsPerPrim;
     for (size_t i = 0; i < shutterOffsets.size(); ++i) {
         const UsdTimeCode sampleTime(
             baseTime.GetValue() + double(shutterOffsets[i]));
@@ -1288,12 +1411,21 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
         if (!pose.valid) {
             return result;  // an incomplete sample set never publishes
         }
+        for (const auto &[path, matrix] : pose.providerXforms) {
+            const auto base = pose.providerBaseXforms.find(path);
+            if (base == pose.providerBaseXforms.end()) return result;
+            RigExecPublishedPrim &published = snapshot->prims[path];
+            published.sampleOffsets = shutterOffsets;
+            published.xformSamples.push_back(matrix);
+            published.xformBaseSamples.push_back(base->second);
+        }
         if (i == baseIndex) {
             // Guides are single-sampled at the base offset.
             _FillProviderXforms(pose, snapshot.get());
             _FillGuides(pose, snapshot.get());
             _FillControlGuides(pose, snapshot.get());
             _FillVolumeGuides(pose, snapshot.get());
+            _FillCurvenetGuides(pose, snapshot.get());
             _FillWeightOverlay(pose, snapshot.get());
         }
         for (const auto &[propertyPath, value] : pose.movedProperties) {
@@ -1309,12 +1441,16 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
             if (!isGeometry) {
                 continue;
             }
-            if (property == "points") {
-                pointsPerPrim[primPath].push_back(
-                    value.UncheckedGet<VtVec3fArray>());
-            }
+            RigExecPublishedPrim &published = snapshot->prims[primPath];
+            published.sampleOffsets = shutterOffsets;
+            const auto &array = value.UncheckedGet<VtVec3fArray>();
+            if (property == "points") published.pointsSamples.push_back(array);
+            else if (property == "normals") published.normalsSamples.push_back(array);
+            else if (array.size() == 2) {
+                published.extentMinSamples.push_back(GfVec3d(array[0]));
+                published.extentMaxSamples.push_back(GfVec3d(array[1]));
+            } else return result;
             if (i == baseIndex) {
-                RigExecPublishedPrim &published = snapshot->prims[primPath];
                 if (property == "points") {
                     published.hasPoints = true;
                     published.points = value.UncheckedGet<VtVec3fArray>();
@@ -1333,13 +1469,15 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
             }
         }
     }
-    for (auto &[primPath, samples] : pointsPerPrim) {
-        if (samples.size() != shutterOffsets.size()) {
-            return result;  // missing required samples fail preflight
+    for (const auto &[primPath, published] : snapshot->prims) {
+        for (size_t count : {published.pointsSamples.size(),
+                             published.normalsSamples.size(),
+                             published.xformSamples.size(),
+                             published.xformBaseSamples.size(),
+                             published.extentMinSamples.size(),
+                             published.extentMaxSamples.size()}) {
+            if (count && count != shutterOffsets.size()) return result;
         }
-        RigExecPublishedPrim &published = snapshot->prims[primPath];
-        published.sampleOffsets = shutterOffsets;
-        published.pointsSamples = std::move(samples);
     }
     snapshot->generation = ++_generation;
     // The sampled path is identified by its BASE time: that is the frame a

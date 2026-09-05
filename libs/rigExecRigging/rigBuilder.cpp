@@ -485,6 +485,41 @@ void RigExecTwoBoneIkHandle::SetPoleControl(const SdfPath &path)
     _SetSingleRel("rigExec:poleControl", path);
 }
 
+void
+RigExecTwoBoneIkHandle::SetRestJoints(const std::vector<SdfPath> &paths)
+{
+    if (!paths.empty() && paths.size() != 3) {
+        throw std::invalid_argument(
+            "TwoBoneIK rest joints must be empty or [root, mid, end]");
+    }
+    for (const SdfPath &path : paths) {
+        _RequireTypedPrim(
+            _stage, path, TfToken("RigExecJoint"), "TwoBoneIK rest joint");
+    }
+    if (paths.size() == 3 &&
+        (paths[0] == paths[1] || paths[0] == paths[2] || paths[1] == paths[2])) {
+        throw std::invalid_argument("TwoBoneIK rest joints must be distinct");
+    }
+    SetRel("rigExec:restJoints", paths);
+}
+
+void
+RigExecTwoBoneIkHandle::SetRestJoints(
+    const std::vector<RigExecJointHandle> &joints)
+{
+    std::vector<SdfPath> paths;
+    paths.reserve(joints.size());
+    for (const RigExecJointHandle &joint : joints) {
+        if (!joint.IsValid() || joint.GetStage() != _stage ||
+            joint.GetSchemaTypeName() != TfToken("RigExecJoint")) {
+            throw std::invalid_argument(
+                "SetRestJoints requires RigExecJoint handles from this stage");
+        }
+        paths.push_back(joint.GetPath());
+    }
+    SetRestJoints(paths);
+}
+
 void RigExecTwoBoneIkHandle::SetUpperLength(double length)
 { _AuthorAttr(GetPrim(), "rigExec:upperLength", SdfValueTypeNames->Double, VtValue(length)); }
 void RigExecTwoBoneIkHandle::SetLowerLength(double length)
@@ -559,6 +594,13 @@ RigExecTwistDistributionHandle::SetWeights(const std::vector<float> &weights)
     _AuthorAttr(
         GetPrim(), "rigExec:weights", SdfValueTypeNames->FloatArray,
         VtValue(VtFloatArray(weights.begin(), weights.end())));
+}
+
+void
+RigExecTwistDistributionHandle::SetTwistTurns(double turns)
+{
+    _AuthorAttr(
+        GetPrim(), "inputs:twistTurns", SdfValueTypeNames->Double, VtValue(turns));
 }
 
 void
@@ -1842,6 +1884,83 @@ RigExecMoverChain::AddVolumeCorrectMover(
     return handle;
 }
 
+void
+RigExecCurvenetAdjustmentHandle::SetCurvenet(const SdfPath &path)
+{
+    _RequireTypedPrim(_stage, path, TfToken("RigExecCurvenet"), "adjustment curvenet");
+    SetRel("rigExec:curvenet", {path});
+}
+
+void
+RigExecCurvenetAdjustmentHandle::SetKnotIndex(int index)
+{
+    SdfPathVector nets;
+    GetPrim().GetRelationship(TfToken("rigExec:curvenet")).GetTargets(&nets);
+    VtVec3fArray points;
+    if (nets.size()!=1 || !_stage->GetPrimAtPath(nets[0])
+            .GetAttribute(TfToken("points")).Get(&points) ||
+        index<0 || size_t(index)>=points.size()) {
+        throw std::invalid_argument("adjustment index is outside its curvenet point pool");
+    }
+    SetAttr("rigExec:knotIndex", TfToken("int"), VtValue(index));
+}
+
+void
+RigExecCurvenetAdjustmentHandle::SetIncludeTangents(bool include)
+{
+    SetAttr("rigExec:includeTangents", TfToken("bool"), VtValue(include));
+}
+
+RigExecCurvenetAdjustmentHandle
+RigExecCurvenetAdjustmentHandle::AddTangent(const std::string &name, int index)
+{
+    _RequireName(name, "tangent adjustment name");
+    SdfPathVector nets;
+    GetPrim().GetRelationship(TfToken("rigExec:curvenet")).GetTargets(&nets);
+    VtVec3fArray points;
+    if (nets.size()!=1 || !_stage->GetPrimAtPath(nets[0])
+            .GetAttribute(TfToken("points")).Get(&points) ||
+        index<0 || size_t(index)>=points.size()) {
+        throw std::invalid_argument("tangent index is outside its curvenet point pool");
+    }
+    const SdfPath path=_path.AppendChild(TfToken(name));
+    if (_stage->GetPrimAtPath(path)) throw std::invalid_argument("tangent adjustment already exists");
+    const auto prim=RigExecSchemaPrim::Define(_stage,path,TfToken("RigExecCurvenetAdjustment")).GetPrim();
+    _ApplyApiRequired(prim,_kControlApi);
+    _ApplyApiRequired(prim,_kNodeGraphApi);
+    RigExecCurvenetAdjustmentHandle child(_stage,path);
+    child.SetCurvenet(nets[0]);
+    child.SetKnotIndex(index);
+    child.SetAttr("rigExec:pointKind",TfToken("token"),VtValue(TfToken("tangent")));
+    child.SetIncludeTangents(false);
+    return child;
+}
+
+void
+RigExecCurvenetAdjusterMoverHandle::SetAdjustments(const std::vector<SdfPath> &paths)
+{
+    if (paths.empty()) throw std::invalid_argument("adjuster needs at least one adjustment");
+    for (const auto &path:paths) _RequireTypedPrim(
+        _stage,path,TfToken("RigExecCurvenetAdjustment"),"curvenet adjustment");
+    SetRel("rigExec:adjustments",paths);
+}
+
+RigExecCurvenetAdjusterMoverHandle
+RigExecMoverChain::AddCurvenetAdjusterMover(
+    const std::string &name, const std::vector<SdfPath> &adjustments,
+    float defaultWeight, const SdfPath &target)
+{
+    _RequireNormalizedMoverWeight(defaultWeight);
+    if (adjustments.empty()) throw std::invalid_argument("adjuster needs at least one adjustment");
+    for (const auto &path:adjustments) _RequireTypedPrim(
+        _stage,path,TfToken("RigExecCurvenetAdjustment"),"curvenet adjustment");
+    RigExecCurvenetAdjusterMoverHandle handle(_stage,
+        _AddMoverPrim("RigExecCurvenetAdjusterMover",name,target));
+    handle.SetAdjustments(adjustments);
+    handle.SetDefaultWeight(defaultWeight);
+    return handle;
+}
+
 RigExecCurvenetMoverHandle
 RigExecMoverChain::AddCurvenetMover(
     const std::string &name, const SdfPath &curvenetPrim, float defaultWeight,
@@ -2477,6 +2596,26 @@ RigExecRigBuilder::AddCurvenet(
     _ApplyApiRequired(prim, _kNodeGraphApi);
     RigExecCurvenetHandle handle(_stage, prim.GetPath());
     handle.SetPoints(points);
+    return handle;
+}
+
+RigExecCurvenetAdjustmentHandle
+RigExecRigBuilder::AddCurvenetAdjustment(
+    const std::string &name, const SdfPath &curvenet, int knotIndex)
+{
+    _RequireName(name,"curvenet adjustment name");
+    _RequireTypedPrim(_stage,curvenet,TfToken("RigExecCurvenet"),"adjustment curvenet");
+    const auto net=_stage->GetPrimAtPath(curvenet);
+    VtVec3fArray points;
+    net.GetAttribute(TfToken("points")).Get(&points);
+    if (knotIndex<0 || size_t(knotIndex)>=points.size())
+        throw std::invalid_argument("adjustment index is outside its curvenet point pool");
+    const auto prim=_DefineTyped(_EnsureScope("Adjustments"),"RigExecCurvenetAdjustment",name);
+    _ApplyApiRequired(prim,_kControlApi);
+    _ApplyApiRequired(prim,_kNodeGraphApi);
+    RigExecCurvenetAdjustmentHandle handle(_stage,prim.GetPath());
+    handle.SetCurvenet(curvenet);
+    handle.SetKnotIndex(knotIndex);
     return handle;
 }
 

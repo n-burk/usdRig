@@ -51,6 +51,9 @@ public:
     /// Serialized evaluate-then-publish, broadcast to every chain.
     bool SetTime(UsdTimeCode time);
 
+    /// Number of actual evaluator pulls for one active session, for profiling.
+    size_t GetSessionEvaluationCount(const SdfPath &rigPath);
+
     /// Selects the weight object painted as the influence overlay, and
     /// republishes at the current time so the viewport updates without
     /// waiting for a frame change. An empty string turns the overlay off.
@@ -82,6 +85,10 @@ private:
         std::shared_ptr<RigExecSnapshotStore> store;
         std::unique_ptr<RigExecImagingBridge> bridge;
         RigExecBindingResolvingSceneIndex::BindingEpochConstPtr epoch;
+        std::set<SdfPath> readRoots;
+        bool readRootsDirty = true;
+        bool dirty = true;
+        size_t evaluationCount = 0;
     };
 
     using RigSessions = std::vector<RigSession>;
@@ -99,10 +106,11 @@ private:
         const RigExecBindingResolvingSceneIndex::BindingEpochConstPtr &epoch);
 
     void _Broadcast(const RigExecImagingBridge::PublishResult &result);
+    void _RefreshReadRoots();
 
     /// Edit-driven re-evaluation: any authored change touching the rig's
-    /// asset (every input that factors into the final frame lives
-    /// beneath it) re-evaluates at the last-set time and republishes, so
+    /// asset or transitive external read dependencies re-evaluates at the
+    /// last-set time and republishes, so
     /// property edits redraw exactly like timeline changes.
     void _OnObjectsChanged(
         const UsdNotice::ObjectsChanged &notice,
@@ -115,6 +123,8 @@ private:
     UsdStageRefPtr _stage;
     std::set<SdfPath> _generatedScopes;
     std::set<SdfPath> _assetRoots;
+    std::set<SdfPath> _readRoots;
+    bool _readRootsDirty = false;
     UsdTimeCode _lastTime = UsdTimeCode::Default();
     /// The influence-overlay selection, held HERE rather than only on the
     /// bridge because it outlives one: a host may select before
@@ -154,6 +164,13 @@ RIGEXEC_IMAGING_C_API int RigExecImaging_SetTime(double frame);
 RIGEXEC_IMAGING_C_API void RigExecImaging_Deactivate();
 /// Current published snapshot generation (0 before first publication).
 RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGeneration();
+
+/// Reads one complete evaluated control matrix from the exact published
+/// stage/time. Returns 1 on success, 0 without changing output otherwise.
+/// isDefault selects UsdTimeCode::Default; ordinary frames must be finite.
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetControlFrameAssetSpace(
+    long long stageCacheId, const char *primPath, double frame,
+    int isDefault, double outMatrix[16]);
 
 /// ASSET-SPACE axis-aligned bounds of everything the current generation
 /// draws for \p primPath, as min xyz then max xyz in \p outMinMax.

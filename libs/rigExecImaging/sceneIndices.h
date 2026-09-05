@@ -144,6 +144,8 @@ private:
 /// store (spec §10.3). GetPrim() only reads the atomic immutable snapshot
 /// and constructs/returns cached data-source overlays; it never computes,
 /// waits, changes time, or locks the authoring stage.
+/// Snapshot-only publishers must populate xformResetPaths for authored
+/// reset boundaries; the USD bridge captures these before Hydra flattening.
 class RigExecResultsSceneIndex final
     : public HdSingleInputFilteringSceneIndexBase {
 public:
@@ -167,7 +169,7 @@ public:
         const SdfPath &primPath,
         const HdContainerDataSourceHandle &inputDataSource,
         const RigExecImagingSnapshot &snapshot,
-        GfMatrix4d *result) const;
+        GfMatrix4d *result, float shutterOffset = 0.0f) const;
 
     /// Dirties \p locators on every descendant present upstream, plus the
     /// synthesized guide children present only here.

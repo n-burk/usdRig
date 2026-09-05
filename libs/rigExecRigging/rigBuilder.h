@@ -136,6 +136,16 @@ public:
     void SetChannelRole(const TfToken &role);
 };
 
+/// A curvenet knot control, with local avars in a deformation-relative frame.
+class RigExecCurvenetAdjustmentHandle : public RigExecControlHandle {
+public:
+    using RigExecControlHandle::RigExecControlHandle;
+    void SetCurvenet(const SdfPath &path);
+    void SetKnotIndex(int index);
+    void SetIncludeTangents(bool include);
+    RigExecCurvenetAdjustmentHandle AddTangent(const std::string &name, int index);
+};
+
 /// A RigExecJoint: a solver-posed output xformable. When posed by a solver
 /// its rest:space is the asset-space bind transform; an unposed joint follows
 /// its namespace parent's posed space with local rest offsets and avars.
@@ -186,6 +196,10 @@ public:
     void SetRootControl(const SdfPath &path);
     void SetEffectorControl(const SdfPath &path);
     void SetPoleControl(const SdfPath &path);
+    /// Optional rest inputs [root, mid, end], independent of output bindings.
+    /// An empty list restores the rigExec:joints rest fallback.
+    void SetRestJoints(const std::vector<SdfPath> &paths);
+    void SetRestJoints(const std::vector<RigExecJointHandle> &joints);
     void SetUpperLength(double length);
     void SetLowerLength(double length);
     /// Deltas added to the rest-implied lengths. Used only when the
@@ -222,6 +236,8 @@ public:
     void SetCount(int count);
     /// Optional per-frame weights (parallel to the distributed frames).
     void SetWeights(const std::vector<float> &weights);
+    /// Additional signed revolutions around the aim axis, including fractions.
+    void SetTwistTurns(double turns);
     void SetDistribution(const TfToken &mode);  // minimumEnergy
     /// Optional element index per rigExec:joints entry.
     void SetJointElements(const std::vector<int> &elements);
@@ -625,6 +641,12 @@ public:
     void SetStrength(float strength);
 };
 
+class RigExecCurvenetAdjusterMoverHandle : public RigExecMoverHandle {
+public:
+    using RigExecMoverHandle::RigExecMoverHandle;
+    void SetAdjustments(const std::vector<SdfPath> &paths);
+};
+
 /// RigExecFloatMathMover: add | multiply | clamp | remap | blend over an
 /// exact float property. The common MoverAPI envelope mixes the candidate
 /// result back over the incoming value.
@@ -753,6 +775,9 @@ public:
         const SdfPath &curvenetPrim,
         float defaultWeight = 1.0f,
         const SdfPath &target = {});
+    RigExecCurvenetAdjusterMoverHandle AddCurvenetAdjusterMover(
+        const std::string &name, const std::vector<SdfPath> &adjustments,
+        float defaultWeight = 1.0f, const SdfPath &target = {});
 
     // ---- Property-domain movers ----------------------------------------
 
@@ -957,6 +982,8 @@ public:
 
     RigExecCurvenetHandle AddCurvenet(
         const std::string &name, const std::vector<GfVec3f> &points);
+    RigExecCurvenetAdjustmentHandle AddCurvenetAdjustment(
+        const std::string &name, const SdfPath &curvenet, int knotIndex);
 
     // ---- Mover chains ----------------------------------------------------
 

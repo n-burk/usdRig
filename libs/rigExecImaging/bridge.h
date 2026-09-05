@@ -60,11 +60,11 @@ public:
     /// caller forwards the result to its chains.
     PublishResult EvaluateAndPublishResult(UsdTimeCode time);
 
-    /// Render-motion publication (spec 10.5 subset): evaluates the rig at
+    /// Render-motion publication: evaluates the rig at
     /// baseTime + offset for every explicit frame-relative shutter offset,
-    /// retains the final point sets per offset, and publishes them under
-    /// one complete generation fence. Non-point outputs are retained at
-    /// the offset nearest zero. Preflight (capability check and offset
+    /// retains points, normals, extents and driven transforms per offset,
+    /// and publishes them under one complete generation fence. Diagnostic
+    /// guides use the offset nearest zero. Preflight (capability check and offset
     /// validation) fails before any evaluation; an incomplete sample set
     /// never publishes.
     PublishResult EvaluateAndPublishSamples(
@@ -141,6 +141,11 @@ private:
     /// every placed influence volume draws, so a rigger can see the shape
     /// being placed rather than infer it from the deformation.
     void _FillVolumeGuides(
+        const RigExecRigPose &pose,
+        RigExecImagingSnapshot *snapshot) const;
+
+    /// Samples native curvenets from their evaluated control-point pools.
+    void _FillCurvenetGuides(
         const RigExecRigPose &pose,
         RigExecImagingSnapshot *snapshot) const;
 

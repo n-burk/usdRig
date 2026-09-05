@@ -87,16 +87,16 @@ RigExecPointFrame RigExecBlendFrames(
 /// aim-axis twist angle interpolates linearly after swing/twist
 /// decomposition (deterministic minimum-energy distribution).
 ///
-/// v0.1 limitation: the twist angle is the principal angle in (-pi, pi]
-/// derived from the endpoint orientations. Multi-revolution ("unwrapped")
-/// twist is not derivable from two frames alone and requires an explicit
-/// wrap-count input, which the current schema does not author.
+/// twistTurns adds signed revolutions to the principal endpoint twist. It
+/// carries winding information that endpoint frames alone cannot represent;
+/// fractional values support continuous animation through complete turns.
 std::vector<RigExecPointFrame> RigExecDistributeTwist(
     const RigExecPointFrame &start,
     const RigExecPointFrame &end,
     const std::array<GfVec3d, 4> &startRest,
     const std::array<GfVec3d, 4> &endRest,
-    const std::vector<double> &weights);
+    const std::vector<double> &weights,
+    double twistTurns = 0.0);
 
 /// Weighted matrix movement kernel (RigExecMatrixMover, spec §7.4):
 ///   p' = q + w (T q - q), 0 <= w <= 1,

@@ -2,12 +2,14 @@
 // RigExec geometry mover kernels implementation.
 //
 #include "geometryKernels.h"
+#include "pxr/base/gf/vec3d.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
 #include <set>
+#include <utility>
 
 namespace rigExec {
 
@@ -93,6 +95,94 @@ _BuildAdjacency(
 }
 
 }  // namespace
+
+bool
+RigExecTransportSurfaceOffsets(
+    const std::vector<GfVec3f> &rest,
+    const std::vector<GfVec3f> &posed,
+    const std::vector<int> &faceCounts,
+    const std::vector<int> &faceIndices,
+    const std::vector<GfVec3f> &deltas,
+    std::vector<GfVec3f> *out)
+{
+    if (!out || rest.size() != posed.size() || rest.size() != deltas.size()) return false;
+    for (size_t i = 0; i < rest.size(); ++i) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(rest[i][axis]) || !std::isfinite(posed[i][axis]) ||
+                !std::isfinite(deltas[i][axis])) return false;
+        }
+    }
+    size_t offset = 0;
+    std::vector<GfVec3d> restNormals(rest.size(), GfVec3d(0));
+    std::vector<GfVec3d> posedNormals(rest.size(), GfVec3d(0));
+    for (int count : faceCounts) {
+        if (count < 3 || static_cast<size_t>(count) > faceIndices.size() - offset) return false;
+        for (int corner = 0; corner < count; ++corner) {
+            const int index = faceIndices[offset + corner];
+            if (index < 0 || static_cast<size_t>(index) >= rest.size()) return false;
+        }
+        // Newell's area vector, evaluated relative to the first corner to
+        // avoid subtracting products of large translated coordinates.
+        const int origin = faceIndices[offset];
+        GfVec3d restArea(0), posedArea(0);
+        for (int corner = 1; corner + 1 < count; ++corner) {
+            const int a = faceIndices[offset + corner];
+            const int b = faceIndices[offset + corner + 1];
+            restArea += GfCross(GfVec3d(rest[a]) - GfVec3d(rest[origin]),
+                                GfVec3d(rest[b]) - GfVec3d(rest[origin]));
+            posedArea += GfCross(GfVec3d(posed[a]) - GfVec3d(posed[origin]),
+                                 GfVec3d(posed[b]) - GfVec3d(posed[origin]));
+        }
+        for (int corner = 0; corner < count; ++corner) {
+            const int index = faceIndices[offset + corner];
+            restNormals[index] += restArea;
+            posedNormals[index] += posedArea;
+        }
+        offset += static_cast<size_t>(count);
+    }
+    if (offset != faceIndices.size()) return false;
+    const auto adjacency = _BuildAdjacency(rest.size(), faceCounts, faceIndices);
+    auto normalize = [](GfVec3d *value) {
+        const double length = value->GetLength();
+        if (!(length > 0) || !std::isfinite(length)) return false;
+        *value /= length;
+        return true;
+    };
+    std::vector<GfVec3f> result = deltas;
+    for (size_t i = 0; i < rest.size(); ++i) {
+        if (deltas[i] == GfVec3f(0)) continue;
+        GfVec3d nr = restNormals[i], np = posedNormals[i];
+        if (!normalize(&nr) || !normalize(&np)) return false;
+        int neighbor = -1;
+        double longest = 0;
+        GfVec3d tr(0);
+        // _BuildAdjacency orders neighbors by index, making equal-length
+        // choices independent of face order and corner traversal direction.
+        for (int candidate : adjacency[i]) {
+            const GfVec3d edge = GfVec3d(rest[candidate]) - GfVec3d(rest[i]);
+            const GfVec3d projected = edge - GfDot(edge, nr) * nr;
+            const double length2 = projected.GetLengthSq();
+            if (length2 > longest) {
+                neighbor = candidate;
+                longest = length2;
+                tr = projected;
+            }
+        }
+        if (neighbor < 0 || !normalize(&tr)) return false;
+        const GfVec3d edge = GfVec3d(posed[neighbor]) - GfVec3d(posed[i]);
+        GfVec3d tp = edge - GfDot(edge, np) * np;
+        if (tp.GetLengthSq() <= edge.GetLengthSq() * 1e-24 || !normalize(&tp)) return false;
+        const GfVec3d br = GfCross(nr, tr), bp = GfCross(np, tp);
+        const GfVec3d delta(deltas[i]);
+        const GfVec3d rotated = GfDot(delta, tr) * tp + GfDot(delta, br) * bp + GfDot(delta, nr) * np;
+        result[i] = GfVec3f(rotated);
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(result[i][axis])) return false;
+        }
+    }
+    *out = std::move(result);
+    return true;
+}
 
 void
 RigExecApplyLaplacianSmooth(

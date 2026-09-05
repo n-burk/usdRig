@@ -50,6 +50,21 @@ std::vector<GfVec3f> RigExecComputeVertexNormals(
     const std::vector<int> &faceVertexCounts,
     const std::vector<int> &faceVertexIndices);
 
+/// Rotate target-local offsets through corresponding rest/posed surface frames.
+/// Area-weighted polygon normals supply each vertex normal. The longest
+/// projected incident REST edge supplies its tangent (lowest neighbor index
+/// wins ties); the corresponding POSED edge supplies the posed tangent.
+/// Orthonormal transport preserves offset magnitude, even under mesh scaling.
+/// Invalid arrays/topology or a nonzero offset at a degenerate frame fail
+/// atomically, leaving out unchanged. A zero offset needs no valid frame.
+bool RigExecTransportSurfaceOffsets(
+    const std::vector<GfVec3f> &rest,
+    const std::vector<GfVec3f> &posed,
+    const std::vector<int> &faceCounts,
+    const std::vector<int> &faceIndices,
+    const std::vector<GfVec3f> &deltas,
+    std::vector<GfVec3f> *out);
+
 /// Two-element extent (min, max) from final local points, optionally
 /// widened by the winning widths (curves/points rule, spec §7.6).
 std::vector<GfVec3f> RigExecComputeExtent(

@@ -59,6 +59,7 @@ enum class RigExecRevisionOp {
     Ribbon,
     EmitGuidePoints,
     Curvenet,
+    CurvenetAdjuster,
     RecomputeNormals,
     RecomputeExtent,
 };
@@ -108,7 +109,7 @@ struct RigExecReadPhase {
 ///
 /// Not namespaced: USD metadata field names are plain identifiers, and
 /// `rigExec:readPhase` does not parse in a metadata position.
-extern const char *const RigExecReadPhaseMetadataName;
+inline constexpr const char *RigExecReadPhaseMetadataName = "rigExecReadPhase";
 
 /// Parses an authored phase string.
 ///
@@ -167,38 +168,39 @@ public:
 
     /// Resolves one scalar/static input exactly as Exec's AttributeValue
     /// accessor does: an in-memory property override wins, otherwise a single
-    /// authored attribute connection is followed recursively, otherwise the
+    /// authored attribute connection is followed, otherwise the
     /// attribute's own value is read. Compile validates connection
     /// cardinality/type/cycles for schema inputs that require one scalar.
     template <class T>
     bool GetAttribute(
         const UsdAttribute &attribute, UsdTimeCode time, T *out) const {
+        if (!out) {
+            return false;
+        }
         std::set<SdfPath> visiting;
-        std::function<bool(const UsdAttribute &)> read =
-            [&](const UsdAttribute &a) {
-            if (!a || !out || !visiting.insert(a.GetPath()).second) {
-                return false;
-            }
-            struct _EraseOnReturn {
-                std::set<SdfPath> *paths;
-                SdfPath path;
-                ~_EraseOnReturn() { paths->erase(path); }
-            } erase{&visiting, a.GetPath()};
+        std::vector<UsdAttribute> fallback;
+        UsdAttribute a = attribute;
+        while (a && visiting.insert(a.GetPath()).second) {
             if (Get(a.GetPath(), out)) {
                 return true;
             }
+            fallback.push_back(a);
             SdfPathVector connections;
             a.GetConnections(&connections);
-            if (connections.size() == 1) {
-                const UsdAttribute source =
-                    a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
-                if (read(source)) {
-                    return true;
-                }
+            if (connections.size() != 1) {
+                break;
             }
-            return a.Get(out, time);
-        };
-        return read(attribute);
+            a = a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
+        }
+        // The nearest readable upstream authored value is the same fallback
+        // that recursive connection traversal selected, without consuming a
+        // native stack frame for every operation in a long connection chain.
+        for (auto it = fallback.rbegin(); it != fallback.rend(); ++it) {
+            if (it->Get(out, time)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     bool IsEmpty() const { return _values.empty(); }
@@ -264,6 +266,15 @@ private:
 /// which prim carries the topology, which attribute holds the cage -- so in the
 /// graph they are just the paths an edge will be built from, and nothing needs
 /// to be authored anywhere to express them.
+struct RigExecBlendSampleBinding {
+    SdfPath sample;
+    SdfPath points;
+    RigExecReadPhase phase;
+    bool operator==(const RigExecBlendSampleBinding &o) const {
+        return sample == o.sample && points == o.points && phase == o.phase;
+    }
+};
+
 struct RigExecRevisionBinding {
     SdfPath moverPath;        ///< the authored mover
     SdfPath target;           ///< canonical exact write target
@@ -280,6 +291,7 @@ struct RigExecRevisionBinding {
     SdfPath curvenet;         ///< RigExecCurvenet prim (Profile Mover)
     SdfPath curvenetPoints;   ///< that curvenet's points property
     std::vector<SdfPath> blendInputs;  ///< sorted blend channels
+    std::map<SdfPath, std::vector<RigExecBlendSampleBinding>> blendSamples;
 
     /// Declared read phase per side input, keyed by the exact property path
     /// the phase governs. Absent means Base, which is what an unannotated
@@ -290,6 +302,15 @@ struct RigExecRevisionBinding {
     /// `phases` because it is answered from the FRAME chains rather than the
     /// point chains -- a different store with a different value type.
     RigExecReadPhase transformPhase;
+
+    std::vector<std::pair<SdfPath, RigExecReadPhase>> GetPhasedInputs() const {
+        std::vector<std::pair<SdfPath, RigExecReadPhase>> result(
+            phases.begin(), phases.end());
+        for (const auto &[input, samples] : blendSamples)
+            for (const auto &sample : samples)
+                if (!sample.phase.IsBase()) result.emplace_back(sample.points, sample.phase);
+        return result;
+    }
 
     bool operator==(const RigExecRevisionBinding &o) const;
 };
@@ -471,17 +492,52 @@ public:
         const RigExecMoverParameters &parameters,
         const RigExecMoverStatus &status);
 
-    /// Evaluates \p output and returns its points.
+    /// Updates an existing source without changing graph topology. Returns
+    /// false for an unknown source or a changed point count; cardinality
+    /// changes require rebuilding that target's chain. Equal values stay clean.
+    bool UpdatePointSource(
+        const VdfMaskedOutput &source, const VtVec3fArray &points);
+
+    /// Updates a revision's packet and status in place. Returns false for an
+    /// unknown revision. Only changed inputs and their dependents are dirtied.
+    bool UpdateRevision(
+        const VdfMaskedOutput &revision,
+        const RigExecMoverParameters &parameters,
+        const RigExecMoverStatus &status);
+
+    /// Splices a retained revision into a new chain. Its operation and point
+    /// cardinality stay fixed; only that revision and its dependents are dirty.
+    bool ReconnectRevision(const VdfMaskedOutput &revision,
+                           const VdfMaskedOutput &previous);
+
+    /// Removes an obsolete revision after surviving consumers are reconnected.
+    bool RemoveRevision(const VdfMaskedOutput &revision);
+
+    /// Evaluates \p output and returns its points. The schedule and executor
+    /// persist between calls, including intermediate revision values, so an
+    /// edit only executes the affected suffix and an unchanged call is cached.
     VtVec3fArray Evaluate(const VdfMaskedOutput &output) const;
+
+    /// Actual cached execution status, including kernel-time rejection.
+    /// Evaluate the revision or a downstream output before querying it.
+    RigExecMoverStatus GetRevisionStatus(const VdfMaskedOutput &revision) const;
+    /// Cached deformation-relative control frames produced by an adjuster.
+    std::vector<GfMatrix4d> GetRevisionControlFrames(const VdfMaskedOutput &revision) const;
 
     /// Number of revision nodes currently in the graph (excludes sources).
     size_t GetRevisionCount() const { return _revisionCount; }
 
+    /// Cumulative counters for inspecting incremental execution behavior.
+    size_t GetRevisionExecutionCount() const;
+    size_t GetScheduleBuildCount() const;
+
     const VdfNetwork &GetNetwork() const { return _network; }
 
 private:
+    struct _Runtime;
     VdfNetwork _network;
     size_t _revisionCount = 0;
+    std::unique_ptr<_Runtime> _runtime;
 };
 
 }  // namespace rigExec

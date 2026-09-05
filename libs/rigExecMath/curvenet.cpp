@@ -7,6 +7,7 @@
 // appears where these meet point arrays, and the transpose is written there.
 //
 #include "curvenet.h"
+#include "pxr/base/gf/vec4d.h"
 
 #include <algorithm>
 #include <cmath>
@@ -167,20 +168,44 @@ void _GatherSpline(const RigExecCurvenetTopology &topology,
 /// Even arc-length samples of one spline span, inclusive of both ends.
 /// Uniform refinement in parametric space first, then resampling by arc
 /// length, exactly as §3 describes.
+GfVec4d _SplineWeights(RigExecCurvenetBasis basis, const GfVec3d p[4], double t)
+{
+    if (basis == RigExecCurvenetBasis::Bezier) {
+        const double u = 1.0 - t;
+        return GfVec4d(u*u*u, 3*u*u*t, 3*u*t*t, t*t*t);
+    }
+    double knots[4] = {0, 0, 0, 0};
+    for (int i = 1; i < 4; ++i)
+        knots[i] = knots[i-1] + std::sqrt(std::max((p[i]-p[i-1]).GetLength(), kEps));
+    const double at = knots[1] + t * (knots[2] - knots[1]);
+    auto mix = [&](const GfVec4d &a, const GfVec4d &b, int lo, int hi) {
+        const double w = (at-knots[lo])/(knots[hi]-knots[lo]);
+        return a*(1-w) + b*w;
+    };
+    const GfVec4d a = mix(GfVec4d(1,0,0,0), GfVec4d(0,1,0,0), 0,1);
+    const GfVec4d b = mix(GfVec4d(0,1,0,0), GfVec4d(0,0,1,0), 1,2);
+    const GfVec4d c = mix(GfVec4d(0,0,1,0), GfVec4d(0,0,0,1), 2,3);
+    return mix(mix(a,b,0,2), mix(b,c,1,3), 1,2);
+}
+
 void _SampleSplineSpan(RigExecCurvenetBasis basis, const GfVec3d p[4],
-                       int subdivisions, std::vector<GfVec3d> *out)
+                       int subdivisions, std::vector<GfVec3d> *out,
+                       std::vector<GfVec4d> *stencils)
 {
     const int refine = std::max(8 * subdivisions, 32);
     std::vector<GfVec3d> dense(refine + 1);
+    std::vector<GfVec4d> coefficients(refine + 1);
     std::vector<double> arc(refine + 1, 0.0);
     for (int i = 0; i <= refine; ++i) {
         dense[i] = _EvalSpline(basis, p, double(i) / double(refine));
+        coefficients[i] = _SplineWeights(basis, p, double(i) / double(refine));
         if (i > 0) {
             arc[i] = arc[i - 1] + (dense[i] - dense[i - 1]).GetLength();
         }
     }
     const double total = arc[refine];
     out->clear();
+    stencils->clear();
     out->reserve(subdivisions + 1);
     if (total <= kEps) {
         // Degenerate span: every sample coincides. Emitted rather than
@@ -188,6 +213,7 @@ void _SampleSplineSpan(RigExecCurvenetBasis basis, const GfVec3d p[4],
         // frame stage rejects the resulting zero-length segments by name.
         for (int j = 0; j <= subdivisions; ++j) {
             out->push_back(dense[0]);
+            stencils->push_back(coefficients[0]);
         }
         return;
     }
@@ -200,6 +226,7 @@ void _SampleSplineSpan(RigExecCurvenetBasis basis, const GfVec3d p[4],
         const double span = arc[cursor + 1] - arc[cursor];
         const double w = (span <= kEps) ? 0.0 : (target - arc[cursor]) / span;
         out->push_back(dense[cursor] * (1.0 - w) + dense[cursor + 1] * w);
+        stencils->push_back(coefficients[cursor]*(1-w) + coefficients[cursor+1]*w);
     }
 }
 
@@ -277,14 +304,14 @@ bool RigExecBuildCurvenetTopology(
     std::vector<int> valence(pointCount, 0);
     std::vector<bool> isHandle(pointCount, false);
     for (size_t s = 0; s < splineCount; ++s) {
-        const int a = splineIndices[4 * s];
-        const int b = splineIndices[4 * s + 3];
+        const int a = topology->GetSplineStartKnot(s);
+        const int b = topology->GetSplineEndKnot(s);
         incident[a].push_back({int(s), true});
         incident[b].push_back({int(s), false});
         ++valence[a];
         ++valence[b];
-        isHandle[splineIndices[4 * s + 1]] = true;
-        isHandle[splineIndices[4 * s + 2]] = true;
+        isHandle[splineIndices[4 * s + (basis == RigExecCurvenetBasis::Bezier ? 1 : 0)]] = true;
+        isHandle[splineIndices[4 * s + (basis == RigExecCurvenetBasis::Bezier ? 2 : 3)]] = true;
     }
 
     topology->knotValence.assign(pointCount, 0);
@@ -308,8 +335,8 @@ bool RigExecBuildCurvenetTopology(
                topology->knotKinds[knot] == RigExecCurvenetKnotKind::Anchor;
     };
     auto otherEnd = [&](int spline, int knot) {
-        const int a = splineIndices[4 * spline];
-        const int b = splineIndices[4 * spline + 3];
+        const int a = topology->GetSplineStartKnot(spline);
+        const int b = topology->GetSplineEndKnot(spline);
         return (knot == a) ? b : a;
     };
 
@@ -334,7 +361,7 @@ bool RigExecBuildCurvenetTopology(
             for (;;) {
                 consumed[currentSpline] = true;
                 const bool reversed =
-                    splineIndices[4 * currentSpline] != currentKnot;
+                    topology->GetSplineStartKnot(currentSpline) != currentKnot;
                 curve.splines.push_back(currentSpline);
                 curve.reversed.push_back(reversed);
                 const int next = otherEnd(currentSpline, currentKnot);
@@ -372,14 +399,14 @@ bool RigExecBuildCurvenetTopology(
         }
         RigExecCurvenetCurve curve;
         curve.closed = true;
-        const int origin = splineIndices[4 * s];
+        const int origin = topology->GetSplineStartKnot(s);
         curve.startKnot = origin;
         int currentKnot = origin;
         int currentSpline = int(s);
         for (;;) {
             consumed[currentSpline] = true;
             const bool reversed =
-                splineIndices[4 * currentSpline] != currentKnot;
+                topology->GetSplineStartKnot(currentSpline) != currentKnot;
             curve.splines.push_back(currentSpline);
             curve.reversed.push_back(reversed);
             const int next = otherEnd(currentSpline, currentKnot);
@@ -566,6 +593,7 @@ RigExecCurvenetSampling RigExecSampleCurvenet(
     sampling.curveBegin.push_back(0);
 
     std::vector<GfVec3d> span;
+    std::vector<GfVec4d> stencils;
     for (const RigExecCurvenetCurve &curve : topology.curves) {
         for (size_t i = 0; i < curve.splines.size(); ++i) {
             const size_t spline = curve.splines[i];
@@ -575,7 +603,7 @@ RigExecCurvenetSampling RigExecSampleCurvenet(
                 (spline < samplesPerSpline.size())
                     ? std::max(1, samplesPerSpline[spline])
                     : 1;
-            _SampleSplineSpan(topology.basis, cp, subdivisions, &span);
+            _SampleSplineSpan(topology.basis, cp, subdivisions, &span, &stencils);
 
             // The first sample of every span but the first is the previous
             // span's last: drop it so shared knots appear once.
@@ -588,6 +616,14 @@ RigExecCurvenetSampling RigExecSampleCurvenet(
                                   : topology.GetSplineEndKnot(spline);
             for (size_t j = first; j < span.size(); ++j) {
                 sampling.positions.push_back(span[j]);
+                std::array<int,4> indices;
+                std::array<double,4> weights;
+                for (int k = 0; k < 4; ++k) {
+                    indices[k] = topology.splineIndices[4*spline + (curve.reversed[i] ? 3-k : k)];
+                    weights[k] = stencils[j][k];
+                }
+                sampling.stencilIndices.push_back(indices);
+                sampling.stencilWeights.push_back(weights);
                 int knot = -1;
                 if (j == 0) {
                     knot = startKnot;
@@ -603,6 +639,8 @@ RigExecCurvenetSampling RigExecSampleCurvenet(
             // instead, so the duplicate is removed.
             sampling.positions.pop_back();
             sampling.knotOfSample.pop_back();
+            sampling.stencilIndices.pop_back();
+            sampling.stencilWeights.pop_back();
         }
         sampling.curveBegin.push_back(int(sampling.positions.size()));
     }

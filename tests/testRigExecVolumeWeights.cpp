@@ -136,6 +136,7 @@ struct Fixture {
     VtVec3fArray Resolve(const char *label)
     {
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        evaluator.cpuParityMode = true;
         std::vector<std::string> errors;
         if (!evaluator.Compile(&errors)) {
             for (const std::string &e : errors) {
@@ -409,6 +410,8 @@ TestPlaneBoundsEpochSplit()
     f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
+
+    evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         for (const std::string &e : errors) {
@@ -516,6 +519,8 @@ TestPlaneBoundedInvalidExtents()
     f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
+
+    evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         for (const std::string &e : errors) {
@@ -941,6 +946,8 @@ TestVolumeWeightTargetMismatchFailsCompile()
     f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
+
+    evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
     CHECK(!evaluator.Compile(&errors));
     CHECK(!errors.empty());
@@ -972,6 +979,8 @@ TestCurveWeightRejectsTwoCurves()
     f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
+
+    evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
     CHECK(!evaluator.Compile(&errors));
     CHECK(!errors.empty());
@@ -1089,6 +1098,8 @@ TestCombineCycleFailsCompile()
     f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), a.GetPath());
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
+
+    evaluator.cpuParityMode = true;
     std::vector<std::string> errors;
     CHECK(!evaluator.Compile(&errors));
     CHECK(!errors.empty());
