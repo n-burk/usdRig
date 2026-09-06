@@ -106,13 +106,11 @@ def Xform "LegAsset"
                     </LegAsset/Rig/Joints/Hip/Knee>,
                     </LegAsset/Rig/Joints/Hip/Knee/Ankle>,
                 ]
-                double rigExec:lowerLength = 4
                 rel rigExec:poleControl = </LegAsset/Rig/Controls/KneePole>
                 double rigExec:preferredBendRadians = 0.3
                 rel rigExec:rootControl = </LegAsset/Rig/Controls/HipRoot>
                 uniform token rigExec:stretchPolicy = "uniformSegments"
                 uniform token rigExec:unreachablePolicy = "clampWithSoftness"
-                double rigExec:upperLength = 4
                 uniform asset ui:nodegraph:node:icon = @../icons/two_bone_ik.png@
             }
         }

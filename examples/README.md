@@ -41,7 +41,12 @@ aggregate frame element with their own radius, color, and opacity.
   effector with a knee pole; an `inputs:stretch` spline ramps 0→1 so the
   out-of-reach pose visibly stretches the chain under
   `clampWithSoftness`. A `RigExecDynamicWeight` modulates painted knee
-  weights with an animated driver before skinning.
+  weights with an animated driver before skinning. Its bone lengths are
+  left unauthored, so they are measured from the bound joints' rests on
+  every evaluation: move a joint's rest and the limb re-proportions
+  itself. `03` and `ArmRig` bind their joints through
+  `RigExecBlendPointFrames` instead, so their solvers have no rests to
+  measure and must author the two absolute lengths.
 - **03_IkFkBlendClamp.usda** — `RigExecBlendPointFrames` blending an FK
   chain against a two-bone IK, plus a pose-phase `RigExecFloatMathMover`
   that clamps the deliberately overdriven blend weight (-0.25→1.3) to

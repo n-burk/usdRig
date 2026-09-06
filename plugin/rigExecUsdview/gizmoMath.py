@@ -245,6 +245,35 @@ def SolverPosedPaths(rigRoot):
     return paths
 
 
+IK_LENGTHS = ("rigExec:upperLength", "rigExec:lowerLength")
+
+
+def FrozenIkSolvers(rigRoot, primPath):
+    """
+    The RigExecTwoBoneIk prims that bind `primPath` and have BOTH
+    absolute bone lengths authored.
+
+    Such a solver is skipped entirely by the implied-length pass
+    (rigEvaluator.cpp:3315-3319 -- the guard is `&&`, so ONE authored
+    length still leaves the other measured), and the bones stop tracking
+    the bound joints' rest frames. A pivot drag on one of those joints
+    is then provably inert on the solve.
+    """
+    frozen = []
+    if rigRoot is None:
+        return frozen
+    for prim in Usd.PrimRange(rigRoot):
+        if prim.GetTypeName() != "RigExecTwoBoneIk":
+            continue
+        rel = prim.GetRelationship(SOLVER_JOINTS_REL)
+        if not rel or primPath not in rel.GetTargets():
+            continue
+        authored = [prim.GetAttribute(n) for n in IK_LENGTHS]
+        if all(a and a.HasAuthoredValueOpinion() for a in authored):
+            frozen.append(prim.GetName())
+    return frozen
+
+
 class SolverPosedCache(object):
     """
     SolverPosedPaths memoised per rig root.
@@ -483,36 +512,76 @@ class RigFrames(object):
       posed      avars * P   (the evaluator's computePointFrame)
       P          posedDefault * parentDefault^-1 * parentPosed: the frame the avars
                  are expressed in -- Pose mode edits happen relative to it
+      Qrest      orthonormalize(rest:space): the frame the rest offsets
+                 are ACTUALLY expressed in, and what Pivot mode edits
+                 relative to. computeRestFrame composes rest:t/rest:r
+                 against rest:space and reads no namespace ancestor
+                 (computations.cpp:200-219), so a rest frame is absolute
+                 in asset space and owes nothing to the parent's pose.
+                 restLocal * Qrest is therefore `rest` itself, and the
+                 pivot manipulator sits on the frame its own channels
+                 define -- unmoved by an animated ancestor, and unmoved
+                 by a solver posing this joint.
       Q          orthonormalize(rest:space) * parentRest^-1 * parentPosed:
-                 the frame the rest offsets are expressed in -- Pivot mode
-                 edits act before local default offsets. With identity
-                 default channels, restLocal * Q reproduces P. A default
-                 offset moves the avar origin while the rest pivot remains
-                 in the bind frame. Raw rest:space is orthonormalized here,
-                 matching the evaluator's rigid rest-frame convention.
+                 the frame the rest offsets are carried into for POSE
+                 purposes. Pivot mode does NOT use it. Rest editing acts
+                 in the bind frame, before local default offsets: with
+                 identity default channels, restLocal * Q reproduces P,
+                 while a default offset moves the avar origin and leaves
+                 the rest pivot in the bind frame. Raw rest:space is
+                 orthonormalized here, matching the evaluator's rigid
+                 rest-frame convention -- an approximation only for a
+                 rest:space carrying scale or shear, which the evaluator
+                 throws away too.
       restLocal  compose(rest:t, rest:r)
       default    computed default:space, including connected overrides
       unitScale  distance per translation avar unit; inverted on drag writes
       reason     "" when the prim is editable through its avars, else why
                  not (solver-posed, posed:space authority, no rig root)
+      pivotReason
+                 "" when the prim is editable through its REST offsets,
+                 else why not. Much narrower than `reason`: everything
+                 that only redirects the POSE authority away from the
+                 avars -- a solver, an authored or connected posed:space,
+                 an ancestor with either -- leaves rest:t/r authored,
+                 read and honoured, so it is no reason to refuse a pivot.
+                 Only a prim outside a RigExecRoot is refused here, and
+                 for a hard reason: the frames are never computed, so
+                 there is nothing to draw on.
     """
 
     def __init__(self, prim):
         self.prim = prim
         self.rigRoot = None
         self.reason = ""
+        self.pivotReason = ""
         self.rest = Gf.Matrix4d(1.0)
         self.posed = Gf.Matrix4d(1.0)
         self.P = Gf.Matrix4d(1.0)
         self.Q = Gf.Matrix4d(1.0)
+        self.Qrest = Gf.Matrix4d(1.0)
         self.restLocal = Gf.Matrix4d(1.0)
         self.parentRest = Gf.Matrix4d(1.0)
         self.parentPosed = Gf.Matrix4d(1.0)
         self.parentDefault = Gf.Matrix4d(1.0)
         self.default = Gf.Matrix4d(1.0)
         self.unitScale = 1.0
-        self.pivotReason = ""
         self.assetToWorld = Gf.Matrix4d(1.0)
+
+
+def _RefuseBothModes(frames, message):
+    """
+    Record a cause that refuses Pose AND Pivot.
+
+    Pivot normally answers only to `pivotReason`, because a solver or a
+    posed:space redirects the POSE authority and leaves rest:t/r live.
+    That reasoning needs frames to exist: every site that gives up before
+    building Qrest/restLocal, and every prim whose data is broken rather
+    than merely solver-driven, refuses both modes through here.
+    """
+    frames.reason = message
+    frames.pivotReason = message
+    return frames
 
 
 _publishedControlFrameReader = None
@@ -545,8 +614,11 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
     frames = RigFrames(prim)
     frames.rigRoot = FindRigRoot(prim)
     if frames.rigRoot is None:
-        frames.reason = "%s is not under a RigExecRoot" % prim.GetName()
-        return frames
+        # Returns before any frame is computed, so rest/Qrest/assetToWorld
+        # stay identity and a pivot built from them would draw at the
+        # world origin.
+        return _RefuseBothModes(
+            frames, "%s is not under a RigExecRoot" % prim.GetName())
     if prim.GetTypeName() == "RigExecCurvenetAdjustment":
         # The adjustment scope depends on preceding point revisions. Its
         # cached native frame is the authority; authored USD alone cannot
@@ -554,18 +626,19 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         matrix = (_publishedControlFrameReader(stage, prim.GetPath(), time)
                   if _publishedControlFrameReader is not None else None)
         if matrix is None:
-            frames.reason = "Activate RigExec at this frame to edit the curvenet adjustment"
-            return frames
+            return _RefuseBothModes(
+                frames,
+                "Activate RigExec at this frame to edit the curvenet adjustment")
         avars = AvarsMatrix(prim, time)
         if not all(math.isfinite(avars[r][c]) for r in range(4) for c in range(4)) \
                 or abs(avars.GetDeterminant()) < 1e-12:
-            frames.reason = "The adjustment's avar matrix is not invertible"
-            return frames
+            return _RefuseBothModes(
+                frames, "The adjustment's avar matrix is not invertible")
         posedAttr = prim.GetAttribute(POSED_SPACE)
         if posedAttr and (posedAttr.HasAuthoredConnections()
                           or _MatrixAttr(prim, POSED_SPACE, time) != _IDENTITY):
-            frames.reason = "posed:space drives this adjustment; edit its source"
-            return frames
+            return _RefuseBothModes(
+                frames, "posed:space drives this adjustment; edit its source")
         frames.posed = Gf.Matrix4d(matrix)
         frames.P = avars.GetInverse() * frames.posed
         frames.default = frames.P
@@ -573,7 +646,9 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         frames.rest = frames.P
         frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
         if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
-            frames.reason = "The adjustment has a zero or non-finite translation unit scale"
+            _RefuseBothModes(
+                frames,
+                "The adjustment has a zero or non-finite translation unit scale")
         frames.pivotReason = "Curvenet adjustment pivots follow the preceding deformation"
         assetRoot = frames.rigRoot.GetParent()
         if assetRoot and not assetRoot.IsPseudoRoot():
@@ -614,16 +689,21 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         frames.parentPosed = _ComputedSpace(prim, PARENT_SPACE, time, solverPosed, frameCache=_frameCache)
         effectiveDefault = _ComputedSpace(prim, POSED_DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
     except ValueError as error:
-        frames.reason = str(error)
-        return frames
+        # Returns with Qrest/restLocal unbuilt, so it refuses Pivot too.
+        return _RefuseBothModes(frames, str(error))
     frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
     if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
-        frames.reason = "%s has a zero or non-finite translation unit scale" % prim.GetName()
+        # Only RigPoseTarget divides by it, but a prim carrying a broken
+        # unit scale is not one to author against in either mode.
+        _RefuseBothModes(
+            frames,
+            "%s has a zero or non-finite translation unit scale" % prim.GetName())
     toParent = frames.parentDefault.GetInverse() * frames.parentPosed
     frames.P = effectiveDefault * toParent
     # Rest editing still acts in the bind frame before local default offsets.
-    frames.Q = _MatrixAttr(prim, REST_SPACE, time)\
-        .GetOrthonormalized(False) * frames.parentRest.GetInverse() \
+    frames.Qrest = _MatrixAttr(prim, REST_SPACE, time)\
+        .GetOrthonormalized(False)
+    frames.Q = frames.Qrest * frames.parentRest.GetInverse() \
         * frames.parentDefault * toParent
     for name in (DEFAULT_SPACE, AVAR_DEFAULT_SPACE, POSED_DEFAULT_SPACE):
         attr = prim.GetAttribute(name)
@@ -977,6 +1057,15 @@ class Target(object):
     def time(self):
         return self.writer.time
 
+    def Advisory(self):
+        """
+        A note about an edit that will succeed and change nothing
+        visible, or "" when there is none. Sibling of the
+        `the default is outranked by its spline` warning: the drag is
+        not refused, it is explained.
+        """
+        return ""
+
     def Refresh(self):
         """Re-read the stage; call after a frame change or an undo."""
 
@@ -1215,8 +1304,27 @@ class RigPivotTarget(_RigTarget):
         return [self.prim.GetPath().AppendProperty(n)
                 for n in REST_T + REST_R]
 
+    def Refresh(self):
+        # Recomputed here rather than in Advisory(): the status line asks
+        # for it on every redraw, and FrozenIkSolvers walks the whole rig
+        # -- the same cost SolverPosedCache exists to keep off that path.
+        # Refresh() is the cadence that matters, since only a stage edit
+        # can change the answer.
+        _RigTarget.Refresh(self)
+        frozen = FrozenIkSolvers(self.frames.rigRoot, self.prim.GetPath())
+        self._advisory = "" if not frozen else (
+            "%s %s an authored bone length; this rest edit will not move "
+            "the solve" % (", ".join(frozen),
+                           "have" if len(frozen) > 1 else "has"))
+
+    def Advisory(self):
+        return self._advisory
+
     def _Qw(self):
-        return self.frames.Q * self.frames.assetToWorld
+        # Qrest, not Q: rest:t/r are expressed against rest:space alone,
+        # so the parent's pose belongs nowhere in the frame this drag
+        # inverts through -- nor in the frame it draws on.
+        return self.frames.Qrest * self.frames.assetToWorld
 
     def GizmoMatrix(self):
         return (self.frames.restLocal * self._Qw()).GetOrthonormalized(False)
@@ -1685,10 +1793,16 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None):
         posed = (solverPosed.For(FindRigRoot(prim))
                  if solverPosed is not None else None)
         frames = ComputeRigFrames(stage, prim, writer.time, posed)
-        if frames.reason:
-            return None, frames.reason
-        if channels == CHANNELS_PIVOT and frames.pivotReason:
-            return None, frames.pivotReason
+        # Pose answers to `reason`. Pivot edits rest:t/r, which no solver
+        # and no posed:space takes away -- a TwoBoneIk measures its bone
+        # lengths FROM the bound joints' rest frames -- so it answers to
+        # `pivotReason` alone: the causes that leave the frames unusable,
+        # a curvenet adjustment, and a default space that selects the
+        # pivot independently of rest.
+        blocking = (frames.pivotReason if channels == CHANNELS_PIVOT
+                    else frames.reason)
+        if blocking:
+            return None, blocking
         names = (AVAR_T + AVAR_R + AVAR_S if channels == CHANNELS_POSE
                  else REST_T + REST_R)
         connected = _ConnectedAvar(prim, names)

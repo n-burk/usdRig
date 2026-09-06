@@ -591,7 +591,7 @@ def TestRigPivotTarget():
     _Check(target.supportsTranslate and target.supportsRotate
            and not target.supportsScale, "pivot: no scale")
     before = gizmoMath.ComputeRigFrames(stage, child, time)
-    expectedOrigin = (before.restLocal * before.Q * before.assetToWorld)\
+    expectedOrigin = (before.restLocal * before.Qrest * before.assetToWorld)\
         .ExtractTranslation()
     origin = target.GizmoMatrix().ExtractTranslation()
     _Check(all(_Close(origin[i], expectedOrigin[i]) for i in range(3)),
@@ -600,23 +600,110 @@ def TestRigPivotTarget():
     delta = Gf.Vec3d(1.0, 2.0, -0.5)
     _Drag(target, lambda: target.ApplyTranslate(delta))
     after = gizmoMath.ComputeRigFrames(stage, child, time)
-    moved = (after.restLocal * after.Q * after.assetToWorld)\
+    moved = (after.restLocal * after.Qrest * after.assetToWorld)\
         .ExtractTranslation()
     _Check(all(_Close(moved[i], expectedOrigin[i] + delta[i], 1e-6)
                for i in range(3)), "pivot translate maps onto rest:t")
     _Check([child.GetAttribute(n).Get() for n in gizmoMath.AVAR_T]
            == avarsBefore, "pivot mode never touches avars")
     target.Refresh()
-    base = (after.restLocal * after.Q * after.assetToWorld)\
+    base = (after.restLocal * after.Qrest * after.assetToWorld)\
         .GetOrthonormalized(False)
     _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(1, 0, 0), -20.0))
     rotated = gizmoMath.ComputeRigFrames(stage, child, time)
-    rotWorld = (rotated.restLocal * rotated.Q * rotated.assetToWorld)\
+    rotWorld = (rotated.restLocal * rotated.Qrest * rotated.assetToWorld)\
         .GetOrthonormalized(False)
     expected = base * _Rot(Gf.Vec3d(1, 0, 0), -20.0)
     expected.SetTranslateOnly(rotWorld.ExtractTranslation())
     _Check(_MatClose(rotWorld, expected, 1e-6), "pivot rotate onto rest:r")
     _Check(len(target.AttributePaths()) == 6, "six rest channels")
+
+
+def TestPivotUnderSolver():
+    """
+    A joint a solver poses keeps its pivot: the evaluator overrides only
+    computePointFrame, and measures a TwoBoneIk's bone lengths from the
+    bound joints' rest frames, so rest:t/r stays live, authored data.
+    The manipulator therefore sits on the rest frame -- which owes
+    nothing to the parent's pose, let alone to the solve.
+    """
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    solver = stage.DefinePrim("/Asset/Rig/Solvers/Ik", "RigExecTwoBoneIk")
+    solver.GetRelationship("rigExec:joints").SetTargets([child.GetPath()])
+
+    refused, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_POSE, writer)
+    _Check(refused is None and "solver" in reason,
+           "pose stays refused on a solver-posed joint: %r" % reason)
+
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(target is not None and target.kind == "rig-pivot",
+           "pivot is offered on a solver-posed joint: %r" % reason)
+
+    frames = gizmoMath.ComputeRigFrames(stage, child, time)
+    restWorld = frames.rest * frames.assetToWorld
+    posedWorld = frames.restLocal * frames.Q * frames.assetToWorld
+    _Check(not _MatClose(restWorld, posedWorld, 1e-6),
+           "the animated parent makes rest and posed frames differ, so "
+           "the assertion below can tell them apart")
+    expected = restWorld.ExtractTranslation()
+    origin = target.GizmoMatrix().ExtractTranslation()
+    _Check(all(_Close(origin[i], expected[i]) for i in range(3)),
+           "pivot anchors on the rest frame, not the parent's pose: "
+           "%s vs %s" % (origin, expected))
+
+    delta = Gf.Vec3d(1.0, 2.0, -0.5)
+    _Drag(target, lambda: target.ApplyTranslate(delta))
+    moved = (gizmoMath.ComputeRigFrames(stage, child, time).rest
+             * frames.assetToWorld).ExtractTranslation()
+    _Check(all(_Close(moved[i], expected[i] + delta[i], 1e-6)
+               for i in range(3)),
+           "a pivot drag moves the rest frame by the world delta")
+
+
+def TestFrozenIkLengthAdvisory():
+    """
+    An authored absolute bone length opts a TwoBoneIk out of measuring
+    that bone from the bound joints' rests (rigEvaluator.cpp:3315-3319),
+    so once BOTH are authored the solver is skipped and a pivot drag
+    cannot move the solve at all. The manipulator says so rather than
+    letting a working drag look broken.
+    """
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    solver = stage.DefinePrim("/Asset/Rig/Solvers/Ik", "RigExecTwoBoneIk")
+    solver.GetRelationship("rigExec:joints").SetTargets([child.GetPath()])
+
+    target, reason = gizmoMath.MakeTarget(
+        stage, child, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(target is not None, reason)
+    _Check(target.Advisory() == "",
+           "unauthored lengths measure the rests: no advisory, got %r"
+           % target.Advisory())
+
+    # One authored length still leaves the other implied, so the joint
+    # can still drive a bone -- that is not yet inert.
+    solver.GetAttribute("rigExec:upperLength").Set(4.0)
+    target.Refresh()
+    _Check(target.Advisory() == "",
+           "one authored length still implies the other: %r"
+           % target.Advisory())
+
+    solver.GetAttribute("rigExec:lowerLength").Set(4.0)
+    target.Refresh()
+    advisory = target.Advisory()
+    _Check("Ik" in advisory and "length" in advisory,
+           "both authored: the drag is reported inert, got %r" % advisory)
+
+    # A pose target never carries it: this is a rest-channel concern.
+    poseTarget, _ = gizmoMath.MakeTarget(
+        stage, parent, gizmoMath.CHANNELS_POSE, writer)
+    _Check(poseTarget is not None and poseTarget.Advisory() == "",
+           "an unbound control has nothing to advise about")
 
 
 def TestXformTargets():
@@ -794,8 +881,9 @@ def TestGimbalAndFrames():
             _Check(_Close(after[i], want, 1e-6),
                    "rigid: ring %d must move only channel %d: %s -> %s"
                    % (j, j, base, after))
-    # Pivot mode: XYZ rest angles, expressed in Q. Q rides on the
-    # parent's avars, so it has to be re-read after the scale change.
+    # Pivot mode: XYZ rest angles, expressed in Qrest. Unlike Q it does
+    # NOT ride on the parent's avars -- rest:t/r are authored against
+    # rest:space alone -- so the scale change above cannot move it.
     frames = gizmoMath.ComputeRigFrames(stage, child, time)
     pivot, reason = gizmoMath.MakeTarget(
         stage, child, gizmoMath.CHANNELS_PIVOT, writer)
@@ -803,11 +891,11 @@ def TestGimbalAndFrames():
     pivotOrder, pivotAngles = pivot.RotationState()
     _Check(pivotOrder == "XYZ" and _Close(pivotAngles[1], 45.0),
            "pivot rotation state is the XYZ rest angles: %s" % (pivotAngles,))
-    pivotExpected = (frames.Q * frames.assetToWorld)\
+    pivotExpected = (frames.Qrest * frames.assetToWorld)\
         .GetOrthonormalized(False)
     pivotExpected.SetTranslateOnly(pivot.GizmoMatrix().ExtractTranslation())
     _Check(_MatClose(pivot.ChannelFrame(), pivotExpected),
-           "the pivot channel frame is Q")
+           "the pivot channel frame is Qrest")
     _Drag(pivot, lambda: pivot.ApplyRotateChannel(2, 12.0))
     _Check(_Close(child.GetAttribute("rest:rz").Get(), 12.0)
            and _Close(child.GetAttribute("rest:ry").Get(), 45.0),
@@ -1726,6 +1814,8 @@ def main():
         ("writer", TestWriter),
         ("rig pose target", TestRigPoseTarget),
         ("rig pivot target", TestRigPivotTarget),
+        ("pivot under solver", TestPivotUnderSolver),
+        ("frozen ik length advisory", TestFrozenIkLengthAdvisory),
         ("xform targets", TestXformTargets),
         ("gimbal + frames", TestGimbalAndFrames),
         ("preserve children", TestPreserveChildren),

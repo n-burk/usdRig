@@ -38,12 +38,23 @@ the evaluator orthonormalizes rest spaces, so a scale written there would
 be silently discarded; the toolbar says so rather than accepting a drag
 that does nothing.
 
-The gizmo sits at the evaluated frame. For a rig prim that is
-`avars * rest * parentRest⁻¹ * parentPosed`, placed by the asset root's
-world transform (`libs/rigExec/computations.cpp`), so a rest offset or an
-animated parent is already accounted for. Its axes are the target's local
-frame, the one the avars are expressed in, unless the Axis Orientation
-option asks for another.
+In **Pose** mode the gizmo sits at the evaluated frame. For a rig prim
+that is `avars * rest * parentRest⁻¹ * parentPosed`, placed by the asset
+root's world transform (`libs/rigExec/computations.cpp`), so a rest
+offset or an animated parent is already accounted for. Its axes are the
+target's local frame, the one the avars are expressed in, unless the Axis
+Orientation option asks for another.
+
+In **Pivot** mode it sits on the rest frame itself —
+`orthonormalize(compose(rest:t, rest:r) * rest:space)`, placed by the
+same asset transform. `computeRestFrame` composes those channels against
+`rest:space` and reads no namespace ancestor, so a rest frame is absolute
+in asset space: it owes nothing to the parent's pose, and nothing to a
+solver posing the joint. The manipulator is therefore anchored on the
+frame its own channels define, which is the point of a pivot mode — drag
+it and the value you are editing moves with it, whatever the character
+happens to be doing at the current frame. Expect it to sit away from the
+posed geometry whenever the rig is animated off its rest pose.
 
 ## Where the value lands
 
@@ -283,10 +294,15 @@ fire outside a Move drag.
 The status label always says why, rather than leaving an empty viewport
 to interpret:
 
-- a joint posed by a solver (named in some solver's `rigExec:joints`) —
-  the evaluator ignores avars for it;
-- a prim with a connected or authored `posed:space`, for the same reason;
-- an avar with an authored connection, e.g. `avars:rz.connect`;
+- **in Pose mode only** — a joint posed by a solver (named in some
+  solver's `rigExec:joints`), or a prim with a connected or authored
+  `posed:space`, or a descendant of either: the evaluator ignores avars
+  for those. Pivot mode still works on all of them, because none of it
+  touches `rest:t/r` — the evaluator overrides `computePointFrame` alone,
+  and a `RigExecTwoBoneIk` measures its bone lengths *from* the bound
+  joints' rest frames;
+- an avar with an authored connection, e.g. `avars:rz.connect` (in Pivot
+  mode, a connected `rest:` channel);
 - an xformOp stack `XformCommonAPI` cannot represent;
 - a prim with no transform at all, such as a `RigExecRoot`;
 - nothing selected.
@@ -294,6 +310,32 @@ to interpret:
 A control that a constraint names in `rigExec:moves` publishes a revised
 frame. The gizmo draws at its unconstrained frame and edits the avars
 under the constraint; that is a documented limitation, not an error.
+
+## Editing a pivot under an IK solver
+
+Dragging the pivot of a joint bound to a `RigExecTwoBoneIk` is how you
+re-proportion the limb: the solver measures each bone between the bound
+joints' rest origins on every evaluation, so moving a rest changes the
+bone length and the solve follows immediately, with no recompile.
+
+Three things about it are worth knowing before the viewport surprises
+you:
+
+- **Only the middle joint visibly moves.** The root joint's position is
+  pinned by `rigExec:rootControl` and the end joint's by
+  `rigExec:effectorControl`, so dragging either one's pivot re-proportions
+  the limb around it rather than moving the joint you grabbed. The knee
+  is where you see the result.
+- **Rotation does not reach the solve.** Only rest *origins* are
+  measured, so `rest:r` cannot change a bone length. It still sets the
+  joint's bind orientation, which is why the Rotate tool stays available.
+- **An authored bone length freezes it.** `rigExec:upperLength` and
+  `rigExec:lowerLength` are a deliberate opt-out: authoring *both* makes
+  the solver skip the measurement entirely, and a pivot drag then authors
+  a correct rest that moves nothing. The status label says
+  `… has an authored bone length; this rest edit will not move the solve`
+  rather than letting the tool look broken. Clear the two attributes to
+  hand the bones back to the rests.
 
 ## Out of scope
 

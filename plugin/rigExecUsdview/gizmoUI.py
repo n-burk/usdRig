@@ -1813,8 +1813,16 @@ class GizmoController(QtCore.QObject):
         if skipped:
             text += "  (%d child%s not preserved)" % (
                 len(skipped), "" if len(skipped) == 1 else "ren")
-        if self._warnings:
-            text += "  warning: " + "; ".join(self._warnings)
+        # Post-drag warnings from the Writer, plus the target's own
+        # standing advisory about a drag that authors correctly and
+        # moves nothing (a pivot on a joint whose solver has authored
+        # bone lengths). One "warning:" prefix carries both.
+        notes = list(self._warnings)
+        advisory = target.Advisory()
+        if advisory:
+            notes.append(advisory)
+        if notes:
+            text += "  warning: " + "; ".join(notes)
         return text
 
     def SkippedChildren(self):

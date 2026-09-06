@@ -1989,6 +1989,91 @@ TestAimConstraintRevisesJointFrame(const std::string &examplesDir)
     }
 }
 
+// A TwoBoneIk that leaves its bone lengths unauthored measures them from the
+// bound joints' rest frames on EVERY Evaluate, so moving a joint's rest
+// recalibrates the solve with no recompile (rigEvaluator.h:298-304).
+//
+// The shipped examples are the regression that matters. Authoring an absolute
+// length -- as a measure-then-bake repair session once did to spider_leg_ik --
+// opts the solver out of that measurement entirely, and the pose silently
+// stops answering to the skeleton it is supposed to follow. The symptom is
+// not a wrong number anywhere; it is an edit that does nothing at all.
+//
+// Only rigs that bind three joints can be checked: 03_IkFkBlendClamp and
+// ArmRig route their joints through a RigExecBlendPointFrames instead, so
+// their solvers have no rests to measure and their absolute lengths carry
+// the bone -- see the comment on rigExec:upperLength in those files.
+static void
+_CheckRestEditRecalibrates(const std::string &stagePath, const char *rigPath,
+                           const char *editJoint, const char *restChannel,
+                           const char *watchJoint)
+{
+    UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, SdfPath(rigPath));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+
+    const SdfPath watch(watchJoint);
+    const RigExecRigPose before = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(before.valid);
+    const auto beforeIt = before.jointFramesFinal.find(watch);
+    CHECK(beforeIt != before.jointFramesFinal.end());
+    if (beforeIt == before.jointFramesFinal.end()) {
+        return;
+    }
+    const GfVec3d beforeOrigin = beforeIt->second.Origin();
+
+    // Lengthen the lower bone at its rest. The mid joint is the one free to
+    // move: the root and the effector are pinned by their own controls.
+    const UsdPrim edited = stage->GetPrimAtPath(SdfPath(editJoint));
+    CHECK(edited);
+    if (!edited) {
+        return;
+    }
+    const UsdAttribute rest = edited.GetAttribute(TfToken(restChannel));
+    CHECK(rest);
+    if (!rest) {
+        return;
+    }
+    double value = 0.0;
+    rest.Get(&value);
+    CHECK(rest.Set(value - 3.0));
+
+    const RigExecRigPose after = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(after.valid);
+    const auto afterIt = after.jointFramesFinal.find(watch);
+    CHECK(afterIt != after.jointFramesFinal.end());
+    if (afterIt == after.jointFramesFinal.end()) {
+        return;
+    }
+    const double moved =
+        (afterIt->second.Origin() - beforeOrigin).GetLength();
+    if (moved <= 1e-6) {
+        std::printf("  %s: %s did not move after a rest edit -- the solver "
+                    "is frozen against its joints' rests (an authored "
+                    "absolute rigExec:upperLength/lowerLength?)\n",
+                    stagePath.c_str(), watchJoint);
+    }
+    CHECK(moved > 1e-6);
+}
+
+static void
+TestShippedTwoBoneIksRecalibrateOnRestEdit(const std::string &examplesDir)
+{
+    _CheckRestEditRecalibrates(
+        examplesDir + "/components/spider_leg_ik.usd", "/RigRoot",
+        "/RigRoot/Joints/Shoulder/ankle/foot", "rest:ty",
+        "/RigRoot/Joints/Shoulder/ankle");
+    _CheckRestEditRecalibrates(
+        examplesDir + "/02_TwoBoneIkLeg.usda", "/LegAsset/Rig",
+        "/LegAsset/Rig/Joints/Hip/Knee/Ankle", "rest:ty",
+        "/LegAsset/Rig/Joints/Hip/Knee");
+}
+
 // 09 exercises the three property-domain math movers: the output domain that
 // is neither a joint frame nor a points array.
 //
@@ -3456,6 +3541,7 @@ main(int argc, char **argv)
     TestSolverCycleRejected(examplesDir);
     TestPureSolverToSolverCycleRejected(examplesDir);
     TestAimConstraintRevisesJointFrame(examplesDir);
+    TestShippedTwoBoneIksRecalibrateOnRestEdit(examplesDir);
     TestPropertyMathMoversAreEvaluated(examplesDir);
     TestPropertyMoverFeedsConsumingComputation(examplesDir);
     TestDisabledPropertyMoverPassesThrough(examplesDir);
