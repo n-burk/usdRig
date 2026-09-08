@@ -591,8 +591,11 @@ def TestRigPivotTarget():
     _Check(target.supportsTranslate and target.supportsRotate
            and not target.supportsScale, "pivot: no scale")
     before = gizmoMath.ComputeRigFrames(stage, child, time)
-    expectedOrigin = (before.restLocal * before.Qrest * before.assetToWorld)\
-        .ExtractTranslation()
+    # Parent-relative rest: the pivot frame is the local rest carried into
+    # the parent's REST frame (not its pose, which is what keeps the pivot
+    # still under an animated ancestor).
+    expectedOrigin = (before.restLocal * before.Qrest * before.parentRest
+                      * before.assetToWorld).ExtractTranslation()
     origin = target.GizmoMatrix().ExtractTranslation()
     _Check(all(_Close(origin[i], expectedOrigin[i]) for i in range(3)),
            "pivot gizmo sits at the rest frame origin")
@@ -600,19 +603,19 @@ def TestRigPivotTarget():
     delta = Gf.Vec3d(1.0, 2.0, -0.5)
     _Drag(target, lambda: target.ApplyTranslate(delta))
     after = gizmoMath.ComputeRigFrames(stage, child, time)
-    moved = (after.restLocal * after.Qrest * after.assetToWorld)\
-        .ExtractTranslation()
+    moved = (after.restLocal * after.Qrest * after.parentRest
+             * after.assetToWorld).ExtractTranslation()
     _Check(all(_Close(moved[i], expectedOrigin[i] + delta[i], 1e-6)
                for i in range(3)), "pivot translate maps onto rest:t")
     _Check([child.GetAttribute(n).Get() for n in gizmoMath.AVAR_T]
            == avarsBefore, "pivot mode never touches avars")
     target.Refresh()
-    base = (after.restLocal * after.Qrest * after.assetToWorld)\
-        .GetOrthonormalized(False)
+    base = (after.restLocal * after.Qrest * after.parentRest
+            * after.assetToWorld).GetOrthonormalized(False)
     _Drag(target, lambda: target.ApplyRotate(Gf.Vec3d(1, 0, 0), -20.0))
     rotated = gizmoMath.ComputeRigFrames(stage, child, time)
-    rotWorld = (rotated.restLocal * rotated.Qrest * rotated.assetToWorld)\
-        .GetOrthonormalized(False)
+    rotWorld = (rotated.restLocal * rotated.Qrest * rotated.parentRest
+                * rotated.assetToWorld).GetOrthonormalized(False)
     expected = base * _Rot(Gf.Vec3d(1, 0, 0), -20.0)
     expected.SetTranslateOnly(rotWorld.ExtractTranslation())
     _Check(_MatClose(rotWorld, expected, 1e-6), "pivot rotate onto rest:r")
@@ -891,11 +894,11 @@ def TestGimbalAndFrames():
     pivotOrder, pivotAngles = pivot.RotationState()
     _Check(pivotOrder == "XYZ" and _Close(pivotAngles[1], 45.0),
            "pivot rotation state is the XYZ rest angles: %s" % (pivotAngles,))
-    pivotExpected = (frames.Qrest * frames.assetToWorld)\
-        .GetOrthonormalized(False)
+    pivotExpected = (frames.Qrest * frames.parentRest
+                     * frames.assetToWorld).GetOrthonormalized(False)
     pivotExpected.SetTranslateOnly(pivot.GizmoMatrix().ExtractTranslation())
     _Check(_MatClose(pivot.ChannelFrame(), pivotExpected),
-           "the pivot channel frame is Qrest")
+           "the pivot channel frame is Qrest * parentRest")
     _Drag(pivot, lambda: pivot.ApplyRotateChannel(2, 12.0))
     _Check(_Close(child.GetAttribute("rest:rz").Get(), 12.0)
            and _Close(child.GetAttribute("rest:ry").Get(), 45.0),

@@ -14,6 +14,7 @@
 #
 #   avars = S * R(rotationOrder) * Rspin(+X) * T
 #   rest  = orthonormalize(compose(rest:t, rest:r, XYZ) * rest:space)
+#           * parentRest
 #   default = defaultOffsets * rest * parentRest^-1 * parentDefault
 #   posed = avars * posedDefault * parentDefault^-1 * parentPosed
 #
@@ -426,9 +427,14 @@ def RestLocal(prim, time):
 
 
 def RestSpace(prim, time):
-    """Mirror of _JointRestSpace: orthonormalize(restLocal * rest:space)."""
+    """
+    Mirror of _JointRestSpace: the local rest carried into the parent's
+    rest frame, orthonormalize(restLocal * rest:space) * parentRest.
+    """
     rest = RestLocal(prim, time) * _MatrixAttr(prim, REST_SPACE, time)
-    return rest.GetOrthonormalized(False)
+    rest = rest.GetOrthonormalized(False)
+    parent = _FindParentXformable(prim, FindRigRoot(prim))
+    return rest * RestSpace(parent, time) if parent else rest
 
 
 def DefaultLocal(prim, time):
@@ -700,11 +706,13 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
             "%s has a zero or non-finite translation unit scale" % prim.GetName())
     toParent = frames.parentDefault.GetInverse() * frames.parentPosed
     frames.P = effectiveDefault * toParent
-    # Rest editing still acts in the bind frame before local default offsets.
+    # Rest editing still acts in the bind frame before local default
+    # offsets. No parentRest^-1 here: rest:t/r are parent-relative now, so
+    # restLocal is already in the parent's frame and dividing it out again
+    # would land the pivot an ancestor offset away from the joint.
     frames.Qrest = _MatrixAttr(prim, REST_SPACE, time)\
         .GetOrthonormalized(False)
-    frames.Q = frames.Qrest * frames.parentRest.GetInverse() \
-        * frames.parentDefault * toParent
+    frames.Q = frames.Qrest * frames.parentDefault * toParent
     for name in (DEFAULT_SPACE, AVAR_DEFAULT_SPACE, POSED_DEFAULT_SPACE):
         attr = prim.GetAttribute(name)
         if attr and (attr.HasAuthoredConnections()
@@ -1324,7 +1332,8 @@ class RigPivotTarget(_RigTarget):
         # Qrest, not Q: rest:t/r are expressed against rest:space alone,
         # so the parent's pose belongs nowhere in the frame this drag
         # inverts through -- nor in the frame it draws on.
-        return self.frames.Qrest * self.frames.assetToWorld
+        return self.frames.Qrest * self.frames.parentRest \
+            * self.frames.assetToWorld
 
     def GizmoMatrix(self):
         return (self.frames.restLocal * self._Qw()).GetOrthonormalized(False)
