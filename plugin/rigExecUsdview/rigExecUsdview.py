@@ -157,6 +157,13 @@ class RigExecUsdviewContainer(PluginContainer):
             "Graph Editor",
             lambda api: self._OpenGraphEditor(api))
 
+        # The per-layer opinion editor. Same lazy-import reasoning as
+        # the panels above: layerOpinionsUI pulls in Qt.
+        self._layerOpinions = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.layerOpinions",
+            "Layer Opinions",
+            lambda api: self._OpenLayerOpinionsPanel(api))
+
         # The viewport manipulator toolbar. Same lazy-import reasoning
         # again; the menu item toggles it rather than opening a window,
         # because the toolbar lives inside the viewport frame.
@@ -189,6 +196,7 @@ class RigExecUsdviewContainer(PluginContainer):
         menu.addItem(self._volumeWeights)
         menu.addItem(self._curvenets)
         menu.addItem(self._graphEditor)
+        menu.addItem(self._layerOpinions)
         menu.addItem(self._viewportToolsCommand)
         menu.addItem(self._viewCubeCommand)
 
@@ -262,6 +270,19 @@ class RigExecUsdviewContainer(PluginContainer):
             import curvenetUI
 
         return curvenetUI.OpenCurvenetPanel(usdviewApi)
+
+    def _OpenLayerOpinionsPanel(self, usdviewApi):
+        # Same lazy sibling import as _OpenVolumeWeightPanel. Shares the
+        # undo stack, so Ctrl+Z spans an opinion delete and a gizmo drag.
+        try:
+            import layerOpinionsUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import layerOpinionsUI
+
+        return layerOpinionsUI.OpenLayerOpinionsPanel(
+            usdviewApi or self._api, self._UndoStack())
 
     def _OpenGraphEditor(self, usdviewApi=None):
         """
