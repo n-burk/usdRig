@@ -1304,13 +1304,74 @@ class RigPivotTarget(_RigTarget):
 
     kind = "rig-pivot"
     supportsScale = False
+    # Rest offsets are parent-relative, so a pivot drag carries the whole
+    # subtree with it. Preserve Children is therefore meaningful here in a
+    # way it is not for a rig POSE edit: the compensation is authored into
+    # each child's own rest channels, which the evaluator does read, rather
+    # than into xformOps, which it ignores.
+    supportsPreserveChildren = True
+    preserveChildrenReason = ""
+
+    def _ChildProviders(self):
+        """
+        Immediate child frame providers.
+
+        Immediate only: rest is parent-relative, so a grandchild rides on
+        a child this already holds still, and compensating it too would
+        double-count the correction.
+        """
+        return [child for child in self.prim.GetChildren()
+                if IsRigXformable(child)]
 
     def _ScalarChannels(self):
         return [(n, 0.0) for n in REST_T] + [(n, 0.0) for n in REST_R]
 
     def AttributePaths(self):
-        return [self.prim.GetPath().AppendProperty(n)
-                for n in REST_T + REST_R]
+        paths = [self.prim.GetPath().AppendProperty(n)
+                 for n in REST_T + REST_R]
+        self.skippedChildren = []
+        if self.preserveChildren:
+            for child in self._ChildProviders():
+                paths.extend(child.GetPath().AppendProperty(n)
+                             for n in REST_T + REST_R)
+        return paths
+
+    def BeginDrag(self):
+        _RigTarget.BeginDrag(self)
+        # The world rest each child must be put back onto. Captured before
+        # the first write, so a multi-event drag compensates against the
+        # start of the drag rather than accumulating per event.
+        self._preserved = [(child, RestSpace(child, self.time))
+                           for child in self._ChildProviders()] \
+            if self.preserveChildren else []
+
+    def _RestoreChildren(self):
+        """
+        Put every captured child back on its starting world rest.
+
+        restLocal(child) = restWorld(child) * restWorld(self)^-1, then the
+        rest:t/r scalars that produce it against the child's own untouched
+        rest:space -- so the bind basis stays the author's and only the
+        offset channels move.
+        """
+        preserved = getattr(self, "_preserved", [])
+        if not preserved:
+            return
+        inverse = RestSpace(self.prim, self.time).GetInverse()
+        with Sdf.ChangeBlock():
+            for child, worldRest in preserved:
+                scalars = (worldRest * inverse
+                           * _MatrixAttr(child, REST_SPACE,
+                                         self.time).GetInverse())
+                scalars = scalars.GetOrthonormalized(False)
+                hint = [ScalarAvar(child, n, self.time, 0.0)
+                        for n in REST_R]
+                for name, value in zip(REST_T,
+                                       scalars.ExtractTranslation()):
+                    self.writer.Set(child.GetAttribute(name), float(value))
+                for name, value in zip(
+                        REST_R, DecomposeEuler(scalars, "XYZ", hint=hint)):
+                    self.writer.Set(child.GetAttribute(name), float(value))
 
     def Refresh(self):
         # Recomputed here rather than in Advisory(): the status line asks
@@ -1354,6 +1415,7 @@ class RigPivotTarget(_RigTarget):
         base = [self._base[n] for n in REST_T]
         self._WriteVector(REST_T, _SnapTranslation(
             base, local, snapStep, snapAbsolute))
+        self._RestoreChildren()
 
     def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
         base = [self._base[n] for n in REST_R]
@@ -1361,11 +1423,13 @@ class RigPivotTarget(_RigTarget):
                                   self._Qw(), worldAxis,
                                   _SnapValue(degrees, snapStep))
         self._WriteVector(REST_R, DecomposeEuler(rNew, "XYZ", hint=base))
+        self._RestoreChildren()
 
     def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
         values = [self._base[n] for n in REST_R]
         values[axisIndex] = values[axisIndex] + _SnapValue(degrees, snapStep)
         self._WriteVector(REST_R, values)
+        self._RestoreChildren()
 
     def ApplyScale(self, axisIndex, factor, *, snapStep=None):
         pass

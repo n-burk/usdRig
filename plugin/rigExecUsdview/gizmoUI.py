@@ -1125,6 +1125,7 @@ class GizmoController(QtCore.QObject):
         self._holdGrid = False
         self._holdEdge = False
         self._holdPoint = False
+        self._holdPreserve = False
         self._snapMode = gizmoSettings.SNAP_OFF
         self._snapReason = ""
         self._hoverPoint = None
@@ -1426,7 +1427,8 @@ class GizmoController(QtCore.QObject):
             return
         try:
             target.SetPreserveChildren(
-                bool(self.settings.For(self._tool).preserveChildren)
+                (bool(self.settings.For(self._tool).preserveChildren)
+                 or self._holdPreserve)
                 and target.supportsPreserveChildren)
             target.AttributePaths()
         except Exception as error:
@@ -2225,7 +2227,7 @@ class GizmoController(QtCore.QObject):
 
     # The keys a live drag owns outright, wherever the cursor is.
     _DRAG_KEYS = (QtCore.Qt.Key_Escape, QtCore.Qt.Key_J, QtCore.Qt.Key_X,
-                  QtCore.Qt.Key_C, QtCore.Qt.Key_V)
+                  QtCore.Qt.Key_C, QtCore.Qt.Key_V, QtCore.Qt.Key_B)
 
     # Everything else, which needs the cursor over the viewport.
     _TOOL_KEYS = {QtCore.Qt.Key_Q: TOOL_SELECT,
@@ -2389,6 +2391,15 @@ class GizmoController(QtCore.QObject):
                 self._holdPoint = True
                 self._ReapplyDrag()
             return True
+        if key == QtCore.Qt.Key_B:
+            if not self._holdPreserve:
+                self._holdPreserve = True
+                # No _ReapplyDrag: arming mid-drag would leave the
+                # children outside the undo record the recorder has
+                # already begun (Target.AttributePaths says why). Hold B
+                # BEFORE the drag; pressed during one it arms the next.
+                self._PrimePreserveChildren()
+            return True
         return False
 
     def _ToolKey(self, key):
@@ -2446,6 +2457,10 @@ class GizmoController(QtCore.QObject):
             self._RefreshHoverSnap()
             self.toolbar.Sync()
             return self._drag is not None
+        if key == QtCore.Qt.Key_B and self._holdPreserve:
+            self._holdPreserve = False
+            self._PrimePreserveChildren()
+            return True
         if key == QtCore.Qt.Key_V and self._holdPoint:
             self._holdPoint = False
             self._ReapplyDrag()
@@ -3115,6 +3130,7 @@ class GizmoController(QtCore.QObject):
         self._holdGrid = False
         self._holdEdge = False
         self._holdPoint = False
+        self._holdPreserve = False
         self._claimedKey = None
 
     def _EndDrag(self):

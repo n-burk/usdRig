@@ -953,6 +953,65 @@ def TestGimbalAndFrames():
            "the xform pivot ignores a gimbal ring")
 
 
+def TestRigPivotPreservesChildren():
+    """
+    Preserve Children on a rig pivot holds the child's WORLD rest still.
+
+    Rest offsets are parent-relative, so a pivot drag carries the subtree
+    by default -- that is the point. With Preserve Children on, each
+    immediate child's own rest:t/r absorb the parent's delta so the child
+    stays where it was, in translation and in rotation alike, since the
+    correction is a full matrix identity rather than a vector subtraction.
+    """
+    for describe, drag in (
+            ("translate", lambda tgt: tgt.ApplyTranslate(
+                Gf.Vec3d(1.0, 2.0, -0.5))),
+            ("rotate", lambda tgt: tgt.ApplyRotate(
+                Gf.Vec3d(0, 0, 1), 25.0))):
+        stage, parent, child = _ChainStage()
+        time = Usd.TimeCode.Default()
+        childRestBefore = gizmoMath.RestSpace(child, time)
+
+        writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+        target, reason = gizmoMath.MakeTarget(
+            stage, parent, gizmoMath.CHANNELS_PIVOT, writer)
+        _Check(target is not None, reason)
+        _Check(target.supportsPreserveChildren,
+               "a rig pivot supports Preserve Children")
+        target.SetPreserveChildren(True)
+        _Check(target.preserveChildren, "Preserve Children stayed off")
+        paths = target.AttributePaths()
+        _Check(any(str(p).startswith(str(child.GetPath())) for p in paths),
+               "the child's channels are declared for undo: %s"
+               % [str(p) for p in paths])
+
+        _Drag(target, lambda: drag(target))
+
+        childRestAfter = gizmoMath.RestSpace(child, time)
+        _Check(_MatClose(childRestAfter, childRestBefore, 1e-6),
+               "%s: the child's world rest moved:\n%s\n%s"
+               % (describe, childRestAfter, childRestBefore))
+
+
+def TestRigPivotCarriesChildrenWhenOff():
+    """Without Preserve Children the subtree follows -- the new default."""
+    stage, parent, child = _ChainStage()
+    time = Usd.TimeCode.Default()
+    before = gizmoMath.RestSpace(child, time).ExtractTranslation()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, parent, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(target is not None, reason)
+    target.SetPreserveChildren(False)
+    delta = Gf.Vec3d(1.0, 2.0, -0.5)
+    _Drag(target, lambda: target.ApplyTranslate(delta))
+    after = gizmoMath.RestSpace(child, time).ExtractTranslation()
+    moved = Gf.Vec3d(after) - Gf.Vec3d(before)
+    _Check(all(_Close(moved[i], delta[i], 1e-6) for i in range(3)),
+           "the child should follow the parent by %s, moved %s"
+           % (delta, moved))
+
+
 def TestPreserveChildren():
     """
     Maya's Preserve Children (design spec section 8.2), default off: the
@@ -1822,6 +1881,10 @@ def main():
         ("xform targets", TestXformTargets),
         ("gimbal + frames", TestGimbalAndFrames),
         ("preserve children", TestPreserveChildren),
+        ("rig pivot preserves children",
+         TestRigPivotPreservesChildren),
+        ("rig pivot carries children",
+         TestRigPivotCarriesChildrenWhenOff),
         ("snap + planar scale", TestSnapAndPlanarScale),
         ("xformOp noise", TestXformOpNoise),
         ("xform local matrix", TestXformLocalMatrix),

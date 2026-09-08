@@ -33,7 +33,11 @@ of scope.
 **Pose** moves the character. **Pivot** moves the frame the pose is
 expressed in — the rest offset for a rig prim — so the control keeps its
 animation but "lives" somewhere else, like moving a Maya pivot without
-compensation. Scale is unavailable in Pivot mode on a rig prim because
+compensation. A rest offset is relative to the parent frame provider, so
+a Pivot drag carries the joint's whole subtree with it; hold `B` (or tick
+Preserve Children) to hold the immediate children on their own world
+rests instead, which is how you re-proportion one bone without dragging
+the rest of the limb. Scale is unavailable in Pivot mode on a rig prim because
 the evaluator orthonormalizes rest spaces, so a scale written there would
 be silently discarded; the toolbar says so rather than accepting a drag
 that does nothing.
@@ -46,10 +50,11 @@ target's local frame, the one the avars are expressed in, unless the Axis
 Orientation option asks for another.
 
 In **Pivot** mode it sits on the rest frame itself —
-`orthonormalize(compose(rest:t, rest:r) * rest:space)`, placed by the
-same asset transform. `computeRestFrame` composes those channels against
-`rest:space` and reads no namespace ancestor, so a rest frame is absolute
-in asset space: it owes nothing to the parent's pose, and nothing to a
+`orthonormalize(compose(rest:t, rest:r) * rest:space) * parentRest`,
+placed by the same asset transform. `computeRestFrame` composes those
+channels against `rest:space` and then carries the result into the
+namespace ancestor's rest frame, so a rest frame is relative to the
+parent's REST: it owes nothing to the parent's pose, and nothing to a
 solver posing the joint. The manipulator is therefore anchored on the
 frame its own channels define, which is the point of a pivot mode — drag
 it and the value you are editing moves with it, whatever the character
@@ -161,6 +166,7 @@ moved silently.
 | `X` (hold) | snap the world pivot to the grid (Move; Rotate: Gimbal ring only) |
 | `C` (hold) | snap the pivot to the nearest edge under the cursor (Move) |
 | `V` (hold) | snap the pivot to the nearest vertex under the cursor (Move) |
+| `B` (hold) | Preserve Children for the drag: hold immediate child joints on their world rests (Pivot) |
 | `Escape` | abort the drag in progress |
 | `Ctrl+Z` | undo |
 | `Ctrl+Shift+Z`, `Shift+Z`, `Ctrl+Y` | redo |
@@ -173,6 +179,11 @@ including with the cursor off the viewport — but it goes through the
 same typing gate as the tool keys, so it does nothing while a text field
 has keyboard focus: that `Escape` belongs to the field. Move the focus
 off the field to get it back.
+
+`B` must be held BEFORE the drag starts: the undo record is opened with
+the set of channels the drag may write, and arming compensation once that
+is open would move the children outside it. Pressed mid-drag it arms the
+next one.
 
 `J` is relative step snapping while `X`, `C` and `V` snap the world
 pivot to the grid, an edge and a vertex instead. All of that lives under
