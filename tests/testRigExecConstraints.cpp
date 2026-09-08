@@ -903,7 +903,8 @@ TestModeAndFailureContracts()
         const SdfPath mid("/Asset/Rig/Joints/Root/Mid");
         const SdfPath end("/Asset/Rig/Joints/Root/Mid/End");
         const SdfPath joints[] = {root, mid, end};
-        const double restX[] = {0.0, 1.0, 2.0};
+        // Parent-relative: 0 then two 1-unit steps, world 0/1/2.
+        const double restX[] = {0.0, 1.0, 1.0};
         const double posedX[] = {0.0, 2.0, 4.0};
         for (size_t i = 0; i < 3; ++i) {
             const UsdPrim joint = stage->GetPrimAtPath(joints[i]);
@@ -949,7 +950,8 @@ TestModeAndFailureContracts()
         const SdfPath mid("/Asset/Rig/Joints/Root/Mid");
         const SdfPath end("/Asset/Rig/Joints/Root/Mid/End");
         const SdfPath joints[] = {root, mid, end};
-        const double restX[] = {0.0, 1.0, 2.0};
+        // Parent-relative: 0 then two 1-unit steps, world 0/1/2.
+        const double restX[] = {0.0, 1.0, 1.0};
         for (size_t i = 0; i < 3; ++i) {
             const UsdPrim joint = stage->GetPrimAtPath(joints[i]);
             joint.GetAttribute(TfToken("posed:space")).Clear();
@@ -2126,7 +2128,8 @@ TestIncompleteSolverLeavesJointsVisible()
     const SdfPath shoulder("/Asset/Rig/Joints/Shoulder");
     const SdfPath elbow("/Asset/Rig/Joints/Shoulder/Elbow");
     const SdfPath wrist("/Asset/Rig/Joints/Shoulder/Elbow/Wrist");
-    const double restTx[3] = {1.0, 2.0, 3.0};
+    // Parent-relative: three 1-unit steps, world 1/2/3.
+    const double restTx[3] = {1.0, 1.0, 1.0};
     const SdfPath joints[3] = {shoulder, elbow, wrist};
     for (int i = 0; i < 3; ++i) {
         const UsdPrim prim =
@@ -2160,8 +2163,8 @@ TestIncompleteSolverLeavesJointsVisible()
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
     // Every bound joint stays on its rest chain. rest:tx/ty/tz is the
-    // bind-world position (world = rest when the parent is at rest), so
-    // each joint sits exactly at its authored rest.
+    // offset from the parent frame provider, so each joint sits at the
+    // accumulated chain -- three 1-unit steps reaching x = 1, 2, 3.
     const GfVec3d expected[3] = {
         GfVec3d(1, 0, 0), GfVec3d(2, 0, 0), GfVec3d(3, 0, 0)};
     for (int i = 0; i < 3; ++i) {
@@ -2219,7 +2222,8 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     const SdfPath shoulder("/Asset/Rig/Joints/Shoulder");
     const SdfPath elbow("/Asset/Rig/Joints/Shoulder/Elbow");
     const SdfPath wrist("/Asset/Rig/Joints/Shoulder/Elbow/Wrist");
-    const double restTx[3] = {0.0, 3.0, 7.0};
+    // Parent-relative: a 3-unit upper and a 4-unit lower, world 0/3/7.
+    const double restTx[3] = {0.0, 3.0, 4.0};
     const SdfPath joints[3] = {shoulder, elbow, wrist};
     for (int i = 0; i < 3; ++i) {
         const UsdPrim prim =
@@ -2311,7 +2315,7 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     const UsdAttribute wristRest = stage->GetAttributeAtPath(
         wrist.AppendProperty(TfToken("rest:tx")));
     elbowRest.Set(4.0);
-    wristRest.Set(9.0);
+    wristRest.Set(5.0);
     GfVec3d edited[3];
     const RigExecRigPose editedPose =
         origins(UsdTimeCode::Default(), edited);
@@ -2327,8 +2331,8 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     // an already sampled time must invalidate the cached rest request too.
     elbowRest.Set(3.0, UsdTimeCode(1));
     elbowRest.Set(5.0, UsdTimeCode(2));
-    wristRest.Set(7.0, UsdTimeCode(1));
-    wristRest.Set(11.0, UsdTimeCode(2));
+    wristRest.Set(4.0, UsdTimeCode(1));
+    wristRest.Set(6.0, UsdTimeCode(2));
     GfVec3d sampled[3];
     origins(UsdTimeCode(2), sampled);
     CHECK(std::abs((sampled[1] - sampled[0]).GetLength() - 5.0) < 1e-4);
@@ -2336,7 +2340,10 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     elbowRest.Set(4.0, UsdTimeCode(2));
     origins(UsdTimeCode(2), sampled);
     CHECK(std::abs((sampled[1] - sampled[0]).GetLength() - 4.0) < 1e-4);
-    CHECK(std::abs((sampled[2] - sampled[1]).GetLength() - 7.0) < 1e-4);
+    // The lower bone is UNCHANGED by the upper edit: rest is parent-
+    // relative, so moving the elbow carries the wrist with it instead of
+    // stretching the segment between them.
+    CHECK(std::abs((sampled[2] - sampled[1]).GetLength() - 6.0) < 1e-4);
     origins(UsdTimeCode(1), sampled);
     CHECK(Near(sampled[1], GfVec3d(3, 0, 0)));
     CHECK(Near(sampled[2], GfVec3d(7, 0, 0)));
@@ -2344,7 +2351,7 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     elbowRest.Clear();
     wristRest.Clear();
     elbowRest.Set(3.0);
-    wristRest.Set(7.0);
+    wristRest.Set(4.0);
 
     // Offset only touches its own bone: +1 on lower reaches (8, 0, 0)
     // with segments 3 and 5. Offsets are values, so no recompile.

@@ -78,7 +78,10 @@ static void TestDefaultHierarchyAndOverrides()
     const UsdPrim parent = stage->DefinePrim(SdfPath("/Parent"), TfToken("RigExecJoint"));
     const UsdPrim child = stage->DefinePrim(SdfPath("/Parent/Child"), TfToken("RigExecControl"));
     parent.GetAttribute(TfToken("rest:space")).Set(Translate(10));
-    child.GetAttribute(TfToken("rest:space")).Set(Translate(15));
+    // Rest is relative to the namespace frame provider, so the child's 15
+    // of world bind offset is authored as 5 past its parent's 10. Every
+    // expectation below is a world value and is unchanged by that.
+    child.GetAttribute(TfToken("rest:space")).Set(Translate(5));
     parent.GetAttribute(TfToken("default:tx")).Set(2.0);
     parent.GetAttribute(TfToken("avars:tx")).Set(3.0);
     child.GetAttribute(TfToken("default:ty")).Set(4.0);
