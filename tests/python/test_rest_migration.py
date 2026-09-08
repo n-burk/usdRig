@@ -21,7 +21,7 @@ import sys
 import rigexec_test_env
 rigexec_test_env.SetupPluginTest()
 
-from pxr import Gf, Plug, Usd  # noqa: E402
+from pxr import Gf, Plug, Sdf, Usd  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
@@ -99,34 +99,70 @@ def _PosedOrigins(stage):
             for j in pose.joint_paths()}
 
 
+def _Fixture(absolutePositions):
+    """
+    A chain of nested joints authored the OLD way: each joint's rest is
+    its absolute asset-space position, not an offset from its parent.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    stage.DefinePrim("/Rig", "RigExecRoot")
+    path = "/Rig/Joints"
+    stage.DefinePrim(path, "Scope")
+    for index, position in enumerate(absolutePositions):
+        path = "%s/J%d" % (path, index)
+        prim = stage.DefinePrim(path, "RigExecJoint")
+        space = Gf.Matrix4d(1.0)
+        space.SetTranslate(Gf.Vec3d(*position))
+        prim.CreateAttribute("rest:space", Sdf.ValueTypeNames.Matrix4d)\
+            .Set(space)
+    return stage
+
+
+_ABSOLUTE = ((0.0, 5.0, 0.0), (2.0, 5.0, 0.0), (4.0, 5.0, 0.0),
+             (6.0, 5.0, 0.0))
+
+
 def TestMigrationPreservesWorldRests():
     """The rebake holds every provider's world rest frame fixed."""
-    for relative in _EXAMPLES:
-        stage = _Open(relative)
-        before = migrateRestToLocal.AbsoluteWorldRests(stage)
-        if migrateRestToLocal.IsMigrated(stage):
-            continue
-        rewritten = migrateRestToLocal.MigrateStage(stage)
-        _Check(rewritten > 0,
-               "%s has nested providers but nothing was rebased" % relative)
-        after = migrateRestToLocal.LocalWorldRests(stage)
-        _Check(set(after) == set(before),
-               "%s: the provider set changed" % relative)
-        for provider, frame in after.items():
-            for row in range(4):
-                for col in range(4):
-                    _Check(abs(frame[row][col]
-                               - before[provider][row][col]) < 1e-9,
-                           "%s: %s rest [%d][%d] moved %.12f -> %.12f"
-                           % (relative, provider, row, col,
-                              before[provider][row][col], frame[row][col]))
+    stage = _Fixture(_ABSOLUTE)
+    before = migrateRestToLocal.AbsoluteWorldRests(stage)
+    rewritten = migrateRestToLocal.MigrateStage(stage)
+    _Check(rewritten == 3, "rebased %d provider(s), expected 3" % rewritten)
+    after = migrateRestToLocal.LocalWorldRests(stage)
+    _Check(set(after) == set(before), "the provider set changed")
+    for provider, frame in after.items():
+        for row in range(4):
+            for col in range(4):
+                _Check(abs(frame[row][col]
+                           - before[provider][row][col]) < 1e-9,
+                       "%s rest [%d][%d] moved %.12f -> %.12f"
+                       % (provider, row, col,
+                          before[provider][row][col], frame[row][col]))
+
+
+def TestMigrationWritesParentRelativeOffsets():
+    """A chain of 2-unit steps becomes a root plus three (2,0,0) offsets."""
+    stage = _Fixture(_ABSOLUTE)
+    migrateRestToLocal.MigrateStage(stage)
+    expected = ((0.0, 5.0, 0.0), (2.0, 0.0, 0.0), (2.0, 0.0, 0.0),
+                (2.0, 0.0, 0.0))
+    path = "/Rig/Joints"
+    for index, want in enumerate(expected):
+        path = "%s/J%d" % (path, index)
+        local = migrateRestToLocal.ComposedRest(
+            stage.GetPrimAtPath(path)).ExtractTranslation()
+        for axis in range(3):
+            _Check(abs(local[axis] - want[axis]) < 1e-9,
+                   "%s local rest is %s, expected %s" % (path, local, want))
 
 
 def TestMigratedExamplesMatchGoldens():
-    """Posed joint origins match what the old absolute semantics gave."""
+    """The shipped assets evaluate to what the old absolute semantics gave."""
     for relative, expected in sorted(_GOLDEN.items()):
         stage = _Open(relative)
-        migrateRestToLocal.MigrateStage(stage)
+        _Check(migrateRestToLocal.IsMigrated(stage),
+               "%s is not stamped; run tools/migrateRestToLocal.py"
+               % relative)
         origins = _PosedOrigins(stage)
         for joint, want in expected:
             _Check(joint in origins, "%s: %s has no posed frame"
@@ -138,11 +174,18 @@ def TestMigratedExamplesMatchGoldens():
                        % (relative, joint, axis, got[axis], want[axis]))
 
 
+def TestEveryShippedExampleIsStamped():
+    """No shipped rig is left on the old semantics."""
+    for relative in _EXAMPLES:
+        _Check(migrateRestToLocal.IsMigrated(_Open(relative)),
+               "%s carries no rigExec:restFrameVersion stamp" % relative)
+
+
 def TestMigrationIsIdempotent():
     """The version stamp makes a second run a no-op."""
-    stage = _Open("examples/ArmRig.usda")
-    first = migrateRestToLocal.MigrateStage(stage)
-    _Check(first > 0, "first migration did nothing")
+    stage = _Fixture(_ABSOLUTE)
+    _Check(migrateRestToLocal.MigrateStage(stage) == 3,
+           "first migration did not rebase the chain")
     frames = migrateRestToLocal.LocalWorldRests(stage)
     second = migrateRestToLocal.MigrateStage(stage)
     _Check(second == 0, "second migration rewrote %d provider(s); the "
@@ -157,23 +200,25 @@ def TestMigrationIsIdempotent():
 
 def TestTopLevelProviderKeepsItsRest():
     """A provider with no frame-provider ancestor is left alone."""
-    stage = _Open("examples/ArmRig.usda")
-    shoulder = stage.GetPrimAtPath("/ArmAsset/Rig/Joints/Shoulder")
-    _Check(migrateRestToLocal.ParentProvider(shoulder) is None,
-           "Shoulder unexpectedly has a frame-provider ancestor")
-    before = migrateRestToLocal.ComposedRest(shoulder)
+    stage = _Fixture(_ABSOLUTE)
+    root = stage.GetPrimAtPath("/Rig/Joints/J0")
+    _Check(migrateRestToLocal.ParentProvider(root) is None,
+           "J0 unexpectedly has a frame-provider ancestor")
+    before = migrateRestToLocal.ComposedRest(root)
     migrateRestToLocal.MigrateStage(stage)
-    after = migrateRestToLocal.ComposedRest(shoulder)
+    after = migrateRestToLocal.ComposedRest(root)
     for row in range(4):
         for col in range(4):
             _Check(abs(after[row][col] - before[row][col]) < 1e-12,
-                   "the top-level Shoulder rest was rewritten")
+                   "the top-level J0 rest was rewritten")
 
 
 if __name__ == "__main__":
     _RegisterSchema()
     TestMigrationPreservesWorldRests()
+    TestMigrationWritesParentRelativeOffsets()
     TestMigratedExamplesMatchGoldens()
+    TestEveryShippedExampleIsStamped()
     TestMigrationIsIdempotent()
     TestTopLevelProviderKeepsItsRest()
     print("test_rest_migration: OK")

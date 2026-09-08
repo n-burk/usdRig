@@ -39,6 +39,7 @@ def Xform "TailAsset"
     def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "TailAsset"
+        custom int rigExec:restFrameVersion = 2
 
         def Scope "Controls"
         {
@@ -57,11 +58,11 @@ def Xform "TailAsset"
                     1024: 25; post linear,
                     1048: 45; post linear,
                 }
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
-                uniform token guide:shape = "diamond"
                 double guide:scaleX = 1.6
                 double guide:scaleY = 1.6
                 double guide:scaleZ = 1.6
+                uniform token guide:shape = "diamond"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 5, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -75,12 +76,12 @@ def Xform "TailAsset"
                     1024: 25; post linear,
                     1048: 45; post linear,
                 }
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
-                uniform token guide:shape = "cube"
                 uniform token guide:drawMode = "geometry"
                 double guide:scaleX = 1.2
                 double guide:scaleY = 1.2
                 double guide:scaleZ = 1.2
+                uniform token guide:shape = "cube"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -94,11 +95,11 @@ def Xform "TailAsset"
                     1024: 25; post linear,
                     1048: 45; post linear,
                 }
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
-                uniform token guide:shape = "sphere"
                 double guide:scaleX = 1.8
                 double guide:scaleY = 0.6
                 double guide:scaleZ = 1.8
+                uniform token guide:shape = "sphere"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -112,11 +113,11 @@ def Xform "TailAsset"
                     1024: 25; post linear,
                     1048: 45; post linear,
                 }
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
-                uniform token guide:shape = "pyramid"
                 double guide:scaleX = 1.5
                 double guide:scaleY = 1.5
                 double guide:scaleZ = 1.5
+                uniform token guide:shape = "pyramid"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
         }
@@ -156,21 +157,21 @@ def Xform "TailAsset"
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 5, 0, 1) )
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
                     def RigExecJoint "Seg3" (
                         prepend apiSchemas = ["NodeGraphNodeAPI"]
                     )
                     {
-                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 5, 0, 1) )
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
                         uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
                         def RigExecJoint "Seg4" (
                             prepend apiSchemas = ["NodeGraphNodeAPI"]
                         )
                         {
-                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 5, 0, 1) )
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
                             uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                         }
                     }
@@ -296,3 +297,4 @@ def Xform "TailAsset"
         }
     }
 }
+

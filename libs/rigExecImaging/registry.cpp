@@ -849,6 +849,29 @@ _AuthoredRestSpace(const PXR_NS::UsdPrim &prim, const PXR_NS::UsdTimeCode &time,
     // frame cannot be orthonormalized, so an extent computed from one would
     // bound a guide the renderer declines to draw.
     *rigid = rest.Orthonormalize(/* issueWarning = */ false);
+    if (!*rigid) {
+        return rest;
+    }
+    // An authored rest is relative to the namespace frame provider, so it
+    // only becomes a world frame once the ancestor chain is folded in --
+    // the same multiply _JointRestSpace does (computations.cpp:230).
+    // Without it a nested joint bounds at its parent-relative offset, which
+    // for a chain authored as successive 2-unit steps collapses the whole
+    // tail onto the origin.
+    for (PXR_NS::UsdPrim parent = prim.GetParent();
+         parent && !parent.IsPseudoRoot(); parent = parent.GetParent()) {
+        const PXR_NS::TfToken parentType = parent.GetTypeName();
+        if (parentType != "RigExecJoint" && parentType != "RigExecControl") {
+            continue;
+        }
+        bool parentRigid = false;
+        const PXR_NS::GfMatrix4d parentRest =
+            _AuthoredRestSpace(parent, time, &parentRigid);
+        if (parentRigid) {
+            rest = rest * parentRest;
+        }
+        break;
+    }
     return rest;
 }
 

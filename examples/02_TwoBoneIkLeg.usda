@@ -28,6 +28,7 @@ def Xform "LegAsset"
     def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "LegAsset"
+        custom int rigExec:restFrameVersion = 2
 
         def Scope "Controls"
         {
@@ -35,12 +36,12 @@ def Xform "LegAsset"
                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
             )
             {
-                matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 8, 0, 1) )
-                uniform token guide:shape = "cube"
                 uniform token guide:drawMode = "geometry"
                 double guide:scaleX = 0.6
                 double guide:scaleY = 0.6
                 double guide:scaleZ = 0.6
+                uniform token guide:shape = "cube"
+                matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 8, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -62,8 +63,8 @@ def Xform "LegAsset"
                     1032: 3.5; post linear,
                     1048: 1; post linear,
                 }
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
                 uniform token guide:shape = "sphere"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
 
@@ -76,12 +77,12 @@ def Xform "LegAsset"
                     1001: 0; pre (0, 0); post linear,
                     1048: 0.8; post linear,
                 }
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 4, 3, 1) )
-                uniform token guide:shape = "sphere"
                 uniform token guide:drawMode = "geometry"
                 double guide:scaleX = 0.4
                 double guide:scaleY = 0.4
                 double guide:scaleZ = 0.4
+                uniform token guide:shape = "sphere"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 4, 3, 1) )
                 uniform asset ui:nodegraph:node:icon = @../icons/control.png@
             }
         }
@@ -128,14 +129,14 @@ def Xform "LegAsset"
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 4, 0, 1) )
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
                     def RigExecJoint "Ankle" (
                         prepend apiSchemas = ["NodeGraphNodeAPI"]
                     )
                     {
-                        matrix4d rest:space = ( (0, -1, 0, 0), (0, 0, -1, 0), (1, 0, 0, 0), (0, 0, 0, 1) )
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
                         uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                     }
                 }
@@ -257,3 +258,4 @@ def Xform "LegAsset"
         }
     }
 }
+

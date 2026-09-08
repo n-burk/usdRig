@@ -28,6 +28,7 @@ def Xform "SpineAsset"
     def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "SpineAsset"
+        custom int rigExec:restFrameVersion = 2
 
         def Scope "Controls"
         {
@@ -120,7 +121,7 @@ def Xform "SpineAsset"
                 )
                 {
                     double guide:radius = 0.25
-                    matrix4d rest:space = ( (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 0), (0, 4, 0, 1) )
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                 }
             }
@@ -249,3 +250,4 @@ def Xform "SpineAsset"
         }
     }
 }
+

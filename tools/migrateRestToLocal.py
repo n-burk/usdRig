@@ -199,6 +199,14 @@ def main(argv):
     if len(argv) < 2:
         print(__doc__)
         return 2
+    # Without the RigExec schemas registered, Usd crashes outright rather
+    # than reporting an unknown type, so refuse before touching a layer.
+    if not Usd.SchemaRegistry().IsConcrete("RigExecJoint"):
+        print("RigExec schemas are not registered; point "
+              "PXR_PLUGINPATH_NAME at the GENERATED resources, e.g.\n"
+              "  PXR_PLUGINPATH_NAME=<repo>/build-python/usd/rigExecSchema/"
+              "resources")
+        return 2
     for path in argv[1:]:
         stage = Usd.Stage.Open(path)
         if not stage:

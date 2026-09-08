@@ -23,6 +23,7 @@ def Xform "BlendArmAsset"
     def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "BlendArmAsset"
+        custom int rigExec:restFrameVersion = 2
 
         def Scope "Controls"
         {
@@ -161,14 +162,14 @@ def Xform "BlendArmAsset"
                     prepend apiSchemas = ["NodeGraphNodeAPI"]
                 )
                 {
-                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 10, 0, 1) )
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
                     uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
 
                     def RigExecJoint "Wrist" (
                         prepend apiSchemas = ["NodeGraphNodeAPI"]
                     )
                     {
-                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 10, 0, 1) )
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
                         uniform asset ui:nodegraph:node:icon = @../icons/joint.png@
                     }
                 }
@@ -216,8 +217,6 @@ def Xform "BlendArmAsset"
 
         def Scope "Movers"
         {
-            # The hierarchy is the displayed stack: bottom executes first.
-            # Keep Pose below Geometry so final pose is available to skinning.
             reorder nameChildren = ["Geometry", "Pose"]
             def Scope "Pose"
             {
@@ -286,3 +285,4 @@ def Xform "BlendArmAsset"
         }
     }
 }
+
