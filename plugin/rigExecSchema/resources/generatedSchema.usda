@@ -221,7 +221,7 @@ class RigExecControl "RigExecControl" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0
@@ -332,7 +332,7 @@ class "RigExecXformable" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0
@@ -471,7 +471,7 @@ class RigExecJoint "RigExecJoint" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0
@@ -1827,7 +1827,7 @@ class "RigExecVolumeWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0
@@ -2048,7 +2048,7 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0
@@ -2281,7 +2281,7 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0
@@ -2522,7 +2522,7 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0
@@ -3110,7 +3110,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Local-to-world bind transform; always orthonormalized."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
         }
     )
     double rest:tx = 0

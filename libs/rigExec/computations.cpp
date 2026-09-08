@@ -226,8 +226,28 @@ _ElementOutSpace(const RigExecPointFrameArray *source, size_t index)
     return rigExec::RigExecElementOutSpace(source, index);
 }
 
-// Local-to-world rest space: authored rest:space with the rest avars as a
-// preceding local delta (all-default avars leave rest:space authoritative).
+static GfMatrix4d
+_SpaceFromFrame(const RigExecPointFrame *frame)
+{
+    GfMatrix4d result(1.0);
+    if (frame) {
+        if (!frame->IsValid() || frame->IsDegenerate() ||
+            !rigExec::RigExecPointsToMatrix(_IdentityLandmarks(), frame->points, &result)) {
+            // Missing ancestors select identity; an existing invalid frame
+            // must retain failure through the matrix-typed space expressions.
+            // FrameFromMatrix will classify this sentinel as degenerate.
+            result[3][0] = std::numeric_limits<double>::quiet_NaN();
+        }
+    }
+    return result;
+}
+
+// Rest space relative to the namespace frame provider: the authored
+// rest:space with the rest avars as a preceding local delta (all-default
+// avars leave rest:space authoritative), carried into the parent's rest
+// frame. A provider with no RigExec ancestor resolves against identity --
+// _SpaceFromFrame returns it for a null frame -- so a top-level rest keeps
+// its authored local-to-world meaning.
 static GfMatrix4d
 _JointRestSpace(const VdfContext &ctx)
 {
@@ -243,31 +263,19 @@ _JointRestSpace(const VdfContext &ctx)
         _ScalarInput(ctx, _tokens->restRz, 0),
         0.0, TfToken("XYZ"));
     GfMatrix4d rest = local * (space ? *space : GfMatrix4d(1.0));
-    // Rest spaces are always orthonormalized (Ir contract).
+    // Rest spaces are always orthonormalized (Ir contract). Orthonormalize
+    // the local factor BEFORE the parent multiply: the parent's frame is
+    // already orthonormal, so the product is too, and an invalid ancestor's
+    // NaN sentinel survives the multiply instead of being scrubbed by it.
     rest.Orthonormalize(/* issueWarning = */ false);
-    return rest;
+    return rest * _SpaceFromFrame(
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->parentRestFrame));
 }
 
 static RigExecPointFrame
 _ComputeJointRestFrame(const VdfContext &ctx)
 {
     return _FrameFromMatrix(_JointRestSpace(ctx));
-}
-
-static GfMatrix4d
-_SpaceFromFrame(const RigExecPointFrame *frame)
-{
-    GfMatrix4d result(1.0);
-    if (frame) {
-        if (!frame->IsValid() || frame->IsDegenerate() ||
-            !rigExec::RigExecPointsToMatrix(_IdentityLandmarks(), frame->points, &result)) {
-            // Missing ancestors select identity; an existing invalid frame
-            // must retain failure through the matrix-typed space expressions.
-            // FrameFromMatrix will classify this sentinel as degenerate.
-            result[3][0] = std::numeric_limits<double>::quiet_NaN();
-        }
-    }
-    return result;
 }
 
 // Matrix spaces preserve the existing posed:space convention: a connection
@@ -423,7 +431,10 @@ _ComputeJointMatrix(const VdfContext &ctx)
                 AttributeValue<double>(_tokens->restTz),                     \
                 AttributeValue<double>(_tokens->restRx),                     \
                 AttributeValue<double>(_tokens->restRy),                     \
-                AttributeValue<double>(_tokens->restRz));                    \
+                AttributeValue<double>(_tokens->restRz),                     \
+                NamespaceAncestor<RigExecPointFrame>(                        \
+                    _tokens->computeRestFrame)                               \
+                    .InputName(_tokens->parentRestFrame));                   \
         self.PrimComputation(_tokens->computedDefaultSpace)                 \
             .Callback<GfMatrix4d>(&_ComputeDefaultSpace)                     \
             .Inputs(                                                        \

@@ -241,7 +241,7 @@ class "RigExecXformable" (
     double rest:ry = 0
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        doc = "Local-to-world bind transform; always orthonormalized."
+        doc = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
     )
     double default:tx = 0
     double default:ty = 0
