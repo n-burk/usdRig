@@ -124,8 +124,18 @@ bool RigExecSceneDb::ValidateCapabilities(std::string *error) const
         }
     }
     for (const auto &[path, rel] : relationships) {
-        if (path.GetNameToken() == "rigExec:joints" && !rel.targets.empty())
-            return fail("requires explicit solver outputs; reverse joint binding is not lowered: " + path.GetString());
+        // rigExec:joints is NOT rejected. It carries two meanings and only
+        // one of them needs an evaluator: it declares the chain a solver
+        // POSES (reverse binding, applied as joint value overrides -- a
+        // pack has no evaluator and never does this), and it declares the
+        // chain a solver MEASURES, whose rest frames wire straight into
+        // the solver's computation. A TwoBoneIk has no absolute length
+        // attribute any more, so that second meaning is the only way it
+        // gets bone lengths at all; rejecting the relationship here made
+        // the type unpackable. Lowering must therefore still resolve
+        // posed outputs explicitly -- a packed rig is not posed through
+        // this relationship -- but the rest inputs it names lower like
+        // any other relationship-targeted computation input.
         if (path.GetNameToken() == "rigExec:moves" && !rel.targets.empty())
             return fail("does not lower mover revisions: " + path.GetString());
         if (!baseMetadata(rel.metadata))

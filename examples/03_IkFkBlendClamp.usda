@@ -114,13 +114,16 @@ def Xform "BlendArmAsset"
                 float inputs:softness = 0.1
                 float inputs:stretch = 1
                 rel rigExec:effectorControl = </BlendArmAsset/Rig/Controls/HandIK>
-                double rigExec:lowerLength = 3
+                rel rigExec:joints = [
+                    </BlendArmAsset/Rig/Joints/Shoulder>,
+                    </BlendArmAsset/Rig/Joints/Shoulder/Elbow>,
+                    </BlendArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
                 rel rigExec:poleControl = </BlendArmAsset/Rig/Controls/ElbowPole>
                 double rigExec:preferredBendRadians = -0.35
                 rel rigExec:rootControl = </BlendArmAsset/Rig/Controls/ShoulderFK>
                 uniform token rigExec:stretchPolicy = "uniformSegments"
                 uniform token rigExec:unreachablePolicy = "clampWithSoftness"
-                double rigExec:upperLength = 3
                 uniform asset ui:nodegraph:node:icon = @../icons/two_bone_ik.png@
             }
 

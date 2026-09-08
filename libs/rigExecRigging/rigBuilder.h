@@ -196,14 +196,9 @@ public:
     void SetRootControl(const SdfPath &path);
     void SetEffectorControl(const SdfPath &path);
     void SetPoleControl(const SdfPath &path);
-    /// Optional rest inputs [root, mid, end], independent of output bindings.
-    /// An empty list restores the rigExec:joints rest fallback.
-    void SetRestJoints(const std::vector<SdfPath> &paths);
-    void SetRestJoints(const std::vector<RigExecJointHandle> &joints);
-    void SetUpperLength(double length);
-    void SetLowerLength(double length);
-    /// Deltas added to the rest-implied lengths. Used only when the
-    /// matching absolute length carries no authored opinion.
+    /// Deltas added to the measured bone lengths. Bone lengths themselves
+    /// are computed from the bound joints' rest positions and cannot be
+    /// authored, so these offsets are the only length controls.
     void SetUpperLengthOffset(double offset);
     void SetLowerLengthOffset(double offset);
     void SetPreferredBendRadians(double radians);

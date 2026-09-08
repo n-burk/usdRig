@@ -1744,24 +1744,6 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                 appendRelTargets(solver, "rigExec:inputA", false);
                 appendRelTargets(solver, "rigExec:inputB", false);
             }
-            if (stype == "RigExecTwoBoneIk") {
-                appendRelTargets(solver, "rigExec:restJoints", false);
-                appendFrameBindingIdentity(solver, "rigExec:restJoints");
-                // Whether each absolute length is authored decides between
-                // the authored value and the rest-implied one, so
-                // authoring or clearing one begins a new epoch. The length
-                // and offset VALUES stay value-only (read live at
-                // Evaluate); only the authored-or-not bit is here.
-                const UsdAttribute upper = solver.GetAttribute(
-                    TfToken("rigExec:upperLength"));
-                const UsdAttribute lower = solver.GetAttribute(
-                    TfToken("rigExec:lowerLength"));
-                digest += "|lengthAuthored=";
-                digest += (upper && upper.HasAuthoredValueOpinion()) ? '1'
-                                                                    : '0';
-                digest += (lower && lower.HasAuthoredValueOpinion()) ? '1'
-                                                                    : '0';
-            }
             digest += ';';
         }
     }
@@ -3163,24 +3145,28 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // a hint; reject samples explicitly.
             for (const UsdPrim &solver : solvers) {
                 const TfToken t = solver.GetTypeName();
+                // rigExec:upperLength/rigExec:lowerLength no longer exist
+                // in the schema -- bone lengths are measured from the bound
+                // joints' rests. An asset saved against the old schema can
+                // still carry one as a custom property, where it would be
+                // silently inert; that used to freeze the bone, so a rig
+                // relying on it would change shape with no explanation.
+                // Fail loudly instead and name the knob that replaced it.
                 if (t == "RigExecTwoBoneIk") {
-                    SdfPathVector rests;
-                    solver.GetRelationship(TfToken("rigExec:restJoints"))
-                        .GetTargets(&rests);
-                    std::set<SdfPath> unique;
-                    bool valid = rests.empty() || rests.size() == 3;
-                    for (const SdfPath &path : rests) {
-                        const UsdPrim joint = _stage->GetPrimAtPath(path);
-                        valid = valid && path.IsPrimPath() && joint &&
-                            joint.GetTypeName() == "RigExecJoint" &&
-                            unique.insert(path).second;
-                    }
-                    if (!valid) {
-                        reportError(solver.GetPath().GetString() +
-                            ": rigExec:restJoints must be empty or contain "
-                            "three distinct RigExecJoint prims in root, mid, "
-                            "end order");
-                        return false;
+                    static const char *const lengthAttrs[2] = {
+                        "rigExec:upperLength", "rigExec:lowerLength"};
+                    for (const char *name : lengthAttrs) {
+                        const UsdAttribute a =
+                            solver.GetAttribute(TfToken(name));
+                        if (a && a.HasAuthoredValueOpinion()) {
+                            reportError(
+                                solver.GetPath().GetString() + ": " + name +
+                                " was removed from the schema; bone lengths "
+                                "are measured from the bound joints' rest "
+                                "positions. Remove this opinion and author " +
+                                name + "Offset to adjust the measured bone");
+                            return false;
+                        }
                     }
                 }
                 std::vector<const char *> cardinalityAttrs;
@@ -3201,6 +3187,122 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     }
                 }
             }
+            // Solvers whose aggregate is READ by another solver. Such a
+            // solver does not pose anything itself -- the consumer that
+            // reads it is what writes to the joints -- so its
+            // rigExec:joints is a rest reference, not an output claim.
+            //
+            // That is what lets an IK feeding an IK/FK blend name the
+            // chain it solves for: the blend still claims those joints
+            // exclusively, while the IK gets the joint REST frames it
+            // needs to measure its bone lengths from. Without this the
+            // IK could not name them at all ("posed by two solvers") and
+            // had no bones to measure.
+            std::set<SdfPath> consumedSolvers;
+            std::set<SdfPath> posedByUnconsumed;
+            {
+                const std::vector<UsdPrim> allSolvers =
+                    _DiscoverAggregateSolvers(_stage, _rigPath);
+                std::set<SdfPath> solverPaths;
+                for (const UsdPrim &solver : allSolvers) {
+                    solverPaths.insert(solver.GetPath());
+                }
+                for (const UsdPrim &solver : allSolvers) {
+                    for (const UsdRelationship &rel :
+                         solver.GetRelationships()) {
+                        if (rel.GetName() == "rigExec:joints") {
+                            continue;
+                        }
+                        SdfPathVector targets;
+                        rel.GetTargets(&targets);
+                        for (const SdfPath &target : targets) {
+                            if (target != solver.GetPath() &&
+                                solverPaths.count(target)) {
+                                consumedSolvers.insert(target);
+                            }
+                        }
+                    }
+                }
+                // "Consumed" only means anything in a DAG: in a cycle every
+                // solver reads another, nothing is unconsumed, and the
+                // relaxation below would collapse. The full dependency
+                // check downstream also folds in joint-binding edges and so
+                // cannot run until claims are known -- but a cycle among
+                // solver-to-solver edges alone is already decidable here,
+                // and reporting it now keeps a cyclic rig from being
+                // diagnosed as a bogus double claim.
+                {
+                    std::map<SdfPath, size_t> pending;
+                    std::map<SdfPath, std::vector<SdfPath>> consumers;
+                    std::vector<SdfPath> ready;
+                    for (const UsdPrim &solver : allSolvers) {
+                        std::set<SdfPath> deps;
+                        for (const UsdRelationship &rel :
+                             solver.GetRelationships()) {
+                            if (rel.GetName() == "rigExec:joints") {
+                                continue;
+                            }
+                            SdfPathVector targets;
+                            rel.GetTargets(&targets);
+                            for (const SdfPath &target : targets) {
+                                const SdfPath prim = target.GetPrimPath();
+                                if (prim != solver.GetPath() &&
+                                    solverPaths.count(prim)) {
+                                    deps.insert(prim);
+                                }
+                            }
+                        }
+                        pending[solver.GetPath()] = deps.size();
+                        if (deps.empty()) {
+                            ready.push_back(solver.GetPath());
+                        }
+                        for (const SdfPath &dep : deps) {
+                            consumers[dep].push_back(solver.GetPath());
+                        }
+                    }
+                    size_t scheduled = 0;
+                    while (!ready.empty()) {
+                        scheduled += ready.size();
+                        std::vector<SdfPath> next;
+                        for (const SdfPath &solver : ready) {
+                            for (const SdfPath &consumer : consumers[solver]) {
+                                if (--pending[consumer] == 0) {
+                                    next.push_back(consumer);
+                                }
+                            }
+                        }
+                        ready.swap(next);
+                    }
+                    if (scheduled != pending.size()) {
+                        std::string paths;
+                        for (const auto &[solver, count] : pending) {
+                            if (count) {
+                                paths += " " + solver.GetString();
+                            }
+                        }
+                        reportError("solver dependency cycle among:" + paths);
+                        return false;
+                    }
+                }
+
+                // Joints that a solver nobody reads writes to. Only these
+                // are already spoken for; a consumed solver still POSES
+                // any joint no such solver names, so feeding a blend does
+                // not silently stop it driving its own extra outputs.
+                for (const UsdPrim &solver : allSolvers) {
+                    if (consumedSolvers.count(solver.GetPath())) {
+                        continue;
+                    }
+                    if (const UsdRelationship rel = solver.GetRelationship(
+                            TfToken("rigExec:joints"))) {
+                        SdfPathVector targets;
+                        rel.GetTargets(&targets);
+                        posedByUnconsumed.insert(targets.begin(),
+                                                 targets.end());
+                    }
+                }
+            }
+
             // A claim binds wherever the solver sits; a non-solver prim
             // carrying rigExec:joints is rejected wherever it sits.
             if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
@@ -3366,6 +3468,15 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                                 }
                             }
                         }
+                        // A consumed solver naming a joint that a solver
+                        // nobody reads already writes to is referencing it
+                        // for its REST, not claiming it: the consumer is
+                        // what poses it. Any other joint it names it still
+                        // poses itself.
+                        if (consumedSolvers.count(solver.GetPath()) &&
+                            posedByUnconsumed.count(jointPath)) {
+                            continue;
+                        }
                         const auto claimed = jointClaim.find(jointPath);
                         if (claimed != jointClaim.end()) {
                             reportError("joint " + jointPath.GetString() +
@@ -3396,8 +3507,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
         for (const UsdPrim &solver : solvers) {
             for (const UsdRelationship &rel : solver.GetRelationships()) {
-                if (rel.GetName() == "rigExec:joints" ||
-                    rel.GetName() == "rigExec:restJoints") {
+                if (rel.GetName() == "rigExec:joints") {
                     continue;
                 }
                 SdfPathVector targets;
@@ -3677,72 +3787,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
-    // Rest-implied TwoBoneIk lengths. A solver whose absolute length
-    // carries no authored opinion measures that bone from its bound
-    // joints' rest positions at Evaluate time (plus the authored
-    // offset); an authored absolute implies nothing. Element order is
-    // root/mid/end, honoring any rigExec:jointElements remap via the
-    // compiled binding rather than raw list position.
-    std::vector<_ImpliedIkLengths> newImplied;
-    auto newRestTaps = std::make_unique<RigExecTapSet>(_stage);
-    std::map<SdfPath, RigExecTapId> newImpliedRestTaps;
-    {
-        std::map<SdfPath, std::map<int, SdfPath>> elementsBySolver;
-        for (const auto &[jointPath, binding] : newJointBinding) {
-            elementsBySolver[binding.first][binding.second] = jointPath;
-        }
-        for (const UsdPrim &solver :
-             _DiscoverAggregateSolvers(_stage, _rigPath)) {
-            if (solver.GetTypeName() != "RigExecTwoBoneIk") {
-                continue;
-            }
-            const UsdAttribute upper = solver.GetAttribute(
-                TfToken("rigExec:upperLength"));
-            const UsdAttribute lower = solver.GetAttribute(
-                TfToken("rigExec:lowerLength"));
-            _ImpliedIkLengths record;
-            record.solver = solver.GetPath();
-            record.implyUpper = !upper || !upper.HasAuthoredValueOpinion();
-            record.implyLower = !lower || !lower.HasAuthoredValueOpinion();
-            if (!record.implyUpper && !record.implyLower) {
-                continue;
-            }
-            const auto found = elementsBySolver.find(solver.GetPath());
-            const bool hasBinding = found != elementsBySolver.end();
-            SdfPathVector restJoints;
-            solver.GetRelationship(TfToken("rigExec:restJoints"))
-                .GetTargets(&restJoints);
-            for (int element = 0; element < 3; ++element) {
-                SdfPath path;
-                if (!restJoints.empty()) {
-                    path = restJoints[element];
-                } else if (hasBinding) {
-                    const auto joint = found->second.find(element);
-                    if (joint != found->second.end()) path = joint->second;
-                }
-                if (path.IsEmpty()) {
-                    break;
-                }
-                record.joints[element] = path;
-                if (!newImpliedRestTaps.count(path)) {
-                    newImpliedRestTaps[path] = newRestTaps->Add(
-                        RigExecValueAddress::Prim(
-                            path, TfToken("computeRestFrame")));
-                }
-            }
-            // A solver binding fewer than three elements keeps its schema
-            // defaults; Evaluate diagnoses which unauthored length could
-            // not be implied. Compile stays open: a solver wired before
-            // its joints are finished still compiles, as it always has.
-            newImplied.push_back(record);
-        }
-    }
-    if (!newImpliedRestTaps.empty() && !newRestTaps->Prepare()) {
-        reportError("failed to build a valid prepared request for the "
-                    "implied-length rest frames");
-        restorePreviousEpoch();
-        return false;
-    }
 
     // Pose-domain constraints, compiled to in-memory structural wiring. Aim,
     // Position, Rotation, Scale, and Parent revise one transform provider;
@@ -4405,8 +4449,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     for (const auto &[solver, dependencies] : newSolverDependencies) {
         const UsdPrim prim = _stage->GetPrimAtPath(solver);
         for (const UsdRelationship &rel : prim.GetRelationships()) {
-            if (rel.GetName() == "rigExec:joints" ||
-                rel.GetName() == "rigExec:restJoints") {
+            if (rel.GetName() == "rigExec:joints") {
                 continue;
             }
             SdfPathVector targets;
@@ -4699,9 +4742,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _solverBatches = std::move(newSolverBatches);
     _solverJoints = std::move(newSolverJoints);
     _solverInputBatches = std::move(newSolverInputBatches);
-    _impliedIkLengths = std::move(newImplied);
-    _impliedRestTaps = std::move(newImpliedRestTaps);
-    _restFrameTaps = std::move(newRestTaps);
     _solverArrayTaps = std::move(newSolverArrayTaps);
     _graphChains = std::move(newGraphChains);
     _graphDerivedChains = std::move(newGraphDerivedChains);
@@ -6490,118 +6530,6 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             VtValue(restPacket)});
     }
 
-    // Rest-implied TwoBoneIk lengths, measured before anything consumes
-    // them: each record's joints publish computeRestFrame through the
-    // epoch's rest request, and a bone is its rest-origin distance plus
-    // the authored offset. The overrides join baseOverrides, so the
-    // solver aggregates, the joint-override loop, and the solver guides
-    // all read the same implied values -- and an authored absolute
-    // (which implies no record) is never touched.
-    if (_restFrameTaps && !_impliedIkLengths.empty()) {
-        const RigExecSnapshot restSnapshot =
-            _restFrameTaps->Evaluate(time, baseOverrides);
-        if (!restSnapshot.IsValid() || !restSnapshot.IsComplete()) {
-            pose.diagnostics.push_back(
-                restSnapshot.IsValid()
-                    ? "implied-length rest snapshot incomplete: schema "
-                      "defaults stand"
-                    : "implied-length rest evaluation failed: schema "
-                      "defaults stand");
-        } else {
-            for (const _ImpliedIkLengths &implied : _impliedIkLengths) {
-                RigExecPointFrame rests[3];
-                bool usable = true;
-                for (int i = 0; i < 3; ++i) {
-                    if (implied.joints[i].IsEmpty()) {
-                        usable = false;
-                        break;
-                    }
-                    const auto tap =
-                        _impliedRestTaps.find(implied.joints[i]);
-                    if (tap == _impliedRestTaps.end()) {
-                        usable = false;
-                        break;
-                    }
-                    rests[i] =
-                        restSnapshot.Get<RigExecPointFrame>(tap->second);
-                    if (!rests[i].IsValid()) {
-                        usable = false;
-                        break;
-                    }
-                }
-                if (!usable) {
-                    pose.diagnostics.push_back(
-                        "solver " + implied.solver.GetString() +
-                        " binds fewer than three elements; unauthored "
-                        "lengths keep their schema defaults");
-                    continue;
-                }
-                const UsdPrim solverPrim =
-                    _stage->GetPrimAtPath(implied.solver);
-                const GfVec3d origins[3] = {
-                    rests[0].Origin(), rests[1].Origin(),
-                    rests[2].Origin()};
-                // A mover-driven length is explicit authoring intent: when
-                // a property chain already overrode the attribute, the
-                // rest-implied value yields to it rather than pushing a
-                // second override for the same key.
-                auto drivenByMover = [&](const char *lengthName) {
-                    const TfToken name(lengthName);
-                    for (const RigExecValueOverride &o : baseOverrides) {
-                        if (o.prim == implied.solver &&
-                            o.attribute == name) {
-                            return true;
-                        }
-                    }
-                    return false;
-                };
-                auto imply = [&](bool want, const char *lengthName,
-                                 const char *offsetName, const GfVec3d &a,
-                                 const GfVec3d &b) {
-                    if (!want || drivenByMover(lengthName)) {
-                        return;
-                    }
-                    const double measured = (b - a).GetLength();
-                    double offset = _ResolvedRead(
-                        _resolvedInputs, solverPrim, offsetName, 0.0, time);
-                    if (!std::isfinite(offset)) {
-                        pose.diagnostics.push_back(
-                            "solver " + implied.solver.GetString() + " " +
-                            offsetName + " is not finite; treated as 0");
-                        offset = 0.0;
-                    }
-                    if (!std::isfinite(measured)) {
-                        pose.diagnostics.push_back(
-                            "solver " + implied.solver.GetString() +
-                            " rest distance for " + lengthName +
-                            " is not finite; schema default stands");
-                        return;
-                    }
-                    const double length = measured + offset;
-                    if (length <= 0.0) {
-                        pose.diagnostics.push_back(
-                            "solver " + implied.solver.GetString() +
-                            " implied " + lengthName +
-                            " is not positive; the kernel clamps it");
-                    }
-                    baseOverrides.push_back(RigExecValueOverride{
-                        implied.solver, TfToken(), TfToken(lengthName),
-                        VtValue(length)});
-                    pose.diagnostics.push_back(
-                        "solver " + implied.solver.GetString() + " implied " +
-                        lengthName + "=" + std::to_string(length) +
-                        " (rest " + std::to_string(measured) + " + offset " +
-                        std::to_string(offset) + ")");
-                };
-                imply(
-                    implied.implyUpper, "rigExec:upperLength",
-                    "rigExec:upperLengthOffset", origins[0], origins[1]);
-                imply(
-                    implied.implyLower, "rigExec:lowerLength",
-                    "rigExec:lowerLengthOffset", origins[1], origins[2]);
-            }
-        }
-    }
 
     std::vector<RigExecValueOverride> jointOverrides = baseOverrides;
     // Joints whose solver published no element for them (an incomplete

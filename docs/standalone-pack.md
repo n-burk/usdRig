@@ -65,8 +65,10 @@ CurvenetWeight. BlendInput and BlendSample also support their registered
 descriptor computations; Curvenet may carry ordinary source data. Standard
 USD prims and attributes can be retained, subject to the
 computations actually registered by the installed OpenExec library. Aggregate
-solver requests use explicit dependencies; `rigExec:restJoints` does not claim
-joint outputs and is permitted. Attribute read-phase metadata and BlendSample
+solver requests use explicit dependencies. `rigExec:joints` is permitted and
+supplies solver REST inputs -- a two-bone IK measures its bone lengths through
+it -- but a packed rig is never posed through it, so lowering must still
+resolve posed outputs explicitly. Attribute read-phase metadata and BlendSample
 read phases must select authored base values: preceding/final mover revisions
 are not lowered by this provider runtime. Export, load and runtime preparation
 share the same capability validation.

@@ -437,30 +437,19 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     rel rigExec:rootControl
     rel rigExec:effectorControl
     rel rigExec:poleControl
-    rel rigExec:restJoints (
-        doc = """Optional ordered rest-input joints [root, mid, end]. Their
-        live rest frames define the solve's references and implied segment
-        lengths without claiming output ownership. Use this when an IK/FK
-        blend poses the joints. Empty uses this solver's rigExec:joints;
-        authored absolute lengths still override measured rest lengths."""
-    )
-    double rigExec:upperLength = 1
-    double rigExec:lowerLength = 1
     double rigExec:upperLengthOffset = 0 (
-        doc = """Delta added to the IMPLIED upper length. When
-        rigExec:upperLength carries no authored opinion, the upper length
-        is measured from the bound joints' rest positions (root to mid)
+        doc = """Delta added to the measured upper length. The upper
+        bone is measured from the bound joints' rest positions (root to mid)
         and this offset adjusts it -- zero leaves the measured bone
-        length exact. An authored rigExec:upperLength is absolute and
-        this offset is ignored."""
+        length exact. This is the only control over the upper bone's
+        length: the bone itself is always the measured rest distance."""
     )
     double rigExec:lowerLengthOffset = 0 (
-        doc = """Delta added to the IMPLIED lower length. When
-        rigExec:lowerLength carries no authored opinion, the lower length
-        is measured from the bound joints' rest positions (mid to end)
+        doc = """Delta added to the measured lower length. The lower
+        bone is measured from the bound joints' rest positions (mid to end)
         and this offset adjusts it -- zero leaves the measured bone
-        length exact. An authored rigExec:lowerLength is absolute and
-        this offset is ignored."""
+        length exact. This is the only control over the lower bone's
+        length: the bone itself is always the measured rest distance."""
     )
     uniform token rigExec:stretchPolicy = "uniformSegments" (
         allowedTokens = ["uniformSegments"]

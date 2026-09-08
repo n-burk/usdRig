@@ -233,6 +233,10 @@ TestIkAndBlend(const std::string &examplesDir)
     const RigExecTapId ikTap = taps.Add(RigExecValueAddress::Prim(
         SdfPath("/ArmAsset/Rig/Solvers/IK"), _computePointFrameArray));
     taps.Prepare();
+    // ArmRig's IK names Shoulder/Elbow/Wrist itself, so the kernel
+    // measures its own bones (4 and 4) from their rests. IKFKBlend
+    // still POSES those joints -- the IK's rigExec:joints is a rest
+    // reference because its aggregate is consumed by the blend.
     const RigExecSnapshot snap = taps.Evaluate(UsdTimeCode::Default());
     CHECK(snap.IsValid());
 
@@ -360,12 +364,38 @@ TestViewFreeValidation(const std::string &examplesDir)
     }
 
     // A joint posed by two solvers is rejected (the BLOCKER scenario: this
-    // must fail in Phase A, not inside compilation after teardown).
+    // must fail in Phase A, not inside compilation after teardown). Both
+    // claimants must be solvers nobody READS: a solver whose aggregate is
+    // consumed does not pose, so naming a joint its consumer writes to is
+    // a rest reference, exercised separately below.
     {
         UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmRig.usda");
         CHECK(stage);
         if (stage) {
-            // FK already feeds the blend; also list a joint the blend owns.
+            // A second unconsumed chain claiming a joint IKFKBlend owns.
+            UsdPrim rogue = stage->DefinePrim(
+                SdfPath("/ArmAsset/Rig/Solvers/Rogue"),
+                TfToken("RigExecFkChain"));
+            CHECK(rogue);
+            rogue.CreateRelationship(TfToken("rigExec:controls")).SetTargets(
+                {SdfPath("/ArmAsset/Rig/Controls/ShoulderFK")});
+            rogue.CreateRelationship(jointsTok).SetTargets(
+                {SdfPath("/ArmAsset/Rig/Joints/Shoulder")});
+            RigExecRigEvaluator eval(stage, rigPath);
+            eval.cpuParityMode = true;
+            std::vector<std::string> errors;
+            CHECK(!eval.Compile(&errors));
+            CHECK(!errors.empty());
+        }
+    }
+
+    // A CONSUMED solver naming joints its consumer poses is legal: that is
+    // how an IK feeding an IK/FK blend declares the chain whose rests give
+    // it its bone lengths. ArmRig's own IK does exactly this.
+    {
+        UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmRig.usda");
+        CHECK(stage);
+        if (stage) {
             UsdPrim fk =
                 stage->GetPrimAtPath(SdfPath("/ArmAsset/Rig/Solvers/FK"));
             CHECK(fk);
@@ -374,8 +404,11 @@ TestViewFreeValidation(const std::string &examplesDir)
             RigExecRigEvaluator eval(stage, rigPath);
             eval.cpuParityMode = true;
             std::vector<std::string> errors;
-            CHECK(!eval.Compile(&errors));
-            CHECK(!errors.empty());
+            CHECK(eval.Compile(&errors));
+            for (const std::string &error : errors) {
+                std::printf("  unexpected: %s\n", error.c_str());
+            }
+            CHECK(errors.empty());
         }
     }
 
@@ -1999,10 +2032,10 @@ TestAimConstraintRevisesJointFrame(const std::string &examplesDir)
 // stops answering to the skeleton it is supposed to follow. The symptom is
 // not a wrong number anywhere; it is an edit that does nothing at all.
 //
-// Only rigs that bind three joints can be checked: 03_IkFkBlendClamp and
-// ArmRig route their joints through a RigExecBlendPointFrames instead, so
-// their solvers have no rests to measure and their absolute lengths carry
-// the bone -- see the comment on rigExec:upperLength in those files.
+// Every TwoBoneIk names the three joints it solves for, so every rig can
+// be checked. 03_IkFkBlendClamp and ArmRig route POSING through a
+// RigExecBlendPointFrames, but their IKs still name the same chain as a
+// rest reference, which is where their bone lengths come from.
 static void
 _CheckRestEditRecalibrates(const std::string &stagePath, const char *rigPath,
                            const char *editJoint, const char *restChannel,
@@ -2054,8 +2087,8 @@ _CheckRestEditRecalibrates(const std::string &stagePath, const char *rigPath,
         (afterIt->second.Origin() - beforeOrigin).GetLength();
     if (moved <= 1e-6) {
         std::printf("  %s: %s did not move after a rest edit -- the solver "
-                    "is frozen against its joints' rests (an authored "
-                    "absolute rigExec:upperLength/lowerLength?)\n",
+                    "is not measuring its joints' rests (does its "
+                    "rigExec:joints name the chain?)\n",
                     stagePath.c_str(), watchJoint);
     }
     CHECK(moved > 1e-6);

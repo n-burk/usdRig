@@ -70,15 +70,12 @@ TF_DEFINE_PRIVATE_TOKENS(
     (endFrame)
     (endRest)
     (jointRests)
-    (restJointFrames)
 
     // Attribute tokens.
     ((controls, "rigExec:controls"))
     ((rootControl, "rigExec:rootControl"))
     ((effectorControl, "rigExec:effectorControl"))
     ((poleControl, "rigExec:poleControl"))
-    ((upperLength, "rigExec:upperLength"))
-    ((lowerLength, "rigExec:lowerLength"))
     ((preferredBendRadians, "rigExec:preferredBendRadians"))
     ((inputA, "rigExec:inputA"))
     ((inputB, "rigExec:inputB"))
@@ -91,7 +88,8 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((twistTurns, "inputs:twistTurns"))
     ((joints, "rigExec:joints"))
     ((jointElements, "rigExec:jointElements"))
-    ((restJoints, "rigExec:restJoints"))
+    ((upperLengthOffset, "rigExec:upperLengthOffset"))
+    ((lowerLengthOffset, "rigExec:lowerLengthOffset"))
     ((inputsWeight, "inputs:weight"))
     ((inputsStretch, "inputs:stretch"))
     ((inputsSoftness, "inputs:softness"))
@@ -640,15 +638,17 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
     }
 
     rigExec::RigExecTwoBoneIkParams params;
-    const double *upper = ctx.GetInputValuePtr<double>(_tokens->upperLength);
-    const double *lower = ctx.GetInputValuePtr<double>(_tokens->lowerLength);
     const double *bend =
         ctx.GetInputValuePtr<double>(_tokens->preferredBendRadians);
     const float *stretch = ctx.GetInputValuePtr<float>(_tokens->inputsStretch);
     const float *softness =
         ctx.GetInputValuePtr<float>(_tokens->inputsSoftness);
-    params.upperLength = upper ? *upper : 1.0;
-    params.lowerLength = lower ? *lower : 1.0;
+    const double *upperOff =
+        ctx.GetInputValuePtr<double>(_tokens->upperLengthOffset);
+    const double *lowerOff =
+        ctx.GetInputValuePtr<double>(_tokens->lowerLengthOffset);
+    const double upperOffset = upperOff ? *upperOff : 0.0;
+    const double lowerOffset = lowerOff ? *lowerOff : 0.0;
     params.preferredBendRadians = bend ? *bend : 0.0;
     params.stretch = stretch ? *stretch : 1.0;
     params.softness = softness ? *softness : 0.0;
@@ -666,23 +666,22 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
     rests[0] = rootRest ? rootRest->points : _IdentityLandmarks();
     const GfVec3d restAim =
         (rests[0][1] - rests[0][0]).GetNormalized();
+    // Placeholder mid rest. Every bound joint's rest overwrites this
+    // below, and the solve bails if all three are not bound, so this
+    // only has to be a well-formed frame on the root's aim.
     rests[1] = rests[0];
     for (auto &p : rests[1]) {
-        p += restAim * params.upperLength;
+        p += restAim;
     }
     rests[2] = effectorRest ? effectorRest->points : _IdentityLandmarks();
 
-    VdfReadIterator<RigExecPointFrame> explicitRestIt(
-        ctx, _tokens->restJointFrames);
-    const bool explicitRests = explicitRestIt.ComputeSize() != 0;
-    if (explicitRests && explicitRestIt.ComputeSize() != 3) {
-        ctx.Warn("TwoBoneIk: restJoints must provide root, mid, and end rests");
-        return result;
-    }
+    // Which of [root, mid, end] a bound joint actually supplied a rest
+    // for; the control-derived defaults above are not measurable bones.
+    bool seen[3] = {false, false, false};
     VdfReadIterator<RigExecPointFrame> jointRestIt(
-        ctx, explicitRests ? _tokens->restJointFrames : _tokens->jointRests);
+        ctx, _tokens->jointRests);
     VdfReadIterator<int> elementIt(ctx, _tokens->jointElements);
-    const bool remapped = !explicitRests && elementIt.ComputeSize() != 0;
+    const bool remapped = elementIt.ComputeSize() != 0;
     if (remapped && elementIt.ComputeSize() != jointRestIt.ComputeSize()) {
         ctx.Warn("TwoBoneIk: joint/rest element cardinality mismatch");
         return result;
@@ -698,7 +697,27 @@ _ComputeTwoBoneIk(const VdfContext &ctx)
             return result;
         }
         rests[element] = jointRestIt->points;
+        seen[element] = true;
     }
+
+    // Bone lengths are MEASURED here, from the rests of the joints this
+    // solver names, plus the authored offsets. There is no absolute
+    // length attribute to author or to inject: rigExec:joints is the
+    // single declaration of the chain, and a solver whose joints are
+    // posed by a downstream consumer (an IK feeding an IK/FK blend)
+    // still names them for their rests -- the claim check treats a
+    // consumed solver's rigExec:joints as a rest reference, not an
+    // output claim, precisely so this measurement has an input.
+    if (!seen[0] || !seen[1] || !seen[2]) {
+        ctx.Warn("TwoBoneIk: needs three bound joint rests to measure its "
+                 "bone lengths; rigExec:joints binds %d of 3",
+                 int(seen[0]) + int(seen[1]) + int(seen[2]));
+        return result;
+    }
+    params.upperLength =
+        (rests[1][0] - rests[0][0]).GetLength() + upperOffset;
+    params.lowerLength =
+        (rests[2][0] - rests[1][0]).GetLength() + lowerOffset;
 
     const auto frames = rigExec::RigExecSolveTwoBoneIk(
         *root, *effector, *pole, rests, params);
@@ -733,12 +752,9 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwoBoneIk)
             Relationship(_tokens->joints)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->jointRests),
-            Relationship(_tokens->restJoints)
-                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
-                .InputName(_tokens->restJointFrames),
             AttributeValue<int>(_tokens->jointElements),
-            AttributeValue<double>(_tokens->upperLength),
-            AttributeValue<double>(_tokens->lowerLength),
+            AttributeValue<double>(_tokens->upperLengthOffset),
+            AttributeValue<double>(_tokens->lowerLengthOffset),
             AttributeValue<double>(_tokens->preferredBendRadians),
             AttributeValue<float>(_tokens->inputsStretch),
             AttributeValue<float>(_tokens->inputsSoftness));

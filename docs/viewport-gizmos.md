@@ -340,13 +340,16 @@ you:
 - **Rotation does not reach the solve.** Only rest *origins* are
   measured, so `rest:r` cannot change a bone length. It still sets the
   joint's bind orientation, which is why the Rotate tool stays available.
-- **An authored bone length freezes it.** `rigExec:upperLength` and
-  `rigExec:lowerLength` are a deliberate opt-out: authoring *both* makes
-  the solver skip the measurement entirely, and a pivot drag then authors
-  a correct rest that moves nothing. The status label says
-  `… has an authored bone length; this rest edit will not move the solve`
-  rather than letting the tool look broken. Clear the two attributes to
-  hand the bones back to the rests.
+- **There is no bone-length attribute.** `rigExec:upperLength` and
+  `rigExec:lowerLength` were removed from the schema; the kernel measures
+  both bones from the rests of the joints in `rigExec:joints` on every
+  evaluation. So a pivot drag always reaches the solve and the tool
+  carries no advisory. They used to be an opt-out that froze a bone,
+  which read as a broken middle joint rather than as a mode switch --
+  and the property editor could not reveal it either, showing the schema
+  fallback of `1` while the solve ran on the measured value. To tune a
+  bone, author `rigExec:upperLengthOffset` / `rigExec:lowerLengthOffset`,
+  deltas on the measured length that keep it tracking the rests.
 
 ## Out of scope
 

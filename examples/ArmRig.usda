@@ -97,13 +97,16 @@ def Xform "ArmAsset" (
                 float inputs:softness = 0.15
                 float inputs:stretch = 1
                 rel rigExec:effectorControl = </ArmAsset/Rig/Controls/HandIK>
-                double rigExec:lowerLength = 4
+                rel rigExec:joints = [
+                    </ArmAsset/Rig/Joints/Shoulder>,
+                    </ArmAsset/Rig/Joints/Shoulder/Elbow>,
+                    </ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
                 rel rigExec:poleControl = </ArmAsset/Rig/Controls/ElbowPole>
                 double rigExec:preferredBendRadians = -0.35
                 rel rigExec:rootControl = </ArmAsset/Rig/Controls/ShoulderFK>
                 uniform token rigExec:stretchPolicy = "uniformSegments"
                 uniform token rigExec:unreachablePolicy = "clampWithSoftness"
-                double rigExec:upperLength = 4
                 uniform asset ui:nodegraph:node:icon = @../icons/two_bone_ik.png@
             }
 

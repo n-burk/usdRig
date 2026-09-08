@@ -667,13 +667,206 @@ def TestPivotUnderSolver():
            "a pivot drag moves the rest frame by the world delta")
 
 
-def TestFrozenIkLengthAdvisory():
+def _SolverChainStage():
     """
-    An authored absolute bone length opts a TwoBoneIk out of measuring
-    that bone from the bound joints' rests (rigEvaluator.cpp:3315-3319),
-    so once BOTH are authored the solver is skipped and a pivot drag
-    cannot move the solve at all. The manipulator says so rather than
-    letting a working drag look broken.
+    Three joints in ONE namespace chain, all named by one TwoBoneIk.
+
+    The shape of examples/components/spider_leg_ik.usd and of
+    examples/02_TwoBoneIkLeg.usda: every joint below the chain root has a
+    solver-posed ANCESTOR, which is what TestPivotUnderSolver's two-prim
+    stage never produces (it binds the leaf, whose parent is untouched).
+    """
+    stage = Usd.Stage.CreateInMemory()
+    asset = UsdGeom.Xform.Define(stage, "/Asset")
+    asset.AddTranslateOp().Set(Gf.Vec3d(100, 0, 0))
+    stage.DefinePrim("/Asset/Rig", "RigExecRoot")
+    stage.DefinePrim("/Asset/Rig/Joints", "Scope")
+    joints = []
+    path = "/Asset/Rig/Joints"
+    for index, name in enumerate(("Root", "Mid", "End")):
+        path = "%s/%s" % (path, name)
+        joint = stage.DefinePrim(path, "RigExecJoint")
+        space = _Rot(Gf.Vec3d(0, 0, 1), 20.0 * (index + 1))
+        space.SetTranslateOnly(Gf.Vec3d(0, 4.0 * index, 0))
+        joint.GetAttribute("rest:space").Set(space)
+        joint.GetAttribute("rest:tx").Set(float(index) + 1.0)
+        # Authored and ignored: the solver owns the pose, which is the
+        # whole reason Pose is refused and Pivot must not be.
+        joint.GetAttribute("avars:ty").Set(0.5)
+        joints.append(joint)
+    solver = stage.DefinePrim("/Asset/Rig/Solvers/Ik", "RigExecTwoBoneIk")
+    solver.GetRelationship("rigExec:joints").SetTargets(
+        [joint.GetPath() for joint in joints])
+    return stage, joints
+
+
+def TestPivotBelowSolverPosedJoint():
+    """
+    The joints BELOW the one a solver names keep their pivots too.
+
+    Resolving the POSE side of such a joint needs its ancestor's posed
+    frame, which the replica cannot reproduce for a solver-driven
+    ancestor and correctly gives up on. That give-up used to travel
+    through _RefuseBothModes and take Pivot with it, leaving every joint
+    under a chain root unmanipulable -- the mid joint above all, which is
+    exactly where a re-proportioned limb is visible
+    (examples/components/spider_leg_ik.usd: ankle and foot refused).
+    rest:t/r is authored data the solver READS, so it stays editable.
+    """
+    stage, joints = _SolverChainStage()
+    time = Usd.TimeCode.Default()
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    cache = gizmoMath.SolverPosedCache()
+
+    origins = []
+    for joint in joints:
+        refused, reason = gizmoMath.MakeTarget(
+            stage, joint, gizmoMath.CHANNELS_POSE, writer, cache)
+        _Check(refused is None and "solver" in reason,
+               "%s: pose stays refused under the solver: %r"
+               % (joint.GetName(), reason))
+
+        target, reason = gizmoMath.MakeTarget(
+            stage, joint, gizmoMath.CHANNELS_PIVOT, writer, cache)
+        _Check(target is not None and target.kind == "rig-pivot",
+               "%s: pivot is offered below a solver-posed joint: %r"
+               % (joint.GetName(), reason))
+
+        frames = gizmoMath.ComputeRigFrames(stage, joint, time)
+        _Check(frames.pivotReason == "",
+               "%s: nothing blocks the pivot: %r"
+               % (joint.GetName(), frames.pivotReason))
+        expected = (gizmoMath.RestSpace(joint, time)
+                    * frames.assetToWorld).ExtractTranslation()
+        origin = target.GizmoMatrix().ExtractTranslation()
+        _Check(all(_Close(origin[i], expected[i]) for i in range(3)),
+               "%s: pivot anchors on its own rest frame, %s vs %s"
+               % (joint.GetName(), origin, expected))
+        origins.append(origin)
+
+    # Each joint's rest frame is its own: a manipulator that collapsed
+    # onto a shared frame would pass the check above vacuously.
+    _Check(len(set(tuple(round(v, 6) for v in o) for o in origins)) == 3,
+           "the three rest frames are distinct: %s" % (origins,))
+
+    mid = joints[1]
+    target, reason = gizmoMath.MakeTarget(
+        stage, mid, gizmoMath.CHANNELS_PIVOT, writer, cache)
+    _Check(target is not None, reason)
+    delta = Gf.Vec3d(1.0, 2.0, -0.5)
+    _Drag(target, lambda: target.ApplyTranslate(delta))
+    moved = (gizmoMath.RestSpace(mid, time)
+             * gizmoMath.ComputeRigFrames(stage, mid, time).assetToWorld
+             ).ExtractTranslation()
+    _Check(all(_Close(moved[i], origins[1][i] + delta[i], 1e-6)
+               for i in range(3)),
+           "a pivot drag on the mid joint moves its rest frame by the "
+           "world delta: %s vs %s" % (moved, origins[1] + delta))
+    _Check(_Close(mid.GetAttribute("avars:ty").Get(), 0.5),
+           "the pivot drag never touched an avar")
+
+
+def TestPivotDrivesIkSolve():
+    """
+    The far end of what the pivot is FOR: dragging it moves the solve,
+    so the viewport moves.
+
+    A TwoBoneIk with unauthored absolute lengths measures each bone
+    between the bound joints' rest origins on every evaluation, so a rest
+    edit re-proportions the limb. The root and the end stay pinned by
+    rigExec:rootControl and rigExec:effectorControl -- the MID joint is
+    where the result shows, which is why refusing its pivot (it is always
+    a descendant of the solver-posed chain root) made the feature look
+    broken even though the solver was reading rests all along.
+
+    Native, because only the evaluator can answer whether a solve moved.
+    """
+    _rigexec = _NativeModule()
+    if _rigexec is None:
+        return
+    stage = Usd.Stage.CreateInMemory()
+    builder = _rigexec.Builder.create(stage, "/Rig")
+
+    def _At(y):
+        m = Gf.Matrix4d(1.0)
+        m.SetTranslateOnly(Gf.Vec3d(0, y, 0))
+        return [m[r][c] for r in range(4) for c in range(4)]
+
+    root = builder.add_joint("Root", _At(0.0))
+    mid = builder.add_joint("Mid", _At(-3.0), parent_joint=root)
+    # Parent-relative rest: two 3-unit steps down Y, world 0 / -3 / -6.
+    end = builder.add_joint("End", _At(-3.0), parent_joint=mid)
+    rootControl = builder.add_control("RootCtl")
+    effector = builder.add_control("EffectorCtl")
+    pole = builder.add_control("PoleCtl")
+    # Inside reach (3 + 3 against 5), so the chain bends toward the pole
+    # instead of resolving through the unreachable policy.
+    effector.set_avar_translation(0.0, -5.0, 0.0)
+    pole.set_avar_translation(0.0, -2.5, 3.0)
+    ik = builder.add_two_bone_ik("Ik", rootControl, effector, pole)
+    ik.set_joints([root, mid, end])
+
+    rig = _rigexec.Rig(stage, "/Rig")
+    rig.compile()  # raises ValueError with every message on failure
+
+    def _Solved():
+        # World origins, not joint_matrix: that is the rest-to-pose delta,
+        # and a pivot drag moves the REST, so the delta changes for a joint
+        # whose world position the solve is holding perfectly still.
+        pose = rig.evaluate(1.0)
+        return {handle.name: Gf.Matrix4d(
+                    *pose.joint_frame(str(handle.path), True).to_matrix4())
+                .ExtractTranslation()
+                for handle in (root, mid, end)}
+
+    before = _Solved()
+    time = Usd.TimeCode.Default()
+    midPrim = stage.GetPrimAtPath(Sdf.Path(str(mid.path)))
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeTarget(
+        stage, midPrim, gizmoMath.CHANNELS_PIVOT, writer)
+    _Check(target is not None and target.kind == "rig-pivot",
+           "the mid joint offers a pivot: %r" % reason)
+    _Check(target.Advisory() == "",
+           "unauthored lengths: the drag is not reported inert, got %r"
+           % target.Advisory())
+
+    # The manipulator is on the REST frame, not on the solve: the knee is
+    # bent toward the pole, the rest chain is straight down Y.
+    origin = target.GizmoMatrix().ExtractTranslation()
+    _Check(_Close(origin[1], -3.0) and _Close(origin[2], 0.0),
+           "the pivot draws at the rest origin, not the solved knee "
+           "(%s vs solved %s)" % (origin, before["Mid"]))
+    _Check(abs(before["Mid"][2] - origin[2]) > 0.1,
+           "the solve bends the knee away from its rest, so the check "
+           "above is not vacuous: solved %s" % (before["Mid"],))
+
+    # Shorten the upper bone. The lower one keeps its length: rest is
+    # parent-relative, so lifting the mid carries the end's rest with it
+    # rather than stretching the segment between them.
+    _Drag(target, lambda: target.ApplyTranslate(Gf.Vec3d(0.0, 1.0, 0.0)))
+    rig.compile()
+    after = _Solved()
+
+    _Check(not _Close(after["Mid"][1], before["Mid"][1], 1e-4)
+           or not _Close(after["Mid"][2], before["Mid"][2], 1e-4),
+           "the pivot drag moved the solved mid joint: %s -> %s"
+           % (before["Mid"], after["Mid"]))
+    for name in ("Root", "End"):
+        _Check(all(_Close(after[name][i], before[name][i], 1e-4)
+                   for i in range(3)),
+               "%s stays pinned by its control: %s -> %s"
+               % (name, before[name], after[name]))
+
+
+def TestIkLengthAdvisoryIsGone():
+    """
+    Bone lengths are measured from the bound joints' rests, and
+    rigExec:upperLength / rigExec:lowerLength no longer exist in the
+    schema at all.
+    So a pivot drag ALWAYS reaches the solve and the manipulator has
+    nothing to warn about -- the advisory this used to carry described
+    an opt-out that no longer exists.
     """
     stage, parent, child = _ChainStage()
     time = Usd.TimeCode.Default()
@@ -685,24 +878,20 @@ def TestFrozenIkLengthAdvisory():
         stage, child, gizmoMath.CHANNELS_PIVOT, writer)
     _Check(target is not None, reason)
     _Check(target.Advisory() == "",
-           "unauthored lengths measure the rests: no advisory, got %r"
+           "lengths measure the rests: no advisory, got %r"
            % target.Advisory())
 
-    # One authored length still leaves the other implied, so the joint
-    # can still drive a bone -- that is not yet inert.
-    solver.GetAttribute("rigExec:upperLength").Set(4.0)
+    # Even a leftover custom opinion from an asset saved against the old
+    # schema cannot freeze the bone -- there is no absolute length input
+    # any more, and Compile rejects the stale property outright.
+    solver.CreateAttribute("rigExec:upperLength", Sdf.ValueTypeNames.Double,
+                           custom=True).Set(4.0)
     target.Refresh()
     _Check(target.Advisory() == "",
-           "one authored length still implies the other: %r"
+           "no length can freeze a bone any more, got %r"
            % target.Advisory())
 
-    solver.GetAttribute("rigExec:lowerLength").Set(4.0)
-    target.Refresh()
-    advisory = target.Advisory()
-    _Check("Ik" in advisory and "length" in advisory,
-           "both authored: the drag is reported inert, got %r" % advisory)
-
-    # A pose target never carries it: this is a rest-channel concern.
+    # A pose target never carried it either: a rest-channel concern.
     poseTarget, _ = gizmoMath.MakeTarget(
         stage, parent, gizmoMath.CHANNELS_POSE, writer)
     _Check(poseTarget is not None and poseTarget.Advisory() == "",
@@ -1877,7 +2066,10 @@ def main():
         ("rig pose target", TestRigPoseTarget),
         ("rig pivot target", TestRigPivotTarget),
         ("pivot under solver", TestPivotUnderSolver),
-        ("frozen ik length advisory", TestFrozenIkLengthAdvisory),
+        ("pivot below a solver-posed joint",
+         TestPivotBelowSolverPosedJoint),
+        ("pivot drives the ik solve", TestPivotDrivesIkSolve),
+        ("ik length advisory is gone", TestIkLengthAdvisoryIsGone),
         ("xform targets", TestXformTargets),
         ("gimbal + frames", TestGimbalAndFrames),
         ("preserve children", TestPreserveChildren),

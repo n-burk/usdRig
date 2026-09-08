@@ -2052,10 +2052,17 @@ TestSolverBindsJointsUnderAnyScope()
 
     stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Shoulder"),
                       TfToken("RigExecJoint"));
+    // Parent-local rests of 3 and 3: the bones the solve measures. They
+    // used to be authored as absolute rigExec:upperLength/lowerLength,
+    // which is now a compile error -- the lengths come from these rests.
     stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Shoulder/Elbow"),
-                      TfToken("RigExecJoint"));
+                      TfToken("RigExecJoint"))
+        .CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+        .Set(3.0);
     stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Shoulder/Elbow/Wrist"),
-                      TfToken("RigExecJoint"));
+                      TfToken("RigExecJoint"))
+        .CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+        .Set(3.0);
 
     // Deliberately NOT under any "Solvers" scope.
     const UsdPrim ik = stage->DefinePrim(
@@ -2071,12 +2078,6 @@ TestSolverBindsJointsUnderAnyScope()
         .SetTargets({SdfPath("/Asset/Rig/Joints/Shoulder"),
                      SdfPath("/Asset/Rig/Joints/Shoulder/Elbow"),
                      SdfPath("/Asset/Rig/Joints/Shoulder/Elbow/Wrist")});
-    ik.CreateAttribute(TfToken("rigExec:upperLength"),
-                       SdfValueTypeNames->Double)
-        .Set(3.0);
-    ik.CreateAttribute(TfToken("rigExec:lowerLength"),
-                       SdfValueTypeNames->Double)
-        .Set(3.0);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
@@ -2145,12 +2146,6 @@ TestIncompleteSolverLeavesJointsVisible()
     CHECK(ik);
     ik.CreateRelationship(TfToken("rigExec:joints"))
         .SetTargets({shoulder, elbow, wrist});
-    ik.CreateAttribute(TfToken("rigExec:upperLength"),
-                       SdfValueTypeNames->Double)
-        .Set(3.0);
-    ik.CreateAttribute(TfToken("rigExec:lowerLength"),
-                       SdfValueTypeNames->Double)
-        .Set(3.0);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
@@ -2243,10 +2238,10 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     ik.CreateRelationship(TfToken("rigExec:poleControl"))
         .SetTargets({SdfPath("/Asset/Rig/Controls/Pole")});
     if (throughBlend) {
-        // Only the blend owns the output joints. IK must read their rests
-        // through an independent input, or implied lengths stay at defaults.
-        ik.CreateRelationship(TfToken("rigExec:restJoints"))
-            .SetTargets({shoulder, elbow, wrist});
+        // Only the blend owns the output joints -- rigExec:joints is an
+        // exclusive output claim, so the IK cannot list them too. It finds
+        // their rests by following its own output edge to the consumer
+        // that does own them.
         const UsdPrim fk = stage->DefinePrim(
             SdfPath("/Asset/Rig/Solvers/FK"), TfToken("RigExecFkChain"));
         fk.CreateRelationship(TfToken("rigExec:controls"))
@@ -2263,11 +2258,13 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
         blend.GetAttribute(TfToken("inputs:weight")).Set(1.0f);
         blend.CreateRelationship(TfToken("rigExec:joints"))
             .SetTargets({shoulder, elbow, wrist});
-    } else {
-        ik.CreateRelationship(TfToken("rigExec:joints"))
-            .SetTargets({shoulder, elbow, wrist});
     }
-    // No lengths authored: both are implied.
+    // The IK names its chain either way. When the blend poses those
+    // joints this is a REST reference -- the claim check defers to the
+    // unconsumed blend -- and it is what gives the kernel the rests it
+    // measures its bone lengths from.
+    ik.CreateRelationship(TfToken("rigExec:joints"))
+        .SetTargets({shoulder, elbow, wrist});
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
@@ -2302,8 +2299,6 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     CHECK(Near(atRest[0], GfVec3d(0, 0, 0)));
     CHECK(Near(atRest[1], GfVec3d(3, 0, 0)));
     CHECK(Near(atRest[2], GfVec3d(7, 0, 0)));
-    CHECK(hasDiagnostic(restPose, "implied rigExec:upperLength=3"));
-    CHECK(hasDiagnostic(restPose, "implied rigExec:lowerLength=4"));
 
     // Edit the existing rest channels on this same evaluator. The root and
     // goal controls remain fixed; only the chain's binding rest changes.
@@ -2323,8 +2318,6 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     CHECK(std::abs((edited[2] - edited[1]).GetLength() - 5.0) < 1e-4);
     CHECK(Near(edited[2], GfVec3d(7, 0, 0)));
     CHECK(!Near(edited[1], atRest[1]));
-    CHECK(hasDiagnostic(editedPose, "implied rigExec:upperLength=4"));
-    CHECK(hasDiagnostic(editedPose, "implied rigExec:lowerLength=5"));
     CHECK(evaluator.GetBindingEpochDigest() == restEpoch);
 
     // Rest samples also update when scrubbing in either direction. Editing
@@ -2365,32 +2358,42 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     CHECK(Near(offset[2], GfVec3d(8, 0, 0)));
     CHECK(std::abs((offset[1] - offset[0]).GetLength() - 3.0) < 1e-4);
     CHECK(std::abs((offset[2] - offset[1]).GetLength() - 5.0) < 1e-4);
-    CHECK(hasDiagnostic(offsetPose, "implied rigExec:lowerLength=5"));
 
-    // Authored absolutes win over rests: 2.5/2.5 with no stretch clamps
-    // the (7, 0, 0) goal to a reach of 5. Authoring the lengths changes
-    // the epoch, which Evaluate recompiles by itself.
+    // An absolute length cannot be authored at all. It used to be an
+    // opt-out that froze the bone against rest edits, which read as a
+    // broken middle joint rather than as a mode switch -- and it could
+    // not be discovered from the property editor either, which showed
+    // the schema fallback of 1 while the solve ran on the measured
+    // value. Compile now rejects it and names the knob that works.
     ik.CreateAttribute(TfToken("rigExec:upperLength"),
                        SdfValueTypeNames->Double)
         .Set(2.5);
-    ik.CreateAttribute(TfToken("rigExec:lowerLength"),
-                       SdfValueTypeNames->Double)
-        .Set(2.5);
-    ik.CreateAttribute(TfToken("inputs:stretch"), SdfValueTypeNames->Float)
-        .Set(0.0f);
-    effCtl.GetAttribute(TfToken("avars:tx")).Set(0.0);
-    GfVec3d authored[3];
-    const RigExecRigPose authoredPose =
-        origins(UsdTimeCode::Default(), authored);
-    CHECK(Near(authored[1], GfVec3d(2.5, 0, 0)));
-    CHECK(Near(authored[2], GfVec3d(5, 0, 0)));
-    CHECK(!hasDiagnostic(authoredPose, "implied rigExec:"));
+    {
+        RigExecRigEvaluator rejecting(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> rejected;
+        CHECK(!rejecting.Compile(&rejected));
+        CHECK(std::any_of(
+            rejected.begin(), rejected.end(),
+            [](const std::string &error) {
+                return error.find("was removed from the schema") !=
+                           std::string::npos &&
+                       error.find("rigExec:upperLengthOffset") !=
+                           std::string::npos;
+            }));
+    }
+    ik.GetAttribute(TfToken("rigExec:upperLength")).Clear();
+
+    // Clearing it hands the bone back to the rests with no other edit.
+    GfVec3d cleared[3];
+    const RigExecRigPose clearedPose =
+        origins(UsdTimeCode::Default(), cleared);
+    CHECK(std::abs((cleared[1] - cleared[0]).GetLength() - 3.0) < 1e-4);
 }
 
 static void
 TestTwoBoneIkRestFrameInputs()
 {
-    for (bool explicitRestInputs : {false, true}) {
+    {
         const UsdStageRefPtr stage = UsdStage::CreateInMemory();
         const auto provider = [&](const char *path, const char *type,
                                   double tx) {
@@ -2413,21 +2416,15 @@ TestTwoBoneIkRestFrameInputs()
             .SetTargets({goal.GetPath()});
         ik.GetRelationship(TfToken("rigExec:poleControl"))
             .SetTargets({pole.GetPath()});
-        ik.GetAttribute(TfToken("rigExec:upperLength")).Set(3.0);
-        ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(4.0);
-        if (explicitRestInputs) {
-            ik.GetRelationship(TfToken("rigExec:restJoints"))
-                .SetTargets({jointRoot.GetPath(), jointMid.GetPath(),
-                             jointEnd.GetPath()});
-        } else {
-            // Custom remaps are accepted by evaluator bindings even for IK.
-            ik.GetRelationship(TfToken("rigExec:joints"))
-                .SetTargets({jointEnd.GetPath(), jointRoot.GetPath(),
-                             jointMid.GetPath()});
-            ik.CreateAttribute(TfToken("rigExec:jointElements"),
-                               SdfValueTypeNames->IntArray)
-                .Set(VtIntArray{2, 0, 1});
-        }
+        // Lengths are measured from the joint rests (0/3/7 through the
+        // remap below): a 3-unit upper and a 4-unit lower.
+        // Custom remaps are accepted by evaluator bindings even for IK.
+        ik.GetRelationship(TfToken("rigExec:joints"))
+            .SetTargets({jointEnd.GetPath(), jointRoot.GetPath(),
+                         jointMid.GetPath()});
+        ik.CreateAttribute(TfToken("rigExec:jointElements"),
+                           SdfValueTypeNames->IntArray)
+            .Set(VtIntArray{2, 0, 1});
         RigExecTapSet taps(stage);
         const RigExecTapId tap = taps.Add(RigExecValueAddress::Prim(
             ik.GetPath(), TfToken("computePointFrameArray")));
@@ -2440,7 +2437,7 @@ TestTwoBoneIkRestFrameInputs()
         const auto before = solve();
         CHECK(before.frames.size() == 3 && before.rests.size() == 3);
         if (before.frames.size() != 3 || before.rests.size() != 3) {
-            continue;
+            return;
         }
         CHECK(Near(before.rests[1][0], GfVec3d(3, 0, 0)));
         CHECK(Near(before.rests[2][0], GfVec3d(7, 0, 0)));
@@ -2454,15 +2451,17 @@ TestTwoBoneIkRestFrameInputs()
         const auto edited = solve();
         CHECK(edited.frames.size() == 3 && edited.rests.size() == 3);
         if (edited.frames.size() != 3 || edited.rests.size() != 3) {
-            continue;
+            return;
         }
         CHECK(edited.frames[1].Origin()[2] > 1.0);
         CHECK(std::abs(edited.frames[1].Origin()[1]) < 1e-6);
         CHECK(Near(edited.rests[0][2] - edited.rests[0][0], GfVec3d(0, 0, 1)));
         CHECK(Near(edited.rests[1][0], GfVec3d(4, 0, 0)));
-        // Authored lengths remain authoritative despite moving the mid rest.
+        // Moving the mid rest RE-PROPORTIONS the upper bone: lengths are
+        // measured from the rests on every evaluation, and there is no
+        // longer an authored absolute that could hold the old 3.0.
         CHECK(std::abs((edited.frames[1].Origin() -
-                        edited.frames[0].Origin()).GetLength() - 3.0) < 1e-6);
+                        edited.frames[0].Origin()).GetLength() - 4.0) < 1e-6);
     }
 }
 
@@ -2756,10 +2755,14 @@ TestConstraintSolverDependencySchedule()
         prim.GetAttribute(TfToken("rest:ty")).Set(rest[1]);
         return prim;
     };
-    const auto joint = [&](const char *name) {
-        return stage->DefinePrim(
+    // rest:tx 0/5/10 so the IK's bones MEASURE 5 and 5. These tests
+    // used to author absolute lengths, which Compile now rejects.
+    const auto joint = [&](const char *name, double tx = 0.0) {
+        const UsdPrim prim = stage->DefinePrim(
             SdfPath(std::string("/Asset/Rig/Joints/") + name),
             TfToken("RigExecJoint"));
+        prim.GetAttribute(TfToken("rest:tx")).Set(tx);
+        return prim;
     };
     const auto fk = [&](const char *name, const UsdPrim &input, const UsdPrim &output) {
         const UsdPrim prim = stage->DefinePrim(
@@ -2776,9 +2779,9 @@ TestConstraintSolverDependencySchedule()
     const UsdPrim follow = control("Follow", GfVec3d(0));
     const UsdPrim other = control("Other", GfVec3d(20, 0, 0));
     const UsdPrim sourceJoint = joint("Source");
-    const UsdPrim rootJoint = joint("Root");
-    const UsdPrim midJoint = joint("Mid");
-    const UsdPrim endJoint = joint("End");
+    const UsdPrim rootJoint = joint("Root", 0.0);
+    const UsdPrim midJoint = joint("Mid", 5.0);
+    const UsdPrim endJoint = joint("End", 10.0);
     const UsdPrim finalJoint = joint("Final");
     fk("Source", driver, sourceJoint);
     fk("Final", follow, finalJoint);
@@ -2790,8 +2793,6 @@ TestConstraintSolverDependencySchedule()
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
     ik.GetRelationship(TfToken("rigExec:joints"))
         .SetTargets({rootJoint.GetPath(), midJoint.GetPath(), endJoint.GetPath()});
-    ik.GetAttribute(TfToken("rigExec:upperLength")).Set(5.0);
-    ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(5.0);
     // Reverse sibling order runs DriveGoal then FollowEnd. Solvers must be
     // interleaved: Source FK -> DriveGoal -> IK -> FollowEnd -> Final FK.
     const UsdPrim followConstraint = MakeConstraint(
@@ -2865,12 +2866,20 @@ TestConstrainedSolverInputAncestor()
     goal.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
     const UsdPrim root = control("/Asset/Rig/Controls/Root", 0, 0);
     const UsdPrim pole = control("/Asset/Rig/Controls/Pole", 0, 5);
+    // rest:tx 0/5/10 so the IK's bones MEASURE 5 and 5. These tests
+    // used to author absolute lengths, which Compile now rejects.
     SdfPathVector joints;
-    for (const char *name : {"J0", "J1", "J2"}) {
-        const UsdPrim joint = stage->DefinePrim(
-            group.GetPath().AppendChild(TfToken(name)), TfToken("RigExecJoint"));
-        joint.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
-        joints.push_back(joint.GetPath());
+    {
+        double tx = 0.0;
+        for (const char *name : {"J0", "J1", "J2"}) {
+            const UsdPrim joint = stage->DefinePrim(
+                group.GetPath().AppendChild(TfToken(name)),
+                TfToken("RigExecJoint"));
+            joint.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+            joint.GetAttribute(TfToken("rest:tx")).Set(tx);
+            tx += 5.0;
+            joints.push_back(joint.GetPath());
+        }
     }
     const UsdPrim ik = stage->DefinePrim(
         SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
@@ -2878,8 +2887,6 @@ TestConstrainedSolverInputAncestor()
     ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
     ik.GetRelationship(TfToken("rigExec:joints")).SetTargets(joints);
-    ik.GetAttribute(TfToken("rigExec:upperLength")).Set(5.0);
-    ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(5.0);
     const UsdPrim constraint = MakeConstraint(
         stage, "MoveGroup", "RigExecPositionConstraint", {group.GetPath()});
     constraint.GetRelationship(TfToken("rigExec:sources"))
@@ -2932,19 +2939,25 @@ TestConnectedParentSpaceSolverInputs()
         .SetConnections({bridge.GetPath().AppendProperty(TfToken("posed:defaultSpace"))});
     const UsdPrim root = control("/Asset/Rig/Controls/Root", 0);
     const UsdPrim pole = control("/Asset/Rig/Controls/Pole", 0, 5);
+    // rest:tx 0/5/10 so the IK's bones MEASURE 5 and 5. These tests
+    // used to author absolute lengths, which Compile now rejects.
     SdfPathVector joints;
-    for (const char *name : {"J0", "J1", "J2"}) {
-        const SdfPath path = SdfPath("/Asset/Rig/Joints").AppendChild(TfToken(name));
-        stage->DefinePrim(path, TfToken("RigExecJoint"));
-        joints.push_back(path);
+    {
+        double tx = 0.0;
+        for (const char *name : {"J0", "J1", "J2"}) {
+            const SdfPath path =
+                SdfPath("/Asset/Rig/Joints").AppendChild(TfToken(name));
+            stage->DefinePrim(path, TfToken("RigExecJoint"))
+                .GetAttribute(TfToken("rest:tx")).Set(tx);
+            tx += 5.0;
+            joints.push_back(path);
+        }
     }
     const UsdPrim ik = stage->DefinePrim(SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
     ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
     ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
     ik.GetRelationship(TfToken("rigExec:joints")).SetTargets(joints);
-    ik.GetAttribute(TfToken("rigExec:upperLength")).Set(5.0);
-    ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(5.0);
     const UsdPrim moveJoint = MakeConstraint(stage, "MoveJoint", "RigExecPositionConstraint", {source.GetPath()});
     moveJoint.GetRelationship(TfToken("rigExec:sources")).SetTargets({target.GetPath()});
     const UsdPrim moveDriver = MakeConstraint(stage, "MoveDriver", "RigExecPositionConstraint", {driver.GetPath()});

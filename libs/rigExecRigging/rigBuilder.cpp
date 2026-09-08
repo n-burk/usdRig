@@ -485,45 +485,6 @@ void RigExecTwoBoneIkHandle::SetPoleControl(const SdfPath &path)
     _SetSingleRel("rigExec:poleControl", path);
 }
 
-void
-RigExecTwoBoneIkHandle::SetRestJoints(const std::vector<SdfPath> &paths)
-{
-    if (!paths.empty() && paths.size() != 3) {
-        throw std::invalid_argument(
-            "TwoBoneIK rest joints must be empty or [root, mid, end]");
-    }
-    for (const SdfPath &path : paths) {
-        _RequireTypedPrim(
-            _stage, path, TfToken("RigExecJoint"), "TwoBoneIK rest joint");
-    }
-    if (paths.size() == 3 &&
-        (paths[0] == paths[1] || paths[0] == paths[2] || paths[1] == paths[2])) {
-        throw std::invalid_argument("TwoBoneIK rest joints must be distinct");
-    }
-    SetRel("rigExec:restJoints", paths);
-}
-
-void
-RigExecTwoBoneIkHandle::SetRestJoints(
-    const std::vector<RigExecJointHandle> &joints)
-{
-    std::vector<SdfPath> paths;
-    paths.reserve(joints.size());
-    for (const RigExecJointHandle &joint : joints) {
-        if (!joint.IsValid() || joint.GetStage() != _stage ||
-            joint.GetSchemaTypeName() != TfToken("RigExecJoint")) {
-            throw std::invalid_argument(
-                "SetRestJoints requires RigExecJoint handles from this stage");
-        }
-        paths.push_back(joint.GetPath());
-    }
-    SetRestJoints(paths);
-}
-
-void RigExecTwoBoneIkHandle::SetUpperLength(double length)
-{ _AuthorAttr(GetPrim(), "rigExec:upperLength", SdfValueTypeNames->Double, VtValue(length)); }
-void RigExecTwoBoneIkHandle::SetLowerLength(double length)
-{ _AuthorAttr(GetPrim(), "rigExec:lowerLength", SdfValueTypeNames->Double, VtValue(length)); }
 void RigExecTwoBoneIkHandle::SetUpperLengthOffset(double offset)
 { _AuthorAttr(GetPrim(), "rigExec:upperLengthOffset", SdfValueTypeNames->Double, VtValue(offset)); }
 void RigExecTwoBoneIkHandle::SetLowerLengthOffset(double offset)

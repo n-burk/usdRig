@@ -324,27 +324,6 @@ private:
     /// parent:space reached through connected default-space expressions.
     std::map<SdfPath, std::set<SdfPath>> _poseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> _connectedPoseTaps;
-    /// One TwoBoneIk solver with an unauthored absolute length: the bone
-    /// is measured from the bound joints' rest positions at Evaluate time
-    /// (root to mid for upper, mid to end for lower), plus the authored
-    /// length offset. An authored absolute length is exact and implies
-    /// nothing. Records are structural (which solver measures from which
-    /// joints); rest positions and offset values are read live, so rest
-    /// edits need no recompile -- that is the point of implying them.
-    struct _ImpliedIkLengths {
-        SdfPath solver;
-        /// Elements 0, 1, 2 (root, mid, end). Empty when the solver binds
-        /// fewer than three elements, in which case nothing is implied.
-        SdfPath joints[3];
-        bool implyUpper = false;
-        bool implyLower = false;
-    };
-    std::vector<_ImpliedIkLengths> _impliedIkLengths;
-    /// computeRestFrame taps for the joints above, in their own request:
-    /// rest frames are pure attribute reads, so they evaluate before the
-    /// solver aggregates whose length inputs they supply.
-    std::unique_ptr<RigExecTapSet> _restFrameTaps;
-    std::map<SdfPath, RigExecTapId> _impliedRestTaps;
     std::vector<RigExecTapId> _jointFrameTaps;
     std::vector<RigExecTapId> _jointFinalFrameTaps;
     std::vector<RigExecTapId> _jointFinalMatrixTaps;

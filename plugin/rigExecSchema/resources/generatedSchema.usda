@@ -632,19 +632,13 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
         (view-free extraction)."""
         }
     )
-    double rigExec:lowerLength = 1
     double rigExec:lowerLengthOffset = 0 (
         customData = {
-            string userDocBrief = "Delta added to the IMPLIED lower length."
+            string userDocBrief = "Delta added to the measured lower length."
         }
     )
     rel rigExec:poleControl
     double rigExec:preferredBendRadians = 0
-    rel rigExec:restJoints (
-        customData = {
-            string userDocBrief = "Optional ordered rest-input joints [root, mid, end]."
-        }
-    )
     rel rigExec:rootControl
     uniform token rigExec:stretchPolicy = "uniformSegments" (
         allowedTokens = ["uniformSegments"]
@@ -652,10 +646,9 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     uniform token rigExec:unreachablePolicy = "clampWithSoftness" (
         allowedTokens = ["clampWithSoftness"]
     )
-    double rigExec:upperLength = 1
     double rigExec:upperLengthOffset = 0 (
         customData = {
-            string userDocBrief = "Delta added to the IMPLIED upper length."
+            string userDocBrief = "Delta added to the measured upper length."
         }
     )
     token visibility = "inherited" (

@@ -982,12 +982,6 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("paths"));
 
     py::class_<rigExec::RigExecTwoBoneIkHandle, rigExec::RigExecSolverHandle>(m, "TwoBoneIk")
-        .def("set_rest_joints", [](rigExec::RigExecTwoBoneIkHandle &h,
-                                    const py::iterable &joints) {
-            h.SetRestJoints(_PythonToDependencyPaths(
-                joints, h.GetStage(), TfToken("RigExecJoint")));
-        }, py::arg("paths"),
-           "Set ordered rest inputs [root, mid, end] without binding outputs.")
         .def("set_root_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
             h.SetRootControl(_PythonToDependencyPath(p, h.GetStage()));
         }, py::arg("path"))
@@ -997,10 +991,6 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_pole_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
             h.SetPoleControl(_PythonToDependencyPath(p, h.GetStage()));
         }, py::arg("path"))
-        .def("set_upper_length", &rigExec::RigExecTwoBoneIkHandle::SetUpperLength,
-             py::arg("length"))
-        .def("set_lower_length", &rigExec::RigExecTwoBoneIkHandle::SetLowerLength,
-             py::arg("length"))
         .def("set_upper_length_offset",
              &rigExec::RigExecTwoBoneIkHandle::SetUpperLengthOffset,
              py::arg("offset"))

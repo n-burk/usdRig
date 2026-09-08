@@ -246,35 +246,6 @@ def SolverPosedPaths(rigRoot):
     return paths
 
 
-IK_LENGTHS = ("rigExec:upperLength", "rigExec:lowerLength")
-
-
-def FrozenIkSolvers(rigRoot, primPath):
-    """
-    The RigExecTwoBoneIk prims that bind `primPath` and have BOTH
-    absolute bone lengths authored.
-
-    Such a solver is skipped entirely by the implied-length pass
-    (rigEvaluator.cpp:3315-3319 -- the guard is `&&`, so ONE authored
-    length still leaves the other measured), and the bones stop tracking
-    the bound joints' rest frames. A pivot drag on one of those joints
-    is then provably inert on the solve.
-    """
-    frozen = []
-    if rigRoot is None:
-        return frozen
-    for prim in Usd.PrimRange(rigRoot):
-        if prim.GetTypeName() != "RigExecTwoBoneIk":
-            continue
-        rel = prim.GetRelationship(SOLVER_JOINTS_REL)
-        if not rel or primPath not in rel.GetTargets():
-            continue
-        authored = [prim.GetAttribute(n) for n in IK_LENGTHS]
-        if all(a and a.HasAuthoredValueOpinion() for a in authored):
-            frozen.append(prim.GetName())
-    return frozen
-
-
 class SolverPosedCache(object):
     """
     SolverPosedPaths memoised per rig root.
@@ -445,6 +416,20 @@ def DefaultLocal(prim, time):
           + (0.0, "XYZ")))
 
 
+class _PoseAuthorityError(ValueError):
+    """
+    A parent:space that cannot be resolved because the POSE authority
+    upstream is not the avars -- a solver-posed ancestor, or one with an
+    authored or connected posed:space.
+
+    Distinguished from every other ValueError raised here (a cyclic
+    space connection, a singular matrix) because it says nothing about
+    the rest side: rest:t/r upstream is still authored data, still read,
+    and a rest frame reads no namespace ancestor at all. It refuses Pose
+    only. See _ComputeRigFrames.
+    """
+
+
 def _ComputedSpace(prim, name, time, solverPosed, visiting=None, frameCache=None):
     """Evaluate the schema space expressions, including connected identity."""
     visiting = set() if visiting is None else visiting
@@ -478,7 +463,8 @@ def _ComputedSpace(prim, name, time, solverPosed, visiting=None, frameCache=None
                 return Gf.Matrix4d(1.0)
             parentFrames = ComputeRigFrames(prim.GetStage(), parent, time, solverPosed, frameCache)
             if parentFrames.reason:
-                raise ValueError("space source %s: %s" % (parent.GetPath(), parentFrames.reason))
+                raise _PoseAuthorityError("space source %s: %s" % (
+                    parent.GetPath(), parentFrames.reason))
             return parentFrames.posed
         parentRest = RestSpace(parent, time) if parent else Gf.Matrix4d(1.0)
         return (DefaultLocal(prim, time) * RestSpace(prim, time)
@@ -689,13 +675,34 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
 
     frames.restLocal = RestLocal(prim, time)
     frames.rest = RestSpace(prim, time)
+    # Built here, before anything on the pose side can fail: Pivot needs
+    # Qrest and restLocal and nothing else (RigPivotTarget._Qw), so a
+    # pose-side give-up must not be allowed to return past this.
+    frames.Qrest = _MatrixAttr(prim, REST_SPACE, time)\
+        .GetOrthonormalized(False)
     try:
         frames.default = _ComputedSpace(prim, DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
         frames.parentDefault = _ComputedSpace(prim, PARENT_DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
-        frames.parentPosed = _ComputedSpace(prim, PARENT_SPACE, time, solverPosed, frameCache=_frameCache)
         effectiveDefault = _ComputedSpace(prim, POSED_DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
     except ValueError as error:
-        # Returns with Qrest/restLocal unbuilt, so it refuses Pivot too.
+        # The default-space family. Pivot answers to these too -- the
+        # loop below refuses a pivot on an authored default space -- so a
+        # broken one refuses both modes.
+        return _RefuseBothModes(frames, str(error))
+    try:
+        frames.parentPosed = _ComputedSpace(prim, PARENT_SPACE, time, solverPosed, frameCache=_frameCache)
+    except _PoseAuthorityError as error:
+        # An ancestor whose pose comes from somewhere other than its
+        # avars: a solver, or an authored posed:space. That is a POSE
+        # reason. The rest frames are already built above, and a rest
+        # frame reads no namespace ancestor (computations.cpp:200-219),
+        # so the pivot below such an ancestor is untouched by it -- which
+        # is the case that matters, since a TwoBoneIk MEASURES its bone
+        # lengths from these rests. Falls through with P/Q/posed built
+        # from the parent's stale posed frame; Pose is refused, and
+        # nothing else reads them.
+        frames.reason = frames.reason or str(error)
+    except ValueError as error:
         return _RefuseBothModes(frames, str(error))
     frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
     if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
@@ -710,8 +717,6 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
     # offsets. No parentRest^-1 here: rest:t/r are parent-relative now, so
     # restLocal is already in the parent's frame and dividing it out again
     # would land the pivot an ancestor offset away from the joint.
-    frames.Qrest = _MatrixAttr(prim, REST_SPACE, time)\
-        .GetOrthonormalized(False)
     frames.Q = frames.Qrest * frames.parentDefault * toParent
     for name in (DEFAULT_SPACE, AVAR_DEFAULT_SPACE, POSED_DEFAULT_SPACE):
         attr = prim.GetAttribute(name)
@@ -1373,26 +1378,19 @@ class RigPivotTarget(_RigTarget):
                         REST_R, DecomposeEuler(scalars, "XYZ", hint=hint)):
                     self.writer.Set(child.GetAttribute(name), float(value))
 
-    def Refresh(self):
-        # Recomputed here rather than in Advisory(): the status line asks
-        # for it on every redraw, and FrozenIkSolvers walks the whole rig
-        # -- the same cost SolverPosedCache exists to keep off that path.
-        # Refresh() is the cadence that matters, since only a stage edit
-        # can change the answer.
-        _RigTarget.Refresh(self)
-        frozen = FrozenIkSolvers(self.frames.rigRoot, self.prim.GetPath())
-        self._advisory = "" if not frozen else (
-            "%s %s an authored bone length; this rest edit will not move "
-            "the solve" % (", ".join(frozen),
-                           "have" if len(frozen) > 1 else "has"))
-
     def Advisory(self):
-        return self._advisory
+        # A bone length can no longer be authored -- rigExec:upperLength /
+        # rigExec:lowerLength are computed from the joints' rests on every
+        # evaluation and Compile rejects an authored opinion. So a pivot
+        # drag always reaches the solve, and there is nothing to warn about.
+        return ""
 
     def _Qw(self):
-        # Qrest, not Q: rest:t/r are expressed against rest:space alone,
-        # so the parent's pose belongs nowhere in the frame this drag
-        # inverts through -- nor in the frame it draws on.
+        # Qrest AND the parent's REST, not Q: rest:t/r are expressed
+        # against rest:space carried into the parent's rest frame
+        # (computations.cpp:230), so the parent's rest belongs in the frame
+        # this drag inverts through and draws on -- but its POSE still does
+        # not, which is what keeps a pivot still under an animated ancestor.
         return self.frames.Qrest * self.frames.parentRest \
             * self.frames.assetToWorld
 

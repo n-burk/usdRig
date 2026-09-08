@@ -33,11 +33,16 @@ the affected downstream revisions. Unchanged branches retain their results;
 derived normals and bounds update from the final points. A point-count change
 replaces that target's graph when its VDF element masks must change.
 
-Two-bone IK measures unauthored lengths from live joint rest frames. When IK
-feeds a blend that owns the output joints, give the IK solver a separate
-ordered `rigExec:restJoints` relationship (root, mid, end), or call
-`ik.set_rest_joints([root, mid, end])` in Python. Explicit upper/lower lengths
-still take precedence. Rest orientation edits also reach the IK pole fallback.
+Two-bone IK measures both bone lengths from live joint rest frames. There is
+no absolute length attribute: the kernel measures root-to-mid and mid-to-end
+from the joints named in `rigExec:joints`, plus
+`rigExec:upperLengthOffset`/`rigExec:lowerLengthOffset`, and re-measures on
+every evaluation, so a rest edit re-proportions the limb with no recompile.
+`rigExec:joints` carries two meanings: the chain a solver POSES, and the
+chain it MEASURES. A solver whose aggregate another solver reads does not
+pose -- its consumer does -- so an IK feeding an IK/FK blend names the same
+joints the blend claims, as a rest reference. Rest orientation edits also
+reach the IK pole fallback.
 
 Controls, constraints, and solvers run in one compiled dependency order, so a
 constraint can drive an IK goal and a later constraint can consume the solved

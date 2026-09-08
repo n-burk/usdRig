@@ -182,8 +182,18 @@ int main()
     ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({a.GetPath()});
     ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
-    ik.GetAttribute(TfToken("rigExec:upperLength")).Set(3.0);
-    ik.GetAttribute(TfToken("rigExec:lowerLength")).Set(4.0);
+    // Bone lengths are measured from the rests of the joints the solver
+    // names -- there is no absolute length attribute to seed. Rests of
+    // 0/3/7 give the 3-unit upper and 4-unit lower this used to author.
+    const auto joint = [&](const char *path, double rest) {
+        const auto prim =
+            stage->DefinePrim(SdfPath(path), TfToken("RigExecJoint"));
+        prim.GetAttribute(TfToken("rest:tx")).Set(rest);
+        return prim;
+    };
+    ik.GetRelationship(TfToken("rigExec:joints")).SetTargets(
+        {joint("/JRoot", 0).GetPath(), joint("/JMid", 3).GetPath(),
+         joint("/JEnd", 7).GetPath()});
     const auto blend = stage->DefinePrim(SdfPath("/Blend"), TfToken("RigExecBlendPointFrames"));
     blend.GetRelationship(TfToken("rigExec:inputA")).SetTargets({fk.GetPath()});
     blend.GetRelationship(TfToken("rigExec:inputB")).SetTargets({fk.GetPath()});
