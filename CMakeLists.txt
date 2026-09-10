@@ -399,6 +399,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_layer_opinions_model.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testCompositionArcsModel
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_composition_arcs_model.py")
     add_test(NAME testGizmoScreen
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_screen.py")
@@ -437,6 +440,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRestLocal testRestMigration
                          testInterveningXform
                          testRigExecUndo testGizmoMath testGizmoScreen
+                         testLayerOpinionsModel testCompositionArcsModel
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
                          testGraphModel testGraphScreen)
@@ -444,17 +448,51 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
             "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
-        if (WIN32)
-            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
-                "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
-        else()
-            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
-                "LD_LIBRARY_PATH=${USD_INSTALL_DIR}/lib")
-            set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
-                "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
-        endif()
+        set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
+            "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
     endforeach()
 endif()
+
+# ---------------------------------------------------------------------------
+# Every test, C++ and Python alike, carries the path its loader needs.
+#
+# Without this, `ctest --test-dir build` -- which is what the README tells a
+# reader to run -- works only from a shell that already has OpenUSD on the
+# loader path: on Windows the C++ tests die at startup with 0xc0000135 (DLL
+# not found) and on Linux with a missing .so, while the same tests pass
+# through bin/build_rigexec.* because those helpers export it first. Tests
+# that only pass when launched a particular way are tests nobody else can run.
+#
+# ENVIRONMENT_MODIFICATION rather than ENVIRONMENT: ctest splits an
+# ENVIRONMENT value on ';', which is exactly the separator a Windows PATH
+# uses, so a multi-entry PATH cannot be written that way at all.
+# path_list_prepend appends with the platform's own separator and leaves the
+# inherited value in place.
+#
+# Read from the directory's own TESTS property so a test added later is
+# covered by having been added, not by being remembered here.
+get_property(_rigexec_tests DIRECTORY PROPERTY TESTS)
+foreach(_rigexec_test IN LISTS _rigexec_tests)
+    if (WIN32)
+        set_property(TEST ${_rigexec_test} APPEND PROPERTY
+            ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:${USD_INSTALL_DIR}/bin"
+            "PATH=path_list_prepend:${USD_INSTALL_DIR}/lib"
+            "PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
+    elseif (APPLE)
+        # Mach-O reads DYLD_LIBRARY_PATH and ELF reads LD_LIBRARY_PATH;
+        # setting only the other platform's is the same as setting none.
+        set_property(TEST ${_rigexec_test} APPEND PROPERTY
+            ENVIRONMENT_MODIFICATION
+            "DYLD_LIBRARY_PATH=path_list_prepend:${USD_INSTALL_DIR}/lib"
+            "DYLD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
+    else()
+        set_property(TEST ${_rigexec_test} APPEND PROPERTY
+            ENVIRONMENT_MODIFICATION
+            "LD_LIBRARY_PATH=path_list_prepend:${USD_INSTALL_DIR}/lib"
+            "LD_LIBRARY_PATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+endforeach()
 
 # ---------------------------------------------------------------------------
 # Install
