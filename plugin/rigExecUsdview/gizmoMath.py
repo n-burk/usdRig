@@ -397,14 +397,60 @@ def RestLocal(prim, time):
         0.0, "XYZ")
 
 
+def InterveningXform(prim, time, rigRoot=None):
+    """
+    The transform of any plain Xformable lying between `prim` and the
+    frame provider above it -- the quantity the evaluator folds into its
+    frames (RigExecRigEvaluator::_ComposeInterveningXforms).
+
+    _FindParentXformable walks past a `Scope` and past an `Xform` alike,
+    because neither is a RigExec provider. Skipping the Scope is right --
+    it has no transform -- and dropping the Xform is the defect this
+    answers. Without it the manipulator would draw and drag a joint at
+    the place it sat before its Xform was applied, while the pose put it
+    somewhere else.
+
+    Computed through UsdGeomXformCache relative to the same anchor the
+    evaluator uses, rather than by multiplying local matrices here: the
+    two agreeing is the whole point, and a second hand-rolled walk is how
+    they would stop agreeing.
+
+    Identity across a `!resetXformStack!`, which detaches the provider
+    from the anchor entirely -- again matching the evaluator, which
+    reports that case rather than guessing at it.
+    """
+    rigRoot = FindRigRoot(prim) if rigRoot is None else rigRoot
+    if rigRoot is None:
+        return Gf.Matrix4d(1.0)
+    anchor = _FindParentXformable(prim, rigRoot)
+    if anchor is None:
+        # No RigExec ancestor: the chain is anchored at the asset root,
+        # which is the rig root's parent.
+        anchor = rigRoot.GetParent()
+    parent = prim.GetParent()
+    if not anchor or not parent or parent == anchor:
+        return Gf.Matrix4d(1.0)
+    matrix, resets = UsdGeom.XformCache(time).ComputeRelativeTransform(
+        parent, anchor)
+    return Gf.Matrix4d(1.0) if resets else matrix
+
+
 def RestSpace(prim, time):
     """
     Mirror of _JointRestSpace: the local rest carried into the parent's
-    rest frame, orthonormalize(restLocal * rest:space) * parentRest.
+    rest frame, orthonormalize(restLocal * rest:space) * X * parentRest.
+
+    X is InterveningXform, and it sits AFTER the orthonormalize for the
+    same reason the evaluator does not orthonormalize it either: it is
+    the author's own transform, and scale they put there is theirs to
+    keep. Orthonormalizing the local factor first is what keeps an
+    invalid ancestor's NaN from being scrubbed by the multiply.
     """
+    rigRoot = FindRigRoot(prim)
     rest = RestLocal(prim, time) * _MatrixAttr(prim, REST_SPACE, time)
-    rest = rest.GetOrthonormalized(False)
-    parent = _FindParentXformable(prim, FindRigRoot(prim))
+    rest = rest.GetOrthonormalized(False) * InterveningXform(
+        prim, time, rigRoot)
+    parent = _FindParentXformable(prim, rigRoot)
     return rest * RestSpace(parent, time) if parent else rest
 
 
@@ -717,7 +763,11 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
     # offsets. No parentRest^-1 here: rest:t/r are parent-relative now, so
     # restLocal is already in the parent's frame and dividing it out again
     # would land the pivot an ancestor offset away from the joint.
-    frames.Q = frames.Qrest * frames.parentDefault * toParent
+    # Qrest reads no namespace ancestor, so the intervening Xform has to
+    # be inserted here rather than arriving through it -- the pivot draws
+    # in the bind basis, and the bind basis moved with the Xform.
+    frames.Q = (frames.Qrest * InterveningXform(prim, time, frames.rigRoot)
+                * frames.parentDefault * toParent)
     for name in (DEFAULT_SPACE, AVAR_DEFAULT_SPACE, POSED_DEFAULT_SPACE):
         attr = prim.GetAttribute(name)
         if attr and (attr.HasAuthoredConnections()

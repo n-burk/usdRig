@@ -20,6 +20,7 @@
 #include "pxr/usd/usdGeom/imageable.h"
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdGeom/boundableComputeExtent.h"
+#include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdUtils/stageCache.h"
 
 #include <algorithm>
@@ -1199,9 +1200,63 @@ _WriteBounds(const PXR_NS::GfRange3d &range, double outMinMax[6])
 //
 // The extent BAKES the posed frame, because the prim carries no stage
 // transform of its own: rest:space plus avars are the only transform
-// authority (the Ir alignment), and they are asset-relative. That is
-// correct exactly while no Xformable sits between the asset root and the
-// provider, which the compiler validates and warns about.
+// authority (the Ir alignment), and they are asset-relative.
+//
+// "Asset-relative" is not "local", and an extent is LOCAL --
+// UsdGeomBBoxCache multiplies it by the prim's own local-to-world. The two
+// coincide only while nothing between the asset root and the provider
+// contributes a transform. Since 2026-09-10 something may: an intervening
+// Xformable is composed into the published frames
+// (RigExecRigEvaluator::_ComposeInterveningXforms), so the snapshot branch
+// below divides it back out. Leaving it in draws the guide in one place and
+// its bounding box in another, offset by exactly that Xform.
+//
+// The rest fallback needs no such division: it reads authored rest
+// attributes alone, which never carried the intervening transform in the
+// first place. Both branches therefore return the same local quantity, and
+// the box does not jump when a generation is published.
+// The published bounds expressed in the prim's OWN space, by dividing out
+// everything UsdGeomBBoxCache is about to re-apply between the asset root
+// and this prim.
+//
+// That is the whole namespace chain, the prim's own xformOps included. Ops
+// authored on a provider are not a transform authority for EVALUATION --
+// rest:space and the avars are -- but BBoxCache applies them regardless, so
+// an extent that ignored them would be wrong in the same way and for the
+// same reason.
+//
+// Conservative rather than tight: an inverse-rotated box has to be
+// re-aligned to axes to be expressed as a min/max pair, and USD re-aligns
+// it again on the way out, so a rotated chain grows the box slightly.
+// Bounds are allowed to be too big and are never allowed to be too small.
+PXR_NS::GfRange3d
+_AssetSpaceToLocal(
+    const PXR_NS::UsdPrim &prim, const PXR_NS::SdfPath &assetRootPath,
+    const PXR_NS::UsdTimeCode &time, const PXR_NS::GfRange3d &range)
+{
+    if (range.IsEmpty() || assetRootPath.IsEmpty()) {
+        return range;
+    }
+    const PXR_NS::UsdPrim assetRoot =
+        prim.GetStage()->GetPrimAtPath(assetRootPath);
+    if (!assetRoot || prim == assetRoot) {
+        return range;
+    }
+    PXR_NS::UsdGeomXformCache cache(time);
+    bool resetsBelowAsset = false;
+    const PXR_NS::GfMatrix4d localToAsset =
+        cache.ComputeRelativeTransform(prim, assetRoot, &resetsBelowAsset);
+    // A reset detaches the prim from the asset root, so there is no
+    // relative transform to divide out and guessing at one would move the
+    // box somewhere nobody asked for. Matches what the evaluator does with
+    // the same condition.
+    if (resetsBelowAsset || localToAsset == PXR_NS::GfMatrix4d(1.0)) {
+        return range;
+    }
+    return PXR_NS::GfBBox3d(range, localToAsset.GetInverse())
+        .ComputeAlignedRange();
+}
+
 bool
 _ComputeRigExecGuideExtent(
     const PXR_NS::UsdGeomBoundable &boundable, const PXR_NS::UsdTimeCode &time,
@@ -1227,6 +1282,10 @@ _ComputeRigExecGuideExtent(
         if (snapshot->Describes(prim.GetStage(), time)) {
             found = _AccumulateSubtreeGuideBounds(
                 *snapshot, prim.GetPath(), _ResolvedPurpose(prim), &range);
+            if (found) {
+                range = _AssetSpaceToLocal(prim, snapshot->assetRoot, time,
+                                           range);
+            }
         }
     }
     // ...otherwise the rest pose, from authored attributes alone, so an

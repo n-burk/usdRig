@@ -4158,21 +4158,97 @@ TestTransformAuthorityWarnings(const std::string &examplesDir)
         CHECK(warnedAbout(errors, "is parented under RigExec provider"));
     }
 
-    // An Xformable between the asset root and a provider: its transform is
-    // never composed into the rig's frames, so the baked extent puts the
-    // guide where the provider would be if that Xform were identity.
+    // An Xformable between the asset root and a provider is COMPOSED into
+    // the provider's frames as of 2026-09-10, so it is no longer a defect to
+    // warn about -- placing a rig, or one leg of an assembly, under an Xform
+    // inside the asset is a supported shape.
+    //
+    // The assertion is that the walk stays quiet about it. That the
+    // transform actually lands is a frame question, tested where the frames
+    // are (tests/python/test_intervening_xform.py).
     {
         const SdfPath intervening("/TailAsset/Rig/Extra");
         stage->DefinePrim(intervening, TfToken("Xform"));
         stage->DefinePrim(intervening.AppendChild(TfToken("Ctrl")),
                           TfToken("RigExecControl"));
+        UsdGeomXformable(stage->GetPrimAtPath(intervening))
+            .AddTranslateOp()
+            .Set(GfVec3d(0, 7, 0));
         RigExecImagingBridge bridge(stage, rigPath);
         std::vector<std::string> errors;
         CHECK(bridge.Compile(&errors));
-        if (!warnedAbout(errors, "sits between the asset root")) {
-            std::printf("  no intervening-Xformable warning\n");
+        if (warnedAbout(errors, "sits between the asset root")) {
+            std::printf("  still warning about a composed intervening "
+                        "Xformable\n");
         }
-        CHECK(warnedAbout(errors, "sits between the asset root"));
+        CHECK(!warnedAbout(errors, "sits between the asset root"));
+    }
+}
+
+// An intervening Xformable moves the guide and must NOT move the extent.
+//
+// The extent is LOCAL and UsdGeomBBoxCache multiplies it by the prim's own
+// local-to-world, which already contains that Xform. The published frames
+// contain it too since 2026-09-10, so the snapshot branch has to divide it
+// back out; if it does not, the box lands at the Xform applied twice --
+// guide in one place, bounding box in another.
+//
+// Asserted with a pure TRANSLATION, where the local extent must come back
+// bit-for-bit unchanged. A rotation would also grow the box through two
+// axis-realignments, which is legal (bounds may be conservative) and would
+// blunt the assertion.
+static void
+TestInterveningXformLeavesTheLocalExtentAlone(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/01_FkChainTail.usda");
+    CHECK(stage);
+    if (!stage) return;
+
+    const SdfPath rigPath("/TailAsset/Rig");
+    const SdfPath control("/TailAsset/Rig/Controls/Tail4");
+    UsdGeomBoundable boundable(stage->GetPrimAtPath(control));
+    CHECK(boundable);
+    if (!boundable) return;
+
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rigPath, UsdTimeCode(1024), &errors));
+    VtVec3fArray before;
+    CHECK(boundable.ComputeExtent(UsdTimeCode(1024), &before));
+    registry.Deactivate();
+
+    // Reparent nothing: put the op on the Controls scope's own Xform-able
+    // ancestor by making one. The rig root stays where it is, so the asset
+    // root does too, and the only thing that changes is a transform BETWEEN
+    // them.
+    UsdGeomXformable intervening(
+        stage->DefinePrim(SdfPath("/TailAsset/Rig/Controls"),
+                          TfToken("Xform")));
+    CHECK(intervening);
+    intervening.AddTranslateOp().Set(GfVec3d(0, 13, 0));
+
+    errors.clear();
+    CHECK(registry.Activate(stage, rigPath, UsdTimeCode(1024), &errors));
+    VtVec3fArray after;
+    CHECK(boundable.ComputeExtent(UsdTimeCode(1024), &after));
+    registry.Deactivate();
+
+    CHECK(before.size() == 2 && after.size() == 2);
+    if (before.size() == 2 && after.size() == 2) {
+        const bool same =
+            GfIsClose(GfVec3d(before[0]), GfVec3d(after[0]), 1e-4) &&
+            GfIsClose(GfVec3d(before[1]), GfVec3d(after[1]), 1e-4);
+        if (!same) {
+            std::printf("  the local extent moved with the intervening "
+                        "Xform: (%g %g %g)-(%g %g %g) became "
+                        "(%g %g %g)-(%g %g %g)\n",
+                        before[0][0], before[0][1], before[0][2],
+                        before[1][0], before[1][1], before[1][2],
+                        after[0][0], after[0][1], after[0][2],
+                        after[1][0], after[1][1], after[1][2]);
+        }
+        CHECK(same);
     }
 }
 
@@ -4500,6 +4576,7 @@ main(int argc, char **argv)
     TestGuideBoundsExport();
     TestTransformAuthorityWarnings(examplesDir);
     TestSnapshotBackedExtent(examplesDir);
+    TestInterveningXformLeavesTheLocalExtentAlone(examplesDir);
     TestExtentIsPureFunctionOfStageAndTime(examplesDir);
     TestPurposeScopedBounds(examplesDir);
     TestAllPurposeRenderTags(examplesDir);

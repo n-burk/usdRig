@@ -1,0 +1,117 @@
+#usda 1.0
+(
+    doc = """Generated from Composed Stage of root layer /var/folders/n1/3jdrkcb53gx0bzrffj2l0g2w0000gn/T/rigexec-blank.usda
+
+
+Generated from Composed Stage of root layer D:\\work\\usdRig\\usdRig\\examples\\spider_legs_assembly.usd
+"""
+)
+
+def Xform "World"
+{
+    custom float2 ui:nodegraph:node:pos = (0, 0)
+
+    def RigExecRoot "RigExecRoot1"
+    {
+        uniform token ui:nodegraph:node:expansionState = "open"
+        float2 ui:nodegraph:node:pos = (-0.36280978, -1.0271509)
+
+        def Xform "Xform1"
+        {
+            custom int rigExec:restFrameVersion = 2
+            uniform token ui:nodegraph:node:expansionState = "open"
+            float2 ui:nodegraph:node:pos = (-0.35676295, -0.29785958)
+
+            def Scope "Joints"
+            {
+                float2 ui:nodegraph:node:pos = (-0.016385086, 0.24980846)
+
+                def RigExecJoint "Shoulder"
+                {
+                    double rest:tx = 0
+                    double rest:ty = 4.638096248186861
+                    double rest:tz = 0
+                    uniform token ui:nodegraph:node:expansionState = "open"
+                    custom float2 ui:nodegraph:node:pos = (0.5387176, 2.3888013)
+
+                    def RigExecJoint "ankle"
+                    {
+                        double rest:rx = 0
+                        double rest:ry = -0
+                        double rest:rz = 0
+                        double rest:tx = 4.476721406958012
+                        double rest:ty = -1.414695859730183
+                        double rest:tz = 0
+                        uniform token ui:nodegraph:node:expansionState = "closed"
+                        float2 ui:nodegraph:node:pos = (0.0849164, 0.9845363)
+
+                        def RigExecJoint "foot"
+                        {
+                            double rest:rx = 0
+                            double rest:ry = -0
+                            double rest:rz = 0
+                            double rest:tx = 2.4230563708795367
+                            double rest:ty = -3.247218607300546
+                            double rest:tz = 0
+                            uniform token ui:nodegraph:node:expansionState = "closed"
+                            float2 ui:nodegraph:node:pos = (0.1599998, 0.44380176)
+                        }
+                    }
+                }
+            }
+
+            def Scope "Movers"
+            {
+                float2 ui:nodegraph:node:pos = (0.19306399, 0.18018188)
+            }
+
+            def Scope "Controller"
+            {
+                float2 ui:nodegraph:node:pos = (0.77153903, -1.2842771)
+
+                def RigExecControl "foot"
+                {
+                    double rest:tx = 6.881092380838071
+                    double rest:ty = 0
+                    double rest:tz = 0
+                    float2 ui:nodegraph:node:pos = (1.0435016, -0.07633985)
+                }
+
+                def RigExecControl "hip"
+                {
+                    double rest:tx = 0
+                    double rest:ty = 4.545887511986089
+                    double rest:tz = 0
+                }
+
+                def RigExecControl "kneePole"
+                {
+                    uniform token guide:shape = "pyramid"
+                    double rest:rx = 0
+                    double rest:ry = 0
+                    double rest:rz = -52.28251976612493
+                    double rest:tx = 6.161888578489937
+                    double rest:ty = 4.097522111835891
+                    double rest:tz = 0
+                }
+            }
+
+            def Scope "Solvers"
+            {
+                def RigExecTwoBoneIk "RigExecTwoBoneIk1"
+                {
+                    rel rigExec:effectorControl = </World/RigExecRoot1/Xform1/Controller/foot>
+                    rel rigExec:joints = [
+                        </World/RigExecRoot1/Xform1/Joints/Shoulder>,
+                        </World/RigExecRoot1/Xform1/Joints/Shoulder/ankle>,
+                        </World/RigExecRoot1/Xform1/Joints/Shoulder/ankle/foot>,
+                    ]
+                    rel rigExec:poleControl = </World/RigExecRoot1/Xform1/Controller/kneePole>
+                    rel rigExec:rootControl = </World/RigExecRoot1/Xform1/Controller/hip>
+                    custom float2 ui:nodegraph:node:pos = (-3.529647, 0.8725186)
+                }
+            }
+        }
+    }
+}
+

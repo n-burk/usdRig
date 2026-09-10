@@ -22,6 +22,8 @@
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/notice.h"
+#include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usdGeom/xformCache.h"
 
 #include <map>
 #include <set>
@@ -476,6 +478,26 @@ private:
         std::map<SdfPath, VtValue> *results,
         std::vector<RigExecValueOverride> *overrides,
         std::vector<std::string> *diagnostics);
+    /// Folds any plain Xformable lying between the asset root and a provider
+    /// into that provider's seeded frames.
+    ///
+    /// Exec resolves a provider's parent space through a NamespaceAncestor
+    /// that only RigExec types satisfy, so a `Scope` is correctly skipped and
+    /// an `Xform` is silently dropped with it. This composes what was
+    /// dropped, at evaluation, from the stage -- nothing is authored, and the
+    /// rig follows the Xform wherever the author put it. See
+    /// docs/superpowers/specs/2026-09-09-intervening-xform-design.md.
+    ///
+    /// Returns false only when a frame cannot be resolved at all; a rig with
+    /// no such Xform returns true having done no work.
+    bool _ComposeInterveningXforms(
+        const UsdPrim &assetRoot,
+        UsdGeomXformCache *xformCache,
+        std::map<SdfPath, RigExecPointFrame> *restFrames,
+        std::map<SdfPath, RigExecPointFrame> *baseFrames,
+        std::map<SdfPath, RigExecPointFrame> *finalFrames,
+        RigExecRigPose *pose) const;
+
     /// Providers whose base frame comes from their own USD transform rather
     /// than a computePointFrame tap: a plain Xform has no such computation.
     std::set<SdfPath> _xformDerivedProviders;

@@ -380,6 +380,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRestMigration COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rest_migration.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testInterveningXform COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_intervening_xform.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
     # Headless usdview-plugin tests (Qt-free modules under plugin/).
     # testGizmoMath and testGizmoScreen are written by later tasks; they
@@ -432,6 +435,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     foreach(_python_test testRigExecPython testRigExecPythonSchemaAuthoring
                          testRigExecBake testRigExecInverse
                          testRestLocal testRestMigration
+                         testInterveningXform
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits

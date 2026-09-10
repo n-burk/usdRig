@@ -2061,32 +2061,17 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                          "and are not in the computed extent");
                 }
             }
-            // ...and nothing between the provider and the asset root may
-            // contribute one either. RigExec's own types are skipped: a
-            // joint nested under a joint is the ordinary shape of a rig,
-            // and the loop above already polices ops authored on those.
-            for (SdfPath ancestorPath = providerPath.GetParentPath();
-                 ancestorPath != assetRoot &&
-                     !ancestorPath.IsAbsoluteRootPath() &&
-                     !ancestorPath.IsEmpty();
-                 ancestorPath = ancestorPath.GetParentPath()) {
-                const UsdPrim ancestor = _stage->GetPrimAtPath(ancestorPath);
-                if (!ancestor) {
-                    break;
-                }
-                if (TfStringStartsWith(ancestor.GetTypeName().GetString(),
-                                       "RigExec")) {
-                    continue;
-                }
-                if (UsdGeomXformable(ancestor)) {
-                    warn("Xformable " + ancestorPath.GetString() +
-                         " sits between the asset root and provider " +
-                         providerPath.GetString() +
-                         "; its transform is not composed into the "
-                         "provider's frames, so the computed extent places "
-                         "the guide as if it were identity");
-                }
-            }
+            // An Xformable BETWEEN the asset root and the provider used to
+            // warn here, because its transform was dropped. It is now
+            // composed at evaluation, by _ComposeInterveningXforms, so there
+            // is nothing left to report: placing a rig -- or one leg of an
+            // assembly -- under an Xform inside the asset is a supported
+            // shape, and warning ten times per compile about a configuration
+            // that works is noise nobody can act on.
+            //
+            // The check above it stays. An op authored on the PROVIDER is
+            // still not a transform authority, which is a different claim
+            // and still true.
 
             // A provider's extent covers the guides beneath it, and only
             // those. Authored geometry parented under one is invisible to
@@ -6451,6 +6436,146 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
     }
 }
 
+bool
+RigExecRigEvaluator::_ComposeInterveningXforms(
+    const UsdPrim &assetRoot,
+    UsdGeomXformCache *xformCache,
+    std::map<SdfPath, RigExecPointFrame> *restFrames,
+    std::map<SdfPath, RigExecPointFrame> *baseFrames,
+    std::map<SdfPath, RigExecPointFrame> *finalFrames,
+    RigExecRigPose *pose) const
+{
+    if (!assetRoot || !xformCache) {
+        return true;
+    }
+    const SdfPath assetRootPath = assetRoot.GetPath();
+
+    // X(P) per provider, and which provider (if any) anchors it. The anchor
+    // is the nearest RigExec ancestor -- exec has already folded that one's
+    // rest:space and avars in -- and the asset root otherwise.
+    std::map<SdfPath, GfMatrix4d> intervening;
+    std::map<SdfPath, SdfPath> anchorOf;
+    bool anyIntervening = false;
+    for (const auto &[provider, tap] : _poseSeedFrames) {
+        SdfPath anchorPath;
+        for (SdfPath walk = provider.GetParentPath();
+             !walk.IsEmpty() && !walk.IsAbsoluteRootPath() &&
+                 walk != assetRootPath;
+             walk = walk.GetParentPath()) {
+            if (_poseSeedFrames.count(walk)) {
+                anchorPath = walk;
+                break;
+            }
+        }
+        anchorOf[provider] = anchorPath;
+
+        const UsdPrim anchor = anchorPath.IsEmpty()
+            ? assetRoot : _stage->GetPrimAtPath(anchorPath);
+        const UsdPrim parent = _stage->GetPrimAtPath(provider.GetParentPath());
+        GfMatrix4d x(1.0);
+        if (parent && anchor && parent != anchor) {
+            bool resetsBelowAnchor = false;
+            x = xformCache->ComputeRelativeTransform(
+                parent, anchor, &resetsBelowAnchor);
+            if (resetsBelowAnchor) {
+                // !resetXformStack! detaches the provider from the anchor
+                // entirely, so "relative to the anchor" is not a quantity
+                // that exists. Reported rather than composed: guessing here
+                // would place the provider somewhere nobody asked for.
+                pose->diagnostics.push_back(
+                    "resetXformStack between " + anchor.GetPath().GetString() +
+                    " and " + provider.GetString() +
+                    "; the intervening transform is not composed");
+                x = GfMatrix4d(1.0);
+            }
+        }
+        intervening[provider] = x;
+        anyIntervening = anyIntervening || x != GfMatrix4d(1.0);
+    }
+    // The overwhelmingly common rig has no such Xform anywhere, and must not
+    // pay a frame rebuild for the ones that do.
+    if (!anyIntervening) {
+        return true;
+    }
+
+    // Parents before children, so an anchor is already corrected when the
+    // providers under it are reached. Ordered by path element COUNT rather
+    // than by SdfPath's own ordering, which makes no parent-first promise.
+    std::vector<SdfPath> ordered;
+    ordered.reserve(intervening.size());
+    for (const auto &[provider, x] : intervening) {
+        ordered.push_back(provider);
+    }
+    std::stable_sort(ordered.begin(), ordered.end(),
+                     [](const SdfPath &a, const SdfPath &b) {
+                         return a.GetPathElementCount() <
+                                b.GetPathElementCount();
+                     });
+
+    // The uncorrected matrices, captured before anything is overwritten. The
+    // correction divides a provider by its anchor's OLD value to recover its
+    // own local factor, so reading the anchor after correcting it would
+    // divide by the answer instead of by the question.
+    auto toMatrix = [](const RigExecPointFrame &frame, GfMatrix4d *out) {
+        if (!frame.IsValid() || frame.IsDegenerate()) {
+            return false;
+        }
+        return RigExecPointsToMatrix(
+            RigExecIdentityLandmarks(), frame.points, out);
+    };
+    std::map<SdfPath, GfMatrix4d> execRest, execBase;
+    for (const SdfPath &provider : ordered) {
+        GfMatrix4d m(1.0);
+        if (toMatrix(restFrames->at(provider), &m)) execRest[provider] = m;
+        m = GfMatrix4d(1.0);
+        if (toMatrix(baseFrames->at(provider), &m)) execBase[provider] = m;
+    }
+
+    auto correct = [&](std::map<SdfPath, RigExecPointFrame> *frames,
+                       const std::map<SdfPath, GfMatrix4d> &exec,
+                       const SdfPath &provider) {
+        const auto own = exec.find(provider);
+        if (own == exec.end()) {
+            // Degenerate on the way in stays degenerate: a collapsed frame
+            // laundered through a matrix round trip would come back as a
+            // plausible identity and hide the failure.
+            return;
+        }
+        const SdfPath &anchorPath = anchorOf.at(provider);
+        GfMatrix4d anchorExec(1.0), anchorTrue(1.0);
+        if (!anchorPath.IsEmpty()) {
+            const auto execIt = exec.find(anchorPath);
+            if (execIt != exec.end()) {
+                anchorExec = execIt->second;
+            }
+            GfMatrix4d corrected(1.0);
+            if (toMatrix(frames->at(anchorPath), &corrected)) {
+                anchorTrue = corrected;
+            }
+        }
+        // frame_true(P) = frame_exec(P) . frame_exec(anchor)^-1 . X(P)
+        //                 . frame_true(anchor)
+        //
+        // The inverse recovers P's own local factor from the composed exec
+        // frame, so X(P) lands BETWEEN P and its anchor rather than after
+        // both. A uniform right-multiply is the same thing only while every
+        // intervening Xform sits above every chain root; put one between two
+        // joints and it applies in the wrong order.
+        (*frames)[provider] = RigExecFrameFromMatrix(
+            own->second * anchorExec.GetInverse() *
+            intervening.at(provider) * anchorTrue);
+    };
+
+    for (const SdfPath &provider : ordered) {
+        correct(restFrames, execRest, provider);
+        correct(baseFrames, execBase, provider);
+        // base and final are the same frame at seeding time; final is
+        // reassigned rather than corrected again so the two cannot drift.
+        (*finalFrames)[provider] = baseFrames->at(provider);
+    }
+    return true;
+}
+
 RigExecRigPose
 RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 {
@@ -6594,6 +6719,18 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         finalFrames[provider] = frame;
         restFrames[provider] = seedSnapshot.Get<RigExecPointFrame>(
             _poseSeedRests.at(provider));
+    }
+    // Compose the transform of any plain Xformable lying between the asset
+    // root and a provider, which exec resolves as identity and therefore
+    // drops (docs/superpowers/specs/2026-09-09-intervening-xform-design.md).
+    //
+    // At evaluation, from the stage, into the frames in memory. Nothing is
+    // authored: the rig follows the Xform the author wrote, wherever they
+    // wrote it, and no layer is rewritten.
+    if (!_ComposeInterveningXforms(assetRoot, &constraintXformCache,
+                                   &restFrames, &baseFrames, &finalFrames,
+                                   &pose)) {
+        return pose;
     }
     for (const SdfPath &provider : _xformDerivedProviders) {
         RigExecPointFrame base;
