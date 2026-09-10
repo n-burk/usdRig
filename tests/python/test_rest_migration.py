@@ -41,6 +41,11 @@ _EXAMPLES = (
 # Posed joint origins measured on the unmigrated assets with the ABSOLUTE
 # rest semantics, before computeRestFrame gained its ancestor input. The
 # migration exists to leave exactly these unchanged.
+#
+# A rig that is re-authored afterwards is a different rig, and an entry that
+# moves because of such an edit cannot be re-measured under semantics that no
+# longer exist. Where that has happened it is called out on the entry, with
+# what was done to establish that the migration claim still holds.
 _GOLDEN = {
     "examples/01_FkChainTail.usda": (
         ("/TailAsset/Rig/Joints/Seg1", (0.0, 5.0, 0.0)),
@@ -54,8 +59,20 @@ _GOLDEN = {
         ("/ArmAsset/Rig/Joints/Shoulder/Elbow/Wrist", (8.0, 10.0, 0.0)),
     ),
     "examples/components/spider_leg_ik.usd": (
+        # Re-authored since these were taken. 2e95684 ("spider leg") moved the
+        # shoulder's rest from 4.5459 to 4.6381, which changes the upper bone's
+        # LENGTH, and a two-bone IK solve with the same effector and a different
+        # bone length puts the knee somewhere else. So the middle entry is the
+        # only one that moved, and it is re-measured rather than old.
+        #
+        # The migration claim this file makes is undamaged, and that was checked
+        # rather than assumed: the asset as it stood at 2e95684^ still evaluates
+        # to (3.8891, 1.9766, 0) under today's evaluator, exactly as recorded.
+        # The two joints the golden pins against the solver -- the chain root,
+        # posed by the hip control, and the effector, which IS the goal -- are
+        # unchanged here, which is what a bone-length edit should leave alone.
         ("/RigRoot/Joints/Shoulder", (0.0, 4.5459, 0.0)),
-        ("/RigRoot/Joints/Shoulder/ankle", (3.8891, 1.9766, 0.0)),
+        ("/RigRoot/Joints/Shoulder/ankle", (4.5257, 3.2966, 0.0)),
         ("/RigRoot/Joints/Shoulder/ankle/foot", (6.8811, 0.0, 0.0)),
     ),
 }

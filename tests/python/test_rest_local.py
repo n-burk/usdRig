@@ -101,10 +101,32 @@ def TestRestMatchesAvarPropagation():
 
 def TestTopLevelProviderUnchanged():
     """A provider with no RigExec ancestor keeps its absolute rest frame."""
-    origin = _Origins(_OpenDisconnected())[0]
-    _Check(abs(origin[1] - 4.545887511986089) < 1e-9,
-           "Shoulder is at y=%.9f, not its authored height; the top-level "
-           "rest frame changed meaning, which it must not" % origin[1])
+    stage = _OpenDisconnected()
+    origin = _Origins(stage)[0]
+    # Read from the asset rather than written down here. The property being
+    # asserted is that a top-level provider's evaluated frame IS its authored
+    # rest -- there is no parent to be relative to -- and a literal copy of the
+    # number only asserts that as long as nobody re-authors the rig. Somebody
+    # did (2e95684 "spider leg" moved the shoulder from 4.5459 to 4.6381) and
+    # the test failed for describing an asset that no longer existed, which is
+    # the opposite of what it is for.
+    shoulder = stage.GetPrimAtPath(_JOINTS[0])
+    authored = shoulder.GetAttribute("rest:ty").Get()
+    _Check(authored is not None,
+           "%s authors no rest:ty; this test needs one to compare against"
+           % _JOINTS[0])
+    _Check(abs(origin[1] - authored) < 1e-9,
+           "Shoulder is at y=%.9f, not its authored height %.9f; the "
+           "top-level rest frame changed meaning, which it must not"
+           % (origin[1], authored))
+    # The other two axes are authored zero, and the frame has to agree: a
+    # top-level provider with a non-zero x or z would mean the chain product
+    # had crept in somewhere above it.
+    for axis, name in ((0, "rest:tx"), (2, "rest:tz")):
+        want = shoulder.GetAttribute(name).Get() or 0.0
+        _Check(abs(origin[axis] - want) < 1e-9,
+               "Shoulder %s is %.9f, authored %.9f" % (name, origin[axis],
+                                                       want))
 
 
 if __name__ == "__main__":
