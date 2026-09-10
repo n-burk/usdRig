@@ -330,9 +330,14 @@ class RigExecUsdviewContainer(PluginContainer):
         None in any context without Qt or without a viewport, which is
         how the headless tests get away with loading this container.
         """
-        if self._viewportTools is not None:
+        # getattr, like _ActivateCurrentStage's _activating guard: a container
+        # built by __new__ for one branch of a test (testUsdviewRigExec.py's
+        # activation-failure case) has only the attributes that branch needs,
+        # and reaching this far through _OnStageReplaced must not depend on
+        # the rest of registerPlugins having run.
+        if getattr(self, "_viewportTools", None) is not None:
             return self._viewportTools
-        if self._viewportToolsFailed:
+        if getattr(self, "_viewportToolsFailed", False):
             # A headless or Qt-less session fails identically on every
             # stage replacement; warning each time would bury the one
             # message that mattered.
@@ -387,9 +392,10 @@ class RigExecUsdviewContainer(PluginContainer):
         None in any context without Qt or without a viewport, which is
         how the headless tests get away with loading this container.
         """
-        if self._viewCube is not None:
+        # Same tolerance as _EnsureViewportTools above, for the same reason.
+        if getattr(self, "_viewCube", None) is not None:
             return self._viewCube
-        if self._viewCubeFailed:
+        if getattr(self, "_viewCubeFailed", False):
             # A headless or Qt-less session fails identically on every
             # stage replacement; warning each time would bury the one
             # message that mattered.
