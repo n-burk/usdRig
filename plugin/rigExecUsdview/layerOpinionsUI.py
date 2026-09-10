@@ -4,6 +4,14 @@
 # Shows every opinion the selected prim has, grouped by the layer that
 # holds it, strongest layer first -- and lets you retype or remove one.
 #
+# A composition arc is shown as the list it is. `references` is a
+# heading with one row per reference underneath it, and each of those
+# rows can be retyped in place, removed on its own, moved against the
+# arcs beside it, or reopened in the guided flow that would have added
+# it. The same goes for the two arcs that belong to the LAYER rather
+# than to the prim -- its sublayers and its relocates -- which are
+# listed at the top of their layer's group.
+#
 # All of the rules live in layerOpinionsModel, which imports no Qt and
 # is tested headlessly (tests/python/test_layer_opinions_model.py). This
 # file is a thin Qt driver over it: build a tree, dispatch edits, push
@@ -24,6 +32,20 @@ _COLUMNS = ("Opinion", "Value", "")
 # Roles carrying the model objects on their tree items.
 _ROW_ROLE = QtCore.Qt.UserRole + 1
 _GROUP_ROLE = QtCore.Qt.UserRole + 2
+# The string an expandable item's fold state is remembered under, so a
+# rebuild -- which happens on every stage notice -- does not refold the
+# tree under the mouse.
+_EXPAND_ROLE = QtCore.Qt.UserRole + 3
+
+# What the third column says a row is.
+_KIND_TEXT = {"info": "metadata",
+              "attribute": "attr",
+              "relationship": "rel",
+              "arcItem": "arc",
+              "sublayer": "arc",
+              "relocate": "arc",
+              "variantSelection": "variant",
+              "layerInfo": "layer"}
 
 
 def _Muted(stage, layer):
@@ -241,6 +263,7 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         item = QtWidgets.QTreeWidgetItem(
             self._tree, [_GroupLabel(group, group.isEditTarget), "", ""])
         item.setData(0, _GROUP_ROLE, group)
+        item.setData(0, _EXPAND_ROLE, group.layer.identifier)
         font = item.font(COL_NAME)
         font.setBold(True)
         item.setFont(COL_NAME, font)
@@ -254,11 +277,9 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
         item.setExpanded(group.layer.identifier in self._expanded)
 
     def _AddRow(self, parent, row):
-        kindText = {"info": "metadata",
-                    "attribute": "attr",
-                    "relationship": "rel"}.get(row.kind, row.kind)
         item = QtWidgets.QTreeWidgetItem(
-            parent, [row.key, row.valueText, kindText])
+            parent, [row.key, row.valueText,
+                     _KIND_TEXT.get(row.kind, row.kind)])
         item.setData(COL_VALUE, _ROW_ROLE, row)
         item.setData(COL_NAME, _ROW_ROLE, row)
         flags = item.flags()
@@ -278,25 +299,35 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
                 "overridden by a stronger layer above")
         if not row.editable:
             item.setForeground(COL_VALUE, QtGui.QBrush(QtCore.Qt.gray))
+        for child in row.children:
+            self._AddRow(item, child)
+        if row.children:
+            self._SeedRowExpansion(item, row)
+
+    def _SeedRowExpansion(self, item, row):
+        """
+        Open an arc field the first time it is seen, and keep the fold
+        the user leaves it at afterwards.
+
+        Opened rather than folded, because the heading on its own
+        ("3 items") answers nothing: the arcs underneath it are the
+        reason these rows exist. The key is per layer AND per field, so
+        folding one layer's `references` does not fold another's.
+        """
+        key = "%s|%s" % (row.layer.identifier, row.key)
+        item.setData(COL_NAME, _EXPAND_ROLE, key)
+        if key not in self._seeded:
+            self._seeded.add(key)
+            self._expanded.add(key)
+        item.setExpanded(key in self._expanded)
 
     def _OnContextMenu(self, point):
         item = self._tree.itemAt(point)
-        if item is None:
-            return
         menu = QtWidgets.QMenu(self)
-        row = item.data(COL_NAME, _ROW_ROLE)
-        group = item.data(0, _GROUP_ROLE)
+        row = item.data(COL_NAME, _ROW_ROLE) if item is not None else None
+        group = item.data(0, _GROUP_ROLE) if item is not None else None
         if row is not None:
-            owner = self._GroupFor(row.layer)
-            action = menu.addAction("Delete Opinion")
-            action.setEnabled(bool(owner and owner.editable))
-            action.triggered.connect(
-                lambda: self._Apply(lambda: model.DeleteRow(row),
-                                    "Delete %s" % row.key))
-            if row.editable:
-                edit = menu.addAction("Edit Value")
-                edit.triggered.connect(
-                    lambda: self._tree.editItem(item, COL_VALUE))
+            self._AddRowActions(menu, item, row)
         elif group is not None:
             action = menu.addAction("Delete All Opinions In This Layer")
             action.setEnabled(group.editable)
@@ -305,13 +336,132 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             copyId.triggered.connect(
                 lambda: QtWidgets.QApplication.clipboard().setText(
                     group.layer.identifier))
-        menu.exec_(self._tree.viewport().mapToGlobal(point))
+
+        # Authoring a new arc is offered everywhere in the tree,
+        # including the empty space below the rows -- a prim with no
+        # opinions yet has nothing to right-click, and that is exactly
+        # when you want to give it a reference.
+        self._AddArcMenu(menu, group)
+        try:
+            menu.exec_(self._tree.viewport().mapToGlobal(point))
+        finally:
+            # Parented to the panel, so a menu per right-click would
+            # otherwise pile up for the session -- each holding its
+            # actions, their triggers, and the prim those captured.
+            menu.deleteLater()
+
+    def _AddRowActions(self, menu, item, row):
+        """
+        The actions for one opinion row.
+
+        An arc row gets three the others do not: its own guided flow,
+        reopened on the arc it already holds; and the two moves, which
+        are the only way to change an arc's strength against the arcs
+        beside it short of deleting and re-adding it.
+        """
+        if row.kind == "layerInfo":
+            # The heading over a layer's own arcs. It is not an opinion,
+            # so there is nothing to edit or delete on it -- the entries
+            # underneath carry all of that.
+            return
+        arc = self._ArcFor(row)
+        if arc is not None:
+            action = menu.addAction(
+                "Edit %s..." % arc.title.replace("Add ", ""))
+            action.setToolTip(arc.summary)
+            action.triggered.connect(lambda: self._EditArc(row))
+        if row.editable:
+            inline = menu.addAction("Edit Value")
+            inline.triggered.connect(
+                lambda: self._tree.editItem(item, COL_VALUE))
+        delete = menu.addAction(_DeleteLabel(row))
+        delete.setEnabled(model.CanDeleteRow(row, self._GroupFor(row.layer)))
+        delete.triggered.connect(
+            lambda: self._Apply(lambda: model.DeleteRow(row),
+                                "Delete %s" % row.key))
+        moves = (("Move Stronger", -1), ("Move Weaker", 1))
+        if any(model.CanMove(row, delta) for _, delta in moves):
+            menu.addSeparator()
+            for label, delta in moves:
+                move = menu.addAction(label)
+                move.setEnabled(model.CanMove(row, delta))
+                move.triggered.connect(
+                    _MoveTrigger(self._Apply, row, delta))
+
+    def _ArcFor(self, row):
+        """
+        The guided flow that can reopen `row`, or None.
+
+        Imported where it is used for the same reason _AddArcMenu does
+        it: the panel reads a stage perfectly well without the arc
+        modules, and an ImportError must not take the context menu with
+        it.
+        """
+        if not row.editable:
+            return None
+        try:
+            import compositionArcsModel
+        except ImportError:
+            return None
+        return compositionArcsModel.ArcForRow(row)
+
+    def _EditArc(self, row):
+        try:
+            import compositionArcsUI
+        except ImportError as error:
+            self._status.setText("composition arcs unavailable: %s" % error)
+            return
+        edit, warnings = compositionArcsUI.RunArcEditFlow(
+            self._api, row, self._SelectedPrim(), self)
+        if edit is not None:
+            self._OnArcAuthored(edit, warnings, edit.label)
+
+    def _AddArcMenu(self, menu, group):
+        """
+        Hang the "Add Composition Arc" submenu off `menu`.
+
+        Imported here rather than at module scope so a panel that is
+        only being read still opens when the arc modules are missing or
+        fail to import -- the flows are an addition to this panel, not a
+        prerequisite for it.
+        """
+        try:
+            import compositionArcsUI
+        except ImportError as error:
+            self._status.setText("composition arcs unavailable: %s" % error)
+            return
+        if not menu.isEmpty():
+            menu.addSeparator()
+        # Constructed with the parent menu as its QObject parent, not
+        # via menu.addMenu(title): that convenience does NOT transfer
+        # ownership, so the submenu is collected the moment this
+        # function returns and the items open onto a deleted C++ object.
+        submenu = QtWidgets.QMenu("Add Composition Arc", menu)
+        menu.addMenu(submenu)
+        compositionArcsUI.PopulateArcMenu(
+            submenu, self._api, self._SelectedPrim(),
+            group.layer if group is not None else None,
+            self._OnArcAuthored, self)
+
+    def _OnArcAuthored(self, edit, warnings, label):
+        """
+        A flow committed: push its Edit and rebuild, exactly as an
+        inline edit does. Warnings are reported afterwards because the
+        dialog already showed them and the artist chose to go ahead --
+        the status line is a record, not a second prompt.
+        """
+        if edit is not None and self._undo is not None:
+            self._undo.Push(edit)
+        self.Rebuild()
+        self._status.setText(
+            "%s  (%s)" % (label, "; ".join(warnings)) if warnings else label)
 
     def _OnExpansionChanged(self, item):
-        group = item.data(0, _GROUP_ROLE)
-        if group is None:
+        # Keyed off the role rather than off the item's kind, so a layer
+        # group and an arc field remember their fold the same way.
+        key = item.data(0, _EXPAND_ROLE)
+        if key is None:
             return
-        key = group.layer.identifier
         if item.isExpanded():
             self._expanded.add(key)
         else:
@@ -387,9 +537,8 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             row = items[0].data(COL_NAME, _ROW_ROLE)
             group = items[0].data(0, _GROUP_ROLE)
             if row is not None:
-                enabled = bool(
-                    self._GroupFor(row.layer)
-                    and self._GroupFor(row.layer).editable)
+                enabled = model.CanDeleteRow(row, self._GroupFor(row.layer))
+                text = _DeleteLabel(row)
             elif group is not None:
                 enabled = group.editable
                 text = "Delete All In Layer"
@@ -401,6 +550,39 @@ class LayerOpinionsPanel(QtWidgets.QDialog):
             if group.layer == layer:
                 return group
         return None
+
+
+def _DeleteLabel(row):
+    """
+    What removing this row is called.
+
+    An entry of a list is not "the opinion". Deleting one reference off
+    a prim that has three is not the same act as deleting the layer's
+    whole say about references, and a menu that calls both "Delete
+    Opinion" invites the wrong one.
+    """
+    if row.kind in model.ENTRY_KINDS:
+        return "Remove This Entry"
+    return "Delete Opinion"
+
+
+class _MoveTrigger(object):
+    """
+    A callable holding one move action's row and direction.
+
+    A class rather than a lambda in the loop, for the reason
+    compositionArcsUI._ArcTrigger is one: a lambda would capture the
+    loop variable by reference and both items would move the same way.
+    """
+
+    def __init__(self, apply, row, delta):
+        self._apply = apply
+        self._row = row
+        self._delta = delta
+
+    def __call__(self, *args):
+        row, delta = self._row, self._delta
+        self._apply(lambda: model.MoveRow(row, delta), "Move %s" % row.key)
 
 
 def OpenLayerOpinionsPanel(usdviewApi, undoStack=None):

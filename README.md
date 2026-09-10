@@ -412,5 +412,6 @@ verified fixes, regression coverage, and remaining scope limits.
 - [Viewport gizmos in usdview](docs/viewport-gizmos.md)
 - [Graph editor in usdview](docs/graph-editor.md)
 - [ViewCube in usdview](docs/view-cube.md)
+- [Guided composition arcs in usdview](docs/composition-arcs.md)
 - [OpenExec API notes](docs/exec-api-notes.md) and
   [ExecUsd API notes](docs/execusd-api-notes.md)
