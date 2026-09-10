@@ -498,6 +498,197 @@ static void TestAnimatedPointCounts()
     }
 }
 
+// Uncommitted manipulation values change the generation and author nothing
+// (docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
+//
+// The fixture is the ordering fixture's arithmetic, reused because it makes
+// every candidate behaviour a different number: dial = 2, multiplied by 10,
+// then 1 added, published as the chain's result at /Asset/Rig/Channels
+// .rigExec:dial. A mover also moves a point by a control avar, so one rig
+// covers both what exec computes and what the property chains compute.
+static const char *kPreviewFixture = R"USDA(#usda 1.0
+(
+)
+
+def Scope "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        def Scope "Channels"
+        {
+            float rigExec:dial = 2
+        }
+
+        def RigExecControl "Driver"
+        {
+            double avars:tx = 1
+        }
+
+        def Scope "Movers"
+        {
+            reorder nameChildren = ["AddOne", "TimesTen"]
+
+            def RigExecFloatMathMover "TimesTen" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "multiply"
+                float inputs:value = 10
+                rel rigExec:moves = </Asset/Rig/Channels.rigExec:dial>
+            }
+
+            def RigExecFloatMathMover "AddOne" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float inputs:value = 1
+                rel rigExec:moves = </Asset/Rig/Channels.rigExec:dial>
+            }
+
+            def RigExecMatrixMover "MoveShape" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                float inputs:defaultWeight = 1
+                rel rigExec:moves = </Asset/Shape.points>
+                rel rigExec:transform = </Asset/Rig/Driver>
+            }
+        }
+    }
+
+    def Points "Shape"
+    {
+        point3f[] points = [(0, 0, 0)]
+    }
+}
+)USDA";
+
+static void TestInteractiveOverrides()
+{
+    const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    CHECK(layer);
+    if (!layer || !layer->ImportFromString(kPreviewFixture)) {
+        std::printf("  could not build the preview fixture\n");
+        ++failures;
+        return;
+    }
+    const UsdStageRefPtr stage = UsdStage::Open(layer);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath dial("/Asset/Rig/Channels.rigExec:dial");
+    const SdfPath shapePoints("/Asset/Shape.points");
+    const SdfPath driver("/Asset/Rig/Driver");
+    const SdfPath timesTen("/Asset/Rig/Movers/TimesTen");
+
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    if (!evaluator.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("    %s\n", e.c_str());
+        }
+    }
+    CHECK(errors.empty());
+
+    auto dialValue = [&](const RigExecRigPose &pose, float *out) {
+        const auto it = pose.movedProperties.find(dial);
+        if (it == pose.movedProperties.end() ||
+            !it->second.IsHolding<float>()) {
+            return false;
+        }
+        *out = it->second.Get<float>();
+        return true;
+    };
+    auto pointX = [&](const RigExecRigPose &pose, float *out) {
+        const auto it = pose.movedProperties.find(shapePoints);
+        if (it == pose.movedProperties.end()) {
+            return false;
+        }
+        const VtVec3fArray points = it->second.Get<VtVec3fArray>();
+        if (points.size() != 1) {
+            return false;
+        }
+        *out = points[0][0];
+        return true;
+    };
+
+    // The authored rig, for every later comparison to be against.
+    auto exported = [&]() {
+        std::string text;
+        layer->ExportToString(&text);
+        return text;
+    };
+    const std::string authored = exported();
+    CHECK(!authored.empty());
+    float value = 0, x = 0;
+    RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    CHECK(dialValue(pose, &value) && std::abs(value - 21.0f) < 1e-6f);
+    CHECK(pointX(pose, &x) && std::abs(x - 1.0f) < 1e-6f);
+
+    // 1. An override on an avar EXEC reads: the point follows it, and the
+    //    authored avar does not move.
+    evaluator.SetInteractiveOverrides({RigExecValueOverride{
+        driver, TfToken(), TfToken("avars:tx"), VtValue(4.0)}});
+    CHECK(evaluator.HasInteractiveOverrides());
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    CHECK(pointX(pose, &x) && std::abs(x - 4.0f) < 1e-6f);
+    double authoredTx = 0;
+    CHECK(stage->GetAttributeAtPath(driver.AppendProperty(TfToken("avars:tx")))
+              .Get(&authoredTx) &&
+          std::abs(authoredTx - 1.0) < 1e-12);
+    // The whole point of the exercise: the document is untouched. Compared as
+    // text rather than by probing the one attribute, so a spec authored
+    // anywhere else -- a different layer arm, a sibling property -- fails too.
+    CHECK(exported() == authored);
+
+    // 2. Evaluating twice with the same override is stable: an override is a
+    //    value, not an increment.
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pointX(pose, &x) && std::abs(x - 4.0f) < 1e-6f);
+
+    // 3. An override on a value a property CHAIN reads: the chain computes
+    //    from the override, so TimesTen multiplying by 3 gives (2*3)+1.
+    evaluator.SetInteractiveOverrides({RigExecValueOverride{
+        timesTen, TfToken(), TfToken("inputs:value"), VtValue(3.0f)}});
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(dialValue(pose, &value) && std::abs(value - 7.0f) < 1e-6f);
+    // Setting replaces rather than accumulates: the avar override from step 1
+    // is gone, so the point is back at its authored 1.
+    CHECK(pointX(pose, &x) && std::abs(x - 1.0f) < 1e-6f);
+    CHECK(exported() == authored);
+
+    // 4. An override on the property a chain WRITES outranks the chain: the
+    //    held value is what the generation carries, not 21 and not 51.
+    evaluator.SetInteractiveOverrides({RigExecValueOverride{
+        dial.GetPrimPath(), TfToken(), dial.GetNameToken(), VtValue(5.0f)}});
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(dialValue(pose, &value) && std::abs(value - 5.0f) < 1e-6f);
+    CHECK(exported() == authored);
+
+    // 5. Two overrides at once, on both kinds of consumer.
+    evaluator.SetInteractiveOverrides({
+        RigExecValueOverride{driver, TfToken(), TfToken("avars:tx"),
+                             VtValue(-2.0)},
+        RigExecValueOverride{timesTen, TfToken(), TfToken("inputs:value"),
+                             VtValue(4.0f)}});
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pointX(pose, &x) && std::abs(x + 2.0f) < 1e-6f);
+    CHECK(dialValue(pose, &value) && std::abs(value - 9.0f) < 1e-6f);
+
+    // 6. Releasing the drag: the authored rig is back, with nothing to undo.
+    evaluator.ClearInteractiveOverrides();
+    CHECK(!evaluator.HasInteractiveOverrides());
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pointX(pose, &x) && std::abs(x - 1.0f) < 1e-6f);
+    CHECK(dialValue(pose, &value) && std::abs(value - 21.0f) < 1e-6f);
+    CHECK(exported() == authored);
+}
+
 int main()
 {
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
@@ -508,6 +699,7 @@ int main()
     TestBlendSurfaceFrames();
     TestGeometryConstraintsCompose();
     TestAnimatedPointCounts();
+    TestInteractiveOverrides();
     std::printf("testRigExecInteractive: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

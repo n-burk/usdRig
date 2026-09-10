@@ -6576,6 +6576,72 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
     return true;
 }
 
+void
+RigExecRigEvaluator::SetInteractiveOverrides(
+    std::vector<RigExecValueOverride> overrides)
+{
+    _interactiveOverrides = std::move(overrides);
+}
+
+void
+RigExecRigEvaluator::ClearInteractiveOverrides()
+{
+    _interactiveOverrides.clear();
+}
+
+// Appends the interactive overrides to \p overrides, replacing any entry
+// already standing on the same key, and mirrors the attribute ones into
+// _resolvedInputs.
+//
+// Replacing rather than appending is not a tidiness preference: exec is given
+// a vector of key/value pairs and which of two entries on one key wins is not
+// a promise anything here should rely on. Removing the loser makes the answer
+// a property of this function.
+static void
+_ApplyInteractiveOverrides(
+    const std::vector<RigExecValueOverride> &interactive,
+    std::vector<RigExecValueOverride> *overrides,
+    RigExecResolvedInputs *resolved,
+    std::map<SdfPath, VtValue> *publishedProperties = nullptr)
+{
+    for (const RigExecValueOverride &o : interactive) {
+        if (overrides) {
+            overrides->erase(
+                std::remove_if(
+                    overrides->begin(), overrides->end(),
+                    [&o](const RigExecValueOverride &existing) {
+                        return existing.prim == o.prim &&
+                               existing.attribute == o.attribute &&
+                               existing.computation == o.computation;
+                    }),
+                overrides->end());
+            overrides->push_back(o);
+        }
+        // Only an ATTRIBUTE override has a property path to resolve; a
+        // computation override names no property and the static readers never
+        // look for one.
+        if (resolved && !o.attribute.IsEmpty()) {
+            resolved->SetProperty(o.prim.AppendProperty(o.attribute), o.value);
+        }
+        // A property a chain WRITES is also PUBLISHED, and the generation
+        // Hydra draws has to carry the same value exec was given -- otherwise
+        // the viewport shows the chain's arithmetic while every exec consumer
+        // sees the held one, which is the disagreement between the two
+        // delivery routes that this function exists to prevent.
+        //
+        // Only an entry that is already there is replaced. Inventing one would
+        // publish an avar as a moved property of the generation, and an avar
+        // is an input, not a result.
+        if (publishedProperties && !o.attribute.IsEmpty()) {
+            const auto it = publishedProperties->find(
+                o.prim.AppendProperty(o.attribute));
+            if (it != publishedProperties->end()) {
+                it->second = o.value;
+            }
+        }
+    }
+}
+
 RigExecRigPose
 RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 {
@@ -6624,6 +6690,25 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     std::map<SdfPath, VtValue> propertyResults;
     _resolvedInputs.Clear();
     _chainSnapshots.Clear();
+
+    // Interactive overrides are applied on BOTH sides of the property chains,
+    // because an override can be either end of one and the two ends want
+    // opposite orderings.
+    //
+    // Here, before the chains: an override on a value a chain READS -- a
+    // control avar feeding a math mover -- has to be the value the chain
+    // computes from, or dragging that control would move everything except
+    // what the mover drives. _resolvedInputs is the route those reads take,
+    // and it was cleared one line ago, so this has to come after the clear.
+    //
+    // Again after them: an override on a property a chain WRITES has to beat
+    // the chain's own result. Which of the two situations a given override is
+    // in is not knowable here, and applying it twice means it does not have
+    // to be.
+    if (!_interactiveOverrides.empty()) {
+        _ApplyInteractiveOverrides(
+            _interactiveOverrides, &baseOverrides, &_resolvedInputs);
+    }
     if (!_propertyChains.empty()) {
         _EvaluatePropertyChains(time, &propertyResults, &baseOverrides,
                                 &pose.diagnostics);
@@ -6634,6 +6719,16 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         for (const auto &[path, value] : propertyResults) {
             _resolvedInputs.SetProperty(path, value);
         }
+    }
+
+    // The second of the two applications described above: after the chains,
+    // before any copy of baseOverrides. A held drag outranks what the rig
+    // would have computed for the property it is holding, and nothing is
+    // authored either way -- see SetInteractiveOverrides.
+    if (!_interactiveOverrides.empty()) {
+        _ApplyInteractiveOverrides(
+            _interactiveOverrides, &baseOverrides, &_resolvedInputs,
+            &propertyResults);
     }
 
     for (const auto &[ribbonPath, pointsPath] : _ribbonDriverPoints) {

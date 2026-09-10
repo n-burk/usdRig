@@ -189,6 +189,39 @@ public:
     /// Evaluates one complete generation at an explicit time.
     RigExecRigPose Evaluate(UsdTimeCode time);
 
+    /// Values that stand in for authored attributes while they are set,
+    /// with NOTHING authored: the manipulation path (spec: docs/superpowers/
+    /// specs/2026-09-10-hydra-preview-manipulation-design.md).
+    ///
+    /// An interactive drag asks "what would the rig look like if this avar
+    /// were 3.2", once per mouse sample. Authoring the answer to ask it
+    /// invalidates exec through the authoring stage, rewrites a layer spec,
+    /// and notifies every observer of the stage -- for a value the artist
+    /// has not committed to. These overrides ask the same question through
+    /// the route exec already provides for it (ExecUsdSystem::
+    /// ComputeWithOverrides, tapSet.cpp), so the generation Hydra draws is
+    /// the previewed one while the document still holds the authored value.
+    ///
+    /// Each override is delivered TWICE, because there are two ways a value
+    /// reaches a consumer and they must not disagree: as an exec override
+    /// for everything exec computes, and through _resolvedInputs for the
+    /// property chains and the CPU oracle that exec never runs. An override
+    /// replaces any earlier one on the same key rather than joining it, and
+    /// outranks a property chain's result, which is the manipulator's edit
+    /// winning over the rig's own arithmetic for as long as it is held.
+    ///
+    /// Setting them does not evaluate; the caller decides when to publish.
+    void SetInteractiveOverrides(std::vector<RigExecValueOverride> overrides);
+
+    /// Drops every interactive override. The next Evaluate is the authored
+    /// rig again -- which is what a released or aborted drag wants, and the
+    /// reason the manipulator never has to undo a preview.
+    void ClearInteractiveOverrides();
+
+    bool HasInteractiveOverrides() const {
+        return !_interactiveOverrides.empty();
+    }
+
     /// Composed mover-stack applications: descendants before their mover
     /// parent, sibling branches in reverse composed child order (the bottom
     /// usdview row executes first; spec §4.2).
@@ -372,6 +405,8 @@ private:
     /// first, and every later read -- exec override, packet assembly, CPU
     /// oracle -- then sees one consistent value for the attribute.
     RigExecResolvedInputs _resolvedInputs;
+    /// Uncommitted manipulation values; see SetInteractiveOverrides.
+    std::vector<RigExecValueOverride> _interactiveOverrides;
 
     /// What every chain held at every point in the walk this generation.
     ///
