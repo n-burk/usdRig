@@ -1,0 +1,33 @@
+# Line endings are part of whether a script runs at all, so they are pinned
+# here rather than left to each clone's core.autocrlf.
+#
+# A .sh file checked out with CRLF fails under bash on every platform --
+# `\r': command not found` -- and Windows developers routinely have
+# core.autocrlf=true, so the POSIX helpers in bin/ must stay LF even in a
+# Windows working tree. .bat is the mirror case: cmd.exe mis-parses a
+# multi-line construct whose lines end in bare LF, so those stay CRLF.
+* text=auto
+
+*.sh   text eol=lf
+*.bash text eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# USD text assets are read by Sdf, which accepts either ending; normalizing
+# them keeps a Windows checkout from showing every example as modified.
+*.usda text
+*.usd  -text -diff
+
+# Sources and docs: normalized in the repository, native in the tree.
+*.cpp text
+*.h   text
+*.py  text
+*.md  text
+*.txt text
+*.json text
+*.cmake text
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.exr binary
