@@ -88,15 +88,37 @@ You need:
 - CMake 3.26 or newer, Ninja, and a C++17 compiler
 - a Python environment compatible with the OpenUSD build
 
-The checked-in POSIX helpers currently expect OpenUSD's Python 3.11 install
-layout. They look for `usd-install` and `usd-pr4156-venv` beside this checkout
-unless `USD` and `VENV` point somewhere else.
+Every helper in `bin/` comes as a pair: a `.sh` for macOS and Linux (and for
+Windows shells that run bash, such as Git Bash and WSL) and a `.bat` for
+`cmd.exe`. The two are kept deliberately parallel -- same names, same
+arguments, same environment variables -- so a command in this README differs
+only in its extension and its slashes. The interactive launcher is the one
+place the names differ (`bin/usdview.sh` and `bin\launch_usdview.bat`), and
+`bin/launch.sh`, which adds a Muse provider-readiness banner, is the single
+POSIX-only helper.
 
-### macOS
+Nothing is pinned to one machine. The helpers discover the interpreter, the
+USD python modules, and the Visual Studio toolchain, and every discovery can
+be overridden:
+
+| Variable | Means | Default |
+|---|---|---|
+| `USD` | the OpenUSD install | `../usd-install`, beside this checkout |
+| `VENV` | a virtualenv holding a USD-compatible python | a venv beside the checkout, if one is there |
+| `PY` | the interpreter itself, when it is not in a venv | the venv's python, else `python3`/`python` on `PATH` |
+| `RIG` | this checkout | the parent of `bin/` |
+| `RIGEXEC_VCVARS` | Windows: which `vcvars64.bat` initializes the toolchain | whatever `vswhere` reports, else the well-known VS locations |
+
+The interpreter has to be the one OpenUSD was built against, and the helpers
+check that it can actually load `pxr` -- not merely import it -- before
+anything else runs, so a version mismatch is reported here rather than as a
+DLL error deep inside a test.
+
+### macOS and Linux
 
 ```sh
 export USD=/absolute/path/to/usd-install
-export VENV=/absolute/path/to/python-venv
+export VENV=/absolute/path/to/python-venv   # or PY=/path/to/python
 
 bin/build_rigexec.sh
 build/rigExecPose examples/ArmShotAnim.usda \
@@ -105,7 +127,7 @@ bin/usdview.sh examples/ArmShotAnim.usda
 ```
 
 `build_rigexec.sh` configures the project, builds it, and runs every enabled
-CTest suite. In `usdview`, scrub frames 1001–1048 to see the arm deform.
+CTest suite. In `usdview`, scrub frames 1001-1048 to see the arm deform.
 RigExec guide geometry is enabled automatically.
 
 To verify the viewport path without opening the interactive viewer:
@@ -116,16 +138,23 @@ bin/run_testusdview.sh
 
 ### Windows
 
-With OpenUSD installed at the default sibling path `..\usd-install`:
+OpenUSD is looked for at the sibling path `..\usd-install`; point `USD`
+elsewhere if it lives somewhere else:
 
 ```bat
+set USD=C:\absolute\path\to\usd-install
+
 bin\build_rigexec.bat
 build\rigExecPose.exe examples\ArmShotAnim.usda --frames 1001,1024,1048 --joints --targets
 bin\launch_usdview.bat examples\ArmShotAnim.usda
+bin\run_testusdview.bat
 ```
 
-The Windows helper initializes the Visual Studio 2022 x64 toolchain. Use the
-manual CMake setup below if your compiler or OpenUSD layout differs.
+The Windows helpers initialize the x64 toolchain themselves, from whichever
+Visual Studio `vswhere` reports -- any edition, any year, any drive. A
+Developer Command Prompt is already initialized and is left alone. If the
+compiler is somewhere neither finds, point `RIGEXEC_VCVARS` at its
+`vcvars64.bat`, or configure manually as below.
 
 ## Start with an example
 
@@ -286,8 +315,9 @@ Parent, and SingleChainIK; there is intentionally no `FbxCharacter` schema.
 
 ## Building, testing, and installing
 
-The helper scripts are the shortest supported source-tree workflow. To
-configure manually on a POSIX shell:
+The helper scripts are the shortest supported source-tree workflow --
+`bin/build_rigexec.sh` on macOS and Linux, `bin\build_rigexec.bat` on Windows.
+To configure manually instead:
 
 ```sh
 cmake -S . -B build -G Ninja \
@@ -299,25 +329,48 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The same three cache variables on Windows, from a shell where the x64
+toolchain is initialized (`bin\_vcvars.bat` does it, as does a Developer
+Command Prompt):
+
+```bat
+cmake -S . -B build -G Ninja ^
+  -DCMAKE_BUILD_TYPE=Release ^
+  -DUSD_INSTALL_DIR=C:/absolute/path/to/usd-install ^
+  -DCMAKE_PREFIX_PATH=C:/absolute/path/to/usd-install
+
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
 `CMAKE_PREFIX_PATH` is required so OpenUSD's transitive dependencies, including
-OpenSubdiv, resolve from the same installation.
+OpenSubdiv, resolve from the same installation. `USD_INSTALL_DIR` defaults to
+`../usd-install` and must be passed whenever OpenUSD is anywhere else.
 
 The enabled CTest suites cover math and solvers, constraints, curvenets, weight
 fields, the reference arm, mover graphs, strict schema authoring, the Python
 facade, Hydra publication, native bounds, and the no-authoring contract.
+
+The Qt-free plugin tests also run on their own, with no build and no display,
+which is the quick loop while editing a panel:
+
+```sh
+bin/run_python_tests.sh            # bin\run_python_tests.bat on Windows
+```
+
 Separate `testusdview` tests exercise the real application integration. Useful
 checks include:
 
 ```sh
-bin/run_testusdview.sh
-bin/run_testusdview_overlay.sh
+bin/run_testusdview.sh             # bin\run_testusdview.bat
+bin/run_testusdview_overlay.sh     # bin\run_testusdview_overlay.bat
 ```
 
 If you change `libs/rigExecSchema/schema.usda`, regenerate and review the
 checked-in schema resources before rebuilding:
 
 ```sh
-bin/gen_schema.sh
+bin/gen_schema.sh                  # bin\gen_schema.bat
 ```
 
 Install the libraries, headers, plugins, Python modules, and CMake package with:
@@ -356,7 +409,7 @@ and `rigExec::rigExecImaging`, plus `rigExec_PLUGINPATHS`, `rigExec_PYTHON_DIR`,
 |---|---|
 | macOS arm64 | Verified with AppleClang and Python 3.11: 17/17 enabled CTest suites and the live `usdview` path pass |
 | Windows x64 | Release build with Visual Studio 2022 and Ninja; 35/35 CTest suites pass for the September 2026 changes |
-| Linux | Intended, but not yet verified; the current POSIX environment helper is macOS-oriented |
+| Linux | Supported by the build and by every helper -- the python layout, the loader variable, and the interpreter are all discovered rather than assumed -- but no full CTest run has been recorded here yet |
 | iOS/iPadOS | Core/static integration is design work only; no device build has been verified |
 
 ## Current limitations

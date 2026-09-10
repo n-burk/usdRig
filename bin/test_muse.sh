@@ -17,14 +17,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$SCRIPT_DIR/_env.sh"
 STAGE="${1:-$RIG/examples/ArmShotAnim.usda}"
 
-if [ ! -x "$PY" ]; then
-  echo "ERROR: venv python not found at $PY (set VENV=...)" >&2
-  exit 1
-fi
+rigexec_require_python
+rigexec_require_usd "$TESTUSDVIEW"
 
-export DYLD_LIBRARY_PATH="$USD/lib:$RIG/build${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant:$USD/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}"
-export PXR_PLUGINPATH_NAME="$RIG/build/usd/rigExecSchema/resources:$RIG/build/usd/rigExecImaging/resources:$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant"
+# _env.sh has already set the loader path for THIS platform, the USD
+# site-packages for THIS build, and the schema plugin paths. Only the Muse
+# panel's own plugin container is added here -- it is registered by the
+# launchers and by this test, and deliberately not by the other helpers, which
+# must not load an extra panel into the app they are asserting against.
+export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/museAssistant"
 
 echo "== headless: agent core =="
 # The unit suite scripts each transport itself. Do not let the provider selected
@@ -35,7 +36,7 @@ env -u MUSE_PROVIDER -u MUSE_APPLE_URL -u MUSE_LMSTUDIO_URL \
 
 echo ""
 echo "== in usdview: panel against a live stage =="
-"$PY" "$USD/bin/testusdview" --testScript "$RIG/tests/testUsdviewMuse.py" "$STAGE"
+"$PY" "$TESTUSDVIEW" --testScript "$RIG/tests/testUsdviewMuse.py" "$STAGE"
 
 # Opt-in: the only test that proves asking in English changes the stage.
 # Makes real model calls through the configured provider, so it is not run by
@@ -43,7 +44,7 @@ echo "== in usdview: panel against a live stage =="
 if [ "${MUSE_LIVE:-0}" = "1" ]; then
   echo ""
   echo "== LIVE: real model, real stage (MUSE_LIVE=1) =="
-  "$PY" "$USD/bin/testusdview" --testScript "$RIG/tests/testUsdviewMuseLive.py" "$STAGE"
+  "$PY" "$TESTUSDVIEW" --testScript "$RIG/tests/testUsdviewMuseLive.py" "$STAGE"
 else
   echo ""
   echo "(set MUSE_LIVE=1 to also run the live end-to-end test against the real model)"

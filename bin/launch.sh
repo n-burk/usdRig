@@ -1,21 +1,22 @@
 #!/bin/bash
 # bin/launch.sh — launch usdview with Muse Assistant on a blank stage (or given stage)
 # Usage: bin/launch.sh [stage.usda] [--renderer Gl|Embree]
-#   no args → blank stage /tmp/blank.usda (World Xform)
-# Requires: usd-install at $USD, rig build at $RIG/build, venv at $VENV
+#   no args → blank stage $TMPDIR/blank.usda (World Xform)
+# Requires: usd-install at $USD, rig build at $RIG/build, a python that can
+# load pxr (see _env.sh for how USD, VENV and PY are discovered).
+#
+# POSIX only, and the one helper with no .bat twin. Windows reaches the same
+# panel through bin\launch_usdview.bat, which registers the Muse plugin
+# container exactly as this does; what it does not reproduce is the
+# provider-readiness banner below, which is a convenience and not a
+# requirement -- the panel reports an unreachable provider itself.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 . "$SCRIPT_DIR/_env.sh"
 
-if [ ! -x "$PY" ]; then
-  echo "ERROR: venv python not found at $PY (set VENV=...)" >&2
-  exit 1
-fi
-if [ ! -f "$USDVIEW" ]; then
-  echo "ERROR: usdview not found at $USD/bin/usdview" >&2
-  exit 1
-fi
+rigexec_require_python
+rigexec_require_usd "$USDVIEW"
 
 # Build if needed (no-op if up to date)
 if [ -f "$RIG/build/CMakeCache.txt" ]; then
@@ -26,14 +27,15 @@ fi
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   echo "Usage: bin/launch.sh [stage.usda] [--renderer Storm|GL|Embree]"
   echo "  no args      → examples/ArmShotAnim.usda (rig with Storm-visible controls; blank has no rig)"
-  echo "  --blank      → blank stage /tmp/blank.usda (World Xform, no rig, no controls to draw)"
+  echo "  --blank      → blank stage \$TMPDIR/blank.usda (World Xform, no rig, no controls to draw)"
   echo "  <file.usda>  → that stage"
   echo "  --help/-h    → this help"
   exit 0
 fi
 
-# Blank stage helper
-BLANK="/tmp/blank.usda"
+# Blank stage helper. TMPDIR first, like usdview.sh: /tmp is not writable
+# on every platform this script runs on, and TMPDIR is set on all of them.
+BLANK="${TMPDIR:-/tmp}/blank.usda"
 _create_blank() {
   cat > "$BLANK" <<'USD'
 #usda 1.0
@@ -70,14 +72,16 @@ else
   EXTRA=("$@")
 fi
 
-export PATH="$RIG/build:$USD/lib:$PATH"
-export DYLD_LIBRARY_PATH="$USD/lib:$RIG/build${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant:$USD/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}"
-export PXR_PLUGINPATH_NAME="$RIG/build/usd/rigExecSchema/resources:$RIG/build/usd/rigExecImaging/resources:$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant${PXR_PLUGINPATH_NAME:+:$PXR_PLUGINPATH_NAME}"
+# _env.sh has already set PATH, the loader path for THIS platform, the USD
+# site-packages for THIS build, and the schema plugin paths. Only the Muse
+# panel's own plugin container is added here: registering it is what separates
+# an interactive launcher from the headless runners, which must not load an
+# extra panel into the app they are asserting against.
+export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/museAssistant"
 
 echo "USD: $USD"
 echo "RIG: $RIG"
-echo "VENV: $VENV ($($PY --version))"
+echo "PY: $PY ($("$PY" --version 2>&1))"
 echo "Stage: $STAGE"
 echo "Muse Assistant: $RIG/plugin/museAssistant (tool loop + drawover + /goal)"
 echo "Launch: $PY $USDVIEW ${STAGE} ${EXTRA[*]:-}"

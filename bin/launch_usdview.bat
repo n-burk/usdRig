@@ -9,8 +9,10 @@ rem     examples\ArmShotAnim.usda for the rig that deforms on the timeline.
 rem   a bare second argument is the renderer (e.g. Embree); anything starting
 rem   with - is passed to usdview untouched.
 setlocal EnableDelayedExpansion
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+call "%~dp0_vcvars.bat"
 call "%~dp0_env.bat"
+call "%~dp0_require_python.bat"
+if errorlevel 1 exit /b 1
 
 rem Register the Muse assistant's plugin container. _env.bat puts museAssistant
 rem on PYTHONPATH for every helper, but registering it is deliberately left to
@@ -77,5 +79,5 @@ shift
 goto :collect
 
 :run
-python "%USDVIEW%" !RENDERER!!FLAGS! "%STAGE%"
+"%PY%" "%USDVIEW%" !RENDERER!!FLAGS! "%STAGE%"
 exit /b %errorlevel%
