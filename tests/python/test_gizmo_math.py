@@ -452,14 +452,45 @@ def TestRigFramesReasons():
 
 
 def TestWriter():
+    """
+    A drag collects; a release authors (design note: docs/superpowers/specs/
+    2026-09-10-hydra-preview-manipulation-design.md).
+
+    The two halves are asserted separately, because the whole point of the
+    split is that the first one touches nothing: while the mouse is down the
+    stage still holds the pre-drag value, and what the artist sees comes from
+    Hydra instead.
+    """
     stage, parent, child = _ChainStage()
     attr = child.GetAttribute("avars:tx")
     anim = gizmoMath.Writer(stage, Usd.TimeCode(1001.0),
                             gizmoMath.WRITE_ANIMATION)
+
+    # Collecting. Nothing is authored -- not a knot, not a sample, not a
+    # default -- and the value is held where the preview channel reads it.
     anim.Set(attr, 2.0)
+    _Check(not attr.HasSpline() and attr.GetNumTimeSamples() == 0
+           and stage.GetRootLayer().GetAttributeAtPath(attr.GetPath()) is None,
+           "a collected value authors nothing")
+    pending = anim.Pending()
+    _Check(list(pending.keys()) == [attr.GetPath()]
+           and _Close(pending[attr.GetPath()], 2.0),
+           "the collected value is pending")
+
+    # Several samples of one drag: the last one is what gets authored, and the
+    # ones before it never existed as far as the document is concerned.
+    anim.Set(attr, 2.5)
+    anim.Set(attr, 3.0)
+    _Check(len(anim.Pending()) == 1, "a channel is pending once, at its last "
+           "value")
+    _Check(anim.Warnings() == [], "nothing to warn about before authoring")
+
+    # Releasing.
+    authored = anim.CommitToStage()
+    _Check(authored == [attr.GetPath()], "the commit reports what it authored")
     _Check(attr.HasSpline() and len(attr.GetSpline().GetKnots()) == 1,
-           "animation mode writes a spline knot")
-    _Check(_Close(attr.Get(Usd.TimeCode(1001.0)), 2.0), "knot value")
+           "animation mode writes ONE spline knot for the whole drag")
+    _Check(_Close(attr.Get(Usd.TimeCode(1001.0)), 3.0), "knot value")
     # Maya's default new key (graphModel.AuthorKnot), so a gizmo drag and
     # a graph-editor insert produce the same knot.
     knot = attr.GetSpline().GetKnot(1001.0)
@@ -468,14 +499,33 @@ def TestWriter():
            "the authored knot has AutoEase tangents on both sides")
     _Check(knot.GetNextInterpolation() == Ts.InterpCurve,
            "and a curve segment after it")
-    anim.Set(attr, 3.0)
+
+    # A second drag over the same frame updates that knot rather than adding
+    # one beside it.
+    anim.Set(attr, 4.0)
+    anim.CommitToStage()
     _Check(len(attr.GetSpline().GetKnots()) == 1
-           and _Close(attr.Get(Usd.TimeCode(1001.0)), 3.0),
+           and _Close(attr.Get(Usd.TimeCode(1001.0)), 4.0),
            "re-writing the same frame updates the knot")
     _Check(anim.Warnings() == [], "no warnings in animation mode")
+
+    # An abandoned drag: collected, then dropped. Nothing reaches the stage,
+    # which is why an aborted gizmo drag has nothing to undo.
+    ty = child.GetAttribute("avars:ty")
+    anim.Set(ty, 7.0)
+    anim.Clear()
+    _Check(anim.Pending() == {}, "Clear drops the collected values")
+    _Check(anim.CommitToStage() == [] and ty.Get() != 7.0,
+           "a cleared drag authors nothing")
+
     default = gizmoMath.Writer(stage, Usd.TimeCode(1001.0),
                                gizmoMath.WRITE_DEFAULT)
     default.Set(attr, 9.0)
+    # The warning belongs to authoring, not to collecting: it says what the
+    # artist will see, and until the value is authored there is nothing to see.
+    _Check(default.Warnings() == [], "the outranked-default warning waits for "
+           "the commit")
+    default.CommitToStage()
     _Check(stage.GetRootLayer().GetAttributeAtPath(
         attr.GetPath()).default == 9.0, "default mode writes the default")
     _Check(len(default.Warnings()) == 1
@@ -484,17 +534,30 @@ def TestWriter():
            % default.Warnings())
     clean = child.GetAttribute("avars:ty")
     default.Set(clean, 1.0)
+    default.CommitToStage()
     _Check(not clean.HasSpline() and clean.Get() == 1.0, "plain default")
     # A vector attribute (xformOp) gets a time sample, not a spline.
     xf = UsdGeom.Xform.Define(stage, "/Asset/Box")
     op = xf.AddTranslateOp()
     anim.Set(op.GetAttr(), Gf.Vec3d(1, 2, 3))
+    anim.CommitToStage()
     _Check(op.GetAttr().GetNumTimeSamples() == 1, "vec3 -> time sample")
 
 
 def _Drag(target, fn):
+    """
+    One complete gesture: press, apply, release.
+
+    The release is what authors. A drag COLLECTS its values and hands them to
+    Hydra (gizmoMath.Writer), so a test that stopped after fn() would be
+    asserting against the pre-drag stage -- the values are real from the
+    artist's point of view all through the drag, and real on the stage from
+    here.
+    """
     target.BeginDrag()
     fn()
+    target.writer.CommitToStage()
+    target.Refresh()
 
 
 def TestRigPoseTarget():
@@ -1650,20 +1713,26 @@ def TestXformLocalMatrix():
         zero.GetLocalTransformation(time), 1e-6), "zero pivot")
 
 
-def TestOneNoticePerApply():
+def TestOneNoticePerDrag():
     """
-    One Apply* must reach the stage as ONE ObjectsChanged once the ops
-    it writes exist (design spec 3.3 and 4.2).
+    A WHOLE DRAG must reach the stage as one ObjectsChanged, at its release
+    (design note: docs/superpowers/specs/
+    2026-09-10-hydra-preview-manipulation-design.md).
 
-    The RigExec evaluator republishes synchronously on the notice, so an
-    unbatched Preserve Children drag cost 1 + 3N recompositions per
-    mouse-move for N children, all discarded but the last -- invisible
-    in a test that only checks the values, and very visible in a scene.
+    This used to be one notice per Apply*, which was the best available answer
+    while every mouse sample authored: the RigExec evaluator republishes
+    synchronously on the notice, so an unbatched Preserve Children drag cost
+    1 + 3N recompositions per sample for N children, all discarded but the
+    last. Batching each sample into one notice took that to one per sample.
 
-    The exception is an event that has to CREATE an op: that authoring
-    cannot happen inside the block (see TestReferencedPrimDrag), so it
-    costs one extra notice. The last group here pins that to once per
-    drag rather than once per event, which is the whole trade.
+    Collecting takes it to ZERO per sample. The artist still sees every sample,
+    through the preview channel into Hydra, and the document hears about the
+    drag once -- when it is over and there is something to hear about.
+
+    The exception is an event that has to CREATE an op. That authoring cannot
+    be deferred: the value has nowhere to live until the op exists, and the
+    preview is keyed by attribute path. The last group pins that cost to once
+    per drag rather than once per sample, which is the whole trade.
     """
     stage, parent, child = _ChainStage()
     time = Usd.TimeCode.Default()
@@ -1673,17 +1742,34 @@ def TestOneNoticePerApply():
     _Check(target is not None, reason)
     target.BeginDrag()
     counter = _NoticeCounter(stage)
+    # Three samples of one gesture, as a real drag arrives.
     target.ApplyTranslate(Gf.Vec3d(0.25, -0.5, 0.75))
+    target.ApplyTranslate(Gf.Vec3d(0.50, -0.5, 0.75))
+    target.ApplyTranslate(Gf.Vec3d(0.75, -0.5, 0.75))
+    _Check(counter.count == 0,
+           "a rig drag in progress must not touch the stage at all, got %d "
+           "notice(s)" % counter.count)
+    # The value the last sample collected, in the channel frame the drag
+    # writes -- taken from the Writer rather than computed here, because what
+    # is being asserted is that THIS is what reaches the stage, not what the
+    # world delta maps to.
+    txPath = child.GetPath().AppendProperty("avars:tx")
+    lastSample = writer.Pending()[txPath]
+    writer.CommitToStage()
     _Check(counter.count == 1,
-           "a rig ApplyTranslate writes three avars in one notice, got %d"
+           "the release authors three avars in ONE notice, got %d"
            % counter.count)
     counter.Revoke()
+    # And the value that landed is the last sample's, not the first's.
+    _Check(_Close(child.GetAttribute("avars:tx").Get(time), lastSample, 1e-9),
+           "the committed value is the one the drag ended on")
+    _Check(writer.Pending() == {},
+           "and the commit emptied the collection")
 
-    # An xform pose target with Preserve Children on and two children:
-    # the op write plus 3 channels on each child, still one notice.
-    # Every prim here carries a full T/R/S stack already, so nothing in
-    # this group has an op to create and the count is the steady-state
-    # cost of a mouse-move mid-drag.
+    # An xform pose target with Preserve Children on and two children: the op
+    # writes plus 3 channels on each child, still nothing until the release.
+    # Every prim here carries a full T/R/S stack already, so nothing in this
+    # group has an op to create.
     xstage = Usd.Stage.CreateInMemory()
     group = UsdGeom.Xform.Define(xstage, "/P")
     groupApi = UsdGeom.XformCommonAPI(group)
@@ -1709,39 +1795,36 @@ def TestOneNoticePerApply():
     xtarget.AttributePaths()
     xtarget.BeginDrag()
     counter = _NoticeCounter(xstage)
+    xtarget.ApplyTranslate(Gf.Vec3d(0, 3, 0))
     xtarget.ApplyTranslate(Gf.Vec3d(0, 5, 0))
+    _Check(counter.count == 0,
+           "an xform drag compensating two children must not touch the stage "
+           "either, got %d notice(s)" % counter.count)
+    xwriter.CommitToStage()
     _Check(counter.count == 1,
-           "an xform ApplyTranslate compensating two children must fire "
-           "exactly one ObjectsChanged, got %d" % counter.count)
+           "the release fires exactly one ObjectsChanged, got %d"
+           % counter.count)
     counter.Revoke()
-    # ... and the batching must not have cost the compensation itself:
-    # the children have to be exactly where they were.
+    # ... and deferring must not have cost the compensation itself: the
+    # children have to be exactly where they were.
     cache.Clear()
     for kid, was in zip(kids, before):
         _Check(_MatClose(cache.GetLocalToWorldTransform(kid.GetPrim()),
                          was, 1e-5),
-               "%s held its world transform through the batched write"
+               "%s held its world transform through the deferred write"
                % kid.GetPath())
     _Check(_Close(UsdGeom.XformCommonAPI(group).GetXformVectors(time)[0][1],
                   5.0, 1e-6), "and the parent actually moved")
-    # A second move is one notice too, now that the ops already exist.
-    xtarget.BeginDrag()
-    counter = _NoticeCounter(xstage)
-    xtarget.ApplyRotate(Gf.Vec3d(0, 0, 1), 15.0)
-    _Check(counter.count == 1,
-           "a second Apply* is one notice as well, got %d" % counter.count)
-    counter.Revoke()
 
     # A prim with NO ops pays for creating them, and pays ONCE.
     #
-    # Op creation cannot go in the block (TestReferencedPrimDrag), and
-    # it is not cheap: measured on this USD build, CreateXformOps for a
-    # single missing op costs three change rounds -- the op attribute,
-    # then xformOpOrder, then xformOpOrder's value -- and nothing at all
-    # when the ops already exist. So the first event of a drag on a bare
-    # prim is 3 + 1 and every event after it is 1. What matters is that
-    # the cost is once per drag, not once per mouse-move; the assertion
-    # is written to say exactly that rather than to pin a magic number.
+    # Op creation is authored structure and cannot be deferred: measured on
+    # this USD build, CreateXformOps for a single missing op costs three change
+    # rounds -- the op attribute, then xformOpOrder, then xformOpOrder's value
+    # -- and nothing at all when the ops already exist. So the first sample of
+    # a drag on a bare prim pays that and every sample after it pays nothing.
+    # The assertion is written to say exactly that rather than to pin a magic
+    # number.
     bare = UsdGeom.Xform.Define(xstage, "/Bare")
     bareTarget, reason = gizmoMath.MakeTarget(
         xstage, bare.GetPrim(), gizmoMath.CHANNELS_POSE, xwriter)
@@ -1755,14 +1838,18 @@ def TestOneNoticePerApply():
     second = counter.count
     counter.count = 0
     bareTarget.ApplyTranslate(Gf.Vec3d(3, 0, 0))
-    _Check(second == 1 and counter.count == 1,
-           "once the op exists every further event is one notice: "
+    _Check(second == 0 and counter.count == 0,
+           "once the op exists every further sample is silent: "
            "first=%d, second=%d, third=%d" % (first, second, counter.count))
-    _Check(first > second,
-           "and the creation cost fell on the first event: %d" % first)
+    _Check(first > 0,
+           "and the creation cost fell on the first sample alone: %d" % first)
+    counter.count = 0
+    xwriter.CommitToStage()
+    _Check(counter.count == 1, "the release is one notice, got %d"
+           % counter.count)
     counter.Revoke()
     _Check(_Close(UsdGeom.XformCommonAPI(bare).GetXformVectors(time)[0][0],
-                  3.0, 1e-6), "and every event landed")
+                  3.0, 1e-6), "and the last sample is what landed")
 
 
 def TestResetXformStack():
@@ -1810,6 +1897,7 @@ def TestResetXformStack():
     target.AttributePaths()
     target.BeginDrag()
     target.ApplyTranslate(Gf.Vec3d(0, 5, 0))
+    writer.CommitToStage()   # a drag collects; the release authors
     _Check(_Close(api.GetXformVectors(time)[0][1], 7.0, 1e-6),
            "the world delta reached the channel unscaled: %s"
            % (api.GetXformVectors(time)[0],))
@@ -1881,6 +1969,11 @@ def TestReferencedPrimDrag():
     target.AttributePaths()
     target.BeginDrag()
     target.ApplyTranslate(Gf.Vec3d(0, 5, 0))
+    # The release: a drag collects and authors here, so the stage reads below
+    # are reads of a finished gesture. What this test is about happens earlier
+    # regardless -- creating an op is authored structure and still happens
+    # during the drag, which is exactly why it cannot be inside a change block.
+    writer.CommitToStage()
     cache.Clear()
     _Check(_Close(UsdGeom.XformCommonAPI(group).GetXformVectors(time)[0][1],
                   5.0, 1e-6),
@@ -1895,6 +1988,7 @@ def TestReferencedPrimDrag():
     # A second event on the same prim, with the ops now in place.
     target.BeginDrag()
     target.ApplyTranslate(Gf.Vec3d(0, 0, 3))
+    writer.CommitToStage()
     cache.Clear()
     _Check(_MatClose(cache.GetLocalToWorldTransform(kid), before, 1e-5),
            "and again on the next event")
@@ -2080,7 +2174,7 @@ def main():
         ("snap + planar scale", TestSnapAndPlanarScale),
         ("xformOp noise", TestXformOpNoise),
         ("xform local matrix", TestXformLocalMatrix),
-        ("one notice per apply", TestOneNoticePerApply),
+        ("one notice per drag", TestOneNoticePerDrag),
         ("referenced prim drag", TestReferencedPrimDrag),
         ("reset xform stack", TestResetXformStack),
         ("notice filter", TestNoticeFilter),

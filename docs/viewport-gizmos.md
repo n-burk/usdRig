@@ -61,12 +61,41 @@ it and the value you are editing moves with it, whatever the character
 happens to be doing at the current frame. Expect it to sit away from the
 posed geometry whenever the rig is animated off its rest pose.
 
+## When the value lands
+
+While the mouse is down, nowhere. A drag in progress is not an edit to the
+document — it is a question the artist has not finished asking — so the
+manipulator feeds its uncommitted values straight to Hydra and the stage still
+holds the value it had before the drag started. Letting go authors the result,
+once.
+
+That is visible, and it is meant to be. The [graph editor](graph-editor.md),
+the [Layer Opinions](../plugin/rigExecUsdview/layerOpinionsUI.py) panel and
+anything else watching the stage show the pre-drag value for the length of the
+gesture and the committed one the moment it ends. The viewport, the
+manipulator's own handles, and the guides all follow every mouse sample, which
+is the only place the in-between values were ever wanted.
+
+It also means an abandoned drag — `Esc`, or releasing outside — leaves the
+layer exactly as it found it, because there is nothing to take back.
+
+A rig control's preview goes through the evaluator: the dragged avars are
+supplied as evaluation-time overrides
+(`RigExecRigEvaluator::SetInteractiveOverrides`), the rig re-runs, and the
+generation Hydra draws is the previewed one. A plain `Xformable` has no rig to
+re-run, so its preview is a transform override in the Hydra chain
+(`RigExecXformOverrideSceneIndex`), which carries its children the way an
+authored edit would. Both are in memory only; the design note is
+[docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md](superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
+
 ## Where the value lands
 
 **Write: Animation** authors a spline knot at usdview's current frame for
 a double attribute and a time sample for anything else, by the same rule
 the volume weight panel uses (`volumeWeightUI.SetAtTime`). **Write:
-Default** authors the attribute's default instead.
+Default** authors the attribute's default instead. Either way it is authored
+on release, so a drag across fifty mouse samples leaves one knot behind rather
+than fifty rewrites of one.
 
 The knot Animation mode authors is Maya's default new key: Auto tangents
 on both sides and a curve segment after it. It comes from the same
@@ -96,7 +125,9 @@ default value, not a rig default pose.
 ## Undo
 
 Every drag is one undo step, on the same `rigExecUndo` stack the other
-panels can adopt later. `Ctrl+Z` undoes; `Ctrl+Shift+Z`, `Shift+Z`
+panels can adopt later. It was already one step before the manipulator
+deferred its authoring, and it stays one now for a simpler reason: the drag
+authors once, so there is one edit to record. `Ctrl+Z` undoes; `Ctrl+Shift+Z`, `Shift+Z`
 (Maya's redo) and `Ctrl+Y` all redo. They are application shortcuts, so
 they work wherever focus is in the window. The toolbar's Undo and Redo
 buttons name the step they would reverse on their tooltips, and both go

@@ -23,6 +23,7 @@
 # parent prim places it (libs/rigExec/rigEvaluator.h:79-84).
 #
 import math
+from collections import OrderedDict
 
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom
 
@@ -356,11 +357,49 @@ def NoticeAffectsTarget(resyncedPaths, changedPaths, targetPath,
     return False
 
 
+# Uncommitted manipulation values, by attribute path: {Sdf.Path: value}.
+#
+# A drag in progress is not authored (see Writer and the design note at
+# docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md), so
+# the stage still holds the pre-drag value for as long as the mouse is down.
+# Every read below consults this first, for one reason: the gizmo has to draw
+# its handles where it is dragging them. Hydra is given the same values through
+# the evaluator, and both sides reading the same place is what keeps the
+# manipulator on the geometry it is moving.
+#
+# Module-level, like _publishedControlFrameReader above it, because the frame
+# maths is a tree of free functions that no drag object is threaded through.
+_previewValues = {}
+
+
+def SetPreviewValues(values):
+    """Install the uncommitted values; {} during normal operation."""
+    global _previewValues
+    _previewValues = dict(values) if values else {}
+
+
+def PreviewValues():
+    return dict(_previewValues)
+
+
+def _Previewed(attr):
+    """The uncommitted value for `attr`, or None."""
+    if not _previewValues or not attr:
+        return None
+    return _previewValues.get(attr.GetPath())
+
+
 def ScalarAvar(prim, name, time, fallback):
     attr = prim.GetAttribute(name)
     visiting = set()
     while attr and attr.GetPath() not in visiting:
         visiting.add(attr.GetPath())
+        # A previewed value stands in for the attribute ITSELF, so the
+        # connection is not followed past it: a dragged channel is the value,
+        # and its upstream author is what it is standing in for.
+        previewed = _Previewed(attr)
+        if previewed is not None:
+            return float(previewed)
         connections = attr.GetConnections()
         if len(connections) != 1:
             break
@@ -369,6 +408,9 @@ def ScalarAvar(prim, name, time, fallback):
             break
         attr = source
     if attr:
+        previewed = _Previewed(attr)
+        if previewed is not None:
+            return float(previewed)
         value = attr.Get(time)
         if value is not None:
             return float(value)
@@ -378,7 +420,9 @@ def ScalarAvar(prim, name, time, fallback):
 def _MatrixAttr(prim, name, time):
     attr = prim.GetAttribute(name)
     if attr:
-        value = attr.Get(time)
+        value = _Previewed(attr)
+        if value is None:
+            value = attr.Get(time)
         if value is not None:
             return Gf.Matrix4d(value)
     return Gf.Matrix4d(1.0)
@@ -827,11 +871,28 @@ def SetAnimated(attr, value, time):
 
 class Writer(object):
     """
-    Where a gizmo value lands. WRITE_ANIMATION authors at `time` through
-    SetAnimated; WRITE_DEFAULT authors the default and records a warning
-    for every attribute whose spline or time samples will outrank it
-    (the default is then invisible in the viewport, and the toolbar says
-    so rather than letting the drag look broken).
+    Where a gizmo value lands, and WHEN.
+
+    A drag COLLECTS; a release AUTHORS. While a manipulation is in progress
+    Set() records the value and nothing reaches the stage -- the viewport is
+    kept correct by handing the same values to Hydra instead (see the design
+    note at docs/superpowers/specs/
+    2026-09-10-hydra-preview-manipulation-design.md) -- and CommitToStage()
+    authors all of them in one pass when the artist lets go.
+
+    That is the only write path. It used to author on every mouse sample,
+    which invalidated exec through the authoring stage, rewrote a layer spec,
+    and notified every observer of the stage, all for a value the artist had
+    not committed to -- and in WRITE_ANIMATION mode it authored a spline knot
+    per sample to arrive at one knot.
+
+    WRITE_ANIMATION authors at `time` through SetAnimated; WRITE_DEFAULT
+    authors the default and records a warning for every attribute whose
+    spline or time samples will outrank it (the default is then invisible in
+    the viewport, and the toolbar says so rather than letting the drag look
+    broken). Those warnings now appear when the value is authored, which is
+    the same moment the artist finds out, because it is the same moment the
+    value becomes real.
     """
 
     def __init__(self, stage, time, mode):
@@ -839,8 +900,67 @@ class Writer(object):
         self.time = time
         self.mode = mode
         self._warnings = []
+        # {Sdf.Path: value} in the order they were first set. Ordered so
+        # CommitToStage authors deterministically, which keeps the undo
+        # recorder's before/after diff reproducible.
+        self._pending = OrderedDict()
 
     def Set(self, attr, value):
+        """
+        Record `value` for `attr`. Authors nothing; see CommitToStage.
+
+        The value also goes straight into the module's preview map, which is
+        what every read above consults first. That is not a convenience for
+        the viewport -- it is a correctness requirement. A Preserve Children
+        pivot drag writes the parent and then computes the children's
+        compensation FROM the parent's new state, and a rotate reads the spin
+        it just set; while those writes were authored immediately a plain stage
+        read saw them, and now the uncommitted value has to be visible in the
+        same way or the second half of such a drag computes from the first
+        half's pre-drag values.
+        """
+        if not attr:
+            return
+        path = attr.GetPath()
+        self._pending[path] = value
+        _previewValues[path] = value
+
+    def Pending(self):
+        """{Sdf.Path: value} collected so far, for the preview channel."""
+        return OrderedDict(self._pending)
+
+    def Clear(self):
+        """Drop the collected values without authoring any of them."""
+        for path in self._pending:
+            _previewValues.pop(path, None)
+        self._pending.clear()
+
+    def CommitToStage(self):
+        """
+        Author every collected value, once, inside one change block.
+
+        Returns the paths authored. One SdfChangeBlock for the whole commit
+        rather than one per attribute: a release is a single edit, and the
+        observers watching the stage should see it as one.
+        """
+        if not self._pending:
+            return []
+        with Sdf.ChangeBlock():
+            for path, value in self._pending.items():
+                attr = self.stage.GetAttributeAtPath(path)
+                if attr:
+                    self._Author(attr, value)
+        authored = list(self._pending.keys())
+        # The stage holds these now, so the preview has nothing left to stand
+        # in for. Dropped here rather than left for the caller: a value that
+        # stayed in the preview map would shadow the authored one, and the next
+        # reader could not tell which it was looking at.
+        for path in authored:
+            _previewValues.pop(path, None)
+        self._pending.clear()
+        return authored
+
+    def _Author(self, attr, value):
         if self.mode == WRITE_DEFAULT:
             if attr.HasSpline() or attr.GetNumTimeSamples() > 0:
                 message = ("%s: the default is outranked by its %s" % (
@@ -1277,9 +1397,11 @@ class _RigTarget(Target):
         return root.GetPath() if root else None
 
     def _WriteVector(self, names, values):
-        with Sdf.ChangeBlock():
-            for name, value in zip(names, values):
-                self._Write(name, value)
+        # No change block: these collect rather than author (Writer.Set), so
+        # there is no edit to batch. The batching moved to where the editing
+        # did -- Writer.CommitToStage wraps the whole release in one block.
+        for name, value in zip(names, values):
+            self._Write(name, value)
 
 
 class RigPoseTarget(_RigTarget):
@@ -1413,20 +1535,19 @@ class RigPivotTarget(_RigTarget):
         if not preserved:
             return
         inverse = RestSpace(self.prim, self.time).GetInverse()
-        with Sdf.ChangeBlock():
-            for child, worldRest in preserved:
-                scalars = (worldRest * inverse
-                           * _MatrixAttr(child, REST_SPACE,
-                                         self.time).GetInverse())
-                scalars = scalars.GetOrthonormalized(False)
-                hint = [ScalarAvar(child, n, self.time, 0.0)
-                        for n in REST_R]
-                for name, value in zip(REST_T,
-                                       scalars.ExtractTranslation()):
-                    self.writer.Set(child.GetAttribute(name), float(value))
-                for name, value in zip(
-                        REST_R, DecomposeEuler(scalars, "XYZ", hint=hint)):
-                    self.writer.Set(child.GetAttribute(name), float(value))
+        # No change block: collecting authors nothing (Writer.Set), so there
+        # is no edit to batch. The release batches, in CommitToStage.
+        for child, worldRest in preserved:
+            scalars = (worldRest * inverse
+                       * _MatrixAttr(child, REST_SPACE,
+                                     self.time).GetInverse())
+            scalars = scalars.GetOrthonormalized(False)
+            hint = [ScalarAvar(child, n, self.time, 0.0) for n in REST_R]
+            for name, value in zip(REST_T, scalars.ExtractTranslation()):
+                self.writer.Set(child.GetAttribute(name), float(value))
+            for name, value in zip(
+                    REST_R, DecomposeEuler(scalars, "XYZ", hint=hint)):
+                self.writer.Set(child.GetAttribute(name), float(value))
 
     def Advisory(self):
         # A bone length can no longer be authored -- rigExec:upperLength /
@@ -1580,6 +1701,44 @@ class _XformTarget(Target):
         else:
             self.parentWorld = cache.GetParentToWorldTransform(self.prim)
         self.vectors = self.api.GetXformVectors(self.time)
+        self.vectors = self._PreviewedVectors(self.vectors)
+
+    def _PreviewedVectors(self, vectors):
+        """
+        `vectors` with any uncommitted op value substituted in.
+
+        GetXformVectors reads the stage through XformCommonAPI, which a
+        preview cannot reach -- nothing is authored for it to read -- so the
+        substitution happens here, on the same four slots the API reports.
+        Without it the handles would snap back to the pre-drag transform on
+        every mouse sample while the geometry moved, which is the same defect
+        the preview-aware reads above answer for a rig control.
+
+        The ops are matched the way XformCommonAPI itself interprets them: a
+        plain translate is the translation, a translate named `pivot` is the
+        pivot, any rotate is the rotation, and scale is the scale.
+        """
+        if not _previewValues:
+            return vectors
+        t, r, sc, p, order = vectors
+        for op in UsdGeom.Xformable(self.prim).GetOrderedXformOps():
+            value = _Previewed(op.GetAttr())
+            if value is None:
+                continue
+            opType = op.GetOpType()
+            name = op.GetOpName()
+            if opType == UsdGeom.XformOp.TypeTranslate:
+                # HasSuffix is C++-only; the op NAME carries the suffix and is
+                # what XformCommonAPI keys the pivot off.
+                if name.endswith(":pivot"):
+                    p = Gf.Vec3f(value)
+                else:
+                    t = Gf.Vec3d(value)
+            elif opType == UsdGeom.XformOp.TypeScale:
+                sc = Gf.Vec3f(value)
+            elif name.startswith("xformOp:rotate"):
+                r = Gf.Vec3f(value)
+        return (t, r, sc, p, order)
 
     def BeginDrag(self):
         self.Refresh()
@@ -1743,13 +1902,14 @@ class _XformTarget(Target):
         childOps = [entry.api.CreateXformOps(
             entry.order, api.OpTranslate, api.OpRotate, api.OpScale)
             for entry, _, _, _ in children]
-        with Sdf.ChangeBlock():
-            self.writer.Set(target, value)
-            for ops, (_, translation, angles, scale) in zip(childOps,
-                                                            children):
-                self.writer.Set(ops[0].GetAttr(), translation)
-                self.writer.Set(ops[2].GetAttr(), angles)
-                self.writer.Set(ops[3].GetAttr(), scale)
+        # No change block, for the same reason: the writes below collect, and
+        # CommitToStage batches the release. Op CREATION above still authors,
+        # and still has to stay outside any block -- see the class comment.
+        self.writer.Set(target, value)
+        for ops, (_, translation, angles, scale) in zip(childOps, children):
+            self.writer.Set(ops[0].GetAttr(), translation)
+            self.writer.Set(ops[2].GetAttr(), angles)
+            self.writer.Set(ops[3].GetAttr(), scale)
 
     def AttributePaths(self):
         prefix = self.prim.GetPath()

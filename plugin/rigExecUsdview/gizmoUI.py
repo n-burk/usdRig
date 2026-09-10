@@ -86,6 +86,7 @@ try:
     import gizmoScreen
     import gizmoSettings
     import gizmoSnap
+    import gizmoPreview
     import rigExecUndo
 except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -94,6 +95,7 @@ except ImportError:                    # loader that did not add our dir
     import gizmoScreen
     import gizmoSettings
     import gizmoSnap
+    import gizmoPreview
     import rigExecUndo
 
 
@@ -3109,6 +3111,12 @@ class GizmoController(QtCore.QObject):
                 holdSnap=self._holdSnap, holdGrid=self._holdGrid,
                 ctrl=drag.ctrl, snapMode=mode,
                 gridSize=self.settings.gridSize)
+            # The sample goes to Hydra, not to the stage. BEFORE Refresh():
+            # Refresh re-reads the target's frames, and what it has to read is
+            # the previewed values, or the handles would be drawn at the
+            # pre-drag pose while the geometry moved (gizmoPreview.Push sets
+            # both in the right order).
+            gizmoPreview.Push(drag.target.writer.Pending())
             drag.target.Refresh()
         except Exception as error:
             Tf.Warn("rigExecUsdview: gizmo drag failed: %s" % error)
@@ -3142,11 +3150,20 @@ class GizmoController(QtCore.QObject):
         label = "%s %s" % (_EDIT_VERBS.get(drag.tool, drag.tool),
                            drag.target.label)
         try:
+            # Author BEFORE the recorder commits: Begin() captured the layer as
+            # it was, Commit() captures it as it now is, and the difference
+            # between the two IS the undo entry -- so the values have to be on
+            # the stage by now. The whole drag authors here, once.
+            drag.target.writer.CommitToStage()
             edit = drag.recorder.Commit(label)
         except Exception as error:
             Tf.Warn("rigExecUsdview: could not record the gizmo edit: %s"
                     % error)
             edit = None
+        # AFTER authoring: the generation this republishes is the committed
+        # one, so the artist sees the value they released on rather than a
+        # frame of the pre-drag rig between the two.
+        gizmoPreview.End()
         if edit is not None:
             self.undoStack.Push(edit)
         self._warnings = drag.target.writer.Warnings()
@@ -3158,8 +3175,18 @@ class GizmoController(QtCore.QObject):
         drag = self._drag
         self._drag = None
         self._ClearHolds()
+        # First, and unconditionally: an abandoned preview would keep drawing a
+        # pose nobody is holding any more, and this is the one path that can be
+        # reached with the stage already gone.
+        gizmoPreview.End()
         if drag is None:
             return
+        if drag.target is not None and drag.target.writer is not None:
+            # Nothing was authored, so there is nothing to take back; dropping
+            # the collected values is the whole of it. recorder.Abort() below
+            # still runs, because creating an xformOp IS authored structure
+            # even when no value ever was.
+            drag.target.writer.Clear()
         if not drag.target.prim.IsValid():
             # The stage went away under the drag (a replacement, or
             # usdview quitting). There is no layer left to restore into

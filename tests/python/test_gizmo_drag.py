@@ -695,6 +695,9 @@ def TestGridWorldNotChannels():
                          camera, VIEWPORT)
     settings = _Settings(gs.TOOL_TRANSLATE)
     gd.ApplyDrag(state, current, settings, holdGrid=True, gridSize=1.0)
+    # A drag collects; a release authors (gizmoMath.Writer). The stage is read
+    # below, so this is the release.
+    writer.CommitToStage()
     cache = UsdGeom.XformCache(time)
     world = cache.GetLocalToWorldTransform(
         child.GetPrim()).ExtractTranslation()

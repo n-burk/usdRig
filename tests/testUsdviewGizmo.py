@@ -226,6 +226,22 @@ def _World(stage, path, frame):
         stage.GetPrimAtPath(path)).ExtractTranslation()
 
 
+def _Landed(controller, stage, path, frame):
+    """
+    Where the dragged prim is NOW: the manipulator while a drag is live, the
+    stage once it has been released.
+
+    A drag in progress authors nothing (see _TestPreviewThenCommit), so
+    mid-gesture the stage still holds the pre-drag transform while the
+    manipulator -- drawn from the previewed values -- is where the artist sees
+    the prim. Both branches answer the same question about the same prim, and
+    asking it of the stage mid-drag would answer about the prim's past.
+    """
+    if controller.IsDragging() and controller.Target() is not None:
+        return controller.Target().GizmoMatrix().ExtractTranslation()
+    return _World(stage, path, frame)
+
+
 def _ProjectLogical(controller, world):
     """
     A world point as LOGICAL pixels, which is what _Driver.Send takes.
@@ -248,6 +264,99 @@ def _ProjectLogical(controller, world):
 def _Changed(before, after, tolerance=1e-6):
     return [i for i in range(len(before))
             if abs((before[i] or 0.0) - (after[i] or 0.0)) > tolerance]
+
+
+def _TestPreviewThenCommit(d, controller, stage, session, frame):
+    """
+    A drag in progress does not touch the document; the release does, once
+    (docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
+
+    The assertions the headless tests cannot make: that a real mouse drag
+    through the real application leaves the edit target layer alone while the
+    manipulator and the viewport both follow it, and that letting go is what
+    writes -- which is the difference between authoring an unfinished gesture
+    hundreds of times and authoring the result of it once.
+    """
+    import gizmoMath
+    import gizmoUI
+
+    prim = d.Select(CONTROL)
+    controller.SetTool(gizmoUI.TOOL_TRANSLATE)
+    d.Pump()
+    _Check(controller.Target() is not None, controller.Reason())
+    specPath = Sdf.Path(CONTROL + ".avars:tx")
+    tx = prim.GetAttribute("avars:tx")
+
+    # Start from a known, committed state so "nothing was authored" below means
+    # nothing at all rather than nothing new.
+    session.RemovePropertyIfHasOnlyRequiredFields(
+        session.GetAttributeAtPath(specPath)) \
+        if session.GetAttributeAtPath(specPath) else None
+    before = tx.Get(frame)
+    undosBefore = controller.undoStack.UndoCount() \
+        if hasattr(controller.undoStack, "UndoCount") else None
+
+    a, b = d.AxisPoints("x")
+    start, end = _Lerp(a, b, 0.5), _Lerp(a, b, 0.85)
+    d.Press(start, button=d.QtCore.Qt.LeftButton)
+    _Check(controller.IsDragging(), "the press started a drag")
+    gizmoBefore = controller.Target().GizmoMatrix().ExtractTranslation()
+
+    # --- mid-drag ---------------------------------------------------------
+    for i in (1, 2, 3):
+        d.Move(_Lerp(start, end, i / 3.0),
+               button=d.QtCore.Qt.NoButton,
+               buttons=d.QtCore.Qt.LeftButton)
+    _Check(session.GetAttributeAtPath(specPath) is None,
+           "mid-drag the edit target layer has NO spec for the channel being "
+           "dragged; found %s" % session.GetAttributeAtPath(specPath))
+    _Check(abs(tx.Get(frame) - before) < 1e-12,
+           "and the composed value has not moved either: %s -> %s"
+           % (before, tx.Get(frame)))
+    # The value IS real everywhere the artist can see it: the preview channel
+    # holds it, and the manipulator is drawn from it.
+    pending = gizmoMath.PreviewValues()
+    _Check(specPath in pending,
+           "the dragged channel is in the preview: %s"
+           % sorted(str(p) for p in pending))
+    gizmoMid = controller.Target().GizmoMatrix().ExtractTranslation()
+    _Check((gizmoMid - gizmoBefore).GetLength() > 1e-6,
+           "the manipulator followed the uncommitted drag: %s -> %s"
+           % (gizmoBefore, gizmoMid))
+
+    # --- release ----------------------------------------------------------
+    d.Release(end, button=d.QtCore.Qt.LeftButton)
+    _Check(not controller.IsDragging(), "the release ended the drag")
+    spec = session.GetAttributeAtPath(specPath)
+    _Check(spec is not None,
+           "the release authored the channel into the edit target layer")
+    _Check(abs(tx.Get(frame) - before) > 1e-6,
+           "and the value moved: %s -> %s" % (before, tx.Get(frame)))
+    _Check(gizmoMath.PreviewValues() == {},
+           "the preview is over; the stage is the authority again")
+    _Check(controller.undoStack.CanUndo(),
+           "the whole drag is one undo entry")
+    after = tx.Get(frame)
+
+    # --- an aborted drag authors nothing ----------------------------------
+    d.Press(start, button=d.QtCore.Qt.LeftButton)
+    for i in (1, 2):
+        d.Move(_Lerp(start, end, i / 2.0),
+               button=d.QtCore.Qt.NoButton,
+               buttons=d.QtCore.Qt.LeftButton)
+    d.Key(d.QtCore.Qt.Key_Escape)
+    _Check(not controller.IsDragging(), "Escape ended the drag")
+    _Check(gizmoMath.PreviewValues() == {},
+           "an aborted drag stops previewing")
+    _Check(abs(tx.Get(frame) - after) < 1e-9,
+           "and leaves the committed value exactly as it was: %s vs %s"
+           % (tx.Get(frame), after))
+
+    # Undo the committed drag, so the rest of the suite starts where it did.
+    controller.Undo()
+    d.Pump()
+    _Check(abs(tx.Get(frame) - before) < 1e-9,
+           "undo restored the pre-drag value: %s" % tx.Get(frame))
 
 
 def testUsdviewInputFunction(appController):
@@ -675,11 +784,23 @@ def testUsdviewInputFunction(appController):
     v0 = tx.Get(frame)
     d.Press(_Lerp(a, b, 0.5))
     d.Move(_Lerp(a, b, 0.85))
-    _Check(abs(tx.Get(frame) - v0) > 1e-6, "the drag is live and has moved")
+    # "Has moved" is a statement about the PREVIEW now, not about the stage: a
+    # drag in progress authors nothing (see _TestPreviewThenCommit), so the
+    # value the artist is looking at lives in the preview channel until they
+    # let go. The stage value moving here would mean the preview had leaked.
+    import gizmoMath
+    _Check(controller.IsDragging(), "the drag is live")
+    _Check(Sdf.Path(CONTROL + ".avars:tx") in gizmoMath.PreviewValues(),
+           "and has moved, in the preview: %s"
+           % sorted(str(p) for p in gizmoMath.PreviewValues()))
+    _Check(abs(tx.Get(frame) - v0) < 1e-12,
+           "with the stage still holding the committed value")
     d.Key(d.QtCore.Qt.Key_Escape)
     _Check(not controller.IsDragging(), "Escape ended the drag")
     _Check(abs(tx.Get(frame) - v0) < 1e-9,
-           "Escape restored avars:tx to %s: %s" % (v0, tx.Get(frame)))
+           "Escape left avars:tx at %s: %s" % (v0, tx.Get(frame)))
+    _Check(gizmoMath.PreviewValues() == {},
+           "and stopped previewing")
     _Check(not controller.undoStack.CanUndo(),
            "an aborted drag pushed nothing onto the undo stack")
 
@@ -978,7 +1099,7 @@ def testUsdviewInputFunction(appController):
     _Check(candidate is not None,
            "a point candidate resolves at the (8, 9.5, 3) pixel")
     seenPrims.append(str(candidate.primPath))
-    landed = _World(stage, "/Shot/SnapProbe", frame)
+    landed = _Landed(controller, stage, "/Shot/SnapProbe", frame)
     _Check((landed - Gf.Vec3d(8, 9.5, 3)).GetLength() < 1e-4,
            "point snap put the pivot on the (8, 9.5, 3) corner: %s"
            % (landed,))
@@ -1010,7 +1131,7 @@ def testUsdviewInputFunction(appController):
     _Check(candidate is not None,
            "an edge candidate resolves at the bottom-edge pixel")
     seenPrims.append(str(candidate.primPath))
-    landed = _World(stage, "/Shot/SnapProbe", frame)
+    landed = _Landed(controller, stage, "/Shot/SnapProbe", frame)
     _Check(abs(landed[1] - 9.5) < 0.02
            and abs(landed[2] - 3) < 0.02
            and 0.0 < landed[0] < 8.0,
@@ -1041,7 +1162,7 @@ def testUsdviewInputFunction(appController):
     _Check(candidate is not None,
            "a surface candidate resolves at the quad-centre pixel")
     seenPrims.append(str(candidate.primPath))
-    landed = _World(stage, "/Shot/SnapProbe", frame)
+    landed = _Landed(controller, stage, "/Shot/SnapProbe", frame)
     _Check(abs(landed[2] - 3) < 1e-3
            and -0.05 < landed[0] < 8.05
            and 9.45 < landed[1] < 10.55,
@@ -1075,7 +1196,7 @@ def testUsdviewInputFunction(appController):
            "the candidate is the mesh corner (0, 9.5, 3), not the "
            "decoy point on the same ray: %s" % (candidate.point,))
     seenPrims.append(str(candidate.primPath))
-    landed = _World(stage, "/Shot/SnapProbe", frame)
+    landed = _Landed(controller, stage, "/Shot/SnapProbe", frame)
     _Check((landed - Gf.Vec3d(0, 9.5, 3)).GetLength() < 1e-4,
            "the pivot followed the candidate to (0, 9.5, 3): %s"
            % (landed,))
@@ -1103,7 +1224,7 @@ def testUsdviewInputFunction(appController):
     _Check(controller.IsDragging(), "the centre grab started a drag")
     d.Move(aim, button=d.QtCore.Qt.NoButton,
            buttons=d.QtCore.Qt.LeftButton)
-    after = _World(stage, "/Shot/SnapProbe", frame)
+    after = _Landed(controller, stage, "/Shot/SnapProbe", frame)
     _Check((after - before).GetLength() > 0.5,
            "the snapped drag moved the probe: %s -> %s"
            % (before, after))
@@ -1155,6 +1276,9 @@ def testUsdviewInputFunction(appController):
            "a click where the arrow used to be is left to usdview's picker")
     d.Release(_Lerp(a, b, 0.5))
 
+    # --- preview then commit ---------------------------------------------
+    _TestPreviewThenCommit(d, controller, stage, session, frame)
+
     shot = os.environ.get("RIGEXEC_GIZMO_SHOT")
     if shot:
         d.Select(CONTROL)
@@ -1163,4 +1287,4 @@ def testUsdviewInputFunction(appController):
         d.view.window().grab().save(shot)
 
     print("RIGEXEC_GIZMO_OK translate/rotate/scale, undo/redo, default, "
-          "pivot, xform, maya parity, snapping")
+          "pivot, xform, maya parity, snapping, preview then commit")

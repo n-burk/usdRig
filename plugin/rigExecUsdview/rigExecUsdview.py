@@ -76,6 +76,20 @@ def _LoadRigExecImaging():
     except AttributeError:
         pass  # Older libraries cannot supply deformation-relative gizmos.
 
+    # The manipulation preview is optional in exactly the same way, and its
+    # absence is not worth a warning: a session without it authors on release
+    # as usual, and simply does not redraw until then.
+    try:
+        lib.RigExecImaging_BeginPreview.argtypes = [ctypes.c_char_p]
+        lib.RigExecImaging_BeginPreview.restype = ctypes.c_int
+        lib.RigExecImaging_UpdatePreview.argtypes = [
+            ctypes.POINTER(ctypes.c_double), ctypes.c_int]
+        lib.RigExecImaging_UpdatePreview.restype = ctypes.c_int
+        lib.RigExecImaging_EndPreview.argtypes = []
+        lib.RigExecImaging_EndPreview.restype = ctypes.c_int
+    except AttributeError:
+        pass
+
     # The influence overlay is optional: an older rigExecImaging.dll
     # does not export it, and touching a missing symbol on a CDLL raises
     # AttributeError at *bind* time. Binding it here rather than at the
@@ -350,7 +364,9 @@ class RigExecUsdviewContainer(PluginContainer):
                     0, os.path.dirname(os.path.abspath(__file__)))
                 import gizmoUI
             import gizmoMath
+            import gizmoPreview
             gizmoMath.SetPublishedControlFrameReader(self._ReadPublishedControlFrame)
+            gizmoPreview.SetSink(self._PreviewSink())
             self._viewportTools = gizmoUI.InstallViewportTools(
                 self._api, self._UndoStack(),
                 openGraphEditor=self._OpenGraphEditor)
@@ -360,6 +376,51 @@ class RigExecUsdviewContainer(PluginContainer):
             self._viewportTools = None
             self._viewportToolsFailed = True
         return self._viewportTools
+
+    def _PreviewSink(self):
+        """
+        The manipulation preview's route into rigExecImaging.
+
+        Three thin calls over the C entry points, and only Update runs per
+        mouse sample: the attribute paths are marshalled once per drag and
+        every sample after that is an array of doubles, which is the shape the
+        C side asked for so that dragging costs what dragging costs.
+
+        Every call resolves the library FRESH. The viewport tools are built
+        the first time they are shown, which can be before any rig is
+        activated and is certainly before the stage is replaced the next time;
+        a sink that captured the library at construction would preview against
+        whichever one happened to be loaded then, or against none at all.
+        """
+        container = self
+
+        class _Sink(object):
+            def _Entry(self, name):
+                lib = container._lib
+                if lib is None or not container._active:
+                    return None
+                return getattr(lib, name, None)
+
+            def Begin(self, packedPaths):
+                entry = self._Entry("RigExecImaging_BeginPreview")
+                if entry is None:
+                    return -1
+                return entry(packedPaths.encode("utf-8"))
+
+            def Update(self, values):
+                entry = self._Entry("RigExecImaging_UpdatePreview")
+                if entry is None:
+                    return False
+                buffer = (ctypes.c_double * len(values))(*values)
+                return entry(buffer, len(values)) == 0
+
+            def End(self):
+                entry = self._Entry("RigExecImaging_EndPreview")
+                if entry is None:
+                    return False
+                return entry() == 0
+
+        return _Sink()
 
     def _ReadPublishedControlFrame(self, stage, path, time):
         if not self._active or self._lib is None or stage != self._cachedStage:
