@@ -31,11 +31,17 @@ public:
 
         auto pruning =
             rigExec::RigExecInternalPrimPruningSceneIndex::New(inputScene);
+        // Between pruning and binding: pruned paths never reach it, and the
+        // results index stays downstream so a rig-driven prim's published
+        // transform still wins over a preview delta -- which is right,
+        // because a rig prim previews through the evaluator instead.
+        auto xforms =
+            rigExec::RigExecXformOverrideSceneIndex::New(pruning);
         auto binding =
-            rigExec::RigExecBindingResolvingSceneIndex::New(pruning);
+            rigExec::RigExecBindingResolvingSceneIndex::New(xforms);
         auto results = rigExec::RigExecResultsSceneIndex::New(
             binding, registry.GetStore());
-        registry.RegisterChain(pruning, binding, results);
+        registry.RegisterChain(pruning, binding, results, xforms);
         return results;
     }
 };

@@ -145,6 +145,7 @@ _GuideTopologyCounts(const HdSceneIndexPrim &prim)
 // The standard three-filter chain over one upstream (spec §10.1).
 struct _Chain {
     RigExecInternalPrimPruningSceneIndexRefPtr pruning;
+    RigExecXformOverrideSceneIndexRefPtr xforms;
     RigExecBindingResolvingSceneIndexRefPtr binding;
     RigExecResultsSceneIndexRefPtr results;
 };
@@ -157,7 +158,11 @@ _BuildChain(const HdSceneIndexBaseRefPtr &upstream,
     _Chain chain;
     chain.pruning = RigExecInternalPrimPruningSceneIndex::New(upstream);
     chain.pruning->SetOwnedScopes(ownedScopes);
-    chain.binding = RigExecBindingResolvingSceneIndex::New(chain.pruning);
+    // Same order as the real chain (sceneIndexPlugin.cpp): the preview filter
+    // sits between pruning and binding, so every existing assertion here is
+    // also the assertion that it is transparent when nothing is previewed.
+    chain.xforms = RigExecXformOverrideSceneIndex::New(chain.pruning);
+    chain.binding = RigExecBindingResolvingSceneIndex::New(chain.xforms);
     chain.results = RigExecResultsSceneIndex::New(chain.binding, store);
     return chain;
 }
@@ -167,6 +172,23 @@ _MeshShell(const SdfPath &path)
 {
     return {path, HdPrimTypeTokens->mesh,
             HdRetainedContainerDataSource::New(0, nullptr, nullptr)};
+}
+
+static HdRetainedSceneIndex::AddedPrimEntry
+_MeshShellWithXform(const SdfPath &path, const GfMatrix4d &world)
+{
+    // resetXformStack true: upstream of these filters the transform is already
+    // flattened, and that flag is how a composed matrix says so.
+    static const TfToken xformName = HdXformSchemaTokens->xform;
+    const HdDataSourceBaseHandle xformSource =
+        HdXformSchema::Builder()
+            .SetMatrix(
+                HdRetainedTypedSampledDataSource<GfMatrix4d>::New(world))
+            .SetResetXformStack(
+                HdRetainedTypedSampledDataSource<bool>::New(true))
+            .Build();
+    return {path, HdPrimTypeTokens->mesh,
+            HdRetainedContainerDataSource::New(1, &xformName, &xformSource)};
 }
 
 static HdRetainedSceneIndex::AddedPrimEntry
@@ -4528,6 +4550,108 @@ TestAllPurposeRenderTags(const std::string &examplesDir)
     }
 }
 
+// A manipulation preview of a prim no rig drives reaches Hydra as a
+// post-multiplied world delta, and carries the prim's descendants with it
+// (docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
+//
+// The delta form is what a FLATTENED chain needs. By the time a prim reaches
+// these filters its xform is the composed world one -- which is why the
+// results index marks its own overrides resetXformStack=true -- so a local
+// matrix would drop the ancestors, and overriding only the dragged prim would
+// leave its children at the parent's old place. Post-multiplying answers both,
+// and this test is the assertion that it does: the child moves by exactly the
+// same amount as the parent, while keeping its own offset.
+static void
+TestXformPreviewDelta()
+{
+    HdRetainedSceneIndexRefPtr upstream = HdRetainedSceneIndex::New();
+    auto store = std::make_shared<RigExecSnapshotStore>();
+    _Chain chain = _BuildChain(upstream, store, {});
+
+    // Flattened world matrices, as upstream would hand them over: the hand
+    // sits 2 along X from the body, and the body 1 up in Y.
+    const SdfPath bodyPath("/Asset/Geom/Body");
+    const SdfPath handPath("/Asset/Geom/Body/Hand");
+    const SdfPath otherPath("/Asset/Geom/Prop");
+    GfMatrix4d bodyWorld(1.0), handWorld(1.0), otherWorld(1.0);
+    bodyWorld.SetTranslate(GfVec3d(0, 1, 0));
+    handWorld.SetTranslate(GfVec3d(2, 1, 0));
+    otherWorld.SetTranslate(GfVec3d(-5, 0, 0));
+
+    HdRetainedSceneIndex::AddedPrimEntries entries;
+    entries.push_back(_MeshShellWithXform(bodyPath, bodyWorld));
+    entries.push_back(_MeshShellWithXform(handPath, handWorld));
+    entries.push_back(_MeshShellWithXform(otherPath, otherWorld));
+    upstream->AddPrims(entries);
+
+    _RecordingObserver observer;
+    chain.results->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    auto worldOf = [&](const SdfPath &path) {
+        const HdSceneIndexPrim prim = chain.results->GetPrim(path);
+        HdXformSchema schema = HdXformSchema::GetFromParent(prim.dataSource);
+        if (!schema || !schema.GetMatrix()) {
+            return GfMatrix4d(0.0);
+        }
+        return schema.GetMatrix()->GetTypedValue(0.0f);
+    };
+    auto composed = [&](const SdfPath &path) {
+        const HdSceneIndexPrim prim = chain.results->GetPrim(path);
+        HdXformSchema schema = HdXformSchema::GetFromParent(prim.dataSource);
+        return schema && schema.GetResetXformStack() &&
+               schema.GetResetXformStack()->GetTypedValue(0.0f);
+    };
+
+    CHECK(worldOf(bodyPath) == bodyWorld);
+    CHECK(worldOf(handPath) == handWorld);
+
+    // One mouse sample: the body moves 10 along X.
+    GfMatrix4d delta(1.0);
+    delta.SetTranslate(GfVec3d(10, 0, 0));
+    observer.dirtied.clear();
+    chain.xforms->SetWorldDeltas({{bodyPath, delta}});
+
+    GfMatrix4d expectedBody(1.0), expectedHand(1.0);
+    expectedBody.SetTranslate(GfVec3d(10, 1, 0));
+    expectedHand.SetTranslate(GfVec3d(12, 1, 0));
+    CHECK(worldOf(bodyPath) == expectedBody);
+    // The child kept its 2 along X from the body and moved with it. A local
+    // override would have put it at (2,1,0) -- its own offset, with the body's
+    // transform lost -- and an override that skipped descendants would have
+    // left it at (2,1,0) too, so this number distinguishes all three.
+    CHECK(worldOf(handPath) == expectedHand);
+    CHECK(worldOf(otherPath) == otherWorld);
+    CHECK(composed(bodyPath) && composed(handPath));
+
+    // The notice names the previewed prim AND its descendant: the child's
+    // matrix changed without the child being mentioned in the call.
+    bool dirtiedBody = false, dirtiedHand = false, dirtiedOther = false;
+    for (const SdfPath &path : observer.dirtied) {
+        if (path == bodyPath) dirtiedBody = true;
+        if (path == handPath) dirtiedHand = true;
+        if (path == otherPath) dirtiedOther = true;
+    }
+    CHECK(dirtiedBody);
+    CHECK(dirtiedHand);
+    CHECK(!dirtiedOther);
+
+    // A second sample at the same value is not a change, and says nothing.
+    observer.dirtied.clear();
+    chain.xforms->SetWorldDeltas({{bodyPath, delta}});
+    CHECK(observer.dirtied.empty());
+
+    // Release: the authored transforms are what is drawn again, and the
+    // subtree is dirtied on the way out.
+    observer.dirtied.clear();
+    chain.xforms->ClearWorldDeltas();
+    CHECK(!chain.xforms->HasWorldDeltas());
+    CHECK(worldOf(bodyPath) == bodyWorld);
+    CHECK(worldOf(handPath) == handWorld);
+    CHECK(!observer.dirtied.empty());
+
+    chain.results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4575,6 +4699,7 @@ main(int argc, char **argv)
     // Last: it publishes a fixture into the process-global registry store.
     TestGuideBoundsExport();
     TestTransformAuthorityWarnings(examplesDir);
+    TestXformPreviewDelta();
     TestSnapshotBackedExtent(examplesDir);
     TestInterveningXformLeavesTheLocalExtentAlone(examplesDir);
     TestExtentIsPureFunctionOfStageAndTime(examplesDir);

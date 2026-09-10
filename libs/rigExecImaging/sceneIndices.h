@@ -22,7 +22,9 @@
 #include "pxr/imaging/hd/filteringSceneIndex.h"
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -38,6 +40,9 @@ using RigExecBindingResolvingSceneIndexRefPtr =
     TfRefPtr<RigExecBindingResolvingSceneIndex>;
 class RigExecResultsSceneIndex;
 using RigExecResultsSceneIndexRefPtr = TfRefPtr<RigExecResultsSceneIndex>;
+class RigExecXformOverrideSceneIndex;
+using RigExecXformOverrideSceneIndexRefPtr =
+    TfRefPtr<RigExecXformOverrideSceneIndex>;
 
 /// Whether a control guide with this shape/drawMode pair is DRAWN at all.
 ///
@@ -86,6 +91,93 @@ private:
     bool _IsOwned(const SdfPath &path) const;
 
     std::set<SdfPath> _ownedScopes;
+};
+
+/// In-memory transform previews for prims the rig does not drive
+/// (docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
+///
+/// This is the manipulation preview for a plain Xformable. A rig prim's
+/// preview goes through the evaluator, because moving a control has to re-run
+/// the rig; a prim with no rig behind it has nothing to re-run, so its preview
+/// is its transform, held here and overlaid on the way past.
+///
+/// WHAT IS STORED IS A WORLD-SPACE DELTA, post-multiplied:
+///
+///     xform'(X) = xform(X) . delta     for X at or under the previewed prim
+///
+/// and not the prim's new local matrix, because by the time a prim reaches
+/// this filter its transform is already FLATTENED -- the same reason the
+/// results index marks its own driven matrices resetXformStack=true
+/// (see _ComputeDrivenXform). Overriding a flattened matrix with a local one
+/// would drop every ancestor, and overriding only the previewed prim would
+/// leave its children behind at the parent's old place.
+///
+/// A post-multiplied delta answers both: applied to the prim it is the move,
+/// and applied to a descendant it is the same move around the same pivot,
+/// which is what inheriting a parent's transform means. One multiply per
+/// prim, no ancestor lookups, and it is the quantity a manipulator already
+/// computes -- a world translation of d is a delta of Translate(d).
+///
+/// Deltas are replaced as a SET rather than one at a time. A manipulation
+/// changes the same handful of prims on every mouse sample, and computing the
+/// dirty set as the union of what was previewed and what now is makes one
+/// call enough to add, change, and drop in any combination.
+///
+/// Nothing here is ever authored. On release the application authors the
+/// committed values to the stage and drops the deltas in one step, and the
+/// prim's own authored transform is what is drawn from then on.
+class RigExecXformOverrideSceneIndex final
+    : public HdSingleInputFilteringSceneIndexBase {
+public:
+    static RigExecXformOverrideSceneIndexRefPtr New(
+        const HdSceneIndexBaseRefPtr &inputSceneIndex) {
+        return TfCreateRefPtr(
+            new RigExecXformOverrideSceneIndex(inputSceneIndex));
+    }
+
+    /// Replaces every preview delta and dirties the xform locator across the
+    /// subtree of each path that entered, left, or changed.
+    void SetWorldDeltas(const std::map<SdfPath, GfMatrix4d> &deltas);
+
+    /// Equivalent to SetWorldDeltas({}), named for the call site that means it.
+    void ClearWorldDeltas() { SetWorldDeltas({}); }
+
+    bool HasWorldDeltas() const;
+
+    HdSceneIndexPrim GetPrim(const SdfPath &primPath) const override;
+
+    SdfPathVector GetChildPrimPaths(const SdfPath &primPath) const override {
+        return _GetInputSceneIndex()->GetChildPrimPaths(primPath);
+    }
+
+protected:
+    void _PrimsAdded(
+        const HdSceneIndexBase &sender,
+        const HdSceneIndexObserver::AddedPrimEntries &entries) override;
+    void _PrimsRemoved(
+        const HdSceneIndexBase &sender,
+        const HdSceneIndexObserver::RemovedPrimEntries &entries) override;
+    void _PrimsDirtied(
+        const HdSceneIndexBase &sender,
+        const HdSceneIndexObserver::DirtiedPrimEntries &entries) override;
+
+private:
+    explicit RigExecXformOverrideSceneIndex(
+        const HdSceneIndexBaseRefPtr &inputSceneIndex);
+
+    /// The delta governing \p path: the nearest previewed ancestor's, or
+    /// its own. Null when no preview applies.
+    const GfMatrix4d *_FindDelta(const SdfPath &path) const;
+
+    /// Dirties the xform locator on \p path and every descendant upstream.
+    void _DirtyXformSubtree(
+        const SdfPath &path,
+        HdSceneIndexObserver::DirtiedPrimEntries *entries) const;
+
+    /// Hydra pulls on its own thread while the application sets deltas on its
+    /// own; the map is small and the critical sections are tiny.
+    mutable std::mutex _mutex;
+    std::map<SdfPath, GfMatrix4d> _deltas;
 };
 
 /// Atomically receives the compiler-produced immutable binding epoch and

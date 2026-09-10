@@ -2786,4 +2786,165 @@ RigExecResultsSceneIndex::_PrimsDirtied(
     _SendPrimsDirtied(forwarded);
 }
 
+// ---------------------------------------------------------------------------
+// RigExecXformOverrideSceneIndex
+// ---------------------------------------------------------------------------
+
+RigExecXformOverrideSceneIndex::RigExecXformOverrideSceneIndex(
+    const HdSceneIndexBaseRefPtr &inputSceneIndex)
+    : HdSingleInputFilteringSceneIndexBase(inputSceneIndex)
+{
+}
+
+bool
+RigExecXformOverrideSceneIndex::HasWorldDeltas() const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return !_deltas.empty();
+}
+
+const GfMatrix4d *
+RigExecXformOverrideSceneIndex::_FindDelta(const SdfPath &path) const
+{
+    // Nearest previewed ancestor, or the prim itself. Walking up rather than
+    // testing every entry keeps the cost proportional to namespace depth
+    // instead of to how many prims are being previewed, and "nearest" is the
+    // answer that matches flattening: the closest previewed ancestor's move is
+    // the one already composed into this prim's matrix.
+    if (_deltas.empty()) {
+        return nullptr;
+    }
+    for (SdfPath walk = path; !walk.IsEmpty() && !walk.IsAbsoluteRootPath();
+         walk = walk.GetParentPath()) {
+        const auto it = _deltas.find(walk);
+        if (it != _deltas.end()) {
+            return &it->second;
+        }
+    }
+    return nullptr;
+}
+
+void
+RigExecXformOverrideSceneIndex::_DirtyXformSubtree(
+    const SdfPath &path,
+    HdSceneIndexObserver::DirtiedPrimEntries *entries) const
+{
+    static const HdDataSourceLocatorSet locators{
+        HdXformSchema::GetDefaultLocator()};
+    entries->emplace_back(path, locators);
+    // Descendants carry the previewed ancestor baked in, so each one's matrix
+    // changes too. The walk is over the UPSTREAM children: a preview adds no
+    // prims and removes none.
+    for (const SdfPath &child :
+         _GetInputSceneIndex()->GetChildPrimPaths(path)) {
+        _DirtyXformSubtree(child, entries);
+    }
+}
+
+void
+RigExecXformOverrideSceneIndex::SetWorldDeltas(
+    const std::map<SdfPath, GfMatrix4d> &deltas)
+{
+    std::set<SdfPath> changed;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        // The union of what was previewed and what now is, minus the entries
+        // that are identical in both. A mouse sample that moved one prim
+        // dirties one subtree, and a released drag dirties exactly what it
+        // stops previewing.
+        for (const auto &[path, delta] : _deltas) {
+            const auto it = deltas.find(path);
+            if (it == deltas.end() || it->second != delta) {
+                changed.insert(path);
+            }
+        }
+        for (const auto &[path, delta] : deltas) {
+            const auto it = _deltas.find(path);
+            if (it == _deltas.end() || it->second != delta) {
+                changed.insert(path);
+            }
+        }
+        if (changed.empty()) {
+            return;
+        }
+        _deltas = deltas;
+    }
+    if (!_IsObserved()) {
+        return;
+    }
+    HdSceneIndexObserver::DirtiedPrimEntries entries;
+    for (const SdfPath &path : changed) {
+        _DirtyXformSubtree(path, &entries);
+    }
+    if (!entries.empty()) {
+        _SendPrimsDirtied(entries);
+    }
+}
+
+HdSceneIndexPrim
+RigExecXformOverrideSceneIndex::GetPrim(const SdfPath &primPath) const
+{
+    HdSceneIndexPrim prim = _GetInputSceneIndex()->GetPrim(primPath);
+    if (!prim.dataSource) {
+        return prim;
+    }
+    GfMatrix4d delta(1.0);
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        const GfMatrix4d *found = _FindDelta(primPath);
+        if (!found) {
+            return prim;
+        }
+        delta = *found;
+    }
+    // Post-multiplied onto the matrix that arrived, which is already the
+    // composed world one. resetXformStack stays TRUE for the same reason the
+    // driven-xform overlay sets it: the result is fully composed, and a
+    // downstream consumer that re-composed a parent into it would double the
+    // ancestors.
+    static const TfToken xformName = HdXformSchemaTokens->xform;
+    const HdDataSourceBaseHandle xformSource =
+        HdXformSchema::Builder()
+            .SetMatrix(HdRetainedTypedSampledDataSource<GfMatrix4d>::New(
+                _ReadXform(prim.dataSource) * delta))
+            .SetResetXformStack(
+                HdRetainedTypedSampledDataSource<bool>::New(true))
+            .Build();
+    prim.dataSource =
+        HdOverlayContainerDataSource::OverlayedContainerDataSources(
+            HdRetainedContainerDataSource::New(1, &xformName, &xformSource),
+            prim.dataSource);
+    return prim;
+}
+
+void
+RigExecXformOverrideSceneIndex::_PrimsAdded(
+    const HdSceneIndexBase &,
+    const HdSceneIndexObserver::AddedPrimEntries &entries)
+{
+    if (_IsObserved()) {
+        _SendPrimsAdded(entries);
+    }
+}
+
+void
+RigExecXformOverrideSceneIndex::_PrimsRemoved(
+    const HdSceneIndexBase &,
+    const HdSceneIndexObserver::RemovedPrimEntries &entries)
+{
+    if (_IsObserved()) {
+        _SendPrimsRemoved(entries);
+    }
+}
+
+void
+RigExecXformOverrideSceneIndex::_PrimsDirtied(
+    const HdSceneIndexBase &,
+    const HdSceneIndexObserver::DirtiedPrimEntries &entries)
+{
+    if (_IsObserved()) {
+        _SendPrimsDirtied(entries);
+    }
+}
+
 }  // namespace rigExec

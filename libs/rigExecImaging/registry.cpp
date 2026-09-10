@@ -21,6 +21,7 @@
 #include "pxr/usd/usdGeom/tokens.h"
 #include "pxr/usd/usdGeom/boundableComputeExtent.h"
 #include "pxr/usd/usdGeom/xformCache.h"
+#include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdUtils/stageCache.h"
 
 #include <algorithm>
@@ -128,14 +129,22 @@ void
 RigExecImagingRegistry::RegisterChain(
     const RigExecInternalPrimPruningSceneIndexRefPtr &pruning,
     const RigExecBindingResolvingSceneIndexRefPtr &binding,
-    const RigExecResultsSceneIndexRefPtr &results)
+    const RigExecResultsSceneIndexRefPtr &results,
+    const RigExecXformOverrideSceneIndexRefPtr &xforms)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _chains.push_back(
         {TfWeakPtr<RigExecInternalPrimPruningSceneIndex>(
              get_pointer(pruning)),
          TfWeakPtr<RigExecBindingResolvingSceneIndex>(get_pointer(binding)),
-         TfWeakPtr<RigExecResultsSceneIndex>(get_pointer(results))});
+         TfWeakPtr<RigExecResultsSceneIndex>(get_pointer(results)),
+         TfWeakPtr<RigExecXformOverrideSceneIndex>(get_pointer(xforms))});
+    // A chain built mid-manipulation -- a second viewport opened during a drag
+    // -- starts out holding the deltas the others already have, or it would
+    // draw the un-previewed prim until the next mouse sample.
+    if (xforms && !_previewXformDeltas.empty()) {
+        xforms->SetWorldDeltas(_previewXformDeltas);
+    }
     // A chain constructed after activation adopts every active rig's scope.
     if (!_generatedScopes.empty()) {
         pruning->SetOwnedScopes(_generatedScopes);
@@ -508,6 +517,341 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
     // reports the overlay's displayColor primvar appearing or disappearing
     // as structural, which dirties the mesh universally.
     return SetTime(time);
+}
+
+// ---------------------------------------------------------------------------
+// Manipulation preview (docs/superpowers/specs/
+// 2026-09-10-hydra-preview-manipulation-design.md)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// How many doubles a value of this type takes, and the token naming how to
+// rebuild it. An unsupported type returns an empty token: a manipulation
+// cannot preview a value it cannot reconstruct, and saying so at declaration
+// time is better than guessing per sample.
+TfToken
+_PreviewValueKind(const SdfValueTypeName &type, size_t *arity)
+{
+    static const TfToken kDouble("double");
+    static const TfToken kFloat("float");
+    static const TfToken kVec3d("vec3d");
+    static const TfToken kVec3f("vec3f");
+    static const TfToken kMatrix4d("matrix4d");
+    if (type == SdfValueTypeNames->Double) {
+        *arity = 1;
+        return kDouble;
+    }
+    if (type == SdfValueTypeNames->Float) {
+        *arity = 1;
+        return kFloat;
+    }
+    if (type == SdfValueTypeNames->Double3 ||
+        type == SdfValueTypeNames->Vector3d ||
+        type == SdfValueTypeNames->Point3d ||
+        type == SdfValueTypeNames->Normal3d) {
+        *arity = 3;
+        return kVec3d;
+    }
+    if (type == SdfValueTypeNames->Float3 ||
+        type == SdfValueTypeNames->Vector3f ||
+        type == SdfValueTypeNames->Point3f ||
+        type == SdfValueTypeNames->Normal3f) {
+        *arity = 3;
+        return kVec3f;
+    }
+    if (type == SdfValueTypeNames->Matrix4d) {
+        *arity = 16;
+        return kMatrix4d;
+    }
+    *arity = 0;
+    return TfToken();
+}
+
+VtValue
+_PreviewValue(const TfToken &kind, const double *v)
+{
+    if (kind == "double") {
+        return VtValue(v[0]);
+    }
+    if (kind == "float") {
+        return VtValue(float(v[0]));
+    }
+    if (kind == "vec3d") {
+        return VtValue(GfVec3d(v[0], v[1], v[2]));
+    }
+    if (kind == "vec3f") {
+        return VtValue(GfVec3f(float(v[0]), float(v[1]), float(v[2])));
+    }
+    if (kind == "matrix4d") {
+        return VtValue(GfMatrix4d(
+            v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+            v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15]));
+    }
+    return VtValue();
+}
+
+std::vector<std::string>
+_SplitLines(const std::string &packed)
+{
+    std::vector<std::string> out;
+    std::string current;
+    for (const char c : packed) {
+        if (c == '\n' || c == '\r') {
+            if (!current.empty()) {
+                out.push_back(current);
+                current.clear();
+            }
+            continue;
+        }
+        current.push_back(c);
+    }
+    if (!current.empty()) {
+        out.push_back(current);
+    }
+    return out;
+}
+
+}  // namespace
+
+int
+RigExecImagingRegistry::BeginPreview(const std::string &packedAttributePaths)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_stage) {
+        return -1;
+    }
+    std::vector<PreviewSlot> slots;
+    size_t total = 0;
+    for (const std::string &text : _SplitLines(packedAttributePaths)) {
+        // Caller-supplied strings: ask before constructing, the same guard
+        // SetWeightOverlay uses.
+        if (!SdfPath::IsValidPathString(text)) {
+            return -1;
+        }
+        const SdfPath path(text);
+        if (!path.IsAbsolutePath() || !path.IsPropertyPath()) {
+            return -1;
+        }
+        const UsdAttribute attribute = _stage->GetAttributeAtPath(path);
+        if (!attribute) {
+            return -1;
+        }
+        PreviewSlot slot;
+        slot.primPath = path.GetPrimPath();
+        slot.attributeName = path.GetNameToken();
+        slot.valueKind = _PreviewValueKind(
+            attribute.GetTypeName(), &slot.arity);
+        if (slot.valueKind.IsEmpty()) {
+            return -1;
+        }
+        // Which lane. An attribute inside an active rig previews through that
+        // rig's evaluator; everything else is a transform of its own.
+        for (const RigSession &session : _sessions) {
+            if (slot.primPath.HasPrefix(session.rigPath)) {
+                slot.rigPath = session.rigPath;
+                break;
+            }
+        }
+        if (slot.rigPath.IsEmpty() &&
+            !UsdGeomXformOp::IsXformOp(slot.attributeName)) {
+            // Nothing to preview: the prim has no rig to re-run and this is
+            // not part of its transform. Refused rather than silently
+            // ignored, because the caller would then be sending values that
+            // change nothing and wondering why.
+            return -1;
+        }
+        total += slot.arity;
+        slots.push_back(std::move(slot));
+    }
+    _previewSlots = std::move(slots);
+    _previewActive = true;
+    return int(total);
+}
+
+bool
+RigExecImagingRegistry::IsPreviewActive() const
+{
+    return _previewActive;
+}
+
+bool
+RigExecImagingRegistry::_ComposeXformDelta(
+    const UsdPrim &prim,
+    const std::map<TfToken, VtValue> &opValues,
+    UsdGeomXformCache *cache,
+    GfMatrix4d *delta) const
+{
+    const UsdGeomXformable xformable(prim);
+    if (!xformable || !cache || !delta) {
+        return false;
+    }
+    bool resetsXformStack = false;
+    const std::vector<UsdGeomXformOp> ops =
+        xformable.GetOrderedXformOps(&resetsXformStack);
+
+    // The authored local transform and the previewed one, composed the same
+    // way out of the same ops, so the only difference between them is the
+    // overridden values. Composing op by op rather than calling
+    // GetLocalTransformation twice is what lets an override stand in for one
+    // op's value without being authored anywhere.
+    GfMatrix4d authored(1.0), previewed(1.0);
+    const UsdTimeCode time = cache->GetTime();
+    for (const UsdGeomXformOp &op : ops) {
+        VtValue value;
+        if (!op.GetAttr().Get(&value, time)) {
+            // An op with no value at this time contributes its identity to
+            // both, which is what USD itself does with it.
+            continue;
+        }
+        authored = op.GetOpTransform(op.GetOpType(), value, op.IsInverseOp()) *
+                   authored;
+        const auto found = opValues.find(op.GetOpName());
+        const VtValue &previewValue =
+            found == opValues.end() ? value : found->second;
+        previewed =
+            op.GetOpTransform(op.GetOpType(), previewValue, op.IsInverseOp()) *
+            previewed;
+    }
+
+    // delta = parentToWorld^-1 . local^-1 . local' . parentToWorld
+    //
+    // which is exactly xform^-1 . xform', the quantity
+    // RigExecXformOverrideSceneIndex post-multiplies. A prim that resets the
+    // xform stack has no parent contribution, and then the conjugation
+    // collapses to local^-1 . local' on its own.
+    const GfMatrix4d parentToWorld = resetsXformStack
+        ? GfMatrix4d(1.0)
+        : cache->GetParentToWorldTransform(prim);
+    const GfMatrix4d parentInverse = parentToWorld.GetInverse();
+    *delta = parentInverse * authored.GetInverse() * previewed * parentToWorld;
+    return true;
+}
+
+bool
+RigExecImagingRegistry::_ResolvePreviewSample(
+    const double *values, size_t count,
+    std::map<SdfPath, std::vector<RigExecValueOverride>> *byRig,
+    std::map<SdfPath, GfMatrix4d> *xformDeltas) const
+{
+    size_t offset = 0;
+    std::map<SdfPath, std::map<TfToken, VtValue>> xformOps;
+    for (const PreviewSlot &slot : _previewSlots) {
+        if (offset + slot.arity > count) {
+            return false;
+        }
+        const VtValue value =
+            _PreviewValue(slot.valueKind, values + offset);
+        offset += slot.arity;
+        if (value.IsEmpty()) {
+            return false;
+        }
+        if (!slot.rigPath.IsEmpty()) {
+            (*byRig)[slot.rigPath].push_back(RigExecValueOverride{
+                slot.primPath, TfToken(), slot.attributeName, value});
+        } else {
+            xformOps[slot.primPath][slot.attributeName] = value;
+        }
+    }
+    if (offset != count) {
+        return false;
+    }
+    if (!xformOps.empty()) {
+        UsdGeomXformCache cache(_lastTime);
+        for (const auto &[primPath, opValues] : xformOps) {
+            const UsdPrim prim = _stage->GetPrimAtPath(primPath);
+            GfMatrix4d delta(1.0);
+            if (!prim ||
+                !_ComposeXformDelta(prim, opValues, &cache, &delta)) {
+                return false;
+            }
+            (*xformDeltas)[primPath] = delta;
+        }
+    }
+    return true;
+}
+
+void
+RigExecImagingRegistry::_SetChainXformDeltas(
+    const std::map<SdfPath, GfMatrix4d> &deltas)
+{
+    _previewXformDeltas = deltas;
+    for (auto it = _chains.begin(); it != _chains.end();) {
+        if (!it->results) {
+            it = _chains.erase(it);
+            continue;
+        }
+        if (it->xforms) {
+            it->xforms->SetWorldDeltas(deltas);
+        }
+        ++it;
+    }
+}
+
+bool
+RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
+{
+    UsdTimeCode time;
+    bool needsRigPublish = false;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_previewActive || !_stage || (!values && count)) {
+            return false;
+        }
+        std::map<SdfPath, std::vector<RigExecValueOverride>> byRig;
+        std::map<SdfPath, GfMatrix4d> xformDeltas;
+        if (!_ResolvePreviewSample(values, count, &byRig, &xformDeltas)) {
+            return false;
+        }
+        // The xform lane needs no evaluation at all: the delta goes straight
+        // into the chains and the dirty notice it sends is the whole update.
+        _SetChainXformDeltas(xformDeltas);
+
+        // Every active rig is told, including the ones with no slots this
+        // sample: a rig that was being previewed and no longer is has to stop.
+        for (RigSession &session : _sessions) {
+            const auto found = byRig.find(session.rigPath);
+            if (found == byRig.end()) {
+                session.bridge->ClearInteractiveOverrides();
+            } else {
+                session.bridge->SetInteractiveOverrides(found->second);
+                needsRigPublish = true;
+            }
+            session.dirty = true;
+        }
+        time = _lastTime;
+    }
+    // Republished OUTSIDE the lock: SetTime takes the same non-recursive mutex
+    // (the rule _OnObjectsChanged and SetWeightOverlay both follow).
+    //
+    // Only when a rig is involved. An xform-lane drag has already dirtied what
+    // it changed, and evaluating every active rig to redraw a prim no rig
+    // drives would make the cheap lane pay for the expensive one.
+    return needsRigPublish ? SetTime(time) : true;
+}
+
+bool
+RigExecImagingRegistry::EndPreview()
+{
+    UsdTimeCode time;
+    bool hadRigOverrides = false;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _previewSlots.clear();
+        _previewActive = false;
+        _SetChainXformDeltas({});
+        for (RigSession &session : _sessions) {
+            session.bridge->ClearInteractiveOverrides();
+            session.dirty = true;
+            hadRigOverrides = true;
+        }
+        time = _lastTime;
+    }
+    // Republished so the authored rig is what is drawn again. The caller
+    // authors its committed values separately; when it has already done so,
+    // this generation is the committed one and the artist sees no flicker,
+    // and when it has not -- an aborted drag -- this is the rig going back.
+    return hadRigOverrides ? SetTime(time) : true;
 }
 
 void
@@ -1476,6 +1820,34 @@ RigExecImaging_SetWeightOverlay(const char *weightPrimPath)
     return RigExecImagingRegistry::GetInstance().SetWeightOverlay(
                weightPrimPath ? std::string(weightPrimPath) : std::string())
         ? 0 : 1;
+}
+
+// Manipulation preview (docs/superpowers/specs/
+// 2026-09-10-hydra-preview-manipulation-design.md). Three calls, and only the
+// middle one runs per mouse sample: strings are marshalled once per drag and
+// every sample after that is an array of doubles.
+int
+RigExecImaging_BeginPreview(const char *packedAttributePaths)
+{
+    return RigExecImagingRegistry::GetInstance().BeginPreview(
+        packedAttributePaths ? std::string(packedAttributePaths)
+                             : std::string());
+}
+
+int
+RigExecImaging_UpdatePreview(const double *values, int count)
+{
+    if (count < 0) {
+        return 1;
+    }
+    return RigExecImagingRegistry::GetInstance().UpdatePreview(
+               values, size_t(count)) ? 0 : 1;
+}
+
+int
+RigExecImaging_EndPreview()
+{
+    return RigExecImagingRegistry::GetInstance().EndPreview() ? 0 : 1;
 }
 
 int

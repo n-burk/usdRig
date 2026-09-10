@@ -116,6 +116,23 @@ public:
 
     const SdfPath &GetWeightOverlay() const { return _weightOverlay; }
 
+    /// Uncommitted manipulation values for this rig, with nothing authored
+    /// (RigExecRigEvaluator::SetInteractiveOverrides). Records only, like
+    /// SetWeightOverlay: publishing is the caller's serialization point.
+    void SetInteractiveOverrides(std::vector<RigExecValueOverride> overrides) {
+        _evaluator->SetInteractiveOverrides(std::move(overrides));
+    }
+
+    void ClearInteractiveOverrides() {
+        _evaluator->ClearInteractiveOverrides();
+    }
+
+    /// The stage the rig evaluates against, for a caller that has to read the
+    /// authored value an override is standing in for.
+    const UsdStageRefPtr &GetEvaluationStage() const {
+        return _evaluator->GetEvaluationStage();
+    }
+
 private:
     /// Publishes guide payloads (joints and aggregate solvers draw as
     /// guide geometry like OpenExec's IrJointScope) into the snapshot.

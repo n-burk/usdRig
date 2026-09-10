@@ -16,7 +16,9 @@
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"
 #include "pxr/usd/usd/notice.h"
+#include "pxr/usd/usdGeom/xformCache.h"
 
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -38,7 +40,8 @@ public:
     void RegisterChain(
         const RigExecInternalPrimPruningSceneIndexRefPtr &pruning,
         const RigExecBindingResolvingSceneIndexRefPtr &binding,
-        const RigExecResultsSceneIndexRefPtr &results);
+        const RigExecResultsSceneIndexRefPtr &results,
+        const RigExecXformOverrideSceneIndexRefPtr &xforms = nullptr);
 
     /// Activates evaluation for one rig, or every RigExecRoot when rigPath is
     /// empty.  Compilation and the first evaluation complete off to the side;
@@ -63,6 +66,40 @@ public:
     /// first generation rather than none at all.
     bool SetWeightOverlay(const std::string &weightPrimPath);
 
+    /// Declares what one manipulation is going to change, and returns how
+    /// many doubles UpdatePreview will expect (-1 when the declaration is
+    /// rejected). \p packedAttributePaths is newline-separated absolute
+    /// attribute paths.
+    ///
+    /// Declared once per drag so the per-sample call can be nothing but
+    /// numbers. Resolving a path to a rig session, reading its value type, and
+    /// deciding which lane it previews through are all done HERE, once,
+    /// because the interactive cost of a manipulation is the cost of the thing
+    /// that runs per mouse sample.
+    ///
+    /// Two lanes, chosen per attribute and invisible to the caller:
+    ///
+    ///   * an attribute under an active rig previews through the evaluator,
+    ///     because moving a control has to re-run the rig
+    ///     (RigExecRigEvaluator::SetInteractiveOverrides);
+    ///   * an xformOp on a prim no rig drives previews through
+    ///     RigExecXformOverrideSceneIndex, which is the same prim's transform
+    ///     and nothing else.
+    int BeginPreview(const std::string &packedAttributePaths);
+
+    /// One mouse sample: the declared slots' values, flattened in declaration
+    /// order -- 1 double for a scalar, 3 for a vector, 16 for a matrix.
+    /// Evaluates and republishes. Authors nothing.
+    bool UpdatePreview(const double *values, size_t count);
+
+    /// Ends the manipulation: drops every override and delta and republishes
+    /// the authored rig. The application authors the committed values itself,
+    /// before or after this call -- the two are independent, which is why an
+    /// aborted drag is this call alone.
+    bool EndPreview();
+
+    bool IsPreviewActive() const;
+
     /// Drops the bridge; chains remain and read the (cleared) store.
     void Deactivate();
 
@@ -77,6 +114,7 @@ private:
         TfWeakPtr<RigExecInternalPrimPruningSceneIndex> pruning;
         TfWeakPtr<RigExecBindingResolvingSceneIndex> binding;
         TfWeakPtr<RigExecResultsSceneIndex> results;
+        TfWeakPtr<RigExecXformOverrideSceneIndex> xforms;
     };
 
     struct RigSession {
@@ -116,6 +154,36 @@ private:
         const UsdNotice::ObjectsChanged &notice,
         const UsdStageWeakPtr &sender);
 
+    /// One declared value of a manipulation in progress; see BeginPreview.
+    struct PreviewSlot {
+        SdfPath primPath;
+        TfToken attributeName;
+        /// The rig this attribute previews through, or empty for the xform
+        /// lane. Resolved once, at declaration: a drag does not change which
+        /// rig a prim belongs to.
+        SdfPath rigPath;
+        /// double | float | vec3d | vec3f | matrix4d -- how to turn this
+        /// slot's doubles back into the attribute's own type.
+        TfToken valueKind;
+        size_t arity = 1;
+    };
+
+    /// Turns one sample's doubles into the per-rig override vectors and the
+    /// per-prim xform deltas. Stage reads happen here, off the Hydra thread.
+    bool _ResolvePreviewSample(
+        const double *values, size_t count,
+        std::map<SdfPath, std::vector<RigExecValueOverride>> *byRig,
+        std::map<SdfPath, GfMatrix4d> *xformDeltas) const;
+
+    /// The composed world delta for \p primPath given its overridden ops.
+    bool _ComposeXformDelta(
+        const UsdPrim &prim,
+        const std::map<TfToken, VtValue> &opValues,
+        UsdGeomXformCache *cache,
+        GfMatrix4d *delta) const;
+
+    void _SetChainXformDeltas(const std::map<SdfPath, GfMatrix4d> &deltas);
+
     std::mutex _mutex;
     std::shared_ptr<RigExecSnapshotStore> _store;
     std::vector<Chain> _chains;
@@ -126,6 +194,12 @@ private:
     std::set<SdfPath> _readRoots;
     bool _readRootsDirty = false;
     UsdTimeCode _lastTime = UsdTimeCode::Default();
+    /// A manipulation in progress: the declared slots, and the xform-lane
+    /// deltas currently standing (kept here as well as on the chains so a
+    /// chain built mid-drag starts in step -- see RegisterChain).
+    std::vector<PreviewSlot> _previewSlots;
+    std::map<SdfPath, GfMatrix4d> _previewXformDeltas;
+    bool _previewActive = false;
     /// The influence-overlay selection, held HERE rather than only on the
     /// bridge because it outlives one: a host may select before
     /// activation, and Deactivate/Activate must not silently drop it.
