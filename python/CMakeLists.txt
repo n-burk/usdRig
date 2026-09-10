@@ -59,6 +59,12 @@ add_custom_target(rigexec_python_package ALL
 install(TARGETS _rigexec LIBRARY DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}")
 # No trailing slash: install the rigexec/ directory itself so the package
 # lands in lib/python/rigexec/, not its contents directly in lib/python/.
+# FILES_MATCHING walks -- and recreates -- every subdirectory it passes
+# through, so a developer's __pycache__ arrives in the install as an empty
+# directory. Excluded for the same reason the header installs exclude it.
 install(DIRECTORY "rigexec"
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}"
-    FILES_MATCHING PATTERN "*.py")
+    FILES_MATCHING
+        PATTERN ".*" EXCLUDE
+        PATTERN "__pycache__" EXCLUDE
+        PATTERN "*.py")

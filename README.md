@@ -379,6 +379,15 @@ Install the libraries, headers, plugins, Python modules, and CMake package with:
 cmake --install build --prefix /absolute/path/to/rigexec-install
 ```
 
+The usdview plugins install as whole directories — every panel module and the
+toolbar's artwork, not a hand-kept list — so an installed tree opens the same
+panels the source tree does. Point usdview at one with:
+
+```sh
+export PXR_PLUGINPATH_NAME=<prefix>/lib/usd/rigExecSchema/resources:<prefix>/lib/usd/rigExecImaging/resources:<prefix>/lib/python/rigExecUsdview
+export PYTHONPATH=<prefix>/lib/python:<prefix>/lib/python/rigExecUsdview:$PYTHONPATH
+```
+
 ## Integrating RigExec
 
 Choose the smallest layer your application needs:

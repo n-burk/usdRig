@@ -587,28 +587,48 @@ install(FILES
         "${_rigexec_schema_resources}/generatedSchema.usda"
     DESTINATION "${RIGEXEC_INSTALL_PLUGINDIR}/rigExecSchema/resources")
 
-install(FILES
-        plugin/rigExecUsdview/plugInfo.json
-        plugin/rigExecUsdview/rigExecUsdview.py
-        plugin/rigExecUsdview/volumeWeightUI.py
-        plugin/rigExecUsdview/curvenetUI.py
-    DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview")
-
-# The toolbar's artwork travels with the module that tints it (gizmoIcons).
-# Missing art is not fatal -- the glyphs fall back to being drawn -- but an
-# install that ships the toolbar should ship what the toolbar looks like.
-install(DIRECTORY plugin/rigExecUsdview/icons
+# The usdview plugins ship as DIRECTORIES, not as lists of files.
+#
+# Each is a plugInfo.json naming the container plus a flat set of modules that
+# import each other as siblings -- rigExecUsdview.py puts its own directory on
+# sys.path and the panels take it from there -- so what has to arrive is the
+# directory's contents, whatever they currently are.
+#
+# It was a list, and the list went stale. The gizmo toolbar and its maths, the
+# graph editor, the view cube, the undo stack, and the layer-opinion and
+# composition-arc panels were all added after that list was written and none of
+# them were ever added to it, so an installed plugin could open two of its
+# panels and warned at runtime about the rest. Nothing failed at build time,
+# because a list of filenames that must agree with a directory is a second copy
+# of that directory, and a copy drifts in silence.
+#
+# The artwork travels the same way, for the same reason: gizmoIcons tints it at
+# draw time and falls back to drawing each glyph when a file is missing, so an
+# install that dropped it would look almost right.
+#
+# FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
+# through, so dot-directories and bytecode caches are excluded explicitly: a
+# stale .pyc for a module that has since changed is worse than no .pyc.
+install(DIRECTORY plugin/rigExecUsdview/
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview"
-    FILES_MATCHING PATTERN "*.png")
+    FILES_MATCHING
+        PATTERN ".*" EXCLUDE
+        PATTERN "__pycache__" EXCLUDE
+        PATTERN "*.py"
+        PATTERN "*.json"
+        PATTERN "*.png")
 
-install(FILES
-        plugin/museAssistant/plugInfo.json
-        plugin/museAssistant/museAssistant.py
-        # museAgent.py carries the agent core (message shaping, tool loop,
-        # image metadata); museAssistant imports it, so shipping one without
-        # the other installs a plugin that fails at import.
-        plugin/museAssistant/museAgent.py
-    DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/museAssistant")
+# museAgent.py carries the agent core (message shaping, tool loop, image
+# metadata) and museAssistant imports it, so shipping one without the other
+# installs a plugin that fails at import. The directory install is what keeps
+# that true of whatever the plugin grows next.
+install(DIRECTORY plugin/museAssistant/
+    DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/museAssistant"
+    FILES_MATCHING
+        PATTERN ".*" EXCLUDE
+        PATTERN "__pycache__" EXCLUDE
+        PATTERN "*.py"
+        PATTERN "*.json")
 
 # rigExecImaging is the one plugin whose plugInfo.json names a library, so it
 # is generated from a template rather than checked in: the filename is
