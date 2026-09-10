@@ -82,6 +82,7 @@ except ImportError:                                       # PySide2
 
 try:
     import gizmoDrag
+    import gizmoIcons
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
@@ -91,6 +92,7 @@ try:
 except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import gizmoDrag
+    import gizmoIcons
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
@@ -476,9 +478,22 @@ class ViewportToolbar(QtWidgets.QToolBar):
         # viewport is around 600 logical px and the default padding put
         # the bar over that, which sends the trailing items into
         # QToolBar's overflow chevron where nobody finds them.
+        # ICONS, NOT WORDS (gizmoIcons). A row of text buttons is as wide as
+        # the platform's UI font makes it, and QToolBar folds what does not fit
+        # into an overflow chevron from the end: on Windows at 10pt the row
+        # wanted 856 px against usdview's ~600 and put Snap, Undo, Redo,
+        # Settings and Graph where nobody finds them. Glyphs are the width we
+        # choose, so the row is the same on every platform, and the space that
+        # buys is why the checked highlight can afford real padding again.
+        #
+        # The stylesheet still earns its keep for the checked state, which the
+        # default style barely distinguishes -- and "which tool am I in" is the
+        # one thing this bar must say.
+        self.setToolButtonStyle(QtCore.Qt.ToolButtonIconOnly)
+        self.setIconSize(QtCore.QSize(18, 18))
         self.setStyleSheet(
             "QToolBar { padding: 0px; spacing: 1px; }"
-            " QToolButton { padding: 1px 5px; margin: 0px; }"
+            " QToolButton { padding: 2px 4px; margin: 0px; }"
             " QToolButton:checked { background: #4879b4; color: white;"
             " border: 1px solid #79a6dc; border-radius: 3px; }")
         self.setContentsMargins(0, 0, 0, 0)
@@ -504,8 +519,12 @@ class ViewportToolbar(QtWidgets.QToolBar):
         # does not fit into an overflow menu, and a right-aligned status
         # label is the first thing to disappear on a narrow viewport --
         # which is exactly when an artist needs to read it.
-    def _AddChecked(self, group, text, tooltip, checked, handler):
+    def _AddChecked(self, group, text, tooltip, checked, handler, icon=None):
+        # The text is kept even though the button shows only the icon: it is
+        # what the overflow menu, the accessibility tree and the tests read.
         action = QtActionWidgets.QAction(text, self)
+        if icon is not None:
+            action.setIcon(gizmoIcons.Icon(icon))
         action.setCheckable(True)
         action.setChecked(checked)
         action.setToolTip(tooltip)
@@ -528,11 +547,14 @@ class ViewportToolbar(QtWidgets.QToolBar):
             TOOL_SCALE: "Scale (R): drag a cube for one axis, a planar "
                         "square for two, the centre cube for uniform.",
         }
+        glyphs = {TOOL_SELECT: "select", TOOL_TRANSLATE: "move",
+                  TOOL_ROTATE: "rotate", TOOL_SCALE: "scale"}
         for tool in (TOOL_SELECT, TOOL_TRANSLATE, TOOL_ROTATE, TOOL_SCALE):
             self._toolActions[tool] = self._AddChecked(
                 group, TOOL_LABELS[tool], tips[tool],
                 tool == self._controller.Tool(),
-                lambda checked=False, t=tool: self._onTool(t))
+                lambda checked=False, t=tool: self._onTool(t),
+                icon=glyphs[tool])
 
     def _BuildChannels(self):
         # No section label: the row already overflows at usdview's
@@ -549,12 +571,14 @@ class ViewportToolbar(QtWidgets.QToolBar):
                 "Pivot (D / Insert): edit the rest offset a rig prim's "
                 "avars ride on, or a plain xform's pivot.",
         }
-        for channels, label in ((gizmoMath.CHANNELS_POSE, "Pose"),
-                                (gizmoMath.CHANNELS_PIVOT, "Pivot")):
+        for channels, label, glyph in (
+                (gizmoMath.CHANNELS_POSE, "Pose", "pose"),
+                (gizmoMath.CHANNELS_PIVOT, "Pivot", "pivot")):
             self._channelActions[channels] = self._AddChecked(
                 group, label, tips[channels],
                 channels == self._controller.Channels(),
-                lambda checked=False, c=channels: self._onChannels(c))
+                lambda checked=False, c=channels: self._onChannels(c),
+                icon=glyph)
 
     def _BuildWrite(self):
         # No section label either (see _BuildChannels): the
@@ -571,11 +595,13 @@ class ViewportToolbar(QtWidgets.QToolBar):
                 "spline or time samples outrank it; the status label "
                 "warns when that happens.",
         }
-        for mode, label in ((gizmoMath.WRITE_ANIMATION, "Animation"),
-                            (gizmoMath.WRITE_DEFAULT, "Default")):
+        for mode, label, glyph in (
+                (gizmoMath.WRITE_ANIMATION, "Animation", "animation"),
+                (gizmoMath.WRITE_DEFAULT, "Default", "default")):
             self._writeActions[mode] = self._AddChecked(
                 group, label, tips[mode], mode == self._controller.WriteMode(),
-                lambda checked=False, m=mode: self._onWrite(m))
+                lambda checked=False, m=mode: self._onWrite(m),
+                icon=glyph)
 
     def _BuildSnap(self):
         # One button, not four toggles: the row already overflows at
@@ -584,6 +610,12 @@ class ViewportToolbar(QtWidgets.QToolBar):
         # the mutually exclusive modes; the button text names the one
         # actually in force, holds included.
         self._snapButton = QtWidgets.QToolButton(self)
+        # The one button that keeps its words. Every other label on this row
+        # names what the button IS, which a glyph can say; this one names the
+        # mode in force -- "Snap: Surface" -- and a glyph would have to change
+        # per mode to say the same thing, which is five glyphs to answer a
+        # question the text already answers.
+        self._snapButton.setToolButtonStyle(QtCore.Qt.ToolButtonTextOnly)
         self._snapButton.setPopupMode(
             QtWidgets.QToolButton.InstantPopup)
         self._snapButton.setToolTip(
@@ -623,6 +655,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
         # Qt.ApplicationShortcut so undo works with focus in the prim
         # tree or the attribute view, not only over the viewport.
         self.undoAction = QtActionWidgets.QAction("Undo", self)
+        self.undoAction.setIcon(gizmoIcons.Icon("undo"))
         self.undoAction.setShortcut(QtGui.QKeySequence("Ctrl+Z"))
         self.undoAction.setShortcutContext(QtCore.Qt.ApplicationShortcut)
         self.undoAction.triggered.connect(
@@ -630,6 +663,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
         self.addAction(self.undoAction)
 
         self.redoAction = QtActionWidgets.QAction("Redo", self)
+        self.redoAction.setIcon(gizmoIcons.Icon("redo"))
         # Ctrl+Shift+Z is the user's ask, Shift+Z is Maya's, Ctrl+Y is
         # what a Windows-trained hand reaches for.
         self.redoAction.setShortcuts([QtGui.QKeySequence("Ctrl+Shift+Z"),
@@ -642,6 +676,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
 
     def _BuildSettingsButton(self):
         self.settingsAction = QtActionWidgets.QAction("Settings…", self)
+        self.settingsAction.setIcon(gizmoIcons.Icon("settings"))
         self.settingsAction.setToolTip(
             "Axis orientation, snapping and the manipulator size for "
             "the active tool.")
@@ -651,6 +686,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
 
     def _BuildGraphButton(self):
         self.graphAction = QtActionWidgets.QAction("Graph…", self)
+        self.graphAction.setIcon(gizmoIcons.Icon("graph"))
         self.graphAction.setToolTip(
             "Open the Graph Editor: the selected attributes' animation "
             "curves, their keys and their tangents.")

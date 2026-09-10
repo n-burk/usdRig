@@ -14,6 +14,14 @@ because a `QToolBar` folds whatever does not fit into an overflow chevron,
 and at usdview's default viewport width the status was the first thing to
 disappear — exactly when an artist most needs to read it.
 
+The controls are **glyphs, not words** (`gizmoIcons`), and each one's
+tooltip names it and says what it does. Words made the row as wide as the
+platform's UI font: on Windows at 10pt it wanted 856 px against the ~600 the
+default viewport gives, which put Snap, Undo, Redo, Settings and Graph into
+that same chevron. Glyphs are the width we choose, so the whole row fits
+everywhere. The one exception is the `Snap:` button, which keeps its text
+because its label reports the mode in force rather than naming the button.
+
 The manipulator is drawn on a transparent child widget of the stage view,
 not as prims in the session layer the way the curvenet authoring guides
 are. A gizmo has to be screen-constant, unoccluded by the geometry it

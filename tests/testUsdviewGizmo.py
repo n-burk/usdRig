@@ -393,16 +393,44 @@ def testUsdviewInputFunction(appController):
     # 598 logical px, and the Snap: button once pushed Undo/Redo into
     # the overflow chevron. Asserted here, before the resize below --
     # at 1800 px everything fits and the check would be vacuous.
+    # NOTHING folds into QToolBar's overflow chevron at usdview's default
+    # width. This used to ask only that Undo and Redo survive, and it was the
+    # most the row could promise: text buttons are as wide as the platform's
+    # UI font makes them, and on Windows at 10pt the row wanted 856 px against
+    # the ~600 it gets, so Snap, Undo, Redo, Settings and Graph all went into
+    # the chevron -- where, as the toolbar's own comment says, nobody finds
+    # them. The row is glyphs now (gizmoIcons), which are the width we choose
+    # rather than the width a font imposes, so every control fits everywhere
+    # and the assertion can say so.
     d.Pump()
     bar = controller.toolbar
     _Check(bar.width() > 0, "the toolbar is laid out already")
-    for action in (bar.undoAction, bar.redoAction):
+    _Check(bar.sizeHint().width() <= bar.width(),
+           "the toolbar fits the default viewport width (needs %d px, has "
+           "%d)" % (bar.sizeHint().width(), bar.width()))
+    for action in bar.actions():
+        # A separator has a widget of its own (a plain QWidget), so it has to
+        # be filtered on the ACTION, not on the widget being None.
+        if action.isSeparator():
+            continue
         widget = bar.widgetForAction(action)
+        name = action.text() or getattr(widget, "text", lambda: "")()             or type(widget).__name__
         _Check(widget is not None and widget.isVisibleTo(bar),
-               "%r stays out of the overflow chevron at the default "
-               "width (toolbar %d px, sizeHint %d)" % (
-                   action.text(), bar.width(),
-                   bar.sizeHint().width()))
+               "%r stays out of the overflow chevron at the default width "
+               "(toolbar %d px, sizeHint %d)" % (
+                   name, bar.width(), bar.sizeHint().width()))
+
+    # Every button says what it is twice over: a glyph to look at and a
+    # tooltip to read. With the words gone the tooltip is the only text an
+    # artist can reach, so a button without one is unlabelled.
+    for action in (list(bar._toolActions.values())
+                   + list(bar._channelActions.values())
+                   + list(bar._writeActions.values())
+                   + [bar.undoAction, bar.redoAction,
+                      bar.settingsAction, bar.graphAction]):
+        _Check(not action.icon().isNull(),
+               "%r has a glyph" % action.text())
+        _Check(action.toolTip(), "%r has a tooltip" % action.text())
 
     # Widen the window so the toolbar is not folded into QToolBar's
     # overflow chevron, which is where testusdview's default width puts
