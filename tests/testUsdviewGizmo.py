@@ -432,6 +432,16 @@ def testUsdviewInputFunction(appController):
                "%r has a glyph" % action.text())
         _Check(action.toolTip(), "%r has a tooltip" % action.text())
 
+    # The ARTWORK is complete. gizmoIcons falls back to drawing a glyph when a
+    # file is missing, which is what keeps a broken install from showing a row
+    # of blank buttons -- and would also let a set that quietly lost half its
+    # art ship looking almost right. Asserted here so "almost right" fails.
+    import gizmoIcons
+    missing = [n for n in gizmoIcons.Names() if not gizmoIcons.HasArt(n)]
+    _Check(not missing,
+           "every glyph is served by artwork rather than the drawn fallback; "
+           "missing: %s" % missing)
+
     # Widen the window so the toolbar is not folded into QToolBar's
     # overflow chevron, which is where testusdview's default width puts
     # the status label -- the one control a reader of the grab most wants

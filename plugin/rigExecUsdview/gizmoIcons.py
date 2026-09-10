@@ -1,12 +1,19 @@
 #
 # RigExec usdview gizmo: the toolbar's glyphs.
 #
-# DRAWN, not loaded. Every icon here is a few QPainterPath strokes rendered at
-# whatever size the style asks for, which buys three things a PNG set does not:
-# it is crisp at any device pixel ratio, it costs no binary assets in the
-# repository, and its colour comes from the palette, so the same glyph reads on
-# the dark toolbar and on the blue checked background the stylesheet paints
-# behind an active tool.
+# ART FIRST, DRAWN AS A FALLBACK. The set under icons/ is the artwork -- white
+# line-art on transparency, one file per glyph, normalised to a common extent
+# so the row reads as a family (see tools/bakeGizmoIcons.py, which is what
+# normalises them). It is tinted here rather than shipped in the toolbar's
+# colours, so one file works on the dark chrome and on the blue checked
+# background the stylesheet paints behind an active tool.
+#
+# Every glyph also exists as a few QPainterPath strokes below. That is not a
+# second implementation of the same thing -- it is what the toolbar falls back
+# to when a file is missing, because the alternative failure is a row of blank
+# buttons, and a toolbar that cannot say what its buttons do is worse than one
+# drawn a little more plainly. It costs nothing to keep: no file, no load, and
+# it is the same code that drew the first version of this set.
 #
 # WHY ICONS AT ALL. QToolBar folds whatever does not fit into an overflow
 # chevron, from the end, and the row of text buttons did not fit at usdview's
@@ -26,8 +33,12 @@
 # four strokes at most; anything more turns to mud at that size.
 #
 import math
+import os
 
 from pxr.Usdviewq.qt import QtCore, QtGui
+
+# The artwork, beside this module so it travels with the plugin.
+_ART_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
 
 # The unit box every glyph is drawn in, before scaling to the icon size.
 _BOX = 100.0
@@ -232,7 +243,29 @@ _GLYPHS = {
 _cache = {}
 
 
-def _Pixmap(name, size, color):
+def _ArtPixmap(name, size, color):
+    """The generated glyph at `size`, tinted `color`, or None if there is none."""
+    path = os.path.join(_ART_DIR, "%s.png" % name)
+    if not os.path.isfile(path):
+        return None
+    source = QtGui.QPixmap(path)
+    if source.isNull():
+        return None
+    scaled = source.scaled(size, size, QtCore.Qt.KeepAspectRatio,
+                           QtCore.Qt.SmoothTransformation)
+    # SourceIn keeps the artwork's alpha and replaces its colour, which is what
+    # lets one white file be drawn in whatever ink the chrome needs.
+    tinted = QtGui.QPixmap(scaled.size())
+    tinted.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(tinted)
+    painter.drawPixmap(0, 0, scaled)
+    painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
+    painter.fillRect(tinted.rect(), color)
+    painter.end()
+    return tinted
+
+
+def _DrawnPixmap(name, size, color):
     pixmap = QtGui.QPixmap(size, size)
     pixmap.fill(QtCore.Qt.transparent)
     painter = QtGui.QPainter(pixmap)
@@ -249,6 +282,11 @@ def _Pixmap(name, size, color):
         painter.drawPath(path)
     painter.end()
     return pixmap
+
+
+def _Pixmap(name, size, color):
+    art = _ArtPixmap(name, size, color)
+    return art if art is not None else _DrawnPixmap(name, size, color)
 
 
 def Icon(name, color=None):
@@ -270,5 +308,10 @@ def Icon(name, color=None):
 
 
 def Names():
-    """Every glyph this module can draw, for the contact sheet and tests."""
+    """Every glyph this module can supply, for the contact sheet and tests."""
     return sorted(_GLYPHS)
+
+
+def HasArt(name):
+    """Whether `name` is served by artwork rather than by the fallback."""
+    return os.path.isfile(os.path.join(_ART_DIR, "%s.png" % name))

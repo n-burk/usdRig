@@ -594,6 +594,13 @@ install(FILES
         plugin/rigExecUsdview/curvenetUI.py
     DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview")
 
+# The toolbar's artwork travels with the module that tints it (gizmoIcons).
+# Missing art is not fatal -- the glyphs fall back to being drawn -- but an
+# install that ships the toolbar should ship what the toolbar looks like.
+install(DIRECTORY plugin/rigExecUsdview/icons
+    DESTINATION "${RIGEXEC_INSTALL_PYTHONDIR}/rigExecUsdview"
+    FILES_MATCHING PATTERN "*.png")
+
 install(FILES
         plugin/museAssistant/plugInfo.json
         plugin/museAssistant/museAssistant.py

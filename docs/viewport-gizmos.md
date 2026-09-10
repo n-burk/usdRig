@@ -22,6 +22,17 @@ that same chevron. Glyphs are the width we choose, so the whole row fits
 everywhere. The one exception is the `Snap:` button, which keeps its text
 because its label reports the mode in force rather than naming the button.
 
+The artwork in `plugin/rigExecUsdview/icons/` is generated — one image per
+glyph through the Codex CLI's built-in image generation, then normalised into
+a set by [`tools/bakeGizmoIcons.py`](../tools/bakeGizmoIcons.py), which keys
+the black ground out to alpha and brings every glyph to a common extent and a
+common stroke weight. That script's docstring carries the prompt, so the set
+can be regenerated rather than only admired. `gizmoIcons` tints the white art
+at draw time, which is why one file reads on both the dark toolbar and the
+blue highlight behind a checked tool — and it falls back to drawing each glyph
+with `QPainterPath` if a file is missing, so a broken install is a plainer
+toolbar rather than a row of blank buttons.
+
 The manipulator is drawn on a transparent child widget of the stage view,
 not as prims in the session layer the way the curvenet authoring guides
 are. A gizmo has to be screen-constant, unoccluded by the geometry it
