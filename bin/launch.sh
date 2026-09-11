@@ -78,6 +78,7 @@ fi
 # an interactive launcher from the headless runners, which must not load an
 # extra panel into the app they are asserting against.
 export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/museAssistant"
+rigexec_register_usdnoodles
 
 echo "USD: $USD"
 echo "RIG: $RIG"

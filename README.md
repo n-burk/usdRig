@@ -351,6 +351,19 @@ The enabled CTest suites cover math and solvers, constraints, curvenets, weight
 fields, the reference arm, mover graphs, strict schema authoring, the Python
 facade, Hydra publication, native bounds, and the no-authoring contract.
 
+The same build produces the Noodles node-graph editor,
+[`plugin/usdNoodles`](plugin/usdNoodles), localized from OpenUSD PR #4156,
+whenever the USD install was built with Python and imaging
+(`-DRIGEXEC_BUILD_USDNOODLES=OFF` skips it). It links the noodles core library:
+a copy under `NOODLES_ROOT` (default: the USD install, where
+`build_usd.py --build-noodles` puts it) is used as is, and otherwise the pinned
+commit is fetched and built at configure time. Its unittest suite runs as the
+`testUsdNoodles` CTest entry. The package imports as the top-level `UsdNoodles`,
+not `pxr.UsdNoodles`, because nothing outside the USD install can add to `pxr`.
+`bin/launch.sh` and `bin/usdview.sh` register it, except against a USD install
+that ships its own `pxr.UsdNoodles`: the two register the same usdview
+commands, and usdview then loads no plugins at all.
+
 The Qt-free plugin tests also run on their own, with no build and no display,
 which is the quick loop while editing a panel:
 
@@ -387,6 +400,9 @@ panels the source tree does. Point usdview at one with:
 export PXR_PLUGINPATH_NAME=<prefix>/lib/usd/rigExecSchema/resources:<prefix>/lib/usd/rigExecImaging/resources:<prefix>/lib/python/rigExecUsdview
 export PYTHONPATH=<prefix>/lib/python:<prefix>/lib/python/rigExecUsdview:$PYTHONPATH
 ```
+
+Add `<prefix>/lib/python/UsdNoodles` to `PXR_PLUGINPATH_NAME` for the Noodles
+editor as well; the `PYTHONPATH` above already covers its package.
 
 ## Integrating RigExec
 
@@ -459,6 +475,7 @@ verified fixes, regression coverage, and remaining scope limits.
 | [`libs/rigExecImaging`](libs/rigExecImaging) | Hydra scene-index publication and activation API |
 | [`plugin/rigExecUsdview`](plugin/rigExecUsdview) | usdview activation and authoring panels |
 | [`plugin/museAssistant`](plugin/museAssistant) | Optional live usdview assistant; see its [setup guide](plugin/museAssistant/README.md) |
+| [`plugin/usdNoodles`](plugin/usdNoodles) | Noodles node-graph editor for usdview, localized from OpenUSD PR #4156 |
 | [`examples`](examples) | Reference character and focused animated stages |
 | [`tests`](tests) | C++ conformance tests and Python usdview integration tests |
 | [`tools`](tools) | The `rigExecPose` command-line diagnostic tool |

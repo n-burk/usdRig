@@ -355,6 +355,33 @@ if (RIGEXEC_BUILD_PYTHON)
     add_subdirectory(python)
 endif()
 
+# ---------------------------------------------------------------------------
+# usdNoodles: the Noodles node-graph editor for usdview, localized from
+# OpenUSD PR #4156 -- see plugin/usdNoodles/CMakeLists.txt.
+#
+# It wraps its C++ with the Boost.Python that ships inside OpenUSD, not with
+# pybind11, so what it needs is an OpenUSD built with Python and with imaging
+# (garch, glf) -- not RIGEXEC_BUILD_PYTHON. The default follows whether this
+# USD install has them.
+# ---------------------------------------------------------------------------
+if (NOT CMAKE_CROSSCOMPILING AND TARGET python AND TARGET garch AND TARGET glf)
+    set(_rigexec_usdnoodles_default ON)
+else()
+    set(_rigexec_usdnoodles_default OFF)
+endif()
+option(RIGEXEC_BUILD_USDNOODLES
+       "Build the usdNoodles node-graph editor plugin for usdview"
+       ${_rigexec_usdnoodles_default})
+
+if (RIGEXEC_BUILD_USDNOODLES)
+    # garch and glf name OpenGL::GL in their link interface and pxrConfig
+    # leaves finding it to the consumer. It is found HERE, not in the
+    # subdirectory: an imported target's link interface resolves in the
+    # directory that imported it, and that is this one.
+    find_package(OpenGL REQUIRED)
+    add_subdirectory(plugin/usdNoodles)
+endif()
+
 # End-to-end Python binding test: authors a rig through the package and
 # evaluates it in-process. The interpreter was already located by the probe
 # above (the python/ subdirectory's find_package result does not propagate to
@@ -455,6 +482,35 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
             "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
     endforeach()
+endif()
+
+# The usdNoodles suite: plain unittest modules inside the package, run from
+# the staged build copy so they exercise what this build produced.
+#
+# pxr goes on PYTHONPATH here rather than being resolved inside the test, as
+# tests/python/rigexec_test_env.py does for the tests above: these modules are
+# upstream code, and three of them start child interpreters that have to
+# import pxr and UsdNoodles too -- an environment variable is the one thing
+# that reaches those. ENVIRONMENT_MODIFICATION because a Windows PATH-style
+# list cannot be written through ENVIRONMENT at all (see below). The site
+# layouts are the ones rigexec_test_env.py knows.
+if (RIGEXEC_BUILD_USDNOODLES AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
+    add_test(NAME testUsdNoodles
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s . -p "test*.py"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/python/UsdNoodles/testenv")
+    file(GLOB _rigexec_usd_site_dirs LIST_DIRECTORIES true
+        "${USD_INSTALL_DIR}/Lib/site-packages"
+        "${USD_INSTALL_DIR}/lib/python*/site-packages"
+        "${USD_INSTALL_DIR}/lib/python")
+    foreach(_rigexec_usd_site_dir IN LISTS _rigexec_usd_site_dirs)
+        if (IS_DIRECTORY "${_rigexec_usd_site_dir}/pxr")
+            set_property(TEST testUsdNoodles APPEND PROPERTY
+                ENVIRONMENT_MODIFICATION
+                "PYTHONPATH=path_list_prepend:${_rigexec_usd_site_dir}")
+        endif()
+    endforeach()
+    set_property(TEST testUsdNoodles APPEND PROPERTY ENVIRONMENT_MODIFICATION
+        "PYTHONPATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/python")
 endif()
 
 # ---------------------------------------------------------------------------

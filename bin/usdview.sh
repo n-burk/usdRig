@@ -26,6 +26,7 @@ export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/museAssistant"
 rigexec_require_python
 rigexec_require_usd "$USDVIEW"
 rigexec_build
+rigexec_register_usdnoodles
 
 # Rewritten every run rather than kept, so an edited or truncated leftover
 # cannot turn into a confusing "blank" stage on the next launch.

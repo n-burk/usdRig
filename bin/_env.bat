@@ -31,7 +31,9 @@ rem Where THIS USD build keeps its python modules. A Windows install uses
 rem Lib\site-packages; a build configured the POSIX way puts them under
 rem lib\python. Both are added when both exist rather than one being assumed,
 rem which is what let build_rigexec.bat and gen_schema.bat disagree about it.
-set "PYTHONPATH=%RIG%\plugin\rigExecUsdview;%RIG%\plugin\museAssistant"
+rem build\python is where the build stages the UsdNoodles package beside its
+rem native module; launch_usdview.bat registers it.
+set "PYTHONPATH=%RIG%\plugin\rigExecUsdview;%RIG%\plugin\museAssistant;%RIG%\build\python"
 if exist "%USD%\Lib\site-packages" set "PYTHONPATH=%PYTHONPATH%;%USD%\Lib\site-packages"
 if exist "%USD%\lib\python" set "PYTHONPATH=%PYTHONPATH%;%USD%\lib\python"
 

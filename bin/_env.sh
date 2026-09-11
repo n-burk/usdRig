@@ -106,7 +106,9 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
         ;;
 esac
 
-export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant${PY_SITE:+:$PY_SITE}${PYTHONPATH:+:$PYTHONPATH}"
+# build/python is where the build stages the UsdNoodles package beside its
+# native module; see rigexec_register_usdnoodles below.
+export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant:$RIG/build/python${PY_SITE:+:$PY_SITE}${PYTHONPATH:+:$PYTHONPATH}"
 
 # The schema resources MUST be the GENERATED directory: only the generated
 # plugInfo carries the LibraryPath and implementsComputeExtent that let Plug
@@ -160,6 +162,29 @@ rigexec_require_usd() {
         echo "ERROR: $1 not found (USD=$USD)" >&2
         echo "       set USD=/path/to/usd-install and retry." >&2
         exit 1
+    fi
+}
+
+# Register the usdNoodles node-graph editor the build staged under
+# build/python/UsdNoodles. For the interactive launchers only, like the Muse
+# container: the headless runners must not load an extra panel into the app
+# they are asserting against. Call it after building, so a first build has
+# already produced the plugInfo.json it looks for.
+#
+# Skipped when this USD install ships its own pxr.UsdNoodles -- an OpenUSD
+# built from PR #4156 with noodles, which is where this copy came from. The
+# two register the same usdview command names, and usdview answers a
+# duplicate name by loading no plugins at all, RigExec's own included.
+rigexec_register_usdnoodles() {
+    if [ -n "$PY_SITE" ] && [ -d "$PY_SITE/pxr/UsdNoodles" ]; then
+        echo "usdNoodles: $PY_SITE/pxr/UsdNoodles is loaded instead of the" >&2
+        echo "            in-repo copy; registering both stops usdview loading" >&2
+        echo "            any plugin. Build OpenUSD without noodles to use" >&2
+        echo "            plugin/usdNoodles." >&2
+        return 0
+    fi
+    if [ -f "$RIG/build/python/UsdNoodles/plugInfo.json" ]; then
+        export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/build/python/UsdNoodles"
     fi
 }
 
