@@ -4,6 +4,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/splineIk.h"
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
@@ -14,6 +15,7 @@
 #include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -3008,6 +3010,652 @@ TestConnectedParentSpaceSolverInputs()
     }));
 }
 
+// ---------------------------------------------------------------------------
+// RigExecSplineIk: the control-driven spine solver, exercised through exec
+// (the aggregate tap, like TestTwoBoneIkRestFrameInputs) and through the
+// evaluator (joint binding, and the non-uniform squash scale surviving into
+// the bound joints' frames and matrices). The kernel itself is covered by
+// testRigExecSplineIk; these tests are about the wiring: control frames in,
+// per-joint frames out, and the schema knobs reaching the solve.
+// ---------------------------------------------------------------------------
+
+static constexpr double kSplineIkPi = 3.141592653589793238462643383279502884;
+
+static GfVec3d
+SplineIkUnitX(const RigExecPointFrame &f)
+{
+    return (f.X() - f.Origin()).GetNormalized();
+}
+
+static GfVec3d
+SplineIkUnitY(const RigExecPointFrame &f)
+{
+    return (f.Y() - f.Origin()).GetNormalized();
+}
+
+static double
+SplineIkHandle(const RigExecPointFrame &f, int axis)
+{
+    return (f.points[axis] - f.Origin()).GetLength();
+}
+
+// Orthonormal rest matrix (row-vector convention) with X along `aim` and Y
+// the projected `up`: what a joint's rest:space must be, since rest spaces
+// are orthonormalized by contract.
+static GfMatrix4d
+SplineIkRestSpace(
+    const GfVec3d &origin, const GfVec3d &aim, const GfVec3d &upCandidate)
+{
+    const GfVec3d x = aim.GetNormalized();
+    GfVec3d y = upCandidate - x * GfDot(x, upCandidate);
+    y.Normalize();
+    const GfVec3d z = GfCross(x, y);
+    GfMatrix4d m(1.0);
+    m.SetRow(0, GfVec4d(x[0], x[1], x[2], 0));
+    m.SetRow(1, GfVec4d(y[0], y[1], y[2], 0));
+    m.SetRow(2, GfVec4d(z[0], z[1], z[2], 0));
+    m.SetRow(3, GfVec4d(origin[0], origin[1], origin[2], 1));
+    return m;
+}
+
+struct SplineIkStage {
+    UsdStageRefPtr stage;
+    UsdPrim root, mid, end, solver;
+    std::vector<UsdPrim> joints;
+    std::vector<GfVec3d> origins;
+};
+
+// A chain whose rest origins are `origins` (X aims at the successor, Y the
+// projected +Y up), root/mid/end controls at the first, middle, and last
+// joint with the same orientation, and a RigExecSplineIk over the chain,
+// all under a rig root so the evaluator can compile it too.
+static SplineIkStage
+MakeSplineIkStage(const std::vector<GfVec3d> &origins)
+{
+    SplineIkStage s;
+    s.origins = origins;
+    s.stage = UsdStage::CreateInMemory();
+    s.stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    s.stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const size_t n = origins.size();
+    std::vector<GfMatrix4d> rests;
+    for (size_t i = 0; i < n; ++i) {
+        const GfVec3d aim = i + 1 < n ? origins[i + 1] - origins[i]
+                                      : origins[i] - origins[i - 1];
+        rests.push_back(SplineIkRestSpace(origins[i], aim, GfVec3d(0, 1, 0)));
+    }
+    const auto define = [&](const std::string &path, const char *type,
+                            const GfMatrix4d &rest) {
+        const UsdPrim prim = s.stage->DefinePrim(SdfPath(path), TfToken(type));
+        CHECK(prim);
+        CHECK(prim.GetAttribute(TfToken("rest:space")).Set(rest));
+        return prim;
+    };
+    SdfPathVector jointPaths;
+    for (size_t i = 0; i < n; ++i) {
+        s.joints.push_back(define(
+            "/Asset/Rig/Joints/J" + std::to_string(i), "RigExecJoint", rests[i]));
+        jointPaths.push_back(s.joints.back().GetPath());
+    }
+    s.root = define("/Asset/Rig/Controls/Root", "RigExecControl", rests[0]);
+    s.mid = define("/Asset/Rig/Controls/Mid", "RigExecControl", rests[n / 2]);
+    s.end = define("/Asset/Rig/Controls/End", "RigExecControl", rests[n - 1]);
+    s.solver = s.stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/Spine"), TfToken("RigExecSplineIk"));
+    CHECK(s.solver);
+    s.solver.GetRelationship(TfToken("rigExec:rootControl"))
+        .SetTargets({s.root.GetPath()});
+    s.solver.GetRelationship(TfToken("rigExec:midControl"))
+        .SetTargets({s.mid.GetPath()});
+    s.solver.GetRelationship(TfToken("rigExec:endControl"))
+        .SetTargets({s.end.GetPath()});
+    s.solver.GetRelationship(TfToken("rigExec:joints")).SetTargets(jointPaths);
+    return s;
+}
+
+static std::vector<GfVec3d>
+SplineIkStraightOrigins()
+{
+    std::vector<GfVec3d> origins;
+    for (int i = 0; i < 7; ++i) {
+        origins.emplace_back(double(i), 0.0, 0.0);
+    }
+    return origins;
+}
+
+static RigExecPointFrameArray
+SplineIkSolve(const SplineIkStage &s)
+{
+    RigExecTapSet taps(s.stage);
+    const RigExecTapId tap = taps.Add(RigExecValueAddress::Prim(
+        s.solver.GetPath(), TfToken("computePointFrameArray")));
+    CHECK(taps.Prepare());
+    const RigExecSnapshot snapshot = taps.Evaluate(UsdTimeCode::Default());
+    CHECK(snapshot.IsValid() && snapshot.IsComplete());
+    return snapshot.Get<RigExecPointFrameArray>(tap);
+}
+
+static void
+SplineIkSet(const UsdPrim &prim, const char *attr, double value)
+{
+    CHECK(prim.GetAttribute(TfToken(attr)).Set(value));
+}
+
+static void
+TestSplineIkRest()
+{
+    // Straight chain: the rest curve IS the chain, so every joint reproduces
+    // its rest frame exactly and the published rests are the joint rests.
+    {
+        const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+        const RigExecPointFrameArray frames = SplineIkSolve(s);
+        CHECK(frames.GetSize() == 7 && frames.rests.size() == 7);
+        if (frames.GetSize() != 7 || frames.rests.size() != 7) {
+            return;
+        }
+        for (size_t i = 0; i < 7; ++i) {
+            const RigExecPointFrame &f = frames.frames[i];
+            CHECK(f.IsValid() && !f.IsDegenerate());
+            CHECK(Near(f.Origin(), s.origins[i], 1e-9));
+            CHECK(Near(SplineIkUnitX(f), GfVec3d(1, 0, 0), 1e-9));
+            CHECK(Near(SplineIkUnitY(f), GfVec3d(0, 1, 0), 1e-9));
+            for (int axis = 1; axis < 4; ++axis) {
+                CHECK(std::abs(SplineIkHandle(f, axis) - 1.0) < 1e-9);
+            }
+            CHECK(Near(frames.rests[i][0], s.origins[i], 1e-12));
+        }
+    }
+    // Curved chain: the degree-2 curve through rest CVs [0], [1], [N-2],
+    // [N-1] interpolates only its end CVs, so the interior joints carry a
+    // rest residual. That is inherent to the model (a maintained offset
+    // downstream absorbs it, as Maya's mo=1 constraints do): measure and
+    // bound it, do not assert it away. With restLength = curve the ratio
+    // is exactly one at rest, so the tip overshoots the curve end by the
+    // chain/curve length difference along the end tangent.
+    {
+        std::vector<GfVec3d> origins;
+        const double radius = 10.0;
+        for (int i = 0; i < 7; ++i) {
+            const double a = i * 8.0 * kSplineIkPi / 180.0;
+            origins.emplace_back(radius * std::sin(a), radius * (1 - std::cos(a)), 0.0);
+        }
+        const SplineIkStage s = MakeSplineIkStage(origins);
+        const RigExecPointFrameArray frames = SplineIkSolve(s);
+        CHECK(frames.GetSize() == 7);
+        if (frames.GetSize() != 7) {
+            return;
+        }
+        double chainLength = 0.0;
+        for (size_t i = 1; i < 7; ++i) {
+            chainLength += (origins[i] - origins[i - 1]).GetLength();
+        }
+        const double segment = chainLength / 6.0;
+        const RigExecSplineIkCurve restCurve(
+            {origins[0], origins[1], origins[5], origins[6]});
+        const double curveLength = restCurve.ArcLength();
+        CHECK(chainLength > curveLength);
+
+        CHECK(Near(frames.frames[0].Origin(), origins[0], 1e-9));
+        double maxResidual = 0.0;
+        for (size_t i = 1; i < 6; ++i) {
+            const double residual =
+                (frames.frames[i].Origin() - origins[i]).GetLength();
+            maxResidual = std::max(maxResidual, residual);
+            CHECK(residual < 0.5 * segment);
+            CHECK(!frames.frames[i].IsDegenerate());
+        }
+        CHECK(maxResidual > 1e-6);  // measured, not zero: the model's residual
+        std::printf("SplineIk curved rest: interior residual max %.4f "
+                    "(segment %.4f, chain %.4f, curve %.4f)\n",
+                    maxResidual, segment, chainLength, curveLength);
+        const GfVec3d endTangent = (origins[6] - origins[5]).GetNormalized();
+        CHECK(Near(frames.frames[6].Origin(),
+                   origins[6] + endTangent * (chainLength - curveLength), 1e-9));
+
+        // restLength = chain: the chain spans the curve, tip on the end CV.
+        CHECK(s.solver.GetAttribute(TfToken("rigExec:restLength"))
+                  .Set(TfToken("chain")));
+        const RigExecPointFrameArray spanned = SplineIkSolve(s);
+        CHECK(spanned.GetSize() == 7);
+        if (spanned.GetSize() == 7) {
+            CHECK(Near(spanned.frames[6].Origin(), origins[6], 1e-9));
+            CHECK(Near(spanned.frames[0].Origin(), origins[0], 1e-9));
+        }
+    }
+}
+
+static void
+TestSplineIkStretch()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    // End control pulled +3 along the chain; the mid control rides on its
+    // follow point (half the end displacement) so it adds no offset.
+    SplineIkSet(s.end, "avars:tx", 3.0);
+    SplineIkSet(s.mid, "avars:tx", 1.5);
+    const RigExecPointFrameArray frames = SplineIkSolve(s);
+    CHECK(frames.GetSize() == 7);
+    if (frames.GetSize() != 7) {
+        return;
+    }
+    // ratio 1.5: joints at 1.5 spacing, the tip at the curve end (9), no
+    // thinning without volume weights.
+    for (size_t i = 0; i < 7; ++i) {
+        const RigExecPointFrame &f = frames.frames[i];
+        CHECK(Near(f.Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+        CHECK(Near(SplineIkUnitX(f), GfVec3d(1, 0, 0), 1e-9));
+        CHECK(Near(SplineIkUnitY(f), GfVec3d(0, 1, 0), 1e-9));
+        CHECK(std::abs(SplineIkHandle(f, 1) - 1.0) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(f, 2) - 1.0) < 1e-9);
+    }
+
+    // Off-axis pull: the curve bends and lengthens; the ratio tracks the
+    // posed curve's ARC LENGTH, so joint i sits at arc distance
+    // ratio * i = (L / 6) * i along it. Verify against the curve built
+    // from the CVs this pose produces: cv0/cv1 carried by the root
+    // (unchanged), cv2/cv3 by the end (+4, +2), mid on its follow point.
+    SplineIkSet(s.end, "avars:tx", 4.0);
+    SplineIkSet(s.end, "avars:ty", 2.0);
+    SplineIkSet(s.mid, "avars:tx", 2.0);
+    SplineIkSet(s.mid, "avars:ty", 1.0);
+    const RigExecPointFrameArray bent = SplineIkSolve(s);
+    CHECK(bent.GetSize() == 7);
+    if (bent.GetSize() != 7) {
+        return;
+    }
+    const RigExecSplineIkCurve curve(
+        {GfVec3d(0, 0, 0), GfVec3d(1, 0, 0), GfVec3d(9, 2, 0), GfVec3d(10, 2, 0)});
+    const double ratio = curve.ArcLength() / 6.0;
+    CHECK(ratio > 1.0);
+    for (size_t i = 0; i < 7; ++i) {
+        GfVec3d expected;
+        CHECK(curve.PointAtArcLength(ratio * i, &expected, nullptr));
+        CHECK(Near(bent.frames[i].Origin(), expected, 1e-9));
+    }
+    CHECK(Near(bent.frames[6].Origin(), GfVec3d(10, 2, 0), 1e-9));
+    for (size_t i = 0; i + 1 < 7; ++i) {
+        const GfVec3d chord = (bent.frames[i + 1].Origin() -
+                               bent.frames[i].Origin()).GetNormalized();
+        CHECK(Near(SplineIkUnitX(bent.frames[i]), chord, 1e-9));
+    }
+}
+
+static void
+TestSplineIkMidBend()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    // Mid control lifted +1.5 in Z: cv1 and cv2 take the offset, the
+    // endpoints stay put, and the bend lies in the XZ plane so the +Y up
+    // is untouched.
+    SplineIkSet(s.mid, "avars:tz", 1.5);
+    const RigExecPointFrameArray frames = SplineIkSolve(s);
+    CHECK(frames.GetSize() == 7);
+    if (frames.GetSize() != 7) {
+        return;
+    }
+    CHECK(Near(frames.frames[0].Origin(), GfVec3d(0, 0, 0), 1e-9));
+    CHECK(Near(frames.frames[6].Origin(), GfVec3d(6, 0, 0), 1e-9));
+    for (size_t i = 1; i < 6; ++i) {
+        CHECK(frames.frames[i].Origin()[2] > 0.1);
+        CHECK(frames.frames[i].Origin()[2] <= 1.5);
+        CHECK(std::abs(frames.frames[i].Origin()[1]) < 1e-9);
+    }
+    CHECK(frames.frames[3].Origin()[2] > frames.frames[1].Origin()[2]);
+    CHECK(frames.frames[3].Origin()[2] > frames.frames[5].Origin()[2]);
+    for (size_t i = 0; i < 7; ++i) {
+        CHECK(Near(SplineIkUnitY(frames.frames[i]), GfVec3d(0, 1, 0), 1e-9));
+    }
+    // Exactly the curve those CVs define.
+    const RigExecSplineIkCurve curve(
+        {GfVec3d(0, 0, 0), GfVec3d(1, 0, 1.5), GfVec3d(5, 0, 1.5), GfVec3d(6, 0, 0)});
+    const double ratio = curve.ArcLength() / 6.0;
+    for (size_t i = 0; i < 7; ++i) {
+        GfVec3d expected;
+        CHECK(curve.PointAtArcLength(ratio * i, &expected, nullptr));
+        CHECK(Near(frames.frames[i].Origin(), expected, 1e-9));
+    }
+
+    // inputs:midFollowWeight moves the follow point. With the end lifted
+    // +2 in Z and the mid control left alone: weight 0 follows the root
+    // only, so the mid registers no offset and only cv2/cv3 rise; weight 1
+    // follows the end, so the mid registers minus the end displacement and
+    // cv1/cv2 drop by it. Each is exactly the curve those CVs define.
+    SplineIkSet(s.mid, "avars:tz", 0.0);
+    SplineIkSet(s.end, "avars:tz", 2.0);
+    const auto expectCurve = [&](const RigExecPointFrameArray &r,
+                                 const std::array<GfVec3d, 4> &cvs) {
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() != 7) {
+            return;
+        }
+        const RigExecSplineIkCurve c(cvs);
+        const double ratio = c.ArcLength() / 6.0;
+        for (size_t i = 0; i < 7; ++i) {
+            GfVec3d expected;
+            CHECK(c.PointAtArcLength(ratio * i, &expected, nullptr));
+            CHECK(Near(r.frames[i].Origin(), expected, 1e-9));
+        }
+    };
+    SplineIkSet(s.solver, "inputs:midFollowWeight", 0.0);
+    expectCurve(SplineIkSolve(s),
+                {GfVec3d(0, 0, 0), GfVec3d(1, 0, 0), GfVec3d(5, 0, 2), GfVec3d(6, 0, 2)});
+    SplineIkSet(s.solver, "inputs:midFollowWeight", 1.0);
+    expectCurve(SplineIkSolve(s),
+                {GfVec3d(0, 0, 0), GfVec3d(1, 0, -2), GfVec3d(5, 0, 0), GfVec3d(6, 0, 2)});
+    SplineIkSet(s.solver, "inputs:midFollowWeight", 0.5);
+    expectCurve(SplineIkSolve(s),
+                {GfVec3d(0, 0, 0), GfVec3d(1, 0, -1), GfVec3d(5, 0, 1), GfVec3d(6, 0, 2)});
+}
+
+static void
+TestSplineIkTwist()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    const RigExecPointFrameArray plain = SplineIkSolve(s);
+    CHECK(plain.GetSize() == 7);
+    if (plain.GetSize() != 7) {
+        return;
+    }
+    // Signed rotation of a joint's posed up about its aim, relative to the
+    // untwisted solve.
+    const auto upRotation = [&](const RigExecPointFrameArray &r, size_t i) {
+        const GfVec3d x = SplineIkUnitX(r.frames[i]);
+        const GfVec3d y0 = SplineIkUnitY(plain.frames[i]);
+        const GfVec3d y1 = SplineIkUnitY(r.frames[i]);
+        return std::atan2(GfDot(GfCross(y0, y1), x), GfDot(y0, y1));
+    };
+    const auto degrees = [](double d) { return d * kSplineIkPi / 180.0; };
+
+    // inputs:roll is constant along the chain (Maya ikHandle.roll).
+    {
+        SplineIkSet(s.solver, "inputs:roll", 35.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(35.0)) < 1e-9);
+                CHECK(Near(r.frames[i].Origin(), s.origins[i], 1e-9));
+            }
+        }
+        SplineIkSet(s.solver, "inputs:roll", 0.0);
+    }
+    // Root and end controls rolled together about the chain axis: the
+    // root twist is constant along the chain and every joint is its rest
+    // frame rotated about that axis.
+    {
+        SplineIkSet(s.root, "avars:rx", 35.0);
+        SplineIkSet(s.end, "avars:rx", 35.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            const GfRotation rot(GfVec3d(1, 0, 0), 35.0);
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(35.0)) < 1e-9);
+                for (int k = 0; k < 4; ++k) {
+                    CHECK(Near(r.frames[i].points[k],
+                               rot.TransformDir(plain.frames[i].points[k]), 1e-9));
+                }
+            }
+        }
+        SplineIkSet(s.root, "avars:rx", 0.0);
+        SplineIkSet(s.end, "avars:rx", 0.0);
+    }
+    // End control twisted alone: a gradient exactly linear in t_i = i/6,
+    // asserted as equal increments between equally spaced joints, not just
+    // at the endpoints.
+    {
+        SplineIkSet(s.end, "avars:rx", -80.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            const double slope = degrees(-80.0);
+            CHECK(std::abs(upRotation(r, 0)) < 1e-9);
+            CHECK(std::abs(upRotation(r, 6) - slope) < 1e-9);
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - slope * i / 6.0) < 1e-9);
+                if (i > 0) {
+                    CHECK(std::abs((upRotation(r, i) - upRotation(r, i - 1)) -
+                                   slope / 6.0) < 1e-9);
+                }
+                CHECK(Near(r.frames[i].Origin(), s.origins[i], 1e-9));
+            }
+        }
+        SplineIkSet(s.end, "avars:rx", 0.0);
+    }
+    // Root control twisted alone: the end holds its orientation, so the
+    // roll fades linearly to zero at the tip (roll * (1 - t_i)).
+    {
+        SplineIkSet(s.root, "avars:rx", 30.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(30.0) * (1.0 - i / 6.0)) < 1e-9);
+            }
+        }
+        SplineIkSet(s.root, "avars:rx", 0.0);
+    }
+    // inputs:twist adds a linear gradient on top (Maya ikHandle.twist).
+    {
+        SplineIkSet(s.solver, "inputs:twist", 60.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(60.0) * i / 6.0) < 1e-9);
+            }
+        }
+        SplineIkSet(s.solver, "inputs:twist", 0.0);
+    }
+}
+
+static void
+TestSplineIkSquash()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    const std::vector<float> weights = {
+        0.0f, 0.1429f, 0.5f, 1.0f, 0.25f, 0.3571f, 0.0714f};
+    CHECK(s.solver.GetAttribute(TfToken("rigExec:volumeWeights"))
+              .Set(VtFloatArray(weights.begin(), weights.end())));
+    const auto solveWithEndAt = [&](double x, double preserveVolume) {
+        SplineIkSet(s.end, "avars:tx", x - 6.0);
+        SplineIkSet(s.mid, "avars:tx", (x - 6.0) * 0.5);
+        SplineIkSet(s.solver, "inputs:preserveVolume", preserveVolume);
+        return SplineIkSolve(s);
+    };
+    // s_y = s_z = 1 - w_i * preserveVolume * (ratio - 1), s_x = 1.
+    const auto expectScale = [&](const RigExecPointFrameArray &r, double ratio,
+                                 double preserveVolume, size_t i) {
+        const double expected = 1.0 - double(weights[i]) * preserveVolume * (ratio - 1.0);
+        CHECK(std::abs(SplineIkHandle(r.frames[i], 2) - expected) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(r.frames[i], 3) - expected) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(r.frames[i], 1) - 1.0) < 1e-9);
+    };
+
+    // ratio 1.5, full strength: s = 1 - w / 2.
+    const RigExecPointFrameArray stretched = solveWithEndAt(9.0, 1.0);
+    CHECK(stretched.GetSize() == 7);
+    if (stretched.GetSize() != 7) {
+        return;
+    }
+    CHECK(std::abs(SplineIkHandle(stretched.frames[3], 2) - 0.5) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(stretched.frames[2], 2) - 0.75) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(stretched.frames[0], 2) - 1.0) < 1e-9);
+    for (size_t i = 0; i < 7; ++i) {
+        expectScale(stretched, 1.5, 1.0, i);
+        CHECK(Near(stretched.frames[i].Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+    }
+    // The scale is what element extraction hands the bound joint: the
+    // out-space measures posed/rest handle-length ratios per axis, so
+    // the joint's frame carries (1, s, s) -- non-uniform, not laundered.
+    const RigExecPointFrame extracted = RigExecExtractElementFrame(&stretched, 3);
+    CHECK(extracted.IsValid() && !extracted.IsDegenerate());
+    CHECK(std::abs(SplineIkHandle(extracted, 1) - 1.0) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(extracted, 2) - 0.5) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(extracted, 3) - 0.5) < 1e-9);
+    CHECK(Near(extracted.Origin(), GfVec3d(4.5, 0, 0), 1e-9));
+
+    // Partial strength: s = 1 - w * 0.4 * 0.5.
+    const RigExecPointFrameArray partial = solveWithEndAt(9.0, 0.4);
+    CHECK(partial.GetSize() == 7);
+    if (partial.GetSize() == 7) {
+        CHECK(std::abs(SplineIkHandle(partial.frames[3], 2) - 0.8) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(partial.frames[2], 3) - 0.9) < 1e-9);
+        for (size_t i = 0; i < 7; ++i) {
+            expectScale(partial, 1.5, 0.4, i);
+        }
+    }
+    // preserveVolume 0: no thinning anywhere, the stretch still applies.
+    const RigExecPointFrameArray off = solveWithEndAt(9.0, 0.0);
+    CHECK(off.GetSize() == 7);
+    if (off.GetSize() == 7) {
+        for (size_t i = 0; i < 7; ++i) {
+            for (int axis = 1; axis < 4; ++axis) {
+                CHECK(std::abs(SplineIkHandle(off.frames[i], axis) - 1.0) < 1e-9);
+            }
+            CHECK(Near(off.frames[i].Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+        }
+    }
+    // ratio 0.8 (squash): s = 1 + w * 0.2, thickening.
+    const RigExecPointFrameArray squashed = solveWithEndAt(4.8, 1.0);
+    CHECK(squashed.GetSize() == 7);
+    if (squashed.GetSize() == 7) {
+        CHECK(std::abs(SplineIkHandle(squashed.frames[3], 2) - 1.2) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(squashed.frames[2], 2) - 1.1) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(squashed.frames[4], 2) - 1.05) < 1e-9);
+        for (size_t i = 0; i < 7; ++i) {
+            expectScale(squashed, 0.8, 1.0, i);
+            CHECK(Near(squashed.frames[i].Origin(), GfVec3d(0.8 * i, 0, 0), 1e-9));
+        }
+    }
+}
+
+static void
+TestSplineIkEvaluatorBinding()
+{
+    // The evaluator recognizes the solver as an aggregate, accepts its
+    // rigExec:joints claim, binds each joint to its chain slot, and the
+    // per-joint non-uniform scale reaches the joint frames and matrices.
+    SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    const std::vector<float> weights = {
+        0.0f, 0.1429f, 0.5f, 1.0f, 0.25f, 0.3571f, 0.0714f};
+    CHECK(s.solver.GetAttribute(TfToken("rigExec:volumeWeights"))
+              .Set(VtFloatArray(weights.begin(), weights.end())));
+    SplineIkSet(s.end, "avars:tx", 3.0);
+    SplineIkSet(s.mid, "avars:tx", 1.5);
+
+    RigExecRigEvaluator evaluator(s.stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const std::string &e : errors) {
+        std::printf("  compile: %s\n", e.c_str());
+    }
+    CHECK(errors.empty());
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    for (const std::string &d : pose.diagnostics) {
+        std::printf("  diagnostic: %s\n", d.c_str());
+    }
+    const auto solverFrames = pose.solverFrames.find(s.solver.GetPath());
+    CHECK(solverFrames != pose.solverFrames.end() &&
+          solverFrames->second.size() == 7);
+    for (size_t i = 0; i < 7; ++i) {
+        const auto it = pose.jointFramesFinal.find(s.joints[i].GetPath());
+        CHECK(it != pose.jointFramesFinal.end());
+        if (it == pose.jointFramesFinal.end()) {
+            continue;
+        }
+        const RigExecPointFrame &f = it->second;
+        CHECK(f.IsValid() && !f.IsDegenerate());
+        CHECK(Near(f.Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+        const double expected = 1.0 - double(weights[i]) * 0.5;
+        CHECK(std::abs(SplineIkHandle(f, 1) - 1.0) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(f, 2) - expected) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(f, 3) - expected) < 1e-9);
+    }
+    // The joint matrix carries the same (1, s, s): its Y row is half length.
+    const auto m = pose.jointMatricesFinal.find(s.joints[3].GetPath());
+    CHECK(m != pose.jointMatricesFinal.end());
+    if (m != pose.jointMatricesFinal.end()) {
+        const GfVec3d xRow(m->second[0][0], m->second[0][1], m->second[0][2]);
+        const GfVec3d yRow(m->second[1][0], m->second[1][1], m->second[1][2]);
+        const GfVec3d zRow(m->second[2][0], m->second[2][1], m->second[2][2]);
+        CHECK(std::abs(xRow.GetLength() - 1.0) < 1e-9);
+        CHECK(std::abs(yRow.GetLength() - 0.5) < 1e-9);
+        CHECK(std::abs(zRow.GetLength() - 0.5) < 1e-9);
+    }
+
+    // A value edit on a control re-solves without a recompile.
+    const size_t epoch = evaluator.GetBindingEpochDigest();
+    SplineIkSet(s.end, "avars:tx", 0.0);
+    SplineIkSet(s.mid, "avars:tx", 0.0);
+    const RigExecRigPose atRest = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(atRest.valid);
+    CHECK(evaluator.GetBindingEpochDigest() == epoch);
+    const auto tip = atRest.jointFramesFinal.find(s.joints[6].GetPath());
+    CHECK(tip != atRest.jointFramesFinal.end());
+    if (tip != atRest.jointFramesFinal.end()) {
+        CHECK(Near(tip->second.Origin(), GfVec3d(6, 0, 0), 1e-9));
+        CHECK(std::abs(SplineIkHandle(tip->second, 2) - 1.0) < 1e-9);
+    }
+
+    // rigExec:jointElements remaps list position to chain slot: listing
+    // the tip first with a permutation binds every joint to the same slot.
+    {
+        SplineIkStage p = MakeSplineIkStage(SplineIkStraightOrigins());
+        SplineIkSet(p.end, "avars:tx", 3.0);
+        SplineIkSet(p.mid, "avars:tx", 1.5);
+        SdfPathVector order = {p.joints[6].GetPath()};
+        VtIntArray elements = {6};
+        for (int i = 0; i < 6; ++i) {
+            order.push_back(p.joints[i].GetPath());
+            elements.push_back(i);
+        }
+        p.solver.GetRelationship(TfToken("rigExec:joints")).SetTargets(order);
+        CHECK(p.solver.GetAttribute(TfToken("rigExec:jointElements")).Set(elements));
+        RigExecRigEvaluator permuted(p.stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> permutedErrors;
+        CHECK(permuted.Compile(&permutedErrors));
+        CHECK(permutedErrors.empty());
+        const RigExecRigPose remapped = permuted.Evaluate(UsdTimeCode::Default());
+        CHECK(remapped.valid);
+        for (size_t i = 0; i < 7; ++i) {
+            const auto it = remapped.jointFramesFinal.find(p.joints[i].GetPath());
+            CHECK(it != remapped.jointFramesFinal.end());
+            if (it != remapped.jointFramesFinal.end()) {
+                CHECK(Near(it->second.Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+            }
+        }
+    }
+    // Compile rejects a volumeWeights array that is not parallel to the
+    // chain, and a remap that fills one chain slot twice.
+    {
+        SplineIkStage bad = MakeSplineIkStage(SplineIkStraightOrigins());
+        CHECK(bad.solver.GetAttribute(TfToken("rigExec:volumeWeights"))
+                  .Set(VtFloatArray{0.1f, 0.2f, 0.3f}));
+        RigExecRigEvaluator rejected(bad.stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> badErrors;
+        CHECK(!rejected.Compile(&badErrors));
+        bool named = false;
+        for (const std::string &e : badErrors) {
+            named = named || e.find("rigExec:volumeWeights") != std::string::npos;
+        }
+        CHECK(named);
+    }
+    {
+        SplineIkStage bad = MakeSplineIkStage(SplineIkStraightOrigins());
+        CHECK(bad.solver.GetAttribute(TfToken("rigExec:jointElements"))
+                  .Set(VtIntArray{0, 1, 2, 3, 4, 5, 5}));
+        RigExecRigEvaluator rejected(bad.stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> badErrors;
+        CHECK(!rejected.Compile(&badErrors));
+        bool named = false;
+        for (const std::string &e : badErrors) {
+            named = named || e.find("twice") != std::string::npos;
+        }
+        CHECK(named);
+    }
+}
+
 int
 main()
 {
@@ -3045,6 +3693,12 @@ main()
     TestTwoBoneIkImpliedLengths(false);
     TestTwoBoneIkImpliedLengths(true);
     TestTwoBoneIkRestFrameInputs();
+    TestSplineIkRest();
+    TestSplineIkStretch();
+    TestSplineIkMidBend();
+    TestSplineIkTwist();
+    TestSplineIkSquash();
+    TestSplineIkEvaluatorBinding();
     TestAggregateSolverValueUpdates();
     TestDeepSolverDependencySchedule();
     TestSolverTransitiveConnectionInvalidation();

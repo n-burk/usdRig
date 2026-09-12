@@ -51,6 +51,7 @@ namespace rigExec {
 /// operation dispatch inside a node.
 enum class RigExecRevisionOp {
     Matrix,
+    Skin,
     BlendShape,
     VolumeCorrect,
     Smooth,
@@ -279,6 +280,9 @@ struct RigExecRevisionBinding {
     SdfPath moverPath;        ///< the authored mover
     SdfPath target;           ///< canonical exact write target
     SdfPath transform;        ///< computeMatrix provider (matrix)
+    /// Ordered computeMatrix providers (skin): rigExec:influences, which
+    /// rigExec:jointIndices index. Every entry shares transformPhase.
+    std::vector<SdfPath> influences;
     SdfPath weightObject;     ///< computeWeightPacket provider
     SdfPath base;             ///< authored-base points (blend/volume/lattice)
     SdfPath topologyCounts;   ///< faceVertexCounts (smooth/surface)
@@ -390,6 +394,23 @@ RigExecMoverParameters RigExecAssembleMatrixParameters(
     UsdTimeCode time = UsdTimeCode::Default(),
     const RigExecResolvedInputs *resolved = nullptr);
 
+/// Assembles a skin mover's parameter packet.
+///
+/// \p influenceTransforms are the already-evaluated computeMatrix results of
+/// the providers named by rigExec:influences, in that order; null fails the
+/// application. The per-point layout (rigExec:jointIndices, jointWeights,
+/// elementSize) and the method token are static reads off the mover prim at
+/// \p time. The packet is valid only when the layout indexes the influence
+/// table in range with finite non-negative weights, so the kernel never has
+/// to guard an element; the point-count half of the check happens in the
+/// kernel, which is the first place the count is known.
+RigExecMoverParameters RigExecAssembleSkinParameters(
+    const UsdPrim &moverPrim,
+    const std::vector<GfMatrix4d> *influenceTransforms,
+    const RigExecWeightPacket *weights,
+    UsdTimeCode time = UsdTimeCode::Default(),
+    const RigExecResolvedInputs *resolved = nullptr);
+
 /// Derives a mover's status from its packet (spec §6.6): disabled and failed
 /// movers both pass their preceding revision through, and a failure records the
 /// first bad canonical address.
@@ -407,6 +428,8 @@ RigExecMoverStatus RigExecStatusForParameters(
 /// so inputs:defaultWeight supplies the common envelope.
 struct RigExecProviderValues {
     const GfMatrix4d *transform = nullptr;          ///< computeMatrix
+    /// computeMatrix per binding.influences entry, in that order (skin).
+    const std::vector<GfMatrix4d> *influenceTransforms = nullptr;
     /// Bound computeWeightPacket, or null to use inputs:defaultWeight.
     const RigExecWeightPacket *weights = nullptr;
     const RigExecPointFrameArray *driverFrames = nullptr;

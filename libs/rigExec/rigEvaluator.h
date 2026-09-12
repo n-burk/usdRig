@@ -252,6 +252,10 @@ private:
         const UsdPrim &prim,
         const RigExecMoverRecord &record,
         std::string *error) const;
+    bool _ValidateSkinMover(
+        const UsdPrim &prim,
+        const RigExecMoverRecord &record,
+        std::string *error) const;
 
     VtVec3fArray _EvaluateChain(
         const SdfPath &target,
@@ -376,6 +380,8 @@ private:
         RigExecRevisionOp op;
         RigExecRevisionBinding binding;
         RigExecTapId transformTap = -1;
+        /// computeMatrix per binding.influences entry, in that order (skin).
+        std::vector<RigExecTapId> influenceTaps;
         RigExecTapId weightTap = -1;
         RigExecTapId driverFramesTap = -1;
         /// The mover asked for the provider's FINAL frame, so its transform

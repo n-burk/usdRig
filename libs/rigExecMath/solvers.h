@@ -7,9 +7,11 @@
 #ifndef RIGEXEC_MATH_SOLVERS_H
 #define RIGEXEC_MATH_SOLVERS_H
 
+#include "dualQuat.h"
 #include "pointFrame.h"
 
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace rigExec {
@@ -103,6 +105,110 @@ std::vector<RigExecPointFrame> RigExecDistributeTwist(
 /// applied per point of an exact native points value.
 GfVec3d RigExecApplyWeightedMatrix(
     const GfVec3d &point, const GfMatrix4d &transform, double weight);
+
+/// Skinning influence layout (RigExecSkinMover): UsdSkel's jointIndices /
+/// jointWeights arrangement over a table of influence matrices, elementSize
+/// slots per point in point order.
+///
+/// Every skinning method starts from the same gather -- for point i and
+/// slot k, Transform(i, k) and Weight(i, k) applied to that point's rest
+/// position -- and differs only in how the gathered terms accumulate. The
+/// layout is therefore shared, and each method is one loop over it:
+/// RigExecApplyLinearBlendSkin below, and the dual-quaternion path that
+/// libs/rigExecMath/dualQuat.h is to supply.
+///
+/// A view, not an owner: the pointers must outlive the call. Validate()
+/// checks the shape once so the per-point accessors can index unchecked.
+struct RigExecSkinLayout {
+    const GfMatrix4d *transforms = nullptr;  ///< one per influence
+    size_t transformCount = 0;
+    const int *indices = nullptr;            ///< pointCount * elementSize
+    const float *weights = nullptr;          ///< parallel to indices
+    size_t indexCount = 0;                   ///< length of indices/weights
+    size_t elementSize = 0;                  ///< influence slots per point
+    size_t pointCount = 0;
+
+    const GfMatrix4d &Transform(size_t point, size_t slot) const {
+        return transforms[indices[point * elementSize + slot]];
+    }
+    float Weight(size_t point, size_t slot) const {
+        return weights[point * elementSize + slot];
+    }
+
+    /// Shape and range check: at least one influence, elementSize >= 1,
+    /// indexCount == pointCount * elementSize, every index in
+    /// [0, transformCount), every weight finite and non-negative, and every
+    /// transform finite and affine. Fills \p error on failure.
+    bool Validate(std::string *error = nullptr) const;
+};
+
+/// Linear blend skinning of point \p i (scalar reference):
+///   p' = (1 - sum_k w_k) p + sum_k w_k (T_k p).
+/// With weights summing to one this is exactly sum_k w_k T_k p. The
+/// complement of the weight sum stays with the rest point, so a partially
+/// weighted point is held in place in proportion to its shortfall rather
+/// than pulled toward the origin (which is what the bare sum does), and an
+/// all-zero-weight point is left where it was. A sum above one is used as
+/// authored: the point is over-driven, not renormalized.
+GfVec3d RigExecApplyLinearBlendSkin(
+    const GfVec3d &point, const RigExecSkinLayout &layout, size_t i);
+
+/// Whole-array form of the above over \p layout.pointCount points. The
+/// caller has validated the layout. in/out may alias.
+void RigExecApplyLinearBlendSkin(
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout);
+
+/// Dual-quaternion skinning over the same layout (scale-aware DQS from
+/// dualQuat.h; scalar, there is no SIMD path for it yet):
+///   p' = (p * S_blend) rotated and translated by normalise(sum_k w_k dq_k)
+/// with S_blend = sum_k w_k S_k, every influence split once per evaluation
+/// into a pre-rotation stretch S_k and a unit dual quaternion dq_k by
+/// RigExecScaledDualQuatFromMatrix, so non-uniform scale (squash and
+/// stretch) survives and the rotational part is length-preserving.
+///
+/// Weight shortfall: the complement 1 - sum_k w_k enters the blend as an
+/// extra IDENTITY influence, the exact analogue of the rest-retaining rule
+/// of RigExecApplyLinearBlendSkin. With weights summing to one the extra
+/// influence has weight zero and is skipped, so a fully weighted point is
+/// the plain DQS blend; a partially weighted point is pulled only part of
+/// the way from rest along the shortest arc (a lone influence at weight w
+/// rotates the point by w of its angle, not to w of its chord); an
+/// all-zero-weight point stays exactly where it was; and for pure
+/// translations the result is identical to the linear rule, complement
+/// included. A sum above one is used as authored, as for the linear
+/// kernel: the identity enters with a negative weight, which extrapolates
+/// past the influences rather than renormalising.
+///
+/// Sign-correction reference: the blend's reference is its first non-zero
+/// input, and the gather puts the LARGEST-weight slot first (ties to the
+/// earliest slot), which is UsdSkel's pivot choice; the remaining slots
+/// follow in authored order and the complement last. For one or two
+/// influences this is bit-neutral, so only points with three or more
+/// influences spanning more than 90 degrees of quaternion space can tell
+/// the two reference conventions apart.
+///
+/// Returns false, leaving \p out unspecified, if any point's blend is
+/// degenerate (RigExecBlendScaledDualQuats' rules; with non-negative
+/// weights summing to at most one the sign-corrected sum is always
+/// constructive, so this is only reachable through an over-driven sum
+/// that cancels the identity). in/out may alias.
+bool RigExecApplyDualQuatSkin(
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout);
+
+/// The hoisted half of RigExecApplyDualQuatSkin: one RigExecScaledDualQuat
+/// per influence in layout order, then one trailing identity entry at
+/// index layout.transformCount that carries the weight complement. Built
+/// once per evaluation, never per point.
+std::vector<RigExecScaledDualQuat> RigExecSkinDualQuatPalette(
+    const RigExecSkinLayout &layout);
+
+/// Single-point form of RigExecApplyDualQuatSkin against a palette from
+/// RigExecSkinDualQuatPalette (scalar reference; allocates, so the array
+/// form does not call it per point). Returns false on a degenerate blend.
+bool RigExecApplyDualQuatSkin(
+    const GfVec3d &point, const RigExecScaledDualQuat *palette,
+    size_t paletteSize, const RigExecSkinLayout &layout, size_t i,
+    GfVec3d *out);
 
 /// Euler application/decomposition order used by the FBX-equivalent
 /// constraints.  The named axes are applied from left to right in the same

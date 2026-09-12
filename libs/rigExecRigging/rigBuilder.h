@@ -186,6 +186,13 @@ public:
     /// Ordered driving controls (rigExec:controls).
     void SetControls(const std::vector<RigExecControlHandle> &controls);
     void SetControls(const std::vector<SdfPath> &paths);
+    /// world | parentRelative (rigExec:controlSpace): whether each control's
+    /// posed frame already carries the motion of the control before it.
+    /// Use parentRelative for controls nested one under the next (AddControl
+    /// with a parent) so they travel with their parent, Maya FK style,
+    /// without the solver applying that motion twice. The joints pose the
+    /// same either way. Any other token is rejected.
+    void SetControlSpace(const TfToken &space);
 };
 
 /// RigExecTwoBoneIk.
@@ -251,6 +258,34 @@ public:
     void SetParameterization(const TfToken &mode);  // arcLength | parametric
     void SetDriverCurveReadPhase(const TfToken &phase);
     void SetSurfaceReadPhase(const TfToken &phase);
+    void SetJointElements(const std::vector<int> &elements);
+};
+
+/// RigExecSplineIk: control-driven spline IK (root/mid/end controls shape a
+/// degree-2 B-spline; the ordered rigExec:joints chain is laid along it).
+class RigExecSplineIkHandle : public RigExecSolverHandle {
+public:
+    using RigExecSolverHandle::RigExecSolverHandle;
+
+    void SetRootControl(const SdfPath &path);
+    void SetMidControl(const SdfPath &path);
+    void SetEndControl(const SdfPath &path);
+    /// Per-joint squash/stretch weights, parallel to rigExec:joints (in
+    /// chain-slot order). Empty means no thinning.
+    void SetVolumeWeights(const std::vector<float> &weights);
+    /// curve | chain: what the stretch ratio is measured against.
+    void SetRestLength(const TfToken &mode);
+    /// Strength of the linear volume preservation, 0..1.
+    void SetPreserveVolume(double amount);
+    /// Mid control follow point: 0 follows the root, 1 the end.
+    void SetMidFollowWeight(double weight);
+    /// Additional roll / twist in degrees (Maya ikHandle roll / twist).
+    void SetRoll(double degrees);
+    void SetTwist(double degrees);
+    /// Length floor as a fraction of the rest root->end chord, 0 = off
+    /// (inputs:minLengthRatio).
+    void SetMinLengthRatio(double ratio);
+    /// Optional chain slot per rigExec:joints entry (a permutation).
     void SetJointElements(const std::vector<int> &elements);
 };
 
@@ -550,6 +585,32 @@ public:
     void SetReadPhase(const TfToken &phase);
 };
 
+/// RigExecSkinMover: multi-influence skinning in one pass, UsdSkel's
+/// jointIndices / jointWeights layout over an ordered influence list.
+/// classicLinear: p' = (1 - sum w) p + sum_i w_i (T_i p).
+class RigExecSkinMoverHandle : public RigExecMoverHandle {
+public:
+    using RigExecMoverHandle::RigExecMoverHandle;
+    using RigExecMoverHandle::SetReadPhase;
+
+    /// Ordered GfMatrix4d providers (joints or controls). The order is
+    /// semantic: jointIndices index this list.
+    void SetInfluences(const std::vector<SdfPath> &providers);
+    /// Per-point layout: elementSize slots per point in point order, each an
+    /// index into the influence list with a parallel weight. Lengths must
+    /// agree and be a multiple of elementSize; indices non-negative; weights
+    /// finite and non-negative. The point count is checked at compile.
+    void SetJointInfluences(
+        const std::vector<int> &indices, const std::vector<float> &weights,
+        int elementSize);
+    /// classicLinear | dualQuaternion (scale-aware dual-quaternion
+    /// skinning: rotation blended on the shortest arc, joint scale and
+    /// shear blended linearly in the pre-rotation frame).
+    void SetSkinningMethod(const TfToken &method);
+    /// base | preceding | final, for every influence.
+    void SetReadPhase(const TfToken &phase);
+};
+
 /// RigExecLatticeMover: tensor-product lattice deformation through a cage.
 class RigExecLatticeMoverHandle : public RigExecMoverHandle {
 public:
@@ -708,6 +769,17 @@ public:
     RigExecMatrixMoverHandle AddMatrixMover(
         const std::string &name,
         const SdfPath &transformProvider,
+        const SdfPath &weightObject = {},
+        const SdfPath &target = {},
+        const TfToken &readPhase = TfToken("base"));
+
+    /// Multi-influence skinning over an ordered influence list. The
+    /// per-point layout is authored on the handle (SetJointInfluences).
+    /// weightObject is optional; without one, the MoverAPI defaultWeight
+    /// envelope is used.
+    RigExecSkinMoverHandle AddSkinMover(
+        const std::string &name,
+        const std::vector<SdfPath> &influences,
         const SdfPath &weightObject = {},
         const SdfPath &target = {},
         const TfToken &readPhase = TfToken("base"));
@@ -885,9 +957,15 @@ public:
 
     // ---- Transform providers -------------------------------------------
 
-    /// Create <rig>/Controls/<name> as a RigExecControl.
+    /// Create <rig>/Controls/<name> (or nested under \p parentControl) as a
+    /// RigExecControl. restSpace is asset space for a top-level control and
+    /// relative to the parent control's rest when nested: a nested
+    /// control's rest and posed frames compose through its namespace
+    /// ancestor, so it travels with the parent (an FK chain in
+    /// parentRelative controlSpace is built this way).
     RigExecControlHandle AddControl(
-        const std::string &name, const GfMatrix4d &restSpace = GfMatrix4d());
+        const std::string &name, const GfMatrix4d &restSpace = GfMatrix4d(),
+        const RigExecControlHandle *parentControl = nullptr);
 
     /// Create <rig>/Joints/<name> (or nested under \p parentJoint) as a
     /// RigExecJoint. restSpace is the asset-space bind transform for
@@ -919,6 +997,11 @@ public:
         const std::string &name,
         const SdfPath &driverCurve,
         int sampleCount = 5);
+    RigExecSplineIkHandle AddSplineIk(
+        const std::string &name,
+        const SdfPath &rootControl,
+        const SdfPath &midControl,
+        const SdfPath &endControl);
 
     // ---- Weight objects (created under <rig>/Weights) -------------------
 

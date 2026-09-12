@@ -160,7 +160,7 @@ struct RigExecBlendChannel {
 /// schema owns a statically registered computeMoverParameters). The kind
 /// token names the owning operation; unused fields stay default.
 struct RigExecMoverParameters {
-    /// Operation kind: matrix, blendShape, volumeCorrect, smooth,
+    /// Operation kind: matrix, skin, blendShape, volumeCorrect, smooth,
     /// lattice, surfaceProject, ribbon, emitGuidePoints,
     /// recomputeNormals, or recomputeExtent.
     TfToken kind;
@@ -202,6 +202,16 @@ struct RigExecMoverParameters {
     /// Widths for the extent computation (empty, one, or per-point).
     std::vector<float> widths;
 
+    /// Skin: one matrix per rigExec:influences entry, UsdSkel-layout
+    /// indices and weights (skinElementSize slots per point), and the
+    /// method token the kernel dispatches on (classicLinear |
+    /// dualQuaternion).
+    std::vector<GfMatrix4d> skinTransforms;
+    std::vector<int> skinIndices;
+    std::vector<float> skinWeights;
+    int skinElementSize = 0;
+    TfToken skinningMethod;
+
     /// Profile Mover state: the epoch's cut-mesh and factorization, shared
     /// rather than copied because it is large and identity IS the equality
     /// that matters -- two packets naming the same binding name the same
@@ -222,7 +232,13 @@ struct RigExecMoverParameters {
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&
                restPoints == o.restPoints && divisions == o.divisions &&
                bindCoords == o.bindCoords && frames == o.frames &&
-               widths == o.widths && curvenetBinding == o.curvenetBinding &&
+               widths == o.widths &&
+               skinTransforms == o.skinTransforms &&
+               skinIndices == o.skinIndices &&
+               skinWeights == o.skinWeights &&
+               skinElementSize == o.skinElementSize &&
+               skinningMethod == o.skinningMethod &&
+               curvenetBinding == o.curvenetBinding &&
                curvenetAdjustmentBasis == o.curvenetAdjustmentBasis &&
                curvenetAdjustments == o.curvenetAdjustments;
     }

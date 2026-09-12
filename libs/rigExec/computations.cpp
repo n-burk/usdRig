@@ -13,8 +13,10 @@
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/solvers.h"
+#include "rigExecMath/splineIk.h"
 
 #include "pxr/pxr.h"
+#include "pxr/base/gf/math.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/vec4d.h"
 #include "pxr/base/tf/staticTokens.h"
@@ -69,10 +71,15 @@ TF_DEFINE_PRIVATE_TOKENS(
     (startRest)
     (endFrame)
     (endRest)
+    (midFrame)
+    (midRest)
     (jointRests)
 
     // Attribute tokens.
     ((controls, "rigExec:controls"))
+    ((controlSpace, "rigExec:controlSpace"))
+    ((controlSpaceWorld, "world"))
+    ((controlSpaceParentRelative, "parentRelative"))
     ((rootControl, "rigExec:rootControl"))
     ((effectorControl, "rigExec:effectorControl"))
     ((poleControl, "rigExec:poleControl"))
@@ -93,6 +100,15 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((inputsWeight, "inputs:weight"))
     ((inputsStretch, "inputs:stretch"))
     ((inputsSoftness, "inputs:softness"))
+    ((midControl, "rigExec:midControl"))
+    ((endControl, "rigExec:endControl"))
+    ((volumeWeights, "rigExec:volumeWeights"))
+    ((restLength, "rigExec:restLength"))
+    ((inputsPreserveVolume, "inputs:preserveVolume"))
+    ((inputsMidFollowWeight, "inputs:midFollowWeight"))
+    ((inputsMinLengthRatio, "inputs:minLengthRatio"))
+    ((inputsRoll, "inputs:roll"))
+    ((inputsTwist, "inputs:twist"))
 
     // Ir-aligned joint contract (IrXformable mirror).
     ((restSpace, "rest:space"))
@@ -566,6 +582,16 @@ RIGEXEC_REGISTER_XFORMABLE(
 // RigExecFkChain: applies control frames to a rest hierarchy. v0.1 treats
 // the targeted control list as an ordered chain (each element's parent is
 // the preceding element).
+//
+// rigExec:controlSpace says what a control's frame already contains.
+// `world` (default): sibling controls, each frame carrying only its own
+// delta A_i, composed here as W_i = W_(i-1) . A_i. `parentRelative`:
+// controls nested one under the next, whose computePointFrame already
+// travels with the parent control's posed frame (the NamespaceAncestor
+// input of the xformable computations above), so the asset-space delta
+// pose_i . rest_i^-1 IS W_i and composing the parent in again would apply
+// its motion twice -- every element is solved as a chain root instead.
+// The joints come out the same either way; only the control frames differ.
 // ---------------------------------------------------------------------------
 
 static RigExecPointFrameArray
@@ -581,6 +607,22 @@ _ComputeFkChain(const VdfContext &ctx)
         return RigExecPointFrameArray();
     }
 
+    // Unauthored or `world` keeps the linear parent chain; `parentRelative`
+    // makes every element its own root (see the header comment). An
+    // unknown token is reported and treated as `world`, so a typo degrades
+    // to the documented default rather than to an empty solve.
+    bool parentRelative = false;
+    if (const TfToken *space =
+            ctx.GetInputValuePtr<TfToken>(_tokens->controlSpace)) {
+        if (*space == _tokens->controlSpaceParentRelative) {
+            parentRelative = true;
+        } else if (!space->IsEmpty() &&
+                   *space != _tokens->controlSpaceWorld) {
+            ctx.Warn("FkChain: unsupported controlSpace '%s'; using world",
+                     space->GetText());
+        }
+    }
+
     std::vector<rigExec::RigExecFkChainElement> elements;
     VdfReadIterator<RigExecPointFrame> poseIt(ctx, _tokens->controlFrames);
     VdfReadIterator<RigExecPointFrame> restIt(ctx, _tokens->controlRests);
@@ -589,7 +631,7 @@ _ComputeFkChain(const VdfContext &ctx)
         rigExec::RigExecFkChainElement e;
         e.restPoints = (*restIt).points;
         e.posePoints = (*poseIt).points;
-        e.parentIndex = index - 1;
+        e.parentIndex = parentRelative ? -1 : index - 1;
         elements.push_back(e);
         ++index;
     }
@@ -615,7 +657,8 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecFkChain)
             Relationship(_tokens->controls)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->controlRests)
-                .Required());
+                .Required(),
+            AttributeValue<TfToken>(_tokens->controlSpace));
 }
 
 // ---------------------------------------------------------------------------
@@ -926,4 +969,194 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwistDistribution)
             AttributeValue<float>(_tokens->weights),
             AttributeValue<int>(_tokens->count),
             AttributeValue<double>(_tokens->twistTurns));
+}
+
+// ---------------------------------------------------------------------------
+// RigExecSplineIk: control-driven spline IK over an ordered joint chain.
+// Three control frames shape the curve; the chain named on rigExec:joints
+// supplies the rest CVs and the rest spacing, and receives one frame per
+// entry. All of it is pose-phase: the curve is never scene data, so a
+// control-driven pose reaches it directly (contrast RigExecRibbon, whose
+// native driver curve cannot see mover output).
+// ---------------------------------------------------------------------------
+
+static RigExecPointFrameArray
+_ComputeSplineIk(const VdfContext &ctx)
+{
+    RigExecPointFrameArray result;
+
+    const RigExecPointFrame *root =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->rootFrame);
+    const RigExecPointFrame *mid =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->midFrame);
+    const RigExecPointFrame *end =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->endFrame);
+    if (!root || !mid || !end) {
+        return result;
+    }
+    // The rest->pose maps that carry the CVs need the controls' rest
+    // frames. Every control publishes computeRestFrame, so a missing one
+    // means an unwired relationship rather than a value to default.
+    const RigExecPointFrame *rootRest =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->rootRest);
+    const RigExecPointFrame *midRest =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->midRest);
+    const RigExecPointFrame *endRest =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->endRest);
+    if (!rootRest || !midRest || !endRest) {
+        ctx.Warn("SplineIk: root, mid, and end controls must each publish "
+                 "a rest frame");
+        return result;
+    }
+
+    // Joint rests in chain-slot order. The chain IS the cardinality: one
+    // aggregate element per rigExec:joints entry, and a jointElements
+    // remap is a permutation of those slots (the compile-time claim check
+    // enforces the same shape; this is the runtime counterpart).
+    VdfReadIterator<RigExecPointFrame> jointRestIt(ctx, _tokens->jointRests);
+    VdfReadIterator<int> elementIt(ctx, _tokens->jointElements);
+    const size_t count = jointRestIt.ComputeSize();
+    if (count == 0) {
+        ctx.Warn("SplineIk: rigExec:joints binds no joints; there is no "
+                 "chain to measure rest CVs from");
+        return result;
+    }
+    const bool remapped = elementIt.ComputeSize() != 0;
+    if (remapped && elementIt.ComputeSize() != count) {
+        ctx.Warn("SplineIk: joint/rest element cardinality mismatch");
+        return result;
+    }
+    std::vector<RigExecPointFrame> restJoints(count);
+    std::vector<bool> filled(count, false);
+    size_t jointIndex = 0;
+    for (; !jointRestIt.IsAtEnd(); ++jointRestIt, ++jointIndex) {
+        const int slot = remapped ? *elementIt : int(jointIndex);
+        if (remapped) {
+            ++elementIt;
+        }
+        if (slot < 0 || size_t(slot) >= count) {
+            ctx.Warn("SplineIk: joint element %d is out of range", slot);
+            return result;
+        }
+        if (filled[slot]) {
+            ctx.Warn("SplineIk: chain slot %d is filled twice", slot);
+            return result;
+        }
+        restJoints[slot] = *jointRestIt;
+        filled[slot] = true;
+    }
+
+    // Per-joint volume weights, parallel to the chain slots; empty means
+    // no thinning anywhere.
+    std::vector<double> weights;
+    VdfReadIterator<float> wIt(ctx, _tokens->volumeWeights);
+    for (; !wIt.IsAtEnd(); ++wIt) {
+        weights.push_back(*wIt);
+    }
+    if (!weights.empty() && weights.size() != count) {
+        ctx.Warn("SplineIk: rigExec:volumeWeights has %zu entries for a "
+                 "%zu-joint chain", weights.size(), count);
+        return result;
+    }
+
+    const TfToken *restTok =
+        ctx.GetInputValuePtr<TfToken>(_tokens->restLength);
+    rigExec::RigExecSplineIkRestLength restLength =
+        rigExec::RigExecSplineIkRestLength::Curve;
+    if (restTok && *restTok == "chain") {
+        restLength = rigExec::RigExecSplineIkRestLength::Chain;
+    } else if (restTok && !restTok->IsEmpty() && *restTok != "curve") {
+        ctx.Warn("SplineIk: unsupported restLength '%s'", restTok->GetText());
+        return result;
+    }
+
+    // The rest description is rebuilt every evaluation, exactly as
+    // TwoBoneIk re-measures its bones: a rest edit on a bound joint or a
+    // control re-shapes the rest curve with no recompile.
+    const rigExec::RigExecSplineIkRest rest = rigExec::RigExecSplineIkMakeRest(
+        restJoints, *rootRest, *midRest, *endRest, weights, restLength);
+
+    rigExec::RigExecSplineIkParams params;
+    params.preserveVolume =
+        _ScalarInput(ctx, _tokens->inputsPreserveVolume, 1.0);
+    params.midFollowWeight =
+        _ScalarInput(ctx, _tokens->inputsMidFollowWeight, 0.5);
+    // The schema attributes are degrees (an animator-facing angle, like
+    // the avars); the kernel is radians.
+    params.roll =
+        GfDegreesToRadians(_ScalarInput(ctx, _tokens->inputsRoll, 0.0));
+    params.twist =
+        GfDegreesToRadians(_ScalarInput(ctx, _tokens->inputsTwist, 0.0));
+    // Length floor as a fraction of the rest chord; 0 (the schema
+    // default) is off, so an asset authored before it existed solves
+    // exactly as it did.
+    params.minLengthRatio =
+        _ScalarInput(ctx, _tokens->inputsMinLengthRatio, 0.0);
+
+    rigExec::RigExecSplineIkControls controls;
+    controls.root = *root;
+    controls.mid = *mid;
+    controls.end = *end;
+
+    // A degenerate solve (collapsed curve, singular rest control) still
+    // returns one finite frame per joint, flagged degenerate, so the
+    // failure propagates through extraction instead of vanishing into an
+    // identity frame. Only a shape mismatch (already rejected above)
+    // clears the result.
+    rigExec::RigExecSplineIkResult solved;
+    rigExec::RigExecSolveSplineIk(rest, controls, params, &solved);
+    if (solved.joints.size() != count) {
+        ctx.Warn("SplineIk: solve produced %zu frames for %zu joints",
+                 solved.joints.size(), count);
+        return result;
+    }
+    result.frames.reserve(count);
+    result.rests.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        // The Y/Z handles carry (1, s, s): element extraction measures
+        // posed/rest handle-length ratios per axis, so the non-uniform
+        // squash survives into the joint's matrix (frameExtraction.h).
+        result.frames.push_back(solved.joints[i].frame);
+        result.rests.push_back(restJoints[i].points);
+    }
+    return result;
+}
+
+EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSplineIk)
+{
+    self.PrimComputation(_tokens->computePointFrameArray)
+        .Callback<RigExecPointFrameArray>(&_ComputeSplineIk)
+        .Inputs(
+            Relationship(_tokens->rootControl)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computePointFrame)
+                .InputName(_tokens->rootFrame)
+                .Required(),
+            Relationship(_tokens->rootControl)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->rootRest),
+            Relationship(_tokens->midControl)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computePointFrame)
+                .InputName(_tokens->midFrame)
+                .Required(),
+            Relationship(_tokens->midControl)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->midRest),
+            Relationship(_tokens->endControl)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computePointFrame)
+                .InputName(_tokens->endFrame)
+                .Required(),
+            Relationship(_tokens->endControl)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->endRest),
+            Relationship(_tokens->joints)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->jointRests),
+            AttributeValue<int>(_tokens->jointElements),
+            AttributeValue<float>(_tokens->volumeWeights),
+            AttributeValue<TfToken>(_tokens->restLength),
+            AttributeValue<double>(_tokens->inputsPreserveVolume),
+            AttributeValue<double>(_tokens->inputsMidFollowWeight),
+            AttributeValue<double>(_tokens->inputsRoll),
+            AttributeValue<double>(_tokens->inputsTwist),
+            AttributeValue<double>(_tokens->inputsMinLengthRatio));
 }

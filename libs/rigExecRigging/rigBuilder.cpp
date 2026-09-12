@@ -462,6 +462,21 @@ RigExecFkChainHandle::SetControls(const std::vector<SdfPath> &paths)
     SetRel("rigExec:controls", paths);
 }
 
+void
+RigExecFkChainHandle::SetControlSpace(const TfToken &space)
+{
+    static const TfToken world("world");
+    static const TfToken parentRelative("parentRelative");
+    if (space != world && space != parentRelative) {
+        throw std::invalid_argument(
+            "SetControlSpace expects 'world' or 'parentRelative', got '" +
+            space.GetString() + "'");
+    }
+    _AuthorAttr(
+        GetPrim(), "rigExec:controlSpace", SdfValueTypeNames->Token,
+        VtValue(space));
+}
+
 void RigExecTwoBoneIkHandle::SetRootControl(const SdfPath &path)
 {
     _RequireTypedPrim(
@@ -627,6 +642,75 @@ RigExecRibbonHandle::SetSurfaceReadPhase(const TfToken &phase)
 
 void
 RigExecRibbonHandle::SetJointElements(const std::vector<int> &elements)
+{
+    // Explicit VtIntArray payload (see TwistDistribution above).
+    _AuthorAttr(
+        GetPrim(), "rigExec:jointElements", SdfValueTypeNames->IntArray,
+        VtValue(VtIntArray(elements.begin(), elements.end())));
+}
+
+void RigExecSplineIkHandle::SetRootControl(const SdfPath &path)
+{ _SetSingleRel("rigExec:rootControl", path); }
+void RigExecSplineIkHandle::SetMidControl(const SdfPath &path)
+{ _SetSingleRel("rigExec:midControl", path); }
+void RigExecSplineIkHandle::SetEndControl(const SdfPath &path)
+{ _SetSingleRel("rigExec:endControl", path); }
+
+void
+RigExecSplineIkHandle::SetVolumeWeights(const std::vector<float> &weights)
+{
+    _AuthorAttr(
+        GetPrim(), "rigExec:volumeWeights", SdfValueTypeNames->FloatArray,
+        VtValue(VtFloatArray(weights.begin(), weights.end())));
+}
+
+void
+RigExecSplineIkHandle::SetRestLength(const TfToken &mode)
+{
+    _AuthorAttr(
+        GetPrim(), "rigExec:restLength", SdfValueTypeNames->Token, VtValue(mode));
+}
+
+void
+RigExecSplineIkHandle::SetPreserveVolume(double amount)
+{
+    _AuthorAttr(
+        GetPrim(), "inputs:preserveVolume", SdfValueTypeNames->Double,
+        VtValue(amount));
+}
+
+void
+RigExecSplineIkHandle::SetMidFollowWeight(double weight)
+{
+    _AuthorAttr(
+        GetPrim(), "inputs:midFollowWeight", SdfValueTypeNames->Double,
+        VtValue(weight));
+}
+
+void
+RigExecSplineIkHandle::SetRoll(double degrees)
+{
+    _AuthorAttr(
+        GetPrim(), "inputs:roll", SdfValueTypeNames->Double, VtValue(degrees));
+}
+
+void
+RigExecSplineIkHandle::SetTwist(double degrees)
+{
+    _AuthorAttr(
+        GetPrim(), "inputs:twist", SdfValueTypeNames->Double, VtValue(degrees));
+}
+
+void
+RigExecSplineIkHandle::SetMinLengthRatio(double ratio)
+{
+    _AuthorAttr(
+        GetPrim(), "inputs:minLengthRatio", SdfValueTypeNames->Double,
+        VtValue(ratio));
+}
+
+void
+RigExecSplineIkHandle::SetJointElements(const std::vector<int> &elements)
 {
     // Explicit VtIntArray payload (see TwistDistribution above).
     _AuthorAttr(
@@ -1434,6 +1518,79 @@ RigExecMatrixMoverHandle::SetReadPhase(const TfToken &phase)
 }
 
 void
+RigExecSkinMoverHandle::SetInfluences(const std::vector<SdfPath> &providers)
+{
+    if (providers.empty()) {
+        throw std::invalid_argument("skin mover needs at least one influence");
+    }
+    SetRel("rigExec:influences", providers);
+}
+
+void
+RigExecSkinMoverHandle::SetJointInfluences(
+    const std::vector<int> &indices, const std::vector<float> &weights,
+    int elementSize)
+{
+    if (elementSize < 1) {
+        throw std::invalid_argument(
+            "skin mover elementSize must be at least 1");
+    }
+    if (indices.size() != weights.size()) {
+        throw std::invalid_argument(
+            "skin mover jointIndices and jointWeights must have the same "
+            "length");
+    }
+    if (indices.size() % size_t(elementSize) != 0) {
+        throw std::invalid_argument(
+            "skin mover jointIndices length must be a multiple of "
+            "elementSize");
+    }
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i] < 0) {
+            throw std::invalid_argument(
+                "skin mover jointIndices must be non-negative");
+        }
+        if (!std::isfinite(weights[i]) || weights[i] < 0.0f) {
+            throw std::invalid_argument(
+                "skin mover jointWeights must be finite and non-negative");
+        }
+    }
+    _AuthorAttr(
+        GetPrim(), "rigExec:elementSize", SdfValueTypeNames->Int,
+        VtValue(elementSize));
+    _AuthorAttr(
+        GetPrim(), "rigExec:jointIndices", SdfValueTypeNames->IntArray,
+        VtValue(VtIntArray(indices.begin(), indices.end())));
+    _AuthorAttr(
+        GetPrim(), "rigExec:jointWeights", SdfValueTypeNames->FloatArray,
+        VtValue(VtFloatArray(weights.begin(), weights.end())));
+}
+
+void
+RigExecSkinMoverHandle::SetSkinningMethod(const TfToken &method)
+{
+    if (method != "classicLinear" && method != "dualQuaternion") {
+        throw std::invalid_argument(
+            "skin mover skinningMethod must be classicLinear or "
+            "dualQuaternion");
+    }
+    _AuthorAttr(
+        GetPrim(), "rigExec:skinningMethod", SdfValueTypeNames->Token,
+        VtValue(method));
+}
+
+void
+RigExecSkinMoverHandle::SetReadPhase(const TfToken &phase)
+{
+    if (phase.IsEmpty()) {
+        throw std::invalid_argument("skin mover read phase must not be empty");
+    }
+    _AuthorAttr(
+        GetPrim(), "rigExec:transformReadPhase", SdfValueTypeNames->Token,
+        VtValue(phase));
+}
+
+void
 RigExecLatticeMoverHandle::SetCage(const SdfPath &path)
 {
     if (path.IsEmpty()) {
@@ -1723,6 +1880,32 @@ RigExecMoverChain::AddMatrixMover(
     if (!readPhase.IsEmpty()) {
         handle.RigExecMoverHandle::SetReadPhase(
             TfToken("rigExec:transform"), readPhase.GetString());
+    }
+    return handle;
+}
+
+RigExecSkinMoverHandle
+RigExecMoverChain::AddSkinMover(
+    const std::string &name, const std::vector<SdfPath> &influences,
+    const SdfPath &weightObject, const SdfPath &target, const TfToken &readPhase)
+{
+    if (influences.empty()) {
+        throw std::invalid_argument("skin mover needs at least one influence");
+    }
+    for (const SdfPath &influence : influences) {
+        _RequireTargetPath(influence, "skin mover influence");
+    }
+    if (!weightObject.IsEmpty()) {
+        _RequireTargetPath(weightObject, "skin mover weight object");
+    }
+    RigExecSkinMoverHandle handle(_stage, _AddMoverPrim("RigExecSkinMover", name, target));
+    handle.SetInfluences(influences);
+    if (!weightObject.IsEmpty()) {
+        handle.SetWeightObject(weightObject);
+    }
+    if (!readPhase.IsEmpty()) {
+        handle.RigExecMoverHandle::SetReadPhase(
+            TfToken("rigExec:influences"), readPhase.GetString());
     }
     return handle;
 }
@@ -2233,10 +2416,30 @@ RigExecRigBuilder::_DefineTypedAt(
 }
 
 RigExecControlHandle
-RigExecRigBuilder::AddControl(const std::string &name, const GfMatrix4d &restSpace)
+RigExecRigBuilder::AddControl(
+    const std::string &name, const GfMatrix4d &restSpace,
+    const RigExecControlHandle *parentControl)
 {
     _RequireName(name, "control name");
-    const SdfPath scope = _EnsureScope("Controls");
+    SdfPath scope;
+    if (parentControl) {
+        if (!parentControl->IsValid() ||
+            parentControl->GetStage() != _stage ||
+            parentControl->GetSchemaTypeName() != TfToken("RigExecControl")) {
+            throw std::invalid_argument(
+                "parentControl must be a valid RigExecControl on this stage");
+        }
+        scope = parentControl->GetPath();
+        const SdfPath controlsRoot =
+            _root.AppendChild(TfToken("Controls"));
+        if (scope == controlsRoot || !scope.HasPrefix(controlsRoot)) {
+            throw std::invalid_argument(
+                "parentControl must belong to this builder's Controls "
+                "hierarchy");
+        }
+    } else {
+        scope = _EnsureScope("Controls");
+    }
     UsdPrim prim = _DefineTyped(scope, "RigExecControl", name);
     _ApplyApiRequired(prim, _kControlApi);
     _ApplyApiRequired(prim, _kNodeGraphApi);
@@ -2369,6 +2572,31 @@ RigExecRigBuilder::AddRibbon(
     RigExecRibbonHandle handle(_stage, prim.GetPath());
     handle.SetDriverCurve(driverCurve);
     handle.SetSampleCount(sampleCount);
+    return handle;
+}
+
+RigExecSplineIkHandle
+RigExecRigBuilder::AddSplineIk(
+    const std::string &name, const SdfPath &rootControl,
+    const SdfPath &midControl, const SdfPath &endControl)
+{
+    _RequireName(name, "spline IK name");
+    _RequireTypedPrim(
+        _stage, rootControl, TfToken("RigExecControl"),
+        "spline IK root control");
+    _RequireTypedPrim(
+        _stage, midControl, TfToken("RigExecControl"),
+        "spline IK mid control");
+    _RequireTypedPrim(
+        _stage, endControl, TfToken("RigExecControl"),
+        "spline IK end control");
+    const SdfPath scope = _EnsureScope("Solvers");
+    UsdPrim prim = _DefineTyped(scope, "RigExecSplineIk", name);
+    _ApplyApiRequired(prim, _kNodeGraphApi);
+    RigExecSplineIkHandle handle(_stage, prim.GetPath());
+    handle.SetRootControl(rootControl);
+    handle.SetMidControl(midControl);
+    handle.SetEndControl(endControl);
     return handle;
 }
 

@@ -178,6 +178,21 @@ class RigExecUsdviewContainer(PluginContainer):
             "Layer Opinions",
             lambda api: self._OpenLayerOpinionsPanel(api))
 
+        # The execution stack: what runs, in what order, and what it
+        # writes. Same lazy-import reasoning as the panels above.
+        self._execStack = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.execStack",
+            "Execution Stack",
+            lambda api: self._OpenExecStackPanel(api))
+
+        # The avar editor: the selected control's avar channels as
+        # sliders and number fields, writing through the shared undo
+        # stack. Same lazy-import reasoning as the panels above.
+        self._avarEditor = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.avarEditor",
+            "Avar Editor",
+            lambda api: self._OpenAvarEditorPanel(api))
+
         # The viewport manipulator toolbar. Same lazy-import reasoning
         # again; the menu item toggles it rather than opening a window,
         # because the toolbar lives inside the viewport frame.
@@ -211,6 +226,8 @@ class RigExecUsdviewContainer(PluginContainer):
         menu.addItem(self._curvenets)
         menu.addItem(self._graphEditor)
         menu.addItem(self._layerOpinions)
+        menu.addItem(self._execStack)
+        menu.addItem(self._avarEditor)
         menu.addItem(self._viewportToolsCommand)
         menu.addItem(self._viewCubeCommand)
 
@@ -296,6 +313,33 @@ class RigExecUsdviewContainer(PluginContainer):
             import layerOpinionsUI
 
         return layerOpinionsUI.OpenLayerOpinionsPanel(
+            usdviewApi or self._api, self._UndoStack())
+
+    def _OpenExecStackPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenVolumeWeightPanel: execStackUI
+        # pulls in Qt, and this container must stay importable headless.
+        try:
+            import execStackUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import execStackUI
+
+        return execStackUI.OpenExecStackPanel(usdviewApi or self._api)
+
+    def _OpenAvarEditorPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenVolumeWeightPanel: avarEditorUI
+        # pulls in Qt, and this container must stay importable headless.
+        # Shares the undo stack, so Ctrl+Z spans a slider drag and a
+        # gizmo drag alike.
+        try:
+            import avarEditorUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import avarEditorUI
+
+        return avarEditorUI.OpenAvarEditorPanel(
             usdviewApi or self._api, self._UndoStack())
 
     def _OpenGraphEditor(self, usdviewApi=None):

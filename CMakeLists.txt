@@ -70,6 +70,8 @@ add_library(rigExecMath STATIC
     libs/rigExecMath/sparseSolve.cpp
     libs/rigExecMath/cutMesh.cpp
     libs/rigExecMath/profileMover.cpp
+    libs/rigExecMath/dualQuat.cpp
+    libs/rigExecMath/splineIk.cpp
 )
 target_include_directories(rigExecMath PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -191,6 +193,14 @@ add_test(NAME testRigExecMath COMMAND testRigExecMath)
 add_executable(testRigExecSingleChainIk tests/testRigExecSingleChainIk.cpp)
 target_link_libraries(testRigExecSingleChainIk PRIVATE rigExecMath)
 add_test(NAME testRigExecSingleChainIk COMMAND testRigExecSingleChainIk)
+
+add_executable(testRigExecDualQuat tests/testRigExecDualQuat.cpp)
+target_link_libraries(testRigExecDualQuat PRIVATE rigExecMath)
+add_test(NAME testRigExecDualQuat COMMAND testRigExecDualQuat)
+
+add_executable(testRigExecSplineIk tests/testRigExecSplineIk.cpp)
+target_link_libraries(testRigExecSplineIk PRIVATE rigExecMath)
+add_test(NAME testRigExecSplineIk COMMAND testRigExecSplineIk)
 
 add_executable(testRigExecConstraints tests/testRigExecConstraints.cpp)
 target_link_libraries(testRigExecConstraints PRIVATE rigExec)
@@ -395,6 +405,14 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_schema_authoring.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecSplineIkPython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_spline_ik.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecFkControlSpacePython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_fk_control_space.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecBake COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_bake.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -425,6 +443,10 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testLayerOpinionsModel
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_layer_opinions_model.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testAvarEditorModel
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_avar_editor_model.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testCompositionArcsModel
         COMMAND ${Python3_EXECUTABLE}
@@ -466,11 +488,14 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     # handled by the test itself (_setup_environment); RIGEXEC_USD_INSTALL
     # pins the configured USD install so it does not have to guess.
     foreach(_python_test testRigExecPython testRigExecPythonSchemaAuthoring
+                         testRigExecSplineIkPython
+                         testRigExecFkControlSpacePython
                          testRigExecBake testRigExecInverse
                          testRestLocal testRestMigration
                          testInterveningXform
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testLayerOpinionsModel testCompositionArcsModel
+                         testAvarEditorModel
                          testGizmoPreview
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
@@ -621,7 +646,7 @@ string(REPLACE "\"Type\": \"resource\"" "\"Type\": \"library\""
 foreach(_rigexec_boundable
         RigExecXformable RigExecControl RigExecJoint RigExecFkChain
         RigExecTwoBoneIk RigExecBlendPointFrames RigExecTwistDistribution
-        RigExecRibbon RigExecVolumeWeight RigExecSphereWeight
+        RigExecRibbon RigExecSplineIk RigExecVolumeWeight RigExecSphereWeight
         RigExecPlaneWeight RigExecCurveWeight)
     string(REPLACE
         "\"schemaIdentifier\": \"${_rigexec_boundable}\""

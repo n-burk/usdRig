@@ -67,3 +67,8 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Built biped rigs. `tools/biped/build_biped_rigexec.py` regenerates these
+# from the Maya data in ~40 seconds; 39 of them were sitting in the repo
+# root at 72 MB total.
+/biped_*.usda

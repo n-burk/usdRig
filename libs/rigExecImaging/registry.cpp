@@ -1690,7 +1690,8 @@ TF_REGISTRY_FUNCTION(UsdGeomBoundable)
                              "RigExecTwoBoneIk",
                              "RigExecBlendPointFrames",
                              "RigExecTwistDistribution",
-                             "RigExecRibbon"}) {
+                             "RigExecRibbon",
+                             "RigExecSplineIk"}) {
         const TfType type = TfType::FindByName(name);
         if (type.IsUnknown()) {
             // The schema plugin is not registered in this process, so

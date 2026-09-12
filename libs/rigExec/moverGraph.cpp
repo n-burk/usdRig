@@ -166,6 +166,69 @@ _RevisionNode::Compute(const VdfContext &ctx) const
     case RigExecRevisionOp::Matrix:
         _ComputeMatrix(ctx);
         return;
+    case RigExecRevisionOp::Skin:
+        _RunScratchKernel(
+            ctx, TfToken("skin"), &_resultStatus,
+            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
+                // The incoming revision IS the rest pose the influences were
+                // bound against. A blend shape upstream of the skin is
+                // skinned -- exactly as a skinCluster skins its input
+                // geometry and UsdSkel applies blend shapes before skinning
+                // -- and when the skin is first in its chain the incoming
+                // points are the authored base. No separate rest input is
+                // needed for that, and every skinning method reads the same
+                // gather below.
+                RigExecSkinLayout layout;
+                layout.transforms = p.skinTransforms.data();
+                layout.transformCount = p.skinTransforms.size();
+                layout.indices = p.skinIndices.data();
+                layout.weights = p.skinWeights.data();
+                layout.indexCount = p.skinIndices.size();
+                layout.elementSize =
+                    p.skinElementSize < 1 ? 0 : size_t(p.skinElementSize);
+                layout.pointCount = pts->size();
+                if (p.skinWeights.size() != p.skinIndices.size() ||
+                    !layout.Validate()) {
+                    return false;  // cardinality mismatch fails atomically
+                }
+                static const bool useSimd =
+                    TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
+
+                // ---- Method dispatch -------------------------------------
+                // The one point where the skinning methods part. Everything
+                // above is the shared per-point gather (indices, weights,
+                // influence matrices, rest point); only the accumulation
+                // differs.
+                if (p.skinningMethod == "classicLinear") {
+                    // sum_k w_k T_k p, with the weight complement held at
+                    // the rest point (see RigExecApplyLinearBlendSkin).
+                    if (useSimd) {
+                        RigExecApplyLinearBlendSkinSimd(
+                            pts->data(), pts->data(), layout);
+                    } else {
+                        RigExecApplyLinearBlendSkin(
+                            pts->data(), pts->data(), layout);
+                    }
+                    return true;
+                }
+                if (p.skinningMethod == "dualQuaternion") {
+                    // Scale-aware DQS from libs/rigExecMath/dualQuat.h:
+                    // each influence split once per evaluation into a
+                    // pre-rotation stretch and a unit dual quaternion,
+                    // weighted sum over the same layout with shortest-arc
+                    // sign correction, ONE normalisation, then the direct
+                    // point transform. Weight shortfall enters as an
+                    // identity influence (see RigExecApplyDualQuatSkin).
+                    // Scalar only; a degenerate blend fails atomically.
+                    return RigExecApplyDualQuatSkin(
+                        pts->data(), pts->data(), layout);
+                }
+                // A token neither kernel owns is a compile error upstream;
+                // a packet that reaches here anyway fails the application
+                // rather than silently running the wrong maths.
+                return false;
+            });
+        return;
     case RigExecRevisionOp::BlendShape:
         _ComputeBlendShape(ctx);
         return;
@@ -487,7 +550,8 @@ bool
 RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
 {
     return moverPath == o.moverPath && target == o.target &&
-           transform == o.transform && weightObject == o.weightObject &&
+           transform == o.transform && influences == o.influences &&
+           weightObject == o.weightObject &&
            base == o.base && topologyCounts == o.topologyCounts &&
            topologyIndices == o.topologyIndices &&
            cagePoints == o.cagePoints && surfacePoints == o.surfacePoints &&
@@ -503,6 +567,9 @@ RigExecRevisionOpForSchema(const TfToken &schemaType, const TfToken &curveMode)
 {
     if (schemaType == "RigExecMatrixMover") {
         return RigExecRevisionOp::Matrix;
+    }
+    if (schemaType == "RigExecSkinMover") {
+        return RigExecRevisionOp::Skin;
     }
     if (schemaType == "RigExecBlendShapeMover") {
         return RigExecRevisionOp::BlendShape;
@@ -866,6 +933,21 @@ RigExecResolveRevisionBinding(
             }
         }
         binding.transform = provider;
+    } else if (schemaType == "RigExecSkinMover") {
+        // Every influence shares one declared phase, on rigExec:influences
+        // or the legacy attribute, and "final" binds each provider's
+        // frame-chain head exactly as the matrix mover does for its one.
+        binding.influences = _Targets(moverPrim, "rigExec:influences");
+        binding.transformPhase =
+            phaseFor("rigExec:influences", "rigExec:transformReadPhase");
+        if (binding.transformPhase.kind == RigExecReadPhaseKind::Final) {
+            for (SdfPath &provider : binding.influences) {
+                const auto it = frameChainHeads.find(provider);
+                if (it != frameChainHeads.end()) {
+                    provider = it->second;
+                }
+            }
+        }
     } else if (schemaType == "RigExecBlendShapeMover") {
         if (moverPrim.GetStage()->GetPrimAtPath(ownerPath).IsA<UsdGeomMesh>()) {
             binding.topologyCounts = ownerPath.AppendProperty(TfToken("faceVertexCounts"));
@@ -1097,6 +1179,87 @@ _Enabled(const UsdPrim &prim, UsdTimeCode time,
 
 }  // namespace
 
+RigExecMoverParameters
+RigExecAssembleSkinParameters(
+    const UsdPrim &moverPrim,
+    const std::vector<GfMatrix4d> *influenceTransforms,
+    const RigExecWeightPacket *weights,
+    UsdTimeCode time,
+    const RigExecResolvedInputs *resolved)
+{
+    RigExecMoverParameters params;
+    params.kind = TfToken("skin");
+    params.enabled = _Enabled(moverPrim, time, resolved);
+    if (!params.enabled) {
+        params.valid = true;  // disabled is an ordinary pass-through
+        return params;
+    }
+    if (!moverPrim || !influenceTransforms) {
+        return params;  // MoverFailed
+    }
+    params.weights = weights
+        ? *weights
+        : RigExecWeightPacket::Constant(_Float(
+              moverPrim, "inputs:defaultWeight", 1.0f, time, resolved));
+    if (!params.weights.valid) {
+        return params;  // invalid common envelope => MoverFailed
+    }
+
+    params.skinTransforms = *influenceTransforms;
+    const SdfPath primPath = moverPrim.GetPath();
+    params.skinIndices = _Array<int>(
+        moverPrim, primPath.AppendProperty(TfToken("rigExec:jointIndices")),
+        time, resolved);
+    params.skinWeights = _Array<float>(
+        moverPrim, primPath.AppendProperty(TfToken("rigExec:jointWeights")),
+        time, resolved);
+    params.skinElementSize = 1;
+    if (const UsdAttribute a =
+            moverPrim.GetAttribute(TfToken("rigExec:elementSize"))) {
+        if (!resolved ||
+            !resolved->GetAttribute(a, time, &params.skinElementSize)) {
+            a.Get(&params.skinElementSize, time);
+        }
+    }
+    params.skinningMethod = TfToken("classicLinear");
+    if (const UsdAttribute a =
+            moverPrim.GetAttribute(TfToken("rigExec:skinningMethod"))) {
+        if (!resolved ||
+            !resolved->GetAttribute(a, time, &params.skinningMethod)) {
+            a.Get(&params.skinningMethod, time);
+        }
+    }
+
+    // The point count is not known here, so the layout is checked against
+    // its own length; the kernel re-checks against the points it receives.
+    // Validated now rather than only in the kernel so a bad packet reports
+    // MoverFailed through the status rather than by a silent pass-through.
+    if (params.skinElementSize < 1 ||
+        params.skinWeights.size() != params.skinIndices.size() ||
+        params.skinIndices.size() % size_t(params.skinElementSize) != 0) {
+        return params;
+    }
+    RigExecSkinLayout layout;
+    layout.transforms = params.skinTransforms.data();
+    layout.transformCount = params.skinTransforms.size();
+    layout.indices = params.skinIndices.data();
+    layout.weights = params.skinWeights.data();
+    layout.indexCount = params.skinIndices.size();
+    layout.elementSize = size_t(params.skinElementSize);
+    layout.pointCount = layout.indexCount / layout.elementSize;
+    if (!layout.Validate()) {
+        return params;
+    }
+    // Both declared tokens assemble; the kernel is what has (or lacks) a
+    // branch for them, and the compiler is what tells the author.
+    if (params.skinningMethod != "classicLinear" &&
+        params.skinningMethod != "dualQuaternion") {
+        return params;
+    }
+    params.valid = true;
+    return params;
+}
+
 bool
 RigExecSumBlendChannels(
     const std::vector<RigExecBlendChannel> &channels,
@@ -1163,6 +1326,11 @@ RigExecAssembleParameters(
     if (op == RigExecRevisionOp::Matrix) {
         return RigExecAssembleMatrixParameters(
             moverPrim, values.transform, values.weights, time,
+            values.resolved);
+    }
+    if (op == RigExecRevisionOp::Skin) {
+        return RigExecAssembleSkinParameters(
+            moverPrim, values.influenceTransforms, values.weights, time,
             values.resolved);
     }
     if (op == RigExecRevisionOp::CurvenetAdjuster) {
@@ -1462,6 +1630,7 @@ RigExecAssembleParameters(
         break;
 
     case RigExecRevisionOp::Matrix:
+    case RigExecRevisionOp::Skin:
     case RigExecRevisionOp::CurvenetAdjuster:
         break;
     }

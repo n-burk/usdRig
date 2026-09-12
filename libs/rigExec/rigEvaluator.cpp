@@ -6,6 +6,7 @@
 #include "curvenetAdjuster.h"
 
 #include "frameExtraction.h"
+#include "rigExecMath/dualQuat.h"
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/propertyMath.h"
@@ -13,6 +14,7 @@
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/weightFields.h"
 
+#include "pxr/base/gf/dualQuatd.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/diagnostic.h"
@@ -978,7 +980,8 @@ _IsAggregateSolverType(const TfToken &typeName)
     static const std::set<TfToken> kAggregateSolverTypes = {
         TfToken("RigExecFkChain"), TfToken("RigExecTwoBoneIk"),
         TfToken("RigExecBlendPointFrames"),
-        TfToken("RigExecTwistDistribution"), TfToken("RigExecRibbon")};
+        TfToken("RigExecTwistDistribution"), TfToken("RigExecRibbon"),
+        TfToken("RigExecSplineIk")};
     return kAggregateSolverTypes.count(typeName) > 0;
 }
 
@@ -1091,11 +1094,12 @@ _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
             "rigExec:controls", "rigExec:rootControl", "rigExec:effectorControl",
             "rigExec:poleControl", "rigExec:inputA", "rigExec:inputB",
             "rigExec:start", "rigExec:end", "rigExec:startFrame", "rigExec:endFrame",
-            "rigExec:twistFrames"};
+            "rigExec:twistFrames", "rigExec:midControl", "rigExec:endControl"};
         if (_IsFrameConstraintType(type)) frameRelationships = {
             "rigExec:moves", "rigExec:sources", "rigExec:aimTarget", "rigExec:worldUpObject",
             "rigExec:firstJoint", "rigExec:endJoint", "rigExec:effector", "rigExec:poleVectorObjects"};
         if (type == "RigExecMatrixMover") frameRelationships = {"rigExec:transform"};
+        if (type == "RigExecSkinMover") frameRelationships = {"rigExec:influences"};
         for (const char *name : frameRelationships) {
             SdfPathVector targets;
             if (const auto rel = prim.GetRelationship(TfToken(name))) rel.GetTargets(&targets);
@@ -1743,6 +1747,21 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             } else if (stype == "RigExecBlendPointFrames") {
                 appendRelTargets(solver, "rigExec:inputA", false);
                 appendRelTargets(solver, "rigExec:inputB", false);
+            } else if (stype == "RigExecSplineIk") {
+                // Cardinality is the joints list, hashed above. The
+                // per-joint volume weights are a static parallel array
+                // whose length Compile() validates; hash the length and
+                // the sample presence so an edit that breaks the parallel
+                // shape (or samples the attribute) re-runs that check.
+                const UsdAttribute wa =
+                    solver.GetAttribute(TfToken("rigExec:volumeWeights"));
+                VtFloatArray w;
+                if (wa) {
+                    wa.Get(&w);
+                }
+                digest += std::to_string(w.size()) + "/" +
+                          std::to_string(wa ? wa.GetNumTimeSamples() : 0) +
+                          ",";
             }
             digest += ';';
         }
@@ -1835,7 +1854,10 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
 
             // Declared dependency wiring and read phases.
             appendRelTargets(prim, "rigExec:transform", true);
+            // Influence order is semantic: jointIndices index into it.
+            appendRelTargets(prim, "rigExec:influences", false);
             appendToken(prim, "rigExec:transformReadPhase");
+            appendToken(prim, "rigExec:skinningMethod");
             appendToken(prim, "rigExec:operation");
             appendToken(prim, "rigExec:mode");
             appendToken(prim, "rigExec:deltaSpace");
@@ -2375,6 +2397,13 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             if (record.schemaType == "RigExecMatrixMover") {
                 std::string error;
                 if (!_ValidateMatrixMover(prim, record, &error)) {
+                    reportError(error);
+                    return false;
+                }
+            }
+            if (record.schemaType == "RigExecSkinMover") {
+                std::string error;
+                if (!_ValidateSkinMover(prim, record, &error)) {
                     reportError(error);
                     return false;
                 }
@@ -3064,7 +3093,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             }
         }
         for (const RigExecMoverRecord &m : newMovers) {
-            if (m.schemaType != "RigExecMatrixMover") {
+            const bool isSkin = m.schemaType == "RigExecSkinMover";
+            if (m.schemaType != "RigExecMatrixMover" && !isSkin) {
                 continue;
             }
             const UsdPrim prim = _stage->GetPrimAtPath(m.moverPath);
@@ -3080,8 +3110,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 continue;
             }
             SdfPathVector transforms;
-            if (UsdRelationship rel =
-                    prim.GetRelationship(TfToken("rigExec:transform"))) {
+            if (UsdRelationship rel = prim.GetRelationship(TfToken(
+                    isSkin ? "rigExec:influences" : "rigExec:transform"))) {
                 rel.GetTargets(&transforms);
             }
             for (const SdfPath &provider : transforms) {
@@ -3159,6 +3189,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     cardinalityAttrs = {"rigExec:count", "rigExec:weights"};
                 } else if (t == "RigExecRibbon") {
                     cardinalityAttrs = {"rigExec:sampleCount"};
+                } else if (t == "RigExecSplineIk") {
+                    // Not cardinality (the joints list is), but a static
+                    // parallel array: a sampled one would let the
+                    // per-joint weight silently detach from the chain.
+                    cardinalityAttrs = {"rigExec:volumeWeights"};
                 }
                 for (const char *name : cardinalityAttrs) {
                     const UsdAttribute a = solver.GetAttribute(TfToken(name));
@@ -3377,6 +3412,42 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                             // below that it produces no frames, so no element
                             // is bindable (matches the runtime cardinality).
                             knownCount = c >= 2 ? c : 0;
+                        }
+                    } else if (type == "RigExecSplineIk") {
+                        // The chain IS the cardinality: one frame per
+                        // joints entry. A remap must then be a permutation
+                        // of the chain slots, and the per-joint volume
+                        // weights must be parallel to it.
+                        knownCount = static_cast<int>(jointTargets.size());
+                        if (!jointElements.empty()) {
+                            std::vector<bool> filled(jointTargets.size(), false);
+                            for (int e : jointElements) {
+                                if (e >= 0 && e < knownCount) {
+                                    if (filled[e]) {
+                                        reportError(
+                                            who + ": rigExec:jointElements "
+                                            "fills chain slot " +
+                                            std::to_string(e) + " twice");
+                                        return false;
+                                    }
+                                    filled[e] = true;
+                                }
+                            }
+                        }
+                        if (const UsdAttribute a = solver.GetAttribute(
+                                TfToken("rigExec:volumeWeights"))) {
+                            VtFloatArray weights;
+                            a.Get(&weights);
+                            if (!weights.empty() &&
+                                weights.size() != jointTargets.size()) {
+                                reportError(
+                                    who + ": rigExec:volumeWeights length " +
+                                    std::to_string(weights.size()) +
+                                    " must equal rigExec:joints length " +
+                                    std::to_string(jointTargets.size()) +
+                                    " (or be empty)");
+                                return false;
+                            }
                         }
                     }
 
@@ -4265,6 +4336,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     RigExecValueAddress::Prim(revision.binding.transform,
                                               TfToken("computeMatrix")));
             }
+            for (const SdfPath &influence : revision.binding.influences) {
+                revision.influenceTaps.push_back(newTaps->Add(
+                    RigExecValueAddress::Prim(influence,
+                                              TfToken("computeMatrix"))));
+            }
             if (!revision.binding.weightObject.IsEmpty()) {
                 revision.weightTap = newTaps->Add(RigExecValueAddress::Prim(
                     revision.binding.weightObject,
@@ -5035,6 +5111,137 @@ RigExecRigEvaluator::_ValidateMatrixMover(
         *error = who + ": rigExec:transform target is not a catalogued "
                        "matrix provider";
         return false;
+    }
+    return true;
+}
+
+bool
+RigExecRigEvaluator::_ValidateSkinMover(
+    const UsdPrim &prim,
+    const RigExecMoverRecord &record,
+    std::string *error) const
+{
+    const std::string who = "SkinMover " + prim.GetPath().GetString();
+    // The target rules are the matrix mover's: one native points property,
+    // because the jointIndices/jointWeights layout is written against one
+    // point count and a fan-out would alias it across targets.
+    if (record.targets.size() != 1 ||
+        !record.targets[0].IsPropertyPath() ||
+        record.targets[0].GetNameToken() != "points") {
+        *error = who + ": moves must resolve to exactly one native "
+                       "PointBased points property" +
+                 (record.targets.size() == 1
+                      ? _PointsTargetHint(_stage, record.targets[0])
+                      : std::string());
+        return false;
+    }
+    const UsdPrim owner =
+        _stage->GetPrimAtPath(record.targets[0].GetPrimPath());
+    if (!owner || !owner.IsA<UsdGeomPointBased>()) {
+        *error = who + ": move target owner is not a stock PointBased prim";
+        return false;
+    }
+    const UsdAttribute targetAttr =
+        _stage->GetAttributeAtPath(record.targets[0]);
+    if (!targetAttr ||
+        targetAttr.GetTypeName() != SdfValueTypeNames->Point3fArray) {
+        *error = who + ": move target is not an exact point3f[] property";
+        return false;
+    }
+
+    SdfPathVector influences;
+    if (UsdRelationship rel =
+            prim.GetRelationship(TfToken("rigExec:influences"))) {
+        rel.GetTargets(&influences);
+    }
+    if (influences.empty()) {
+        *error = who + ": rigExec:influences must name at least one matrix "
+                       "provider";
+        return false;
+    }
+    static const std::set<TfToken> frameProviderTypes = {
+        TfToken("RigExecControl"), TfToken("RigExecJoint")};
+    for (const SdfPath &influence : influences) {
+        const UsdPrim provider = _stage->GetPrimAtPath(influence);
+        if (!provider || !frameProviderTypes.count(provider.GetTypeName())) {
+            *error = who + ": rigExec:influences target " +
+                     influence.GetString() +
+                     " is not a catalogued matrix provider";
+            return false;
+        }
+    }
+    TfToken phase("base");
+    if (UsdAttribute a =
+            prim.GetAttribute(TfToken("rigExec:transformReadPhase"))) {
+        a.Get(&phase);
+    }
+    if (phase != "base" && phase != "final") {
+        *error = who + ": unsupported transformReadPhase '" +
+                 phase.GetString() + "' (v0.1 supports base and final)";
+        return false;
+    }
+
+    // Strict about the method: a declared token the kernel cannot honour is
+    // a compile error, never a silent fallback to different maths.
+    TfToken method("classicLinear");
+    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:skinningMethod"))) {
+        a.Get(&method);
+    }
+    if (method != "classicLinear" && method != "dualQuaternion") {
+        *error = who + ": unknown rigExec:skinningMethod '" +
+                 method.GetString() + "'";
+        return false;
+    }
+
+    // The layout is a value, re-validated by the assembler at every
+    // evaluation; checking the authored default here is what turns a
+    // mis-sized export into a compile diagnostic instead of a silently
+    // passed-through mesh.
+    int elementSize = 1;
+    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:elementSize"))) {
+        a.Get(&elementSize);
+    }
+    if (elementSize < 1) {
+        *error = who + ": rigExec:elementSize must be at least 1";
+        return false;
+    }
+    VtIntArray indices;
+    VtFloatArray weights;
+    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:jointIndices"))) {
+        a.Get(&indices);
+    }
+    if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:jointWeights"))) {
+        a.Get(&weights);
+    }
+    if (indices.size() != weights.size()) {
+        *error = who + ": rigExec:jointIndices length " +
+                 std::to_string(indices.size()) +
+                 " must equal rigExec:jointWeights length " +
+                 std::to_string(weights.size());
+        return false;
+    }
+    VtVec3fArray points;
+    if (targetAttr.Get(&points) && !points.empty() &&
+        indices.size() != points.size() * size_t(elementSize)) {
+        *error = who + ": rigExec:jointIndices length " +
+                 std::to_string(indices.size()) + " must equal " +
+                 std::to_string(points.size()) + " points * elementSize " +
+                 std::to_string(elementSize);
+        return false;
+    }
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i] < 0 || size_t(indices[i]) >= influences.size()) {
+            *error = who + ": rigExec:jointIndices[" + std::to_string(i) +
+                     "] = " + std::to_string(indices[i]) +
+                     " is outside the " + std::to_string(influences.size()) +
+                     " influences";
+            return false;
+        }
+        if (!std::isfinite(weights[i]) || weights[i] < 0.0f) {
+            *error = who + ": rigExec:jointWeights[" + std::to_string(i) +
+                     "] must be finite and non-negative";
+            return false;
+        }
     }
     return true;
 }
@@ -5952,6 +6159,201 @@ RigExecRigEvaluator::_EvaluateChain(
                     GfVec3d(points[i]), m, 1.0f);
                 points[i] = GfVec3f(moved);
             }
+        } else if (type == "RigExecSkinMover") {
+            // p' = (1 - sum_k w_k) p + sum_k w_k T_k p per point, in double,
+            // read straight off the stage: independent of
+            // RigExecAssembleSkinParameters and of the SIMD kernel on
+            // purpose, so parity is a real check.
+            SdfPathVector influences;
+            if (UsdRelationship rel =
+                    prim.GetRelationship(TfToken("rigExec:influences"))) {
+                rel.GetTargets(&influences);
+            }
+            TfToken phase("base");
+            if (const UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:transformReadPhase"))) {
+                a.Get(&phase);
+            }
+            const auto &matrices =
+                phase == "final" ? finalProviderMatrices
+                                 : baseProviderMatrices;
+            std::vector<GfMatrix4d> transforms;
+            bool failed = false;
+            for (const SdfPath &provider : influences) {
+                const auto matrixIt = matrices.find(provider);
+                if (matrixIt == matrices.end()) {
+                    diagnostics->push_back(
+                        "MoverFailed " + mover->moverPath.GetString() +
+                        ": no " + phase.GetString() + " matrix provider at " +
+                        provider.GetString());
+                    failed = true;
+                    break;
+                }
+                transforms.push_back(matrixIt->second);
+            }
+            if (failed) {
+                continue;
+            }
+            VtIntArray indices;
+            VtFloatArray weights;
+            int elementSize = 1;
+            TfToken method("classicLinear");
+            if (const UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:jointIndices"))) {
+                if (!_resolvedInputs.Get(a.GetPath(), &indices)) {
+                    a.Get(&indices, time);
+                }
+            }
+            if (const UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:jointWeights"))) {
+                if (!_resolvedInputs.Get(a.GetPath(), &weights)) {
+                    a.Get(&weights, time);
+                }
+            }
+            if (const UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:elementSize"))) {
+                a.Get(&elementSize, time);
+            }
+            if (const UsdAttribute a = prim.GetAttribute(
+                    TfToken("rigExec:skinningMethod"))) {
+                a.Get(&method, time);
+            }
+            if (method != "classicLinear" && method != "dualQuaternion") {
+                diagnostics->push_back(
+                    "MoverFailed " + mover->moverPath.GetString() +
+                    ": skinning method '" + method.GetString() +
+                    "' has no scalar reference kernel");
+                continue;
+            }
+            if (elementSize < 1 || transforms.empty() ||
+                indices.size() != weights.size() ||
+                indices.size() != points.size() * size_t(elementSize)) {
+                diagnostics->push_back(
+                    "MoverFailed " + mover->moverPath.GetString() +
+                    ": jointIndices/jointWeights layout does not match "
+                    "the target's point count");
+                continue;
+            }
+            VtVec3fArray next = points;
+            bool degenerate = false;
+            if (method == "dualQuaternion") {
+                // Independent DQS reference, written from the rule rather
+                // than taken from the kernel. Every influence is split into
+                // a pre-rotation stretch S_j and a rigid motion by the
+                // library's polar split (the one piece shared with the
+                // kernel: Gf's Factor is a Gram-Schmidt split that
+                // legitimately disagrees with it under shear). Per point:
+                // the pivot is the largest-weight slot; every influence
+                // whose rotation opposes the pivot's is negated; the
+                // complement 1 - sum w enters as the identity; the stretch
+                // is sum w_j S_j + (1 - sum w) I; the sum is normalised
+                // once; p' = (p S) rotated and translated. Accumulation,
+                // normalisation and the point transform are Pixar's
+                // GfDualQuatd, whose formulas differ from dualQuat.cpp's.
+                std::vector<GfDualQuatd> rigid;
+                std::vector<GfMatrix3d> stretch;
+                for (const GfMatrix4d &t : transforms) {
+                    const rigExec::RigExecScaledDualQuat sdq =
+                        rigExec::RigExecScaledDualQuatFromMatrix(t);
+                    rigid.emplace_back(sdq.rigid.real, sdq.rigid.dual);
+                    stretch.push_back(sdq.stretch);
+                }
+                for (size_t i = 0; i < points.size() && !failed; ++i) {
+                    int pivot = -1;
+                    float pivotWeight = -1.0f;
+                    for (int k = 0; k < elementSize; ++k) {
+                        const size_t slot =
+                            i * size_t(elementSize) + size_t(k);
+                        const int j = indices[slot];
+                        const float w = weights[slot];
+                        if (j < 0 || size_t(j) >= transforms.size() ||
+                            !std::isfinite(w) || w < 0.0f) {
+                            failed = true;
+                            break;
+                        }
+                        if (pivotWeight < w) {
+                            pivotWeight = w;
+                            pivot = j;
+                        }
+                    }
+                    if (failed) {
+                        break;
+                    }
+                    const GfQuatd pivotReal = rigid[pivot].GetReal();
+                    GfDualQuatd sum = GfDualQuatd::GetZero();
+                    GfMatrix3d s(0.0);
+                    double total = 0.0;
+                    for (int k = 0; k < elementSize; ++k) {
+                        const size_t slot =
+                            i * size_t(elementSize) + size_t(k);
+                        const int j = indices[slot];
+                        const double w = weights[slot];
+                        if (w == 0.0) {
+                            continue;
+                        }
+                        const double signedW =
+                            GfDot(rigid[j].GetReal(), pivotReal) < 0.0 ? -w
+                                                                       : w;
+                        sum += rigid[j] * signedW;
+                        s += stretch[j] * w;
+                        total += w;
+                    }
+                    const double complement = 1.0 - total;
+                    if (complement != 0.0) {
+                        const GfDualQuatd identity =
+                            GfDualQuatd::GetIdentity();
+                        const double signedW =
+                            GfDot(identity.GetReal(), pivotReal) < 0.0
+                                ? -complement
+                                : complement;
+                        sum += identity * signedW;
+                        s += GfMatrix3d(1.0) * complement;
+                    }
+                    if (sum.Normalize().first < 1e-9) {
+                        degenerate = true;
+                        break;
+                    }
+                    next[i] = GfVec3f(sum.Transform(GfVec3d(points[i]) * s));
+                }
+            } else {
+                for (size_t i = 0; i < points.size() && !failed; ++i) {
+                    const GfVec3d p(points[i]);
+                    GfVec3d sum(0.0);
+                    double total = 0.0;
+                    for (int k = 0; k < elementSize; ++k) {
+                        const size_t slot =
+                            i * size_t(elementSize) + size_t(k);
+                        const int j = indices[slot];
+                        const float w = weights[slot];
+                        if (j < 0 || size_t(j) >= transforms.size() ||
+                            !std::isfinite(w) || w < 0.0f) {
+                            failed = true;
+                            break;
+                        }
+                        if (w == 0.0f) {
+                            continue;
+                        }
+                        sum += transforms[j].TransformAffine(p) * double(w);
+                        total += w;
+                    }
+                    next[i] = GfVec3f(p * (1.0 - total) + sum);
+                }
+            }
+            if (failed) {
+                diagnostics->push_back(
+                    "MoverFailed " + mover->moverPath.GetString() +
+                    ": jointIndices out of range or jointWeights not finite "
+                    "and non-negative");
+                continue;
+            }
+            if (degenerate) {
+                diagnostics->push_back(
+                    "MoverFailed " + mover->moverPath.GetString() +
+                    ": degenerate dual-quaternion blend (over-driven "
+                    "weights cancelled the rotation)");
+                continue;
+            }
+            points = next;
         } else if (type == "RigExecCurveMover") {
             TfToken mode("ribbon");
             if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:mode"))) {
@@ -8044,6 +8446,14 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 baseProviderMatrices[revision.binding.transform] =
                     snapshot.Get<GfMatrix4d>(revision.transformTap);
             }
+            for (size_t k = 0; k < revision.influenceTaps.size() &&
+                               k < revision.binding.influences.size(); ++k) {
+                const SdfPath &provider = revision.binding.influences[k];
+                if (!baseProviderMatrices.count(provider)) {
+                    baseProviderMatrices[provider] =
+                        snapshot.Get<GfMatrix4d>(revision.influenceTaps[k]);
+                }
+            }
         }
     }
     std::map<SdfPath, GfMatrix4d> finalProviderMatrices =
@@ -8215,6 +8625,37 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                         values.transform = &transform;
                     }
                 }
+            }
+            // Skin influences: the phase rules of the single transform
+            // above, applied to every rigExec:influences entry in order.
+            std::vector<GfMatrix4d> influenceTransforms;
+            if (!revision.binding.influences.empty()) {
+                influenceTransforms.reserve(revision.binding.influences.size());
+                for (size_t k = 0; k < revision.binding.influences.size(); ++k) {
+                    const SdfPath &provider = revision.binding.influences[k];
+                    GfMatrix4d m(1.0);
+                    if (k < revision.influenceTaps.size() &&
+                        revision.influenceTaps[k] >= 0) {
+                        m = snapshot.Get<GfMatrix4d>(revision.influenceTaps[k]);
+                    }
+                    if (revision.transformFinalPhase) {
+                        const auto revisedIt = finalMatrices.find(provider);
+                        if (revisedIt != finalMatrices.end()) {
+                            m = revisedIt->second;
+                        }
+                    } else if (revision.binding.transformPhase.kind ==
+                               RigExecReadPhaseKind::AtPrim) {
+                        if (const VtValue *v = _chainSnapshots.Lookup(
+                                provider, revision.binding.transformPhase,
+                                revision.moverPath)) {
+                            if (v->IsHolding<GfMatrix4d>()) {
+                                m = v->UncheckedGet<GfMatrix4d>();
+                            }
+                        }
+                    }
+                    influenceTransforms.push_back(m);
+                }
+                values.influenceTransforms = &influenceTransforms;
             }
             if (revision.weightTap >= 0) {
                 weights =

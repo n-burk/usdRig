@@ -190,8 +190,40 @@ class RigExecControl "RigExecControl" (
     double guide:scaleZ = 1.0 (
         doc = "Per-axis draw scale along the local Z axis; see guide:scaleX."
     )
-    color3f guide:displayColor = (1.0, 0.85, 0.2)
-    float guide:displayOpacity = 1.0
+    color3f guide:displayColor = (1.0, 0.85, 0.2) (
+        doc = """Constant colour of the synthesized guide. May be CONNECTED
+        to another color3f attribute, in which case the first connection
+        source's value at the evaluated time is drawn instead of the local
+        one -- the imaging bridge follows the connection because
+        UsdAttribute::Get never does."""
+    )
+    float guide:displayOpacity = 1.0 (
+        doc = """Constant opacity of the synthesized guide. May be CONNECTED
+        to a float or double attribute -- a limb's IK/FK dial, say -- and
+        then the first connection source's value at the evaluated time is
+        what is drawn, optionally complemented by guide:displayOpacityInvert
+        and never below guide:displayOpacityMin. An unconnected attribute
+        draws exactly the value it holds, floor and invert ignored."""
+    )
+    uniform bool guide:displayOpacityInvert = false (
+        doc = """When guide:displayOpacity is connected, draw 1 - source
+        instead of source. This is what lets one dial fade two control sets
+        in opposite directions: the IK controls connect to the switch as-is,
+        the FK controls connect to the SAME switch with this set, and there
+        is no second source of truth to drift. Ignored when the opacity is
+        not connected."""
+    )
+    uniform float guide:displayOpacityMin = 0.15 (
+        doc = """Floor applied to a CONNECTED guide:displayOpacity after the
+        optional inversion. A dial parked at its end stop would otherwise
+        drive the inactive control set to exactly zero, and a fully
+        transparent control is a trap: an animator who switches a limb to
+        IK can no longer see the FK controls they need to switch back.
+        Hydra still picks at any opacity above 0.0001, so the floor is for
+        the eye, not the picker: 0.15 is enough to find a ghosted control
+        against the character. Zero restores a true fade-out. Ignored when
+        the opacity is not connected."""
+    )
 }
 
 class "RigExecXformable" (
@@ -386,6 +418,29 @@ class RigExecFkChain "RigExecFkChain" (
 
     rel rigExec:controls (
         doc = "Ordered chain controls (parents resolved via rigExec:parent)."
+    )
+    uniform token rigExec:controlSpace = "world" (
+        allowedTokens = ["world", "parentRelative"]
+        doc = """What each control's posed frame already contains, i.e.
+        whether it carries the motion of the control before it in the
+        chain.
+
+        `world` (the default): the controls are independent asset-space
+        frames, siblings under the rig's Controls scope, each contributing
+        only its own rest-to-pose delta A_i; the solver composes them down
+        the chain, W_i = W_(i-1) . A_i. Posing a control moves the joints
+        below it but NOT the child controls, which stay at their rest.
+
+        `parentRelative`: control i is authored as a namespace descendant of
+        control i-1 with a rest relative to it, so its computePointFrame is
+        already W_(i-1) . restLocal_i . D_i -- it travels with its parent
+        the way a Maya FK limb control does -- and its asset-space
+        rest-to-pose delta is the whole W_i. The solver therefore takes
+        each control's delta as-is instead of composing the parent in
+        again, which would apply the parent's motion twice. The joint
+        result is identical to `world` for the same avars; only the
+        control frames differ. Nesting is what makes the controls follow;
+        this token is what keeps the solver honest about it."""
     )
     rel rigExec:joints (
         doc = """Ordered output joints this solver poses (view-free
@@ -657,6 +712,133 @@ class RigExecRibbon "RigExecRibbon" (
     uniform int[] rigExec:jointElements = [] (
         doc = """Optional aggregate element index per rigExec:joints entry
         (parallel array). When absent/empty, element = list position."""
+    )
+    double guide:radius = 1.0 (
+        doc = """Radius of the sphere and cone drawn at each aggregate
+        element: the exact counterpart of RigExecJoint's guide:radius,
+        including the rule that zero or negative draws no guides at all,
+        which is how a solver's diagnostics are turned off.
+
+        Without it the elements are stuck at Hydra's fallback radius of
+        1.0. That is proportionate on an asset authored at tens of units
+        and several times the size of the whole character on one authored
+        at one unit -- the joints were given this knob for exactly that
+        reason and the aggregate solvers were not, so turning guide
+        display on for a small asset buried it in solver geometry."""
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1.0)
+    float guide:displayOpacity = 0.5
+}
+
+class RigExecSplineIk "RigExecSplineIk" (
+    inherits = </Boundable>
+    customData = {
+        string className = "SplineIk"
+    }
+    doc = """Control-driven spline IK for a spine or neck: the counterpart of
+    Maya's ikSplineSolver as the squarebit biped uses it. Three control
+    frames (root, mid, end) shape an open degree-2 four-CV B-spline; the
+    ordered rigExec:joints chain is laid along it by arc length, each joint
+    aims +X at its successor with its rest up carried by the minimal
+    rotation, a twist linear in arc position is added (root roll, end
+    twist), and a linear volume-preservation scale thins (stretch) or
+    thickens (squash) each joint's Y/Z handles. Publishes
+    computePointFrameArray with one element per rigExec:joints entry.
+
+    Unlike RigExecRibbon, whose driver curve is native scene data and is
+    therefore invisible to control-driven movers, this solver builds the
+    curve itself from the posed control frames and lives entirely in the
+    pose phase.
+
+    Rest: the rest CVs are the rest origins of joints [0], [1], [N-2],
+    [N-1]; cv0/cv1 are carried by the root control's rest->pose map,
+    cv2/cv3 by the end control's, and cv1/cv2 additionally receive the mid
+    control's translation offset relative to its follow point (its rest
+    origin carried by root and end, blended by inputs:midFollowWeight).
+    The curve interpolates only cv0 and cv3, so interior joints carry a
+    small rest residual that a maintained offset downstream absorbs."""
+)
+{
+    uniform token purpose = "guide" (
+        doc = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides.
+
+        This is the stock attribute rather than a RigExec-specific token so
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache
+        classifies a prim's extent by this exact attribute, and the results
+        scene index stamps the same resolved value onto the guide it
+        synthesizes. A control keeps the inherited `default` -- it is the
+        rig's interaction surface, not a diagnostic -- and authoring
+        `guide` on one moves both its drawing and its bounds together."""
+    )
+
+    rel rigExec:rootControl (
+        doc = "Control carrying the curve start (cv0, cv1) and the root roll."
+    )
+    rel rigExec:midControl (
+        doc = """Control whose translation offset from its follow point bends
+        the interior (cv1, cv2). Its rotation and scale are ignored."""
+    )
+    rel rigExec:endControl (
+        doc = "Control carrying the curve end (cv2, cv3) and the end twist."
+    )
+    rel rigExec:joints (
+        doc = """Ordered chain, root to tip, posed by this solve (view-free
+        extraction). The chain IS the solver's cardinality: it produces
+        exactly one frame per entry, and the rest CVs and segment spacing
+        are measured from these joints' rest frames on every evaluation."""
+    )
+    uniform int[] rigExec:jointElements = [] (
+        doc = """Optional chain slot per rigExec:joints entry (parallel
+        array). When absent/empty, slot = list position. When present it
+        must be a permutation of [0, N): every slot filled exactly once."""
+    )
+    uniform float[] rigExec:volumeWeights = [] (
+        doc = """Per-joint squash/stretch weight w_i, parallel to
+        rigExec:joints (in chain-slot order). Empty means zero everywhere
+        (no thinning). Reference: spine [0.1429, 0.2857, 0.4286, 0.5,
+        0.3571, 0.2143, 0.0714], neck [0.16, 0.32, 0.4, 0.24, 0.08]."""
+    )
+    uniform token rigExec:restLength = "curve" (
+        allowedTokens = ["curve", "chain"]
+        doc = """What the stretch ratio is measured against. `curve`: the
+        rest curve's arc length, so ratio == 1 at rest (Maya reads
+        curveInfo.arcLength; the last joint then overshoots the curve end
+        by the chain/curve difference, absorbed by maintained offsets).
+        `chain`: the sum of rest segment lengths, so the chain spans the
+        curve exactly."""
+    )
+    double inputs:preserveVolume = 1 (
+        doc = """Strength of the linear volume preservation in [0, 1]:
+        s_y = s_z = 1 - w_i * preserveVolume * (ratio - 1), s_x = 1.
+        Zero leaves every handle at rest length; ratio < 1 thickens."""
+    )
+    double inputs:midFollowWeight = 0.5 (
+        doc = """Blend of the mid control's follow point between its rest
+        origin carried by the root control (0) and by the end control (1):
+        a parentConstraint with maintainOffset on both parents."""
+    )
+    double inputs:roll = 0 (
+        doc = """Additional roll in DEGREES about every joint's +X aim,
+        added to the root control's own twist about the rest chain axis
+        (Maya ikHandle.roll)."""
+    )
+    double inputs:twist = 0 (
+        doc = """Additional twist in DEGREES, linear in arc position from 0
+        at the root to the full value at the curve end, added to the end
+        control's twist minus the root's (Maya ikHandle.twist)."""
+    )
+    double inputs:minLengthRatio = 0 (
+        doc = """Length floor as a fraction of the rest root->end chord; 0
+        switches it off. Below it the end CVs (cv2, cv3) are held that far
+        ahead of cv0 along the root control's posed chain axis, so a chest
+        or head driven down onto its root neither shrinks the chain past
+        the floor nor folds it back through the root -- the end joint then
+        overshoots its control. The mid control's follow point, the twist
+        and the volume ratio read the control frames and are unaffected.
+        Maya's ikSpline has no floor; this is a deliberate departure, and
+        animatable per shot like every input."""
     )
     double guide:radius = 1.0 (
         doc = """Radius of the sphere and cone drawn at each aggregate
@@ -1427,6 +1609,62 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     )
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecSkinMover "RigExecSkinMover" (
+    inherits = </Typed>
+    customData = {
+        string className = "SkinMover"
+    }
+    doc = """Multi-influence skinning of an exact native point3f[] points
+    property in ONE pass: every influence's matrix is gathered per point and
+    blended by that point's authored weights, then the result is mixed with
+    the common MoverAPI envelope.
+
+    RigExecMatrixMover applies one influence per mover, sequentially, each
+    from the PRECEDING revision. That is exact for a point with a single
+    influence and diverges from a skinCluster everywhere weights blend, so a
+    skinned character needs this mover: the same jointIndices / jointWeights
+    layout UsdSkel uses, with the influence list in rigExec:influences
+    standing in for UsdSkel's joint order.
+
+    classicLinear: p' = p + sum_i w_i (T_i p - p) = (1 - sum_i w_i) p +
+    sum_i w_i T_i p. With weights that sum to one this is exactly linear blend
+    skinning; a shortfall keeps the rest point in proportion, so a partially
+    weighted point stays put rather than collapsing toward the origin.
+    dualQuaternion blends the influences' rigid motions as dual quaternions
+    (shortest arc, one normalisation, so a twisted joint keeps its volume
+    instead of candy-wrapping) and their scale and shear linearly in each
+    joint's pre-rotation frame, so squash-and-stretch survives; the same
+    weight shortfall enters that blend as an identity influence, so a
+    partially weighted point is likewise held toward rest."""
+)
+{
+    rel rigExec:influences (
+        doc = """Ordered GfMatrix4d providers (computeMatrix), one per
+        influence. rigExec:jointIndices index this list. Named influences,
+        not joints: rigExec:joints is a solver's output claim, and this mover
+        only reads."""
+    )
+    int[] rigExec:jointIndices = [] (
+        doc = """Per-point influence indices into rigExec:influences,
+        rigExec:elementSize entries per point in point order (UsdSkel's
+        primvars:skel:jointIndices layout)."""
+    )
+    float[] rigExec:jointWeights = [] (
+        doc = """Per-point influence weights parallel to rigExec:jointIndices.
+        Finite and non-negative; not renormalized."""
+    )
+    uniform int rigExec:elementSize = 1 (
+        doc = "Influences per point."
+    )
+    uniform token rigExec:skinningMethod = "classicLinear" (
+        allowedTokens = ["classicLinear", "dualQuaternion"]
+    )
+    uniform token rigExec:transformReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+        doc = "Which revision of every influence's matrix is read."
     )
 }
 

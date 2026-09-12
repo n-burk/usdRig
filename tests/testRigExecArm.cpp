@@ -29,6 +29,7 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <limits>
 #include <string>
@@ -1272,6 +1273,348 @@ TestMatrixMoverUniversalEnvelope()
                 return diagnostic.find("defaultWeight") != std::string::npos ||
                        diagnostic.find("weight") != std::string::npos;
             }));
+    }
+}
+
+// RigExecSkinMover end to end: compiled, tapped, assembled, executed by the
+// graph and checked against the independent CPU oracle (cpuParityMode).
+// Three points carry three different layouts -- one influence at weight 1,
+// two at 0.5 / 0.5, and two at 0.25 / 0.25 -- so the single-influence case
+// matches a sequential MatrixMover exactly, the blended case is the analytic
+// midpoint, and the under-weighted case documents the rest-retaining rule.
+static void
+TestSkinMoverLinearBlend()
+{
+    const SdfPath target("/Asset/Geom/P.points");
+    const VtVec3fArray base = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+
+    auto makeStage = [&]() {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdPrim points =
+            stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+        points.CreateAttribute(TfToken("points"),
+                               SdfValueTypeNames->Point3fArray, false)
+            .Set(base);
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        GfMatrix4d posedA(1.0), posedB(1.0);
+        posedA.SetTranslate(GfVec3d(0, 10, 0));
+        posedB.SetTranslate(GfVec3d(4, 0, 0));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Joints/A"), TfToken("RigExecJoint"))
+            .CreateAttribute(TfToken("posed:space"),
+                             SdfValueTypeNames->Matrix4d, false)
+            .Set(posedA);
+        stage->DefinePrim(SdfPath("/Asset/Rig/Joints/B"), TfToken("RigExecJoint"))
+            .CreateAttribute(TfToken("posed:space"),
+                             SdfValueTypeNames->Matrix4d, false)
+            .Set(posedB);
+        return stage;
+    };
+    auto addSkin = [&](const UsdStageRefPtr &stage, const VtIntArray &indices,
+                       const VtFloatArray &weights, int elementSize) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/Skin"), TfToken("RigExecSkinMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateRelationship(TfToken("rigExec:influences"), false)
+            .SetTargets({SdfPath("/Asset/Rig/Joints/A"),
+                         SdfPath("/Asset/Rig/Joints/B")});
+        mover.CreateAttribute(TfToken("rigExec:elementSize"),
+                              SdfValueTypeNames->Int, false)
+            .Set(elementSize);
+        mover.CreateAttribute(TfToken("rigExec:jointIndices"),
+                              SdfValueTypeNames->IntArray, false)
+            .Set(indices);
+        mover.CreateAttribute(TfToken("rigExec:jointWeights"),
+                              SdfValueTypeNames->FloatArray, false)
+            .Set(weights);
+        return mover;
+    };
+
+    {
+        const UsdStageRefPtr stage = makeStage();
+        addSkin(stage, VtIntArray({0, 1, 0, 1, 0, 1}),
+                VtFloatArray({1.0f, 0.0f, 0.5f, 0.5f, 0.25f, 0.25f}), 2);
+        const RigExecRigPose pose = EvaluateEnvelopeFixture(stage);
+        const VtVec3fArray moved = EnvelopePoints(pose, target);
+        CHECK(moved.size() == base.size());
+        if (moved.size() == base.size()) {
+            // Weight 1 on A alone: exactly A's translation.
+            CHECK(Near(GfVec3d(moved[0]), GfVec3d(base[0]) + GfVec3d(0, 10, 0)));
+            // 0.5 / 0.5: the midpoint of A p and B p.
+            CHECK(Near(GfVec3d(moved[1]), GfVec3d(base[1]) + GfVec3d(2, 5, 0)));
+            // 0.25 / 0.25: half the rest point is retained.
+            CHECK(Near(GfVec3d(moved[2]), GfVec3d(base[2]) + GfVec3d(1, 2.5, 0)));
+        }
+        CHECK(pose.moverGraphParityMismatches == 0);
+    }
+
+    // The single-influence case is the sequential MatrixMover's result.
+    {
+        const UsdStageRefPtr stage = makeStage();
+        addSkin(stage, VtIntArray({0, 0, 0}), VtFloatArray({1, 1, 1}), 1);
+        const VtVec3fArray skinned =
+            EnvelopePoints(EvaluateEnvelopeFixture(stage), target);
+
+        const UsdStageRefPtr sequential = makeStage();
+        const UsdPrim mover = sequential->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateRelationship(TfToken("rigExec:transform"), false)
+            .SetTargets({SdfPath("/Asset/Rig/Joints/A")});
+        const VtVec3fArray moved =
+            EnvelopePoints(EvaluateEnvelopeFixture(sequential), target);
+        CHECK(skinned.size() == moved.size());
+        for (size_t i = 0; i < skinned.size() && i < moved.size(); ++i) {
+            CHECK(Near(GfVec3d(skinned[i]), GfVec3d(moved[i])));
+        }
+    }
+
+    // Compile is strict about the layout and the method: a token neither
+    // kernel owns is refused with a diagnostic rather than silently falling
+    // back to different maths, and a mis-sized layout is caught before
+    // evaluation.
+    auto compileError = [&](const UsdStageRefPtr &stage) {
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(!evaluator.Compile(&errors));
+        std::string joined;
+        for (const std::string &e : errors) joined += e + "\n";
+        return joined;
+    };
+    {
+        const UsdStageRefPtr stage = makeStage();
+        const UsdPrim mover = addSkin(
+            stage, VtIntArray({0, 0, 0}), VtFloatArray({1, 1, 1}), 1);
+        mover.CreateAttribute(TfToken("rigExec:skinningMethod"),
+                              SdfValueTypeNames->Token, false)
+            .Set(TfToken("bogus"));
+        CHECK(compileError(stage).find("unknown rigExec:skinningMethod") !=
+              std::string::npos);
+    }
+    {
+        const UsdStageRefPtr stage = makeStage();
+        addSkin(stage, VtIntArray({0, 0}), VtFloatArray({1, 1}), 1);
+        CHECK(compileError(stage).find("jointIndices length") !=
+              std::string::npos);
+    }
+    {
+        const UsdStageRefPtr stage = makeStage();
+        addSkin(stage, VtIntArray({0, 0, 2}), VtFloatArray({1, 1, 1}), 1);
+        CHECK(compileError(stage).find("outside the 2 influences") !=
+              std::string::npos);
+    }
+}
+
+// RigExecSkinMover with rigExec:skinningMethod = dualQuaternion, end to end
+// through compile, assembly, the graph kernel and the CPU oracle (parity
+// must hold on every stage, which exercises the evaluator's independent
+// GfDualQuatd reference alongside the kernel). Every case also runs the
+// classicLinear method on the same stage, so the linear expectations are
+// re-asserted next to the dual-quaternion ones.
+static void
+TestSkinMoverDualQuaternion()
+{
+    const SdfPath target("/Asset/Geom/P.points");
+    static constexpr double kPi = 3.141592653589793238462643383279502884;
+    const GfVec3d X(1, 0, 0), Y(0, 1, 0), Z(0, 0, 1);
+
+    auto rigid = [](const GfVec3d &axis, double degrees, const GfVec3d &t) {
+        GfMatrix4d m(1.0);
+        m.SetRotate(GfRotation(axis, degrees));
+        m.SetTranslateOnly(t);
+        return m;
+    };
+    // Row-vector [S | 0] * [R | t]: the stretch acts in the joint's
+    // pre-rotation frame, which is the transform a scaled joint produces.
+    auto scaled = [&](const GfVec3d &scale, const GfVec3d &axis,
+                      double degrees, const GfVec3d &t) {
+        return GfMatrix4d().SetScale(scale) * rigid(axis, degrees, t);
+    };
+
+    // Joints A and B at the given posed matrices and a skin mover over
+    // `base` with the given layout, evaluated with the given method.
+    auto skin = [&](const VtVec3fArray &base, const GfMatrix4d &posedA,
+                    const GfMatrix4d &posedB, const VtIntArray &indices,
+                    const VtFloatArray &weights, int elementSize,
+                    const char *method) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        const UsdPrim points =
+            stage->DefinePrim(SdfPath("/Asset/Geom/P"), TfToken("Points"));
+        points.CreateAttribute(TfToken("points"),
+                               SdfValueTypeNames->Point3fArray, false)
+            .Set(base);
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        stage->DefinePrim(SdfPath("/Asset/Rig/Joints/A"), TfToken("RigExecJoint"))
+            .CreateAttribute(TfToken("posed:space"),
+                             SdfValueTypeNames->Matrix4d, false)
+            .Set(posedA);
+        stage->DefinePrim(SdfPath("/Asset/Rig/Joints/B"), TfToken("RigExecJoint"))
+            .CreateAttribute(TfToken("posed:space"),
+                             SdfValueTypeNames->Matrix4d, false)
+            .Set(posedB);
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/Skin"), TfToken("RigExecSkinMover"));
+        CHECK(mover.ApplyAPI(TfToken("RigExecMoverAPI")));
+        mover.CreateRelationship(TfToken("rigExec:moves"), false)
+            .SetTargets({target});
+        mover.CreateRelationship(TfToken("rigExec:influences"), false)
+            .SetTargets({SdfPath("/Asset/Rig/Joints/A"),
+                         SdfPath("/Asset/Rig/Joints/B")});
+        mover.CreateAttribute(TfToken("rigExec:elementSize"),
+                              SdfValueTypeNames->Int, false)
+            .Set(elementSize);
+        mover.CreateAttribute(TfToken("rigExec:jointIndices"),
+                              SdfValueTypeNames->IntArray, false)
+            .Set(indices);
+        mover.CreateAttribute(TfToken("rigExec:jointWeights"),
+                              SdfValueTypeNames->FloatArray, false)
+            .Set(weights);
+        mover.CreateAttribute(TfToken("rigExec:skinningMethod"),
+                              SdfValueTypeNames->Token, false)
+            .Set(TfToken(method));
+        const RigExecRigPose pose = EvaluateEnvelopeFixture(stage);
+        // The oracle ran and agreed: the graph kernel and the independent
+        // GfDualQuatd reference in the evaluator match to 1e-4.
+        CHECK(pose.moverGraphParityMismatches == 0);
+        CHECK(pose.moverGraphParityAgreements >= 1);
+        const VtVec3fArray moved = EnvelopePoints(pose, target);
+        CHECK(moved.size() == base.size());
+        return moved.size() == base.size() ? moved : base;
+    };
+    auto nearPoint = [](const GfVec3f &a, const GfVec3d &b) {
+        return Near(GfVec3d(a), b);
+    };
+    auto length = [](const GfVec3f &a) { return GfVec3d(a).GetLength(); };
+
+    // Single influence at weight 1: DQS == classicLinear == T p (to float
+    // precision, the points being GfVec3f).
+    {
+        const GfMatrix4d t = rigid(
+            GfVec3d(1, 2, 3).GetNormalized(), 40.0, GfVec3d(1, -1, 4));
+        const VtVec3fArray base = {
+            GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(0, 1, 0),
+            GfVec3f(0.3f, -0.6f, 0.9f)};
+        const VtIntArray indices({0, 0, 0, 0});
+        const VtFloatArray weights({1, 1, 1, 1});
+        const VtVec3fArray dq = skin(
+            base, t, GfMatrix4d(1.0), indices, weights, 1, "dualQuaternion");
+        const VtVec3fArray lbs = skin(
+            base, t, GfMatrix4d(1.0), indices, weights, 1, "classicLinear");
+        for (size_t i = 0; i < base.size(); ++i) {
+            const GfVec3d expected = t.TransformAffine(GfVec3d(base[i]));
+            CHECK(nearPoint(dq[i], expected));
+            CHECK(nearPoint(lbs[i], expected));
+            CHECK(nearPoint(dq[i], GfVec3d(lbs[i])));
+        }
+    }
+
+    // Two pure translations: 0.5 / 0.5 is the analytic midpoint and
+    // 0.25 / 0.25 retains half of the rest point, under BOTH methods --
+    // translation-only dual-quaternion blending is exact, and the identity
+    // influence carrying the complement makes the shortfall rule agree
+    // with the linear kernel's too.
+    {
+        const GfMatrix4d a = rigid(Z, 0.0, GfVec3d(0, 10, 0));
+        const GfMatrix4d b = rigid(Z, 0.0, GfVec3d(4, 0, 0));
+        const VtVec3fArray base = {
+            GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(2, 0, 0)};
+        for (const char *method : {"dualQuaternion", "classicLinear"}) {
+            const VtVec3fArray moved = skin(
+                base, a, b, VtIntArray({0, 1, 0, 1, 0, 1}),
+                VtFloatArray({1.0f, 0.0f, 0.5f, 0.5f, 0.25f, 0.25f}), 2,
+                method);
+            CHECK(nearPoint(moved[0], GfVec3d(base[0]) + GfVec3d(0, 10, 0)));
+            CHECK(nearPoint(moved[1], GfVec3d(base[1]) + GfVec3d(2, 5, 0)));
+            CHECK(nearPoint(moved[2], GfVec3d(base[2]) + GfVec3d(1, 2.5, 0)));
+        }
+    }
+
+    // Candy wrapper: a bone along X with its far joint twisted 150 degrees
+    // about X, a ring point (0, 1, 0) weighted 0.5 / 0.5. The
+    // dual-quaternion blend rotates it 75 degrees and keeps it on the
+    // ring; the linear blend lands on the chord midpoint, cos 75 = 0.26
+    // of the radius -- the collapse this method exists to remove.
+    {
+        const GfMatrix4d a = rigid(X, 0.0, GfVec3d(0));
+        const GfMatrix4d b = rigid(X, 150.0, GfVec3d(0));
+        const VtVec3fArray base = {
+            GfVec3f(0, 1, 0), GfVec3f(0, 0, 1), GfVec3f(1, 0, 0)};
+        const VtIntArray indices({0, 1, 0, 1, 0, 1});
+        const VtFloatArray weights({0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f});
+        const VtVec3fArray dq = skin(
+            base, a, b, indices, weights, 2, "dualQuaternion");
+        const VtVec3fArray lbs = skin(
+            base, a, b, indices, weights, 2, "classicLinear");
+        const double c75 = std::cos(75.0 * kPi / 180.0);
+        const double s75 = std::sin(75.0 * kPi / 180.0);
+        const double c150 = std::cos(150.0 * kPi / 180.0);
+        const double s150 = std::sin(150.0 * kPi / 180.0);
+        CHECK(nearPoint(dq[0], GfVec3d(0, c75, s75)));
+        CHECK(nearPoint(dq[1], GfVec3d(0, -s75, c75)));
+        CHECK(nearPoint(dq[2], GfVec3d(1, 0, 0)));
+        CHECK(std::abs(length(dq[0]) - 1.0) < 1e-6);
+        CHECK(std::abs(length(dq[1]) - 1.0) < 1e-6);
+        CHECK(nearPoint(lbs[0], GfVec3d(0, 0.5 * (1.0 + c150), 0.5 * s150)));
+        CHECK(length(lbs[0]) < 0.3);
+        CHECK(length(lbs[1]) < 0.3);
+    }
+
+    // Non-uniform scale survives: joint A carries the spine's squash
+    // pattern, s_x = 1, s_y = s_z = 2, with no rotation. Alone at weight 1
+    // it stretches the point; at 0.5 / 0.5 with a joint twisted 150
+    // degrees about X the stretch blends to diag(1, 1.5, 1.5) in the
+    // pre-rotation frame and the rotation to 75 degrees, so the ring point
+    // comes out at radius 1.5, exactly the mean scale. A rigid-only DQS
+    // would have silently returned radius 1.
+    {
+        const GfMatrix4d a = scaled(GfVec3d(1, 2, 2), X, 0.0, GfVec3d(0));
+        const GfMatrix4d b = rigid(X, 150.0, GfVec3d(0));
+        const VtVec3fArray base = {
+            GfVec3f(0, 1, 0), GfVec3f(0, 0, 1), GfVec3f(1, 0, 0),
+            GfVec3f(0, 1, 0)};
+        const VtIntArray indices({0, 0, 0, 0, 0, 0, 0, 1});
+        const VtFloatArray weights({1, 0, 1, 0, 1, 0, 0.5f, 0.5f});
+        const VtVec3fArray dq = skin(
+            base, a, b, indices, weights, 2, "dualQuaternion");
+        const VtVec3fArray lbs = skin(
+            base, a, b, indices, weights, 2, "classicLinear");
+        const double c75 = std::cos(75.0 * kPi / 180.0);
+        const double s75 = std::sin(75.0 * kPi / 180.0);
+        CHECK(nearPoint(dq[0], GfVec3d(0, 2, 0)));
+        CHECK(nearPoint(dq[1], GfVec3d(0, 0, 2)));
+        CHECK(nearPoint(dq[2], GfVec3d(1, 0, 0)));
+        CHECK(nearPoint(dq[3], GfVec3d(0, 1.5 * c75, 1.5 * s75)));
+        CHECK(std::abs(length(dq[3]) - 1.5) < 1e-6);
+        // The linear kernel keeps the scale on the lone influence too, and
+        // collapses the blended one as before.
+        CHECK(nearPoint(lbs[0], GfVec3d(0, 2, 0)));
+        CHECK(length(lbs[3]) < 0.7);
+    }
+
+    // Weight shortfall with rotation: a lone 90 degree influence at weight
+    // 0.5. The complement enters the blend as the identity, so the
+    // dual-quaternion result is the 45 degree point ON the arc (length 1)
+    // where the linear rule lands on the chord midpoint (length 0.71).
+    // All-zero weights leave the point exactly where it was under both.
+    {
+        const GfMatrix4d a = rigid(Z, 90.0, GfVec3d(0));
+        const VtVec3fArray base = {GfVec3f(1, 0, 0), GfVec3f(1, 0, 0)};
+        const VtIntArray indices({0, 0});
+        const VtFloatArray weights({0.5f, 0.0f});
+        const VtVec3fArray dq = skin(
+            base, a, GfMatrix4d(1.0), indices, weights, 1, "dualQuaternion");
+        const VtVec3fArray lbs = skin(
+            base, a, GfMatrix4d(1.0), indices, weights, 1, "classicLinear");
+        const double c45 = std::cos(45.0 * kPi / 180.0);
+        CHECK(nearPoint(dq[0], GfVec3d(c45, c45, 0)));
+        CHECK(std::abs(length(dq[0]) - 1.0) < 1e-6);
+        CHECK(nearPoint(lbs[0], GfVec3d(0.5, 0.5, 0)));
+        CHECK(dq[1] == base[1]);
+        CHECK(lbs[1] == base[1]);
     }
 }
 
@@ -3562,6 +3905,8 @@ main(int argc, char **argv)
     TestBlendDeltasUseBase();
     TestControlAvarScaleDrivesMatrixMover();
     TestMatrixMoverUniversalEnvelope();
+    TestSkinMoverLinearBlend();
+    TestSkinMoverDualQuaternion();
     TestBlendShapeUniversalEnvelope();
     TestSmoothMoverUniversalEnvelope();
     TestPropertyMoverUniversalEnvelope();

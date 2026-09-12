@@ -979,7 +979,12 @@ PYBIND11_MODULE(_rigexec, m) {
                                 const py::iterable &controls) {
             h.SetControls(_PythonToDependencyPaths(
                 controls, h.GetStage(), TfToken("RigExecControl")));
-        }, py::arg("paths"));
+        }, py::arg("paths"))
+        .def("set_control_space", [](rigExec::RigExecFkChainHandle &h, std::string v) { h.SetControlSpace(TfToken(v)); }, py::arg("space"),
+             "'world' (sibling controls; the solver composes the chain) or "
+             "'parentRelative' (controls nested one under the next already "
+             "travel with their parent; the solver takes each delta as-is). "
+             "Same joints either way.");
 
     py::class_<rigExec::RigExecTwoBoneIkHandle, rigExec::RigExecSolverHandle>(m, "TwoBoneIk")
         .def("set_root_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
@@ -1050,6 +1055,30 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_driver_curve_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetDriverCurveReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_surface_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetSurfaceReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_joint_elements", [](rigExec::RigExecRibbonHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
+
+    py::class_<rigExec::RigExecSplineIkHandle, rigExec::RigExecSolverHandle>(m, "SplineIk",
+        "Control-driven spline IK: root/mid/end controls shape a degree-2 "
+        "B-spline and the ordered joint chain is laid along it by arc length.")
+        .def("set_root_control", [](rigExec::RigExecSplineIkHandle &h, py::object p) {
+            h.SetRootControl(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecControl"), false));
+        }, py::arg("path"))
+        .def("set_mid_control", [](rigExec::RigExecSplineIkHandle &h, py::object p) {
+            h.SetMidControl(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecControl"), false));
+        }, py::arg("path"))
+        .def("set_end_control", [](rigExec::RigExecSplineIkHandle &h, py::object p) {
+            h.SetEndControl(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecControl"), false));
+        }, py::arg("path"))
+        .def("set_volume_weights", [](rigExec::RigExecSplineIkHandle &h, std::vector<float> w) { h.SetVolumeWeights(w); }, py::arg("weights"),
+             "Per-joint squash/stretch weights parallel to the joints; empty means no thinning.")
+        .def("set_rest_length", [](rigExec::RigExecSplineIkHandle &h, std::string v) { h.SetRestLength(TfToken(v)); }, py::arg("mode"),
+             "'curve' (ratio == 1 at rest) or 'chain' (chain spans the curve exactly).")
+        .def("set_preserve_volume", &rigExec::RigExecSplineIkHandle::SetPreserveVolume, py::arg("amount"))
+        .def("set_mid_follow_weight", &rigExec::RigExecSplineIkHandle::SetMidFollowWeight, py::arg("weight"))
+        .def("set_roll", &rigExec::RigExecSplineIkHandle::SetRoll, py::arg("degrees"))
+        .def("set_twist", &rigExec::RigExecSplineIkHandle::SetTwist, py::arg("degrees"))
+        .def("set_min_length_ratio", &rigExec::RigExecSplineIkHandle::SetMinLengthRatio, py::arg("ratio"),
+             "Length floor as a fraction of the rest root->end chord (inputs:minLengthRatio); 0 = off.")
+        .def("set_joint_elements", [](rigExec::RigExecSplineIkHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
 
     // Constraints.
     py::class_<rigExec::RigExecConstraintHandle, rigExec::RigExecMoverHandle>(m, "Constraint")
@@ -1296,6 +1325,23 @@ PYBIND11_MODULE(_rigexec, m) {
         }, py::arg("property_name"), py::arg("phase"))
         .def("set_transform_read_phase", [](rigExec::RigExecMatrixMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
+    py::class_<rigExec::RigExecSkinMoverHandle, rigExec::RigExecMoverHandle>(m, "SkinMover",
+        "Multi-influence skinning in one pass over an ordered influence list\n"
+        "(UsdSkel's jointIndices / jointWeights layout).")
+        .def("set_influences", [](rigExec::RigExecSkinMoverHandle &h, py::iterable providers) {
+            std::vector<SdfPath> paths;
+            for (const auto &p : providers) paths.push_back(_PythonToDependencyPath(
+                py::reinterpret_borrow<py::object>(p), h.GetStage(), TfToken(), false));
+            h.SetInfluences(paths);
+        }, py::arg("providers"))
+        .def("set_joint_influences", [](rigExec::RigExecSkinMoverHandle &h,
+                                         std::vector<int> indices,
+                                         std::vector<float> weights, int elementSize) {
+            h.SetJointInfluences(indices, weights, elementSize);
+        }, py::arg("joint_indices"), py::arg("joint_weights"), py::arg("element_size"))
+        .def("set_skinning_method", [](rigExec::RigExecSkinMoverHandle &h, std::string v) { h.SetSkinningMethod(TfToken(v)); }, py::arg("method"))
+        .def("set_transform_read_phase", [](rigExec::RigExecSkinMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
+
     py::class_<rigExec::RigExecLatticeMoverHandle, rigExec::RigExecMoverHandle>(m, "LatticeMover")
         .def("set_cage", [](rigExec::RigExecLatticeMoverHandle &h, py::object p) { h.SetCage(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
         .def("set_basis", [](rigExec::RigExecLatticeMoverHandle &h, std::string v) { h.SetBasis(TfToken(v)); }, py::arg("basis"))
@@ -1411,6 +1457,19 @@ PYBIND11_MODULE(_rigexec, m) {
                 _PythonToDependencyPath(weightObject, c.GetStage()),
                 _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
         }, py::arg("name"), py::arg("transform_provider"),
+           py::arg("weight_object") = py::none(),
+           py::arg("target") = py::none(), py::arg("read_phase") = "base")
+        .def("add_skin_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                   py::iterable influences, py::object weightObject,
+                                   py::object target, std::string readPhase) {
+            std::vector<SdfPath> paths;
+            for (const auto &p : influences) paths.push_back(_PythonToDependencyPath(
+                py::reinterpret_borrow<py::object>(p), c.GetStage(), TfToken(), false));
+            return c.AddSkinMover(
+                name, paths,
+                _PythonToDependencyPath(weightObject, c.GetStage()),
+                _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
+        }, py::arg("name"), py::arg("influences"),
            py::arg("weight_object") = py::none(),
            py::arg("target") = py::none(), py::arg("read_phase") = "base")
         .def("add_lattice_mover", [](rigExec::RigExecMoverChain &c, std::string name,
@@ -1632,9 +1691,26 @@ PYBIND11_MODULE(_rigexec, m) {
         .def_property_readonly("root_path", [](const rigExec::RigExecRigBuilder &b) { return _PathStr(b.GetRootPath()); })
 
         // Transform providers.
-        .def("add_control", [](rigExec::RigExecRigBuilder &b, std::string name, std::vector<double> restSpace) {
-            return b.AddControl(name, restSpace.empty() ? GfMatrix4d() : _VecToMat4(restSpace));
-        }, py::arg("name"), py::arg("rest_space") = py::list())
+        .def("add_control", [](rigExec::RigExecRigBuilder &b, std::string name,
+                                std::vector<double> restSpace,
+                                const py::object &parentObject) {
+            rigExec::RigExecControlHandle parent;
+            const rigExec::RigExecControlHandle *parentPtr = nullptr;
+            if (!parentObject.is_none()) {
+                parent = rigExec::RigExecControlHandle(
+                    b.GetStage(), _PythonToDependencyPath(
+                        parentObject, b.GetStage(),
+                        TfToken("RigExecControl"), false));
+                parentPtr = &parent;
+            }
+            return b.AddControl(
+                name, restSpace.empty() ? GfMatrix4d() : _VecToMat4(restSpace),
+                parentPtr);
+        }, py::arg("name"), py::arg("rest_space") = py::list(),
+           py::arg("parent") = py::none(),
+           "Create <rig>/Controls/<name>, or nest it under `parent` (another "
+           "control), in which case rest_space is relative to that parent's "
+           "rest and the control travels with it.")
         .def("add_joint", [](rigExec::RigExecRigBuilder &b, std::string name,
                               std::vector<double> restSpace,
                               const py::object &parentObject) {
@@ -1723,6 +1799,27 @@ PYBIND11_MODULE(_rigexec, m) {
                 sampleCount);
         }, py::arg("name"), py::arg("driver_curve"),
            py::arg("sample_count") = 5)
+        .def("add_spline_ik", [](rigExec::RigExecRigBuilder &b,
+                                   std::string name, py::object rootControl,
+                                   py::object midControl, py::object endControl,
+                                   const py::object &joints) {
+            auto handle = b.AddSplineIk(
+                name,
+                _PythonToDependencyPath(rootControl, b.GetStage(),
+                    TfToken("RigExecControl"), false),
+                _PythonToDependencyPath(midControl, b.GetStage(),
+                    TfToken("RigExecControl"), false),
+                _PythonToDependencyPath(endControl, b.GetStage(),
+                    TfToken("RigExecControl"), false));
+            if (!joints.is_none()) {
+                handle.SetJoints(_PythonToDependencyPaths(
+                    joints, b.GetStage(), TfToken("RigExecJoint")));
+            }
+            return handle;
+        }, py::arg("name"), py::arg("root_control"), py::arg("mid_control"),
+           py::arg("end_control"), py::arg("joints") = py::none(),
+           "Create a spline IK solver from three controls and optionally wire "
+           "its ordered joint chain (root to tip).")
 
         // Weight objects.
         .def("add_static_weight", [](rigExec::RigExecRigBuilder &b,
