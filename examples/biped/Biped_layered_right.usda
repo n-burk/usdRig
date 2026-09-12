@@ -1,0 +1,1945 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        over "Joints"
+        {
+            over "hips_bind"
+            {
+                def RigExecJoint "pelvis_r_bind" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.4210854715202004e-14, 0, 0.01, 1) )
+                    uniform float2 ui:nodegraph:node:pos = (3.56, 4.29)
+
+                    def RigExecJoint "thigh_r_bind" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (-0.9999888802602237, 0.004715862159090915, 1.5682577858693725e-18, 0), (-0.004715862159090916, -0.9999888802602237, -2.1107991548323983e-16, 0), (5.72816561279374e-19, -2.1108496401705573e-16, 0.9999999999999996, 0), (-1.4210854715202004e-14, 0, 7.7426, 1) )
+                        uniform float2 ui:nodegraph:node:pos = (3.74, 4.4)
+
+                        def RigExecJoint "knee_r_bind" (
+                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                        )
+                        {
+                            matrix4d rest:space = ( (0.9982954832333818, -0.058362043794135905, -6.336525874257112e-18, 0), (0.058362043794135905, 0.9982954832333819, -1.877574774634209e-19, 0), (6.336683069784716e-18, -1.8237515888104345e-19, 1, 0), (44.10400000000001, 0, 0, 1) )
+                            uniform float2 ui:nodegraph:node:pos = (3.92, 4.51)
+
+                            def RigExecJoint "ankleTwist_r_bind" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                matrix4d rest:space = ( (-1, 0, 7.548114061417191e-18, 0), (-1.3877787807814457e-17, -0.9999999999999999, -2.1081635697608647e-16, 0), (7.548114061417191e-18, -2.1081635697608637e-16, 1.0000000000000004, 0), (42.8397, -8.881784197001252e-16, 0, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (4.1, 4.62)
+
+                                def RigExecJoint "ankleSwing_r_driver" (
+                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                )
+                                {
+                                    matrix4d rest:space = ( (0.9980091550935328, 0.0630692187163678, -2.7733391199176196e-32, 0), (-0.0630692187163678, 0.9980091550935328, 0, 0), (-1.5407439555097887e-32, 0, 1, 0), (-1.7763568394002505e-15, 8.881784197001252e-16, 0, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (4.28, 4.73)
+                                }
+                            }
+
+                            def RigExecJoint "ankleTwist_r_driver" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                matrix4d rest:space = ( (-1, 0, 7.548114061417191e-18, 0), (-1.3877787807814457e-17, -0.9999999999999999, -2.1081635697608647e-16, 0), (7.548114061417191e-18, -2.1081635697608637e-16, 1.0000000000000004, 0), (42.8397, -8.881784197001252e-16, 0, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (4.1, 4.84)
+                            }
+
+                            def RigExecJoint "ankle_r_bind" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                matrix4d rest:space = ( (-0.9980091550935328, -0.06306921871636778, -5.762935990128074e-18, 0), (0.06306921871636778, -0.9980091550935327, -2.1087270796223625e-16, 0), (7.548114061417191e-18, -2.1081635697608637e-16, 1.0000000000000004, 0), (42.8397, -8.881784197001252e-16, 0, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (4.1, 4.95)
+
+                                def RigExecJoint "ball_r_bind" (
+                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                )
+                                {
+                                    matrix4d rest:space = ( (1, 0, 2.1570415377137042e-32, 0), (0, 1, 0, 0), (-3.081487911019565e-33, 0, 1, 0), (-7.077499999999999, -14, -8.881784197001252e-16, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (4.28, 5.06)
+
+                                    def RigExecJoint "toe1_001_r_bind" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (0.25881904510252074, 0.9659258262890683, -2.465190328815662e-32, 0), (-0.9659258262890683, 0.25881904510252074, -3.697785493223493e-32, 0), (-3.081487911019565e-33, 0, 1, 0), (1.0162, -0.25129999999999963, -3.458199999999999, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 5.17)
+
+                                        def RigExecJoint "toe1_002_r_bind" (
+                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                        )
+                                        {
+                                            matrix4d rest:space = ( (0.9971305639900172, 0.07570097989425517, -4.930380657631324e-32, 0), (-0.07570097989425517, 0.9971305639900172, 6.162975822039155e-33, 0), (0, 1.232595164407831e-32, 1, 0), (-2.5391000000000004, -0.15940000000000065, 0, 1) )
+                                            uniform float2 ui:nodegraph:node:pos = (4.64, 5.28)
+
+                                            def RigExecJoint "toe1_003_r_bind" (
+                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                            )
+                                            {
+                                                matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-3.0093999999999976, -8.881784197001252e-16, -8.881784197001252e-16, 1) )
+                                                uniform float2 ui:nodegraph:node:pos = (4.82, 5.39)
+
+                                                def RigExecJoint "toe1_004_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-2.0284999999999975, 0, -8.881784197001252e-16, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 5.5)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    def RigExecJoint "toe2_001_r_bind" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (0.25881904510252074, 0.9659258262890683, -2.465190328815662e-32, 0), (-0.9659258262890683, 0.25881904510252074, -3.697785493223493e-32, 0), (-3.081487911019565e-33, 0, 1, 0), (0.7647000000000004, 0.07029999999999959, -0.34440000000000026, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 5.61)
+
+                                        def RigExecJoint "toe2_002_r_bind" (
+                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                        )
+                                        {
+                                            matrix4d rest:space = ( (0.9971305639900172, 0.07570097989425517, -4.930380657631324e-32, 0), (-0.07570097989425517, 0.9971305639900172, 6.162975822039155e-33, 0), (0, 1.232595164407831e-32, 1, 0), (-2.9915000000000003, -0.39779999999999927, 0, 1) )
+                                            uniform float2 ui:nodegraph:node:pos = (4.64, 5.72)
+
+                                            def RigExecJoint "toe2_003_r_bind" (
+                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                            )
+                                            {
+                                                matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-3.6083, 0, 0, 1) )
+                                                uniform float2 ui:nodegraph:node:pos = (4.82, 5.83)
+
+                                                def RigExecJoint "toe2_004_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-1.7704999999999984, -8.881784197001252e-16, 0, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 5.94)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    def RigExecJoint "toe3_001_r_bind" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (0.25881904510252074, 0.9659258262890683, -2.465190328815662e-32, 0), (-0.9659258262890683, 0.25881904510252074, -3.697785493223493e-32, 0), (-3.081487911019565e-33, 0, 1, 0), (0.36690000000000067, 0.12620000000000076, 1.7792000000000012, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 6.05)
+
+                                        def RigExecJoint "toe3_002_r_bind" (
+                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                        )
+                                        {
+                                            matrix4d rest:space = ( (0.9971305639900172, 0.07570097989425517, -4.930380657631324e-32, 0), (-0.07570097989425517, 0.9971305639900172, 6.162975822039155e-33, 0), (0, 1.232595164407831e-32, 1, 0), (-2.7757000000000014, -0.3218999999999994, 0, 1) )
+                                            uniform float2 ui:nodegraph:node:pos = (4.64, 6.16)
+
+                                            def RigExecJoint "toe3_003_r_bind" (
+                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                            )
+                                            {
+                                                matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-3.2532999999999994, 0, -1.7763568394002505e-15, 1) )
+                                                uniform float2 ui:nodegraph:node:pos = (4.82, 6.27)
+
+                                                def RigExecJoint "toe3_004_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-1.331999999999999, 0, 0, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 6.38)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    def RigExecJoint "toe4_001_r_bind" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (0.25881904510252074, 0.9659258262890683, -2.465190328815662e-32, 0), (-0.9659258262890683, 0.25881904510252074, -3.697785493223493e-32, 0), (-3.081487911019565e-33, 0, 1, 0), (0.09710000000000063, 0.43189999999999973, 3.7792000000000012, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 6.49)
+
+                                        def RigExecJoint "toe4_002_r_bind" (
+                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                        )
+                                        {
+                                            matrix4d rest:space = ( (0.9971305639900172, 0.07570097989425517, -4.930380657631324e-32, 0), (-0.07570097989425517, 0.9971305639900172, 6.162975822039155e-33, 0), (0, 1.232595164407831e-32, 1, 0), (-2.5535000000000005, -0.15939999999999976, 0, 1) )
+                                            uniform float2 ui:nodegraph:node:pos = (4.64, 6.6)
+
+                                            def RigExecJoint "toe4_003_r_bind" (
+                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                            )
+                                            {
+                                                matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-2.8130000000000024, 0, 0, 1) )
+                                                uniform float2 ui:nodegraph:node:pos = (4.82, 6.71)
+
+                                                def RigExecJoint "toe4_004_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-1.2984000000000009, 4.440892098500626e-16, -1.7763568394002505e-15, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 6.82)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    def RigExecJoint "toe5_001_r_bind" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (0.25881904510252074, 0.9659258262890683, -2.465190328815662e-32, 0), (-0.9659258262890683, 0.25881904510252074, -3.697785493223493e-32, 0), (-3.081487911019565e-33, 0, 1, 0), (-0.22579999999999956, 0.7562000000000006, 5.4925000000000015, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 6.93)
+
+                                        def RigExecJoint "toe5_002_r_bind" (
+                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                        )
+                                        {
+                                            matrix4d rest:space = ( (0.9971305639900172, 0.07570097989425517, -4.930380657631324e-32, 0), (-0.07570097989425517, 0.9971305639900172, 6.162975822039155e-33, 0), (0, 1.232595164407831e-32, 1, 0), (-2.4349999999999996, -0.1594000000000002, 1.7763568394002505e-15, 1) )
+                                            uniform float2 ui:nodegraph:node:pos = (4.64, 7.04)
+
+                                            def RigExecJoint "toe5_003_r_bind" (
+                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                            )
+                                            {
+                                                matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-1.7193999999999985, 0, 1.7763568394002505e-15, 1) )
+                                                uniform float2 ui:nodegraph:node:pos = (4.82, 7.15)
+
+                                                def RigExecJoint "toe5_004_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (1, 0, 2.465190328815662e-32, 0), (0, 1, -3.0814879110195774e-32, 0), (-2.465190328815662e-32, 5.546678239835239e-32, 1, 0), (-1.0623000000000005, -4.440892098500626e-16, 1.7763568394002505e-15, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 7.26)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    def RigExecJoint "toe_r_bind" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (1, 0, 2.1570415377137042e-32, 0), (0, 1, 0, 0), (-3.081487911019565e-33, 0, 1, 0), (-2.3194999999999997, -9.729799999999997, 8.881784197001252e-16, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 7.37)
+                                    }
+                                }
+
+                                def RigExecJoint "toe_r_driver" (
+                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                )
+                                {
+                                    matrix4d rest:space = ( (-2.220446049250313e-16, 1.0000000000000002, 0, 0), (-1.0000000000000002, -2.220446049250313e-16, 3.081487911019588e-33, 0), (-3.081487911019565e-33, 0, 1, 0), (-7.077499999999999, -14, -8.881784197001252e-16, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (4.28, 7.48)
+                                }
+                            }
+
+                            def RigExecJoint "kneeTwist_r_bind" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                matrix4d rest:space = ( (-0.9982954832333818, -0.05836204379413587, -4.7684252839154156e-18, 0), (0.05836204379413587, -0.9982954832333817, -2.1089754032435893e-16, 0), (7.548114061417191e-18, -2.1081635697608637e-16, 1.0000000000000004, 0), (0, 0, 0, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (4.1, 7.59)
+
+                                def RigExecJoint "knee_r_driver" (
+                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                )
+                                {
+                                    matrix4d rest:space = ( (0.9982954832333817, -0.0583620437941359, 9.244463733058732e-33, 0), (0.0583620437941359, 0.9982954832333817, 0, 0), (-2.6963019221421302e-33, 0, 1, 0), (7.105427357601002e-15, 0, 0, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (4.28, 7.7)
+                                }
+                            }
+                        }
+                    }
+
+                    def RigExecJoint "pelvis_trans_combo_r_driver" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1.0000000000000007, -2.2204460492503136e-16, -4.930380657631324e-32, 0), (2.220446049250314e-16, 1.0000000000000004, -2.2204460492503155e-16, 0), (0, 2.220446049250314e-16, 1.0000000000000007, 0), (-1, 0, 7.7426, 1) )
+                        uniform float2 ui:nodegraph:node:pos = (3.74, 7.81)
+                    }
+
+                    def RigExecJoint "pelvis_trans_r_bind" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.4210854715202004e-14, 0, 7.7426, 1) )
+                        uniform float2 ui:nodegraph:node:pos = (3.74, 7.92)
+
+                        def RigExecJoint "thigh_r_driver" (
+                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                        )
+                        {
+                            matrix4d rest:space = ( (0.9999888802602239, -0.00471586215909092, -2.3881531310401725e-32, 0), (0.00471586215909092, 0.9999888802602239, 0, 0), (0, 0, 1, 0), (-1.4210854715202004e-14, 0, 0, 1) )
+                            uniform float2 ui:nodegraph:node:pos = (3.92, 8.03)
+
+                            def RigExecJoint "thigh_r_twist_driver" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                matrix4d rest:space = ( (1, -8.673617379884035e-19, 2.5422275265911513e-32, 0), (8.673617379884035e-19, 1, 0, 0), (-2.3688938315963e-32, 0, 1, 0), (0, 0, 0, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (4.1, 8.14)
+                            }
+                        }
+                    }
+
+                    def RigExecJoint "thighNoTwist_r_bind" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (0.9999888802602239, -0.00471586215909092, -2.3881531310401725e-32, 0), (0.00471586215909092, 0.9999888802602239, 0, 0), (0, 0, 1, 0), (-1.4210854715202004e-14, 0, 7.7426, 1) )
+                        uniform float2 ui:nodegraph:node:pos = (3.74, 8.25)
+                    }
+
+                    def RigExecJoint "thigh_combo_r_driver" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (0.9999888802602239, -0.00471586215909092, -2.3881531310401725e-32, 0), (0.00471586215909092, 0.9999888802602239, 0, 0), (0, 0, 1, 0), (-1, 0.004699999999999704, 7.7426, 1) )
+                        uniform float2 ui:nodegraph:node:pos = (3.74, 8.36)
+                    }
+                }
+
+                over "spine_0_bind"
+                {
+                    over "spine_1_bind"
+                    {
+                        over "spine_2_bind"
+                        {
+                            over "spine_3_bind"
+                            {
+                                over "spine_4_bind"
+                                {
+                                    over "spine_5_bind"
+                                    {
+                                        over "chest_bind"
+                                        {
+                                            over "neck_base_bind"
+                                            {
+                                                over "neck_0_bind"
+                                                {
+                                                    over "neck_1_bind"
+                                                    {
+                                                        over "neck_2_bind"
+                                                        {
+                                                            over "neck_3_bind"
+                                                            {
+                                                                over "skull_bind"
+                                                                {
+                                                                    over "face_upper_bind"
+                                                                    {
+                                                                        over "head_tip_bind"
+                                                                        {
+                                                                            def RigExecJoint "brow_inner_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (-0.954528138413944, -0.02279307803299429, -0.2972482271936919, 0), (0.00806921816404526, 0.9947323396950782, -0.10218835590700409, 0), (0.2980116116768471, -0.09994022192559573, -0.9493160861100116, 0), (-1.5948, 2.2691999999999837, 8.0452, 1) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 10.23)
+                                                                            }
+
+                                                                            def RigExecJoint "brow_main_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (-0.9375694251374719, -0.02759711935846035, -0.346701560496208, 0), (0.006748213313121566, 0.9952158651568661, -0.09746713988391593, 0), (0.34773270577337345, -0.09372182639697711, -0.9328977353345562, 0), (-3.9988, 2.594799999999964, 7.0779, 1) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 10.45)
+                                                                            }
+
+                                                                            def RigExecJoint "brow_peak_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (-0.7648733191947901, -0.042342583971821196, -0.6427876096865397, 0), (0.018783930335453926, 0.995947065762233, -0.08795797951721561, 0), (0.6439068019093283, -0.07935078942384483, -0.7609779777843213, 0), (-5.3687, 2.637999999999977, 6.1212, 1) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 10.67)
+                                                                            }
+                                                                        }
+
+                                                                        def RigExecJoint "eyeSocket_r_bind" (
+                                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                        )
+                                                                        {
+                                                                            matrix4d rest:space = ( (-1, 0, -1.2246467991473535e-16, 0), (-5.473822126268817e-48, 1, 2.465190328815662e-32, 0), (1.224646799147353e-16, 2.465190328815662e-32, -1, 0), (-3.3842, 8.508399999999995, 5.8184, 1) )
+                                                                            uniform float2 ui:nodegraph:node:pos = (6.08, 11)
+
+                                                                            def RigExecJoint "eye_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (1, 0, -4.930380657631324e-32, 0), (0, 1, -2.465190328815662e-32, 0), (4.930380657631324e-32, 2.465190328815662e-32, 1, 0), (4.440892098500626e-16, -2.842170943040401e-14, 0, 1) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 11.11)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            def RigExecJoint "clavicle_r_bind" (
+                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                            )
+                                            {
+                                                matrix4d rest:space = ( (-2.220446049250313e-16, 0, -1.0000000000000002, 0), (1.2246467991473535e-16, -1, -4.930380657631324e-32, 0), (-1.0000000000000002, -1.2246467991473532e-16, 2.2204460492503126e-16, 0), (11.805399999999992, 1.2661999999999995, 2.0438, 1) )
+                                                uniform float2 ui:nodegraph:node:pos = (4.82, 17.71)
+
+                                                def RigExecJoint "clavicle_trans_combo_r_driver" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (0.9539199996590653, 0.21159261678897112, -0.21275619561094986, 0), (-0.21159268482958024, 0.9770863444335459, 0.023039341312219234, 0), (0.21275612794243798, 0.023039966186750967, 0.9768336552254202, 0), (-18.1814, -4.032900000000001, 4.055099999999982, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 17.82)
+                                                }
+
+                                                def RigExecJoint "clavicle_trans_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (0.9539200993292258, 0.21159253506201747, -0.2127558300064861, 0), (-0.21159263891124064, 0.9770863594251915, 0.02303912723614056, 0), (0.21275572672503376, 0.02304008097326583, 0.9768337399038017, 0), (-17.2275, -3.8213, 3.842299999999966, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 17.93)
+
+                                                    def RigExecJoint "shoulder_r_driver" (
+                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                    )
+                                                    {
+                                                        matrix4d rest:space = ( (0.8163613260981866, -0.1883998274616788, -0.5459484318721138, 0), (0.25170839666238004, 0.9668593242035385, 0.04273090509609065, 0), (0.5198048367424686, -0.17230366279649062, 0.8367283785590452, 0), (3.552713678800501e-15, 0, 0, 1.0000000000000002) )
+                                                        uniform float2 ui:nodegraph:node:pos = (5.18, 18.04)
+
+                                                        def RigExecJoint "shoulder_r_twist_driver" (
+                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                        )
+                                                        {
+                                                            matrix4d rest:space = ( (1, 3.469446951953614e-18, 4.7704895589362195e-18, 0), (0, 0.9995762729794053, -0.029107979947108644, 0), (-2.5695591487906455e-17, 0.02910797994710864, 0.9995762729794053, 0), (1.4210854715202004e-14, 0, -1.4210854715202004e-14, 1) )
+                                                            uniform float2 ui:nodegraph:node:pos = (5.36, 18.15)
+                                                        }
+                                                    }
+                                                }
+
+                                                def RigExecJoint "shoulder_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (-0.7024537380953806, 0.023925081591595645, 0.7113271654496691, 0), (-0.044620496171957534, -0.9989491975960967, -0.010464795434335627, 0), (0.7103293300696472, -0.03909080573420894, 0.702783147030331, 0), (-17.2275, -3.8213, 3.842299999999966, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 18.26)
+
+                                                    def RigExecJoint "elbow_r_bind" (
+                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                    )
+                                                    {
+                                                        matrix4d rest:space = ( (0.9966593743078013, -0.08167062877425559, -3.7730235602495554e-16, 0), (0.08167062877425563, 0.996659374307801, -2.0816681711721685e-17, 0), (3.4206578541917665e-16, -2.7755575615628914e-17, 1, 0), (25.5068, -1.7763568394002505e-15, -1.4210854715202004e-14, 1) )
+                                                        uniform float2 ui:nodegraph:node:pos = (5.18, 18.37)
+
+                                                        def RigExecJoint "elbowTwist_r_bind" (
+                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                        )
+                                                        {
+                                                            matrix4d rest:space = ( (-0.9966593743078015, -0.0816706287742556, -5.63134608388971e-16, 0), (0.08167062877425557, -0.9966593743078014, -4.135580766728708e-15, 0), (-2.723515857283587e-16, -4.191091917959966e-15, 1.0000000000000002, 0), (0, -1.7763568394002505e-15, -1.4210854715202004e-14, 0.9999999999999998) )
+                                                            uniform float2 ui:nodegraph:node:pos = (5.36, 18.48)
+
+                                                            def RigExecJoint "elbow_r_driver" (
+                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                            )
+                                                            {
+                                                                matrix4d rest:space = ( (0.996659374307801, -0.08167062877425563, -5.811323644522304e-17, 0), (0.08167062877425565, 0.996659374307801, -6.938893903907228e-18, 0), (5.97395397039513e-17, 6.938893903907228e-18, 0.9999999999999999, 0), (7.105427357601002e-15, 0, 0, 1) )
+                                                                uniform float2 ui:nodegraph:node:pos = (5.54, 18.59)
+                                                            }
+                                                        }
+
+                                                        def RigExecJoint "wrist_r_bind" (
+                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                        )
+                                                        {
+                                                            matrix4d rest:space = ( (-0.9848056891910002, -0.0020161671542751752, -0.1736481776669306, 0), (0.0020472697824616415, -0.9999979043410232, -4.170275236248244e-15, 0), (-0.1736478137595683, -0.0003555046669211845, 0.9848077530122084, 0), (24.828500000000005, -8.881784197001252e-16, 0, 0.9999999999999998) )
+                                                            uniform float2 ui:nodegraph:node:pos = (5.36, 18.7)
+
+                                                            def RigExecJoint "index_001_r_bind" (
+                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                            )
+                                                            {
+                                                                matrix4d rest:space = ( (0.9883264216701712, -0.0052801375336255785, 0.15225966102766825, 0), (-0.15223873599852727, -0.07261911896775627, 0.9856722735381763, 0), (0.0058524772707955475, -0.9973457693839047, -0.07257523545826056, 0), (-5.0575999999999866, 3.1070999999999986, 0.545899999999989, 0.9999999999999998) )
+                                                                uniform float2 ui:nodegraph:node:pos = (5.54, 18.81)
+
+                                                                def RigExecJoint "index_002_combo_r_driver" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (0.9887581722449577, -0.10947259611932499, -0.10184806094229534, 0), (0.09562531510394107, 0.9866100376367477, -0.13212279419421497, 0), (0.11494814452648781, 0.12089823957903637, 0.985987089031397, 0), (-6.377099999999995, 0.10949999999996862, 0.101799999999999, 1.0000000000000002) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 18.92)
+                                                                }
+
+                                                                def RigExecJoint "index_002_r_bind" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (0.9887581722449577, -0.10947259611932499, -0.10184806094229534, 0), (0.09562531510394107, 0.9866100376367477, -0.13212279419421497, 0), (0.11494814452648781, 0.12089823957903637, 0.985987089031397, 0), (-5.388299999999994, -2.842170943040401e-14, -1.7763568394002505e-15, 1.0000000000000002) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 19.03)
+
+                                                                    def RigExecJoint "index_003_r_bind" (
+                                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                    )
+                                                                    {
+                                                                        matrix4d rest:space = ( (0.9992137495054698, -0.039646977176328604, 0, 0), (0.03964697717632871, 0.9992137495054697, -1.734723475976807e-18, 0), (8.673617379884035e-19, 0, 0.9999999999999999, 0), (-3.5782000000000025, 0, 3.3306690738754696e-16, 1) )
+                                                                        uniform float2 ui:nodegraph:node:pos = (5.9, 19.14)
+
+                                                                        def RigExecJoint "index_004_r_bind" (
+                                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                        )
+                                                                        {
+                                                                            matrix4d rest:space = ( (0.9994881357916543, -0.031991661596791295, 1.734723475976807e-18, 0), (0.03199166159679141, 0.9994881357916544, 3.469446951953614e-18, 0), (0, 0, 1, 0), (-2.805900000000001, 0, -2.220446049250313e-16, 1) )
+                                                                            uniform float2 ui:nodegraph:node:pos = (6.08, 19.25)
+
+                                                                            def RigExecJoint "index_005_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (1.0000000000000002, 7.284483346386983e-18, 0, 0), (-4.843673205578991e-17, 0.9999999999999999, 0, 0), (0, -1.734723475976807e-18, 1.0000000000000002, 0), (-3.8858999999999995, 0, 0, 1.0000000000000002) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 19.36)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            def RigExecJoint "middle_001_r_bind" (
+                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                            )
+                                                            {
+                                                                matrix4d rest:space = ( (0.9859500924008223, 0.03285548621188057, 0.16377708118229, 0), (-0.16272498642130678, -0.03249913346251718, 0.9861360885386818, 0), (0.03772259387946526, -0.9989315909260084, -0.026696115092621778, 0), (-5.222699999999989, 0.9787999999999997, 0.49689999999999657, 0.9999999999999998) )
+                                                                uniform float2 ui:nodegraph:node:pos = (5.54, 19.47)
+
+                                                                def RigExecJoint "middle_002_combo_r_driver" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (0.9937996368644901, -0.05784684955346944, -0.09495274490369218, 0), (0.047388811178261624, 0.9929202245680052, -0.10892074283135333, 0), (0.10058122261693996, 0.10374569697371072, 0.9895050520418381, 0), (-6.0908999999999835, 0.057799999999986085, 0.09499999999999886, 1.0000000000000002) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 19.58)
+                                                                }
+
+                                                                def RigExecJoint "middle_002_r_bind" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (0.9937996368644901, -0.05784684955346944, -0.09495274490369218, 0), (0.047388811178261624, 0.9929202245680052, -0.10892074283135333, 0), (0.10058122261693996, 0.10374569697371072, 0.9895050520418381, 0), (-5.09709999999999, 0, -1.7763568394002505e-15, 1.0000000000000002) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 19.69)
+
+                                                                    def RigExecJoint "middle_003_r_bind" (
+                                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                    )
+                                                                    {
+                                                                        matrix4d rest:space = ( (0.9960412205590694, -0.08889255844669848, -3.469446951953614e-18, 0), (0.08889255844669836, 0.9960412205590694, 0, 0), (-3.469446951953614e-18, -6.938893903907228e-18, 1.0000000000000002, 0), (-4.110599999999987, 0, 1.1102230246251565e-16, 1.0000000000000002) )
+                                                                        uniform float2 ui:nodegraph:node:pos = (5.9, 19.8)
+
+                                                                        def RigExecJoint "middle_004_r_bind" (
+                                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                        )
+                                                                        {
+                                                                            matrix4d rest:space = ( (0.9991245102903297, -0.041835546334531334, -3.469446951953614e-18, 0), (0.041835546334531376, 0.9991245102903297, -6.938893903907228e-18, 0), (-6.938893903907228e-18, 0, 1, 0), (-2.9920000000000115, 1.4210854715202004e-14, -2.220446049250313e-16, 1) )
+                                                                            uniform float2 ui:nodegraph:node:pos = (6.08, 19.91)
+
+                                                                            def RigExecJoint "middle_005_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (1, 1.0625181290357943e-17, 3.469446951953614e-18, 0), (-1.0039712117215771e-16, 1, 0, 0), (-3.469446951953614e-18, 6.938893903907228e-18, 1, 0), (-4.174599999999998, 0, 0, 1) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 20.02)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            def RigExecJoint "pinkyCup_r_bind" (
+                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                            )
+                                                            {
+                                                                matrix4d rest:space = ( (0.029363666668011643, -0.029285257572061674, -0.999139704330054, 0), (-0.027050611418595452, 0.9991813497799171, -0.030081467282415352, 0), (0.9992027019087217, 0.02791064207288821, 0.028547443972956114, 0), (-1.4350999999999914, -0.38900000000000023, 0.8544999999999732, 0.9999999999999998) )
+                                                                uniform float2 ui:nodegraph:node:pos = (5.54, 20.13)
+
+                                                                def RigExecJoint "pinky_001_r_bind" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (-0.024642174535306448, 0.17126739666016794, 0.9849163629849087, 0), (-0.9871818640298796, 0.15123260238929215, -0.050996738180538716, 0), (-0.1576855432963454, -0.973548241647948, 0.1653453676990238, 0), (-0.09319999999999595, -2.324699999999999, -2.7013999999999996, 1) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 20.24)
+
+                                                                    def RigExecJoint "pinky_002_combo_r_driver" (
+                                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                    )
+                                                                    {
+                                                                        matrix4d rest:space = ( (0.994432819587463, -0.0185714787826205, 0.10372303265502297, 0), (0.004423220316639462, 0.9908356232764283, 0.1350007509921407, 0), (-0.10527963929154943, -0.13379038763019632, 0.9854016083447413, 0), (-5.739599999999982, 0.005100000000012983, -0.004400000000000626, 0.9999999999999998) )
+                                                                        uniform float2 ui:nodegraph:node:pos = (5.9, 20.35)
+                                                                    }
+
+                                                                    def RigExecJoint "pinky_002_r_bind" (
+                                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                    )
+                                                                    {
+                                                                        matrix4d rest:space = ( (0.994432819587463, -0.0185714787826205, 0.10372303265502297, 0), (0.004423220316639462, 0.9908356232764283, 0.1350007509921407, 0), (-0.10527963929154943, -0.13379038763019632, 0.9854016083447413, 0), (-4.74519999999999, -0.013499999999964984, 0.0992999999999975, 0.9999999999999998) )
+                                                                        uniform float2 ui:nodegraph:node:pos = (5.9, 20.46)
+
+                                                                        def RigExecJoint "pinky_003_r_bind" (
+                                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                        )
+                                                                        {
+                                                                            matrix4d rest:space = ( (0.9995941161806872, -0.028488645052909246, 4.336808689942018e-19, 0), (0.02848864505290923, 0.9995941161806872, 8.673617379884035e-19, 0), (0, 0, 0.9999999999999999, 0), (-3.764400000000002, 0, 0, 1) )
+                                                                            uniform float2 ui:nodegraph:node:pos = (6.08, 20.57)
+
+                                                                            def RigExecJoint "pinky_004_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (0.998042477886482, -0.06253968607380846, 4.336808689942018e-19, 0), (0.06253968607380857, 0.9980424778864823, 8.673617379884035e-19, 0), (0, 0, 0.9999999999999998, 0), (-2.1000000000000085, -1.4210854715202004e-14, 0, 0.9999999999999998) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 20.68)
+
+                                                                                def RigExecJoint "pinky_005_r_bind" (
+                                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                                )
+                                                                                {
+                                                                                    matrix4d rest:space = ( (1, -1.955121448852376e-17, -4.336808689942018e-19, 0), (9.163710643165374e-17, 1, 0, 0), (-4.336808689942018e-19, 8.673617379884035e-19, 1, 0), (-2.896700000000017, 0, 0, 1) )
+                                                                                    uniform float2 ui:nodegraph:node:pos = (6.44, 20.79)
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            def RigExecJoint "ring_001_r_bind" (
+                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                            )
+                                                            {
+                                                                matrix4d rest:space = ( (0.9906917024959275, 0.028622557946697227, 0.1330815531255489, 0), (-0.13198826039920797, -0.03719699666142522, 0.9905531195025137, 0), (0.03330239814955075, -0.9988979590608633, -0.03307291431868259, 0), (-5.03929999999999, -1.5341999999999993, 0.632499999999979, 0.9999999999999998) )
+                                                                uniform float2 ui:nodegraph:node:pos = (5.54, 20.9)
+
+                                                                def RigExecJoint "ring_002_combo_r_driver" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (0.9927401081795235, -0.10227451167276885, -0.06330088367317852, 0), (0.09433244733138871, 0.9885487667818508, -0.11778253297731871, 0), (0.07462216153515902, 0.11095611725443118, 0.9910198146614637, 0), (-5.748199999999997, 0.10889999999999134, 0.1399999999999988, 1.0000000000000002) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 21.01)
+                                                                }
+
+                                                                def RigExecJoint "ring_002_r_bind" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (0.9927401081795235, -0.10227451167276885, -0.06330088367317852, 0), (0.09433244733138871, 0.9885487667818508, -0.11778253297731871, 0), (0.07462216153515902, 0.11095611725443118, 0.9910198146614637, 0), (-4.755499999999987, 0.006599999999991724, 0.07669999999999888, 1.0000000000000002) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 21.12)
+
+                                                                    def RigExecJoint "ring_003_r_bind" (
+                                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                    )
+                                                                    {
+                                                                        matrix4d rest:space = ( (0.9997054846935355, -0.024268165848763196, -2.168404344971009e-18, 0), (0.024268165848763217, 0.9997054846935356, -3.469446951953614e-18, 0), (2.168404344971009e-19, 3.469446951953614e-18, 1, 0), (-3.8825999999999965, 1.4210854715202004e-14, 4.440892098500626e-16, 1) )
+                                                                        uniform float2 ui:nodegraph:node:pos = (5.9, 21.23)
+
+                                                                        def RigExecJoint "ring_004_r_bind" (
+                                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                        )
+                                                                        {
+                                                                            matrix4d rest:space = ( (0.9998513284507076, -0.01724299844445301, -3.903127820947816e-18, 0), (0.01724299844445278, 0.9998513284507077, -6.938893903907228e-18, 0), (-2.6020852139652106e-18, 0, 1, 0), (-2.589099999999995, 0, 4.440892098500626e-16, 1) )
+                                                                            uniform float2 ui:nodegraph:node:pos = (6.08, 21.34)
+
+                                                                            def RigExecJoint "ring_005_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (1, 4.957514433689969e-17, 8.673617379884035e-19, 0), (-6.287017347700319e-17, 0.9999999999999999, 0, 0), (-3.0357660829594124e-18, 3.469446951953614e-18, 1, 0), (-3.648099999999971, -1.4210854715202004e-14, 0, 1) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 21.45)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            def RigExecJoint "thumbCup_r_bind" (
+                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                            )
+                                                            {
+                                                                matrix4d rest:space = ( (0.039976416081475154, 0.046651830198486295, 0.998110962216332, 0), (-0.026773522498221403, 0.9986008213582175, -0.04560239111856544, 0), (-0.9988418616829782, -0.02489992614095453, 0.04116951575932133, 0), (-1.5796999999999883, 1.1086999999999998, 0.8668999999999869, 0.9999999999999998) )
+                                                                uniform float2 ui:nodegraph:node:pos = (5.54, 21.56)
+
+                                                                def RigExecJoint "thumb_001_r_bind" (
+                                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                )
+                                                                {
+                                                                    matrix4d rest:space = ( (-0.47918723602998253, -0.6541895416774132, -0.5851629143972148, 0), (0.489089403336956, -0.7526092921955143, 0.4408750490155541, 0), (-0.7288148930760446, -0.07493528448510167, 0.6805979391459327, 0), (1.2107999999999919, 2.238199999999998, 2.31280000000001, 1) )
+                                                                    uniform float2 ui:nodegraph:node:pos = (5.72, 21.67)
+
+                                                                    def RigExecJoint "thumb_002_r_bind" (
+                                                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                    )
+                                                                    {
+                                                                        matrix4d rest:space = ( (0.8742396679468301, -0.2617623190551984, -0.4088832245410178, 0), (0.2743456284505603, 0.9612007802817177, -0.028766927814487857, 0), (0.40054897220974495, -0.08702613577920881, 0.9121331989095978, 0), (-2.5212000000000216, 0, 7.105427357601002e-15, 1) )
+                                                                        uniform float2 ui:nodegraph:node:pos = (5.9, 21.78)
+
+                                                                        def RigExecJoint "thumb_003_r_bind" (
+                                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                        )
+                                                                        {
+                                                                            matrix4d rest:space = ( (0.9639580674576798, -0.26167037747058086, 0.04809841720534327, 0), (0.2619735853458145, 0.9650750440152618, 2.7755575615628914e-17, 0), (-0.04641858210151105, 0.012600514804742585, 0.9988426013453475, 0), (-3.600200000000001, -7.105427357601002e-15, -1.4210854715202004e-14, 1) )
+                                                                            uniform float2 ui:nodegraph:node:pos = (6.08, 21.89)
+
+                                                                            def RigExecJoint "thumb_004_r_bind" (
+                                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                                            )
+                                                                            {
+                                                                                matrix4d rest:space = ( (0.9999999999999999, -2.7755575615628914e-17, -1.3877787807814457e-17, 0), (2.7755575615628914e-17, 1, -2.7755575615628914e-17, 0), (0, -2.7755575615628914e-17, 0.9999999999999999, 0), (-3.78479999999999, -3.552713678800501e-15, 1.4210854715202004e-14, 0.9999999999999998) )
+                                                                                uniform float2 ui:nodegraph:node:pos = (6.26, 22)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        def RigExecJoint "wristTwist_r_bind" (
+                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                        )
+                                                        {
+                                                            matrix4d rest:space = ( (-1.0000000000000004, 1.3877787807814457e-17, -1.7867651802561113e-16, 0), (-9.71445146547012e-17, -0.999999983841569, -0.00017976891199130568, 0), (-2.2724877535296173e-16, -0.00017976891199134037, 0.9999999838415693, 0), (24.828500000000005, -8.881784197001252e-16, 0, 0.9999999999999998) )
+                                                            uniform float2 ui:nodegraph:node:pos = (5.36, 22.11)
+
+                                                            def RigExecJoint "wristSwing_r_driver" (
+                                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                            )
+                                                            {
+                                                                matrix4d rest:space = ( (0.9848058348552459, 0.002047833737171434, -0.1736469810047003, 0), (-0.002047775938636573, 0.9999978871964764, 0.0001794889693746901, 0), (0.17364698168631398, 0.0001788283251859743, 0.9848079476586613, 0), (7.105427357601002e-15, -8.881784197001252e-16, -1.4210854715202004e-14, 1) )
+                                                                uniform float2 ui:nodegraph:node:pos = (5.54, 22.22)
+                                                            }
+                                                        }
+
+                                                        def RigExecJoint "wristTwist_r_driver" (
+                                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                        )
+                                                        {
+                                                            matrix4d rest:space = ( (-1.0000000000000004, 1.3877787807814457e-17, -1.7867651802561113e-16, 0), (-9.71445146547012e-17, -0.999999983841569, -0.00017976891199130568, 0), (-2.2724877535296173e-16, -0.00017976891199134037, 0.9999999838415693, 0), (24.828500000000005, -8.881784197001252e-16, 0, 0.9999999999999998) )
+                                                            uniform float2 ui:nodegraph:node:pos = (5.36, 22.33)
+                                                        }
+                                                    }
+                                                }
+
+                                                def RigExecJoint "shoulderNoTwist_r_bind" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (0.7024537380953808, -0.02392508159159564, -0.7113271654496696, 0), (0.023925337366543793, 0.9996637702183019, -0.0099962365331826, 0), (0.7113271568467796, -0.009996848691750916, 0.7027899678769689, 0), (-17.2275, -3.8213, 3.842299999999966, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 22.44)
+                                                }
+
+                                                def RigExecJoint "shoulder_combo_r_driver" (
+                                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (0.7024537380953808, -0.02392508159159564, -0.7113271654496696, 0), (0.023925337366543793, 0.9996637702183019, -0.0099962365331826, 0), (0.7113271568467796, -0.009996848691750916, 0.7027899678769689, 0), (-17.93, -3.7974000000000006, 4.553599999999989, 1) )
+                                                    uniform float2 ui:nodegraph:node:pos = (5, 22.55)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            def RigExecJoint "ankle_r_pivot" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, -1, -1.2246467991473532e-16, 0), (0, 1.2246467991473532e-16, -1, 0), (-7.7526, 9.4858, -7.0843, 1) )
+                uniform float2 ui:nodegraph:node:pos = (3.38, 23.54)
+
+                def RigExecJoint "bankIn_r_pivot" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4.7514, 8.804200000000002, -13.171399999999998, 1) )
+                    uniform float2 ui:nodegraph:node:pos = (3.56, 23.65)
+
+                    def RigExecJoint "bankOut_r_pivot" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-11.1264, 0.04159999999999997, 0, 1) )
+                        uniform float2 ui:nodegraph:node:pos = (3.74, 23.76)
+
+                        def RigExecJoint "heel_r_pivot" (
+                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                        )
+                        {
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6.375, -0.0049000000000000155, 17.1608, 1) )
+                            uniform float2 ui:nodegraph:node:pos = (3.92, 23.87)
+
+                            def RigExecJoint "ball_r_pivot" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1.7634000000000003, -17.9894, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (4.1, 23.98)
+
+                                def RigExecJoint "toe_r_pivot" (
+                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                )
+                                {
+                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.8078, -9.265, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (4.28, 24.09)
+
+                                    def RigExecJoint "ballRoll_r_pivot" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1.8078, 9.265, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 24.2)
+                                    }
+
+                                    def RigExecJoint "toeBend_r_pivot" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1.8078, 9.265, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (4.46, 24.31)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            def RigExecJoint "pupilCenter_r_pivot" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, -1, 1.2246467991473532e-16, 0), (0, -1.2246467991473532e-16, -1, 0), (-3.5306, 164.2843, 3.5224, 1) )
+                uniform float2 ui:nodegraph:node:pos = (3.38, 24.53)
+            }
+        }
+
+        over "Movers"
+        {
+            over "twist_aims"
+            {
+                def RigExecAimConstraint "shoulderNoTwist_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/twist_aims/shoulderNoTwist_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (-1, 0, 0)
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulderNoTwist_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 0.22)
+                }
+
+                def RigExecAimConstraint "elbowTwist_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (1, 0, 0)
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/elbowTwist_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 0.44)
+                }
+
+                def RigExecAimConstraint "clavicle_trans_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/twist_aims/clavicle_trans_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (1, 0, 0)
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/clavicle_trans_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 0.66)
+                }
+
+                def RigExecAimConstraint "thighNoTwist_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/twist_aims/thighNoTwist_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (-1, 0, 0)
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thighNoTwist_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 0.88)
+                }
+
+                def RigExecAimConstraint "kneeTwist_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/twist_aims/kneeTwist_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (1, 0, 0)
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/kneeTwist_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 1.1)
+                }
+
+                def RigExecAimConstraint "pelvis_trans_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/twist_aims/pelvis_trans_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (0, 0, -1)
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/pelvis_trans_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/pelvis_r_bind>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 1.32)
+                }
+            }
+
+            over "girdles"
+            {
+                def RigExecPositionConstraint "clavicle_r_ctl_drives_clavicle_r_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 2.64)
+                }
+
+                def RigExecPositionConstraint "pelvis_r_ctl_drives_pelvis_r_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/pelvis_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 2.86)
+                }
+            }
+
+            def Scope "ball_r_bind_scAim"
+            {
+                def RigExecAimConstraint "ball_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ball_l_bind_scAim/ball_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (-0.23189309080662804, -0.9727412782626985, 8.879605041259261e-17)
+                    float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_r_ikfk.inputs:weight>
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/ballRoll_r_up/ballRoll_r_down/ballRoll_r/ballRoll_r_fk/toe_r_ikTarget>
+                    rel rigExec:worldUpObject = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/ballRoll_r_up/ballRoll_r_down/ballRoll_r/ballRoll_r_fk/toe_r_ikTarget>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.14)
+                }
+            }
+
+            def Scope "ankle_r_bind_scAim"
+            {
+                def RigExecAimConstraint "ankle_r_bind_aim" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ankle_l_bind_scAim/ankle_l_bind_aim>
+                )
+                {
+                    double3 inputs:aimVector = (-0.45116147412328517, -0.8924423366620973, -5.661771601785919e-17)
+                    float inputs:defaultWeight.connect = </Biped/Rig/Solvers/leg_r_ikfk.inputs:weight>
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/toeBend_r/ball_r_ikTarget>
+                    rel rigExec:worldUpObject = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/toeBend_r/ball_r_ikTarget>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.25)
+                }
+            }
+
+            def Scope "ballRoll_r_down_rc"
+            {
+                def RigExecRotationConstraint "ballRoll_r_down_rotation" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_down_rc/ballRoll_l_down_rotation>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/ballRoll_r_up/ballRoll_r_down>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/ballRoll_r_up/ballRoll_r_down_twin>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.36)
+                }
+            }
+
+            def Scope "ballRoll_r_down_w"
+            {
+                def RigExecFloatMathMover "ballRoll_r_down_w_4_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_down_w/ballRoll_l_down_w_4_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_down_rc/ballRoll_r_down_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.47)
+                }
+
+                def RigExecFloatMathMover "ballRoll_r_down_w_3_clamp" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_down_w/ballRoll_l_down_w_3_clamp>
+                )
+                {
+                    float inputs:max = 1
+                    float inputs:max.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:toePlantAngle>
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_down_rc/ballRoll_r_down_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.58)
+                }
+
+                def RigExecFloatMathMover "ballRoll_r_down_w_2_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_down_w/ballRoll_l_down_w_2_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:roll>
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_down_rc/ballRoll_r_down_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.69)
+                }
+
+                def RigExecFloatMathMover "ballRoll_r_down_w_1_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_down_w/ballRoll_l_down_w_1_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_down_rc/ballRoll_r_down_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.8)
+                }
+
+                def RigExecFloatMathMover "ballRoll_r_down_w_0_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_down_w/ballRoll_l_down_w_0_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:toePlantAngle>
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_down_rc/ballRoll_r_down_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 8.91)
+                }
+            }
+
+            def Scope "ballRoll_r_up_rc"
+            {
+                def RigExecRotationConstraint "ballRoll_r_up_rotation" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_up_rc/ballRoll_l_up_rotation>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/ballRoll_r_up>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/ballRoll_r_up_twin>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.02)
+                }
+            }
+
+            def Scope "ballRoll_r_up_w"
+            {
+                def RigExecFloatMathMover "ballRoll_r_up_w_2_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_up_w/ballRoll_l_up_w_2_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_up_rc/ballRoll_r_up_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.13)
+                }
+
+                def RigExecFloatMathMover "ballRoll_r_up_w_1_clamp" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_up_w/ballRoll_l_up_w_1_clamp>
+                )
+                {
+                    float inputs:max = 1
+                    float inputs:max.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:toePlantAngle>
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_up_rc/ballRoll_r_up_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.24)
+                }
+
+                def RigExecFloatMathMover "ballRoll_r_up_w_0_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/ballRoll_l_up_w/ballRoll_l_up_w_0_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:roll>
+                    rel rigExec:moves = </Biped/Rig/Movers/ballRoll_r_up_rc/ballRoll_r_up_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.35)
+                }
+            }
+
+            def Scope "toe_r_roll_rc"
+            {
+                def RigExecRotationConstraint "toe_r_roll_rotation" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/toe_l_roll_rc/toe_l_roll_rotation>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll_twin>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.46)
+                }
+            }
+
+            def Scope "toe_r_roll_w"
+            {
+                def RigExecFloatMathMover "toe_r_roll_w_4_clamp" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/toe_l_roll_w/toe_l_roll_w_4_clamp>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/toe_r_roll_rc/toe_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.57)
+                }
+
+                def RigExecFloatMathMover "toe_r_roll_w_3_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/toe_l_roll_w/toe_l_roll_w_3_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/toe_r_roll_rc/toe_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.68)
+                }
+
+                def RigExecFloatMathMover "toe_r_roll_w_2_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/toe_l_roll_w/toe_l_roll_w_2_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:roll>
+                    rel rigExec:moves = </Biped/Rig/Movers/toe_r_roll_rc/toe_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.79)
+                }
+
+                def RigExecFloatMathMover "toe_r_roll_w_1_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/toe_l_roll_w/toe_l_roll_w_1_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/toe_r_roll_rc/toe_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 9.9)
+                }
+
+                def RigExecFloatMathMover "toe_r_roll_w_0_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/toe_l_roll_w/toe_l_roll_w_0_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:toePlantAngle>
+                    rel rigExec:moves = </Biped/Rig/Movers/toe_r_roll_rc/toe_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.01)
+                }
+            }
+
+            def Scope "heel_r_roll_rc"
+            {
+                def RigExecRotationConstraint "heel_r_roll_rotation" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/heel_l_roll_rc/heel_l_roll_rotation>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll_twin>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.12)
+                }
+            }
+
+            def Scope "heel_r_roll_w"
+            {
+                def RigExecFloatMathMover "heel_r_roll_w_2_clamp" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/heel_l_roll_w/heel_l_roll_w_2_clamp>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/heel_r_roll_rc/heel_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.23)
+                }
+
+                def RigExecFloatMathMover "heel_r_roll_w_1_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/heel_l_roll_w/heel_l_roll_w_1_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/heel_r_roll_rc/heel_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.34)
+                }
+
+                def RigExecFloatMathMover "heel_r_roll_w_0_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/heel_l_roll_w/heel_l_roll_w_0_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:roll>
+                    rel rigExec:moves = </Biped/Rig/Movers/heel_r_roll_rc/heel_r_roll_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.45)
+                }
+            }
+
+            def Scope "bankOut_r_pivot_rc"
+            {
+                def RigExecRotationConstraint "bankOut_r_pivot_rotation" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankOut_l_pivot_rc/bankOut_l_pivot_rotation>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot_twin>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.56)
+                }
+            }
+
+            def Scope "bankOut_r_pivot_w"
+            {
+                def RigExecFloatMathMover "bankOut_r_pivot_w_2_clamp" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankOut_l_pivot_w/bankOut_l_pivot_w_2_clamp>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/bankOut_r_pivot_rc/bankOut_r_pivot_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.67)
+                }
+
+                def RigExecFloatMathMover "bankOut_r_pivot_w_1_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankOut_l_pivot_w/bankOut_l_pivot_w_1_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/bankOut_r_pivot_rc/bankOut_r_pivot_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.78)
+                }
+
+                def RigExecFloatMathMover "bankOut_r_pivot_w_0_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankOut_l_pivot_w/bankOut_l_pivot_w_0_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:bank>
+                    rel rigExec:moves = </Biped/Rig/Movers/bankOut_r_pivot_rc/bankOut_r_pivot_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 10.89)
+                }
+            }
+
+            def Scope "bankIn_r_pivot_rc"
+            {
+                def RigExecRotationConstraint "bankIn_r_pivot_rotation" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankIn_l_pivot_rc/bankIn_l_pivot_rotation>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot>
+                    rel rigExec:sources = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot_twin>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 11)
+                }
+            }
+
+            def Scope "bankIn_r_pivot_w"
+            {
+                def RigExecFloatMathMover "bankIn_r_pivot_w_2_clamp" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankIn_l_pivot_w/bankIn_l_pivot_w_2_clamp>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/bankIn_r_pivot_rc/bankIn_r_pivot_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 11.11)
+                }
+
+                def RigExecFloatMathMover "bankIn_r_pivot_w_1_multiply" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankIn_l_pivot_w/bankIn_l_pivot_w_1_multiply>
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Movers/bankIn_r_pivot_rc/bankIn_r_pivot_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 11.22)
+                }
+
+                def RigExecFloatMathMover "bankIn_r_pivot_w_0_add" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/bankIn_l_pivot_w/bankIn_l_pivot_w_0_add>
+                )
+                {
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bank_r.foot:bank>
+                    rel rigExec:moves = </Biped/Rig/Movers/bankIn_r_pivot_rc/bankIn_r_pivot_rotation.inputs:defaultWeight>
+                    uniform float2 ui:nodegraph:node:pos = (6.76, 11.33)
+                }
+            }
+
+            over "param_follow"
+            {
+                def RigExecParentConstraint "arm_r_params_to_wrist_r_bind" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/param_follow/arm_l_params_to_wrist_l_bind>
+                )
+                {
+                    double3[] inputs:translationOffsets = [(6.5692292851684755, 0.3696914963633411, -4.5506653135998505)]
+                    rel rigExec:moves = </Biped/Rig/Controls/arm_r_params>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind>
+                }
+
+                def RigExecParentConstraint "leg_r_params_to_ankle_r_bind" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Movers/param_follow/leg_l_params_to_ankle_l_bind>
+                )
+                {
+                    double3[] inputs:translationOffsets = [(1.7763568394002505e-15, -2.6645352591003757e-15, 11.999999999999993)]
+                    rel rigExec:moves = </Biped/Rig/Controls/leg_r_params>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind>
+                }
+            }
+        }
+
+        over "Controls"
+        {
+            over "hips_ctl"
+            {
+                over "torso_ctl"
+                {
+                    over "spine_end_pivot"
+                    {
+                        over "spine_end_ctl"
+                        {
+                            def RigExecControl "clavicle_r_ctl" (
+                                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl>
+                            )
+                            {
+                                color3f guide:displayColor = (1, 0, 0)
+                                double guide:scaleX = 0.6387739836559441
+                                double guide:scaleY = 15.9693495913986
+                                double guide:scaleZ = 8.490297660025302
+                                matrix4d rest:space = ( (-2.220446049250313e-16, 0, -1.0000000000000002, 0), (1.2246467991473535e-16, -1, 2.465190328815662e-32, 0), (-1.0000000000000002, -1.2246467991473532e-16, 2.2204460492503126e-16, 0), (11.80540000000002, 1.266199999999999, 2.0438, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (0.9, 1.43)
+
+                                over "arm_l_root" (
+                                    active = false
+                                )
+                                {
+                                }
+
+                                over "arm_l_fk_shoulder_l_bind" (
+                                    active = false
+                                )
+                                {
+                                }
+
+                                def RigExecControl "arm_r_root" (
+                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_root>
+                                )
+                                {
+                                    color3f guide:displayColor = (1, 0, 0)
+                                    double guide:scaleX = 2.0031927491059776
+                                    double guide:scaleY = 0.08014505534194331
+                                    double guide:scaleZ = 2.003626383548583
+                                    matrix4d rest:space = ( (-0.7024537380953806, 0.023925081591595645, 0.7113271654496691, 0), (-0.044620496171957534, -0.9989491975960967, -0.010464795434335627, 0), (0.7103293300696472, -0.03909080573420894, 0.702783147030331, 0), (-17.2275, -3.8213, 3.842299999999966, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (1.08, 1.54)
+                                }
+
+                                def RigExecControl "arm_r_fk_shoulder_r_bind" (
+                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_fk_shoulder_l_bind>
+                                )
+                                {
+                                    color3f guide:displayColor = (1, 0, 0)
+                                    float guide:displayOpacity.connect = </Biped/Rig/Controls/arm_r_params.avars:ikfk>
+                                    double guide:scaleX = 0.4462660234550528
+                                    double guide:scaleY = 11.156650586376319
+                                    double guide:scaleZ = 6.953501109842827
+                                    matrix4d rest:space = ( (-0.7024537380953806, 0.023925081591595645, 0.7113271654496691, 0), (-0.044620496171957534, -0.9989491975960967, -0.010464795434335627, 0), (0.7103293300696472, -0.03909080573420894, 0.702783147030331, 0), (-17.2275, -3.8213, 3.842299999999966, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (1.08, 1.65)
+
+                                    over "arm_l_fk_elbow_l_bind" (
+                                        active = false
+                                    )
+                                    {
+                                    }
+
+                                    def RigExecControl "arm_r_fk_elbow_r_bind" (
+                                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind>
+                                    )
+                                    {
+                                        color3f guide:displayColor = (1, 0, 0)
+                                        float guide:displayOpacity.connect = </Biped/Rig/Controls/arm_r_params.avars:ikfk>
+                                        double guide:scaleX = 0.38956799999999236
+                                        double guide:scaleY = 9.739199998265715
+                                        double guide:scaleZ = 9.739199999999808
+                                        matrix4d rest:space = ( (0.9966593743078013, -0.08167062877425559, -3.7730235602495554e-16, 0), (0.08167062877425563, 0.996659374307801, -2.0816681711721685e-17, 0), (3.4206578541917665e-16, -2.7755575615628914e-17, 1, 0), (25.5068, -1.7763568394002505e-15, -1.4210854715202004e-14, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (1.26, 1.76)
+
+                                        over "arm_l_fk_wrist_l_bind" (
+                                            active = false
+                                        )
+                                        {
+                                        }
+
+                                        def RigExecControl "arm_r_fk_wrist_r_bind" (
+                                            prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_l_ctl/arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind>
+                                        )
+                                        {
+                                            color3f guide:displayColor = (1, 0, 0)
+                                            float guide:displayOpacity.connect = </Biped/Rig/Controls/arm_r_params.avars:ikfk>
+                                            double guide:scaleY = 8.216900000000003
+                                            double guide:scaleZ = 8.216899999999999
+                                            matrix4d rest:space = ( (-0.9848056891910002, -0.0020161671542751752, -0.1736481776669306, 0), (0.0020472697824616415, -0.9999979043410232, -4.170275236248244e-15, 0), (-0.1736478137595683, -0.0003555046669211845, 0.9848077530122084, 0), (24.828500000000005, -8.881784197001252e-16, 0, 0.9999999999999998) )
+                                            uniform float2 ui:nodegraph:node:pos = (1.44, 1.87)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                over "spine_root_pivot"
+                {
+                    over "spine_root_ctl"
+                    {
+                        def RigExecControl "pelvis_r_ctl" (
+                            prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl>
+                        )
+                        {
+                            color3f guide:displayColor = (1, 0, 0)
+                            double guide:scaleY = 0.07181999999999995
+                            double guide:scaleZ = 1.7954999999999988
+                            matrix4d rest:space = ( (0.992005610442374, 0.12619377500832946, -4.930380657631324e-32, 0), (-0.12619377500832946, 0.992005610442374, 0, 0), (1.8488927466117464e-32, 0, 1, 0), (1.5846190607825008, 0.9132700981663717, 0.01, 1) )
+                            uniform float2 ui:nodegraph:node:pos = (0.72, 2.75)
+
+                            over "leg_l_root" (
+                                active = false
+                            )
+                            {
+                            }
+
+                            over "leg_l_fk_thigh_l_bind" (
+                                active = false
+                            )
+                            {
+                            }
+
+                            def RigExecControl "leg_r_root" (
+                                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_root>
+                            )
+                            {
+                                color3f guide:displayColor = (1, 0, 0)
+                                matrix4d rest:space = ( (-0.9999888802602237, 0.004715862159090918, 1.5682577858693228e-18, 0), (-0.00471586215909092, -0.9999888802602237, -2.1107991548323978e-16, 0), (5.728165612793247e-19, -2.1108496401705573e-16, 0.9999999999999996, 0), (-1.4210854715202004e-14, -1.7763568394002505e-15, 7.7426, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (0.9, 2.86)
+                            }
+
+                            def RigExecControl "leg_r_fk_thigh_r_bind" (
+                                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_fk_thigh_l_bind>
+                            )
+                            {
+                                color3f guide:displayColor = (1, 0, 0)
+                                float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                double guide:scaleX = 0.29901997062404223
+                                double guide:scaleY = 7.475499265601056
+                                double guide:scaleZ = 6.398434421700257
+                                matrix4d rest:space = ( (-0.9999888802602237, 0.004715862159090918, 1.5682577858693228e-18, 0), (-0.00471586215909092, -0.9999888802602237, -2.1107991548323978e-16, 0), (5.728165612793247e-19, -2.1108496401705573e-16, 0.9999999999999996, 0), (-1.4210854715202004e-14, -1.7763568394002505e-15, 7.7426, 1) )
+                                uniform float2 ui:nodegraph:node:pos = (0.9, 2.97)
+
+                                over "leg_l_fk_knee_l_bind" (
+                                    active = false
+                                )
+                                {
+                                }
+
+                                def RigExecControl "leg_r_fk_knee_r_bind" (
+                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind>
+                                )
+                                {
+                                    color3f guide:displayColor = (1, 0, 0)
+                                    float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                    double guide:scaleX = 0.28867199999484056
+                                    double guide:scaleY = 7.216799926988181
+                                    double guide:scaleZ = 7.2167999998710135
+                                    matrix4d rest:space = ( (0.9982954832333818, -0.058362043794135905, -6.336525874257112e-18, 0), (0.058362043794135905, 0.9982954832333819, -1.877574774634209e-19, 0), (6.336683069784716e-18, -1.8237515888104345e-19, 1, 0), (44.10400000000001, 0, 0, 1) )
+                                    uniform float2 ui:nodegraph:node:pos = (1.08, 3.08)
+
+                                    over "leg_l_fk_ankle_l_bind" (
+                                        active = false
+                                    )
+                                    {
+                                    }
+
+                                    def RigExecControl "leg_r_fk_ankle_r_bind" (
+                                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_l_ctl/leg_l_fk_thigh_l_bind/leg_l_fk_knee_l_bind/leg_l_fk_ankle_l_bind>
+                                    )
+                                    {
+                                        color3f guide:displayColor = (1, 0, 0)
+                                        float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                        double guide:scaleX = 0.3592599999961501
+                                        double guide:scaleY = 8.981499644049347
+                                        double guide:scaleZ = 8.981499999903752
+                                        matrix4d rest:space = ( (-0.9980091550935328, -0.06306921871636778, -5.762935990128074e-18, 0), (0.06306921871636778, -0.9980091550935327, -2.1087270796223625e-16, 0), (7.548114061417191e-18, -2.1081635697608637e-16, 1.0000000000000004, 0), (42.8397, -8.881784197001252e-16, 0, 1) )
+                                        uniform float2 ui:nodegraph:node:pos = (1.26, 3.19)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            def RigExecControl "arm_r_ik" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/arm_l_ik>
+            )
+            {
+                color3f guide:displayColor = (1, 0, 0)
+                float guide:displayOpacity.connect = </Biped/Rig/Controls/arm_r_params.avars:ikfk>
+                matrix4d rest:space = ( (0.5627385803739778, 0.8211536606460624, -0.09503660224488404, 0), (0.1004152133576366, 0.04621143704541769, 0.9938718669992316, 0), (0.8205132997612052, -0.5688331641999871, -0.05645136155319884, 0), (-54.48077659401703, 101.204188288372, -5.180429132184751, 1) )
+                uniform float2 ui:nodegraph:node:pos = (0.18, 3.74)
+            }
+
+            def RigExecControl "arm_r_pv" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/arm_l_pv>
+            )
+            {
+                color3f guide:displayColor = (1, 0, 0)
+                float guide:displayOpacity.connect = </Biped/Rig/Controls/arm_r_params.avars:ikfk>
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-40.12033185440321, 118.08297525404247, -47.683567637267615, 1) )
+                uniform float2 ui:nodegraph:node:pos = (0.18, 3.85)
+            }
+
+            def RigExecControl "leg_r_ik" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik>
+            )
+            {
+                color3f guide:displayColor = (1, 0, 0)
+                float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                double guide:scaleX = 0.8917859646571498
+                double guide:scaleY = 22.294649116428744
+                double guide:scaleZ = 8.218647940768188
+                matrix4d rest:space = ( (-2.2204460492503128e-16, 1.0000000000000002, 1.3877787807814457e-17, 0), (2.2204460492503136e-16, 1.3877787807814457e-17, -1.0000000000000002, 0), (-1.0000000000000004, -2.2204460492503136e-16, -2.220446049250313e-16, 0), (-7.752599999999984, 9.485777623542653, -7.08425479370813, 1) )
+                uniform float2 ui:nodegraph:node:pos = (0.18, 6.71)
+
+                over "ankle_l_pivot" (
+                    active = false
+                )
+                {
+                }
+
+                def RigExecJoint "ankle_r_pivot" (
+                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot>
+                )
+                {
+                    matrix4d rest:space = ( (-2.220446049250312e-16, 2.2204460492503116e-16, -0.9999999999999996, 0), (-0.9999999999999998, 1.0858689210692079e-16, 2.2204460492503114e-16, 0), (1.0858689210692089e-16, 0.9999999999999998, 2.2204460492503118e-16, 0), (0.000022376457348372014, 0.000045206291869881454, 1.5987211554602254e-14, 1) )
+                    custom float2 ui:nodegraph:node:pos = (0.36, 6.82)
+
+                    over "bank_l" (
+                        active = false
+                    )
+                    {
+                    }
+
+                    over "bankIn_l_pivot" (
+                        active = false
+                    )
+                    {
+                    }
+
+                    over "bankIn_l_pivot_twin" (
+                        active = false
+                    )
+                    {
+                    }
+
+                    def RigExecControl "bank_r" (
+                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bank_l>
+                    )
+                    {
+                        float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.4210854715202004e-14, 7.077522376457347, -14.000045206291874, 1) )
+                        custom float2 ui:nodegraph:node:pos = (0.54, 6.93)
+                    }
+
+                    def RigExecJoint "bankIn_r_pivot" (
+                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot>
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4.7514, 8.804200000000002, -13.171399999999998, 1) )
+                        custom float2 ui:nodegraph:node:pos = (0.54, 7.04)
+
+                        over "bankOut_l_pivot" (
+                            active = false
+                        )
+                        {
+                        }
+
+                        over "bankOut_l_pivot_twin" (
+                            active = false
+                        )
+                        {
+                        }
+
+                        def RigExecJoint "bankOut_r_pivot" (
+                            prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot>
+                        )
+                        {
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-11.1264, 0.04159999999999997, 0, 1) )
+                            custom float2 ui:nodegraph:node:pos = (0.72, 7.15)
+
+                            over "heel_l_roll" (
+                                active = false
+                            )
+                            {
+                            }
+
+                            over "heel_l_roll_twin" (
+                                active = false
+                            )
+                            {
+                            }
+
+                            def RigExecJoint "heel_r_roll" (
+                                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll>
+                            )
+                            {
+                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6.375, -0.0049000000000000155, 17.1608, 1) )
+                                custom float2 ui:nodegraph:node:pos = (0.9, 7.26)
+
+                                over "heel_l" (
+                                    active = false
+                                )
+                                {
+                                }
+
+                                def RigExecControl "heel_r" (
+                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l>
+                                )
+                                {
+                                    float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                    custom float2 ui:nodegraph:node:pos = (1.08, 7.37)
+
+                                    over "ball_l_pivot" (
+                                        active = false
+                                    )
+                                    {
+                                    }
+
+                                    def RigExecJoint "ball_r_pivot" (
+                                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot>
+                                    )
+                                    {
+                                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1.7634000000000003, -17.9894, 1) )
+                                        custom float2 ui:nodegraph:node:pos = (1.26, 7.48)
+
+                                        over "toe_l_roll" (
+                                            active = false
+                                        )
+                                        {
+                                        }
+
+                                        over "toe_l_roll_twin" (
+                                            active = false
+                                        )
+                                        {
+                                        }
+
+                                        def RigExecJoint "toe_r_roll" (
+                                            prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll>
+                                        )
+                                        {
+                                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.8078, -9.265, 1) )
+                                            custom float2 ui:nodegraph:node:pos = (1.44, 7.59)
+
+                                            over "toe_l" (
+                                                active = false
+                                            )
+                                            {
+                                            }
+
+                                            def RigExecControl "toe_r" (
+                                                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l>
+                                            )
+                                            {
+                                                float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                custom float2 ui:nodegraph:node:pos = (1.62, 7.7)
+
+                                                over "toeBend_l" (
+                                                    active = false
+                                                )
+                                                {
+                                                }
+
+                                                over "ballRoll_l_up" (
+                                                    active = false
+                                                )
+                                                {
+                                                }
+
+                                                over "ballRoll_l_up_twin" (
+                                                    active = false
+                                                )
+                                                {
+                                                }
+
+                                                def RigExecControl "toeBend_r" (
+                                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/toeBend_l>
+                                                )
+                                                {
+                                                    float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1.8078, 9.265, 1) )
+                                                    custom float2 ui:nodegraph:node:pos = (1.8, 7.81)
+
+                                                    over "ankle_l_ikTarget" (
+                                                        active = false
+                                                    )
+                                                    {
+                                                    }
+
+                                                    over "ball_l_ikTarget" (
+                                                        active = false
+                                                    )
+                                                    {
+                                                    }
+
+                                                    def RigExecControl "ankle_r_ikTarget" (
+                                                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/toeBend_l/ankle_l_ikTarget>
+                                                    )
+                                                    {
+                                                        float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                        matrix4d rest:space = ( (-2.2204460492503128e-16, -1.0000000000000002, 1.0858689210692089e-16, 0), (2.2204460492503136e-16, 1.0858689210692089e-16, 1.0000000000000002, 0), (-1.0000000000000004, 2.220446049250314e-16, 2.2204460492503128e-16, 0), (1.687538997430238e-14, -7.077477623542654, 13.999954793708131, 1) )
+                                                        custom float2 ui:nodegraph:node:pos = (1.98, 7.92)
+                                                    }
+
+                                                    def RigExecControl "ball_r_ikTarget" (
+                                                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/toeBend_l/ball_l_ikTarget>
+                                                    )
+                                                    {
+                                                        float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                        matrix4d rest:space = ( (-2.2204460492503128e-16, -1.0000000000000002, 1.0858689210692089e-16, 0), (2.2204460492503136e-16, 1.0858689210692089e-16, 1.0000000000000002, 0), (-1.0000000000000004, 2.220446049250314e-16, 2.2204460492503128e-16, 0), (1.509903313490213e-14, 0.000022376457346595657, -0.00004520629187254599, 1) )
+                                                        custom float2 ui:nodegraph:node:pos = (1.98, 8.03)
+                                                    }
+                                                }
+
+                                                def RigExecJoint "ballRoll_r_up" (
+                                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/ballRoll_l_up>
+                                                )
+                                                {
+                                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1.8078, 9.265, 1) )
+                                                    custom float2 ui:nodegraph:node:pos = (1.8, 8.14)
+
+                                                    over "ballRoll_l_down" (
+                                                        active = false
+                                                    )
+                                                    {
+                                                    }
+
+                                                    over "ballRoll_l_down_twin" (
+                                                        active = false
+                                                    )
+                                                    {
+                                                    }
+
+                                                    def RigExecJoint "ballRoll_r_down" (
+                                                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/ballRoll_l_up/ballRoll_l_down>
+                                                    )
+                                                    {
+                                                        custom float2 ui:nodegraph:node:pos = (1.98, 8.25)
+
+                                                        over "ballRoll_l" (
+                                                            active = false
+                                                        )
+                                                        {
+                                                        }
+
+                                                        def RigExecControl "ballRoll_r" (
+                                                            prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/ballRoll_l_up/ballRoll_l_down/ballRoll_l>
+                                                        )
+                                                        {
+                                                            float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                            custom float2 ui:nodegraph:node:pos = (2.16, 8.36)
+
+                                                            over "ballRoll_l_fk" (
+                                                                active = false
+                                                            )
+                                                            {
+                                                            }
+
+                                                            def RigExecControl "ballRoll_r_fk" (
+                                                                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/ballRoll_l_up/ballRoll_l_down/ballRoll_l/ballRoll_l_fk>
+                                                            )
+                                                            {
+                                                                double avars:rx.connect = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind.avars:rx>
+                                                                double avars:ry.connect = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind.avars:ry>
+                                                                double avars:rz.connect = </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind/ball_r_bind.avars:rz>
+                                                                float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                                matrix4d rest:space = ( (-2.2204460492503128e-16, -1.0000000000000002, 1.0858689210692089e-16, 0), (2.2204460492503136e-16, 1.0858689210692089e-16, 1.0000000000000002, 0), (-1.0000000000000004, 2.220446049250314e-16, 2.2204460492503128e-16, 0), (0, 0, 0, 1) )
+                                                                custom float2 ui:nodegraph:node:pos = (2.34, 8.47)
+
+                                                                over "toe_l_ikTarget" (
+                                                                    active = false
+                                                                )
+                                                                {
+                                                                }
+
+                                                                def RigExecControl "toe_r_ikTarget" (
+                                                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/ballRoll_l_up/ballRoll_l_down/ballRoll_l/ballRoll_l_fk/toe_l_ikTarget>
+                                                                )
+                                                                {
+                                                                    float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                                    matrix4d rest:space = ( (1, 0, 2.1570415377137042e-32, 0), (0, 1, 0, 0), (-3.081487911019565e-33, 0, 1, 0), (-2.3195223764573463, -9.72984520629187, -1.4210854715202004e-14, 1) )
+                                                                    custom float2 ui:nodegraph:node:pos = (2.52, 8.58)
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    def RigExecControl "ballRoll_r_down_twin" (
+                                                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/ballRoll_l_up/ballRoll_l_down_twin>
+                                                    )
+                                                    {
+                                                        float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                        custom float2 ui:nodegraph:node:pos = (1.98, 8.69)
+                                                    }
+                                                }
+
+                                                def RigExecControl "ballRoll_r_up_twin" (
+                                                    prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll/toe_l/ballRoll_l_up_twin>
+                                                )
+                                                {
+                                                    float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, -1.8078, 9.265, 1) )
+                                                    custom float2 ui:nodegraph:node:pos = (1.8, 8.8)
+                                                }
+                                            }
+                                        }
+
+                                        def RigExecControl "toe_r_roll_twin" (
+                                            prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll/heel_l/ball_l_pivot/toe_l_roll_twin>
+                                        )
+                                        {
+                                            float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.8078, -9.265, 1) )
+                                            custom float2 ui:nodegraph:node:pos = (1.44, 8.91)
+                                        }
+                                    }
+                                }
+                            }
+
+                            def RigExecControl "heel_r_roll_twin" (
+                                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot/heel_l_roll_twin>
+                            )
+                            {
+                                float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6.375, -0.0049000000000000155, 17.1608, 1) )
+                                custom float2 ui:nodegraph:node:pos = (0.9, 9.02)
+                            }
+                        }
+
+                        def RigExecControl "bankOut_r_pivot_twin" (
+                            prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot/bankOut_l_pivot_twin>
+                        )
+                        {
+                            float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-11.1264, 0.04159999999999997, 0, 1) )
+                            custom float2 ui:nodegraph:node:pos = (0.72, 9.13)
+                        }
+                    }
+
+                    def RigExecControl "bankIn_r_pivot_twin" (
+                        prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_ik/ankle_l_pivot/bankIn_l_pivot_twin>
+                    )
+                    {
+                        float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4.7514, 8.804200000000002, -13.171399999999998, 1) )
+                        custom float2 ui:nodegraph:node:pos = (0.54, 9.24)
+                    }
+                }
+            }
+
+            def RigExecControl "leg_r_pv" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_pv>
+            )
+            {
+                color3f guide:displayColor = (1, 0, 0)
+                float guide:displayOpacity.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                double guide:scaleX = 3.3642999999438783
+                double guide:scaleY = 3.377400030699868
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-7.752599999999994, 50.88391073393221, 35.59461132016058, 1) )
+                uniform float2 ui:nodegraph:node:pos = (0.18, 9.35)
+            }
+
+            def RigExecControl "arm_r_params" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/arm_l_params>
+            )
+            {
+                matrix4d rest:space = ( (0.562738580373978, 0.8211536606460625, -0.09503660224488393, 0), (0.10041521335763663, 0.04621143704541768, 0.9938718669992311, 0), (0.8205132997612054, -0.5688331641999871, -0.05645136155319884, 0), (-54.48077659401702, 109.20418828837204, -5.1804291321847415, 1) )
+            }
+
+            def RigExecControl "leg_r_params" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Controls/leg_l_params>
+            )
+            {
+                matrix4d rest:space = ( (-2.2204460492503126e-16, 1, 2.9490299091605727e-17, 0), (2.2204460492503136e-16, 2.341876692568695e-17, -1, 0), (-1.0000000000000004, -2.220446049250313e-16, -2.2204460492503128e-16, 0), (-19.752599999999983, 9.485777623542617, -7.08425479370813, 1) )
+            }
+        }
+
+        over "Solvers"
+        {
+            def RigExecTwoBoneIk "arm_r_twoBoneIk" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Solvers/arm_l_twoBoneIk>
+            )
+            {
+                rel rigExec:effectorControl = </Biped/Rig/Controls/arm_r_ik>
+                rel rigExec:joints = [
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind>,
+                ]
+                rel rigExec:poleControl = </Biped/Rig/Controls/arm_r_pv>
+                rel rigExec:rootControl = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_root>
+                uniform float2 ui:nodegraph:node:pos = (1.78, 0.55)
+            }
+
+            def RigExecFkChain "arm_r_fkChain" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Solvers/arm_l_fkChain>
+            )
+            {
+                rel rigExec:controls = [
+                    </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_fk_shoulder_r_bind>,
+                    </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind>,
+                    </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/clavicle_r_ctl/arm_r_fk_shoulder_r_bind/arm_r_fk_elbow_r_bind/arm_r_fk_wrist_r_bind>,
+                ]
+                rel rigExec:joints = [
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind>,
+                ]
+                uniform float2 ui:nodegraph:node:pos = (1.78, 0.66)
+            }
+
+            def RigExecBlendPointFrames "arm_r_ikfk" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                float inputs:weight.connect = </Biped/Rig/Controls/arm_r_params.avars:ikfk>
+                rel rigExec:inputA = </Biped/Rig/Solvers/arm_r_fkChain>
+                rel rigExec:inputB = </Biped/Rig/Solvers/arm_r_twoBoneIk>
+                rel rigExec:joints = [
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind>,
+                ]
+                uniform float2 ui:nodegraph:node:pos = (1.78, 0.77)
+            }
+
+            def RigExecTwoBoneIk "leg_r_twoBoneIk" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Solvers/leg_l_twoBoneIk>
+            )
+            {
+                rel rigExec:effectorControl = </Biped/Rig/Controls/leg_r_ik/ankle_r_pivot/bankIn_r_pivot/bankOut_r_pivot/heel_r_roll/heel_r/ball_r_pivot/toe_r_roll/toe_r/toeBend_r/ankle_r_ikTarget>
+                rel rigExec:joints = [
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind>,
+                ]
+                rel rigExec:poleControl = </Biped/Rig/Controls/leg_r_pv>
+                rel rigExec:rootControl = </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_root>
+                uniform float2 ui:nodegraph:node:pos = (1.78, 1.21)
+            }
+
+            def RigExecFkChain "leg_r_fkChain" (
+                prepend references = @./Biped_layered_left.usda@</Biped/Rig/Solvers/leg_l_fkChain>
+            )
+            {
+                rel rigExec:controls = [
+                    </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_fk_thigh_r_bind>,
+                    </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind>,
+                    </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl/pelvis_r_ctl/leg_r_fk_thigh_r_bind/leg_r_fk_knee_r_bind/leg_r_fk_ankle_r_bind>,
+                ]
+                rel rigExec:joints = [
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind>,
+                ]
+                uniform float2 ui:nodegraph:node:pos = (1.78, 1.32)
+            }
+
+            def RigExecBlendPointFrames "leg_r_ikfk" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 1
+                float inputs:weight.connect = </Biped/Rig/Controls/leg_r_params.avars:ikfk>
+                rel rigExec:inputA = </Biped/Rig/Solvers/leg_r_fkChain>
+                rel rigExec:inputB = </Biped/Rig/Solvers/leg_r_twoBoneIk>
+                rel rigExec:joints = [
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind>,
+                    </Biped/Rig/Joints/hips_bind/pelvis_r_bind/thigh_r_bind/knee_r_bind/ankle_r_bind>,
+                ]
+                uniform float2 ui:nodegraph:node:pos = (1.78, 1.43)
+            }
+        }
+    }
+}
+

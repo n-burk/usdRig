@@ -1351,7 +1351,8 @@ def build(out_path, skin_path=None, rig_root="/Biped/Rig",
           with_spine=False, with_girdles=True,
           skin_mode="skin", fk_follow_parent=False,
           with_feet=True, with_hands=True, layered=False,
-          ik_handles_follow_girdle=False, with_torso=True):
+          ik_handles_follow_girdle=False, with_torso=True,
+          with_materials=False):
     data, parent = load_joints(os.path.join(DATA, "joint_positions.data"))
     ordered = skeleton_order(data, parent)
     print("joints to author: %d" % len(ordered))
@@ -1593,6 +1594,19 @@ def build(out_path, skin_path=None, rig_root="/Biped/Rig",
     stage.SetDefaultPrim(stage.GetPrimAtPath("/Biped")
                          or root_prim)
     stage.GetRootLayer().Save()
+    if with_materials:
+        # After the mesh exists, before the save. Twelve
+        # UsdPreviewSurface materials from the FBX, with body_geo's
+        # five slots as GeomSubsets in the materialBind family -- one
+        # binding cannot express five materials over 26,274 faces.
+        # There are no textures in the source, so these are flat
+        # values; see materials.py for the Metallic caveat.
+        print("\nmaterials from the FBX:")
+        from materials import apply_materials
+        bound = apply_materials(stage)
+        print("  bound %d material slot(s) on the body mesh" % bound)
+        stage.GetRootLayer().Save()
+
     print("wrote %s (%.1f MB)" % (out_path, os.path.getsize(out_path) / 1e6))
 
     if layered:
@@ -1728,6 +1742,10 @@ def main(argv):
                     help="omit torso_ctl, the FK swing between hips_ctl "
                          "and the chest pivot (Maya's `torso`); the "
                          "chest pivot then nests under hips_ctl directly")
+    ap.add_argument("--materials", action="store_true",
+                    help="author the FBX's 12 UsdPreviewSurface "
+                         "materials and bind them, with body_geo's "
+                         "five slots as GeomSubsets")
     ap.add_argument("--layered", action="store_true",
                     help="also write a layered form beside the flat "
                          "one: a root composing center/left/right, "
@@ -1759,7 +1777,8 @@ def main(argv):
                  args.blend, args.spine, args.girdles,
                  args.skin_mode, args.fk_follow_parent,
                  args.feet, args.hands, args.layered,
-                 args.ik_handles_follow_girdle, args.torso)
+                 args.ik_handles_follow_girdle, args.torso,
+                 args.materials)
 
 
 if __name__ == "__main__":
