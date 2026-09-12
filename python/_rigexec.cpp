@@ -1078,6 +1078,8 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_twist", &rigExec::RigExecSplineIkHandle::SetTwist, py::arg("degrees"))
         .def("set_min_length_ratio", &rigExec::RigExecSplineIkHandle::SetMinLengthRatio, py::arg("ratio"),
              "Length floor as a fraction of the rest root->end chord (inputs:minLengthRatio); 0 = off.")
+        .def("set_root_tangent", [](rigExec::RigExecSplineIkHandle &h, std::string v) { h.SetRootTangent(TfToken(v)); }, py::arg("mode"),
+             "'rigid' carries cv1 with the root control; 'aim' turns it onto the chord to the (floored) end (rigExec:rootTangent).")
         .def("set_joint_elements", [](rigExec::RigExecSplineIkHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
 
     // Constraints.

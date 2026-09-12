@@ -39,6 +39,14 @@ result:
   * isolate  -- the neck controls must not move the spine at all, while the
                 spine controls must carry the neck, since the neck hangs off
                 chest_bind.
+  * follow   -- the neck follows the chest and the head the neck (Maya:
+                the neck nul is parent-constrained to chest_top, the head
+                control is a child of the neck control). Swivelling the
+                hips must move the neck and skull NO MORE than it moves
+                chest_bind, which its control pins: the regression this
+                guards moved neck_0_bind 25.64 cm and skull_bind 33.08 cm
+                with chest_bind at 0.00 (top-level neck controls plus the
+                neck's bind chain executing before the chest's re-write).
 
 Usage: verify_spine.py <rig.usda> [--rig-root /Biped/Rig]
 """
@@ -285,12 +293,19 @@ def verify(tag, joints, sp):
             sp.clear(who)
     else:
         bad += check("no mid control", not sp.has_control(mid_ctl),
-                     "%s absent; interior CVs come from the root aim "
-                     "helper and the end control" % mid_ctl)
-        # cv1 rides a helper at the root aimed at the end, so the first
-        # joint's bone must point at the head -- with the head moved 15 cm
-        # sideways, well inside a few degrees, where a rigid cv1 (the
-        # spine's model) leaves it pointing along the rest chain.
+                     "%s absent; cv1 is aimed by the solver "
+                     "(rigExec:rootTangent = aim), cv2/cv3 ride the end"
+                     % mid_ctl)
+        if not schema_knows("rigExec:rootTangent"):
+            skip("root joint aims at the moved head",
+                 "this RigExec build predates rigExec:rootTangent "
+                 "(authored on the solver, inert until rebuilt)")
+            sp.clear(end_ctl)
+            rest_axis = None
+        # The solver aims cv1 at the end, so the first joint's bone must
+        # point at the head -- with the head moved 15 cm sideways, well
+        # inside a few degrees, where a rigid cv1 (the spine's model)
+        # leaves it pointing along the rest chain.
         sp.avar(end_ctl, "tz", 15.0)
         pose = sp.pose()
         m0 = Gf.Matrix4d(*pose.joint_frame(sp.joints[joints[0]]).to_matrix4())
@@ -299,9 +314,11 @@ def verify(tag, joints, sp):
         rest_axis = rest[joints[-1]] - rest[joints[0]]
         off = angle_between(row(m0, 0), to_head)
         swung = angle_between(rest_axis, to_head)
-        bad += check("root joint aims at the moved head", off < 0.35 * swung,
-                     "%s bone %.2f deg off the root->head line, which "
-                     "swung %.2f deg" % (joints[0], off, swung))
+        if schema_knows("rigExec:rootTangent"):
+            bad += check("root joint aims at the moved head",
+                         off < 0.35 * swung,
+                         "%s bone %.2f deg off the root->head line, which "
+                         "swung %.2f deg" % (joints[0], off, swung))
         sp.clear(end_ctl)
 
     # --- squash: stretch along the chain axis thins the joints ---
@@ -442,16 +459,35 @@ def verify_pivot(sp, pivot, ctl, far_joint, joints, watch):
     return bad
 
 
+_SETTER = {"inputs:minLengthRatio": "set_min_length_ratio",
+           "rigExec:rootTangent": "set_root_tangent"}
+
+
+def schema_knows(prop):
+    """Whether the loaded RigExec BUILD implements `prop` on the solver.
+
+    Probed on the binding class, not the schema registry: the generated
+    schema resources are regenerated from schema.usda independently of
+    the native build, so a stale rigExec.dll can sit next to resources
+    that already declare the attribute (it did), and the registry would
+    then claim support the solver does not have.
+    """
+    return hasattr(rigexec.SplineIk, _SETTER[prop])
+
+
 def solver_has_floor(sp, tag):
-    """Whether the loaded RigExec build knows inputs:minLengthRatio."""
-    reg = Usd.SchemaRegistry()
-    defn = reg.FindConcretePrimDefinition("RigExecSplineIk")
-    return bool(defn) and "inputs:minLengthRatio" in defn.GetPropertyNames()
+    return schema_knows("inputs:minLengthRatio")
 
 
-def verify_collapse(sp, tag, joints):
+def verify_collapse(sp, tag, joints, measure):
+    """`measure` are the joints the solver drives outright. chest_bind is
+    left out of the spine's: Maya's chest_top_grp override (girdle.py)
+    parent-constrains it to the chest CONTROL, so it goes wherever the
+    animator puts the control -- the floor holds the spline, not the
+    control and what hangs on it (a control-level clamp would be engine
+    work)."""
     print("")
-    print("%s collapse:" % tag)
+    print("%s collapse (measuring %s..%s):" % (tag, measure[0], measure[-1]))
     solver = None
     for prim in sp.stage.Traverse():
         if (prim.GetTypeName() == "RigExecSplineIk" and
@@ -479,27 +515,34 @@ def verify_collapse(sp, tag, joints):
         # the root.
         sp.pull(end_ctl, axis * (-fraction * length))
         pose = sp.pose()
-        pos = [origin(pose, sp.joints[j]) for j in joints]
+        pos = [origin(pose, sp.joints[j]) for j in measure]
         along = [Gf.Dot(p - pos[0], axis) for p in pos]
         ordered = all(along[i] < along[i + 1] for i in range(len(along) - 1))
         forward = all(Gf.Dot(row(Gf.Matrix4d(*pose.joint_frame(
-            sp.joints[j]).to_matrix4()), 0), axis) > 0.0 for j in joints)
+            sp.joints[j]).to_matrix4()), 0), axis) > 0.0 for j in measure)
+        # The measured span is the rest span of these joints scaled by
+        # the floor; allow the sub-cm curve-vs-chain difference.
+        rest_span = Gf.Dot(rest[joints.index(measure[-1])] -
+                           rest[joints.index(measure[0])], axis)
         span = along[-1] - along[0]
         bad += check("end pushed %.0f%% onto the root" % (fraction * 100),
-                     ordered and forward and span >= floor * length - 1e-6,
-                     "root->tip along the axis %.2f cm = %.2f of rest "
+                     ordered and forward and
+                     span >= floor * rest_span * 0.98,
+                     "%s->%s along the root axis %.2f cm = %.2f of rest "
                      "(floor %.2f); ordered %s, all bones forward %s"
-                     % (span, span / length, floor, ordered, forward))
+                     % (measure[0], measure[-1], span, span / rest_span,
+                        floor, ordered, forward))
         sp.clear(end_ctl)
     # The floor is a per-shot dial: off, the chain does crumple.
     attr.Set(0.0)
     sp.pull(end_ctl, axis * (-1.0 * length))
     pose = sp.pose()
-    pos = [origin(pose, sp.joints[j]) for j in joints]
+    pos = [origin(pose, sp.joints[j]) for j in measure]
     span = Gf.Dot(pos[-1] - pos[0], axis)
     bad += check("floor 0 lets it crumple (dial works)",
                  span < 0.25 * length,
-                 "root->tip %.2f of rest with the floor off" % (span / length))
+                 "%s->%s %.2f of rest with the floor off"
+                 % (measure[0], measure[-1], span / length))
     attr.Set(floor)
     sp.clear(end_ctl)
     return bad
@@ -529,8 +572,8 @@ def main(argv):
     bad += verify_pivot(sp, "neck_end_pivot", "neck_end_ctl",
                         "neck_root_ctl", neck, neck[-1])
 
-    bad += verify_collapse(sp, "spine", spine)
-    bad += verify_collapse(sp, "neck", neck)
+    bad += verify_collapse(sp, "spine", spine, spine[:-1])
+    bad += verify_collapse(sp, "neck", neck, neck)
 
     print("")
     print("isolation:")
@@ -556,10 +599,112 @@ def main(argv):
                  "least-moved neck joint %.2f cm" % carried)
     sp.clear("spine_end_ctl")
 
+    bad += verify_neck_follows_chest(sp, spine, neck)
+
     print("")
     print("all spine checks passed" if not bad
           else "%d CHECK(S) FAILED" % bad)
     return 1 if bad else 0
+
+
+def verify_neck_follows_chest(sp, spine, neck):
+    """The neck hangs off the chest and the head off the neck -- as
+    Maya has it (`/neck/head_pivot_connect` line 97 parent-constrains
+    the neck nul to chest_top; `/neck/controls/head` is parented under
+    the neck control) -- and NOTHING ELSE moves the neck joints.
+
+    The regression this guards: with the neck controls top-level and
+    the neck's bind chain executing before the spine's and the girdle's
+    chest override, swivelling the hips 30 degrees left chest_bind at
+    0.00 cm and moved neck_0_bind 25.64 cm and skull_bind 33.08 cm --
+    the chest's later absolute re-write propagated onto neck joints that
+    had already been written. The neck joints may move no more than the
+    chest does, in translation AND rotation, under every spine control.
+    """
+    print("")
+    print("neck follows chest, head follows neck:")
+    bad = 0
+    rest = sp.pose()
+    rest_m = {j: Gf.Matrix4d(*rest.joint_frame(sp.joints[j]).to_matrix4())
+              for j in spine + neck}
+
+    def moved(pose, j):
+        m = Gf.Matrix4d(*pose.joint_frame(sp.joints[j]).to_matrix4())
+        d = (m.ExtractTranslation() -
+             rest_m[j].ExtractTranslation()).GetLength()
+        r = m * rest_m[j].GetInverse()
+        r.SetTranslateOnly(Gf.Vec3d(0, 0, 0))
+        return d, abs(r.GetOrthonormalized().ExtractRotation().GetAngle())
+
+    # --- the hips swivel: the chest is pinned by its own control, so
+    #     the neck and head must not move either. This is the exact
+    #     drive the user reported. Every rotation axis, and the pivot.
+    for ctl, comp in (("spine_root_ctl", "ry"), ("spine_root_ctl", "rx"),
+                      ("spine_root_ctl", "rz"), ("spine_root_pivot", "rz")):
+        sp.avar(ctl, comp, 30.0)
+        pose = sp.pose()
+        chest_d, chest_r = moved(pose, "chest_bind")
+        worst_d = max(moved(pose, j)[0] for j in neck)
+        worst_r = max(moved(pose, j)[1] for j in neck)
+        bad += check("%s %s=30: neck within the chest" % (ctl, comp),
+                     worst_d <= chest_d + 1e-6 and
+                     worst_r <= chest_r + 1e-3,
+                     "chest %.2f cm / %.2f deg; worst neck joint %.2f cm "
+                     "/ %.2f deg" % (chest_d, chest_r, worst_d, worst_r))
+        sp.clear(ctl)
+
+    # --- the chest control carries the neck AND the head rigidly with
+    #     the chest joint: a translate moves every neck joint by exactly
+    #     the chest's displacement; a rotate turns them all by the same
+    #     angle and keeps the neck controls on their joints.
+    sp.avar("spine_end_ctl", "tx", 15.0)
+    pose = sp.pose()
+    chest_d, _ = moved(pose, "chest_bind")
+    ds = [moved(pose, j)[0] for j in neck]
+    bad += check("chest ctl tx=15 carries neck + head",
+                 all(abs(d - chest_d) < 1e-6 for d in ds),
+                 "chest %.2f cm; neck joints [%s] cm"
+                 % (chest_d, ", ".join("%.2f" % d for d in ds)))
+    sp.clear("spine_end_ctl")
+
+    sp.avar("spine_end_ctl", "ry", 25.0)
+    pose = sp.pose()
+    _, chest_r = moved(pose, "chest_bind")
+    rs = [moved(pose, j)[1] for j in neck]
+    ctl_root = sp.ctl_o("neck_root_ctl", pose)
+    ctl_end = sp.ctl_o("neck_end_ctl", pose)
+    gap_root = (ctl_root - origin(pose, sp.joints[neck[0]])).GetLength()
+    gap_end = (ctl_end - origin(pose, sp.joints[neck[-1]])).GetLength()
+    rest_gap_root = (sp.ctl_o("neck_root_ctl", rest) -
+                     origin(rest, sp.joints[neck[0]])).GetLength()
+    rest_gap_end = (sp.ctl_o("neck_end_ctl", rest) -
+                    origin(rest, sp.joints[neck[-1]])).GetLength()
+    bad += check("chest ctl ry=25 turns neck + head with it",
+                 all(abs(r - chest_r) < 0.5 for r in rs) and
+                 abs(gap_root - rest_gap_root) < 1e-6 and
+                 abs(gap_end - rest_gap_end) < 1e-6,
+                 "chest %.2f deg; neck joints [%s] deg; neck ctl still "
+                 "%.2f cm from %s, head ctl %.2f cm from %s"
+                 % (chest_r, ", ".join("%.2f" % r for r in rs), gap_root,
+                    neck[0], gap_end, neck[-1]))
+    sp.clear("spine_end_ctl")
+
+    # --- the neck control carries the head control and the skull, and
+    #     leaves the spine alone.
+    sp.avar("neck_root_ctl", "rz", 20.0)
+    pose = sp.pose()
+    d_head_ctl = (sp.ctl_o("neck_end_ctl", pose) -
+                  sp.ctl_o("neck_end_ctl", rest)).GetLength()
+    d_skull, r_skull = moved(pose, neck[-1])
+    spine_worst = max(moved(pose, j)[0] for j in spine)
+    bad += check("neck ctl rz=20 carries the head",
+                 d_head_ctl > 1.0 and abs(r_skull - 20.0) < 0.5 and
+                 abs(d_skull - d_head_ctl) < 1e-6 and spine_worst < 1e-6,
+                 "head ctl moved %.2f cm, skull %.2f cm / %.2f deg; spine "
+                 "worst %.2g cm" % (d_head_ctl, d_skull, r_skull,
+                                    spine_worst))
+    sp.clear("neck_root_ctl")
+    return bad
 
 
 if __name__ == "__main__":

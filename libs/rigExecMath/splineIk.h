@@ -213,6 +213,16 @@ struct RigExecSplineIkParams {
     /// Maya's ikSpline has no floor at all; this is the requested
     /// departure. Not clamped to [0, 1].
     double minLengthRatio = 0.0;
+
+    /// Aim the root tangent: cv1 is turned about cv0 by the minimal
+    /// rotation taking the root control's posed chain axis to the
+    /// direction cv0 -> cv3 (after the length floor), so the curve leaves
+    /// the root pointing at the end. Maya's neck does exactly this with
+    /// cluster[1] under a joint at the neck control aimed at the head
+    /// (rig_bits.nxt /neck/head_pivot_connect); done here it uses the
+    /// floored end and adds no twist (the rotation axis is perpendicular
+    /// to the chain). The mid offset is applied on top. Off by default.
+    bool aimRootTangent = false;
 };
 
 /// One posed joint.

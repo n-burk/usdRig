@@ -829,6 +829,18 @@ class RigExecSplineIk "RigExecSplineIk" (
         at the root to the full value at the curve end, added to the end
         control's twist minus the root's (Maya ikHandle.twist)."""
     )
+    uniform token rigExec:rootTangent = "rigid" (
+        allowedTokens = ["rigid", "aim"]
+        doc = """How cv1, the root's tangent CV, is posed. `rigid`: carried
+        by the root control like cv0 (Maya's spine, clusters 0-1 under
+        hip_swivel_grp). `aim`: turned about cv0 by the minimal rotation
+        from the root control's posed chain axis onto the chord to the end
+        CV after the length floor, so the curve leaves the root pointing at
+        the end -- Maya's neck, whose cluster[1] sits under a joint at the
+        neck control aimed at the head (rig_bits.nxt
+        /neck/head_pivot_connect). Adds no twist; the mid control's offset
+        is applied on top."""
+    )
     double inputs:minLengthRatio = 0 (
         doc = """Length floor as a fraction of the rest root->end chord; 0
         switches it off. Below it the end CVs (cv2, cv3) are held that far

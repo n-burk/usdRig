@@ -1083,6 +1083,66 @@ TestMinLengthFloor()
     }
 }
 
+static void
+TestRootTangentAim()
+{
+    // Straight chain along +Y; end moved 6 sideways in +X (mid on its
+    // follow point). rigid: cv1 stays at (0,1,0). aim: cv1 turns about
+    // cv0 onto the chord direction (6,6,0)/|..| at its rest length 1.
+    const StraightRig rig = MakeStraightRig();
+    RigExecSplineIkControls c = rig.controls;
+    for (GfVec3d &p : c.end.points) p += GfVec3d(6.0, 0.0, 0.0);
+    for (GfVec3d &p : c.mid.points) p += GfVec3d(3.0, 0.0, 0.0);
+    {
+        RigExecSplineIkResult r;
+        CHECK(RigExecSolveSplineIk(rig.rest, c, {}, &r));
+        CHECK(Near(r.cvs[1], GfVec3d(0.0, 1.0, 0.0), 1e-12));
+    }
+    RigExecSplineIkParams params;
+    params.aimRootTangent = true;
+    {
+        RigExecSplineIkResult r;
+        CHECK(RigExecSolveSplineIk(rig.rest, c, params, &r));
+        const GfVec3d dir = GfVec3d(6.0, 6.0, 0.0).GetNormalized();
+        CHECK(Near(r.cvs[1], dir, 1e-12));
+        CHECK(Near(r.cvs[0], GfVec3d(0.0), 1e-12));
+        CHECK(Near(r.cvs[3], GfVec3d(6.0, 6.0, 0.0), 1e-12));
+        CHECK(Near(r.twist, 0.0, 1e-12));
+        CHECK(Near(r.roll, 0.0, 1e-12));
+        // The curve leaves the root exactly along the chord (the first
+        // BONE is a chord across the bent curve and sits a few degrees
+        // off, which is the curve doing its job).
+        GfVec3d p, t;
+        CHECK(RigExecSplineIkCurve(r.cvs).PointAtArcLength(0.0, &p, &t));
+        CHECK(Near(t, dir, 1e-9));
+        CHECK(GfDot(UnitX(r.joints[0].frame), dir) > 0.95);
+    }
+    // At rest it is inert.
+    {
+        RigExecSplineIkResult r;
+        CHECK(RigExecSolveSplineIk(rig.rest, rig.controls, params, &r));
+        CHECK(Near(r.cvs[1], GfVec3d(0.0, 1.0, 0.0), 1e-12));
+        CHECK(Near(r.ratio, 1.0, 1e-12));
+    }
+    // With the floor, the aim follows the FLOORED end: the end driven 7
+    // back (past the root, where a raw aim would point backwards) is held
+    // at y = 3 and cv1 stays on +Y.
+    {
+        params.minLengthRatio = 0.5;
+        RigExecSplineIkControls pushed = rig.controls;
+        for (GfVec3d &p : pushed.end.points) p += GfVec3d(0.0, -7.0, 0.0);
+        for (GfVec3d &p : pushed.mid.points) p += GfVec3d(0.0, -3.5, 0.0);
+        RigExecSplineIkResult r;
+        CHECK(RigExecSolveSplineIk(rig.rest, pushed, params, &r));
+        CHECK(Near(r.cvs[3], GfVec3d(0.0, 3.0, 0.0), 1e-12));
+        CHECK(Near(r.cvs[1], GfVec3d(0.0, 1.0, 0.0), 1e-12));
+        for (size_t i = 0; i < r.joints.size(); ++i) {
+            CHECK(Near(r.joints[i].frame.Origin(),
+                       GfVec3d(0.0, 0.5 * i, 0.0), 1e-9));
+        }
+    }
+}
+
 int
 main()
 {
@@ -1106,6 +1166,7 @@ main()
     TestTwist();
     TestMidControl();
     TestMinLengthFloor();
+    TestRootTangentAim();
     TestDegenerates();
     if (failures == 0) {
         std::printf("testRigExecSplineIk: PASS\n");

@@ -1439,7 +1439,7 @@ TestControlGuides(const std::string &examplesDir)
             }
             return held.UncheckedGet<VtFloatArray>()[0];
         };
-        const UsdPrim pole = stage->GetPrimAtPath(elbowPole);
+        UsdPrim pole = stage->GetPrimAtPath(elbowPole);
         const UsdPrim shoulder = stage->GetPrimAtPath(shoulderFk);
         const UsdPrim elbow = stage->GetPrimAtPath(elbowFk);
         // A float dial, as the biped's avars:ikfk is, and a double twin,

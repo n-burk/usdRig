@@ -406,39 +406,56 @@ RigExecSplineIkPoseCvs(
     (*cvs)[3] = endMap.TransformAffine(rest.cvs[3]);
 
     // The mid control's follow point: its rest origin carried by both
-    // parents and blended (parentConstraint with maintainOffset).
+    // parents and blended (parentConstraint with maintainOffset). Taken
+    // from the UNCLAMPED maps, so a follow helper in the rig that reads
+    // the same controls stays exact whatever the floor and the root aim
+    // below do to the CVs.
     const GfVec3d midRest = rest.midControl.Origin();
     const double w = params.midFollowWeight;
     const GfVec3d follow = rootMap.TransformAffine(midRest) * (1.0 - w) +
                            endMap.TransformAffine(midRest) * w;
     const GfVec3d offset = controls.mid.Origin() - follow;
-    (*cvs)[1] += offset;
-    (*cvs)[2] += offset;
+
+    // The root's posed chain axis: the rest chord carried by the root map.
+    const GfVec3d restChord = rest.cvs[3] - rest.cvs[0];
+    const double restChordLength = restChord.GetLength();
+    GfVec3d rootAxis = rootMap.TransformDir(restChord);
+    const bool haveAxis =
+        restChordLength > kEps && rootAxis.GetLength() > kEps;
+    if (haveAxis) {
+        rootAxis.Normalize();
+    }
 
     // Length floor: hold the end CVs at least minLengthRatio of the rest
     // chord ahead of cv0 along the root's posed chain axis. Measured
     // against the root's axis rather than the current chord so that an
     // end control driven onto (or past) the root has a defined "forward"
     // and the chain lifts instead of flipping. cv2 rides with cv3 so the
-    // end tangent keeps its direction; the mid offset above was taken
-    // from the unclamped controls, so it is unchanged by this and the
-    // mid's follow helper (which reads the same controls) stays exact.
-    if (params.minLengthRatio > 0.0) {
-        const GfVec3d restChord = rest.cvs[3] - rest.cvs[0];
-        const double restChordLength = restChord.GetLength();
-        GfVec3d axis = rootMap.TransformDir(restChord);
-        const double axisLength = axis.GetLength();
-        if (restChordLength > kEps && axisLength > kEps) {
-            axis /= axisLength;
-            const double minAlong = params.minLengthRatio * restChordLength;
-            const double along = GfDot((*cvs)[3] - (*cvs)[0], axis);
-            if (along < minAlong) {
-                const GfVec3d lift = axis * (minAlong - along);
-                (*cvs)[2] += lift;
-                (*cvs)[3] += lift;
-            }
+    // end tangent keeps its direction.
+    if (params.minLengthRatio > 0.0 && haveAxis) {
+        const double minAlong = params.minLengthRatio * restChordLength;
+        const double along = GfDot((*cvs)[3] - (*cvs)[0], rootAxis);
+        if (along < minAlong) {
+            const GfVec3d lift = rootAxis * (minAlong - along);
+            (*cvs)[2] += lift;
+            (*cvs)[3] += lift;
         }
     }
+
+    // Root tangent aim: turn cv1 about cv0 from the root's axis onto the
+    // (floored) chord direction. Antiparallel or degenerate chords leave
+    // cv1 riding the root rigidly.
+    if (params.aimRootTangent && haveAxis) {
+        const GfVec3d to = (*cvs)[3] - (*cvs)[0];
+        if (to.GetLength() > kEps) {
+            (*cvs)[1] = (*cvs)[0] + _RotateToward(rootAxis, to.GetNormalized(),
+                                                  (*cvs)[1] - (*cvs)[0]);
+        }
+    }
+
+    // The animator's local bend of the mid control, on top of everything.
+    (*cvs)[1] += offset;
+    (*cvs)[2] += offset;
 
     for (const GfVec3d &cv : *cvs) {
         if (!_IsFinite(cv)) {

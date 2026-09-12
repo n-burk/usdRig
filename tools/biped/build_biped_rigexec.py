@@ -97,12 +97,25 @@ def control_world_rest(stage, path):
 
 def add_limb_iks(builder, stage, worlds, by_name, poles, with_blend=False,
                  fk_follow_parent=False, girdle_parents=None,
-                 ik_handles_world=False):
+                 ik_handles_world=True):
     """RigExecTwoBoneIk per limb, optionally with an FK chain and IK/FK blend.
 
     Controls sit under the rig's /Controls scope with no RigExec ancestor,
     so their rest is asset space and takes a world matrix -- unlike the
     joints, whose rest is parent-local.
+
+    The IK effector and pole controls are TOP-LEVEL (asset space) by
+    default, which is Maya's arrangement: `rig_bits.nxt /limb/create/ik/
+    controls` creates `leg_ik_?` / `arm_ik_?` and the pole vector with
+    `parent=ikfk_group`, and `/limb/create` lines 18-19 parent that group
+    under `rig`, so the handle lives in world and a planted foot stays
+    planted when the hips, the swivel or the pelvis move. The control's
+    space switch (`/leg/limb/ik_spaces`: hip_swivel / hips) is ORIENT-only
+    (`/space_switch` constraint_type='orient') and defaults to local, so
+    it never moves the handle either. `ik_handles_world=False` is the
+    older arrangement, nesting them under the girdle control so the hand
+    or foot rides the clavicle or pelvis; it is kept reachable through
+    `--ik-handles-follow-girdle`.
 
     With `with_blend`, the stock `examples/03_IkFkBlendClamp.usda` topology
     is used: an FK chain is input A, the IK is input B, and the
@@ -147,19 +160,18 @@ def add_limb_iks(builder, stage, worlds, by_name, poles, with_blend=False,
             ew.ExtractTranslation())
         pole_rest = Gf.Matrix4d(1.0).SetTranslate(pole_at)
         if girdle is not None and not ik_handles_world:
-            # The EFFECTOR and POLE ride the girdle as well, not just
-            # the chain root. With only the root nested, moving
-            # clavicle_l_ctl 10 cm carried every FK control and every
-            # arm joint by 10.000 cm in FK -- but in IK the wrist
-            # stayed at 0.000 and the elbow went to 12.339, because
-            # the effector was still pinned in asset space while the
-            # chain root had moved. The legs ship in IK, so that was
-            # their default state.
-            #
-            # Note this is a deliberate departure from Maya, where the
-            # IK handle usually hangs off the COG so the hand or foot
-            # STAYS PUT when the clavicle or pelvis moves. Asked for
-            # explicitly; `--ik-handles-world` puts it back.
+            # Opt-in (`--ik-handles-follow-girdle`): the EFFECTOR and
+            # POLE ride the girdle as well, not just the chain root.
+            # With only the root nested, moving clavicle_l_ctl 10 cm
+            # carried every FK control and every arm joint by 10.000 cm
+            # in FK -- but in IK the wrist stayed at 0.000 and the
+            # elbow went to 12.339, because the effector was still
+            # pinned in asset space while the chain root had moved.
+            # That is the planted-foot behaviour Maya has and the
+            # default here now; this branch is the departure, for a
+            # rig where the hand or foot should ride the girdle. It
+            # was the default once, and swivelling the hips then
+            # carried the planted IK feet 44.15 cm.
             eff_ctl = builder.add_control(
                 "%s_ik" % tag, flatten(ew * g_rest.GetInverse()),
                 girdle)
@@ -427,8 +439,18 @@ def pivot_frame(anchor_world, toward, distance):
 
 
 def add_pivot_control(builder, stage, name, child_name, child_world, toward,
-                      arc_length, height=PIVOT_HEIGHT):
+                      arc_length, height=PIVOT_HEIGHT, parent=None):
     """A control that rotates `child_name` about an offset pivot.
+
+    `parent` nests the PIVOT under another control (the hips body control
+    for the hip swivel, torso for the chest, the neck control for the
+    head), with a parent-local rest. The child's authored `default:space`
+    stays its WORLD rest: the composition rule below cancels the pivot's
+    default either way, and with a parent P the child composes to
+    D_child * inverse(D_pivot) * (D_pivot * inverse(D_parent) * P_parent)
+    = D_child * inverse(D_parent) * P_parent -- it rides the parent
+    rigidly and its own zero pose is untouched. verify_spine.py's pivot
+    checks (dial moves only the pivot) run against the nested form.
 
     Maya gives one control a `rotatePivot` (`.rp`) driven by pivotHeight
     (rig_bits.nxt chest_pivot / hip_pivot / head_pivot_connect), so the
@@ -460,7 +482,12 @@ def add_pivot_control(builder, stage, name, child_name, child_world, toward,
     """
     distance = arc_length * height / 10.0
     pw = pivot_frame(child_world, toward, distance)
-    pivot = builder.add_control(name, flatten(pw))
+    if parent is not None:
+        p_rest = control_world_rest(stage, parent.path)
+        pivot = builder.add_control(name, flatten(pw * p_rest.GetInverse()),
+                                    parent)
+    else:
+        pivot = builder.add_control(name, flatten(pw))
     child = builder.add_control(child_name, flatten(child_world * pw.GetInverse()),
                                 pivot)
     stage.GetPrimAtPath(child.path).GetAttribute("default:space").Set(
@@ -488,8 +515,31 @@ def _aim_vector_toward(frame_world, target_world_point):
 def add_spline_ik_chain(builder, stage, worlds, joint_prim_paths, tag, joints,
                         volume_weights, mid_index=None, mid="follow",
                         pivots=("root", "end"), pivot_height=PIVOT_HEIGHT,
-                        min_length_ratio=None):
+                        min_length_ratio=None, root_parent=None,
+                        end_parent=None):
     """A control-driven spline spine, using the RigExecSplineIk solver.
+
+    `root_parent` / `end_parent` nest the chain's root and end controls
+    (or their pivot controls, when they have one) under another control,
+    parent-local rest, so they FOLLOW it. `end_parent="root"` nests the
+    end under this chain's own root control. That is the Maya parenting:
+
+      * spine: hip_swivel (root) under hips_gimbal, chest (end pivot)
+        under torso under hips_gimbal (`/spine/controls/ik/hip_swivel`
+        parent='hips_gimbal'; `/spine/controls/fk/chest` parent=torso;
+        `/spine/controls/fk/torso` parent='hips_gimbal') -- see body.py;
+      * neck: the neck control's nul is parent-constrained to chest_top
+        (`/neck/head_pivot_connect` line 97, mo=1), and the head control
+        is parented under the neck control (`/neck/controls/head`
+        parent=${neck_control}). So root_parent=spine_end_ctl and
+        end_parent="root".
+
+    Left top-level (the original form), the neck did not follow the
+    chest at all, and the neck JOINTS were then moved by whatever wrote
+    an ancestor after them: swivelling the hips 30 degrees carried
+    neck_0_bind 25.64 cm and skull_bind 33.08 cm while chest_bind held
+    at 0.00. The nesting is what ties the neck to the chest; the bind
+    chain ORDER (see build()) is what stops the propagation.
 
     This replaces the earlier RigExecRibbon attempt, which could not work:
     the ribbon reads its driver curve as NATIVE scene data, so a curve
@@ -533,18 +583,19 @@ def add_spline_ik_chain(builder, stage, worlds, joint_prim_paths, tag, joints,
       "aim"     Maya's neck (/neck/head_pivot_connect lines 343-347): no
                 mid control at all; cluster[1] is parented under
                 `neck_head_aim`, a joint AT the neck control's origin
-                aim-constrained at the head. Here the solver's ROOT is
-                `<tag>_root_aim`, a hidden helper nested under the root
-                control at identity and aimed at the end control (up
-                policy none, as Maya's `wut="none"`): a rotation about the
-                root origin leaves cv0 in place and swings cv1 onto the
-                root->head line, and adds no twist (its axis is
-                perpendicular to the chain). The solver's mid is a hidden
-                `<tag>_cv1` nested under the aim helper with
-                midFollowWeight 0, so its offset is identically zero and
-                cv2 stays with the end control alone -- which a mid-driven
-                aim could not give, since the solver adds the mid offset
-                to cv2 as well as cv1.
+                aim-constrained at the head. Here the SOLVER does it:
+                `rigExec:rootTangent = "aim"` turns cv1 about cv0 from the
+                root's posed chain axis onto the chord to the end CV --
+                after the length floor, so a head driven onto or past the
+                neck root cannot flip the aim (an aim-constrained helper
+                control was tried first and did exactly that at 120%
+                compression, because the floor then lifted the end along
+                the helper's backward axis). It adds no twist. The solver's
+                mid is a hidden `<tag>_cv1` nested rigidly under the root
+                with midFollowWeight 0, so its offset is identically zero
+                and cv2 stays with the end control alone -- which a
+                mid-driven aim could not give, since the solver adds the
+                mid offset to cv2 as well as cv1.
 
     `pivots` names which of the root/end controls get an offset rotation
     pivot (see add_pivot_control): "root" makes `<tag>_root_pivot` the
@@ -568,19 +619,28 @@ def add_spline_ik_chain(builder, stage, worlds, joint_prim_paths, tag, joints,
     fold_free = ((cvs[1] - cvs[0]).GetLength() +
                  (cvs[3] - cvs[2]).GetLength()) / chord
 
+    def nested(name, world, parent):
+        if parent is None:
+            return builder.add_control(name, flatten(world))
+        p_rest = control_world_rest(stage, parent.path)
+        return builder.add_control(name, flatten(world * p_rest.GetInverse()),
+                                   parent)
+
     root_pivot = end_pivot = None
     if "root" in pivots:
         root_pivot, root_ctl = add_pivot_control(
             builder, stage, "%s_root_pivot" % tag, "%s_root_ctl" % tag,
-            root_w, cvs[3], arc, pivot_height)
+            root_w, cvs[3], arc, pivot_height, parent=root_parent)
     else:
-        root_ctl = builder.add_control("%s_root_ctl" % tag, flatten(root_w))
+        root_ctl = nested("%s_root_ctl" % tag, root_w, root_parent)
+    if end_parent == "root":
+        end_parent = root_ctl
     if "end" in pivots:
         end_pivot, end_ctl = add_pivot_control(
             builder, stage, "%s_end_pivot" % tag, "%s_end_ctl" % tag,
-            end_w, cvs[0], arc, pivot_height)
+            end_w, cvs[0], arc, pivot_height, parent=end_parent)
     else:
-        end_ctl = builder.add_control("%s_end_ctl" % tag, flatten(end_w))
+        end_ctl = nested("%s_end_ctl" % tag, end_w, end_parent)
 
     solver_root = root_ctl
     mid_ctl = None
@@ -616,27 +676,21 @@ def add_spline_ik_chain(builder, stage, worlds, joint_prim_paths, tag, joints,
         mid_note = ("mid=%s_mid_ctl nested under a follow helper "
                     "(midpoint of root/end, aimed at end)" % tag)
     elif mid == "aim":
-        aim_ctl = builder.add_control("%s_root_aim" % tag,
-                                      flatten(Gf.Matrix4d(1.0)), root_ctl)
-        hide_guide(stage, aim_ctl)
+        # The solver does the aiming (rigExec:rootTangent = "aim") against
+        # the FLOORED end, so no helper chain is needed and a head driven
+        # past the neck root cannot flip the aim. The solver still needs a
+        # mid control: a hidden helper nested rigidly under the root at
+        # cv1's rest, with midFollowWeight 0, whose offset is identically
+        # zero -- cv2 stays with the end control alone.
         cv1_ctl = builder.add_control(
             "%s_cv1" % tag, flatten(worlds[joints[1]] * root_w.GetInverse()),
-            aim_ctl)
+            root_ctl)
         hide_guide(stage, cv1_ctl)
-        def make_movers(builder=builder, aim_ctl=aim_ctl, end_ctl=end_ctl,
-                        root_w=root_w, target=cvs[3]):
-            chain = builder.new_mover_chain("%s_root_aim" % tag)
-            ac = chain.add_aim_constraint("%s_root_aim_at_end" % tag,
-                                          aim_ctl, [end_ctl])
-            v = _aim_vector_toward(root_w, target)
-            ac.set_aim_vector(v[0], v[1], v[2])
-            ac.set_world_up_type("none")
-            return chain
-        solver_root = aim_ctl
+        make_movers = None
         solver_mid = cv1_ctl
         follow_weight = 0.0
-        mid_note = ("no mid control; cv1 rides %s_root_aim, a helper at "
-                    "the root aimed at the end (Maya neck_head_aim)" % tag)
+        mid_note = ("no mid control; cv1 aimed at the end by the solver "
+                    "(rootTangent=aim, Maya neck_head_aim)")
     else:
         raise ValueError("mid must be 'follow' or 'aim', got %r" % (mid,))
 
@@ -673,6 +727,15 @@ def add_spline_ik_chain(builder, stage, worlds, joint_prim_paths, tag, joints,
 
     if min_length_ratio is None:
         min_length_ratio = MIN_LENGTH_RATIO.get(tag, 0.0)
+    if mid == "aim":
+        if hasattr(solver, "set_root_tangent"):
+            solver.set_root_tangent("aim")
+        else:
+            stage.GetPrimAtPath(solver.path).CreateAttribute(
+                "rigExec:rootTangent", Sdf.ValueTypeNames.Token, True,
+                Sdf.VariabilityUniform).Set("aim")
+            mid_note += (" -- AUTHORED BUT INERT: this rigexec build has no "
+                         "set_root_tangent, cv1 rides the root rigidly")
     if hasattr(solver, "set_min_length_ratio"):
         solver.set_min_length_ratio(min_length_ratio)
         floor_note = "solver floor"
@@ -1022,62 +1085,87 @@ def finish_spline_chains(builder, stage, rig_root, chains, worlds,
     either -- it is degree 2 through four CVs), and the ribbon's transported
     frames sit at a constant 90 degrees to Maya's joint orientations.
     """
-    from girdle import offset_in_source_space as _offset_in_source_space
+    solved = solve_spline_rest(stage, rig_root, chains)
+    total = 0
+    for info in chains:
+        total += bind_spline_chain(builder, info, solved, worlds,
+                                   joint_prim_paths)
+    return total
 
+
+def solve_spline_rest(stage, rig_root, chains):
+    """The solved rest frame of every duplicate joint, {path: Matrix4d}.
+
+    One compile + evaluate for all the chains, so `bind_spline_chain` can
+    be called for each chain at the point in the build where its mover
+    chain has to be CREATED -- which is not one point for all of them,
+    since creation order is execution order reversed (see build()).
+    """
     rig = rigexec.Rig(stage, rig_root)
     rig.compile()
     pose = rig.evaluate(0.0)
+    out = {}
+    for info in chains:
+        for dup in info["dup"]:
+            out[dup] = Gf.Matrix4d(*pose.joint_frame(dup).to_matrix4())
+    return out
+
+
+def bind_spline_chain(builder, info, solved, worlds, joint_prim_paths):
+    """Create one spline's `<tag>_to_bind` chain from pre-solved frames.
+
+    A chain per spline, NOT one shared chain. A mover chain is one
+    dependency unit, so a single chain holding both the spine and neck
+    constraints would write the spine joints AND -- through the neck
+    solver's start frame -- read them. Separate chains leave the
+    dependency a DAG, and, since creation order is execution order
+    reversed, let the caller place each chain: the neck's is created
+    BEFORE the girdle chain so it executes after chest_bind's final
+    write (see build()).
+    """
+    from girdle import offset_in_source_space as _offset_in_source_space
 
     total = 0
-    for info in chains:
-        tag = info["tag"]
-        # A chain per spline, NOT one shared chain. A mover chain is one
-        # dependency unit, so a single chain holding both the spine and neck
-        # constraints would write the spine joints AND -- through the neck
-        # ribbon's startFrame, which is neck_base_bind, a descendant of
-        # chest_bind and so of spine_5_bind -- read them. That is a genuine
-        # pose cycle and the compiler rejects it. Separate chains leave the
-        # dependency a DAG: spine constraints -> neck ribbon -> neck
-        # constraints.
-        chain = builder.new_mover_chain("%s_to_bind" % tag)
-        drifts = []
-        # ADD ORDER MATTERS, and it is the reverse of what reads naturally.
-        # A mover chain applies in reverse add order, so adding root-first
-        # would EXECUTE tip-first -- and a joint's write propagates to its
-        # descendants, so the root writing last re-scaled every joint below
-        # it. That compounded the squash down the chain: the bind joints
-        # came out 0.957, 0.875, 0.763, 0.649, 0.582, 0.545, 0.533, which is
-        # just the running product of the correct per-joint profile
-        # (0.957 x 0.914 = 0.875, and so on) instead of the profile itself.
-        # Adding tip-first makes the root execute first, so each joint's own
-        # absolute write lands after it has inherited its parent's.
-        for joint, dup in reversed(list(zip(info["joints"], info["dup"]))):
-            solved = Gf.Matrix4d(*pose.joint_frame(dup).to_matrix4())
-            rest = worlds[joint]
-            drifts.append((solved.ExtractTranslation() -
-                           rest.ExtractTranslation()).GetLength())
-            t, r = _offset_in_source_space(rest, solved)
-            pc = chain.add_parent_constraint(
-                "%s_to_%s" % (dup.rsplit("/", 1)[-1], joint),
-                joint_prim_paths[joint], [dup])
-            pc.set_translation_offsets([t])
-            pc.set_rotation_offsets([r])
-            total += 1
-            # A parent constraint carries translation and rotation only, so
-            # the squetch never reached the bind joints without this: the
-            # duplicates thinned exactly on Maya's profile (0.957, 0.914,
-            # 0.871, 0.849, 0.892, 0.935, 0.979 under a 30% stretch, so
-            # thinnest at spine_3 where the volume weight peaks at 0.5)
-            # while every bind joint stayed at 1.000. Maya's spline.py
-            # makes a separate scaleConstraint for the same reason.
-            sc = chain.add_scale_constraint(
-                "%s_scale_to_%s" % (dup.rsplit("/", 1)[-1], joint),
-                joint_prim_paths[joint], [dup])
-            total += 1
-        print("  %-6s %d joints: parent + scale constraint each; the "
-              "solved chain sat %.2f-%.2f cm off the bind joints at rest, "
-              "now absorbed by the offsets"
-              % (tag, len(info["joints"]), min(drifts), max(drifts)))
+    tag = info["tag"]
+    chain = builder.new_mover_chain("%s_to_bind" % tag)
+    drifts = []
+    # ADD ORDER MATTERS, and it is the reverse of what reads naturally.
+    # A mover chain applies in reverse add order, so adding root-first
+    # would EXECUTE tip-first -- and a joint's write propagates to its
+    # descendants, so the root writing last re-scaled every joint below
+    # it. That compounded the squash down the chain: the bind joints
+    # came out 0.957, 0.875, 0.763, 0.649, 0.582, 0.545, 0.533, which is
+    # just the running product of the correct per-joint profile
+    # (0.957 x 0.914 = 0.875, and so on) instead of the profile itself.
+    # Adding tip-first makes the root execute first, so each joint's own
+    # absolute write lands after it has inherited its parent's.
+    for joint, dup in reversed(list(zip(info["joints"], info["dup"]))):
+        solved_m = solved[dup]
+        rest = worlds[joint]
+        drifts.append((solved_m.ExtractTranslation() -
+                       rest.ExtractTranslation()).GetLength())
+        t, r = _offset_in_source_space(rest, solved_m)
+        pc = chain.add_parent_constraint(
+            "%s_to_%s" % (dup.rsplit("/", 1)[-1], joint),
+            joint_prim_paths[joint], [dup])
+        pc.set_translation_offsets([t])
+        pc.set_rotation_offsets([r])
+        total += 1
+        # A parent constraint carries translation and rotation only, so
+        # the squetch never reached the bind joints without this: the
+        # duplicates thinned exactly on Maya's profile (0.957, 0.914,
+        # 0.871, 0.849, 0.892, 0.935, 0.979 under a 30% stretch, so
+        # thinnest at spine_3 where the volume weight peaks at 0.5)
+        # while every bind joint stayed at 1.000. Maya's spline.py
+        # makes a separate scaleConstraint for the same reason.
+        chain.add_scale_constraint(
+            "%s_scale_to_%s" % (dup.rsplit("/", 1)[-1], joint),
+            joint_prim_paths[joint], [dup])
+        total += 1
+    print("  %-6s %d joints: parent + scale constraint each; the "
+          "solved chain sat %.2f-%.2f cm off the bind joints at rest, "
+          "now absorbed by the offsets"
+          % (tag, len(info["joints"]), min(drifts), max(drifts)))
     return total
 
 
@@ -1263,7 +1351,7 @@ def build(out_path, skin_path=None, rig_root="/Biped/Rig",
           with_spine=False, with_girdles=True,
           skin_mode="skin", fk_follow_parent=False,
           with_feet=True, with_hands=True, layered=False,
-          ik_handles_world=False):
+          ik_handles_follow_girdle=False, with_torso=True):
     data, parent = load_joints(os.path.join(DATA, "joint_positions.data"))
     ordered = skeleton_order(data, parent)
     print("joints to author: %d" % len(ordered))
@@ -1344,58 +1432,110 @@ def build(out_path, skin_path=None, rig_root="/Biped/Rig",
         add_rigexec_skinning(builder, stage, manifest, mesh_name,
                              joint_prim_paths, rig_root, skin_mode)
 
+    if with_twist:
+        # Created right after the skin chain so it EXECUTES right before
+        # it, after every write to the joint hierarchy (hips_follow, the
+        # spline bind chains, the girdles, the feet). It used to be
+        # created after the spine block, and so ran BEFORE hips_follow
+        # and the girdles, aiming at joints that had not been moved
+        # yet: a pure 12.2 cm translate of the whole body turned
+        # shoulderNoTwist_?_bind 17-28 degrees and thighNoTwist_?_bind
+        # 15 degrees, and a 15 cm chest translate turned
+        # shoulderNoTwist 35.4 degrees (measured on the shipped rig
+        # too, so it predates the body control). Here the same
+        # translate leaves every twist joint at 0.0000 cm / 0.0000
+        # degrees of rigid drift and the skinned mesh at exactly the
+        # body's displacement over all 26276 points. Rest check and
+        # every gate re-proved after the move.
+        print("\ntwist aim constraints:")
+        add_twist_aims(builder, data, joint_prim_paths)
+
     if with_spine:
+        # The body controls first: hips (Maya `hips`, the control that
+        # carries the whole character) and torso between it and the
+        # chest. The spine's pivot controls nest under them.
+        print("\nbody controls (Maya rig_bits.nxt /spine/controls/fk: "
+              "hips > hips_gimbal > {hip_swivel, torso > chest}):")
+        from body import add_body_controls
+        body = add_body_controls(builder, stage, worlds,
+                                 with_torso=with_torso)
+        chest_parent = body["torso"] or body["hips"]
+
         print("\nspline IK (control-driven, the ikSpline analogue):")
         # Spine: three controls (hip_swivel, spine_mid, chest_top) with
         # pivots on the root and end; neck: root and head only, the head
         # with a pivot, cv1 aimed from the root (rig_bits.nxt /neck has
         # no pivotHeight on the neck control and no mid control at all).
-        spline_chains = [
-            add_spline_ik_chain(builder, stage, worlds, joint_prim_paths,
-                                "spine", SPINE_JOINTS, SPINE_VOLUME_WEIGHTS,
-                                mid="follow", pivots=("root", "end")),
-            add_spline_ik_chain(builder, stage, worlds, joint_prim_paths,
-                                "neck", NECK_JOINTS, NECK_VOLUME_WEIGHTS,
-                                mid="aim", pivots=("end",)),
-        ]
-        # ORDER IS LOAD-BEARING, established by counterexample:
-        #   * the girdle chain created BEFORE finish_spline_chains
-        #     (so it EXECUTES after) -- built the other way round,
-        #     the rest check still passed but the clavicles sat
-        #     17 cm off their controls and a 25 degree chest swing
-        #     turned chest_bind 62.8 degrees;
-        #   * add_hips_follow created AFTER it (so it EXECUTES
-        #     first) -- built before, the hip twist DOUBLED: 59.7
-        #     degrees for a 30 degree roll.
-        # chest_bind is the clavicles' parent, so its write has to
-        # land before theirs; the hips write has to land before the
-        # spine's absolute writes or their propagation moves it
-        # again.
+        # Parenting: hip_swivel under hips, chest under torso; the neck
+        # control under the chest control, the head under the neck
+        # (see add_spline_ik_chain).
+        spine_chain = add_spline_ik_chain(
+            builder, stage, worlds, joint_prim_paths,
+            "spine", SPINE_JOINTS, SPINE_VOLUME_WEIGHTS,
+            mid="follow", pivots=("root", "end"),
+            root_parent=body["hips"], end_parent=chest_parent)
+        neck_chain = add_spline_ik_chain(
+            builder, stage, worlds, joint_prim_paths,
+            "neck", NECK_JOINTS, NECK_VOLUME_WEIGHTS,
+            mid="aim", pivots=("end",),
+            root_parent=spine_chain["controls"][2], end_parent="root")
+        spline_chains = [spine_chain, neck_chain]
+
+        # ORDER IS LOAD-BEARING. A mover chain executes in REVERSE
+        # creation order, and a joint's write propagates to every
+        # descendant not re-written afterwards, so the chains that
+        # write the spine hierarchy are created in the reverse of the
+        # order they must run:
+        #
+        #   executes   created   chain           writes
+        #   1st        4th       hips_follow     hips_bind (root of all)
+        #   2nd        3rd       spine_to_bind   spine_0 .. chest_bind
+        #   3rd        2nd       girdles         chest_bind (override),
+        #                                        clavicles, pelves
+        #   4th        1st       neck_to_bind    neck_0 .. skull_bind
+        #
+        # Each established by counterexample:
+        #   * girdles before spine_to_bind (executing after) -- the
+        #     other way round the rest check still passed but the
+        #     clavicles sat 17 cm off their controls and a 25 degree
+        #     chest swing turned chest_bind 62.8 degrees;
+        #   * hips_follow created last (executing first) -- created
+        #     earlier, the hip twist DOUBLED: 59.7 degrees for a 30
+        #     degree roll;
+        #   * neck_to_bind created FIRST (executing last). With both
+        #     spline chains bound in one call the neck's chain was
+        #     created after the spine's and so executed BEFORE it and
+        #     before the girdles' chest override: the neck joints were
+        #     written absolutely, then chest_bind's later re-write
+        #     (rest * inverse(hips-propagated)) propagated onto them.
+        #     Swivelling the hips 30 degrees moved neck_0_bind 25.64 cm
+        #     and skull_bind 33.08 cm with chest_bind at 0.00.
+        #     verify_spine.py's "hips swivel" check guards this.
+        print("  binding the bind joints (Maya's mo=1):")
+        solved = solve_spline_rest(stage, rig_root, spline_chains)
+        bind_spline_chain(builder, neck_chain, solved, worlds,
+                          joint_prim_paths)
+
         if with_girdles:
             print("\ngirdles (Maya rig_bits.nxt: the clavicle and "
                   "pelvis nuls are PARENTED under chest_top / "
                   "hip_swivel, and the joints are "
                   "point-constrained only):")
             from girdle import add_girdles
-            spine_ctls = spline_chains[0]["controls"]
+            spine_ctls = spine_chain["controls"]
             girdles = add_girdles(builder, stage, worlds,
                                   joint_prim_paths, spine_ctls[0],
                                   spine_ctls[2],
                                   chest_follows_end=True)
 
-        print("  binding the bind joints (Maya's mo=1):")
-        finish_spline_chains(builder, stage, rig_root, spline_chains,
-                             worlds, joint_prim_paths)
+        print("  binding the spine's bind joints:")
+        bind_spline_chain(builder, spine_chain, solved, worlds,
+                          joint_prim_paths)
 
         if with_girdles:
             from girdle import add_hips_follow
             add_hips_follow(builder, stage, worlds, joint_prim_paths,
-                            spline_chains[0]["controls"][0])
-
-
-    if with_twist:
-        print("\ntwist aim constraints:")
-        add_twist_aims(builder, data, joint_prim_paths)
+                            spine_chain["controls"][0])
 
     limbs = []
     if with_ik:
@@ -1414,7 +1554,8 @@ def build(out_path, skin_path=None, rig_root="/Biped/Rig",
                     girdle_parents[tag] = ctl
         limbs = add_limb_iks(builder, stage, worlds, joint_prim_paths,
                              poles, with_blend, fk_follow_parent,
-                             girdle_parents, ik_handles_world)
+                             girdle_parents,
+                             ik_handles_world=not ik_handles_follow_girdle)
 
     if with_feet or with_hands:
         add_feet_and_hands(builder, stage, worlds, joint_prim_paths, data,
@@ -1427,6 +1568,9 @@ def build(out_path, skin_path=None, rig_root="/Biped/Rig",
         # note at the end of add_spline_ik_chain.
         print("\nspline helper movers (created last, executed first):")
         for info in spline_chains:
+            if info["make_movers"] is None:
+                print("  %s: none needed" % info["tag"])
+                continue
             chain = info["make_movers"]()
             print("  %s" % getattr(chain, "name", getattr(chain, "path", chain)))
 
@@ -1571,14 +1715,19 @@ def main(argv):
     ap.add_argument("--twist", action="store_true",
                     help="aim-constrain the twist/noTwist/trans helper "
                          "joints the way body_rig.nxt connect_twist does")
-    ap.add_argument("--ik-handles-world", dest="ik_handles_world",
-                    action="store_true",
-                    help="keep the IK effector and pole controls in "
-                         "asset space instead of nesting them under "
-                         "the clavicle/pelvis control. Closer to Maya, "
-                         "where the IK handle hangs off the COG so a "
-                         "hand or foot stays PLANTED when the girdle "
-                         "moves; the default makes it ride along")
+    ap.add_argument("--ik-handles-follow-girdle",
+                    dest="ik_handles_follow_girdle", action="store_true",
+                    help="nest the IK effector and pole controls under "
+                         "the clavicle/pelvis control so a hand or foot "
+                         "rides the girdle. The default keeps them in "
+                         "asset space, which is Maya's arrangement (the "
+                         "IK handle hangs off the rig group, so a "
+                         "planted foot stays planted when the hips, "
+                         "swivel or pelvis move)")
+    ap.add_argument("--no-torso", dest="torso", action="store_false",
+                    help="omit torso_ctl, the FK swing between hips_ctl "
+                         "and the chest pivot (Maya's `torso`); the "
+                         "chest pivot then nests under hips_ctl directly")
     ap.add_argument("--layered", action="store_true",
                     help="also write a layered form beside the flat "
                          "one: a root composing center/left/right, "
@@ -1610,7 +1759,7 @@ def main(argv):
                  args.blend, args.spine, args.girdles,
                  args.skin_mode, args.fk_follow_parent,
                  args.feet, args.hands, args.layered,
-                 args.ik_handles_world)
+                 args.ik_handles_follow_girdle, args.torso)
 
 
 if __name__ == "__main__":

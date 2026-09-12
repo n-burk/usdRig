@@ -710,6 +710,14 @@ RigExecSplineIkHandle::SetMinLengthRatio(double ratio)
 }
 
 void
+RigExecSplineIkHandle::SetRootTangent(const TfToken &mode)
+{
+    _AuthorAttr(
+        GetPrim(), "rigExec:rootTangent", SdfValueTypeNames->Token,
+        VtValue(mode));
+}
+
+void
 RigExecSplineIkHandle::SetJointElements(const std::vector<int> &elements)
 {
     // Explicit VtIntArray payload (see TwistDistribution above).

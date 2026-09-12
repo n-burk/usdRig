@@ -107,6 +107,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((inputsPreserveVolume, "inputs:preserveVolume"))
     ((inputsMidFollowWeight, "inputs:midFollowWeight"))
     ((inputsMinLengthRatio, "inputs:minLengthRatio"))
+    ((rootTangent, "rigExec:rootTangent"))
     ((inputsRoll, "inputs:roll"))
     ((inputsTwist, "inputs:twist"))
 
@@ -1092,6 +1093,18 @@ _ComputeSplineIk(const VdfContext &ctx)
     // exactly as it did.
     params.minLengthRatio =
         _ScalarInput(ctx, _tokens->inputsMinLengthRatio, 0.0);
+    // rigid (the schema default) carries cv1 with the root control; aim
+    // turns it onto the chord to the (floored) end, Maya's neck.
+    const TfToken *tangentTok =
+        ctx.GetInputValuePtr<TfToken>(_tokens->rootTangent);
+    if (tangentTok && *tangentTok == "aim") {
+        params.aimRootTangent = true;
+    } else if (tangentTok && !tangentTok->IsEmpty() &&
+               *tangentTok != "rigid") {
+        ctx.Warn("SplineIk: unsupported rootTangent '%s'",
+                 tangentTok->GetText());
+        return result;
+    }
 
     rigExec::RigExecSplineIkControls controls;
     controls.root = *root;
@@ -1158,5 +1171,6 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSplineIk)
             AttributeValue<double>(_tokens->inputsMidFollowWeight),
             AttributeValue<double>(_tokens->inputsRoll),
             AttributeValue<double>(_tokens->inputsTwist),
-            AttributeValue<double>(_tokens->inputsMinLengthRatio));
+            AttributeValue<double>(_tokens->inputsMinLengthRatio),
+            AttributeValue<TfToken>(_tokens->rootTangent));
 }

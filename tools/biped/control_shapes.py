@@ -90,6 +90,13 @@ for _side in ("l", "r"):
         "clavicle_%s_ctl" % _side: ("clavicle_%s" % _side, "box"),
     })
 CONTROL_MAP.update({
+    # The body controls (body.py): Maya's `hips` (the whole-character
+    # control, /spine/controls/fk/hips, control_type cube but a 16-CV
+    # ring flat on world Y in the data) and `torso` (the FK swing between
+    # hips and chest, /spine/controls/fk/torso, same kind of ring). Both
+    # are world-aligned here as in Maya, so the CVs need no re-framing.
+    "hips_ctl": ("hips", "circle"),
+    "torso_ctl": ("torso", "circle"),
     "hip_swivel_ctl": ("hip_swivel", "cube"),
     "chest_top_ctl": ("chest_top", "box"),
     # The spine/neck controls and their offset-pivot parents

@@ -325,14 +325,35 @@ def split(src_path, out_root, use_payload=False, inherit=True):
     #    thighNoTwist_l_bind but a writer with a later ordinal exists"
     # because the skin mover stops sorting last. `reorder nameChildren` in
     # the ROOT layer restores the authored order over the whole stack.
+    # Pin the COMPOSED order, not the layer spec's raw one. A source layer
+    # may itself carry `reorder nameChildren` -- `params.py` authors one to
+    # move the param-follow chain to the top of the Movers stack so it
+    # executes first -- and `spec.nameChildren` reports the authored order
+    # with that reorder NOT applied. Pinning the raw order therefore threw
+    # the reorder away, and the split rig failed to compile with a pose
+    # dependency cycle through `param_follow` that the flat rig does not
+    # have. Reading the order off a composed stage applies every reorder in
+    # the stack, which is exactly the order RigExec will see.
+    src_stage = Usd.Stage.Open(src_path)
+
+    def composed_children(path):
+        prim = (src_stage.GetPseudoRoot() if path == Sdf.Path.absoluteRootPath
+                else src_stage.GetPrimAtPath(path))
+        if not prim or not prim.IsValid():
+            return None
+        return [c.GetName() for c in prim.GetChildren()]
+
     def pin_order(spec):
         children = list(spec.nameChildren)
         if len(children) > 1:
             path = spec.path
             if path != Sdf.Path.absoluteRootPath:
+                order = composed_children(path)
+                if not order:
+                    order = [c.name for c in children]
                 dst = Sdf.CreatePrimInLayer(root, path)
                 dst.specifier = Sdf.SpecifierOver
-                dst.nameChildrenOrder = [c.name for c in children]
+                dst.nameChildrenOrder = order
                 return 1 + sum(pin_order(c) for c in children)
         return sum(pin_order(c) for c in children)
 

@@ -482,6 +482,9 @@ verified fixes, regression coverage, and remaining scope limits.
 
 ## Further reading
 
+- [The biped rig](docs/biped-rig.md) — building, opening and animating the
+  ported Maya character, including how its side layers compose. Start here
+  if you want a real rig on screen rather than an example.
 - [Architecture and implementation specification](docs/spec.md)
 - [OpenUSD 26.08 capability validation](docs/spec-validation-2026-07-24.md)
 - [Hydra integration notes](docs/hydra-integration-notes.md)

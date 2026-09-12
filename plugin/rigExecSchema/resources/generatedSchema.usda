@@ -1005,6 +1005,12 @@ class RigExecSplineIk "RigExecSplineIk" (
             string userDocBrief = "Control carrying the curve start (cv0, cv1) and the root roll."
         }
     )
+    uniform token rigExec:rootTangent = "rigid" (
+        allowedTokens = ["rigid", "aim"]
+        customData = {
+            string userDocBrief = "How cv1, the root's tangent CV, is posed."
+        }
+    )
     uniform float[] rigExec:volumeWeights = [] (
         customData = {
             string userDocBrief = """Per-joint squash/stretch weight w_i, parallel to

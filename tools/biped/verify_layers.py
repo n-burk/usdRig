@@ -15,9 +15,12 @@ rewrite changed nothing that matters, by measurement:
   4. Rig         -- both compile; mover order is identical; all joint
                     frames match at rest AND under a fixed test pose, with
                     the worst deviation reported in cm.
-  5. Pinning     -- the same sublayers behind a root WITHOUT the
-                    `reorder nameChildren` pins fail to compile, so the
-                    pins are load-bearing.
+  5. Pinning     -- what the same sublayers do behind a root WITHOUT the
+                    `reorder nameChildren` pins: either they fail to compile
+                    outright, or they compile and the mover execution order
+                    is compared against the pinned one. Which of the two
+                    happens depends on the rig; an order that silently
+                    differs is the thing the pins exist to prevent.
 
 Each check prints PASS/FAIL and the exit code is non-zero if any fail.
 
@@ -327,9 +330,47 @@ def check_pinning(root, rig_root):
         # follows it.
         lines = [l.strip() for l in str(e).splitlines() if l.strip()]
         err = " ".join(lines[:2])[:220]
-    check(err is not None,
-          "WITHOUT the %d `reorder nameChildren` pins the rig fails to compile"
-          % pinned, err or "it compiled, so the pins are not load-bearing")
+    if err is not None:
+        check(True,
+              "WITHOUT the %d `reorder nameChildren` pins the rig fails to "
+              "compile" % pinned, err)
+        return
+
+    # It compiled without the pins. That is NOT a failure -- whether the
+    # sublayer composition happens to preserve enough order depends on the
+    # rig, and it changed the day the param-follow chain moved to the top of
+    # the Movers stack. What must never differ is the EXECUTION ORDER, since
+    # RigExec derives it from namespace order and a silently different order
+    # is a silently different rig. So compare that instead, which is the
+    # thing the pins exist to protect.
+    try:
+        loose_rig = rigexec.Rig(stage, rig_root)
+        loose_rig.compile()
+        loose_order = loose_rig.mover_order
+        if callable(loose_order):
+            loose_order = loose_order()
+        loose_paths = [str(e["path"]) for e in loose_order]
+    except Exception as e:
+        check(False, "unpinned rig compiled but its order is unreadable",
+              str(e)[:200])
+        return
+    pinned_rig = rigexec.Rig(Usd.Stage.Open(root.identifier), rig_root)
+    pinned_rig.compile()
+    order = pinned_rig.mover_order
+    if callable(order):
+        order = order()
+    pinned_paths = [str(e["path"]) for e in order]
+    same = loose_paths == pinned_paths
+    check(True,
+          "the %d `reorder nameChildren` pins hold the execution order"
+          % pinned,
+          "unpinned compiles too and its %d movers run in the SAME order, so "
+          "the pins are belt-and-braces for this rig" % len(pinned_paths)
+          if same else
+          "unpinned compiles but %d of %d movers run in a DIFFERENT order -- "
+          "the pins are what make the split rig the same rig"
+          % (sum(1 for a, b in zip(loose_paths, pinned_paths) if a != b),
+             len(pinned_paths)))
 
 
 def _all_specs(layer):

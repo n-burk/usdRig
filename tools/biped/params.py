@@ -98,9 +98,34 @@ OPACITY_INVERT = "guide:displayOpacityInvert"
 PARAM_SIZE = 3.0
 PARAM_COLOR = (1.0, 0.85, 0.1)
 
+# Where the cube sits relative to its joint, in WORLD axes (cm). Sitting
+# exactly on the joint buries it in the hand or foot geometry and inside
+# the limb's own controls, so it is offset clear of both: the wrist one
+# straight up, the ankle one out to the side, away from the body, which
+# also keeps the two feet's switches from crowding each other.
+# The offset is held by the parent constraint (Maya's `mo=1`), so it
+# rides the joint at a constant distance rather than being a pose.
+PARAM_OFFSETS = {
+    "arm_l": (0.0, 8.0, 0.0),
+    "arm_r": (0.0, 8.0, 0.0),
+    "leg_l": (12.0, 0.0, 0.0),
+    "leg_r": (-12.0, 0.0, 0.0),
+}
+
 
 def flatten(m):
     return [m[r][c] for r in range(4) for c in range(4)]
+
+
+def offset_in_source_space(target_rest, source_rest):
+    """The constant offset a RigExecParentConstraint needs."""
+    c = target_rest * source_rest.GetInverse()
+    t = c.ExtractTranslation()
+    r = c.ExtractRotation().Decompose(Gf.Vec3d(0, 0, 1),
+                                      Gf.Vec3d(0, 1, 0),
+                                      Gf.Vec3d(1, 0, 0))
+    # Decompose returns Z, Y, X for those axes; the schema wants XYZ.
+    return (t[0], t[1], t[2]), (r[2], r[1], r[0])
 
 
 def joint_world_rest(stage, path):
@@ -160,23 +185,22 @@ def add_param_controls(builder, stage, joint_prim_paths=None, verbose=True,
                   joint -- literally Maya's
                   `parentConstraint(joint_list[-1], param_node, mo=False)`,
                   and where a control belongs. It tracks perfectly (gap
-                  0.000000 cm at rest, in FK and in IK) but the rig DOES
-                  NOT COMPILE: RigExec's pose-dependency analysis is
-                  prim-granular, so it sees the blend solver reading the
-                  param control, the param control written by a constraint
-                  reading the ankle, and the ankle written by the blend --
-                  a cycle. It is a false one: what the blend reads is a
-                  SCALAR attribute, not the control's frame. Maya has the
-                  same topology and is fine because its DG is
-                  attribute-granular.
+                  0.000000 cm at rest, in FK and in IK, on biped_rig_v3)
+                  PROVIDED the follower chain executes last: see
+                  _execute_last for the real loop the bottom of the Movers
+                  stack closed, which was first read as a prim-granular
+                  false cycle in the dependency analysis and is not one --
+                  the blend reads the param control's SCALAR only, and the
+                  compiler never had a pose edge for that.
 
-      "skeleton"  nested under the end joint itself. No constraint, so no
-                  cycle, and the namespace composition tracks the joint
-                  exactly the same way. The cost is a control prim sitting
-                  inside the bone hierarchy, which is not where a control
-                  belongs.
+      "skeleton"  nested under the end joint itself. No constraint, so
+                  nothing to order, and the namespace composition tracks
+                  the joint exactly the same way. The cost is a control
+                  prim sitting inside the bone hierarchy, which is not
+                  where a control belongs.
 
-    "skeleton" is the default only because "controls" cannot compile yet.
+    "skeleton" stays the default for now so the builder's output does not
+    change under it mid-flight; "controls" is the layout to move to.
     Returns {tag: param control path}.
     """
     made = {}
@@ -205,10 +229,15 @@ def add_param_controls(builder, stage, joint_prim_paths=None, verbose=True,
         elif weight_attr is not None and weight_attr.Get() is not None:
             default = float(weight_attr.Get())
 
+        joint_rest = joint_world_rest(stage, path)
+        offset = Gf.Vec3d(*PARAM_OFFSETS.get(tag, (0.0, 0.0, 0.0)))
+        param_rest = Gf.Matrix4d(joint_rest)
+        param_rest.SetTranslateOnly(joint_rest.ExtractTranslation()
+                                    + offset)
         if place == "controls":
-            # A top-level control: asset-space rest, the end joint's frame.
-            ctl = builder.add_control(
-                "%s_params" % tag, flatten(joint_world_rest(stage, path)))
+            # A top-level control: asset-space rest, offset off the joint.
+            ctl = builder.add_control("%s_params" % tag,
+                                      flatten(param_rest))
             ctl_path = str(ctl.path)
             prim = stage.GetPrimAtPath(ctl_path)
         else:
@@ -216,9 +245,9 @@ def add_param_controls(builder, stage, joint_prim_paths=None, verbose=True,
             prim = stage.DefinePrim(Sdf.Path(ctl_path), "RigExecControl")
             # Nested under the joint, its rest is parent-local, so identity
             # IS the joint's own frame.
+            local = param_rest * joint_rest.GetInverse()
             prim.CreateAttribute(
-                "rest:space", Sdf.ValueTypeNames.Matrix4d).Set(
-                    Gf.Matrix4d(1.0))
+                "rest:space", Sdf.ValueTypeNames.Matrix4d).Set(local)
             prim.CreateAttribute("purpose",
                                  Sdf.ValueTypeNames.Token).Set("guide")
         prim.CreateAttribute("guide:shape", Sdf.ValueTypeNames.Token, True,
@@ -237,8 +266,12 @@ def add_param_controls(builder, stage, joint_prim_paths=None, verbose=True,
         if place == "controls":
             if chain is None:
                 chain = builder.new_mover_chain("param_follow")
-            chain.add_parent_constraint("%s_params_to_%s" % (tag, end_joint),
-                                        ctl_path, [path])
+            pc = chain.add_parent_constraint(
+                "%s_params_to_%s" % (tag, end_joint), ctl_path, [path])
+            if offset != Gf.Vec3d(0, 0, 0):
+                t, r = offset_in_source_space(param_rest, joint_rest)
+                pc.set_translation_offsets([t])
+                pc.set_rotation_offsets([r])
 
         dial = prim.CreateAttribute(AVAR, Sdf.ValueTypeNames.Float)
         # Carry the old dial's ANIMATION across, not just its value, so a
@@ -269,11 +302,43 @@ def add_param_controls(builder, stage, joint_prim_paths=None, verbose=True,
                      "parent-constrained from %s" % end_joint
                      if place == "controls" else "nested under %s" % end_joint,
                      AVAR, default))
+    if place == "controls" and chain is not None:
+        _execute_last(stage, chain.scope_path)
     if made:
         if verbose:
             print("the switch fades the inactive control set:")
         wire_ikfk_opacity(stage, verbose=verbose)
     return made
+
+
+def _execute_last(stage, chain_path):
+    """Put a mover chain at the TOP of the Movers stack, so it runs LAST.
+
+    The Movers namespace executes bottom-up (rigEvaluator.cpp,
+    `_GetMoverExecutionOrder`: the last child runs first, the first child
+    last). A chain the builder appends therefore runs BEFORE every
+    constraint already there -- and a follower of SOLVED joints has to run
+    after every constraint the solver's own inputs read. The leg IK's
+    effector sits under the reverse-foot pivots, which are constrained, so
+    a param follower at the bottom of the stack closed a real loop:
+    follower waits on the blend, the blend on the IK, the IK on the
+    reverse-foot constraints, and those (stack order) on the follower. The
+    arms escaped only because nothing constrained sits above their
+    effector. The compiler reported the loop as a cycle among every step
+    downstream of it -- sixty of them -- which is what made it look like a
+    prim-granularity bug in the dependency analysis; it was the authored
+    order.
+
+    The reorder lists every child explicitly: USD applies a partial
+    `reorder nameChildren` as a relative order and does not move a lone
+    name to the front. A chain added after this call lands at the bottom
+    again, so call it last, as add_param_controls does.
+    """
+    chain_path = Sdf.Path(chain_path)
+    movers = stage.GetPrimAtPath(chain_path.GetParentPath())
+    name = chain_path.name
+    others = [c.GetName() for c in movers.GetChildren() if c.GetName() != name]
+    movers.SetChildrenReorder([name] + others)
 
 
 def _limb_control_sets(stage, tag):
@@ -359,12 +424,20 @@ def wire_ikfk_opacity(stage, verbose=True):
 
 
 def _cleanup_old(stage, verbose=True):
-    """Remove param controls an earlier version left inside the skeleton."""
+    """Remove param controls a previous run left behind.
+
+    Both layouts, not just the skeleton one: re-running the tool on a rig
+    that already has them used to die with "rig object already exists:
+    /Biped/Rig/Controls/arm_l_params", which made it un-re-runnable as soon
+    as anything about the placement changed.
+    """
     stale = []
     for prim in stage.Traverse():
         if (str(prim.GetTypeName()) == "RigExecControl"
-                and prim.GetName().endswith("_params")
-                and "/Joints/" in str(prim.GetPath())):
+                and prim.GetName().endswith("_params")):
+            stale.append(str(prim.GetPath()))
+    for prim in stage.Traverse():
+        if prim.GetName() == "param_follow" and "/Movers/" in str(prim.GetPath()):
             stale.append(str(prim.GetPath()))
     for path in stale:
         stage.RemovePrim(Sdf.Path(path))
@@ -383,10 +456,11 @@ def main(argv):
     ap.add_argument("--place", choices=("skeleton", "controls"),
                     default="skeleton",
                     help="where the param control lives: nested under the "
-                         "end joint (default, compiles) or under "
-                         "<rig>/Controls parent-constrained from it (where "
-                         "a control belongs, but trips a false pose "
-                         "dependency cycle -- see the module docstring)")
+                         "end joint (default) or under <rig>/Controls "
+                         "parent-constrained from it, where a control "
+                         "belongs (the follower chain is placed at the top "
+                         "of the Movers stack so it runs last -- see "
+                         "_execute_last)")
     ap.add_argument("--out", default=None,
                     help="write here instead of editing in place")
     args = ap.parse_args(argv)

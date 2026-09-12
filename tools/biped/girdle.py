@@ -67,12 +67,20 @@ write propagates rigidly to every descendant. So:
   * `add_girdles` writes the clavicle and pelvis joints, and overrides
     chest_bind. Those must execute AFTER the spine writes (chest_bind is
     the clavicles' parent; the spline writes chest_bind). Create its chain
-    BEFORE `finish_spline_chains` -- but after `add_spline_ik_chain`,
-    because the controls nest under the spline's root/end controls. Within
-    the chain the clavicles are added first and chest_bind last, so chest
-    executes first and the clavicles land after its propagation.
+    BEFORE the spine's `bind_spline_chain` -- but after
+    `add_spline_ik_chain`, because the controls nest under the spline's
+    root/end controls. Within the chain the clavicles are added first and
+    chest_bind last, so chest executes first and the clavicles land after
+    its propagation.
+  * The NECK's bind chain must execute AFTER the girdles' chest_bind
+    override (the neck joints descend from chest_bind, and its re-write
+    propagates onto anything already written), so it is created BEFORE
+    `add_girdles`. Created after the spine's, as it once was, it ran
+    before both and a 30 degree hip swivel moved neck_0_bind 25.64 cm
+    with chest_bind at 0.00. The builder's build() has the full table.
   * Skinning stays first-created (last-executed), as the builder already
-    does.
+    does; the twist aims are created right after it so they run after
+    every hierarchy write.
 """
 from pxr import Gf
 

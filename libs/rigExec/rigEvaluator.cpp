@@ -4685,11 +4685,85 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         ++poseLevel;
     }
     if (scheduledPose != poseDependencies.size()) {
-        std::string paths;
-        for (const auto &[path, pending] : pendingPose) {
-            if (pending) paths += " " + path.GetString();
+        // Report the LOOP, not everything waiting on it. What Kahn leaves
+        // behind is every step downstream of the cycle -- on the biped that
+        // was sixty constraints and four solvers for a loop of four -- and a
+        // list like that reads as "everything depends on everything", which
+        // sent two investigations after the wrong edge. A depth-first walk
+        // over the unscheduled steps, following only edges into other
+        // unscheduled steps (a scheduled dependency cannot be on the loop),
+        // finds one elementary cycle; the rest are counted as a hint of the
+        // blast radius.
+        const auto unscheduled = [&pendingPose](const SdfPath &path) {
+            const auto it = pendingPose.find(path);
+            return it != pendingPose.end() && it->second != 0;
+        };
+        struct _Frame {
+            SdfPath node;
+            std::vector<SdfPath> dependencies;
+            size_t next = 0;
+        };
+        std::vector<SdfPath> loop;
+        std::map<SdfPath, int> color;  // 0 unvisited, 1 on the stack, 2 done
+        for (const auto &[start, pending] : pendingPose) {
+            if (!pending || color[start] != 0 || !loop.empty()) continue;
+            std::vector<_Frame> stack;
+            const auto push = [&](const SdfPath &node) {
+                color[node] = 1;
+                const auto &deps = poseDependencies[node];
+                stack.push_back({node, {deps.begin(), deps.end()}, 0});
+            };
+            push(start);
+            while (!stack.empty() && loop.empty()) {
+                if (stack.back().next >= stack.back().dependencies.size()) {
+                    color[stack.back().node] = 2;
+                    stack.pop_back();
+                    continue;
+                }
+                const SdfPath dependency =
+                    stack.back().dependencies[stack.back().next++];
+                if (!unscheduled(dependency)) continue;
+                const int c = color[dependency];
+                if (c == 1) {
+                    for (const _Frame &frame : stack) {
+                        if (!loop.empty() || frame.node == dependency) {
+                            loop.push_back(frame.node);
+                        }
+                    }
+                } else if (c == 0) {
+                    push(dependency);
+                }
+            }
         }
-        reportError("pose dependency cycle among:" + paths);
+        std::string message = "pose dependency cycle among:";
+        if (loop.empty()) {
+            // Cannot happen -- an unschedulable DAG has a cycle by
+            // definition -- but a report is still owed if it somehow does.
+            for (const auto &[path, pending] : pendingPose) {
+                if (pending) message += " " + path.GetString();
+            }
+        } else {
+            // In dependency order: each step waits on the next, the last on
+            // the first. A constraint's wait on its predecessor in the
+            // Movers stack shows up here as an ordinary edge, which is how
+            // "this follower is authored below what it needs" reads.
+            size_t waiting = 0;
+            for (const auto &[path, pending] : pendingPose) {
+                if (pending) ++waiting;
+            }
+            waiting -= loop.size();
+            for (const SdfPath &step : loop) message += " " + step.GetString() + " ->";
+            message += " " + loop.front().GetString() +
+                       " (each step waits on the next";
+            if (waiting) {
+                message += "; " + std::to_string(waiting) +
+                           (waiting == 1 ? " further pose step waits"
+                                         : " further pose steps wait") +
+                           " on the loop";
+            }
+            message += ")";
+        }
+        reportError(message);
         restorePreviousEpoch();
         return false;
     }

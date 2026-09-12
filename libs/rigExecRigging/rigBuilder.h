@@ -285,6 +285,8 @@ public:
     /// Length floor as a fraction of the rest root->end chord, 0 = off
     /// (inputs:minLengthRatio).
     void SetMinLengthRatio(double ratio);
+    /// rigid | aim: how the root tangent CV is posed (rigExec:rootTangent).
+    void SetRootTangent(const TfToken &mode);
     /// Optional chain slot per rigExec:joints entry (a permutation).
     void SetJointElements(const std::vector<int> &elements);
 };
