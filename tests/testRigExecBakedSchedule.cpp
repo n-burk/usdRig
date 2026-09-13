@@ -19,25 +19,44 @@
 //   * the report is deterministic, so a schedule can be diffed between two
 //     builds of the same stage and a change in it is a change someone made.
 //
+// The geometry section below asks the two questions the vertex partition
+// adds: that the chunks of a skin revision cover every vertex exactly once
+// and that no chunk is missing an influence one of its own vertices names --
+// a chunk that skins a vertex against an identity it never noticed is a
+// silently wrong deformation, not a crash -- and that a revision whose packet
+// the frame rejects passes its preceding points through exactly as the
+// dynamic path does, which is the decision the fuse took over from the
+// kernel.
+//
 // argv[1] = path to the examples directory (containing biped/Biped.usda).
 //
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
 #include "rigExec/parallel.h"
+#include "rigExec/moverGraph.h"
+#include "rigExecMath/dualQuat.h"
+#include "rigExecMath/simdKernels.h"
+#include "rigExecMath/solvers.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/tapSet.h"
 
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/value.h"
+#include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <cmath>
+#include <set>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -326,12 +345,39 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
     // must fail a test rather than wait for someone to re-run the dumps at
     // grain 0. A revision this step writes RevisionDone for is its own fuse
     // deciding the indirection, and is excluded.
+    //
+    // RevisionOut is indexed by CHUNK and RevisionDone by REVISION, so the
+    // rule is stated over revisions and the buffer slots are mapped back to
+    // the revision that owns them: a chunk of revision r reading any earlier
+    // chunk's buffer is a step reading revision r' output, and it is r' whose
+    // fuse chose it.
     const size_t revisions = B.revisionIndex.size();
+    std::vector<int> revisionOfChunk;
+    for (size_t revision = 0; revision < revisions; ++revision) {
+        const int base = B.revisionChunkBase[revision];
+        const int count = B.revisionChunkCount[revision];
+        if (size_t(base + count) > revisionOfChunk.size()) {
+            revisionOfChunk.resize(size_t(base + count), -1);
+        }
+        for (int k = 0; k < count; ++k) {
+            revisionOfChunk[size_t(base + k)] = int(revision);
+        }
+    }
     auto mark = [revisions](std::vector<bool> *flags,
                             const RigExecBakedSlotRange &range) {
         for (size_t slot = range.begin;
              slot < range.end && slot < revisions; ++slot) {
             (*flags)[slot] = true;
+        }
+    };
+    auto markOut = [&revisionOfChunk](std::vector<bool> *flags,
+                                      const RigExecBakedSlotRange &range) {
+        for (size_t slot = range.begin;
+             slot < range.end && slot < revisionOfChunk.size(); ++slot) {
+            const int revision = revisionOfChunk[slot];
+            if (revision >= 0) {
+                (*flags)[size_t(revision)] = true;
+            }
         }
     };
     std::vector<bool> readsOut(revisions), readsDone(revisions),
@@ -343,7 +389,7 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
         writesDone.assign(revisions, false);
         for (const RigExecBakedSlotRange &read : step.reads) {
             if (read.domain == RigExecBakedSlotDomain::RevisionOut) {
-                mark(&readsOut, read);
+                markOut(&readsOut, read);
             } else if (read.domain == RigExecBakedSlotDomain::RevisionDone) {
                 mark(&readsDone, read);
             }
@@ -542,6 +588,598 @@ TestTheModeIsTheOneTheEnvironmentAsked()
     CHECK(RigExecBakedScheduleModeFromEnvironment() == expected);
 }
 
+/// A synthetic skin packet: \p influences joints, \p points vertices,
+/// elementSize slots per vertex, weights and indices that vary per vertex.
+RigExecMoverParameters
+SyntheticSkinPacket(size_t influences, size_t points, size_t elementSize,
+                    const TfToken &method)
+{
+    RigExecMoverParameters packet;
+    packet.kind = TfToken("skin");
+    packet.enabled = true;
+    packet.valid = true;
+    packet.skinningMethod = method;
+    packet.weights = RigExecWeightPacket::Constant(1.0f);
+    packet.skinElementSize = int(elementSize);
+    for (size_t t = 0; t < influences; ++t) {
+        GfMatrix4d matrix(1.0);
+        matrix.SetTranslate(GfVec3d(double(t) * 0.25, double(t) * -0.125,
+                                    double(t) * 0.5));
+        matrix[0][0] = 1.0 + 0.01 * double(t);
+        matrix[1][2] = 0.02 * double(t);
+        packet.skinTransforms.push_back(matrix);
+    }
+    for (size_t i = 0; i < points; ++i) {
+        float total = 0.0f;
+        for (size_t k = 0; k < elementSize; ++k) {
+            packet.skinIndices.push_back(int((i * 7 + k * 3) % influences));
+            const float weight = float((i + k + 1) % 5) / 10.0f;
+            packet.skinWeights.push_back(weight);
+            total += weight;
+        }
+        // A shortfall on some vertices and a full set on others, so the
+        // complement rule is exercised on both sides.
+        if (total > 0.9f) {
+            packet.skinWeights[i * elementSize] +=
+                std::max(0.0f, 1.0f - total);
+        }
+    }
+    return packet;
+}
+
+/// The range form deforms a vertex exactly as the whole-array form does.
+///
+/// This is the shared-kernel rule as an assertion: the chunked path and the
+/// unchunked one run the same per-vertex body, so a mesh cut into ranges is
+/// bit-identical to the same mesh deformed whole -- not equal to tolerance,
+/// bit-identical -- for both skinning methods and whether the caller narrows
+/// and splits the influence table itself or lets the kernel do it. The rigs
+/// that bake today are all classicLinear, so without this the
+/// dual-quaternion range form has no fixture at all.
+void
+TestTheRangeFormDeformsLikeTheWholeArray(const char *method)
+{
+    const size_t influences = 11, points = 9000, elementSize = 4;
+    const RigExecMoverParameters packet = SyntheticSkinPacket(
+        influences, points, elementSize, TfToken(method));
+    std::vector<GfVec3f> rest(points);
+    for (size_t i = 0; i < points; ++i) {
+        rest[i] = GfVec3f(float(i % 37) * 0.5f, float(i % 11) * 1.25f,
+                          float(i % 5) * -2.0f);
+    }
+
+    std::vector<GfVec3f> whole = rest;
+    CHECK(RigExecApplySkinKernel(packet, &whole));
+
+    // The same influence table, narrowed and split once by the caller -- the
+    // forms a chunk keeps beside its own matrices.
+    std::vector<float> rows(influences * RigExecSkinRowStride);
+    for (size_t t = 0; t < influences; ++t) {
+        RigExecNarrowSkinRows(packet.skinTransforms[t],
+                              &rows[t * RigExecSkinRowStride]);
+    }
+    RigExecSkinLayout layout;
+    layout.transforms = packet.skinTransforms.data();
+    layout.transformCount = influences;
+    const std::vector<RigExecScaledDualQuat> palette =
+        RigExecSkinDualQuatPalette(layout);
+
+    for (const bool supplied : {false, true}) {
+        for (const size_t chunk : {size_t(1), size_t(512), size_t(4096)}) {
+            RigExecSkinTransformsView view;
+            view.transforms = packet.skinTransforms.data();
+            view.transformCount = influences;
+            if (supplied) {
+                view.rows = rows.data();
+                view.palette = palette.data();
+                view.paletteSize = palette.size();
+            }
+            std::vector<GfVec3f> ranged = rest;
+            bool ok = true;
+            for (size_t begin = 0; begin < points; begin += chunk) {
+                ok = ok && RigExecApplySkinKernelRange(
+                               packet, view, begin,
+                               std::min(points, begin + chunk), &ranged);
+            }
+            CHECK(ok);
+            if (ranged != whole) {
+                ++failures;
+                std::printf("FAIL %s: ranges of %zu%s differ from the whole "
+                            "array\n", method, chunk,
+                            supplied ? " (caller's tables)" : "");
+            }
+        }
+    }
+    std::printf("  %s: range forms are bit-identical to the whole array\n",
+                method);
+}
+
+/// A chunk deforms its vertices against a table that is IDENTITY outside its
+/// own key, and gets the same points as the whole array does.
+///
+/// This is the invariant the speculation rests on, asserted directly rather
+/// than through a rig: a chunk copies only |key| matrices into its table and
+/// leaves every other entry the identity the partition filled it with, so if
+/// a kernel ever reached an entry outside the key -- a normalisation over the
+/// table, a complement taken from the wrong slot -- the chunked result would
+/// move and the whole-array one would not. The dual-quaternion case is the
+/// one that needs saying out loud, because its palette is built from the
+/// padded table and the weight complement is an extra entry past its end.
+void
+TestAChunkSeesOnlyItsOwnInfluences(const char *method)
+{
+    const size_t influences = 11, points = 9000, elementSize = 4;
+    RigExecMoverParameters packet = SyntheticSkinPacket(
+        influences, points, elementSize, TfToken(method));
+    // Region-local indices, which is what makes a key a PART of the table:
+    // the synthetic packet's indices stride the whole table, so every range
+    // of it would name every influence and the padding under test would
+    // never exist. A mesh's vertices are numbered by region, which is the
+    // property the partition trades on.
+    for (size_t i = 0; i < points; ++i) {
+        const size_t region = i / 900;
+        for (size_t k = 0; k < elementSize; ++k) {
+            packet.skinIndices[i * elementSize + k] =
+                int((region + k) % influences);
+        }
+    }
+    std::vector<GfVec3f> rest(points);
+    for (size_t i = 0; i < points; ++i) {
+        rest[i] = GfVec3f(float(i % 37) * 0.5f, float(i % 11) * 1.25f,
+                          float(i % 5) * -2.0f);
+    }
+    std::vector<GfVec3f> whole = rest;
+    CHECK(RigExecApplySkinKernel(packet, &whole));
+
+    const size_t chunk = 512;
+    size_t padded = 0;
+    std::vector<GfVec3f> ranged = rest;
+    bool ok = true;
+    for (size_t begin = 0; begin < points; begin += chunk) {
+        const size_t end = std::min(points, begin + chunk);
+        // The key, off the same indices the kernel reads.
+        std::set<int> key;
+        for (size_t point = begin; point < end; ++point) {
+            for (size_t slot = 0; slot < elementSize; ++slot) {
+                key.insert(packet.skinIndices[point * elementSize + slot]);
+            }
+        }
+        if (key.size() < influences) {
+            ++padded;
+        }
+        // The chunk's own tables: identity everywhere, the key copied in,
+        // and the two derived forms maintained entry by entry beside it --
+        // which is exactly what GatherChunkTransforms does per run.
+        std::vector<GfMatrix4d> transforms(influences, GfMatrix4d(1.0));
+        std::vector<float> rows(influences * RigExecSkinRowStride);
+        std::vector<RigExecScaledDualQuat> palette(influences + 1);
+        for (const int index : key) {
+            transforms[size_t(index)] = packet.skinTransforms[size_t(index)];
+        }
+        for (size_t t = 0; t < influences; ++t) {
+            RigExecNarrowSkinRows(transforms[t],
+                                  &rows[t * RigExecSkinRowStride]);
+            palette[t] = RigExecScaledDualQuatFromMatrix(transforms[t]);
+        }
+        palette[influences] = RigExecScaledDualQuat();
+        RigExecSkinTransformsView view;
+        view.transforms = transforms.data();
+        view.transformCount = transforms.size();
+        view.rows = rows.data();
+        view.palette = palette.data();
+        view.paletteSize = palette.size();
+        ok = ok && RigExecApplySkinKernelRange(packet, view, begin, end,
+                                               &ranged);
+    }
+    CHECK(ok);
+    // Otherwise every table above held every matrix and the assertion below
+    // would be the previous test's.
+    CHECK(padded > 0);
+    if (ranged != whole) {
+        ++failures;
+        std::printf("FAIL %s: identity-padded chunk tables differ from the "
+                    "whole array\n", method);
+        return;
+    }
+    std::printf("  %s: a chunk reads no entry outside its key (%zu padded "
+                "range(s))\n", method, padded);
+}
+
+/// The skin mover of \p stage, or an empty path.
+SdfPath
+FindSkinMover(const UsdStageRefPtr &stage)
+{
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (prim.GetTypeName() == "RigExecSkinMover") {
+            return prim.GetPath();
+        }
+    }
+    return SdfPath();
+}
+
+/// Every skin revision's partition covers its vertices exactly once, stays
+/// under the cap, and gives each chunk a key that contains every influence
+/// its own vertices name.
+///
+/// The last one is the invariant the whole design rests on: a chunk fills the
+/// entries of its key and leaves the rest of the table identity, so an
+/// influence missing from a key is a vertex quietly skinned against the
+/// identity. Checked against the authored arrays rather than against the
+/// partition's own bookkeeping, so the check cannot agree with a bug by
+/// reading it back.
+void
+TestTheVertexPartitionCoversEveryVertexOnce(const std::string &stagePath,
+                                            const char *name, bool report)
+{
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    // One frame, so the partition can be asked whether it SURVIVED contact
+    // with the layout the packet carries: a stale one is correct -- the fuse
+    // runs the revision whole -- and would make every assertion below true
+    // of chunks nothing ran.
+    RigExecRigPose pose;
+    CHECK(built.program->Run(UsdTimeCode::Default(), &pose));
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    const size_t cap =
+        size_t(std::max(1, TfGetenvInt("RIGEXEC_BAKED_MAX_CHUNKS", 32)));
+    size_t skinRevisions = 0;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.op != RigExecRevisionOp::Skin) {
+                continue;
+            }
+            ++skinRevisions;
+            CHECK(!revision.chunks.empty());
+            CHECK(revision.chunks.size() <= cap);
+            // The packet's table is identity and sized to the influences:
+            // that is what lets the assemble run before the fold.
+            CHECK(revision.packetInfluences.size() ==
+                  revision.influenceSlots.size());
+            for (const GfMatrix4d &matrix : revision.packetInfluences) {
+                CHECK(matrix == GfMatrix4d(1.0));
+            }
+            if (!revision.chunked) {
+                continue;
+            }
+            // The frame agreed that the keys still describe the vertices,
+            // and every chunk produced its range.
+            CHECK(!revision.partitionStale);
+            for (const RigExecBakedProgramImpl::GeomChunk &chunk :
+                     revision.chunks) {
+                CHECK(chunk.ok);
+            }
+            // (1) The ranges are contiguous, ascending and cover exactly
+            // [0, pointCount).
+            int expected = 0;
+            for (const RigExecBakedProgramImpl::GeomChunk &chunk :
+                     revision.chunks) {
+                CHECK(chunk.begin == expected);
+                CHECK(chunk.end >= chunk.begin);
+                expected = chunk.end;
+            }
+            CHECK(size_t(expected) == revision.partitionPointCount);
+
+            // (2) Every vertex's influences are in its chunk's key, read
+            // back out of the authored layout.
+            const UsdPrim mover =
+                built.stage->GetPrimAtPath(revision.moverPath);
+            VtIntArray indices;
+            int elementSize = 0;
+            if (const UsdAttribute a =
+                    mover.GetAttribute(TfToken("rigExec:jointIndices"))) {
+                a.Get(&indices, UsdTimeCode::Default());
+            }
+            if (const UsdAttribute a =
+                    mover.GetAttribute(TfToken("rigExec:elementSize"))) {
+                a.Get(&elementSize, UsdTimeCode::Default());
+            }
+            CHECK(elementSize >= 1);
+            CHECK(indices.size() ==
+                  revision.partitionPointCount * size_t(elementSize));
+            if (elementSize < 1) {
+                continue;
+            }
+            size_t missing = 0;
+            for (const RigExecBakedProgramImpl::GeomChunk &chunk :
+                     revision.chunks) {
+                const std::set<int> key(chunk.key.begin(), chunk.key.end());
+                CHECK(key.size() == chunk.key.size());  // sorted, unique
+                for (size_t point = size_t(chunk.begin);
+                     point < size_t(chunk.end); ++point) {
+                    for (size_t slot = 0; slot < size_t(elementSize); ++slot) {
+                        const int index =
+                            indices[point * size_t(elementSize) + slot];
+                        if (index < 0 ||
+                            size_t(index) >= revision.influenceSlots.size()) {
+                            continue;  // the packet will reject the layout
+                        }
+                        if (!key.count(index)) {
+                            ++missing;
+                        }
+                    }
+                }
+            }
+            if (missing) {
+                ++failures;
+                std::printf("FAIL %s: %s has %zu vertex influence(s) outside "
+                            "their chunk's key\n", name,
+                            revision.moverPath.GetString().c_str(), missing);
+            }
+        }
+    }
+    std::printf("  %s: %zu skin revision(s)\n", name, skinRevisions);
+    if (report) {
+        std::printf("%s", RigExecBakedGeometryReport(B).c_str());
+    }
+}
+
+/// A skin revision the frame rejects publishes what the dynamic path
+/// publishes: the preceding points, and the MoverFailed line.
+///
+/// The decision moved: the kernel used to make it, and now the fuse does,
+/// out of a packet that no longer carries the influence matrices and a fold
+/// that checks them separately. So the fixture drives a rejection through an
+/// interactive override -- the route a manipulator uses, and the one that
+/// reaches the packet without rebuilding the program -- and asks the parity
+/// mode, which runs both paths in one generation and compares every
+/// published map, whether they agreed.
+void
+TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
+    const std::string &stagePath, const char *what, const TfToken &attribute,
+    const VtValue &value)
+{
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage != nullptr);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = FindRig(stage);
+    const SdfPath moverPath = FindSkinMover(stage);
+    CHECK(!rigPath.IsEmpty());
+    CHECK(!moverPath.IsEmpty());
+    if (rigPath.IsEmpty() || moverPath.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
+    const RigExecRigPose clean = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(clean.valid);
+    CHECK(clean.bakedParityMismatches == 0);
+
+    RigExecValueOverride override;
+    override.prim = moverPath;
+    override.attribute = attribute;
+    override.value = value;
+    evaluator.SetInteractiveOverrides({override});
+    const RigExecRigPose rejected = evaluator.Evaluate(UsdTimeCode::Default());
+    evaluator.ClearInteractiveOverrides();
+
+    CHECK(rejected.valid);
+    if (rejected.bakedParityMismatches != 0) {
+        ++failures;
+        std::printf("FAIL %s: %zu baked/dynamic mismatch(es)\n", what,
+                    rejected.bakedParityMismatches);
+        for (const std::string &diagnostic : rejected.diagnostics) {
+            std::printf("    %s\n", diagnostic.c_str());
+        }
+        return;
+    }
+    // And the fixture really did reject the revision, rather than agree
+    // about a generation in which nothing happened.
+    bool failed = false;
+    for (const std::string &diagnostic : rejected.diagnostics) {
+        failed = failed ||
+                 diagnostic.find("MoverFailed " + moverPath.GetString()) !=
+                     std::string::npos;
+    }
+    if (!failed) {
+        ++failures;
+        std::printf("FAIL %s: the revision was not rejected at all\n", what);
+        return;
+    }
+    // Rejected means the preceding points pass through, so the mesh is no
+    // longer where the skin put it.
+    size_t moved = 0;
+    for (const auto &[target, points] : clean.movedProperties) {
+        const auto found = rejected.movedProperties.find(target);
+        if (found != rejected.movedProperties.end() &&
+            found->second != points) {
+            ++moved;
+        }
+    }
+    if (!moved) {
+        ++failures;
+        std::printf("FAIL %s: the rejected revision published the same "
+                    "points as the applied one\n", what);
+    }
+    std::printf("  %s: passed through, %zu published target(s) moved\n", what,
+                moved);
+}
+
+/// A chunked revision skinned with dual quaternions publishes what the
+/// dynamic path publishes.
+///
+/// The rigs that bake today are all classicLinear, so the chunked
+/// dual-quaternion path -- where each chunk splits its OWN palette out of a
+/// table that is identity outside its key, rather than reading the
+/// revision's -- has no fixture of its own. An interactive override on
+/// rigExec:skinningMethod gives it one: the same rig, the same partition,
+/// the other method, and the parity mode running both paths in one
+/// generation to compare every published map.
+void
+TestADualQuaternionSkinChunksLikeTheDynamicPath(const std::string &stagePath)
+{
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage != nullptr);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = FindRig(stage);
+    const SdfPath moverPath = FindSkinMover(stage);
+    CHECK(!rigPath.IsEmpty());
+    CHECK(!moverPath.IsEmpty());
+    if (rigPath.IsEmpty() || moverPath.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    const RigExecRigPose linear = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(linear.valid);
+    CHECK(linear.bakedParityMismatches == 0);
+
+    RigExecValueOverride override;
+    override.prim = moverPath;
+    override.attribute = TfToken("rigExec:skinningMethod");
+    override.value = VtValue(TfToken("dualQuaternion"));
+    evaluator.SetInteractiveOverrides({override});
+    const RigExecRigPose dual = evaluator.Evaluate(UsdTimeCode::Default());
+    evaluator.ClearInteractiveOverrides();
+    CHECK(dual.valid);
+    if (dual.bakedParityMismatches != 0) {
+        ++failures;
+        std::printf("FAIL dual-quaternion chunks: %zu baked/dynamic "
+                    "mismatch(es)\n", dual.bakedParityMismatches);
+        return;
+    }
+    for (const std::string &diagnostic : dual.diagnostics) {
+        if (diagnostic.find("MoverFailed " + moverPath.GetString()) !=
+            std::string::npos) {
+            ++failures;
+            std::printf("FAIL dual-quaternion chunks: the revision was "
+                        "rejected: %s\n", diagnostic.c_str());
+            return;
+        }
+    }
+    // And it really did skin the other way, rather than agree about points
+    // the override never reached.
+    size_t moved = 0;
+    for (const auto &[target, pointsLinear] : linear.movedProperties) {
+        const auto found = dual.movedProperties.find(target);
+        if (found != dual.movedProperties.end() &&
+            found->second != pointsLinear) {
+            ++moved;
+        }
+    }
+    if (!moved) {
+        ++failures;
+        std::printf("FAIL dual-quaternion chunks: the override changed no "
+                    "published points\n");
+        return;
+    }
+    std::printf("  dual-quaternion chunks: parity held, %zu published "
+                "target(s) moved\n", moved);
+}
+
+/// A revision whose partition no longer describes its layout is run WHOLE,
+/// and lands where the chunks would have landed.
+///
+/// The fallback is the safety net under the whole design -- the keys are
+/// trusted only while they are provably current -- and no stage can drive it
+/// today: the layout cache preserves its handle for a binding that did not
+/// move, and one that did move re-cuts in the prologue. So the fixture makes
+/// the partition disagree with the packet by hand, which is the one thing a
+/// frame cannot do to itself, and then asks the question the fallback exists
+/// to answer: are the points the same ones?
+void
+TestAStalePartitionRunsTheRevisionWhole(const std::string &stagePath)
+{
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    RigExecRigPose chunkedPose;
+    CHECK(built.program->Run(UsdTimeCode::Default(), &chunkedPose));
+    // The program's own state, which is what a stale partition is a property
+    // of. Nothing else can reach it, and a fallback nothing exercises is a
+    // fallback nobody knows the value of.
+    RigExecBakedProgramImpl &B =
+        const_cast<RigExecBakedProgramImpl &>(built.program->GetStepGraph());
+    RigExecBakedProgramImpl::GeomRevision *stale = nullptr;
+    for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.chunked && !stale) {
+                stale = &revision;
+            }
+        }
+    }
+    if (!stale) {
+        // RIGEXEC_BAKED_MAX_CHUNKS=1 cuts nothing, and then there is no
+        // partition to invalidate.
+        std::printf("  stale partition: no chunked revision to test\n");
+        return;
+    }
+    // One element more than the layout the keys were cut from, which is what
+    // a weight-paint edit the epoch let through would look like from here.
+    ++stale->partitionIndexCount;
+    // And something for the revision to execute for, since a revision that
+    // does not execute never reaches the fuse's decision at all.
+    stale->ran = false;
+
+    RigExecRigPose wholePose;
+    CHECK(built.program->Run(UsdTimeCode::Default(), &wholePose));
+    CHECK(stale->partitionStale);
+    CHECK(stale->executed);
+    CHECK(stale->resultStatus != TfToken("moverFailed"));
+    // The chunks stood down; the fuse did the work.
+    for (const RigExecBakedProgramImpl::GeomChunk &chunk : stale->chunks) {
+        CHECK(!chunk.ok);
+    }
+    size_t differed = 0;
+    for (const auto &[target, points] : chunkedPose.movedProperties) {
+        const auto found = wholePose.movedProperties.find(target);
+        if (found == wholePose.movedProperties.end() ||
+            found->second != points) {
+            ++differed;
+        }
+    }
+    CHECK(chunkedPose.movedProperties.size() ==
+          wholePose.movedProperties.size());
+    if (differed) {
+        ++failures;
+        std::printf("FAIL stale partition: %zu published target(s) differ "
+                    "from the chunked run\n", differed);
+        return;
+    }
+    std::printf("  stale partition: %s ran whole and published the chunked "
+                "points\n", stale->moverPath.GetString().c_str());
+}
+
+/// The predicate the fold hands the fuse, on the one input the pose walk
+/// cannot produce.
+///
+/// A provider matrix is always finite -- RigExecPointsToMatrix leaves the
+/// identity where it cannot solve -- so no rig fixture can put a non-finite
+/// matrix in front of the fold. The check is still the one the dynamic path's
+/// assembler makes over the same table, and a fold that stopped making it
+/// would hand a NaN to the kernel, so it is asserted directly.
+void
+TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects()
+{
+    std::vector<GfMatrix4d> table(3, GfMatrix4d(1.0));
+    CHECK(RigExecSkinTransformsAreUsable(table.data(), table.size()));
+    table[1][2][0] = std::nan("");
+    CHECK(!RigExecSkinTransformsAreUsable(table.data(), table.size()));
+    table[1][2][0] = 0.0;
+    table[1][1][3] = 0.5;  // not affine
+    CHECK(!RigExecSkinTransformsAreUsable(table.data(), table.size()));
+    // An empty table is what a skin mover with no influences assembles, and
+    // the assembler rejects that too.
+    CHECK(!RigExecSkinTransformsAreUsable(table.data(), 0));
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -586,6 +1224,26 @@ main(int argc, char **argv)
     TestTheClusteringIsSound(spider, "spider_legs");
     TestTheClusteringIsSound(stacked, "stacked_revisions");
     TestTheReportIsDeterministic(examplesDir + "/biped/Biped.usda");
+    TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects();
+    TestTheRangeFormDeformsLikeTheWholeArray("classicLinear");
+    TestTheRangeFormDeformsLikeTheWholeArray("dualQuaternion");
+    TestAChunkSeesOnlyItsOwnInfluences("classicLinear");
+    TestAChunkSeesOnlyItsOwnInfluences("dualQuaternion");
+    TestTheVertexPartitionCoversEveryVertexOnce(
+        examplesDir + "/biped/Biped.usda", "Biped", /*report=*/true);
+    TestTheVertexPartitionCoversEveryVertexOnce(
+        examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs",
+        /*report=*/false);
+    TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
+        examplesDir + "/biped/Biped.usda", "a non-finite defaultWeight",
+        TfToken("inputs:defaultWeight"), VtValue(std::nanf("")));
+    TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
+        examplesDir + "/biped/Biped.usda", "a non-finite jointWeight",
+        TfToken("rigExec:jointWeights"), VtValue(VtFloatArray()));
+    TestADualQuaternionSkinChunksLikeTheDynamicPath(
+        examplesDir + "/biped/Biped.usda");
+    TestAStalePartitionRunsTheRevisionWhole(
+        examplesDir + "/biped/Biped.usda");
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

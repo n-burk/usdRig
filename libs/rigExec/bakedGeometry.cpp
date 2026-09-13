@@ -11,13 +11,17 @@
 #include "bakedProgramImpl.h"
 
 #include "moverGraph.h"
+#include "parallel.h"
 #include "rigEvaluator.h"
 #include "types.h"
 
+#include "rigExecMath/dualQuat.h"
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/geometryKernels.h"
+#include "rigExecMath/simdKernels.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/vt/array.h"
@@ -28,6 +32,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,6 +47,10 @@ TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
     ((moverFailed, "moverFailed"))
     ((defaultWeight, "inputs:defaultWeight"))
+    ((classicLinear, "classicLinear"))
+    ((dualQuaternion, "dualQuaternion"))
+    ((jointIndices, "rigExec:jointIndices"))
+    ((elementSize, "rigExec:elementSize"))
 );
 
 namespace rigExec {
@@ -159,6 +169,215 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
 
 
 // ---------------------------------------------------------------------------
+// The vertex partition.
+//
+// A skin revision's per-vertex work is separable -- point i reads the indices
+// and weights at i * elementSize, the influence matrices they name and its
+// own incoming position, and nothing else -- so a contiguous range of
+// vertices is an independent sub-problem whose result is bit-identical to the
+// same vertices computed as part of the whole array. What is NOT separable is
+// everything around that body, which is why the range is cut here and the
+// decisions stay whole (§6 of docs/baked-step-graph.md).
+//
+// The cut is by vertex COUNT and the key follows from it, rather than the
+// other way round: the vertex order is the mesh's and is never permuted, so
+// two body regions that happen to share a range simply wait for both their
+// joints -- and the other ranges still start when their own joints land,
+// which is what the whole exercise buys. The schedule report prints |key| per
+// chunk so that trade-off is measured per asset rather than assumed.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// How many vertices one chunk covers before the cap takes over.
+///
+/// The default is the point count at which the geometry kernels start
+/// splitting work themselves, because a range smaller than that is a range
+/// the deformation was never worth spreading over.
+size_t
+ChunkVertexTarget()
+{
+    static const size_t target = [] {
+        const int authored = TfGetenvInt(
+            "RIGEXEC_BAKED_CHUNK_VERTS", int(RigExecGeometryParallelThreshold));
+        return authored < 1 ? size_t(1) : size_t(authored);
+    }();
+    return target;
+}
+
+/// The most chunks one revision is cut into; the range grows to meet it.
+///
+/// A cap rather than a target: chunk count decides STEP count, and a mesh
+/// with a million vertices must not add two hundred steps to the program for
+/// a machine that can run twenty of them at once.
+size_t
+ChunkCap()
+{
+    static const size_t cap = [] {
+        const int authored = TfGetenvInt("RIGEXEC_BAKED_MAX_CHUNKS", 32);
+        return authored < 1 ? size_t(1) : size_t(authored);
+    }();
+    return cap;
+}
+
+/// Whether every element of ascending \p a appears in ascending \p b.
+bool
+IsSubset(const std::vector<int> &a, const std::vector<int> &b)
+{
+    size_t j = 0;
+    for (const int value : a) {
+        while (j < b.size() && b[j] < value) {
+            ++j;
+        }
+        if (j >= b.size() || b[j] != value) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+void
+RigExecBakedPartitionRevision(
+    RigExecBakedProgramImpl::GeomRevision *revision,
+    const int *indices, size_t indexCount, int elementSize, int chunkCount)
+{
+    using GeomChunk = RigExecBakedProgramImpl::GeomChunk;
+    const size_t slots = elementSize < 1 ? 0 : size_t(elementSize);
+    const size_t points = slots ? indexCount / slots : 0;
+    const size_t influences = revision->influenceSlots.size();
+    revision->partitionElementSize = elementSize;
+    revision->partitionIndexCount = indexCount;
+    revision->partitionPointCount = points;
+
+    // How many ranges, and how long. The same answer every time for the same
+    // layout, which is what makes a re-cut against arrays that did not
+    // actually move reproduce the cut it replaces.
+    size_t target = ChunkVertexTarget();
+    size_t count = std::max<size_t>(1, (points + target - 1) / target);
+    if (count > ChunkCap()) {
+        count = ChunkCap();
+        target = std::max<size_t>(1, (points + count - 1) / count);
+        count = std::max<size_t>(1, (points + target - 1) / target);
+    }
+
+    std::vector<GeomChunk> chunks;
+    chunks.reserve(count);
+    // One pass over the indices, and one byte per influence to remember what
+    // this range has already claimed -- the key is a SET of the range's
+    // influence positions, and the vertices arrive in no particular order.
+    std::vector<char> claimed(influences, 0);
+    for (size_t c = 0; c < count; ++c) {
+        GeomChunk chunk;
+        chunk.begin = int(std::min(points, c * target));
+        chunk.end = int(c + 1 == count ? points
+                                       : std::min(points, (c + 1) * target));
+        for (size_t point = size_t(chunk.begin); point < size_t(chunk.end);
+             ++point) {
+            for (size_t slot = 0; slot < slots; ++slot) {
+                const int index = indices[point * slots + slot];
+                // An index outside the table is a layout the packet will
+                // reject; leaving it out of the key costs nothing, because
+                // the revision never applies.
+                if (index < 0 || size_t(index) >= influences ||
+                    claimed[size_t(index)]) {
+                    continue;
+                }
+                claimed[size_t(index)] = 1;
+                chunk.key.push_back(index);
+            }
+        }
+        std::sort(chunk.key.begin(), chunk.key.end());
+        for (const int index : chunk.key) {
+            claimed[size_t(index)] = 0;
+        }
+        chunks.push_back(std::move(chunk));
+    }
+
+    // Adjacent ranges merge while they stay under the vertex target and one
+    // key contains the other: a range waiting for a superset of its
+    // neighbour's joints is not waiting any longer for holding both, and one
+    // range is one step's worth of scheduling instead of two.
+    for (size_t i = 0; i + 1 < chunks.size();) {
+        const size_t merged = size_t(chunks[i + 1].end - chunks[i].begin);
+        const bool contains = IsSubset(chunks[i].key, chunks[i + 1].key);
+        const bool contained = IsSubset(chunks[i + 1].key, chunks[i].key);
+        if (merged <= target && (contains || contained)) {
+            chunks[i].end = chunks[i + 1].end;
+            if (contains) {
+                chunks[i].key = chunks[i + 1].key;  // the union
+            }
+            chunks.erase(chunks.begin() + long(i) + 1);
+        } else {
+            ++i;
+        }
+    }
+
+    // A re-cut is told how many ranges it must end up with, because the
+    // number of STEPS a revision is made of was fixed at Build and a layout
+    // that moved may not change the program. A layout that did NOT move
+    // reaches this with the count it had and nothing happens, which is what
+    // makes the first frame of an epoch re-derive the cut Build made rather
+    // than replace it.
+    if (chunkCount > 0) {
+        while (chunks.size() > size_t(chunkCount)) {
+            // The adjacent pair that costs the least to join.
+            size_t best = 0;
+            for (size_t i = 1; i + 1 < chunks.size(); ++i) {
+                if (chunks[i + 1].end - chunks[i].begin <
+                    chunks[best + 1].end - chunks[best].begin) {
+                    best = i;
+                }
+            }
+            std::vector<int> key;
+            std::set_union(chunks[best].key.begin(), chunks[best].key.end(),
+                           chunks[best + 1].key.begin(),
+                           chunks[best + 1].key.end(),
+                           std::back_inserter(key));
+            chunks[best].key = std::move(key);
+            chunks[best].end = chunks[best + 1].end;
+            chunks.erase(chunks.begin() + long(best) + 1);
+        }
+        // An empty range is a step that does nothing, which is the honest
+        // shape of "this layout wants fewer chunks than the program has".
+        while (chunks.size() < size_t(chunkCount)) {
+            GeomChunk chunk;
+            chunk.begin = int(points);
+            chunk.end = int(points);
+            chunks.push_back(std::move(chunk));
+        }
+    }
+
+    // The table every chunk skins against: identity everywhere, with its own
+    // influences copied in per run. Filled here so that a run writes only the
+    // |key| entries that moved, and so that the rows a SIMD kernel loads are
+    // never out of step with the matrices beside them.
+    const bool keyed = chunks.size() > 1;
+    for (GeomChunk &chunk : chunks) {
+        chunk.ok = false;
+        chunk.keyChanged = false;
+        chunk.palette.clear();
+        if (!keyed) {
+            // One chunk is the whole array, and the whole array is what the
+            // revision's own folded table already holds.
+            chunk.key.clear();
+            chunk.transforms.clear();
+            chunk.rows.clear();
+            continue;
+        }
+        chunk.transforms.assign(influences, GfMatrix4d(1.0));
+        chunk.rows.assign(influences * RigExecSkinRowStride, 0.0f);
+        for (size_t t = 0; t < influences; ++t) {
+            RigExecNarrowSkinRows(chunk.transforms[t],
+                                  &chunk.rows[t * RigExecSkinRowStride]);
+        }
+    }
+    revision->chunks = std::move(chunks);
+    revision->chunked = keyed;
+}
+
+// ---------------------------------------------------------------------------
 // Build: the geometry half of the program, in program order.
 // ---------------------------------------------------------------------------
 
@@ -200,56 +419,136 @@ DeclareMatrixReads(const RigExecBakedProgramImpl::GeomRevision &revision,
 
 }  // namespace
 
+namespace {
+
+/// Cuts \p revision at Build, from the layout the stage authors.
+///
+/// Only a SKIN revision whose layout the epoch fixed is cut into more than
+/// one chunk. Two reasons, and they are the same reason twice: a layout that
+/// can move within the epoch is one whose keys a Build-time cut cannot
+/// promise anything about, and a mover with such a layout already re-reads
+/// and re-validates every element of it once per frame, which is far more
+/// than a partition would save. Everything else -- every other operation, and
+/// a skin whose arrays are animated, connected or written by a property chain
+/// -- is one chunk over the whole array, which is the degenerate case of the
+/// same step.
+void
+PartitionAtBuild(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    revision->chunks.assign(1, RigExecBakedProgramImpl::GeomChunk());
+    revision->chunked = false;
+    if (revision->op != RigExecRevisionOp::Skin ||
+        !revision->skinTopologyFixed || !revision->moverPrim) {
+        return;
+    }
+    // Read directly rather than through the evaluator's skin topology cache:
+    // resolving there would seed the cache from Build's time code with a
+    // layout the dynamic path has not asked for yet. Fixed means the arrays
+    // do not vary in time, so the default-time read IS the epoch's -- and the
+    // prologue re-cuts against the handle the packet will actually carry the
+    // first time it sees one, so a disagreement costs one extra pass and
+    // never a wrong key.
+    VtIntArray indices;
+    int elementSize = 1;
+    if (const UsdAttribute a =
+            revision->moverPrim.GetAttribute(_tokens->jointIndices)) {
+        a.Get(&indices, UsdTimeCode::Default());
+    }
+    if (const UsdAttribute a =
+            revision->moverPrim.GetAttribute(_tokens->elementSize)) {
+        a.Get(&elementSize, UsdTimeCode::Default());
+    }
+    if (elementSize < 1 || indices.empty() ||
+        indices.size() % size_t(elementSize) != 0) {
+        return;
+    }
+    RigExecBakedPartitionRevision(revision, indices.cdata(), indices.size(),
+                                  elementSize, /*chunkCount=*/0);
+}
+
+}  // namespace
+
 void
 RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     B.chainRevisionBegin.assign(B.chains.size(), 0);
     B.chainRevisionEnd.assign(B.chains.size(), 0);
+    B.chainChunkBegin.assign(B.chains.size(), 0);
+    B.chainChunkEnd.assign(B.chains.size(), 0);
+    int nextChunk = 0;
     for (size_t c = 0; c < B.chains.size(); ++c) {
         RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
         // Revision ids are handed out chain by chain, so one chain's
         // revisions are a contiguous RANGE: "the buffers this chain has
         // produced so far" -- which is what a revision reads its preceding
         // points from and what the status sweep reads at the end -- is then
-        // one declared range rather than a list.
+        // one declared range rather than a list. The chunk ids inside them
+        // are contiguous for the same reason and at the same grain.
         B.chainRevisionBegin[c] = int(B.revisionIndex.size());
+        B.chainChunkBegin[c] = nextChunk;
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             B.revisionIndex.emplace_back(int(c), int(r));
         }
         B.chainRevisionEnd[c] = int(B.revisionIndex.size());
         const int first = B.chainRevisionBegin[c];
         const int last = B.chainRevisionEnd[c];
+        const int chunkFirst = B.chainChunkBegin[c];
         for (size_t r = 0; r < chain.revisions.size(); ++r) {
             RigExecBakedProgramImpl::GeomRevision &revision =
                 chain.revisions[r];
             const int id = first + int(r);
+            const bool skin = revision.op == RigExecRevisionOp::Skin;
             revision.influences.assign(revision.influenceSlots.size(),
                                        GfMatrix4d(1.0));
-            {
+            // The table the PACKET carries for a skin revision, and never
+            // anything else: identity, sized to the influence count and
+            // written once, here.
+            //
+            // The packet is assembled before the matrices are folded, so it
+            // cannot carry them -- that is what lets a chunk start on its own
+            // joints without waiting for every joint of the rig. What the
+            // assembler does with the table is check its SHAPE and its
+            // elements' finiteness, and identities pass both; the real
+            // table's finite/affine check is the fold's, and the fuse ANDs it
+            // in exactly where the assembler's would have landed.
+            revision.packetInfluences.assign(revision.influenceSlots.size(),
+                                             GfMatrix4d(1.0));
+            PartitionAtBuild(&revision);
+            revision.chunkBase = nextChunk;
+            nextChunk += int(revision.chunks.size());
+            B.revisionChunkBase.push_back(revision.chunkBase);
+            B.revisionChunkCount.push_back(int(revision.chunks.size()));
+
+            // The fold comes FIRST for every operation but a skin, because
+            // every other operation's packet carries the matrix it was folded
+            // from. A skin revision's does not, so its fold comes after the
+            // assemble -- which is also where it learns the skinning method,
+            // and so which form of the table the chunks will want.
+            const auto addFold = [&] {
                 RigExecBakedStep &fold = AddGeometryStep(
                     &B, RigExecBakedStepKind::InfluenceFold, id);
                 DeclareMatrixReads(revision, &fold);
+                if (skin) {
+                    fold.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::RevisionPacket, id));
+                }
                 fold.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionTransforms, id));
-            }
-            {
+            };
+            const auto addStatic = [&] {
                 RigExecBakedStep &assemble = AddGeometryStep(
                     &B, RigExecBakedStepKind::RevisionStatic, id);
-                // One line per declared phase that resolved to nothing, plus
-                // the one the defaultWeight check can emit.
-                assemble.maxDiagnostics = revision.binding.phases.size() + 1;
-                assemble.reads.push_back(RigExecBakedOne(
-                    RigExecBakedSlotDomain::RevisionTransforms, id));
+                // One line per declared phase that resolved to nothing. The
+                // defaultWeight line moved to the fuse, which is the first
+                // step that knows both halves of "the packet is valid".
+                assemble.maxDiagnostics = revision.binding.phases.size();
+                if (!skin) {
+                    assemble.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::RevisionTransforms, id));
+                }
                 assemble.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
-                if (r == 0) {
-                    // The chain's own dirtiness is where the sticky bit
-                    // starts, and the prologue decided it.
-                } else {
-                    assemble.reads.push_back(RigExecBakedOne(
-                        RigExecBakedSlotDomain::ChainDirty, id - 1));
-                }
                 if (!revision.binding.phases.empty()) {
                     assemble.reads.push_back(RigExecBakedRange(
                         RigExecBakedSlotDomain::Snapshots, 0,
@@ -257,52 +556,105 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
                 assemble.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionPacket, id));
-                assemble.writes.push_back(RigExecBakedOne(
-                    RigExecBakedSlotDomain::ChainDirty, id));
+                // It sizes the buffer the chunks write into, which is a write
+                // to every one of their slots even though it fills none of
+                // them.
+                assemble.writes.push_back(RigExecBakedRange(
+                    RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
+                    revision.chunkBase + int(revision.chunks.size())));
+            };
+            if (skin) {
+                addStatic();
+                addFold();
+            } else {
+                addFold();
+                addStatic();
             }
-            {
-                // One chunk over the whole range in this stage: the vertex
-                // partition and the per-chunk influence key arrive with the
-                // parallel executor, and a whole-range chunk is the
-                // degenerate case of the same step.
+            for (size_t k = 0; k < revision.chunks.size(); ++k) {
                 RigExecBakedStep &chunk = AddGeometryStep(
-                    &B, RigExecBakedStepKind::RevisionChunk, id, 0);
+                    &B, RigExecBakedStepKind::RevisionChunk, id, int(k));
                 chunk.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionPacket, id));
                 chunk.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
+                if (revision.chunked) {
+                    // The whole point: this chunk waits for ITS influences
+                    // and for nothing else. Not the fold, not the other
+                    // chunks' joints -- it starts the instant its own are
+                    // final and the fuse decides afterwards whether the work
+                    // was wanted.
+                    const RigExecBakedSlotDomain domain =
+                        revision.finalPhase
+                            ? RigExecBakedSlotDomain::FinalMatrix
+                            : RigExecBakedSlotDomain::BaseMatrix;
+                    for (const int position : revision.chunks[k].key) {
+                        const int slot =
+                            revision.influenceSlots[size_t(position)];
+                        if (slot >= 0) {
+                            chunk.reads.push_back(
+                                RigExecBakedOne(domain, slot));
+                        }
+                    }
+                } else if (skin) {
+                    // One chunk is the whole array, so there is nothing to
+                    // speculate about: it skins against the folded table.
+                    chunk.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::RevisionTransforms, id));
+                }
                 // Which earlier buffer holds the preceding points is a
                 // runtime indirection, so the declaration is the upper
-                // bound: every buffer this chain has filled before it -- AND
+                // bound: every chunk this chain has filled before it -- AND
                 // the indirection itself, which is the `currentSource` each
                 // earlier fuse published into RevisionDone. Declaring the
                 // buffers alone left a chunk free to run before the fuse that
                 // decides which of them to read, which a serial order hides
-                // and one cluster per step finds immediately.
+                // and one cluster per step finds immediately. The whole
+                // RevisionDone range, not just the last one: the buffers are
+                // indexed by chunk now, so the range that names them cannot
+                // also name the revisions whose fuses chose among them.
                 if (id > first) {
                     chunk.reads.push_back(RigExecBakedRange(
-                        RigExecBakedSlotDomain::RevisionOut, first, id));
+                        RigExecBakedSlotDomain::RevisionOut, chunkFirst,
+                        revision.chunkBase));
                     chunk.reads.push_back(RigExecBakedRange(
                         RigExecBakedSlotDomain::RevisionDone, first, id));
+                    chunk.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::ChainDirty, id - 1));
                 }
-                chunk.writes.push_back(RigExecBakedOne(
-                    RigExecBakedSlotDomain::RevisionOut, id));
+                chunk.writes.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::RevisionOut,
+                                    revision.chunkBase + int(k)));
             }
             {
                 RigExecBakedStep &fuse = AddGeometryStep(
                     &B, RigExecBakedStepKind::RevisionFuse, id);
+                // The one the defaultWeight check can emit.
+                fuse.maxDiagnostics = 1;
                 fuse.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionPacket, id));
                 fuse.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::RevisionTransforms, id));
+                fuse.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
                 fuse.reads.push_back(RigExecBakedRange(
-                    RigExecBakedSlotDomain::RevisionOut, first, id + 1));
+                    RigExecBakedSlotDomain::RevisionOut, chunkFirst,
+                    revision.chunkBase + int(revision.chunks.size())));
                 if (id > first) {
                     fuse.reads.push_back(RigExecBakedRange(
                         RigExecBakedSlotDomain::RevisionDone, first, id));
+                    fuse.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::ChainDirty, id - 1));
                 }
                 fuse.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionDone, id));
+                fuse.writes.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::ChainDirty, id));
+                // Only on the path where the partition no longer describes
+                // the layout: the fuse then runs the revision whole rather
+                // than let a chunk deform a vertex against an identity.
+                fuse.writes.push_back(RigExecBakedRange(
+                    RigExecBakedSlotDomain::RevisionOut, revision.chunkBase,
+                    revision.chunkBase + int(revision.chunks.size())));
                 if (revision.snapshotAfter) {
                     fuse.writes.push_back(
                         RigExecBakedOne(RigExecBakedSlotDomain::Snapshots,
@@ -310,6 +662,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
             }
         }
+        B.chainChunkEnd[c] = nextChunk;
         {
             RigExecBakedStep &status =
                 AddGeometryStep(&B, RigExecBakedStepKind::ChainStatus, int(c));
@@ -322,7 +675,8 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 status.reads.push_back(RigExecBakedRange(
                     RigExecBakedSlotDomain::RevisionDone, first, last));
                 status.reads.push_back(RigExecBakedRange(
-                    RigExecBakedSlotDomain::RevisionOut, first, last));
+                    RigExecBakedSlotDomain::RevisionOut, chunkFirst,
+                    nextChunk));
             }
             status.writes.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainPoints, int(c)));
@@ -413,11 +767,17 @@ PointsAfter(const RigExecBakedProgramImpl::GeomChain &chain, size_t r,
 }
 
 /// The influence matrices of \p revision, out of the tables the pose half's
-/// ProviderMatrix steps published.
-void
+/// ProviderMatrix steps published. Returns whether the table MOVED.
+///
+/// The compare is here rather than in the packet comparison because a skin
+/// revision's packet no longer carries the table: the half of the executed
+/// decision that used to read `skinTransforms == o.skinTransforms` reads this
+/// instead, and it is the same comparison over the same values.
+bool
 FoldInfluences(const RigExecBakedProgramImpl &B,
                RigExecBakedProgramImpl::GeomRevision *revision)
 {
+    bool changed = false;
     revision->haveTransform = revision->transformSlot >= 0;
     if (revision->haveTransform) {
         revision->transform =
@@ -446,9 +806,186 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
     }
     for (size_t k = 0; k < revision->influenceSlots.size(); ++k) {
         const size_t slot = size_t(revision->influenceSlots[k]);
-        revision->influences[k] = revision->finalPhase ? B.finalMatrix[slot]
-                                                       : B.baseMatrix[slot];
+        const GfMatrix4d &matrix = revision->finalPhase ? B.finalMatrix[slot]
+                                                        : B.baseMatrix[slot];
+        if (revision->influences[k] != matrix) {
+            revision->influences[k] = matrix;
+            changed = true;
+        }
     }
+    return changed;
+}
+
+/// The revision's own folded table, in the forms the kernels want it in.
+///
+/// What a chunk of a revision cut into ONE chunk skins against, and what the
+/// fuse falls back to when the partition no longer describes the layout. A
+/// chunked revision's chunks keep their own tables beside these and never
+/// read them; the fold writes them anyway, because they are part of the
+/// RevisionTransforms slot and the fuse may only READ that slot.
+RigExecSkinTransformsView
+WholeTransformsView(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    RigExecSkinTransformsView view;
+    view.transforms = revision->influences.data();
+    view.transformCount = revision->influences.size();
+    if (!revision->rows.empty()) {
+        view.rows = revision->rows.data();
+    }
+    if (!revision->palette.empty()) {
+        view.palette = revision->palette.data();
+        view.paletteSize = revision->palette.size();
+    }
+    return view;
+}
+
+/// Narrows and splits \p revision's folded table for the method its packet
+/// names, once per run rather than once per range.
+///
+/// Part of what InfluenceFold writes, for every skin revision and not only
+/// an unchunked one: the whole-array fallback the fuse falls back to reads
+/// these, and a step may not write a slot it declared as a read.
+void
+FoldTransformForms(RigExecBakedProgramImpl::GeomRevision *revision)
+{
+    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
+    const size_t count = revision->influences.size();
+    if (revision->parameters.skinningMethod == _tokens->dualQuaternion) {
+        revision->rows.clear();
+        revision->palette.resize(count + 1);
+        for (size_t t = 0; t < count; ++t) {
+            revision->palette[t] =
+                RigExecScaledDualQuatFromMatrix(revision->influences[t]);
+        }
+        // The trailing entry is the weight complement's identity influence,
+        // exactly as RigExecSkinDualQuatPalette appends it.
+        revision->palette[count] = RigExecScaledDualQuat();
+        return;
+    }
+    revision->palette.clear();
+    if (!useSimd) {
+        revision->rows.clear();
+        return;
+    }
+    revision->rows.resize(count * RigExecSkinRowStride);
+    for (size_t t = 0; t < count; ++t) {
+        RigExecNarrowSkinRows(revision->influences[t],
+                              &revision->rows[t * RigExecSkinRowStride]);
+    }
+}
+
+/// Copies \p chunk's OWN influences out of the matrix slots, keeping the
+/// narrowed and split forms beside them, and records whether any moved.
+///
+/// Only |key| entries, never the whole table: that is what makes a chunk's
+/// per-run cost proportional to the joints its vertices actually reference.
+/// The entries outside the key stay identity, and linear blend skinning
+/// reaches an entry only through an index of one of the chunk's own vertices,
+/// so they are never read.
+void
+GatherChunkTransforms(const RigExecBakedProgramImpl &B,
+                      const RigExecBakedProgramImpl::GeomRevision &revision,
+                      RigExecBakedProgramImpl::GeomChunk *chunk)
+{
+    const bool dualQuat =
+        revision.parameters.skinningMethod == _tokens->dualQuaternion;
+    const size_t count = chunk->transforms.size();
+    const bool splitAlready = chunk->palette.size() == count + 1;
+    for (const int position : chunk->key) {
+        const int slot = revision.influenceSlots[size_t(position)];
+        if (slot < 0) {
+            continue;
+        }
+        const GfMatrix4d &matrix = revision.finalPhase
+                                       ? B.finalMatrix[size_t(slot)]
+                                       : B.baseMatrix[size_t(slot)];
+        if (chunk->transforms[size_t(position)] == matrix) {
+            continue;
+        }
+        chunk->transforms[size_t(position)] = matrix;
+        chunk->keyChanged = true;
+        RigExecNarrowSkinRows(
+            matrix, &chunk->rows[size_t(position) * RigExecSkinRowStride]);
+        if (splitAlready) {
+            chunk->palette[size_t(position)] =
+                RigExecScaledDualQuatFromMatrix(matrix);
+        }
+    }
+    if (dualQuat && !splitAlready) {
+        // First run of a dual-quaternion revision: the whole table at once,
+        // which is also what keeps the entries outside the key -- identity,
+        // and never read -- in step with the matrices beside them.
+        chunk->palette.resize(count + 1);
+        for (size_t t = 0; t < count; ++t) {
+            chunk->palette[t] =
+                RigExecScaledDualQuatFromMatrix(chunk->transforms[t]);
+        }
+        chunk->palette[count] = RigExecScaledDualQuat();
+    }
+}
+
+/// The view onto \p chunk's own tables.
+RigExecSkinTransformsView
+ChunkTransformsView(const RigExecBakedProgramImpl::GeomChunk &chunk)
+{
+    RigExecSkinTransformsView view;
+    view.transforms = chunk.transforms.data();
+    view.transformCount = chunk.transforms.size();
+    static const bool useSimd = TfGetenvBool("RIGEXEC_ENABLE_SIMD", true);
+    if (useSimd && !chunk.rows.empty()) {
+        view.rows = chunk.rows.data();
+    }
+    if (!chunk.palette.empty()) {
+        view.palette = chunk.palette.data();
+        view.paletteSize = chunk.palette.size();
+    }
+    return view;
+}
+
+/// One vertex range of a skin revision: seed the revision's own output buffer
+/// from the preceding points, deform in place, blend the envelope back.
+///
+/// The three pieces RigExecRunRevisionKernel performs for the whole array,
+/// performed over a range -- with every whole-array decision (the packet
+/// check, the layout validation, the envelope's resolution, the size check)
+/// already made by the steps that own them.
+///
+/// \p whole runs the full-range kernel instead, which is the same body
+/// inside the kernel's own parallel loop; a revision cut into one chunk uses
+/// it so that an unpartitioned mesh keeps the threading it has today.
+bool
+SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
+          const GfVec3f *preceding, const RigExecSkinTransformsView &view,
+          size_t begin, size_t end, bool whole)
+{
+    std::vector<GfVec3f> &out = revision->output;
+    std::copy(preceding + begin, preceding + end, out.begin() + long(begin));
+    if (whole) {
+        if (!RigExecApplySkinKernelWithTransforms(revision->parameters, view,
+                                                  &out)) {
+            return false;
+        }
+    } else if (!RigExecApplySkinKernelRange(revision->parameters, view, begin,
+                                            end, &out)) {
+        return false;
+    }
+    // "Apply once", over the same range: the envelope was resolved at the
+    // full count by RevisionStatic, because resolving it is atomic over the
+    // whole array, and every array here is indexed absolutely. The whole
+    // array goes through the kernel's own split for the reason the skinning
+    // above does: an unpartitioned mesh keeps the threading it has today.
+    if (!revision->fullStrength) {
+        if (whole) {
+            // `whole` means the whole array -- the full-range kernel above
+            // ignores the bounds -- so begin is 0 and the count is `end`.
+            RigExecBlendEnvelopeAll(preceding, revision->envelope.data(), end,
+                                    out.data());
+        } else {
+            RigExecBlendEnvelopeRange(preceding, revision->envelope.data(),
+                                      begin, end, out.data());
+        }
+    }
+    return true;
 }
 
 // WHICH points a revision is assembled against, stated once because the two
@@ -506,11 +1043,27 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     }
     // The fold decided whether there is a matrix at all -- a bound transform
     // provider, or a geometry-domain constraint's delta -- and wrote it.
-    if (revision->haveTransform) {
+    //
+    // A SKIN revision is assembled without one, and that is not an omission:
+    // its static step runs BEFORE its fold, precisely so its chunks wait for
+    // their own joints rather than for the rig's, so the fold's matrix here
+    // would be the one last run measured. Nothing reads it --
+    // RigExecAssembleSkinParameters takes no transform, which is also how
+    // the dynamic path treats a delta landing on a skin mover -- so the
+    // packet is assembled without a matrix rather than with a stale one.
+    if (revision->haveTransform && revision->op != RigExecRevisionOp::Skin) {
         values.transform = &revision->transform;
     }
-    if (!revision->influences.empty()) {
-        values.influenceTransforms = &revision->influences;
+    // A skin revision's packet carries the IDENTITY table and never the
+    // folded one: it is assembled before the matrices are folded, which is
+    // what lets its chunks start on their own joints. Every other operation's
+    // packet carries what the fold wrote -- which is nothing today, because a
+    // skin is the only operation that binds influences at all.
+    const std::vector<GfMatrix4d> &table =
+        revision->op == RigExecRevisionOp::Skin ? revision->packetInfluences
+                                                : revision->influences;
+    if (!table.empty()) {
+        values.influenceTransforms = &table;
     }
     values.basePoints.assign(basePoints, basePoints + basePointCount);
     // Epoch-fixed layouts were resolved in the PROLOGUE, through the same
@@ -543,6 +1096,35 @@ BlendEnvelope(const RigExecMoverParameters &parameters,
             RigExecBlendEnvelope(preceding[i], (*result)[i], envelope[i]);
     }
     return true;
+}
+
+/// The skin revision over its whole array, out of the fuse.
+///
+/// The path where the partition no longer describes the layout the packet
+/// carries -- a weight-paint edit the epoch let through, an interactive
+/// override on the indices, a cache that refused the mover after all. The
+/// keys cannot be trusted, so the chunks stand down and the one step that
+/// holds both the folded table and the preceding points runs the revision
+/// whole. Serial, cold, and exactly the arithmetic an unchunked revision
+/// would have performed.
+bool
+FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
+                  RigExecBakedProgramImpl::GeomRevision *revision,
+                  size_t revisionIndex)
+{
+    const GfVec3f *points = nullptr;
+    size_t count = 0;
+    PointsBefore(chain, revisionIndex, &points, &count);
+    if (!revision->layoutUsable || !revision->envelopeOk ||
+        count != revision->precedingCount ||
+        revision->output.size() != count) {
+        return false;
+    }
+    // Against the forms the FOLD wrote -- this step reads RevisionTransforms
+    // and writes none of it, so the table it skins against is the one that
+    // slot already holds.
+    return SkinRange(revision, points, WholeTransformsView(revision), 0, count,
+                     /*whole=*/true);
 }
 
 }  // namespace
@@ -578,6 +1160,35 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             revision->moverPrim, revision->influenceSlots.size(), time,
             B.resolvedInputs, B.skinTopologies);
         revision->topologyResolved = true;
+        // The partition is Build state, and this is where a frame can tell
+        // in O(1) whether it still describes the vertices: the cache hands
+        // back the SAME layout pointer for a binding that did not move, so a
+        // different one means the arrays did -- a weight-paint edit, or an
+        // override placed on the indices. Re-cutting keeps the chunk COUNT,
+        // because the number of steps a revision is made of was fixed at
+        // Build and a value edit may not change the program. Here rather
+        // than in a step because it reads the arrays, and because the first
+        // frame of an epoch is the one that pays for it.
+        if (!revision->chunked ||
+            revision->topology == revision->partitionTopology) {
+            return;
+        }
+        if (!revision->topology) {
+            // A refusal leaves the partition AND the handle it was cut from
+            // where they are: the packet then reads the arrays per frame,
+            // and RevisionStatic, which has no resolved layout to compare
+            // the handle of, routes the revision through the fuse's
+            // whole-array path. Recording the refusal here instead would
+            // make the handles agree by both being null, which is the one
+            // answer this comparison must never give.
+            return;
+        }
+        RigExecBakedPartitionRevision(
+            revision, revision->topology->indices.data(),
+            revision->topology->indices.size(),
+            revision->topology->elementSize,
+            int(revision->chunks.size()));
+        revision->partitionTopology = revision->topology;
     };
     for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         VtVec3fArray basePoints;
@@ -785,16 +1396,206 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
     RigExecBakedProgramImpl::GeomRevision &revision =
         chain.revisions[size_t(revisionIndex)];
+    const bool skin = revision.op == RigExecRevisionOp::Skin;
+    // The chain's sticky dirty bit as of the PRECEDING revision: once a
+    // revision executed, every later one does, and the chain's own base is
+    // where it starts.
+    const bool chainDirty =
+        revisionIndex == 0
+            ? chain.baseDirty
+            : chain.revisions[size_t(revisionIndex) - 1].executed;
     switch (step->kind) {
-    case RigExecBakedStepKind::InfluenceFold:
-        FoldInfluences(B, &revision);
+    case RigExecBakedStepKind::InfluenceFold: {
+        revision.influencesChanged = FoldInfluences(B, &revision);
+        // The finite/affine check the dynamic path's assembler makes over the
+        // same matrices. It is the fold's because the packet no longer
+        // carries them, and the fuse ANDs it in where the assembler's answer
+        // would have landed: a revision with one bad influence passes its
+        // preceding value through and reports MoverFailed.
+        revision.influencesValid =
+            !skin || RigExecSkinTransformsAreUsable(revision.influences.data(),
+                                                    revision.influences.size());
+        // Both forms of the table, whether or not the revision is chunked:
+        // a chunked one's chunks keep their own, but the fuse's whole-array
+        // fallback reads these and cannot write them. O(influences) of pure
+        // per-matrix arithmetic, which is the size of this step anyway.
+        if (skin && revision.influencesValid) {
+            FoldTransformForms(&revision);
+        }
         return;
+    }
 
     case RigExecBakedStepKind::RevisionStatic: {
         revision.parameters =
             AssembleRevision(B, &revision, chain.lastBase.cdata(),
                              chain.lastBase.size(), time, step);
-        if (revision.parameters.enabled && !revision.parameters.valid) {
+        // The status of the PACKET. For a skin revision that is half of the
+        // answer -- the packet carries identities where the matrices would
+        // be -- and the fold's `influencesValid` is the other half; the fuse
+        // is where the two meet and where `moverFailed` is published.
+        revision.status =
+            RigExecStatusForParameters(revision.parameters,
+                                       revision.moverPath);
+        step->counters.revisionsBuilt = 1;
+        // Whether the revision has to run at all, by VALUE and never by
+        // dirtiness: a control dragged back to where it started leaves an
+        // identical packet, and the VdfNetwork does not re-execute for one.
+        // This is the half of the decision the packet and the status carry;
+        // the chain's sticky bit and the influence table's own comparison are
+        // ORed in by the fuse, which is the first step that has all three.
+        revision.staticDirty = !revision.ran ||
+                               revision.parameters != revision.lastParameters ||
+                               revision.status != revision.lastStatus;
+        // Every revision of a chain is applied to the same number of points:
+        // a kernel that resized its output failed the application, so no
+        // buffer the chain ever reads holds a different count. Sizing the
+        // output here rather than in a chunk is what lets the chunks write
+        // disjoint ranges of it without one of them owning its length.
+        const size_t count = chain.lastBase.size();
+        if (revision.output.size() != count) {
+            revision.output.resize(count);
+            // A resized buffer holds no answers, so every chunk of it has to
+            // produce one again.
+            revision.staticDirty = true;
+        }
+        revision.precedingCount = count;
+        // The whole-array decisions that are the skin kernel's and are made
+        // here because a range may not repeat them: the layout validation
+        // against the points that arrived, and the envelope, which resolves
+        // atomically at the FULL count or not at all.
+        revision.layoutUsable = false;
+        revision.envelopeOk = true;
+        revision.fullStrength = true;
+        revision.partitionStale = false;
+        if (!skin) {
+            return;
+        }
+        revision.layoutUsable =
+            RigExecSkinLayoutIsUsable(revision.parameters, count);
+        revision.fullStrength =
+            RigExecEnvelopeIsFullStrength(revision.parameters.weights);
+        if (!revision.fullStrength) {
+            revision.envelopeOk = revision.parameters.weights.ResolveAll(
+                count, &revision.envelope);
+        }
+        if (revision.chunked) {
+            // Whether the keys still describe the vertices. The handle is
+            // the identity the layout cache preserves for a binding that did
+            // not move, and the prologue re-cut against it; anything else
+            // here means the packet is reading arrays the partition never
+            // saw, and the fuse runs the revision whole instead.
+            const RigExecSkinTopology *const topology =
+                revision.parameters.skinTopology.get();
+            const size_t indexCount =
+                topology ? topology->indices.size()
+                         : revision.parameters.skinIndices.size();
+            const int elementSize = topology
+                                        ? topology->elementSize
+                                        : revision.parameters.skinElementSize;
+            revision.partitionStale =
+                // No resolved layout at all is a layout the keys cannot be
+                // checked against: the packet is reading the mover's arrays
+                // per frame, and nothing here can say they are the arrays
+                // the cut was made from.
+                !revision.parameters.skinTopology ||
+                revision.parameters.skinTopology !=
+                    revision.partitionTopology ||
+                indexCount != revision.partitionIndexCount ||
+                elementSize != revision.partitionElementSize ||
+                count != revision.partitionPointCount;
+        }
+        return;
+    }
+
+    case RigExecBakedStepKind::RevisionChunk: {
+        RigExecBakedProgramImpl::GeomChunk &chunk =
+            revision.chunks[size_t(step->part)];
+        const GfVec3f *points = nullptr;
+        size_t count = 0;
+        PointsBefore(chain, size_t(revisionIndex), &points, &count);
+        const bool sized = count == revision.precedingCount &&
+                           revision.output.size() == count;
+
+        if (!revision.chunked) {
+            // One chunk is the whole array, so there is nothing to speculate
+            // about: it knows everything the fuse knows.
+            chunk.ok = false;
+            const bool executed = chainDirty || revision.staticDirty ||
+                                  (skin && revision.influencesChanged);
+            if (!executed || !revision.status.AllowsApply()) {
+                return;
+            }
+            if (!skin) {
+                // The revision's OWN buffer, seeded from the preceding one:
+                // there is no `scratch = current` and no
+                // `revision.output = current` afterwards -- the fuse decides
+                // which buffer the chain's running value is in rather than
+                // copying one into another.
+                revision.output.assign(points, points + count);
+                // Not a second dispatch that mirrors _RevisionNode::Compute
+                // -- the same function the node calls. The packet check, the
+                // full-strength fast path, the kernel and the "apply once"
+                // blend all live in RigExecRunRevisionKernel, so an
+                // operation cannot mean one thing here and another there.
+                chunk.ok = RigExecRunRevisionKernel(
+                    revision.op, revision.parameters, &revision.output,
+                    /*controlFrames=*/nullptr);
+                return;
+            }
+            if (!revision.parameters.valid ||
+                revision.parameters.kind != "skin" ||
+                !revision.layoutUsable || !revision.envelopeOk ||
+                !revision.influencesValid || !sized) {
+                return;
+            }
+            chunk.ok = SkinRange(&revision, points,
+                                 WholeTransformsView(&revision), 0, count,
+                                 /*whole=*/true);
+            return;
+        }
+
+        // Chunked, and therefore SPECULATIVE: it has not waited for the
+        // fold, so it cannot know whether the revision will apply at all --
+        // only that its own vertices, its own joints and the packet say what
+        // its range of the output buffer should hold. The fuse discards the
+        // work if the revision turns out not to apply.
+        chunk.keyChanged = false;
+        if (!revision.status.AllowsApply() || !revision.parameters.valid ||
+            revision.parameters.kind != "skin" || !revision.layoutUsable ||
+            !revision.envelopeOk || revision.partitionStale || !sized) {
+            chunk.ok = false;
+            return;
+        }
+        GatherChunkTransforms(B, revision, &chunk);
+        if (!(chainDirty || revision.staticDirty || chunk.keyChanged) &&
+            chunk.ok) {
+            // Its own joints stood still over points that stood still and a
+            // packet that stood still, so its range of the buffer already
+            // holds this run's answer -- and its `ok` still describes it.
+            // Another chunk's joints moving makes the REVISION execute; it
+            // does not make this range's vertices land anywhere else.
+            //
+            // `ok` is part of the gate rather than a consequence of it: a
+            // chunk whose last answer was a failure, or one the partition
+            // reset without the packet moving, has nothing in its range to
+            // keep, and reading that off its own flag keeps the invariant
+            // local to this step.
+            return;
+        }
+        chunk.ok = SkinRange(&revision, points, ChunkTransformsView(chunk),
+                             size_t(chunk.begin), size_t(chunk.end),
+                             /*whole=*/false);
+        return;
+    }
+
+    case RigExecBakedStepKind::RevisionFuse: {
+        // Where the dynamic path's assembler would have failed the packet:
+        // for a skin revision the matrices are not in it, so "the packet is
+        // valid" is the packet's own answer AND the fold's.
+        const bool packetValid =
+            revision.parameters.valid &&
+            (!skin || revision.influencesValid);
+        if (revision.parameters.enabled && !packetValid) {
             float scalar = 1.0f;
             if (const UsdAttribute a = revision.moverPrim.GetAttribute(
                     _tokens->defaultWeight)) {
@@ -807,55 +1608,25 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                     "[0, 1]; revision passed through");
             }
         }
-        revision.status =
-            RigExecStatusForParameters(revision.parameters,
-                                       revision.moverPath);
-        step->counters.revisionsBuilt = 1;
-        // Whether the revision has to run at all, by VALUE and never by
-        // dirtiness: a control dragged back to where it started leaves an
-        // identical packet, and the VdfNetwork does not re-execute for one.
-        // The sticky chain bit is the predecessor's own answer, because a
-        // revision that executed makes every later one execute.
-        const bool chainDirty =
-            revisionIndex == 0
-                ? chain.baseDirty
-                : chain.revisions[size_t(revisionIndex) - 1].executed;
-        revision.executed = chainDirty || !revision.ran ||
-                            revision.parameters != revision.lastParameters ||
-                            revision.status != revision.lastStatus;
+        revision.executed = chainDirty || revision.staticDirty ||
+                            (skin && revision.influencesChanged);
         step->counters.revisionsExecuted = revision.executed ? 1 : 0;
-        return;
-    }
-
-    case RigExecBakedStepKind::RevisionChunk: {
-        revision.chunkOk = false;
-        if (!revision.executed || !revision.status.AllowsApply()) {
-            return;
-        }
-        const GfVec3f *points = nullptr;
-        size_t count = 0;
-        PointsBefore(chain, size_t(revisionIndex), &points, &count);
-        // The revision's OWN buffer, seeded from the preceding one: there is
-        // no `scratch = current` and no `revision.output = current` afterwards
-        // -- the fuse decides which buffer the chain's running value is in
-        // rather than copying one into another.
-        revision.output.assign(points, points + count);
-        // Not a second dispatch that mirrors _RevisionNode::Compute -- the
-        // same function the node calls. The packet check, the full-strength
-        // fast path, the kernel and the "apply once" blend all live in
-        // RigExecRunRevisionKernel, so an operation cannot mean one thing
-        // here and another there.
-        revision.chunkOk =
-            RigExecRunRevisionKernel(revision.op, revision.parameters,
-                                     &revision.output,
-                                     /*controlFrames=*/nullptr);
-        return;
-    }
-
-    case RigExecBakedStepKind::RevisionFuse: {
         if (revision.executed) {
             revision.resultStatus = revision.status.state;
-            if (revision.chunkOk) {
+            bool applied = packetValid && revision.status.AllowsApply();
+            if (applied && skin && revision.partitionStale) {
+                applied = FuseWholeRevision(chain, &revision,
+                                            size_t(revisionIndex));
+            } else if (applied) {
+                for (const RigExecBakedProgramImpl::GeomChunk &chunk :
+                         revision.chunks) {
+                    if (!chunk.ok) {
+                        applied = false;
+                        break;
+                    }
+                }
+            }
+            if (applied) {
                 revision.currentSource = int(revisionIndex);
             } else {
                 // Nothing was applied, so the chain's running value stays
@@ -891,6 +1662,83 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     default:
         return;
     }
+}
+
+// ---------------------------------------------------------------------------
+// The report.
+// ---------------------------------------------------------------------------
+
+std::string
+RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
+{
+    std::string out;
+    char line[256];
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.op != RigExecRevisionOp::Skin) {
+                continue;
+            }
+            const size_t influences = revision.influenceSlots.size();
+            const size_t chunks = revision.chunks.size();
+            size_t vertexMin = size_t(-1), vertexMax = 0, vertexSum = 0;
+            size_t keyMin = size_t(-1), keyMax = 0, keySum = 0, wide = 0;
+            for (const RigExecBakedProgramImpl::GeomChunk &chunk :
+                     revision.chunks) {
+                // An unpartitioned revision is one chunk over everything,
+                // which is every influence and every vertex it has.
+                const size_t vertices =
+                    revision.chunked ? size_t(chunk.end - chunk.begin)
+                                     : revision.partitionPointCount;
+                const size_t key =
+                    revision.chunked ? chunk.key.size() : influences;
+                vertexMin = std::min(vertexMin, vertices);
+                vertexMax = std::max(vertexMax, vertices);
+                vertexSum += vertices;
+                keyMin = std::min(keyMin, key);
+                keyMax = std::max(keyMax, key);
+                keySum += key;
+                if (influences && key * 2 >= influences) {
+                    ++wide;
+                }
+            }
+            std::snprintf(
+                line, sizeof(line),
+                "  %s: %zu chunk(s), %zu vertex(es), %zu influence(s)%s\n",
+                revision.moverPath.GetString().c_str(), chunks, vertexSum,
+                influences, revision.chunked ? "" : " [not partitioned]");
+            out += line;
+            std::snprintf(line, sizeof(line),
+                          "    vertices/chunk min %zu mean %.1f max %zu\n",
+                          vertexMin == size_t(-1) ? 0 : vertexMin,
+                          chunks ? double(vertexSum) / double(chunks) : 0.0,
+                          vertexMax);
+            out += line;
+            std::snprintf(
+                line, sizeof(line),
+                "    |key| min %zu mean %.1f max %zu; %zu/%zu chunk(s) reach "
+                "half the influences\n",
+                keyMin == size_t(-1) ? 0 : keyMin,
+                chunks ? double(keySum) / double(chunks) : 0.0, keyMax, wide,
+                chunks);
+            out += line;
+            for (size_t k = 0; k < chunks; ++k) {
+                const RigExecBakedProgramImpl::GeomChunk &chunk =
+                    revision.chunks[k];
+                std::snprintf(line, sizeof(line), "    [%zu] %d..%d key", k,
+                              chunk.begin, chunk.end);
+                out += line;
+                if (!revision.chunked) {
+                    out += " (every influence)";
+                }
+                for (const int position : chunk.key) {
+                    out += " " + std::to_string(position);
+                }
+                out += "\n";
+            }
+        }
+    }
+    return out;
 }
 
 void
