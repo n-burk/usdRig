@@ -19,6 +19,7 @@
 #include "types.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/tf/functionRef.h"
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"
 #include "pxr/base/vt/array.h"
@@ -184,6 +185,31 @@ struct RigExecRigPose {
     size_t moverGraphSchedulesBuilt = 0;
 };
 
+/// One provider, as the pose walk currently holds it: the frame it was
+/// seeded with and the frame it carries after every revision committed so
+/// far.
+///
+/// The dynamic walk keeps its frames in ordered maps and the baked program
+/// keeps them in dense slot arrays, so the routines the two paths share take
+/// the frame store as a visitor rather than as a container -- one body, two
+/// stores, and no copy of the store into a third shape to call it.
+/// TfFunctionRef borrows the callable, so nothing is allocated per frame and
+/// nothing outlives the call.
+using RigExecPoseFrameVisitor =
+    TfFunctionRef<void(const SdfPath &provider,
+                       const RigExecPointFrame &base,
+                       const RigExecPointFrame &current)>;
+
+/// Calls \p visit once for every provider the walk holds, in the walk's own
+/// order. A provider the walk has no base frame for is not visited: it can
+/// carry no revision delta, which is all a visitor of this shape asks about.
+using RigExecPoseFrameEnumerator =
+    TfFunctionRef<void(const RigExecPoseFrameVisitor &visit)>;
+
+/// Answers the FINAL frame of one provider; false when the walk holds none.
+using RigExecPoseFrameLookup =
+    TfFunctionRef<bool(const SdfPath &provider, RigExecPointFrame *frame)>;
+
 /// Compiles and evaluates one RigExecRoot prim.
 class RigExecRigEvaluator : public TfWeakBase {
 public:
@@ -207,6 +233,16 @@ public:
     /// next Evaluate otherwise -- a scene edit standing between the compile
     /// and the request must not leave the mode asking for a program that is
     /// never built.
+    ///
+    /// RIGEXEC_BAKE_REQUIRED=1 in the environment makes that fallback SAY so.
+    /// A suite whose fixtures all decline the bake reports zero parity
+    /// mismatches and goes green having compared nothing, which is the one
+    /// way a parity run can lie; with the variable set, a generation that
+    /// runs dynamically while this mode asks for the program publishes one
+    /// "baked parity mismatch: bake required, evaluated dynamically: <why>"
+    /// diagnostic and counts it on RigExecRigPose::bakedParityMismatches.
+    /// It changes no evaluated value, and Dynamic ignores it entirely. Read
+    /// once per process, so a tool must setenv before the first evaluator.
     void SetEvaluationMode(RigExecEvaluationMode mode);
     RigExecEvaluationMode GetEvaluationMode() const {
         return _evaluationMode;
@@ -219,6 +255,19 @@ public:
     /// "it fell back" is not actionable, and a silent fallback reads as the
     /// mode not working.
     bool IsBakeable(std::vector<std::string> *reasons = nullptr) const;
+
+    /// Every constraint operator this evaluator registers, by schema type,
+    /// in registration order.
+    ///
+    /// The handler table is the one authority on which operators exist. Any
+    /// second enumeration of them -- the baked program's list of the ones it
+    /// can express, a test asserting the table and the schema agree -- asks
+    /// here instead of keeping a private copy, because a private copy is a
+    /// list that silently stops naming an operator somebody added.
+    static const std::vector<TfToken> &GetConstraintOperatorTypeNames();
+
+    /// Whether \p schemaType names one of them.
+    static bool IsConstraintOperatorType(const TfToken &schemaType);
 
     /// How many times a baked program has been built for this rig.
     ///
@@ -858,6 +907,72 @@ private:
         std::map<SdfPath, RigExecPointFrame> *baseFrames,
         std::map<SdfPath, RigExecPointFrame> *finalFrames,
         RigExecRigPose *pose) const;
+
+    /// The frame a plain Xformable contributes to the pose: its transform
+    /// relative to the asset root, at \p xformCache's time.
+    ///
+    /// A constraint target that is not a RigExec type, and a constraint
+    /// source that is not a provider, both enter the walk this way -- read
+    /// off the stage, never through exec, because a plain Xform has no
+    /// computePointFrame to ask. False when \p path is not an Xformable or
+    /// the asset root is gone; \p outFrame and \p outMatrix are optional
+    /// and carry the same transform in the pose's two currencies.
+    ///
+    /// resetXformStack between the two is deliberately NOT diagnosed here:
+    /// ComputeRelativeTransform stops accumulating at it and the partial
+    /// matrix is what the pose has always used.
+    bool _FrameFromXformRelativeToAsset(const UsdPrim &assetRoot,
+                                        UsdGeomXformCache *xformCache,
+                                        const SdfPath &path,
+                                        RigExecPointFrame *outFrame,
+                                        GfMatrix4d *outMatrix) const;
+
+    /// Resolves a constraint source that is a native Xformable, carrying the
+    /// delta of the deepest provider the walk has already revised above it.
+    ///
+    /// A native source that is not itself a written provider may still sit
+    /// beneath a constrained transform provider. The closest revised
+    /// ancestor contains all higher ancestor deltas, so applying it once to
+    /// the stage-derived source frame applies all of them. \p providers
+    /// enumerates the walk's frame store; the search over it -- strict
+    /// prefix, points actually moved, deepest wins -- is here so the dense
+    /// baked program and the map walk pick the same ancestor and compute the
+    /// same delta.
+    bool _ResolveNativeXformSource(
+        const UsdPrim &assetRoot,
+        UsdGeomXformCache *xformCache,
+        const SdfPath &xformPath,
+        const RigExecPoseFrameEnumerator &providers,
+        RigExecPointFrame *out) const;
+
+    /// Republishes every volume weight object's placement from the frames
+    /// the walk holds NOW.
+    ///
+    /// A volume's field is measured in the space its own provider frame
+    /// places it, so a constraint that moves the volume has to be visible to
+    /// every weight resolved after it -- which means re-running this after
+    /// every commit, not once before the walk. \p finalFrameOf is the walk's
+    /// frame store; a provider it cannot answer for, or a frame no matrix
+    /// can be built from, places at the identity.
+    void _UpdateVolumePlacements(const RigExecPoseFrameLookup &finalFrameOf,
+                                 RigExecRigPose *pose);
+
+    /// Whether a SingleChainIK chain's joints can move with time at all.
+    ///
+    /// "autoDetect" asks this to choose between solving the chain as it
+    /// stands and solving a rest-derived copy of it: a chain whose
+    /// translations and scales are authored once has no animated Ts for the
+    /// solver to preserve, and rebuilding its layout from rest is then the
+    /// better-conditioned question. Structural -- a solver binding, a time
+    /// sample or a connection -- so it is settled for the epoch.
+    bool _IkUsesAnimatedTs(const std::vector<SdfPath> &chain) const;
+
+    /// The one diagnostic RIGEXEC_BAKE_REQUIRED exists to produce: says on
+    /// \p pose that this generation ran dynamically while the mode asked for
+    /// the program, and why. No-op unless the variable is set and the mode
+    /// is Baked or BakedWithParityCheck. Publishes no value of its own.
+    void _ReportBakeRequired(const std::string &detail,
+                             RigExecRigPose *pose) const;
     /// Re-pulls the epoch's rest frames after a stage edit no recompile
     /// covered. Returns false when the request could not produce them,
     /// which is what an incomplete per-frame rest tap used to mean.
@@ -952,6 +1067,13 @@ private:
     /// Reset wherever the answer can have changed: Compile, and a notice
     /// that hit the program's capture index.
     bool _bakeRefused = false;
+    /// Why it refused, when anyone asked to be told.
+    ///
+    /// Build is handed a reasons vector only under RIGEXEC_BAKE_REQUIRED:
+    /// filling it walks every refusal on the rig instead of stopping at the
+    /// first, and production pays nothing to collect strings nobody reads.
+    /// Cleared wherever _bakeRefused is, for the same reason.
+    std::vector<std::string> _bakeRefusalReasons;
     size_t _bakedProgramBuilds = 0;
     size_t _bakedProgramBuildAttempts = 0;
     size_t _bakedGenerations = 0;
