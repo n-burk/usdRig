@@ -50,6 +50,27 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((out, "out"))
 );
 
+// The packet kind RigExecAssembleParameters stamps on each operation. The
+// revision kernels check it before they run: a packet assembled for one
+// operation arriving at another's kernel is a compile bug, and the revision
+// passes through rather than running the wrong maths on it.
+TF_DEFINE_PRIVATE_TOKENS(
+    _kindTokens,
+    ((matrix, "matrix"))
+    ((skin, "skin"))
+    ((blendShape, "blendShape"))
+    ((volumeCorrect, "volumeCorrect"))
+    ((smooth, "smooth"))
+    ((lattice, "lattice"))
+    ((surfaceProject, "surfaceProject"))
+    ((ribbon, "ribbon"))
+    ((emitGuidePoints, "emitGuidePoints"))
+    ((curvenet, "curvenet"))
+    ((curvenetAdjuster, "curvenetAdjuster"))
+    ((recomputeNormals, "recomputeNormals"))
+    ((recomputeExtent, "recomputeExtent"))
+);
+
 namespace rigExec {
 
 namespace {
@@ -84,11 +105,6 @@ public:
     const std::vector<GfMatrix4d> &GetControlFrames() const { return _controlFrames; }
 
 private:
-    void _ComputeMatrix(const VdfContext &ctx) const;
-    void _ComputeBlendShape(const VdfContext &ctx) const;
-    void _ComputeRecomputed(const VdfContext &ctx,
-                            const TfToken &expectedKind) const;
-
     mutable RigExecMoverStatus _resultStatus;
     mutable std::vector<GfMatrix4d> _controlFrames;
     RigExecRevisionOp _op;
@@ -103,14 +119,62 @@ _StatusAllowsApply(const VdfContext &ctx)
     return status && status->AllowsApply();
 }
 
-// Shared scratch-collect / kernel / write-back body for the point3f[] ops
+// The kind token an assembled packet must carry to be the packet for \p op.
+//
+// One table, read by the revision node's guard and by the shared kernel
+// entry point, so the two cannot disagree about which packet belongs to
+// which operation.
+const TfToken &
+_RevisionKindToken(RigExecRevisionOp op)
+{
+    switch (op) {
+    case RigExecRevisionOp::Matrix:
+        return _kindTokens->matrix;
+    case RigExecRevisionOp::Skin:
+        return _kindTokens->skin;
+    case RigExecRevisionOp::BlendShape:
+        return _kindTokens->blendShape;
+    case RigExecRevisionOp::VolumeCorrect:
+        return _kindTokens->volumeCorrect;
+    case RigExecRevisionOp::Smooth:
+        return _kindTokens->smooth;
+    case RigExecRevisionOp::Lattice:
+        return _kindTokens->lattice;
+    case RigExecRevisionOp::SurfaceProject:
+        return _kindTokens->surfaceProject;
+    case RigExecRevisionOp::Ribbon:
+        return _kindTokens->ribbon;
+    case RigExecRevisionOp::EmitGuidePoints:
+        return _kindTokens->emitGuidePoints;
+    case RigExecRevisionOp::Curvenet:
+        return _kindTokens->curvenet;
+    case RigExecRevisionOp::CurvenetAdjuster:
+        return _kindTokens->curvenetAdjuster;
+    case RigExecRevisionOp::RecomputeNormals:
+        return _kindTokens->recomputeNormals;
+    case RigExecRevisionOp::RecomputeExtent:
+        return _kindTokens->recomputeExtent;
+    }
+    // No runtime dispatch beyond the frozen operation set: an unhandled op is
+    // a build error, not a silently mismatched packet.
+    static const TfToken unknown;
+    return unknown;
+}
+
+// Shared scratch-collect / kernel / write-back body for every revision
 // (spec §6.5: transient scratch is released before the callback returns).
 // Peer of _EvaluateScratchKernel in moverKernels.cpp, with the write-back
 // changed from Allocate to in-place through the READWRITE connector.
-template <typename Kernel>
+//
+// Everything between the collect and the write-back is
+// RigExecRunRevisionKernel: the kind check, the full-strength fast path, the
+// operation itself and the "apply once" blend. The baked geometry loop calls
+// that same function with the same packet, so the node is the only place the
+// VdfContext appears and neither path holds a copy of the other's dispatch.
 void
-_RunScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
-                  RigExecMoverStatus *resultStatus, Kernel &&kernel)
+_RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
+               RigExecMoverStatus *resultStatus,
+               std::vector<GfMatrix4d> *controlFrames)
 {
     const RigExecMoverParameters *params =
         ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
@@ -118,8 +182,12 @@ _RunScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
         if (_StatusAllowsApply(ctx)) resultStatus->state = TfToken("moverFailed");
         ctx.SetOutputToReferenceInput(_tokens->previous);
     };
+    // RigExecRunRevisionKernel owns the packet check; repeating it here is
+    // what keeps a disabled, failed or mis-assembled revision from paying for
+    // the scratch copy it is about to throw away, exactly as before the
+    // kernel bodies moved out of this callback.
     if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
-        params->kind != expectedKind) {
+        params->kind != _RevisionKindToken(op)) {
         passThrough();
         return;
     }
@@ -132,59 +200,17 @@ _RunScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
             scratch.push_back(*previous);
         }
     }
-    // A constant envelope at exactly full strength makes the blend below the
-    // identity at every point, so the copy of the preceding revision, the
-    // resolved envelope array and the blend loop are all dead. The predicate
-    // lives in moverGraph.h because the baked geometry loop takes the same
-    // fast path and the two must not be able to disagree about when it is
-    // safe; see RigExecEnvelopeIsFullStrength.
-    const bool fullStrengthEnvelope =
-        RigExecEnvelopeIsFullStrength(params->weights);
-    const size_t precedingSize = scratch.size();
-    std::vector<GfVec3f> preceding;
-    if (!fullStrengthEnvelope) {
-        preceding = scratch;
-    }
-    if (!kernel(*params, &scratch)) {
+    if (!RigExecRunRevisionKernel(op, *params, &scratch, controlFrames)) {
         passThrough();
         return;
-    }
-    if (scratch.size() != precedingSize) {
-        passThrough();
-        return;
-    }
-    if (!fullStrengthEnvelope) {
-        std::vector<float> envelope;
-        if (!params->weights.ResolveAll(scratch.size(), &envelope)) {
-            passThrough();
-            return;
-        }
-        // Per point, reading two arrays and writing a third at the same
-        // index: a point range is an independent sub-problem, so splitting
-        // it changes nothing about the arithmetic.
-        GfVec3f *const blended = scratch.data();
-        const GfVec3f *const before = preceding.data();
-        const float *const strength = envelope.data();
-        const size_t count = scratch.size();
-        if (RigExecParallelEvaluationEnabled() &&
-            count >= RigExecGeometryParallelThreshold) {
-            WorkParallelForN(
-                count,
-                [blended, before, strength](size_t begin, size_t end) {
-                    for (size_t i = begin; i < end; ++i) {
-                        blended[i] = RigExecBlendEnvelope(
-                            before[i], blended[i], strength[i]);
-                    }
-                },
-                RigExecGeometryGrainSize);
-        } else {
-            for (size_t i = 0; i < count; ++i) {
-                blended[i] = RigExecBlendEnvelope(
-                    before[i], blended[i], strength[i]);
-            }
-        }
     }
 
+    // The revision writes in place. Unlike the generated-application kernel --
+    // which allocated a fresh output buffer because its expression output had
+    // no associated input -- a READWRITE connector hands the input buffer
+    // straight through as the output, so constructing the iterator on
+    // `previous` is what grants write access. Allocating here instead would
+    // fail ("output cannot hold a boxed value") and silently pass through.
     VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
     size_t i = 0;
     for (; !out.IsAtEnd() && i < scratch.size(); ++out, ++i) {
@@ -198,313 +224,10 @@ _RevisionNode::Compute(const VdfContext &ctx) const
     ++*_executionCount;
     const auto *status = ctx.GetInputValuePtr<RigExecMoverStatus>(_tokens->status);
     _resultStatus = status ? *status : RigExecMoverStatus{TfToken("moverFailed"), {}};
+    // Node state that outlives one Compute, so a revision that passes through
+    // must not leave the frames of the last one that did not.
     _controlFrames.clear();
-    switch (_op) {
-    case RigExecRevisionOp::Matrix:
-        _ComputeMatrix(ctx);
-        return;
-    case RigExecRevisionOp::Skin:
-        _RunScratchKernel(ctx, TfToken("skin"), &_resultStatus,
-                          &RigExecApplySkinKernel);
-        return;
-    case RigExecRevisionOp::BlendShape:
-        _ComputeBlendShape(ctx);
-        return;
-    case RigExecRevisionOp::VolumeCorrect:
-        _RunScratchKernel(
-            ctx, TfToken("volumeCorrect"), &_resultStatus,
-            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                RigExecApplyVolumeCorrect(pts, p.referenceVolume, p.strength);
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::Smooth:
-        _RunScratchKernel(
-            ctx, TfToken("smooth"), &_resultStatus,
-            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                RigExecApplyLaplacianSmooth(
-                    pts, p.topologyCounts, p.topologyIndices, p.strength);
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::Lattice:
-        _RunScratchKernel(
-            ctx, TfToken("lattice"), &_resultStatus,
-            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                if (p.restPoints.size() != pts->size()) {
-                    return false;  // cardinality mismatch fails atomically
-                }
-                RigExecApplyLattice(
-                    pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions);
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::SurfaceProject:
-        _RunScratchKernel(
-            ctx, TfToken("surfaceProject"), &_resultStatus,
-            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                RigExecApplySurfaceProject(
-                    pts, p.auxPoints, p.topologyCounts, p.topologyIndices,
-                    p.strength);
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::EmitGuidePoints:
-        _RunScratchKernel(
-            ctx, TfToken("emitGuidePoints"), &_resultStatus,
-            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                if (p.frames.GetSize() != pts->size()) {
-                    return false;
-                }
-                for (size_t i = 0; i < pts->size(); ++i) {
-                    (*pts)[i] = GfVec3f(p.frames.frames[i].Origin());
-                }
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::Ribbon:
-        _RunScratchKernel(
-            ctx, TfToken("ribbon"), &_resultStatus,
-            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                if (p.bindCoords.size() != pts->size()) {
-                    return false;
-                }
-                // Rest-relative rigid transport: per-sample maps from the
-                // aggregate's rest frames to its posed frames (spec §7.5).
-                const size_t n = p.frames.GetSize();
-                if (n < 2) {
-                    return false;
-                }
-                std::vector<GfMatrix4d> maps(n);
-                for (size_t k = 0; k < n; ++k) {
-                    if (!RigExecPointsToMatrix(
-                            p.frames.rests[k], p.frames.frames[k].points,
-                            &maps[k])) {
-                        maps[k].SetIdentity();
-                    }
-                }
-                for (size_t i = 0; i < pts->size(); ++i) {
-                    const float u =
-                        std::min(1.0f, std::max(0.0f, p.bindCoords[i][0]));
-                    const float s = u * float(n - 1);
-                    const size_t k = std::min(n - 2, size_t(s));
-                    const float t = s - float(k);
-                    const GfVec3d a =
-                        maps[k].TransformAffine(GfVec3d((*pts)[i]));
-                    const GfVec3d b =
-                        maps[k + 1].TransformAffine(GfVec3d((*pts)[i]));
-                    (*pts)[i] = GfVec3f(a + (b - a) * double(t));
-                }
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::CurvenetAdjuster:
-        _RunScratchKernel(ctx, TfToken("curvenetAdjuster"), &_resultStatus,
-            [this](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                const auto preceding = *pts;
-                if (!RigExecApplyCurvenetAdjustments(pts, p.restPoints,
-                    p.topologyIndices, p.curvenetAdjustmentBasis,
-                    p.curvenetAdjustments, &_controlFrames)) return false;
-                for (size_t i = 0; i < _controlFrames.size(); ++i) {
-                    const int point = p.curvenetAdjustments[i].pointIndex;
-                    const float weight = p.weights.Resolve(point, pts->size());
-                    _controlFrames[i].SetTranslateOnly(GfVec3d(
-                        preceding[point] + ((*pts)[point]-preceding[point])*weight));
-                }
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::Curvenet:
-        _RunScratchKernel(
-            ctx, TfToken("curvenet"), &_resultStatus,
-            [](const RigExecMoverParameters &p, std::vector<GfVec3f> *pts) {
-                if (!p.curvenetBinding) {
-                    return false;
-                }
-                // The incoming points ARE the rest surface (§5): a curvenet
-                // layered on top of skinning deforms from the skinned shape,
-                // and when it is first in the chain they are the projection
-                // pose and the solve takes its fast path.
-                std::vector<GfVec3f> solved;
-                std::string error;
-                if (!RigExecEvaluateProfileMover(*p.curvenetBinding,
-                                                 p.auxPoints, *pts, p.strength,
-                                                 &solved, &error)) {
-                    return false;
-                }
-                if (solved.size() != pts->size()) {
-                    return false;
-                }
-                pts->swap(solved);
-                return true;
-            });
-        return;
-    case RigExecRevisionOp::RecomputeNormals:
-        _ComputeRecomputed(ctx, TfToken("recomputeNormals"));
-        return;
-    case RigExecRevisionOp::RecomputeExtent:
-        _ComputeRecomputed(ctx, TfToken("recomputeExtent"));
-        return;
-    }
-    // No runtime dispatch beyond the frozen operation set: an unhandled op is
-    // a build error, not a silently skipped revision.
-    ctx.SetOutputToReferenceInput(_tokens->previous);
-}
-
-// normal3f[] and float3[] hosts: derived values recomputed from the final
-// same-generation points rather than from the preceding revision (spec §7.6).
-void
-_RevisionNode::_ComputeRecomputed(const VdfContext &ctx,
-                                  const TfToken &expectedKind) const
-{
-    const RigExecMoverParameters *params =
-        ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
-    auto passThrough = [&ctx, this]() {
-        if (_StatusAllowsApply(ctx)) _resultStatus.state = TfToken("moverFailed");
-        ctx.SetOutputToReferenceInput(_tokens->previous);
-    };
-    if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
-        params->kind != expectedKind) {
-        passThrough();
-        return;
-    }
-
-    const std::vector<GfVec3f> values =
-        expectedKind == "recomputeNormals"
-            ? RigExecComputeVertexNormals(params->auxPoints,
-                                          params->topologyCounts,
-                                          params->topologyIndices)
-            : RigExecComputeExtent(params->auxPoints, params->widths);
-    if (values.empty() ||
-        (expectedKind == "recomputeExtent" && values.size() != 2)) {
-        passThrough();
-        return;
-    }
-
-    // The derived property keeps its authored cardinality: writing in place
-    // through the READWRITE connector cannot resize it, so a recomputation
-    // that disagrees fails the application rather than truncating.
-    VdfReadIterator<GfVec3f> previous(ctx, _tokens->previous);
-    if (previous.ComputeSize() != values.size()) {
-        passThrough();
-        return;
-    }
-    std::vector<GfVec3f> preceding;
-    preceding.reserve(values.size());
-    for (; !previous.IsAtEnd(); ++previous) {
-        preceding.push_back(*previous);
-    }
-    std::vector<float> envelope;
-    if (!params->weights.ResolveAll(values.size(), &envelope)) {
-        passThrough();
-        return;
-    }
-
-    VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
-    size_t i = 0;
-    for (; !out.IsAtEnd() && i < values.size(); ++out, ++i) {
-        *out = RigExecBlendEnvelope(
-            preceding[i], values[i], envelope[i]);
-    }
-}
-
-// Blend deltas are masked per element and added to the preceding revision.
-void
-_RevisionNode::_ComputeBlendShape(const VdfContext &ctx) const
-{
-    const RigExecMoverParameters *params =
-        ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
-    VdfReadIterator<GfVec3f> previous(ctx, _tokens->previous);
-    const size_t count = previous.ComputeSize();
-
-    auto passThrough = [&ctx, this]() {
-        if (_StatusAllowsApply(ctx)) _resultStatus.state = TfToken("moverFailed");
-        ctx.SetOutputToReferenceInput(_tokens->previous);
-    };
-    if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
-        params->kind != "blendShape") {
-        passThrough();
-        return;
-    }
-    if (params->blendDeltas.size() != count) {
-        passThrough();
-        return;
-    }
-    // Resolve the common envelope up front so a cardinality failure passes
-    // through before any element is written (the in-place write cannot be
-    // rolled back).
-    std::vector<float> envelope;
-    if (!params->weights.ResolveAll(count, &envelope)) {
-        passThrough();
-        return;
-    }
-
-    std::vector<GfVec3f> transported;
-    const std::vector<GfVec3f> *deltas = &params->blendDeltas;
-    if (params->blendSurfaceFrame) {
-        std::vector<GfVec3f> posed;
-        posed.reserve(count);
-        for (; !previous.IsAtEnd(); ++previous) posed.push_back(*previous);
-        if (!RigExecTransportSurfaceOffsets(params->restPoints, posed,
-                params->topologyCounts, params->topologyIndices,
-                params->blendDeltas, &transported)) {
-            passThrough();
-            return;
-        }
-        deltas = &transported;
-    }
-
-    VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
-    size_t i = 0;
-    for (; !out.IsAtEnd() && i < count; ++out, ++i) {
-        const GfVec3f preceding = *out;
-        *out = RigExecBlendEnvelope(
-            preceding, preceding + (*deltas)[i], envelope[i]);
-    }
-}
-
-// Ported unchanged from the generated-application kernel: the callback body was
-// already written against VdfContext, so moving from a registered attribute
-// expression to a node's Compute is a change of binding, not of math.
-void
-_RevisionNode::_ComputeMatrix(const VdfContext &ctx) const
-{
-    const RigExecMoverParameters *params =
-        ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
-    VdfReadIterator<GfVec3f> previous(ctx, _tokens->previous);
-    const size_t count = previous.ComputeSize();
-
-    auto passThrough = [&ctx, this]() {
-        if (_StatusAllowsApply(ctx)) _resultStatus.state = TfToken("moverFailed");
-        ctx.SetOutputToReferenceInput(_tokens->previous);
-    };
-    if (!_StatusAllowsApply(ctx) || !params || !params->valid ||
-        params->kind != "matrix") {
-        passThrough();
-        return;
-    }
-    std::vector<GfVec3f> scratch;
-    scratch.reserve(count);
-    for (; !previous.IsAtEnd(); ++previous) {
-        scratch.push_back(*previous);
-    }
-    // The envelope resolves inside the kernel, before any output is written,
-    // so a cardinality failure passes through with nothing half-applied.
-    if (!RigExecApplyMatrixKernel(*params, &scratch)) {
-        passThrough();
-        return;
-    }
-    // The revision writes in place. Unlike the generated-application kernel --
-    // which allocated a fresh output buffer because its expression output had
-    // no associated input -- a READWRITE connector hands the input buffer
-    // straight through as the output, so constructing the iterator on
-    // `previous` is what grants write access. Allocating here instead would
-    // fail ("output cannot hold a boxed value") and silently pass through.
-    VdfReadWriteIterator<GfVec3f> out(ctx, _tokens->previous);
-    size_t i = 0;
-    for (; !out.IsAtEnd() && i < scratch.size(); ++out, ++i) {
-        *out = scratch[i];
-    }
+    _RunRevisionOp(ctx, _op, &_resultStatus, &_controlFrames);
 }
 
 }  // namespace
@@ -645,6 +368,297 @@ RigExecApplySkinKernel(const RigExecMoverParameters &p,
     // reaches here anyway fails the application rather than silently running
     // the wrong maths.
     return false;
+}
+
+// The blend-shape kernel, shared by the mover-graph revision node and by the
+// baked program. Like the matrix kernel and unlike the point3f[] ops the
+// envelope is NOT a separate blend: the deltas are added to the preceding
+// revision and the result blended back against it in one pass, so resolving
+// the envelope is part of the kernel.
+//
+// One definition, so a second caller cannot drift into a different blend.
+bool
+RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
+                             std::vector<GfVec3f> *pts)
+{
+    const size_t count = pts->size();
+    if (p.blendDeltas.size() != count) {
+        return false;
+    }
+    // Resolve the common envelope up front so a cardinality failure fails the
+    // application before any element is written (the in-place write cannot be
+    // rolled back).
+    std::vector<float> envelope;
+    if (!p.weights.ResolveAll(count, &envelope)) {
+        return false;
+    }
+
+    std::vector<GfVec3f> transported;
+    const std::vector<GfVec3f> *deltas = &p.blendDeltas;
+    if (p.blendSurfaceFrame) {
+        // The incoming points ARE the posed surface the offsets ride on.
+        if (!RigExecTransportSurfaceOffsets(p.restPoints, *pts,
+                p.topologyCounts, p.topologyIndices, p.blendDeltas,
+                &transported)) {
+            return false;
+        }
+        deltas = &transported;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const GfVec3f preceding = (*pts)[i];
+        (*pts)[i] = RigExecBlendEnvelope(
+            preceding, preceding + (*deltas)[i], envelope[i]);
+    }
+    return true;
+}
+
+// The derived-maintenance kernel, shared by the mover-graph revision node and
+// by the baked program: normal3f[] and float3[] hosts recomputed from the
+// final same-generation points rather than from the preceding revision
+// (spec §7.6). Self-enveloping, like the matrix and blend-shape kernels.
+//
+// One definition, so the size rules and the envelope cannot drift between the
+// two paths that maintain the same property.
+bool
+RigExecApplyDerivedKernel(RigExecRevisionOp op,
+                          const RigExecMoverParameters &p,
+                          std::vector<GfVec3f> *pts)
+{
+    const bool extent = op == RigExecRevisionOp::RecomputeExtent;
+    const std::vector<GfVec3f> values =
+        extent ? RigExecComputeExtent(p.auxPoints, p.widths)
+               : RigExecComputeVertexNormals(p.auxPoints, p.topologyCounts,
+                                             p.topologyIndices);
+    if (values.empty() || (extent && values.size() != 2)) {
+        return false;
+    }
+
+    // The derived property keeps its authored cardinality: writing in place
+    // cannot resize it, so a recomputation that disagrees fails the
+    // application rather than truncating.
+    if (pts->size() != values.size()) {
+        return false;
+    }
+    std::vector<float> envelope;
+    if (!p.weights.ResolveAll(values.size(), &envelope)) {
+        return false;
+    }
+
+    for (size_t i = 0; i < values.size(); ++i) {
+        (*pts)[i] = RigExecBlendEnvelope((*pts)[i], values[i], envelope[i]);
+    }
+    return true;
+}
+
+// Every revision operation, over the same kernels the revision node ran when
+// they were lambdas inside its VdfContext callback. \p controlFrames receives
+// the curvenet adjuster's fully adjusted control frames and is unread by every
+// other operation.
+//
+// ONE definition, called by the mover-graph revision node and by the baked
+// program: a second copy of a deformation agrees on the fixtures that exist
+// and drifts on the ones that do not.
+//
+// The envelope is NOT applied here for the ops that take a separate blend --
+// RigExecRunRevisionKernel wraps this, which is where the "apply once" rule
+// lives; matrix, blendShape and the two derived recomputations fold it into
+// their own arithmetic and are routed there instead.
+bool
+RigExecApplyRevisionKernel(RigExecRevisionOp op,
+                           const RigExecMoverParameters &p,
+                           std::vector<GfVec3f> *pts,
+                           std::vector<GfMatrix4d> *controlFrames)
+{
+    switch (op) {
+    case RigExecRevisionOp::Matrix:
+        return RigExecApplyMatrixKernel(p, pts);
+    case RigExecRevisionOp::Skin:
+        return RigExecApplySkinKernel(p, pts);
+    case RigExecRevisionOp::BlendShape:
+        return RigExecApplyBlendShapeKernel(p, pts);
+    case RigExecRevisionOp::VolumeCorrect:
+        RigExecApplyVolumeCorrect(pts, p.referenceVolume, p.strength);
+        return true;
+    case RigExecRevisionOp::Smooth:
+        RigExecApplyLaplacianSmooth(
+            pts, p.topologyCounts, p.topologyIndices, p.strength);
+        return true;
+    case RigExecRevisionOp::Lattice:
+        if (p.restPoints.size() != pts->size()) {
+            return false;  // cardinality mismatch fails atomically
+        }
+        RigExecApplyLattice(
+            pts, p.restPoints, p.auxPoints, p.auxPointsB, p.divisions);
+        return true;
+    case RigExecRevisionOp::SurfaceProject:
+        RigExecApplySurfaceProject(
+            pts, p.auxPoints, p.topologyCounts, p.topologyIndices,
+            p.strength);
+        return true;
+    case RigExecRevisionOp::EmitGuidePoints:
+        if (p.frames.GetSize() != pts->size()) {
+            return false;
+        }
+        for (size_t i = 0; i < pts->size(); ++i) {
+            (*pts)[i] = GfVec3f(p.frames.frames[i].Origin());
+        }
+        return true;
+    case RigExecRevisionOp::Ribbon: {
+        if (p.bindCoords.size() != pts->size()) {
+            return false;
+        }
+        // Rest-relative rigid transport: per-sample maps from the
+        // aggregate's rest frames to its posed frames (spec §7.5).
+        const size_t n = p.frames.GetSize();
+        if (n < 2) {
+            return false;
+        }
+        std::vector<GfMatrix4d> maps(n);
+        for (size_t k = 0; k < n; ++k) {
+            if (!RigExecPointsToMatrix(
+                    p.frames.rests[k], p.frames.frames[k].points,
+                    &maps[k])) {
+                maps[k].SetIdentity();
+            }
+        }
+        for (size_t i = 0; i < pts->size(); ++i) {
+            const float u =
+                std::min(1.0f, std::max(0.0f, p.bindCoords[i][0]));
+            const float s = u * float(n - 1);
+            const size_t k = std::min(n - 2, size_t(s));
+            const float t = s - float(k);
+            const GfVec3d a = maps[k].TransformAffine(GfVec3d((*pts)[i]));
+            const GfVec3d b = maps[k + 1].TransformAffine(GfVec3d((*pts)[i]));
+            (*pts)[i] = GfVec3f(a + (b - a) * double(t));
+        }
+        return true;
+    }
+    case RigExecRevisionOp::CurvenetAdjuster: {
+        if (!controlFrames) {
+            return false;  // the adjuster's whole second output
+        }
+        const auto preceding = *pts;
+        if (!RigExecApplyCurvenetAdjustments(pts, p.restPoints,
+            p.topologyIndices, p.curvenetAdjustmentBasis,
+            p.curvenetAdjustments, controlFrames)) return false;
+        // The frames follow the UNBLENDED adjusted points, weighted per
+        // control point; the points themselves are blended afterwards by
+        // the wrapper, so the envelope still lands exactly once on each.
+        for (size_t i = 0; i < controlFrames->size(); ++i) {
+            const int point = p.curvenetAdjustments[i].pointIndex;
+            const float weight = p.weights.Resolve(point, pts->size());
+            (*controlFrames)[i].SetTranslateOnly(GfVec3d(
+                preceding[point] + ((*pts)[point]-preceding[point])*weight));
+        }
+        return true;
+    }
+    case RigExecRevisionOp::Curvenet: {
+        if (!p.curvenetBinding) {
+            return false;
+        }
+        // The incoming points ARE the rest surface (§5): a curvenet
+        // layered on top of skinning deforms from the skinned shape,
+        // and when it is first in the chain they are the projection
+        // pose and the solve takes its fast path.
+        std::vector<GfVec3f> solved;
+        std::string error;
+        if (!RigExecEvaluateProfileMover(*p.curvenetBinding,
+                                         p.auxPoints, *pts, p.strength,
+                                         &solved, &error)) {
+            return false;
+        }
+        if (solved.size() != pts->size()) {
+            return false;
+        }
+        pts->swap(solved);
+        return true;
+    }
+    case RigExecRevisionOp::RecomputeNormals:
+    case RigExecRevisionOp::RecomputeExtent:
+        return RigExecApplyDerivedKernel(op, p, pts);
+    }
+    // No runtime dispatch beyond the frozen operation set: an unhandled op is
+    // a build error, not a silently skipped revision.
+    return false;
+}
+
+// One revision, envelope included: the packet check, the full-strength fast
+// path, RigExecApplyRevisionKernel and the "apply once" blend against the
+// preceding revision.
+//
+// ONE definition of "apply once", called by the mover-graph revision node and
+// by the baked geometry loop. Two hand-written wrappers would have to agree
+// about which operations blend and which fold the envelope into their own
+// arithmetic, and the rigs that would show a disagreement are the ones no
+// fixture happened to have.
+bool
+RigExecRunRevisionKernel(RigExecRevisionOp op,
+                         const RigExecMoverParameters &p,
+                         std::vector<GfVec3f> *pts,
+                         std::vector<GfMatrix4d> *controlFrames)
+{
+    if (!p.valid || p.kind != _RevisionKindToken(op)) {
+        return false;
+    }
+    // Matrix, blendShape and the two derived recomputations resolve the
+    // envelope inside their own arithmetic; blending their result again would
+    // apply it twice.
+    if (op == RigExecRevisionOp::Matrix ||
+        op == RigExecRevisionOp::BlendShape ||
+        op == RigExecRevisionOp::RecomputeNormals ||
+        op == RigExecRevisionOp::RecomputeExtent) {
+        return RigExecApplyRevisionKernel(op, p, pts, controlFrames);
+    }
+
+    // A constant envelope at exactly full strength makes the blend below the
+    // identity at every point, so the copy of the preceding revision, the
+    // resolved envelope array and the blend loop are all dead. The predicate
+    // lives in moverGraph.h next to the packet it reads; see
+    // RigExecEnvelopeIsFullStrength.
+    const bool fullStrengthEnvelope = RigExecEnvelopeIsFullStrength(p.weights);
+    const size_t precedingSize = pts->size();
+    std::vector<GfVec3f> preceding;
+    if (!fullStrengthEnvelope) {
+        preceding = *pts;
+    }
+    if (!RigExecApplyRevisionKernel(op, p, pts, controlFrames)) {
+        return false;
+    }
+    if (pts->size() != precedingSize) {
+        return false;
+    }
+    if (!fullStrengthEnvelope) {
+        std::vector<float> envelope;
+        if (!p.weights.ResolveAll(pts->size(), &envelope)) {
+            return false;
+        }
+        // Per point, reading two arrays and writing a third at the same
+        // index: a point range is an independent sub-problem, so splitting
+        // it changes nothing about the arithmetic.
+        GfVec3f *const blended = pts->data();
+        const GfVec3f *const before = preceding.data();
+        const float *const strength = envelope.data();
+        const size_t count = pts->size();
+        if (RigExecParallelEvaluationEnabled() &&
+            count >= RigExecGeometryParallelThreshold) {
+            WorkParallelForN(
+                count,
+                [blended, before, strength](size_t begin, size_t end) {
+                    for (size_t i = begin; i < end; ++i) {
+                        blended[i] = RigExecBlendEnvelope(
+                            before[i], blended[i], strength[i]);
+                    }
+                },
+                RigExecGeometryGrainSize);
+        } else {
+            for (size_t i = 0; i < count; ++i) {
+                blended[i] = RigExecBlendEnvelope(
+                    before[i], blended[i], strength[i]);
+            }
+        }
+    }
+    return true;
 }
 
 bool

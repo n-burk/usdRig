@@ -684,6 +684,65 @@ bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
 bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
                             std::vector<GfVec3f> *pts);
 
+/// Applies the blend-shape operation of \p p to \p pts in place, returning
+/// false when the packet fails atomically (the deltas or the envelope do not
+/// resolve to the point count, or the surface-frame transport fails).
+///
+/// The envelope is resolved and applied INSIDE the kernel, like the matrix
+/// kernel and unlike the point3f[] ops: the deltas are added to the preceding
+/// revision and blended back against it in one pass.
+///
+/// Shared by the mover-graph revision node and by the baked program, which
+/// runs the same operation with no VdfNetwork around it.
+bool RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
+                                  std::vector<GfVec3f> *pts);
+
+/// Recomputes the derived property \p op maintains -- vertex normals or an
+/// extent -- from \p p and blends it over \p pts in place, returning false
+/// when the packet fails atomically (nothing computed, or a cardinality the
+/// authored property cannot hold).
+///
+/// The envelope is resolved and applied INSIDE the kernel, as for the matrix
+/// and blend-shape kernels.
+///
+/// Shared by the mover-graph revision node and by the baked program, which
+/// runs the same operation with no VdfNetwork around it.
+bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
+                               const RigExecMoverParameters &p,
+                               std::vector<GfVec3f> *pts);
+
+/// Applies \p op to \p pts in place, returning false when the packet fails
+/// atomically. \p controlFrames receives the curvenet adjuster's fully
+/// adjusted control frames and is unread by every other operation; it may be
+/// null only when \p op is not RigExecRevisionOp::CurvenetAdjuster.
+///
+/// The envelope is NOT applied here for the operations that take a separate
+/// blend: RigExecRunRevisionKernel below is where the "apply once" rule
+/// lives. Matrix, blendShape and the two derived recomputations fold the
+/// envelope into their own arithmetic and are routed to the kernels above.
+///
+/// ONE definition, called by the mover-graph revision node and by the baked
+/// program: a second copy of a deformation agrees on the fixtures that exist
+/// and drifts on the ones that do not.
+bool RigExecApplyRevisionKernel(RigExecRevisionOp op,
+                                const RigExecMoverParameters &p,
+                                std::vector<GfVec3f> *pts,
+                                std::vector<GfMatrix4d> *controlFrames);
+
+/// Runs one revision of \p op over \p pts in place, envelope included: the
+/// packet check, the full-strength fast path, RigExecApplyRevisionKernel and
+/// the "apply once" blend against the preceding revision. Returns false when
+/// the revision must pass its preceding value through unchanged.
+///
+/// ONE definition of "apply once", called by the mover-graph revision node --
+/// which is then only scratch-collect / call / write-back -- and by the baked
+/// geometry loop. Two hand-written wrappers would have to agree about which
+/// operations blend and which fold the envelope into their own arithmetic.
+bool RigExecRunRevisionKernel(RigExecRevisionOp op,
+                              const RigExecMoverParameters &p,
+                              std::vector<GfVec3f> *pts,
+                              std::vector<GfMatrix4d> *controlFrames);
+
 /// Whether \p envelope makes the "apply once" blend the identity, so the
 /// copy of the preceding revision, the resolved envelope array and the blend
 /// loop are all dead work.
