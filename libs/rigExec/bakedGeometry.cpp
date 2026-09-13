@@ -18,6 +18,7 @@
 #include "rigExecMath/geometryKernels.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
@@ -30,6 +31,17 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+// The two names a step body needs a TOKEN for rather than a comparison: the
+// status a failed revision publishes, and the attribute the defaultWeight
+// diagnostic re-reads. Hoisted because TfToken(const char *) takes the token
+// registry's spin lock on every construction, and a step body may take no
+// lock (docs/baked-step-graph.md §2).
+TF_DEFINE_PRIVATE_TOKENS(
+    _tokens,
+    ((moverFailed, "moverFailed"))
+    ((defaultWeight, "inputs:defaultWeight"))
+);
 
 namespace rigExec {
 
@@ -329,6 +341,15 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainPoints, int(c)));
             step.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::ChainBase, int(c)));
+            // A derived revision's binding carries phases like any other, and
+            // its assemble reads the run's store for them -- so it declares
+            // the store the same way a chain revision does: every step before
+            // it, because which of them recorded what is a runtime answer.
+            if (!derived.revision.binding.phases.empty()) {
+                step.reads.push_back(RigExecBakedRange(
+                    RigExecBakedSlotDomain::Snapshots, 0,
+                    int(B.steps.size()) - 1));
+            }
             DeclareMatrixReads(derived.revision, &step);
             step.writes.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::DerivedOut, id));
@@ -390,11 +411,31 @@ void
 FoldInfluences(const RigExecBakedProgramImpl &B,
                RigExecBakedProgramImpl::GeomRevision *revision)
 {
-    if (revision->transformSlot >= 0) {
+    revision->haveTransform = revision->transformSlot >= 0;
+    if (revision->haveTransform) {
         revision->transform =
             revision->finalPhase
                 ? B.finalMatrix[size_t(revision->transformSlot)]
                 : B.baseMatrix[size_t(revision->transformSlot)];
+    }
+    // A geometry-domain constraint's delta, if one was measured for this
+    // mover: the pose walk solved the constraint and stashed the map from the
+    // target's authored transform to the solved one, and THIS is the Matrix
+    // revision that same constraint contributes. Find-guarded, and here
+    // rather than in the assemble because the transform table is what this
+    // step declares -- the assemble only READS it, and a step that writes a
+    // slot it declared as a read is the declaration the executor trusts
+    // being wrong.
+    //
+    // The dynamic path applies it before the final-phase substitution rather
+    // than after. The two orders can only disagree for a revision that has
+    // both a bound transform provider and a delta, which cannot arise: a
+    // geometry-domain constraint's binding.transform is empty -- that is what
+    // makes the delta the only source of the matrix.
+    if (const auto delta = B.constraintDeltas.find(revision->moverPath);
+        delta != B.constraintDeltas.end()) {
+        revision->transform = delta->second;
+        revision->haveTransform = true;
     }
     for (size_t k = 0; k < revision->influenceSlots.size(); ++k) {
         const size_t slot = size_t(revision->influenceSlots[k]);
@@ -456,24 +497,9 @@ AssembleRevision(RigExecBakedProgramImpl &B,
         }
         values.resolved = &revision->revisionInputs;
     }
-    if (revision->transformSlot >= 0) {
-        values.transform = &revision->transform;
-    }
-    // A geometry-domain constraint's delta, if one was measured for this
-    // mover: the pose walk solved the constraint and stashed the map from the
-    // target's authored transform to the solved one, and THIS is the Matrix
-    // revision that same constraint contributes. Find-guarded and in the
-    // dynamic chain loop's position, right after the transform provider is
-    // read.
-    //
-    // The dynamic path applies it before the final-phase substitution rather
-    // than after. The two orders can only disagree for a revision that has
-    // both a bound transform provider and a delta, which cannot arise: a
-    // geometry-domain constraint's binding.transform is empty -- that is what
-    // makes the delta the only source of the matrix.
-    if (const auto delta = B.constraintDeltas.find(revision->moverPath);
-        delta != B.constraintDeltas.end()) {
-        revision->transform = delta->second;
+    // The fold decided whether there is a matrix at all -- a bound transform
+    // provider, or a geometry-domain constraint's delta -- and wrote it.
+    if (revision->haveTransform) {
         values.transform = &revision->transform;
     }
     if (!revision->influences.empty()) {
@@ -683,7 +709,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             if (!applied) {
                 values = preceding;
                 if (status.AllowsApply()) {
-                    revision.resultStatus = TfToken("moverFailed");
+                    revision.resultStatus = _tokens->moverFailed;
                 }
             }
             revision.output = values;
@@ -764,7 +790,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         if (revision.parameters.enabled && !revision.parameters.valid) {
             float scalar = 1.0f;
             if (const UsdAttribute a = revision.moverPrim.GetAttribute(
-                    TfToken("inputs:defaultWeight"))) {
+                    _tokens->defaultWeight)) {
                 R.GetAttribute(a, time, &scalar);
             }
             if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
@@ -834,7 +860,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                         : chain.revisions[size_t(revisionIndex) - 1]
                               .currentSource;
                 if (revision.status.AllowsApply()) {
-                    revision.resultStatus = TfToken("moverFailed");
+                    revision.resultStatus = _tokens->moverFailed;
                 }
             }
             revision.lastParameters = revision.parameters;

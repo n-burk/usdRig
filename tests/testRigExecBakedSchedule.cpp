@@ -24,9 +24,11 @@
 #include "rigExec/bakedProgram.h"
 #include "rigExec/bakedProgramImpl.h"
 #include "rigExec/bakedSchedule.h"
+#include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
@@ -299,15 +301,21 @@ TestTheReportIsDeterministic(const std::string &stagePath)
     std::printf("    first difference at line %zu\n", line);
 }
 
-/// The mode the whole parity argument rests on: with no environment set, and
-/// with RIGEXEC_BAKED_SCHEDULE=serial, a run is the reference order.
+/// The mode the whole parity argument rests on: anything but an explicit
+/// RIGEXEC_BAKED_SCHEDULE=parallel is the reference order, and asking for
+/// parallel with rigExec's own threading switched off is too. The suite runs
+/// under all three of those environments (verify_sched.sh), so the assertion
+/// is on the MAPPING rather than on one answer.
 void
-TestSerialIsTheDefaultMode()
+TestTheModeIsTheOneTheEnvironmentAsked()
 {
-    CHECK(RigExecBakedScheduleModeFromEnvironment() ==
-              RigExecBakedScheduleMode::Serial ||
-          RigExecBakedScheduleModeFromEnvironment() ==
-              RigExecBakedScheduleMode::Parallel);
+    const bool asked = TfGetenv("RIGEXEC_BAKED_SCHEDULE", "serial") ==
+                       "parallel";
+    const RigExecBakedScheduleMode expected =
+        asked && RigExecParallelEvaluationEnabled()
+            ? RigExecBakedScheduleMode::Parallel
+            : RigExecBakedScheduleMode::Serial;
+    CHECK(RigExecBakedScheduleModeFromEnvironment() == expected);
 }
 
 std::string
@@ -337,7 +345,7 @@ main(int argc, char **argv)
                     resources.c_str());
         return 2;
     }
-    TestSerialIsTheDefaultMode();
+    TestTheModeIsTheOneTheEnvironmentAsked();
     TestTheGraphDescribesTheProgram(examplesDir + "/biped/Biped.usda",
                                     "Biped");
     TestTheGraphDescribesTheProgram(examplesDir + "/biped/Biped_anim.usda",

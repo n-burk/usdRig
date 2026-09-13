@@ -71,6 +71,40 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((recomputeExtent, "recomputeExtent"))
 );
 
+// The attribute and value names the PER-FRAME assemblers read. Hoisted out of
+// their bodies because TfToken(const char *) takes the token registry's spin
+// lock on every construction -- on the hit path as much as on the miss path --
+// and an assembler runs once per revision per frame, inside a baked step that
+// is not allowed to take a lock at all (docs/baked-step-graph.md §2). The
+// bind-time readers below keep their inline tokens: they run once per
+// generation, off any step.
+TF_DEFINE_PRIVATE_TOKENS(
+    _attrTokens,
+    ((enabled, "inputs:enabled"))
+    ((defaultWeight, "inputs:defaultWeight"))
+    ((jointIndices, "rigExec:jointIndices"))
+    ((jointWeights, "rigExec:jointWeights"))
+    ((elementSize, "rigExec:elementSize"))
+    ((skinningMethod, "rigExec:skinningMethod"))
+    ((deltaSpace, "rigExec:deltaSpace"))
+    ((basis, "rigExec:basis"))
+    ((splineIndices, "rigExec:splineIndices"))
+    ((samplesPerSpline, "rigExec:samplesPerSpline"))
+    ((divisions, "rigExec:divisions"))
+);
+
+// The values those reads fall back to, and the three states a revision's
+// status reports. Same reason.
+TF_DEFINE_PRIVATE_TOKENS(
+    _valueTokens,
+    ((classicLinear, "classicLinear"))
+    ((target, "target"))
+    ((bezier, "bezier"))
+    ((disabled, "disabled"))
+    ((ok, "ok"))
+    ((moverFailed, "moverFailed"))
+);
+
 namespace rigExec {
 
 namespace {
@@ -180,7 +214,7 @@ _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
         ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
     auto passThrough = [&ctx, resultStatus]() {
         if (_StatusAllowsApply(ctx)) {
-            resultStatus->state = TfToken("moverFailed");
+            resultStatus->state = _valueTokens->moverFailed;
         }
         ctx.SetOutputToReferenceInput(_tokens->previous);
     };
@@ -231,7 +265,9 @@ _RevisionNode::Compute(const VdfContext &ctx) const
 {
     ++*_executionCount;
     const auto *status = ctx.GetInputValuePtr<RigExecMoverStatus>(_tokens->status);
-    _resultStatus = status ? *status : RigExecMoverStatus{TfToken("moverFailed"), {}};
+    _resultStatus =
+        status ? *status
+               : RigExecMoverStatus{_valueTokens->moverFailed, {}};
     // Node state that outlives one Compute, so a revision that passes through
     // must not leave the frames of the last one that did not.
     _controlFrames.clear();
@@ -989,10 +1025,10 @@ _Targets(const UsdPrim &prim, const char *rel)
 }
 
 TfToken
-_Token(const UsdPrim &prim, const char *attr, const char *fallback)
+_Token(const UsdPrim &prim, const TfToken &attr, const TfToken &fallback)
 {
-    TfToken value(fallback);
-    if (const UsdAttribute a = prim.GetAttribute(TfToken(attr))) {
+    TfToken value = fallback;
+    if (const UsdAttribute a = prim.GetAttribute(attr)) {
         a.Get(&value);
     }
     return value;
@@ -1010,11 +1046,11 @@ _PointsOf(const SdfPath &path)
 // before the authored stage. This is what lets a property-domain mover drive
 // another mover's common envelope without a second evaluation model.
 float
-_Float(const UsdPrim &prim, const char *attr, float fallback,
+_Float(const UsdPrim &prim, const TfToken &attr, float fallback,
        UsdTimeCode time, const RigExecResolvedInputs *resolved)
 {
     float value = fallback;
-    if (const UsdAttribute a = prim.GetAttribute(TfToken(attr))) {
+    if (const UsdAttribute a = prim.GetAttribute(attr)) {
         if (resolved && resolved->GetAttribute(a, time, &value)) {
             return value;
         }
@@ -1236,12 +1272,12 @@ RigExecAssembleMatrixParameters(
     const RigExecResolvedInputs *resolved)
 {
     RigExecMoverParameters params;
-    params.kind = TfToken("matrix");
+    params.kind = _kindTokens->matrix;
 
     bool enabled = true;
     if (moverPrim) {
         if (const UsdAttribute a =
-                moverPrim.GetAttribute(TfToken("inputs:enabled"))) {
+                moverPrim.GetAttribute(_attrTokens->enabled)) {
             if (!resolved ||
                 !resolved->GetAttribute(a, time, &enabled)) {
                 a.Get(&enabled, time);
@@ -1260,7 +1296,7 @@ RigExecAssembleMatrixParameters(
     params.weights = weights
         ? *weights
         : RigExecWeightPacket::Constant(_Float(
-              moverPrim, "inputs:defaultWeight", 1.0f, time, resolved));
+              moverPrim, _attrTokens->defaultWeight, 1.0f, time, resolved));
     if (!params.weights.valid) {
         return params;  // invalid common envelope => MoverFailed
     }
@@ -1287,11 +1323,11 @@ RigExecStatusForParameters(
 {
     RigExecMoverStatus status;
     if (!parameters.enabled) {
-        status.state = TfToken("disabled");
+        status.state = _valueTokens->disabled;
     } else if (parameters.valid) {
-        status.state = TfToken("ok");
+        status.state = _valueTokens->ok;
     } else {
-        status.state = TfToken("moverFailed");
+        status.state = _valueTokens->moverFailed;
         // First bad canonical public address (spec §6.6): v0.1 reports the
         // failed mover's own path; per-input attribution is future work.
         status.firstBadAddress = moverPath.GetString();
@@ -1340,7 +1376,7 @@ _Enabled(const UsdPrim &prim, UsdTimeCode time,
     bool enabled = true;
     if (prim) {
         if (const UsdAttribute a =
-                prim.GetAttribute(TfToken("inputs:enabled"))) {
+                prim.GetAttribute(_attrTokens->enabled)) {
             if (resolved && resolved->GetAttribute(a, time, &enabled)) {
                 return enabled;
             }
@@ -1365,9 +1401,9 @@ RigExecResolveSkinTopology(
     }
     const SdfPath primPath = moverPrim.GetPath();
     const SdfPath indicesPath =
-        primPath.AppendProperty(TfToken("rigExec:jointIndices"));
+        primPath.AppendProperty(_attrTokens->jointIndices);
     const SdfPath weightsPath =
-        primPath.AppendProperty(TfToken("rigExec:jointWeights"));
+        primPath.AppendProperty(_attrTokens->jointWeights);
     // The layout is epoch state, so everything about it that does not involve
     // the influence MATRICES is settled once and shared: the two array reads,
     // the copy into the packet, and the per-element range and weight checks.
@@ -1385,10 +1421,10 @@ RigExecResolveSkinTopology(
             // packet back on the per-frame arrays, which is what Compile
             // would have done had the sample been there. Costs one answer per
             // notice.
-            for (const char *name : {"rigExec:jointIndices",
-                                     "rigExec:jointWeights",
-                                     "rigExec:elementSize"}) {
-                const UsdAttribute a = moverPrim.GetAttribute(TfToken(name));
+            for (const TfToken &name : {_attrTokens->jointIndices,
+                                        _attrTokens->jointWeights,
+                                        _attrTokens->elementSize}) {
+                const UsdAttribute a = moverPrim.GetAttribute(name);
                 if (a && (a.ValueMightBeTimeVarying() ||
                           a.HasAuthoredConnections())) {
                     return false;
@@ -1400,7 +1436,7 @@ RigExecResolveSkinTopology(
                 _Array<float>(moverPrim, weightsPath, time, resolved);
             topology->elementSize = 1;
             if (const UsdAttribute a =
-                    moverPrim.GetAttribute(TfToken("rigExec:elementSize"))) {
+                    moverPrim.GetAttribute(_attrTokens->elementSize)) {
                 if (!resolved ||
                     !resolved->GetAttribute(a, time, &topology->elementSize)) {
                     a.Get(&topology->elementSize, time);
@@ -1448,7 +1484,7 @@ RigExecAssembleSkinParameters(
     const std::shared_ptr<const RigExecSkinTopology> *resolvedTopology)
 {
     RigExecMoverParameters params;
-    params.kind = TfToken("skin");
+    params.kind = _kindTokens->skin;
     params.enabled = _Enabled(moverPrim, time, resolved);
     if (!params.enabled) {
         params.valid = true;  // disabled is an ordinary pass-through
@@ -1460,7 +1496,7 @@ RigExecAssembleSkinParameters(
     params.weights = weights
         ? *weights
         : RigExecWeightPacket::Constant(_Float(
-              moverPrim, "inputs:defaultWeight", 1.0f, time, resolved));
+              moverPrim, _attrTokens->defaultWeight, 1.0f, time, resolved));
     if (!params.weights.valid) {
         return params;  // invalid common envelope => MoverFailed
     }
@@ -1468,21 +1504,21 @@ RigExecAssembleSkinParameters(
     params.skinTransforms = *influenceTransforms;
     const SdfPath primPath = moverPrim.GetPath();
     const SdfPath indicesPath =
-        primPath.AppendProperty(TfToken("rigExec:jointIndices"));
+        primPath.AppendProperty(_attrTokens->jointIndices);
     const SdfPath weightsPath =
-        primPath.AppendProperty(TfToken("rigExec:jointWeights"));
+        primPath.AppendProperty(_attrTokens->jointWeights);
     const auto readElementSize = [&moverPrim, time, resolved](int *out) {
         *out = 1;
         if (const UsdAttribute a =
-                moverPrim.GetAttribute(TfToken("rigExec:elementSize"))) {
+                moverPrim.GetAttribute(_attrTokens->elementSize)) {
             if (!resolved || !resolved->GetAttribute(a, time, out)) {
                 a.Get(out, time);
             }
         }
     };
-    params.skinningMethod = TfToken("classicLinear");
+    params.skinningMethod = _valueTokens->classicLinear;
     if (const UsdAttribute a =
-            moverPrim.GetAttribute(TfToken("rigExec:skinningMethod"))) {
+            moverPrim.GetAttribute(_attrTokens->skinningMethod)) {
         if (!resolved ||
             !resolved->GetAttribute(a, time, &params.skinningMethod)) {
             a.Get(&params.skinningMethod, time);
@@ -1655,34 +1691,34 @@ RigExecAssembleParameters(
 
     switch (op) {
     case RigExecRevisionOp::BlendShape:
-        params.kind = TfToken("blendShape");
+        params.kind = _kindTokens->blendShape;
         break;
     case RigExecRevisionOp::VolumeCorrect:
-        params.kind = TfToken("volumeCorrect");
+        params.kind = _kindTokens->volumeCorrect;
         break;
     case RigExecRevisionOp::Smooth:
-        params.kind = TfToken("smooth");
+        params.kind = _kindTokens->smooth;
         break;
     case RigExecRevisionOp::Lattice:
-        params.kind = TfToken("lattice");
+        params.kind = _kindTokens->lattice;
         break;
     case RigExecRevisionOp::SurfaceProject:
-        params.kind = TfToken("surfaceProject");
+        params.kind = _kindTokens->surfaceProject;
         break;
     case RigExecRevisionOp::Ribbon:
-        params.kind = TfToken("ribbon");
+        params.kind = _kindTokens->ribbon;
         break;
     case RigExecRevisionOp::EmitGuidePoints:
-        params.kind = TfToken("emitGuidePoints");
+        params.kind = _kindTokens->emitGuidePoints;
         break;
     case RigExecRevisionOp::Curvenet:
-        params.kind = TfToken("curvenet");
+        params.kind = _kindTokens->curvenet;
         break;
     case RigExecRevisionOp::RecomputeNormals:
-        params.kind = TfToken("recomputeNormals");
+        params.kind = _kindTokens->recomputeNormals;
         break;
     case RigExecRevisionOp::RecomputeExtent:
-        params.kind = TfToken("recomputeExtent");
+        params.kind = _kindTokens->recomputeExtent;
         break;
     case RigExecRevisionOp::Matrix:
         break;  // handled above
@@ -1703,7 +1739,7 @@ RigExecAssembleParameters(
         : (values.weights
                ? *values.weights
                : RigExecWeightPacket::Constant(_Float(
-                     moverPrim, "inputs:defaultWeight", 1.0f, time,
+                     moverPrim, _attrTokens->defaultWeight, 1.0f, time,
                      values.resolved)));
     if (!params.weights.valid) {
         return params;  // MoverFailed, preserving the preceding revision
@@ -1712,7 +1748,8 @@ RigExecAssembleParameters(
     switch (op) {
     case RigExecRevisionOp::BlendShape: {
         params.blendDeltas = values.blendDeltas;
-        const TfToken space = _Token(moverPrim, "rigExec:deltaSpace", "target");
+        const TfToken space =
+            _Token(moverPrim, _attrTokens->deltaSpace, _valueTokens->target);
         if (space != "target" && space != "surfaceFrame") break;
         params.blendSurfaceFrame = space == "surfaceFrame";
         if (params.blendSurfaceFrame) {
@@ -1759,17 +1796,18 @@ RigExecAssembleParameters(
         const std::vector<GfVec3f> restNet = _Array<GfVec3f>(moverPrim, binding.curvenetPoints, UsdTimeCode::Default(), /*resolved=*/nullptr);
         std::vector<int> splineIndices;
         if (const UsdAttribute a =
-                netPrim.GetAttribute(TfToken("rigExec:splineIndices"))) {
+                netPrim.GetAttribute(_attrTokens->splineIndices)) {
             VtIntArray value;
             a.Get(&value, UsdTimeCode::Default());
             splineIndices.assign(value.begin(), value.end());
         }
         int samplesPerSpline = 5;
         if (const UsdAttribute a =
-                netPrim.GetAttribute(TfToken("rigExec:samplesPerSpline"))) {
+                netPrim.GetAttribute(_attrTokens->samplesPerSpline)) {
             a.Get(&samplesPerSpline);
         }
-        const TfToken basisToken = _Token(netPrim, "rigExec:basis", "bezier");
+        const TfToken basisToken =
+            _Token(netPrim, _attrTokens->basis, _valueTokens->bezier);
         params.topologyCounts =
             _Array<int>(moverPrim, binding.topologyCounts, UsdTimeCode::Default(), /*resolved=*/nullptr);
         params.topologyIndices =
@@ -1862,7 +1900,7 @@ RigExecAssembleParameters(
         params.auxPoints = _Array<GfVec3f>(moverPrim, binding.cagePoints, UsdTimeCode::Default(), /*resolved=*/nullptr);
         params.auxPointsB = _Array<GfVec3f>(moverPrim, binding.cagePoints, time, values.resolved);
         if (const UsdAttribute a =
-                moverPrim.GetAttribute(TfToken("rigExec:divisions"))) {
+                moverPrim.GetAttribute(_attrTokens->divisions)) {
             a.Get(&params.divisions, time);
         }
         // Same cardinality contract as the kernel: a cage that does not match

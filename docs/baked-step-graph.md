@@ -18,6 +18,15 @@ the three rigs that bake is byte-identical to before. Clustering (§5.1), the pa
 (§5.2), vertex-chunked skinning (§6) and cone re-execution (§7) are still to come; the mode
 `RIGEXEC_BAKED_SCHEDULE=parallel` is accepted and runs the serial executor until they land.
 
+Two rules of §2 and §4.3 that a serial run cannot enforce, and where they are enforced instead:
+the per-frame assemblers take no token-registry lock -- every `TfToken(const char *)` on the step
+path is hoisted to a `TF_DEFINE_PRIVATE_TOKENS` block in `moverGraph.cpp` and `bakedGeometry.cpp`,
+while the BIND-time readers (`RigExecResolveRevisionBinding` and the read-phase metadata) keep
+their inline tokens because they run once per generation and off any step; and `Snapshots` is not
+a source domain -- every record in the run's store is written by a step, so a step that reads the
+store declares the steps before it, which `tests/testRigExecBakedSchedule` then checks like any
+other read.
+
 Four deviations from the sections below, each made for a stated reason:
 
 * The slot **kind** of §3 is called a slot DOMAIN in the code (`RigExecBakedSlotDomain`), because
@@ -248,7 +257,10 @@ published `VtVec3fArray` is DOUBLE-BUFFERED: two persistent arrays alternate, so
 refcount bump and the array a consumer may still hold from last frame is never mutated (COW aliasing
 rule). Skin scratch copies (`scratch = current`, `preceding = scratch`, `revision.output = current`)
 disappear because chunks write the revision's own buffer (§6). `TfToken(const char*)` constructions
-inside assemblers are hoisted to `static const TfToken`.
+inside assemblers are hoisted to `static const TfToken` -- a file-scope `TF_DEFINE_PRIVATE_TOKENS`
+block in practice, which is the same thing without a guard variable per call. A commit's staging
+slots are numbered across the whole program, not within one commit: per-commit ids would make the
+sweep order two unrelated commits' chunks against each other.
 
 ## 5. Clustering and execution
 
@@ -478,7 +490,9 @@ bake today (diagnostics are compared) [P29]:
   `snapshotAfter` fields; SI-6 invalidation-index coverage note.
 * `_WeightObject` table skeleton and the `WeightPacket` step kind wired to Phase 1's
   `weightPackets.h`, unused by any rig until Phase 3.
-* `constraintDeltas` slot kind and its `find`-guarded consumption in the assemble step (mirrors
-  rigEvaluator.cpp:9955-9958) [P31].
+* `constraintDeltas` slot kind and its `find`-guarded consumption (mirrors
+  rigEvaluator.cpp:9955-9958) [P31]. Consumed in `InfluenceFold`, not in the assemble: the delta
+  IS the revision's transform, the fold is the step that declares `RevisionTransforms`, and a step
+  writing a slot it declared as a read is the declaration an executor trusts being wrong.
 * The comparator gained weightFields/weightFrames/solverOverridesConverged in Phase 1; §8 relies on
   that [P32].

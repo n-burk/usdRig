@@ -488,14 +488,18 @@ const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
 /// read of it with no writer is either a bug or the loop-carried read of
 /// Aggregate that BlendPointFrames makes when its input solver runs in no
 /// earlier batch (the reader list is therefore seeded from program start).
+///
+/// Snapshots is deliberately NOT one of them although the prologue empties
+/// the store: every record in it is written by a step, so a read of it must
+/// name the steps it reads, and calling the domain a source would excuse the
+/// one declaration the verifier exists to check.
 inline bool
 RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
 {
     return domain == RigExecBakedSlotDomain::Avars ||
            domain == RigExecBakedSlotDomain::PropertyResult ||
            domain == RigExecBakedSlotDomain::ChainBase ||
-           domain == RigExecBakedSlotDomain::Aggregate ||
-           domain == RigExecBakedSlotDomain::Snapshots;
+           domain == RigExecBakedSlotDomain::Aggregate;
 }
 
 /// What one step of the program does.
@@ -667,6 +671,11 @@ struct RigExecBakedCommit {
     bool abandoned = true;
     /// Build's decision to run the commit as three steps rather than one.
     bool split = false;
+    /// Where this commit's pairs start in the CommitStaging domain. The
+    /// staging scratch is per commit, but the slot ids may not be: two split
+    /// commits both declaring [0, 64) would make the edge sweep order their
+    /// chunks against each other and hide a real conflict behind a false one.
+    int stagingBase = 0;
     /// A constraint step's source scratch, sized at Build.
     std::vector<RigExecConstraintSource> sources;
 };
@@ -1019,6 +1028,11 @@ struct RigExecBakedProgramImpl {
         /// them. Sized at Build, never resized in the region.
         std::vector<GfMatrix4d> influences;
         GfMatrix4d transform{1.0};
+        /// Whether `transform` holds one at all this run: a bound transform
+        /// provider, or a geometry-domain constraint's delta. Written by the
+        /// fold beside the table, because "there is a matrix" is part of what
+        /// the table says.
+        bool haveTransform = false;
         /// This revision's overlay of the run's snapshot store, built only
         /// when the revision declares a read phase. Per revision, never one
         /// buffer shared by the walk.

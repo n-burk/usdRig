@@ -650,6 +650,11 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // ---- the interleaved solver/constraint walk -----------------------------
     B.commits.resize(B.walkSteps.size());
     std::set<size_t> levels;
+    // Where the next split commit's staging pairs start. The scratch behind
+    // them is per commit, but the SLOT IDS are handed out once for the whole
+    // program: two commits declaring the same [0, n) would be ordered against
+    // each other by the sweep for sharing a slot neither can reach.
+    int stagingSlots = 0;
     for (size_t w = 0; w < B.walkSteps.size(); ++w) {
         const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
         RigExecBakedCommit &commit = B.commits[w];
@@ -700,6 +705,10 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             commit.closestPos.push_back(positionOf(closest));
         }
         commit.split = commit.propagate.size() > kPropagateSplitThreshold;
+        if (commit.split) {
+            commit.stagingBase = stagingSlots;
+            stagingSlots += int(commit.propagate.size());
+        }
 
         if (walk.solverBatch) {
             for (const int si : walk.batchSolvers) {
@@ -850,9 +859,10 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                     RigExecBakedSlotDomain::PoseFin,
                     commit.propagate[k].second));
             }
-            chunk.writes.push_back(
-                RigExecBakedRange(RigExecBakedSlotDomain::CommitStaging,
-                                  int(begin), int(end)));
+            chunk.writes.push_back(RigExecBakedRange(
+                RigExecBakedSlotDomain::CommitStaging,
+                commit.stagingBase + int(begin),
+                commit.stagingBase + int(end)));
         }
         {
             RigExecBakedStep &apply =
@@ -860,9 +870,9 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             apply.maxDiagnostics = RigExecBakedMaxStepDiagnostics;
             apply.reads.push_back(
                 RigExecBakedOne(RigExecBakedSlotDomain::CommitTable, int(w)));
-            apply.reads.push_back(
-                RigExecBakedRange(RigExecBakedSlotDomain::CommitStaging, 0,
-                                  int(commit.propagate.size())));
+            apply.reads.push_back(RigExecBakedRange(
+                RigExecBakedSlotDomain::CommitStaging, commit.stagingBase,
+                commit.stagingBase + int(commit.propagate.size())));
             declarePropagation(&apply, /* writes = */ true);
             if (!walk.solverBatch) {
                 apply.writes.push_back(
@@ -1568,8 +1578,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         if (commit.abandoned) {
             return;
         }
-        const size_t begin = size_t(step->part) * 64;
-        const size_t end = std::min(begin + 64, commit.propagate.size());
+        const size_t begin = size_t(step->part) * kPropagateChunkSize;
+        const size_t end =
+            std::min(begin + kPropagateChunkSize, commit.propagate.size());
         StageCommitPairs(B, &commit, begin, end);
         return;
     }
