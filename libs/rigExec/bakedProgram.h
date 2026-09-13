@@ -64,20 +64,28 @@ enum class RigExecEvaluationMode {
 /// assertion a dead comparator also satisfies. Declared here so a test can
 /// hand it two poses it built itself and check that it finds what is there.
 ///
-/// Compares the seven published maps plus the solver guides, in both
+/// Compares the nine published maps plus the solver guides, in both
 /// directions: a key present only in \p reference and a key present only in
-/// \p baked are each one mismatch. It also compares the SCALARS of the
-/// generation -- the mover-graph work counters, the solver override rounds
-/// and the diagnostics, the last order-sensitively -- because those are
-/// published state a consumer reads, and a program that arrives at the right
-/// numbers while claiming different work is still a second rig. Each is its
-/// own mismatch domain with its own text, so a count of one names which.
+/// \p baked are each one mismatch. Two of the nine -- the resolved weight
+/// fields and the volume placements -- are empty on both paths while the
+/// features that fill them refuse the bake; they are compared anyway, so
+/// that the first generation a weight object ever bakes is measured rather
+/// than waved through. It also compares the SCALARS of the generation -- the
+/// mover-graph work counters, the solver override rounds, whether the solver
+/// overrides converged, and the diagnostics, the last order-sensitively --
+/// because those are published state a consumer reads, and a program that
+/// arrives at the right numbers while claiming different work is still a
+/// second rig. Each is its own mismatch domain with its own text, so a count
+/// of one names which.
 ///
 /// RigExecRigPose::solverEvaluations is the one published scalar left out,
 /// and on purpose: it counts the solver computations the schedule requested,
 /// and the dynamic path's per-batch exec cache answers a repeated time with
 /// the same inputs for free while the program, which holds no such cache,
 /// re-solves. The two numbers are each true of the path that reported them.
+/// movedPropertiesCpu and the two moverGraphParity counters are left out for
+/// the opposite reason -- the mode that fills them turns the baked path off,
+/// so they are empty on both sides of every comparison made here.
 void RigExecComparePoses(const RigExecRigPose &reference,
                          const RigExecRigPose &baked, RigExecRigPose *out);
 
