@@ -633,7 +633,9 @@ struct RigExecBakedStep {
 
     /// Empties this run's output. Called by the executor before the body, so
     /// that a step that is skipped keeps last run's lines for the epilogue
-    /// to replay.
+    /// to replay. The timestamps are NOT cleared here for that same reason:
+    /// a skipped step never reaches this, so RigExecBakedRunSteps clears
+    /// every step's interval at the start of the run instead.
     void BeginRun() {
         diagnostics.clear();
         counters.Clear();
@@ -687,6 +689,12 @@ struct RigExecBakedClustering {
     /// cluster graph by cost. Their ratio is the speed-up this schedule can
     /// reach with threads to spare.
     double serialCost = 0, criticalPathCost = 0;
+    /// Whether the last run stamped the per-cluster times above. Only the
+    /// parallel executor has clusters to time: a serial run walks the steps
+    /// and never asks which cluster they are in, so its run report says so
+    /// rather than printing a table of zeros that reads as "every cluster
+    /// was free".
+    bool lastRunTimed = false;
 };
 
 /// The remaining-predecessor counter of one cluster.

@@ -27,11 +27,14 @@
 #include "rigExec/parallel.h"
 #include "rigExec/rigEvaluator.h"
 
+#include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
+#include "pxr/base/vt/array.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
@@ -77,10 +80,10 @@ struct BuiltProgram {
 };
 
 BuiltProgram
-Build(const std::string &stagePath)
+BuildStage(const UsdStageRefPtr &stage)
 {
     BuiltProgram built;
-    built.stage = UsdStage::Open(stagePath);
+    built.stage = stage;
     if (!built.stage) {
         return built;
     }
@@ -103,6 +106,51 @@ Build(const std::string &stagePath)
         }
     }
     return built;
+}
+
+BuiltProgram
+Build(const std::string &stagePath)
+{
+    return BuildStage(UsdStage::Open(stagePath));
+}
+
+/// A rig whose chain carries THREE revisions, which none of the example
+/// stages does: the biped's two chains hold one revision each, so the rules
+/// about reading a chain's running value are vacuous on them.
+///
+/// Three matrix movers on one points attribute is the shape
+/// tests/testRigExecInteractive drives, and it is the shape that found the
+/// missing RevisionDone declaration under the parallel executor. Built here
+/// so the declaration is checked by a test rather than by remembering to run
+/// one environment.
+UsdStageRefPtr
+MakeStackedChainStage()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim driver = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Driver"), TfToken("RigExecControl"));
+    driver.GetAttribute(TfToken("avars:tx")).Set(1.0);
+    const SdfPath target("/Asset/Shape.points");
+    const UsdPrim shape =
+        stage->DefinePrim(target.GetPrimPath(), TfToken("Points"));
+    shape.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0)});
+    shape.GetAttribute(TfToken("extent"))
+        .Set(VtVec3fArray{GfVec3f(0), GfVec3f(1, 0, 0)});
+    stage->DefinePrim(SdfPath("/Asset/Rig/Movers"), TfToken("Scope"));
+    for (int i = 0; i < 3; ++i) {
+        const UsdPrim mover = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/M" + std::to_string(i)),
+            TfToken("RigExecMatrixMover"));
+        mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+        mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+        mover.GetRelationship(TfToken("rigExec:transform"))
+            .SetTargets({driver.GetPath()});
+        mover.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    }
+    return stage;
 }
 
 /// A dense bitset over steps, for the reachability the write-conflict check
@@ -141,10 +189,8 @@ private:
 };
 
 void
-TestTheGraphDescribesTheProgram(const std::string &stagePath,
-                                const char *name)
+TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
 {
-    const BuiltProgram built = Build(stagePath);
     CHECK(built.program != nullptr);
     if (!built.program) {
         return;
@@ -267,6 +313,60 @@ TestTheGraphDescribesTheProgram(const std::string &stagePath,
         std::printf("FAIL %s: %zu unordered read/write slot overlap(s)\n",
                     name, races);
     }
+    // (5) A step that reads a revision's OUTPUT buffer must also read that
+    // revision's RevisionDone slot. A chain's running points live in
+    // whichever buffer the last applied revision filled, and the fuse
+    // publishes that choice -- the `currentSource` indirection -- into
+    // RevisionDone. A step declaring the buffers alone is free to run before
+    // the fuse that decides which of them to read, so it reads the wrong
+    // one: deterministically wrong points, invisible in every serial order
+    // and immediate at one cluster per step. The rule is asserted here
+    // rather than left to the builder because the builder is the file the
+    // vertex partition rewrites, and a declaration dropped in that rewrite
+    // must fail a test rather than wait for someone to re-run the dumps at
+    // grain 0. A revision this step writes RevisionDone for is its own fuse
+    // deciding the indirection, and is excluded.
+    const size_t revisions = B.revisionIndex.size();
+    auto mark = [revisions](std::vector<bool> *flags,
+                            const RigExecBakedSlotRange &range) {
+        for (size_t slot = range.begin;
+             slot < range.end && slot < revisions; ++slot) {
+            (*flags)[slot] = true;
+        }
+    };
+    std::vector<bool> readsOut(revisions), readsDone(revisions),
+        writesDone(revisions);
+    for (size_t index = 0; index < B.steps.size(); ++index) {
+        const RigExecBakedStep &step = B.steps[index];
+        readsOut.assign(revisions, false);
+        readsDone.assign(revisions, false);
+        writesDone.assign(revisions, false);
+        for (const RigExecBakedSlotRange &read : step.reads) {
+            if (read.domain == RigExecBakedSlotDomain::RevisionOut) {
+                mark(&readsOut, read);
+            } else if (read.domain == RigExecBakedSlotDomain::RevisionDone) {
+                mark(&readsDone, read);
+            }
+        }
+        for (const RigExecBakedSlotRange &write : step.writes) {
+            if (write.domain == RigExecBakedSlotDomain::RevisionDone) {
+                mark(&writesDone, write);
+            }
+        }
+        for (size_t revision = 0; revision < revisions; ++revision) {
+            if (!readsOut[revision] || readsDone[revision] ||
+                writesDone[revision]) {
+                continue;
+            }
+            ++failures;
+            std::printf("FAIL %s: step %zu (%s) reads RevisionOut[%zu] "
+                        "without RevisionDone[%zu], so it may read the "
+                        "buffer before the fuse says which one holds the "
+                        "points\n", name, index, step.label.c_str(),
+                        revision, revision);
+        }
+    }
+
     std::printf("  %s: %zu step(s), %zu edge(s)\n", name, B.steps.size(),
                 edges);
 }
@@ -281,9 +381,8 @@ TestTheGraphDescribesTheProgram(const std::string &stagePath,
 /// clusters. The acceptance matrix runs the rigs under all three, so what
 /// this suite adds is the structural claim the dumps cannot see.
 void
-TestTheClusteringIsSound(const std::string &stagePath, const char *name)
+TestTheClusteringIsSound(const BuiltProgram &built, const char *name)
 {
-    const BuiltProgram built = Build(stagePath);
     CHECK(built.program != nullptr);
     if (!built.program) {
         return;
@@ -471,15 +570,21 @@ main(int argc, char **argv)
         return 2;
     }
     TestTheModeIsTheOneTheEnvironmentAsked();
-    TestTheGraphDescribesTheProgram(examplesDir + "/biped/Biped.usda",
-                                    "Biped");
-    TestTheGraphDescribesTheProgram(examplesDir + "/biped/Biped_anim.usda",
-                                    "Biped_anim");
-    TestTheGraphDescribesTheProgram(
-        examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs");
-    TestTheClusteringIsSound(examplesDir + "/biped/Biped.usda", "Biped");
-    TestTheClusteringIsSound(
-        examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs");
+    const BuiltProgram biped = Build(examplesDir + "/biped/Biped.usda");
+    const BuiltProgram animated =
+        Build(examplesDir + "/biped/Biped_anim.usda");
+    const BuiltProgram spider =
+        Build(examplesDir + "/spider_legs_assembly_ref.usda");
+    // Three revisions on one chain, which no example stage has and which
+    // every rule about reading a chain's running value needs.
+    const BuiltProgram stacked = BuildStage(MakeStackedChainStage());
+    TestTheGraphDescribesTheProgram(biped, "Biped");
+    TestTheGraphDescribesTheProgram(animated, "Biped_anim");
+    TestTheGraphDescribesTheProgram(spider, "spider_legs");
+    TestTheGraphDescribesTheProgram(stacked, "stacked_revisions");
+    TestTheClusteringIsSound(biped, "Biped");
+    TestTheClusteringIsSound(spider, "spider_legs");
+    TestTheClusteringIsSound(stacked, "stacked_revisions");
     TestTheReportIsDeterministic(examplesDir + "/biped/Biped.usda");
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

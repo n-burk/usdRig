@@ -145,7 +145,12 @@ RigExecBakedScheduleReportRequested()
 //                    would make a 90-joint skin look thirty times the work a
 //                    3-influence gather does
 //   RevisionFuse     one decision
-//   ChainStatus      revisions of the chain
+//   ChainStatus      the CHAIN's vertices -- the sweep ends by COPYING
+//                    the chain's whole point array into its spare
+//                    buffer, so its time is the mesh's and not the
+//                    handful of MoverFailed lines it may also emit.
+//                    Sizing it by the revision count made one 26k-point
+//                    copy read as 7.8us of cost 'per revision'
 //   Derived          the CHAIN's vertices, which is what recomputeNormals
 //                    and recomputeExtent walk -- an extent is two vectors
 //                    however large the mesh behind it is
@@ -189,7 +194,7 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0000, 0.000487},   // RevisionStatic    1
     {0.0000, 0.000914},   // RevisionChunk     1 -- see below
     {0.0000, 0.594000},   // RevisionFuse      1
-    {0.0000, 7.791875},   // ChainStatus       1
+    {0.0000, 0.000336},   // ChainStatus       1 -- see below
     {0.0000, 0.003744},   // Derived           1
 };
 static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
@@ -201,6 +206,13 @@ static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
 //    measured it and the row is the guess it started as. It is a per-provider
 //    matrix pass, so it should land near ProviderMatrix's per-unit cost when a
 //    phased rig finally fits it.
+//  * ChainStatus is sized by the chain's vertices, and its row was
+//    re-fitted after that correction: the median per-unit of four
+//    calibration runs of the biped (0.000318 .. 0.000351), which
+//    predicts 8.8us for the 26276 points the step copies. The row it
+//    replaced read 7.79us per REVISION -- the same measurement with the
+//    mesh hidden in it, which would have predicted 23us for a
+//    three-revision chain whatever its size.
 //  * RevisionChunk was measured as ONE chunk over a whole 105k-vertex skin,
 //    and RigExecApplySkinKernel spreads a range that large over the arena
 //    itself. So the row describes the wall time of an internally parallel
@@ -225,6 +237,9 @@ constexpr double kSpawnCostUs = 1.0;
 struct GeometrySizes {
     std::vector<double> revisionUnits;   ///< vertices x elementSize
     std::vector<double> revisionPoints;  ///< vertices
+    /// The chain's vertices, per chain index: what the chain-wide steps
+    /// walk and copy.
+    std::vector<double> chainPoints;
     /// The CHAIN's vertices, per derived id: recomputeNormals and
     /// recomputeExtent loop over the points they are maintained FROM, and
     /// an extent's own array is two vectors however large the mesh is.
@@ -268,7 +283,8 @@ MeasureGeometry(const RigExecBakedProgramImpl &B)
     sizes.revisionUnits.assign(B.revisionIndex.size(), 0);
     sizes.revisionPoints.assign(B.revisionIndex.size(), 0);
     sizes.derivedPoints.assign(B.derivedIndex.size(), 0);
-    std::vector<double> chainPoints(B.chains.size(), 0);
+    std::vector<double> &chainPoints = sizes.chainPoints;
+    chainPoints.assign(B.chains.size(), 0);
     for (size_t c = 0; c < B.chains.size(); ++c) {
         chainPoints[c] = double(PointCountOf(B.chains[c].baseQuery));
     }
@@ -346,7 +362,10 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
         // divides this between the chunks and changes nothing else.
         return geometry.revisionUnits[object];
     case RigExecBakedStepKind::ChainStatus:
-        return double(B.chains[object].revisions.size());
+        // The chain's points, not its revisions: the body copies the
+        // published array whole (bakedGeometry.cpp), and the MoverFailed
+        // sweep over the revisions costs a branch each.
+        return geometry.chainPoints[object];
     case RigExecBakedStepKind::Derived:
         return geometry.derivedPoints[object];
     }
@@ -852,6 +871,9 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
     const bool timing = B.profiler && B.profiler->IsEnabled();
+    // Nothing here looks at a cluster, so the run report must not pretend
+    // this frame measured any.
+    B.clustering.lastRunTimed = false;
     // Calibration measures the same boundaries on a finer clock, into each
     // step's own accumulator: no lock, no shared counter, and nothing that
     // survives the frame but a sum.
@@ -1001,6 +1023,7 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
     run.counters = B.clusterCounters.get();
     run.profiling = B.profiler && B.profiler->IsEnabled();
     run.timing = run.profiling || RigExecBakedScheduleReportRequested();
+    B.clustering.lastRunTimed = run.timing;
     // The run's phased-read store is one container, and folding a step's
     // records into it is a write to it. When some revision declares a read
     // phase the graph orders every writer and reader of the store against
@@ -1054,6 +1077,15 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
 bool
 RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {
+    // Last frame's intervals must not survive into this one. A step's own
+    // BeginRun cannot do this: a run that bails never reaches the steps
+    // after it, so BeginRun is exactly what those steps do not get, and the
+    // epilogue would replay their previous intervals into the trace of the
+    // frame that gave up -- the one frame a reader takes at face value.
+    // Cleared here, once, so that neither executor has to remember it.
+    for (RigExecBakedStep &step : program->steps) {
+        step.startUs = step.endUs = 0;
+    }
     // Calibration times the steps to fit the cost table, so it runs the
     // reference order whatever the mode asks for: a step's interval in a
     // parallel frame includes the memory traffic of every other step that
@@ -1349,6 +1381,16 @@ RigExecBakedScheduleRunReport(const RigExecBakedProgramImpl &B)
     std::string out = "rigExec baked schedule, last run: " +
                       std::to_string(schedule.clusters.size()) +
                       " cluster(s)\n";
+    if (!schedule.lastRunTimed) {
+        // Say which it is. A serial frame leaves every ready/wait/run at
+        // zero, and a table of zeros does not read as "unmeasured" -- it
+        // reads as "free", which is the one thing it never means.
+        out += "  the last run was serial: clusters are not timed. Run with "
+               "RIGEXEC_BAKED_SCHEDULE=parallel\n  for the per-cluster "
+               "ready/wait/run table; the structural half of the report is "
+               "printed at Build.\n";
+        return out;
+    }
     // The region opened when the earliest cluster became ready, which is
     // when the seeds were stamped. Times are relative to it, so two runs of
     // one frame can be laid beside each other.

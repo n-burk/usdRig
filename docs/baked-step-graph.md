@@ -19,7 +19,7 @@ Every published value, diagnostic and compared counter of the three rigs that ba
 byte-identical to before, in serial and in parallel, at grain 0, at the default grain and at 200
 microseconds. Vertex-chunked skinning (§6) and cone re-execution (§7) are still to come, and
 until the vertex partition lands a revision is one whole-range chunk, so a biped's geometry tail
-is a chain of four steps and the schedule's critical-path estimate is 490us of a 530us program --
+is a chain of four steps and the schedule's critical-path estimate is 491us of a 531us program --
 which is why `RIGEXEC_BAKED_SCHEDULE` still DEFAULTS to `serial`: parallel is correct at every
 grain but not yet faster, and the default flips after the acceptance matrix of §8.
 
@@ -63,7 +63,11 @@ Nine deviations from the sections below, each made for a stated reason:
   solver batch with forty candidates and no descendants is not free.
 * A `Derived` step's size is the CHAIN's vertex count, which §5.1 does not name. `recomputeExtent`
   walks the points it is maintained from and publishes two vectors; sizing it by its own array
-  made the fitted per-unit cost 50us, which is the same number saying the model was wrong.
+  made the fitted per-unit cost 50us, which is the same number saying the model was wrong. A
+  `ChainStatus` step's size is the chain's vertex count for the same reason and against §5.1's
+  "revisions of the chain": the sweep ends by copying the chain's published point array whole, so
+  its row was re-fitted (0.000336us per point) after the size was corrected. The row it replaced,
+  7.79us per revision, was one 26276-point copy with the mesh hidden in it.
 * Every recorder of the run's phased-read store declares the whole store up to its own step,
   instead of only its own slot, on a rig where something can look a record up (`phasedReads`).
   Per-step slots order a record against its READERS, which is what §4 asks for, but the records
@@ -74,7 +78,9 @@ Nine deviations from the sections below, each made for a stated reason:
 * The schedule report is TWO reports. `RigExecBakedScheduleReport` is structural and
   deterministic, so two builds of one stage produce the same text and a test can say so; the
   per-cluster wait and run times of §8.5 are in `RigExecBakedScheduleRunReport`, which needs a
-  frame to have happened. §8.5's per-skin-revision chunk statistics wait for the vertex partition
+  frame to have happened -- and only the parallel executor stamps them, so after a serial frame
+  that report says the run was serial instead of printing a table of zeros that would read as
+  "every cluster was free". §8.5's per-skin-revision chunk statistics wait for the vertex partition
   that creates chunks to have anything to say.
 * The vertex partition of §6 not having landed, `RIGEXEC_BAKED_SCHEDULE=parallel` is not the
   default yet. §5.2 makes it the default "once §8 passes", and §8's chunk-count and chunk-vertex
@@ -85,13 +91,20 @@ rediscovered. A `RevisionChunk` reads the chain's running value BEFORE its revis
 things: the earlier revisions' buffers, and the `currentSource` indirection that says which of
 them to read. It declared only the buffers, so at one cluster per step a chunk could overtake the
 fuse that decides the indirection -- deterministically wrong points on
-`tests/testRigExecInteractive`, and invisible in every serial order. It now declares both. And
-`RigExecStaticInputCache` answers a read from a worker thread by bypassing itself (its owner-thread
-rule, moverGraph.h), so a step running off the evaluator's thread resolves its inputs the long way
-and gets the same value; what moves is that cache's bypass COUNTER, which
-`tests/testRigExecStaticInputCache` asserts on only for its own fixture. The counter's increment is
-itself unsynchronised, which is a real data race on a statistic and should be made relaxed-atomic
-before parallel becomes the default.
+`tests/testRigExecInteractive`, and invisible in every serial order. It now declares both, and the
+rule is asserted by `tests/testRigExecBakedSchedule` on a three-revision chain the suite builds
+itself (no example rig stacks revisions, so on those the rule is vacuous): a step that reads
+`RevisionOut[r]` must read `RevisionDone[r]` unless it is the fuse that writes it. The vertex
+partition rewrites that declaration, so the test is what keeps it.
+
+And `RigExecStaticInputCache` answers a read from a worker thread by bypassing itself (its
+owner-thread rule, moverGraph.h), so a step running off the evaluator's thread resolves its inputs
+the long way and gets the same value; what moves is that cache's bypass COUNTER, which
+`tests/testRigExecStaticInputCache` asserts on only for its own fixture. This is the §5.2 "check
+the static input cache before merging" item, and the check comes back clean: `_bypasses` is
+already a `std::atomic<size_t>` (moverGraph.h), which is the one member of the cache written off
+the owning thread, so the off-thread increment is the only shared write and it is synchronised.
+Nothing here needs changing before parallel becomes the default.
 
 ## 1. Why
 
