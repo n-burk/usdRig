@@ -546,10 +546,9 @@ RigExecApplyDualQuatSkin(
 
 bool
 RigExecApplyDualQuatSkin(
-    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout)
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout,
+    const RigExecScaledDualQuat *palette, size_t paletteSize)
 {
-    const std::vector<RigExecScaledDualQuat> palette =
-        RigExecSkinDualQuatPalette(layout);
     std::vector<int> indices;
     std::vector<double> weights;
     indices.reserve(layout.elementSize + 1);
@@ -558,7 +557,7 @@ RigExecApplyDualQuatSkin(
         _GatherDualQuatInfluences(layout, i, &indices, &weights);
         RigExecScaledDualQuat blend;
         if (!RigExecBlendScaledDualQuats(
-                palette.data(), palette.size(), indices.data(),
+                palette, paletteSize, indices.data(),
                 weights.data(), indices.size(), &blend)) {
             return false;
         }
@@ -566,6 +565,19 @@ RigExecApplyDualQuatSkin(
             RigExecScaledDualQuatTransformPoint(blend, GfVec3d(in[i])));
     }
     return true;
+}
+
+bool
+RigExecApplyDualQuatSkin(
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout)
+{
+    // The split is a pure function of the influence table, so building it
+    // here and building it in a caller that skins several ranges against the
+    // same table produce the same palette entry for entry.
+    const std::vector<RigExecScaledDualQuat> palette =
+        RigExecSkinDualQuatPalette(layout);
+    return RigExecApplyDualQuatSkin(in, out, layout, palette.data(),
+                                    palette.size());
 }
 
 namespace {

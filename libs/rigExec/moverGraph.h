@@ -22,6 +22,8 @@
 #include "types.h"
 
 #include "rigExecMath/profileMover.h"
+#include "rigExecMath/simdKernels.h"
+#include "rigExecMath/solvers.h"
 
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
@@ -701,6 +703,111 @@ bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
 /// runs the same operation with no VdfNetwork around it.
 bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
                             std::vector<GfVec3f> *pts);
+/// One vertex range of the matrix operation, against an envelope the caller
+/// already resolved at the FULL point count.
+///
+/// Peer of the skin range form below and there for the same reason: the
+/// envelope resolves atomically over the whole array (a cardinality mismatch
+/// fails the application before any point is written), so it cannot be
+/// resolved per range -- a chunked caller resolves it once and hands the same
+/// array to every range, indexed absolutely.
+void RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
+                                   const float *envelope,
+                                   size_t begin, size_t end, GfVec3f *pts);
+
+/// Blends \p blended over \p preceding for one vertex range, with
+/// \p envelope the FULL resolved envelope and every array indexed
+/// absolutely.
+///
+/// The "apply once" blend of RigExecRunRevisionKernel, as a range: per point
+/// it reads two arrays and writes a third at the same index, so a range is an
+/// independent sub-problem and splitting it changes nothing about the
+/// arithmetic. The envelope is passed in already resolved because resolving
+/// it is the whole-array decision the range form may not repeat.
+void RigExecBlendEnvelopeRange(const GfVec3f *preceding, const float *envelope,
+                               size_t begin, size_t end, GfVec3f *blended);
+
+/// One influence split into a stretch and a unit dual quaternion; the
+/// dual-quaternion skinning path blends these rather than the matrices.
+/// Named here only as a pointer, so dualQuat.h stays out of every
+/// translation unit that assembles a packet.
+struct RigExecScaledDualQuat;
+
+/// The influence tables one skin range reads.
+///
+/// The matrices themselves, plus the two forms the kernels want them in: the
+/// float rows the SIMD linear-blend path loads and the split the
+/// dual-quaternion path blends. Both are pure per-matrix functions of
+/// `transforms`, so a caller that skins several ranges against one table
+/// builds them once and hands them to every range; null means "derive it
+/// here", which is what the full-range kernel passes.
+struct RigExecSkinTransformsView {
+    const GfMatrix4d *transforms = nullptr;
+    size_t transformCount = 0;
+    /// transformCount * RigExecSkinRowStride floats, or null.
+    const float *rows = nullptr;
+    /// transformCount + 1 entries (the last one the weight complement's
+    /// identity), or null.
+    const RigExecScaledDualQuat *palette = nullptr;
+    size_t paletteSize = 0;
+};
+
+/// The view of \p p's own influence table, which is what an unchunked caller
+/// skins against.
+RigExecSkinTransformsView RigExecSkinTransformsOf(
+    const RigExecMoverParameters &p);
+
+/// The layout \p p and \p transforms describe over \p pointCount points.
+///
+/// One definition of "where are the indices, the weights and the element
+/// size", because the answer depends on whether the packet carries an
+/// epoch-fixed layout by handle, and a second copy of that rule is a second
+/// chance to read the wrong array.
+RigExecSkinLayout RigExecSkinLayoutForPacket(
+    const RigExecMoverParameters &p,
+    const RigExecSkinTransformsView &transforms,
+    size_t pointCount);
+
+/// The half of RigExecApplySkinKernel's whole-array validation that does NOT
+/// depend on the influence matrices: the element shape, the index range and
+/// the weights, against \p pointCount points.
+///
+/// Split out because the two halves are decided in different places once a
+/// revision is chunked -- the layout is static for the frame and the matrices
+/// are the last thing the pose walk produces -- and because ANDing the two
+/// gives exactly the boolean the unsplit check gives.
+bool RigExecSkinLayoutIsUsable(const RigExecMoverParameters &p,
+                               size_t pointCount);
+
+/// The other half: every influence matrix finite and affine.
+bool RigExecSkinTransformsAreUsable(const GfMatrix4d *transforms,
+                                    size_t count);
+
+/// One vertex range of the skin operation of \p p, against \p transforms,
+/// written in place over [\p begin, \p end) of \p pts.
+///
+/// The per-vertex body, and nothing else: NO validation -- the caller has
+/// done it, whole-array, because every check the skin kernel makes is a
+/// statement about the whole array -- and NO WorkParallelForN, so a range is
+/// unconditionally serial and a caller that already split the work does not
+/// split it again. Returns false only for a method neither kernel owns.
+///
+/// This is the ONE definition of the per-vertex skin body: the full-range
+/// RigExecApplySkinKernel validates and then calls this inside its own
+/// parallel loop, so a chunked caller and an unchunked one cannot deform a
+/// vertex differently.
+bool RigExecApplySkinKernelRange(const RigExecMoverParameters &p,
+                                 const RigExecSkinTransformsView &transforms,
+                                 size_t begin, size_t end,
+                                 std::vector<GfVec3f> *pts);
+
+/// RigExecApplySkinKernel against an influence table other than the packet's
+/// own, for a caller that folds the matrices outside the packet.
+bool RigExecApplySkinKernelWithTransforms(
+    const RigExecMoverParameters &p,
+    const RigExecSkinTransformsView &transforms,
+    std::vector<GfVec3f> *pts);
+
 
 /// Applies the blend-shape operation of \p p to \p pts in place, returning
 /// false when the packet fails atomically (the deltas or the envelope do not

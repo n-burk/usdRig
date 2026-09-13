@@ -34,6 +34,30 @@ void RigExecApplyWeightedMatrixSimd(
 void RigExecApplyLinearBlendSkinSimd(
     const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout);
 
+/// The same kernel against rows the CALLER narrowed, for one that skins
+/// several ranges of an array against one influence table and would
+/// otherwise narrow the whole table once per range.
+///
+/// \p rows is layout.transformCount * 16 floats, entry t filled by
+/// RigExecNarrowSkinRows from layout.transforms[t]; null narrows them here,
+/// which is what the three-argument form above does. Only the entries the
+/// range's own points index are ever read, so a caller that knows which
+/// influences a range uses may leave the rest identity.
+void RigExecApplyLinearBlendSkinSimd(
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout,
+    const float *rows);
+
+/// Narrows one influence matrix into the 16 floats the kernel above reads:
+/// four rows of three components each, padded to four.
+///
+/// Exposed so a caller keeping its own rows table fills an entry of it with
+/// the same narrowing the kernel performs -- a per-matrix operation, so the
+/// values are identical however many times it is done.
+void RigExecNarrowSkinRows(const GfMatrix4d &transform, float *rows);
+
+/// The number of floats RigExecNarrowSkinRows fills per influence.
+inline constexpr size_t RigExecSkinRowStride = 16;
+
 }  // namespace rigExec
 
 #endif  // RIGEXEC_MATH_SIMD_KERNELS_H

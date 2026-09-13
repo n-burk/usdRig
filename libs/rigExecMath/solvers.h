@@ -202,6 +202,17 @@ bool RigExecApplyDualQuatSkin(
 std::vector<RigExecScaledDualQuat> RigExecSkinDualQuatPalette(
     const RigExecSkinLayout &layout);
 
+/// Array form against a palette the CALLER built with
+/// RigExecSkinDualQuatPalette, for a caller that splits the influences once
+/// per evaluation and then skins several ranges of one array against them --
+/// which is what a chunked skin step does. \p palette must hold
+/// \p paletteSize entries built from the same influence table \p layout
+/// names; the three-argument form above is this one with a palette built on
+/// the spot. in/out may alias.
+bool RigExecApplyDualQuatSkin(
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout,
+    const RigExecScaledDualQuat *palette, size_t paletteSize);
+
 /// Single-point form of RigExecApplyDualQuatSkin against a palette from
 /// RigExecSkinDualQuatPalette (scalar reference; allocates, so the array
 /// form does not call it per point). Returns false on a degenerate blend.
