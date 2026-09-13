@@ -602,6 +602,22 @@ private:
     std::map<SdfPath, std::shared_ptr<const RigExecSkinTopology>> _candidates;
 };
 
+/// The epoch-fixed skin layout of \p moverPrim, through \p cache.
+///
+/// The one call a frame makes that takes a lock (RigExecSkinTopologyCache's,
+/// held across the build). Exposed so a caller that must not take a lock
+/// where it assembles -- the baked program, whose step bodies may not
+/// synchronise at all -- can resolve every layout up front and hand the
+/// answer to the assembler through RigExecProviderValues::skinTopology. A
+/// null return is the cache's remembered REFUSAL: the layout can move within
+/// the epoch, so the packet must read the arrays per frame.
+std::shared_ptr<const RigExecSkinTopology> RigExecResolveSkinTopology(
+    const UsdPrim &moverPrim,
+    size_t influenceCount,
+    UsdTimeCode time,
+    const RigExecResolvedInputs *resolved,
+    RigExecSkinTopologyCache *cache);
+
 /// Resolves a mover's side-input bindings from the authored stage.
 ///
 /// \p frameChainHeads maps a transform provider to its final frame-chain head,
@@ -652,7 +668,9 @@ RigExecMoverParameters RigExecAssembleSkinParameters(
     const RigExecWeightPacket *weights,
     UsdTimeCode time = UsdTimeCode::Default(),
     const RigExecResolvedInputs *resolved = nullptr,
-    RigExecSkinTopologyCache *topologyCache = nullptr);
+    RigExecSkinTopologyCache *topologyCache = nullptr,
+    const std::shared_ptr<const RigExecSkinTopology> *resolvedTopology =
+        nullptr);
 
 /// Derives a mover's status from its packet (spec §6.6): disabled and failed
 /// movers both pass their preceding revision through, and a failure records the
@@ -803,6 +821,11 @@ struct RigExecProviderValues {
     /// and re-validates the arrays every call, which is what a layout that
     /// is animated, connected, or written by a property chain requires.
     RigExecSkinTopologyCache *skinTopologyCache = nullptr;
+    /// A layout the CALLER already resolved, for a caller that may not take
+    /// the cache's lock where it assembles. Set -- even to a shared_ptr
+    /// holding null, which is a remembered refusal -- it is used and
+    /// `skinTopologyCache` is not consulted at all.
+    const std::shared_ptr<const RigExecSkinTopology> *skinTopology = nullptr;
     /// Values already resolved this generation, preferred by every static
     /// read the assembler makes. Null reads the stage throughout, which is
     /// what a rig with no property chains wants and what a test may pass.

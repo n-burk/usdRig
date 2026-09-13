@@ -1352,6 +1352,91 @@ _Enabled(const UsdPrim &prim, UsdTimeCode time,
 
 }  // namespace
 
+std::shared_ptr<const RigExecSkinTopology>
+RigExecResolveSkinTopology(
+    const UsdPrim &moverPrim,
+    size_t influenceCount,
+    UsdTimeCode time,
+    const RigExecResolvedInputs *resolved,
+    RigExecSkinTopologyCache *cache)
+{
+    if (!cache || !moverPrim) {
+        return nullptr;
+    }
+    const SdfPath primPath = moverPrim.GetPath();
+    const SdfPath indicesPath =
+        primPath.AppendProperty(TfToken("rigExec:jointIndices"));
+    const SdfPath weightsPath =
+        primPath.AppendProperty(TfToken("rigExec:jointWeights"));
+    // The layout is epoch state, so everything about it that does not involve
+    // the influence MATRICES is settled once and shared: the two array reads,
+    // the copy into the packet, and the per-element range and weight checks.
+    // What is left per frame is the matrix table -- which is the only part of
+    // the layout an animated rig changes.
+    return cache->Resolve(
+        primPath,
+        [&](RigExecSkinTopology *topology) {
+            // Whether the layout is epoch state is re-asked HERE, where the
+            // cache is filled, and not only where the graph was compiled.
+            // Authoring a time sample on jointWeights (or connecting it)
+            // moves no epoch digest, so it does not recompile; it does send a
+            // notice, and a notice clears this cache -- so this is the one
+            // place that sees the stage as it is now. Refusing puts the
+            // packet back on the per-frame arrays, which is what Compile
+            // would have done had the sample been there. Costs one answer per
+            // notice.
+            for (const char *name : {"rigExec:jointIndices",
+                                     "rigExec:jointWeights",
+                                     "rigExec:elementSize"}) {
+                const UsdAttribute a = moverPrim.GetAttribute(TfToken(name));
+                if (a && (a.ValueMightBeTimeVarying() ||
+                          a.HasAuthoredConnections())) {
+                    return false;
+                }
+            }
+            topology->indices =
+                _Array<int>(moverPrim, indicesPath, time, resolved);
+            topology->weights =
+                _Array<float>(moverPrim, weightsPath, time, resolved);
+            topology->elementSize = 1;
+            if (const UsdAttribute a =
+                    moverPrim.GetAttribute(TfToken("rigExec:elementSize"))) {
+                if (!resolved ||
+                    !resolved->GetAttribute(a, time, &topology->elementSize)) {
+                    a.Get(&topology->elementSize, time);
+                }
+            }
+            topology->influenceCount = influenceCount;
+            if (topology->elementSize < 1 ||
+                topology->weights.size() != topology->indices.size() ||
+                topology->indices.size() %
+                        size_t(topology->elementSize) != 0) {
+                return true;
+            }
+            topology->pointCount =
+                topology->indices.size() / size_t(topology->elementSize);
+            // Exactly RigExecSkinLayout::Validate's shape, range and weight
+            // rules, against a table whose SIZE is epoch state. The matrices
+            // themselves are checked every frame by the caller.
+            if (topology->influenceCount == 0) {
+                return true;
+            }
+            for (size_t i = 0; i < topology->indices.size(); ++i) {
+                const int index = topology->indices[i];
+                if (index < 0 ||
+                    size_t(index) >= topology->influenceCount) {
+                    return true;
+                }
+                const float weight = topology->weights[i];
+                if (!std::isfinite(weight) || weight < 0.0f) {
+                    return true;
+                }
+            }
+            topology->validated = true;
+            return true;
+        });
+}
+
 RigExecMoverParameters
 RigExecAssembleSkinParameters(
     const UsdPrim &moverPrim,
@@ -1359,7 +1444,8 @@ RigExecAssembleSkinParameters(
     const RigExecWeightPacket *weights,
     UsdTimeCode time,
     const RigExecResolvedInputs *resolved,
-    RigExecSkinTopologyCache *topologyCache)
+    RigExecSkinTopologyCache *topologyCache,
+    const std::shared_ptr<const RigExecSkinTopology> *resolvedTopology)
 {
     RigExecMoverParameters params;
     params.kind = TfToken("skin");
@@ -1403,68 +1489,14 @@ RigExecAssembleSkinParameters(
         }
     }
 
-    if (topologyCache) {
-        // The layout is epoch state, so everything about it that does not
-        // involve the influence MATRICES is settled once and shared: the two
-        // array reads, the copy into the packet, and the per-element range
-        // and weight checks. What is left per frame is the matrix table --
-        // which is the only part of the layout an animated rig changes.
-        params.skinTopology = topologyCache->Resolve(
-            primPath,
-            [&](RigExecSkinTopology *topology) {
-                // Whether the layout is epoch state is re-asked HERE, where
-                // the cache is filled, and not only where the graph was
-                // compiled. Authoring a time sample on jointWeights (or
-                // connecting it) moves no epoch digest, so it does not
-                // recompile; it does send a notice, and a notice clears this
-                // cache -- so this is the one place that sees the stage as
-                // it is now. Refusing puts the packet back on the per-frame
-                // arrays below, which is what Compile would have done had
-                // the sample been there. Costs one answer per notice.
-                for (const char *name : {"rigExec:jointIndices",
-                                         "rigExec:jointWeights",
-                                         "rigExec:elementSize"}) {
-                    const UsdAttribute a =
-                        moverPrim.GetAttribute(TfToken(name));
-                    if (a && (a.ValueMightBeTimeVarying() ||
-                              a.HasAuthoredConnections())) {
-                        return false;
-                    }
-                }
-                topology->indices =
-                    _Array<int>(moverPrim, indicesPath, time, resolved);
-                topology->weights =
-                    _Array<float>(moverPrim, weightsPath, time, resolved);
-                readElementSize(&topology->elementSize);
-                topology->influenceCount = influenceTransforms->size();
-                if (topology->elementSize < 1 ||
-                    topology->weights.size() != topology->indices.size() ||
-                    topology->indices.size() %
-                            size_t(topology->elementSize) != 0) {
-                    return true;
-                }
-                topology->pointCount =
-                    topology->indices.size() / size_t(topology->elementSize);
-                // Exactly RigExecSkinLayout::Validate's shape, range and
-                // weight rules, against a table whose SIZE is epoch state.
-                // The matrices themselves are checked every frame below.
-                if (topology->influenceCount == 0) {
-                    return true;
-                }
-                for (size_t i = 0; i < topology->indices.size(); ++i) {
-                    const int index = topology->indices[i];
-                    if (index < 0 ||
-                        size_t(index) >= topology->influenceCount) {
-                        return true;
-                    }
-                    const float weight = topology->weights[i];
-                    if (!std::isfinite(weight) || weight < 0.0f) {
-                        return true;
-                    }
-                }
-                topology->validated = true;
-                return true;
-            });
+    if (resolvedTopology) {
+        // Already answered by a caller that may not take the cache's lock
+        // where it assembles.
+        params.skinTopology = *resolvedTopology;
+    } else if (topologyCache) {
+        params.skinTopology = RigExecResolveSkinTopology(
+            moverPrim, influenceTransforms->size(), time, resolved,
+            topologyCache);
     }
     // Null means the cache refused this mover -- the layout can move within
     // the epoch after all -- so the packet falls through to the per-frame
@@ -1603,7 +1635,7 @@ RigExecAssembleParameters(
     if (op == RigExecRevisionOp::Skin) {
         return RigExecAssembleSkinParameters(
             moverPrim, values.influenceTransforms, values.weights, time,
-            values.resolved, values.skinTopologyCache);
+            values.resolved, values.skinTopologyCache, values.skinTopology);
     }
     if (op == RigExecRevisionOp::CurvenetAdjuster) {
         return RigExecAssembleCurvenetAdjusterParameters(
