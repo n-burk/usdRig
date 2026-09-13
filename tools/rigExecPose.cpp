@@ -9,6 +9,7 @@
 //
 //   rigExecPose <stage> [--rig <primPath>] [--frames 1001,1024,1048]
 //               [--joints] [--targets] [--joints-out <file.usda>]
+//               [--pose-out <file.txt>]
 //               [--profile <file.trace>] [--mode dynamic|baked|parity]
 //
 // With no --frames it evaluates the stage's start time code (or Default when
@@ -20,6 +21,10 @@
 // chain, derived maintenance) across every evaluated frame, writes them as
 // Chrome Trace Event JSON to <file.trace> -- openable in Perfetto
 // (ui.perfetto.dev) or chrome://tracing -- and prints a per-phase summary.
+//
+// --pose-out writes every published domain of every evaluated generation in
+// a canonical text form (%.17g doubles, %.9g floats), so two runs -- two
+// builds, two modes -- can be compared byte for byte with `cmp`.
 //
 // --joints-out writes the evaluated joint frames, as asset-space matrices
 // sampled at every requested frame, to a plain USD layer. It is deliberately
@@ -40,6 +45,9 @@
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/base/vt/value.h"
+#include "pxr/base/gf/vec3f.h"
+#include "pxr/base/gf/vec3d.h"
 // usd/stage.h only forward-declares UsdAttribute and UsdPrim.
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -85,6 +93,170 @@ std::string
 FormatVec(const GfVec3d &v)
 {
     return TfStringPrintf("(%8.4f %8.4f %8.4f)", v[0], v[1], v[2]);
+}
+
+// --pose-out: every published domain of a generation, in a canonical text
+// form that is byte-for-byte reproducible. %.17g round-trips a double and
+// %.9g a float, so two dumps are equal exactly when the poses are, which is
+// what a refactor of either evaluation path is measured against.
+std::string
+FormatD(double v)
+{
+    return TfStringPrintf("%.17g", v);
+}
+
+std::string
+FormatF(float v)
+{
+    return TfStringPrintf("%.9g", v);
+}
+
+std::string
+FormatFrame(const rigExec::RigExecPointFrame &f)
+{
+    std::string out;
+    for (const GfVec3d &pnt : f.points) {
+        out += " " + FormatD(pnt[0]) + " " + FormatD(pnt[1]) + " " +
+               FormatD(pnt[2]);
+    }
+    out += TfStringPrintf(" flags=%u", unsigned(f.flags));
+    return out;
+}
+
+std::string
+FormatMatrix(const GfMatrix4d &m)
+{
+    std::string out;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            out += " " + FormatD(m[r][c]);
+        }
+    }
+    return out;
+}
+
+std::string
+FormatValue(const VtValue &value)
+{
+    if (value.IsHolding<float>()) {
+        return "float " + FormatF(value.UncheckedGet<float>());
+    }
+    if (value.IsHolding<double>()) {
+        return "double " + FormatD(value.UncheckedGet<double>());
+    }
+    if (value.IsHolding<GfVec3f>()) {
+        const GfVec3f &v = value.UncheckedGet<GfVec3f>();
+        return "vec3f " + FormatF(v[0]) + " " + FormatF(v[1]) + " " +
+               FormatF(v[2]);
+    }
+    if (value.IsHolding<GfVec3d>()) {
+        const GfVec3d &v = value.UncheckedGet<GfVec3d>();
+        return "vec3d " + FormatD(v[0]) + " " + FormatD(v[1]) + " " +
+               FormatD(v[2]);
+    }
+    if (value.IsHolding<GfMatrix4d>()) {
+        return "matrix4d" + FormatMatrix(value.UncheckedGet<GfMatrix4d>());
+    }
+    if (value.IsHolding<VtVec3fArray>()) {
+        const VtVec3fArray &a = value.UncheckedGet<VtVec3fArray>();
+        std::string out = TfStringPrintf("vec3f[%zu]", a.size());
+        for (const GfVec3f &v : a) {
+            out += " " + FormatF(v[0]) + " " + FormatF(v[1]) + " " +
+                   FormatF(v[2]);
+        }
+        return out;
+    }
+    if (value.IsHolding<VtFloatArray>()) {
+        const VtFloatArray &a = value.UncheckedGet<VtFloatArray>();
+        std::string out = TfStringPrintf("float[%zu]", a.size());
+        for (float v : a) {
+            out += " " + FormatF(v);
+        }
+        return out;
+    }
+    if (value.IsHolding<GfRange3f>()) {
+        const GfRange3f &r = value.UncheckedGet<GfRange3f>();
+        return "range3f " + FormatF(r.GetMin()[0]) + " " +
+               FormatF(r.GetMin()[1]) + " " + FormatF(r.GetMin()[2]) + " " +
+               FormatF(r.GetMax()[0]) + " " + FormatF(r.GetMax()[1]) + " " +
+               FormatF(r.GetMax()[2]);
+    }
+    return value.GetTypeName() + " " + TfStringify(value);
+}
+
+void
+WritePoseDump(FILE *out, const rigExec::RigExecRigPose &pose, double frame)
+{
+    std::fprintf(out, "frame %s valid=%d\n", FormatD(frame).c_str(),
+                 int(pose.valid));
+    for (const auto &[path, f] : pose.jointFramesBase) {
+        std::fprintf(out, "jointFramesBase %s%s\n", path.GetText(),
+                     FormatFrame(f).c_str());
+    }
+    for (const auto &[path, f] : pose.jointFramesFinal) {
+        std::fprintf(out, "jointFramesFinal %s%s\n", path.GetText(),
+                     FormatFrame(f).c_str());
+    }
+    for (const auto &[path, m] : pose.jointMatricesFinal) {
+        std::fprintf(out, "jointMatricesFinal %s%s\n", path.GetText(),
+                     FormatMatrix(m).c_str());
+    }
+    for (const auto &[path, f] : pose.controlFrames) {
+        std::fprintf(out, "controlFrames %s%s\n", path.GetText(),
+                     FormatFrame(f).c_str());
+    }
+    for (const auto &[path, m] : pose.providerXforms) {
+        std::fprintf(out, "providerXforms %s%s\n", path.GetText(),
+                     FormatMatrix(m).c_str());
+    }
+    for (const auto &[path, m] : pose.providerBaseXforms) {
+        std::fprintf(out, "providerBaseXforms %s%s\n", path.GetText(),
+                     FormatMatrix(m).c_str());
+    }
+    for (const auto &[path, frames] : pose.solverFrames) {
+        std::fprintf(out, "solverFrames %s [%zu]\n", path.GetText(),
+                     frames.size());
+        for (const rigExec::RigExecPointFrame &f : frames) {
+            std::fprintf(out, "  %s\n", FormatFrame(f).c_str());
+        }
+    }
+    for (const auto &[path, value] : pose.movedProperties) {
+        std::fprintf(out, "movedProperties %s %s\n", path.GetText(),
+                     FormatValue(value).c_str());
+    }
+    for (const auto &[path, value] : pose.movedPropertiesCpu) {
+        std::fprintf(out, "movedPropertiesCpu %s %s\n", path.GetText(),
+                     FormatValue(value).c_str());
+    }
+    for (const auto &[path, field] : pose.weightFields) {
+        std::string line = TfStringPrintf("weightFields %s target=%s [%zu]",
+                                          path.GetText(),
+                                          field.target.GetText(),
+                                          field.weights.size());
+        for (float w : field.weights) {
+            line += " " + FormatF(w);
+        }
+        std::fprintf(out, "%s\n", line.c_str());
+    }
+    for (const auto &[path, m] : pose.weightFrames) {
+        std::fprintf(out, "weightFrames %s%s\n", path.GetText(),
+                     FormatMatrix(m).c_str());
+    }
+    for (const std::string &d : pose.diagnostics) {
+        std::fprintf(out, "diagnostic %s\n", d.c_str());
+    }
+    std::fprintf(out,
+                 "counters parityMismatches=%zu parityAgreements=%zu "
+                 "bakedParityMismatches=%zu solverOverrideRounds=%zu "
+                 "solverOverridesConverged=%d solverEvaluations=%zu "
+                 "revisionsCreated=%zu revisionsExecuted=%zu "
+                 "schedulesBuilt=%zu\n",
+                 pose.moverGraphParityMismatches,
+                 pose.moverGraphParityAgreements, pose.bakedParityMismatches,
+                 pose.solverOverrideRounds, int(pose.solverOverridesConverged),
+                 pose.solverEvaluations, pose.moverGraphRevisionsCreated,
+                 pose.moverGraphRevisionsExecuted,
+                 pose.moverGraphSchedulesBuilt);
 }
 
 // A moved property is only interesting as a change: printing 1864 points
@@ -258,13 +430,14 @@ main(int argc, char **argv)
         std::printf(
             "usage: rigExecPose <stage> [--rig <primPath>] "
             "[--frames a,b,c] [--joints] [--targets] "
-            "[--joints-out <file.usda>] [--profile <file.trace>] "
-            "[--mode dynamic|baked|parity]\n");
+            "[--joints-out <file.usda>] [--pose-out <file.txt>] "
+            "[--profile <file.trace>] [--mode dynamic|baked|parity]\n");
         return 2;
     }
     std::string stagePath = argv[1];
     std::string rigArg;
     std::string jointsOut;
+    std::string poseOut;
     std::string profileOut;
     rigExec::RigExecEvaluationMode mode =
         rigExec::RigExecEvaluationMode::Dynamic;
@@ -283,6 +456,8 @@ main(int argc, char **argv)
             showTargets = true;
         } else if (arg == "--joints-out" && i + 1 < argc) {
             jointsOut = argv[++i];
+        } else if (arg == "--pose-out" && i + 1 < argc) {
+            poseOut = argv[++i];
         } else if (arg == "--profile" && i + 1 < argc) {
             profileOut = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
@@ -383,11 +558,22 @@ main(int argc, char **argv)
     std::map<SdfPath, VtVec3fArray> rest;
 
     JointExport jointExport;
+    FILE *poseDump = nullptr;
+    if (!poseOut.empty()) {
+        poseDump = std::fopen(poseOut.c_str(), "w");
+        if (!poseDump) {
+            std::printf("  cannot open %s for writing\n", poseOut.c_str());
+            return 2;
+        }
+    }
     int status = 0;
     for (double frame : frames) {
         const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
         if (!jointsOut.empty()) {
             jointExport.Add(pose, frame);
+        }
+        if (poseDump) {
+            WritePoseDump(poseDump, pose, frame);
         }
         std::printf("\n  frame %g: %s  (%zu moved properties, "
                     "%zu parity agreements / %zu mismatches, "
@@ -437,6 +623,12 @@ main(int argc, char **argv)
             }
             ReportPoints(path.GetString(), value, rest[path]);
         }
+    }
+
+    if (poseDump) {
+        std::fclose(poseDump);
+        std::printf("\n  wrote %s (%zu frames)\n", poseOut.c_str(),
+                    frames.size());
     }
 
     if (!jointsOut.empty()) {
