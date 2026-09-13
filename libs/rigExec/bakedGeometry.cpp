@@ -1668,17 +1668,123 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
 // The report.
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// Two decimals, so a ratio in the report lines up with the scheduler's.
+std::string
+Fixed2(double value)
+{
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.2f", value);
+    return buffer;
+}
+
+/// The level at which every provider's matrix is final, indexed by slot:
+/// [1] the rest -> final matrices, [0] the rest -> base ones. A slot no
+/// ProviderMatrix step writes stays at -1, which reads as "not scheduled"
+/// rather than "ready at level 0".
+struct ProviderLevels {
+    std::vector<int> byPhase[2];
+    int maxLevel = 0;
+
+    int Of(int slot, bool finalPhase) const
+    {
+        const std::vector<int> &levels = byPhase[finalPhase ? 1 : 0];
+        return slot >= 0 && size_t(slot) < levels.size()
+                   ? levels[size_t(slot)]
+                   : -1;
+    }
+};
+
+ProviderLevels
+GatherProviderLevels(const RigExecBakedProgramImpl &B)
+{
+    ProviderLevels levels;
+    levels.byPhase[0].assign(B.paths.size(), -1);
+    levels.byPhase[1].assign(B.paths.size(), -1);
+    for (const RigExecBakedStep &step : B.steps) {
+        levels.maxLevel = std::max(levels.maxLevel, step.level);
+        if (step.kind != RigExecBakedStepKind::ProviderMatrix) {
+            continue;
+        }
+        // part 1 is the final-phase matrix, part 0 the base one; object is
+        // the provider slot.
+        if (step.object >= 0 && size_t(step.object) < B.paths.size() &&
+            (step.part == 0 || step.part == 1)) {
+            levels.byPhase[size_t(step.part)][size_t(step.object)] =
+                step.level;
+        }
+    }
+    return levels;
+}
+
+/// Whether \p step is one of the four steps that make up revision \p id.
+bool
+IsStepOfRevision(const RigExecBakedStep &step, int id)
+{
+    if (step.object != id) {
+        return false;
+    }
+    switch (step.kind) {
+    case RigExecBakedStepKind::InfluenceFold:
+    case RigExecBakedStepKind::RevisionStatic:
+    case RigExecBakedStepKind::RevisionChunk:
+    case RigExecBakedStepKind::RevisionFuse:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// The cost of revision \p id run one step at a time, and the cost of its
+/// longest dependency chain -- the floor the chunks cannot go below however
+/// many threads there are. The longest path is taken over the revision's own
+/// steps only: an edge leaving the revision is the rest of the frame's
+/// business, and what this number answers is "how much of this skin is
+/// width and how much is depth".
+void
+SkinCosts(const RigExecBakedProgramImpl &B, int id, double *serial,
+          double *criticalPath)
+{
+    *serial = 0.0;
+    *criticalPath = 0.0;
+    // Steps are in topological order, so one forward pass settles the
+    // longest path into each of them.
+    std::vector<double> through(B.steps.size(), 0.0);
+    for (size_t index = 0; index < B.steps.size(); ++index) {
+        const RigExecBakedStep &step = B.steps[index];
+        if (!IsStepOfRevision(step, id)) {
+            continue;
+        }
+        double before = 0.0;
+        for (const int pred : step.preds) {
+            if (IsStepOfRevision(B.steps[size_t(pred)], id)) {
+                before = std::max(before, through[size_t(pred)]);
+            }
+        }
+        through[index] = before + step.cost;
+        *serial += step.cost;
+        *criticalPath = std::max(*criticalPath, through[index]);
+    }
+}
+
+}  // namespace
+
 std::string
 RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
 {
     std::string out;
     char line[256];
-    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
-        for (const RigExecBakedProgramImpl::GeomRevision &revision :
-                 chain.revisions) {
+    const ProviderLevels levels = GatherProviderLevels(B);
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+        for (size_t r = 0; r < chain.revisions.size(); ++r) {
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                chain.revisions[r];
             if (revision.op != RigExecRevisionOp::Skin) {
                 continue;
             }
+            const int id = B.chainRevisionBegin[c] + int(r);
             const size_t influences = revision.influenceSlots.size();
             const size_t chunks = revision.chunks.size();
             size_t vertexMin = size_t(-1), vertexMax = 0, vertexSum = 0;
@@ -1722,11 +1828,45 @@ RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
                 chunks ? double(keySum) / double(chunks) : 0.0, keyMax, wide,
                 chunks);
             out += line;
+            // What the partition bought, in the scheduler's own units: the
+            // revision's serial cost against its longest dependency chain.
+            double skinSerial = 0.0, skinPath = 0.0;
+            SkinCosts(B, id, &skinSerial, &skinPath);
+            std::snprintf(line, sizeof(line),
+                          "    skin serial %.2fus critical path %.2fus%s\n",
+                          skinSerial, skinPath,
+                          skinPath > 0.0
+                              ? (" (" + Fixed2(skinSerial / skinPath) +
+                                 "x)").c_str()
+                              : "");
+            out += line;
+            // A chunk is ready when the last of ITS influences is, so its
+            // ready level against the frame's deepest level is the whole
+            // speculation in one number: a chunk ready far below the maximum
+            // is one the arena can start long before the rig is posed.
+            int readyMin = -1, readyMax = -1;
             for (size_t k = 0; k < chunks; ++k) {
                 const RigExecBakedProgramImpl::GeomChunk &chunk =
                     revision.chunks[k];
-                std::snprintf(line, sizeof(line), "    [%zu] %d..%d key", k,
-                              chunk.begin, chunk.end);
+                int ready = 0;
+                const size_t keySize =
+                    revision.chunked ? chunk.key.size() : influences;
+                for (size_t e = 0; e < keySize; ++e) {
+                    const size_t position =
+                        revision.chunked ? size_t(chunk.key[e]) : e;
+                    if (position >= revision.influenceSlots.size()) {
+                        continue;
+                    }
+                    ready = std::max(
+                        ready,
+                        levels.Of(revision.influenceSlots[position],
+                                  revision.finalPhase));
+                }
+                readyMin = readyMin < 0 ? ready : std::min(readyMin, ready);
+                readyMax = std::max(readyMax, ready);
+                std::snprintf(line, sizeof(line),
+                              "    [%zu] %d..%d ready level %d/%d key", k,
+                              chunk.begin, chunk.end, ready, levels.maxLevel);
                 out += line;
                 if (!revision.chunked) {
                     out += " (every influence)";
@@ -1736,6 +1876,11 @@ RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
                 }
                 out += "\n";
             }
+            std::snprintf(line, sizeof(line),
+                          "    ready level min %d max %d of %d\n",
+                          readyMin < 0 ? 0 : readyMin,
+                          readyMax < 0 ? 0 : readyMax, levels.maxLevel);
+            out += line;
         }
     }
     return out;

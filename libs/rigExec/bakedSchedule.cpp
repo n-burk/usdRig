@@ -192,7 +192,7 @@ constexpr StepCostConstants kStepCosts[] = {
     {1.0000, 0.200000},   // SnapshotFinals    0 -- unmeasured, see below
     {0.0000, 0.003781},   // InfluenceFold     1
     {0.0000, 0.000487},   // RevisionStatic    1
-    {0.0000, 0.000914},   // RevisionChunk     1 -- see below
+    {11.3239, 0.000714},  // RevisionChunk     7 -- see below
     {0.0000, 0.594000},   // RevisionFuse      1
     {0.0000, 0.000336},   // ChainStatus       1 -- see below
     {0.0000, 0.003744},   // Derived           1
@@ -213,12 +213,21 @@ static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
 //    replaced read 7.79us per REVISION -- the same measurement with the
 //    mesh hidden in it, which would have predicted 23us for a
 //    three-revision chain whatever its size.
-//  * RevisionChunk was measured as ONE chunk over a whole 105k-vertex skin,
-//    and RigExecApplySkinKernel spreads a range that large over the arena
-//    itself. So the row describes the wall time of an internally parallel
-//    step, not the work in it, and it will read low once the vertex partition
-//    cuts revisions into chunks that each stay under the kernel's own
-//    threshold. Re-run the calibration when that lands.
+//  * RevisionChunk was re-fitted after the vertex partition landed, which is
+//    what the row it replaced ({0.0000, 0.000914}) asked for: that one
+//    measured ONE chunk over a whole skin, a range RigExecApplySkinKernel
+//    spread over the arena itself, so it described the wall time of an
+//    internally parallel step rather than the work in it. A chunk body is
+//    unconditionally serial, so the new row is honest work. It is the median
+//    of three calibration runs of the biped (fixed 10.34 .. 11.42, per-unit
+//    0.000691 .. 0.000743). The FIXED term is the large one in this table for
+//    a reason worth stating: a chunk gathers and narrows its key's matrices
+//    before it deforms a vertex, so its real cost carries a |key| term this
+//    model has no size for -- the biped's chunks range over 30 to 58
+//    influences -- and the intercept is where that work lands. Giving
+//    RevisionChunk a second size dimension would express it properly; until
+//    then the row predicts the biped's chunks within a microsecond or two,
+//    and a cost row can only pack a bin badly, never change an answer.
 
 
 /// What a task costs to hand to the arena and pick up again, in the same
@@ -237,6 +246,9 @@ constexpr double kSpawnCostUs = 1.0;
 struct GeometrySizes {
     std::vector<double> revisionUnits;   ///< vertices x elementSize
     std::vector<double> revisionPoints;  ///< vertices
+    /// The influence slots one vertex stores, per revision id: the factor a
+    /// chunk's own vertex range is multiplied by.
+    std::vector<double> revisionElementSize;
     /// The chain's vertices, per chain index: what the chain-wide steps
     /// walk and copy.
     std::vector<double> chainPoints;
@@ -282,6 +294,7 @@ MeasureGeometry(const RigExecBakedProgramImpl &B)
     GeometrySizes sizes;
     sizes.revisionUnits.assign(B.revisionIndex.size(), 0);
     sizes.revisionPoints.assign(B.revisionIndex.size(), 0);
+    sizes.revisionElementSize.assign(B.revisionIndex.size(), 1);
     sizes.derivedPoints.assign(B.derivedIndex.size(), 0);
     std::vector<double> &chainPoints = sizes.chainPoints;
     chainPoints.assign(B.chains.size(), 0);
@@ -291,9 +304,10 @@ MeasureGeometry(const RigExecBakedProgramImpl &B)
     for (size_t id = 0; id < B.revisionIndex.size(); ++id) {
         const auto &[chain, revision] = B.revisionIndex[id];
         sizes.revisionPoints[id] = chainPoints[size_t(chain)];
-        sizes.revisionUnits[id] =
-            chainPoints[size_t(chain)] *
+        sizes.revisionElementSize[id] =
             ElementSizeOf(B.chains[size_t(chain)].revisions[size_t(revision)]);
+        sizes.revisionUnits[id] =
+            chainPoints[size_t(chain)] * sizes.revisionElementSize[id];
     }
     for (size_t id = 0; id < B.derivedIndex.size(); ++id) {
         sizes.derivedPoints[id] = chainPoints[size_t(B.derivedIndex[id].first)];
@@ -357,10 +371,26 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
     }
     case RigExecBakedStepKind::RevisionStatic:
         return geometry.revisionPoints[object];
-    case RigExecBakedStepKind::RevisionChunk:
-        // One chunk over the whole revision today; the vertex partition
-        // divides this between the chunks and changes nothing else.
+    case RigExecBakedStepKind::RevisionChunk: {
+        // The chunk's OWN vertex range, not the revision's: the partition
+        // divides the work between the chunks, so sizing each of them by the
+        // whole mesh counts the mesh once per chunk. On the biped that made
+        // the modelled serial cost 1972us for a program that runs in 531us,
+        // and the packing binned every chunk as if it were the largest step
+        // in the frame. An unpartitioned revision is one chunk over
+        // everything, which is exactly the revision's units.
+        const auto &[chain, revision] = B.revisionIndex[object];
+        const RigExecBakedProgramImpl::GeomRevision &geom =
+            B.chains[size_t(chain)].revisions[size_t(revision)];
+        if (geom.chunked && step.part >= 0 &&
+            size_t(step.part) < geom.chunks.size()) {
+            const RigExecBakedProgramImpl::GeomChunk &chunk =
+                geom.chunks[size_t(step.part)];
+            return double(chunk.end - chunk.begin) *
+                   geometry.revisionElementSize[object];
+        }
         return geometry.revisionUnits[object];
+    }
     case RigExecBakedStepKind::ChainStatus:
         // The chain's points, not its revisions: the body copies the
         // published array whole (bakedGeometry.cpp), and the MoverFailed
@@ -1329,6 +1359,14 @@ RigExecBakedScheduleReport(const RigExecBakedProgramImpl &B)
     out += "\n";
     for (const auto &[kind, count] : byKind) {
         out += "  " + kind + " " + std::to_string(count) + "\n";
+    }
+    // Per skin revision: the vertex partition's shape, and for every chunk
+    // the level its own influences are final at against the frame's deepest
+    // level. The geometry half owns the chunk keys, so it writes these lines
+    // -- it reads the levels and costs this file just filled in.
+    const std::string geometry = RigExecBakedGeometryReport(B);
+    if (!geometry.empty()) {
+        out += "  skin revisions:\n" + geometry;
     }
     for (size_t c = 0; c < schedule.clusters.size(); ++c) {
         const RigExecBakedCluster &cluster = schedule.clusters[c];

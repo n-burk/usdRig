@@ -80,11 +80,24 @@ Nine deviations from the sections below, each made for a stated reason:
   per-cluster wait and run times of §8.5 are in `RigExecBakedScheduleRunReport`, which needs a
   frame to have happened -- and only the parallel executor stamps them, so after a serial frame
   that report says the run was serial instead of printing a table of zeros that would read as
-  "every cluster was free". §8.5's per-skin-revision chunk statistics wait for the vertex partition
-  that creates chunks to have anything to say.
-* The vertex partition of §6 not having landed, `RIGEXEC_BAKED_SCHEDULE=parallel` is not the
-  default yet. §5.2 makes it the default "once §8 passes", and §8's chunk-count and chunk-vertex
-  rows cannot pass before chunks exist.
+  "every cluster was free". §8.5's per-skin-revision chunk statistics are printed by the
+  structural half, now that the vertex partition gives it something to say: `RigExecBakedGeometryReport`
+  writes them (it owns the chunk keys) and `RigExecBakedScheduleReport` calls it, so the chunk
+  shape, each chunk's ready level and the skin's critical path against its serial cost land in one
+  report with the clusters they explain.
+* `RIGEXEC_BAKED_SCHEDULE=parallel` is still not the default, though §8's chunk-count and
+  chunk-vertex rows now pass. §5.2 makes it the default "once §8 passes", and §8.3 (cones) and
+  §8.4 (parallel faster than serial) do not pass yet: the measured frame times are level, not
+  faster. Flipping the default is the decision that follows a frame that is actually quicker.
+
+Merging the scheduler and the vertex partition needed one cost-model correction, recorded because
+the number it produced was alarming and its cause was not. `StepSize` sized a `RevisionChunk` by
+its REVISION's vertices -- correct while a revision was one chunk, and a sixfold overcount once
+the partition cut the biped's skin into seven. The modelled serial cost read 1972us for a program
+that runs in 531us, and the level packing binned every chunk as though it were the largest step in
+the frame. A chunk is now sized by its own range, and `RevisionChunk`'s cost row was re-fitted as
+its own comment asked: the old row measured one chunk over a whole skin, which
+`RigExecApplySkinKernel` spread over the arena itself, so it timed an internally parallel step.
 
 Two things the parallel executor found that a serial one could not, recorded so they are not
 rediscovered. A `RevisionChunk` reads the chain's running value BEFORE its revision, which is two
