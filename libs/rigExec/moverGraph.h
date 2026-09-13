@@ -727,6 +727,17 @@ void RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
 void RigExecBlendEnvelopeRange(const GfVec3f *preceding, const float *envelope,
                                size_t begin, size_t end, GfVec3f *blended);
 
+/// The same blend over the WHOLE array, split across threads the way
+/// RigExecRunRevisionKernel splits it.
+///
+/// One definition of "which threshold and which grain the blend uses", so a
+/// caller that owns the blend itself -- the baked program's revision step,
+/// which resolved the envelope in an earlier step -- cannot end up threading
+/// it differently from the mover-graph node beside it. Values are unaffected
+/// either way: the blend reads and writes index i and nothing else.
+void RigExecBlendEnvelopeAll(const GfVec3f *preceding, const float *envelope,
+                             size_t count, GfVec3f *blended);
+
 /// One influence split into a stretch and a unit dual quaternion; the
 /// dual-quaternion skinning path blends these rather than the matrices.
 /// Named here only as a pointer, so dualQuat.h stays out of every

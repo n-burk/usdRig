@@ -381,7 +381,7 @@ reduction over all influences [P3].
 
 ### 6.1 As built
 
-The chunked skin landed as described above, with five differences the code makes and this section
+The chunked skin landed as described above, with six differences the code makes and this section
 records so the two do not drift:
 
 * **The packet carries an IDENTITY influence table** (`GeomRevision::packetInfluences`, written once
@@ -410,7 +410,19 @@ records so the two do not drift:
   `RevisionTransforms`: the split is per matrix, so a chunk's palette agrees entry for entry with
   the revision's over every entry the chunk's own vertices index, and keeping the chunk off the
   fold is what the speculation is for. Per-chunk rows are maintained the same way, entry by entry
-  beside the matrices, so a run costs |key| narrowings rather than |influences|.
+  beside the matrices, so a run costs |key| narrowings rather than |influences|. The fold still
+  writes the revision's own rows and palette for every skin revision, chunked or not, because the
+  fuse's whole-array fallback skins against them and a step may only READ a slot it declared as a
+  read. `tests/testRigExecBakedSchedule` covers both halves: that a range deformed against a table
+  that is identity outside its key is bit-identical to the whole array (both methods), and that
+  the biped skinned with dual quaternions through an interactive override holds parity with the
+  dynamic path, which is the only chunked-DQS fixture there is -- every rig that bakes today is
+  classicLinear.
+* **A skin revision's packet is assembled without a transform matrix.** The fold owns the matrix
+  and runs AFTER the static step for a skin, so the matrix available at assembly time would be the
+  one last run measured. Nothing reads it (`RigExecAssembleSkinParameters` takes no transform,
+  which is also how the dynamic path treats a geometry-domain delta landing on a skin mover), so
+  the packet is assembled without one rather than with a stale one.
 
 Two mechanisms exist that the specification does not name:
 
@@ -422,9 +434,17 @@ Two mechanisms exist that the specification does not name:
   `RevisionStatic` still checks in O(1) that the partition describes the packet's layout, and a
   `partitionStale` revision is run WHOLE by the fuse: a chunk skinning a vertex against an identity
   it never noticed is a silently wrong deformation, so the keys are trusted only while they are
-  provably current.
-* **A chunk that skipped keeps its answer.** Its gate is `ChainDirty(r-1) || staticDirty ||
-  its own key moved` -- decided while the key's matrices are copied in, which costs nothing extra.
+  provably current. A REFUSED layout (the cache declining the mover) leaves both the partition and
+  the handle it was cut from standing, so the comparison sees a packet with no layout at all and
+  the revision goes whole -- recording the refusal would make the two handles agree by both being
+  null, which is the one answer that comparison must never give. The fallback has a fixture of its
+  own (`TestAStalePartitionRunsTheRevisionWhole`), which makes the partition disagree with the
+  packet by hand -- no stage can -- and asserts the whole-array run publishes the chunked run's
+  points.
+* **A chunk that skipped keeps its answer.** Its gate is `(ChainDirty(r-1) || staticDirty ||
+  its own key moved) || !ok` -- the first three decided while the key's matrices are copied in,
+  which costs nothing extra, and the last so that a chunk with no answer to keep is never the one
+  that keeps it.
   Another chunk's joints moving makes the REVISION execute; it does not make this range's vertices
   land anywhere else, and the range of the output buffer still holds their positions. `ok` is
   sticky for the same reason.

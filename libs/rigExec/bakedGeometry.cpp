@@ -811,8 +811,10 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
 /// The revision's own folded table, in the forms the kernels want it in.
 ///
 /// What a chunk of a revision cut into ONE chunk skins against, and what the
-/// fuse falls back to. A chunked revision fills its chunks' tables instead,
-/// entry by entry, and leaves these empty.
+/// fuse falls back to when the partition no longer describes the layout. A
+/// chunked revision's chunks keep their own tables beside these and never
+/// read them; the fold writes them anyway, because they are part of the
+/// RevisionTransforms slot and the fuse may only READ that slot.
 RigExecSkinTransformsView
 WholeTransformsView(RigExecBakedProgramImpl::GeomRevision *revision)
 {
@@ -831,6 +833,10 @@ WholeTransformsView(RigExecBakedProgramImpl::GeomRevision *revision)
 
 /// Narrows and splits \p revision's folded table for the method its packet
 /// names, once per run rather than once per range.
+///
+/// Part of what InfluenceFold writes, for every skin revision and not only
+/// an unchunked one: the whole-array fallback the fuse falls back to reads
+/// these, and a step may not write a slot it declared as a read.
 void
 FoldTransformForms(RigExecBakedProgramImpl::GeomRevision *revision)
 {
@@ -957,10 +963,19 @@ SkinRange(RigExecBakedProgramImpl::GeomRevision *revision,
     }
     // "Apply once", over the same range: the envelope was resolved at the
     // full count by RevisionStatic, because resolving it is atomic over the
-    // whole array, and every array here is indexed absolutely.
+    // whole array, and every array here is indexed absolutely. The whole
+    // array goes through the kernel's own split for the reason the skinning
+    // above does: an unpartitioned mesh keeps the threading it has today.
     if (!revision->fullStrength) {
-        RigExecBlendEnvelopeRange(preceding, revision->envelope.data(), begin,
-                                  end, out.data());
+        if (whole) {
+            // `whole` means the whole array -- the full-range kernel above
+            // ignores the bounds -- so begin is 0 and the count is `end`.
+            RigExecBlendEnvelopeAll(preceding, revision->envelope.data(), end,
+                                    out.data());
+        } else {
+            RigExecBlendEnvelopeRange(preceding, revision->envelope.data(),
+                                      begin, end, out.data());
+        }
     }
     return true;
 }
@@ -1020,7 +1035,15 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     }
     // The fold decided whether there is a matrix at all -- a bound transform
     // provider, or a geometry-domain constraint's delta -- and wrote it.
-    if (revision->haveTransform) {
+    //
+    // A SKIN revision is assembled without one, and that is not an omission:
+    // its static step runs BEFORE its fold, precisely so its chunks wait for
+    // their own joints rather than for the rig's, so the fold's matrix here
+    // would be the one last run measured. Nothing reads it --
+    // RigExecAssembleSkinParameters takes no transform, which is also how
+    // the dynamic path treats a delta landing on a skin mover -- so the
+    // packet is assembled without a matrix rather than with a stale one.
+    if (revision->haveTransform && revision->op != RigExecRevisionOp::Skin) {
         values.transform = &revision->transform;
     }
     // A skin revision's packet carries the IDENTITY table and never the
@@ -1089,7 +1112,9 @@ FuseWholeRevision(const RigExecBakedProgramImpl::GeomChain &chain,
         revision->output.size() != count) {
         return false;
     }
-    FoldTransformForms(revision);
+    // Against the forms the FOLD wrote -- this step reads RevisionTransforms
+    // and writes none of it, so the table it skins against is the one that
+    // slot already holds.
     return SkinRange(revision, points, WholeTransformsView(revision), 0, count,
                      /*whole=*/true);
 }
@@ -1140,17 +1165,21 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             revision->topology == revision->partitionTopology) {
             return;
         }
-        if (revision->topology) {
-            RigExecBakedPartitionRevision(
-                revision, revision->topology->indices.data(),
-                revision->topology->indices.size(),
-                revision->topology->elementSize,
-                int(revision->chunks.size()));
+        if (!revision->topology) {
+            // A refusal leaves the partition AND the handle it was cut from
+            // where they are: the packet then reads the arrays per frame,
+            // and RevisionStatic, which has no resolved layout to compare
+            // the handle of, routes the revision through the fuse's
+            // whole-array path. Recording the refusal here instead would
+            // make the handles agree by both being null, which is the one
+            // answer this comparison must never give.
+            return;
         }
-        // A refusal (a null layout) leaves the partition where it was; the
-        // packet then reads the arrays per frame and RevisionStatic sees the
-        // handle disagree, which is what routes the revision through the
-        // fuse's whole-array path.
+        RigExecBakedPartitionRevision(
+            revision, revision->topology->indices.data(),
+            revision->topology->indices.size(),
+            revision->topology->elementSize,
+            int(revision->chunks.size()));
         revision->partitionTopology = revision->topology;
     };
     for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
@@ -1378,7 +1407,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.influencesValid =
             !skin || RigExecSkinTransformsAreUsable(revision.influences.data(),
                                                     revision.influences.size());
-        if (skin && !revision.chunked && revision.influencesValid) {
+        // Both forms of the table, whether or not the revision is chunked:
+        // a chunked one's chunks keep their own, but the fuse's whole-array
+        // fallback reads these and cannot write them. O(influences) of pure
+        // per-matrix arithmetic, which is the size of this step anyway.
+        if (skin && revision.influencesValid) {
             FoldTransformForms(&revision);
         }
         return;
@@ -1388,6 +1421,10 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.parameters =
             AssembleRevision(B, &revision, chain.lastBase.cdata(),
                              chain.lastBase.size(), time, step);
+        // The status of the PACKET. For a skin revision that is half of the
+        // answer -- the packet carries identities where the matrices would
+        // be -- and the fold's `influencesValid` is the other half; the fuse
+        // is where the two meet and where `moverFailed` is published.
         revision.status =
             RigExecStatusForParameters(revision.parameters,
                                        revision.moverPath);
@@ -1448,6 +1485,11 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                         ? topology->elementSize
                                         : revision.parameters.skinElementSize;
             revision.partitionStale =
+                // No resolved layout at all is a layout the keys cannot be
+                // checked against: the packet is reading the mover's arrays
+                // per frame, and nothing here can say they are the arrays
+                // the cut was made from.
+                !revision.parameters.skinTopology ||
                 revision.parameters.skinTopology !=
                     revision.partitionTopology ||
                 indexCount != revision.partitionIndexCount ||
@@ -1517,12 +1559,19 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             return;
         }
         GatherChunkTransforms(B, revision, &chunk);
-        if (!(chainDirty || revision.staticDirty || chunk.keyChanged)) {
+        if (!(chainDirty || revision.staticDirty || chunk.keyChanged) &&
+            chunk.ok) {
             // Its own joints stood still over points that stood still and a
             // packet that stood still, so its range of the buffer already
             // holds this run's answer -- and its `ok` still describes it.
             // Another chunk's joints moving makes the REVISION execute; it
             // does not make this range's vertices land anywhere else.
+            //
+            // `ok` is part of the gate rather than a consequence of it: a
+            // chunk whose last answer was a failure, or one the partition
+            // reset without the packet moving, has nothing in its range to
+            // keep, and reading that off its own flag keeps the invariant
+            // local to this step.
             return;
         }
         chunk.ok = SkinRange(&revision, points, ChunkTransformsView(chunk),

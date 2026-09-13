@@ -1096,6 +1096,14 @@ struct RigExecBakedProgramImpl {
         /// buffer shared by the walk.
         RigExecResolvedInputs revisionInputs;
         /// RevisionStatic writes these three.
+        ///
+        /// `status` is the status OF THE PACKET, which for a skin revision
+        /// is not the whole answer: the packet carries identities where the
+        /// influence matrices would be, so a table the dynamic path's
+        /// assembler would have failed leaves this saying "ok" and
+        /// `influencesValid` below saying otherwise. The fuse ANDs the two
+        /// and publishes `moverFailed` where the dynamic path publishes it;
+        /// read `influencesValid` beside this one, never this one alone.
         RigExecMoverParameters parameters;
         RigExecMoverStatus status;
         /// Whether this revision has to run at all: chain dirty so far, or
@@ -1155,9 +1163,12 @@ struct RigExecBakedProgramImpl {
         /// The table moved since the last run, which is the half of the
         /// executed decision the packet comparison no longer carries.
         bool influencesChanged = false;
-        /// The table in the two forms the kernels want it in, for a revision
-        /// whose single chunk skins against the whole table. A chunked
-        /// revision fills its chunks' own instead and leaves these empty.
+        /// The table in the two forms the kernels want it in, written by
+        /// the fold for every skin revision: an unchunked one's single
+        /// chunk skins against them, and so does the fuse when it has to run
+        /// a revision whole. A chunked revision's chunks keep their own
+        /// beside these and never read them -- but the fuse may only READ
+        /// this slot, so the fold writes them regardless.
         std::vector<float> rows;
         std::vector<RigExecScaledDualQuat> palette;
         /// Which buffer holds the chain's points AFTER this revision: this

@@ -326,6 +326,27 @@ RigExecBlendEnvelopeRange(const GfVec3f *preceding, const float *envelope,
     }
 }
 
+void
+RigExecBlendEnvelopeAll(const GfVec3f *preceding, const float *envelope,
+                        size_t count, GfVec3f *blended)
+{
+    // Per point, reading two arrays and writing a third at the same index: a
+    // point range is an independent sub-problem, so splitting it changes
+    // nothing about the arithmetic -- only who performs it.
+    if (RigExecParallelEvaluationEnabled() &&
+        count >= RigExecGeometryParallelThreshold) {
+        WorkParallelForN(
+            count,
+            [blended, preceding, envelope](size_t begin, size_t end) {
+                RigExecBlendEnvelopeRange(preceding, envelope, begin, end,
+                                          blended);
+            },
+            RigExecGeometryGrainSize);
+        return;
+    }
+    RigExecBlendEnvelopeRange(preceding, envelope, 0, count, blended);
+}
+
 // The skin kernel, shared by the mover-graph revision node and by the
 // baked program, which runs the same operation with no VdfNetwork around
 // it. One definition, so a second caller cannot drift into a different
@@ -811,25 +832,8 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
         if (!p.weights.ResolveAll(pts->size(), &envelope)) {
             return false;
         }
-        // Per point, reading two arrays and writing a third at the same
-        // index: a point range is an independent sub-problem, so splitting
-        // it changes nothing about the arithmetic.
-        GfVec3f *const blended = pts->data();
-        const GfVec3f *const before = preceding.data();
-        const float *const strength = envelope.data();
-        const size_t count = pts->size();
-        if (RigExecParallelEvaluationEnabled() &&
-            count >= RigExecGeometryParallelThreshold) {
-            WorkParallelForN(
-                count,
-                [blended, before, strength](size_t begin, size_t end) {
-                    RigExecBlendEnvelopeRange(before, strength, begin, end,
-                                              blended);
-                },
-                RigExecGeometryGrainSize);
-        } else {
-            RigExecBlendEnvelopeRange(before, strength, 0, count, blended);
-        }
+        RigExecBlendEnvelopeAll(preceding.data(), envelope.data(),
+                                pts->size(), pts->data());
     }
     return true;
 }
