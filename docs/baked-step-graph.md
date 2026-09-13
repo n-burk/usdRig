@@ -7,12 +7,35 @@ where a rule exists because of them. Line numbers refer to bakedProgram.cpp on b
 `bake-all/infra` before Phase 2 (Run at 2124-2980). The implementer commits this document as
 `docs/baked-step-graph.md` and keeps it in sync with the code.
 
-Implementation status: §9's file split has landed -- `bakedProgramImpl.h` holds the program
-state and the helpers more than one file calls, `bakedPose.cpp` and `bakedGeometry.cpp` hold
-each domain's bake and frame path, and `bakedProgram.cpp` keeps the public surface,
-`IsBakeable`, the `Build` skeleton, the run prologue and `RigExecComparePoses`.
-`bakedSchedule.{h,cpp}` and everything the sections below describe -- slots, steps, edges,
-clustering, chunked skinning, cones -- is still to come; the split changed no published value.
+Implementation status: §9's file split has landed, and so has the graph itself with the SERIAL
+executor. `bakedProgramImpl.h` holds the program state, the slot domains, `RigExecBakedStep` and
+the helpers more than one file calls; `bakedPose.cpp` and `bakedGeometry.cpp` hold each domain's
+bake, its step builders and its step bodies; `bakedSchedule.{h,cpp}` holds the edge sweep, the
+serial executor, the timing replay and the `RIGEXEC_BAKED_SCHEDULE_REPORT` dump; and
+`bakedProgram.cpp` keeps the public surface, `IsBakeable`, the `Build` skeleton, the run prologue
+and epilogue, and `RigExecComparePoses`. Every published value, diagnostic and compared counter of
+the three rigs that bake is byte-identical to before. Clustering (§5.1), the parallel executor
+(§5.2), vertex-chunked skinning (§6) and cone re-execution (§7) are still to come; the mode
+`RIGEXEC_BAKED_SCHEDULE=parallel` is accepted and runs the serial executor until they land.
+
+Four deviations from the sections below, each made for a stated reason:
+
+* The slot **kind** of §3 is called a slot DOMAIN in the code (`RigExecBakedSlotDomain`), because
+  `RigExecBakedSlotKind` already says what a PROVIDER slot is.
+* `InfluenceFold(c, r)` runs BEFORE `RevisionStatic(c, r)` and the packet depends on it.
+  §6 wants the static packet to be independent of the influence matrices, which would mean
+  splitting `RigExecAssembleParameters` in two; with one whole-range chunk per revision the chunk
+  needs every influence anyway, so the split buys nothing until the vertex partition lands and it
+  is a parity hazard until then.
+* The `executed` decision is made in `RevisionStatic` rather than in `RevisionFuse`. The predicate
+  and its inputs are exactly §6's (a value comparison, never dirtiness), but the CHUNK has to know
+  it: without §7's cone to skip a clean revision, a fuse-side decision would run every skin kernel
+  on every frame. The fuse still owns `applied`, `resultStatus`, the sticky chain bit and the
+  `currentSource` indirection.
+* `graphChainsBuilt` / `graphRevisionsBuilt` are summed from per-step counter deltas rather than
+  taken as program constants (§4.2 item 7). A chain -- or a derived target -- whose base attribute
+  does not read at the frame's time is skipped entirely by the dynamic path and by today's `Run`,
+  counters included, and a constant cannot reproduce that.
 
 ## 1. Why
 

@@ -46,6 +46,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
@@ -371,6 +372,317 @@ enum class RigExecBakedSlotKind {
     XformDerived,
 };
 
+// ---------------------------------------------------------------------------
+// The step graph.
+//
+// A run is a dependency graph of steps over dense slots rather than one
+// straight line. PROGRAM ORDER -- the order the straight line used -- is still
+// the reference: a step's index is its position in it, every edge points
+// forward, and the serial executor runs the steps in index order. That is what
+// makes "byte-identical to the old Run" a property any topological order of
+// this graph has, because floating-point results depend only on operand values
+// and each step's arithmetic is fixed.
+//
+// A step declares the slot RANGES it reads and writes; the edges are computed
+// from those declarations alone (bakedSchedule.cpp). Declared writes are an
+// UPPER BOUND: a disabled constraint, a revision that did not execute and a
+// commit that passed through all write fewer slots than they declared, and no
+// executor may ever "write what was declared".
+// ---------------------------------------------------------------------------
+
+/// Which dense table a slot indexes.
+///
+/// The specification calls this a slot KIND. That word is already spent in
+/// this header on RigExecBakedSlotKind, which says what a PROVIDER slot is
+/// (PoseSeed or XformDerived), and two similarly named enums in one header is
+/// how the wrong one gets declared -- so the step graph's is a slot's DOMAIN,
+/// the table it indexes, and the provider one keeps its name.
+enum class RigExecBakedSlotDomain : uint8_t {
+    Avars,               ///< avars[i*11 .. +10]; filled by the prologue
+    PoseBase,            ///< base[i]
+    PoseFin,             ///< fin[i]
+    PosedM,              ///< posedM[i]
+    FinalMatrix,         ///< finalMatrix[i]
+    BaseMatrix,          ///< baseMatrix[i]
+    Aggregate,           ///< aggregates[s]
+    Candidates,          ///< one Solve step's own (slot, frame) scratch
+    CommitTable,         ///< one commit's merged candidate table
+    CommitDelta,         ///< one commit's per-candidate hierarchy delta
+    CommitStaging,       ///< one propagation pair's staged frame and outcome
+    PropertyResult,      ///< propertyResults[t]; filled by the prologue
+    ChainBase,           ///< chains[c].lastBase; filled by the prologue
+    RevisionPacket,      ///< one revision's assembled packet, status, executed
+    RevisionTransforms,  ///< one revision's influence table
+    RevisionOut,         ///< one revision's OWN output buffer
+    RevisionDone,        ///< one revision's applied/status flags
+    ChainDirty,          ///< the chain's sticky dirty bit as of one revision
+    ChainPoints,         ///< the chain's published points
+    DerivedOut,          ///< one derived target's output
+    Snapshots,           ///< the phased-read records one step made
+};
+/// Derived from the last enumerator rather than written out: an array
+/// indexed by domain is how the edge sweep is written, and a count that
+/// drifted from the enum is an out-of-bounds write with no symptom at Build.
+inline constexpr size_t RigExecBakedSlotDomainCount =
+    size_t(RigExecBakedSlotDomain::Snapshots) + 1;
+
+/// A slot id: the domain in the top 8 bits, the index in the low 24.
+using RigExecBakedSlot = uint32_t;
+
+inline RigExecBakedSlot
+RigExecBakedMakeSlot(RigExecBakedSlotDomain domain, uint32_t index)
+{
+    return (uint32_t(domain) << 24) | (index & 0xffffffu);
+}
+
+/// A half-open run of slots of one domain.
+///
+/// Provider slots are in namespace DFS pre-order, so a subtree is contiguous
+/// and a commit's descendants are a scan rather than a set; declaring ranges
+/// rather than slots is what collapses the edge count and makes the edge
+/// computation an interval sweep.
+struct RigExecBakedSlotRange {
+    RigExecBakedSlotDomain domain = RigExecBakedSlotDomain::Avars;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+
+    bool IsEmpty() const { return end <= begin; }
+    bool Overlaps(const RigExecBakedSlotRange &other) const {
+        return domain == other.domain && begin < other.end &&
+               other.begin < end;
+    }
+    bool operator==(const RigExecBakedSlotRange &other) const {
+        return domain == other.domain && begin == other.begin &&
+               end == other.end;
+    }
+    bool operator<(const RigExecBakedSlotRange &other) const {
+        if (domain != other.domain) return domain < other.domain;
+        if (begin != other.begin) return begin < other.begin;
+        return end < other.end;
+    }
+};
+
+inline RigExecBakedSlotRange
+RigExecBakedRange(RigExecBakedSlotDomain domain, int begin, int end)
+{
+    RigExecBakedSlotRange range;
+    range.domain = domain;
+    range.begin = uint32_t(begin);
+    range.end = uint32_t(end);
+    return range;
+}
+
+inline RigExecBakedSlotRange
+RigExecBakedOne(RigExecBakedSlotDomain domain, int index)
+{
+    return RigExecBakedRange(domain, index, index + 1);
+}
+
+/// The name of \p domain, for the schedule report.
+const char *RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain);
+
+/// Whether the prologue, and not a step, fills \p domain.
+///
+/// These are the graph's SOURCES: a read of one with no writer in the graph
+/// is well formed. Every other domain's storage is written by a step, and a
+/// read of it with no writer is either a bug or the loop-carried read of
+/// Aggregate that BlendPointFrames makes when its input solver runs in no
+/// earlier batch (the reader list is therefore seeded from program start).
+inline bool
+RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
+{
+    return domain == RigExecBakedSlotDomain::Avars ||
+           domain == RigExecBakedSlotDomain::PropertyResult ||
+           domain == RigExecBakedSlotDomain::ChainBase ||
+           domain == RigExecBakedSlotDomain::Aggregate ||
+           domain == RigExecBakedSlotDomain::Snapshots;
+}
+
+/// What one step of the program does.
+enum class RigExecBakedStepKind {
+    ComposeSubtree,   ///< one subtree of the provider forest
+    Solve,            ///< one solver's aggregate and candidate frames
+    SolverCommit,     ///< one solver batch's merged candidate table
+    Constraint,       ///< one constraint's candidate frame
+    CommitDelta,      ///< a split commit's per-candidate hierarchy deltas
+    PropagateChunk,   ///< a split commit's staged descendant frames
+    CommitApply,      ///< a split commit's decision and write-back
+    ProviderMatrix,   ///< one provider's rest -> final or rest -> base matrix
+    SnapshotFinals,   ///< every provider's final matrix, for a phased read
+    InfluenceFold,    ///< one revision's influence table
+    RevisionStatic,   ///< one revision's packet, status and executed decision
+    RevisionChunk,    ///< one vertex range of one revision
+    RevisionFuse,     ///< one revision's applied decision and chain dirty bit
+    ChainStatus,      ///< one chain's status sweep and published points
+    Derived,          ///< one derived target maintained from a chain
+};
+
+/// The name of \p kind, for the schedule report.
+const char *RigExecBakedStepKindName(RigExecBakedStepKind kind);
+
+/// Whether \p kind belongs to the geometry half of a frame.
+///
+/// The executor uses it to pick a body and the epilogue to replay the two
+/// halves' diagnostics where the published generation puts them: the walk's
+/// before the joint block, the geometry's interleaved with the chains.
+inline bool
+RigExecBakedIsGeometryStep(RigExecBakedStepKind kind)
+{
+    switch (kind) {
+    case RigExecBakedStepKind::InfluenceFold:
+    case RigExecBakedStepKind::RevisionStatic:
+    case RigExecBakedStepKind::RevisionChunk:
+    case RigExecBakedStepKind::RevisionFuse:
+    case RigExecBakedStepKind::ChainStatus:
+    case RigExecBakedStepKind::Derived:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/// How many diagnostics a walk step may emit in one run.
+///
+/// Every diagnostic site in the walk is terminal -- it passes the constraint
+/// through or gives the generation back -- so a walk step's list is short and
+/// bounded, which is what lets the epilogue replay it without ever growing a
+/// shared vector inside the region. The two-line case is a constraint whose
+/// source did not resolve: it names the source, then says the constraint
+/// passed through. Geometry steps carry their own bound (a chain's status
+/// sweep has one line per failed revision), which Build records per step.
+inline constexpr size_t RigExecBakedMaxStepDiagnostics = 4;
+
+/// What one step added to the generation's work counters.
+///
+/// Counted per step and summed in the epilogue rather than incremented on the
+/// pose, because a step body never touches the pose.
+struct RigExecBakedStepCounters {
+    uint32_t revisionsExecuted = 0;
+    uint32_t revisionsCreated = 0;
+    uint32_t schedulesBuilt = 0;
+    uint32_t chainsBuilt = 0;
+    uint32_t revisionsBuilt = 0;
+
+    void Clear() { *this = RigExecBakedStepCounters(); }
+};
+
+/// One step of the program.
+struct RigExecBakedStep {
+    RigExecBakedStepKind kind = RigExecBakedStepKind::ComposeSubtree;
+    /// What this step is about, by kind:
+    ///   ComposeSubtree                              index into composeGroups
+    ///   Solve                                       index into solvers
+    ///   SolverCommit/Constraint/CommitDelta/
+    ///     PropagateChunk/CommitApply                index into commits
+    ///   ProviderMatrix                              provider slot
+    ///   SnapshotFinals                              unused
+    ///   InfluenceFold/RevisionStatic/
+    ///     RevisionChunk/RevisionFuse                index into revisionIndex
+    ///   ChainStatus                                 index into chains
+    ///   Derived                                     index into derivedIndex
+    int object = -1;
+    /// The part of it, by kind: the vertex chunk of a RevisionChunk, the
+    /// propagation-pair chunk of a PropagateChunk, and 1 for a final-phase
+    /// ProviderMatrix against 0 for a base-phase one. -1 where unused.
+    int part = -1;
+
+    /// Sorted, deduplicated. Writes are an upper bound (see above).
+    std::vector<RigExecBakedSlotRange> reads, writes;
+    /// Program indices, sorted; every entry of preds is < this step's index.
+    std::vector<int> preds, succs;
+
+    /// Filled by the clustering pass; the serial executor ignores both.
+    int cluster = -1;
+    double cost = 0;
+
+    /// This run's output, all of it per step so that nothing in a body
+    /// touches shared state.
+    std::vector<std::string> diagnostics;
+    size_t maxDiagnostics = RigExecBakedMaxStepDiagnostics;
+    RigExecBakedStepCounters counters;
+    /// The phased-read records this step made, merged into the run's store
+    /// by the executor in step order.
+    RigExecChainSnapshots snapshots;
+    /// The step gave the generation back: the baked propagation pairs no
+    /// longer describe the walk. Nothing after it runs.
+    bool bail = false;
+    /// When the profiler is on: the step's interval, replayed into it by the
+    /// epilogue in step order so the trace is deterministic.
+    uint64_t startUs = 0, endUs = 0;
+    /// What the step is called in the report and the trace, built once at
+    /// Build so that neither costs a string per step per frame.
+    std::string label;
+
+    /// Empties this run's output. Called by the executor before the body, so
+    /// that a step that is skipped keeps last run's lines for the epilogue
+    /// to replay.
+    void BeginRun() {
+        diagnostics.clear();
+        counters.Clear();
+        snapshots.Clear();
+        bail = false;
+    }
+};
+
+/// One contiguous group of provider slots the compose pass runs as one step.
+struct RigExecBakedComposeGroup {
+    int begin = 0, end = 0;
+    /// The PosedM slots below `begin` that slots inside the group inherit
+    /// from. One entry on any rig that bakes today; more only once a plain
+    /// Xformable can sit between a provider and its compose ancestor.
+    std::vector<int> parentSlots;
+};
+
+/// Everything one commit -- a solver batch's or a constraint's -- needs.
+///
+/// The candidate table is DENSE and in slot order, because both halves of
+/// the commit walk it in slot order: the usability sweep and the write-back.
+/// Which position each producer writes is decided at Build, so the merge is
+/// an indexed store rather than a map insertion, and "last writer wins on a
+/// duplicate slot" stays what it is today.
+struct RigExecBakedCommit {
+    /// Empty for a solver batch, whose diagnostics carry no mover path.
+    SdfPath moverPath;
+    bool solverOutput = false;
+    /// Sorted, unique.
+    std::vector<int> slots;
+    /// Filled this run, in `slots` order.
+    std::vector<char> present;
+    std::vector<RigExecPointFrame> frames;
+    /// (descendant, closest revised ancestor), in the order the dynamic walk
+    /// enumerates them.
+    std::vector<std::pair<int, int>> propagate;
+    /// For each pair, the position of its `closest` in `slots`, or -1 when
+    /// the batch declares no candidate for it at all.
+    std::vector<int> closestPos;
+    /// Per candidate position: the hierarchy delta and whether it resolved.
+    std::vector<GfMatrix4d> deltas;
+    std::vector<char> deltaOk;
+    /// Per pair: the staged frame and what happened to it.
+    std::vector<RigExecPointFrame> staged;
+    std::vector<uint8_t> outcome;
+    /// The candidate set was not produced at all this run -- a disabled
+    /// constraint, an unusable candidate, a solver batch that published
+    /// nothing -- so the whole commit writes nothing.
+    bool abandoned = true;
+    /// Build's decision to run the commit as three steps rather than one.
+    bool split = false;
+    /// A constraint step's source scratch, sized at Build.
+    std::vector<RigExecConstraintSource> sources;
+};
+
+/// What a staged propagation pair turned into. Ordered so that the first
+/// non-Staged, non-Skipped outcome in pair order decides the commit, which is
+/// where today's loop returns.
+enum class RigExecBakedPropagateOutcome : uint8_t {
+    Staged,             ///< a usable descendant frame is waiting
+    Skipped,            ///< a solver commit stepped over an unusable pair
+    NoCandidate,        ///< the baked pairs no longer describe the walk
+    UnusableDescendant, ///< the descendant's own frame is unusable
+    SingularDelta,      ///< the hierarchy delta would not resolve
+    InvalidResult,      ///< the propagated frame is unusable
+};
+
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
@@ -489,49 +801,24 @@ struct RigExecBakedProgramImpl {
     /// still never computed, which is the lazy set this program keeps.
     bool phasedReads = false;
 
-    // ---- rest->pose matrices, resolved on demand once per frame ------------
+    // ---- rest->pose matrices ------------------------------------------------
     //
     // What computeMatrix publishes, over dense slots: the whole
     // AuthoritativeSnapshot request is a re-derivation of values the walk
-    // already holds. Program-owned rather than a per-frame allocation, because
-    // BOTH halves of a frame read them and the geometry half must see exactly
-    // the matrix the pose half published.
+    // already holds. Program-owned rather than a per-frame allocation,
+    // because BOTH halves of a frame read them, the geometry half must see
+    // exactly the matrix the pose half published, and a 267 KB zero-fill per
+    // frame is work that belongs at Build.
+    //
+    // One ProviderMatrix step writes each entry the program can read -- the
+    // set today's lazy finalMatrixOf/baseMatrixOf computed, no larger -- so
+    // there is no on-demand fill and no per-frame reset: an entry no step
+    // writes simply keeps a value nothing reads.
     std::vector<GfMatrix4d> finalMatrix, baseMatrix;
-    std::vector<char> haveFinal, haveBase;
-
-    /// Empties the on-demand matrix tables for a frame over \p slots slots.
-    void ResetMatrices(size_t slots) {
-        finalMatrix.assign(slots, GfMatrix4d(1.0));
-        baseMatrix.assign(slots, GfMatrix4d(1.0));
-        haveFinal.assign(slots, 0);
-        haveBase.assign(slots, 0);
-    }
-
-    /// \p slot's rest -> final matrix, computed on its first use this frame.
-    const GfMatrix4d &FinalMatrixOf(int slot) {
-        if (!haveFinal[size_t(slot)]) {
-            if (RigExecBakedUsable(restFrames[slot]) &&
-                RigExecBakedUsable(fin[slot])) {
-                RigExecPointsToMatrix(restPts[slot], fin[slot].points,
-                                      &finalMatrix[size_t(slot)]);
-            }
-            haveFinal[size_t(slot)] = 1;
-        }
-        return finalMatrix[size_t(slot)];
-    }
-
-    /// \p slot's rest -> base matrix, computed on its first use this frame.
-    const GfMatrix4d &BaseMatrixOf(int slot) {
-        if (!haveBase[size_t(slot)]) {
-            if (RigExecBakedUsable(restFrames[slot]) &&
-                RigExecBakedUsable(base[slot])) {
-                RigExecPointsToMatrix(restPts[slot], base[slot].points,
-                                      &baseMatrix[size_t(slot)]);
-            }
-            haveBase[size_t(slot)] = 1;
-        }
-        return baseMatrix[size_t(slot)];
-    }
+    /// Whether some step or the epilogue reads this slot's final / base
+    /// matrix, which is what decides that a ProviderMatrix step exists for
+    /// it. Build fills both.
+    std::vector<char> needFinal, needBase;
 
     // ---- solvers -----------------------------------------------------------
     struct Solver {
@@ -571,6 +858,21 @@ struct RigExecBakedProgramImpl {
         bool splineParamsVary = false;
         // (providerSlot, element) pairs this solver writes
         std::vector<std::pair<int, int>> outputs;
+
+        // ---- the Solve step's own scratch, sized at Build -----------------
+        //
+        // The candidates this solver published, in `outputs` order and
+        // nowhere else: the merge into the batch's table is the commit's
+        // job, so two solvers of one batch never write the same storage.
+        std::vector<RigExecPointFrame> outFrames;
+        std::vector<char> outPresent;
+        /// Where each output lands in its commit's slot-ordered table.
+        std::vector<int> outPosition;
+        /// Joints this solver published no element for. Merged with every
+        /// other solver's list into one ordered set by the epilogue.
+        std::vector<SdfPath> fallbackJoints;
+        /// FkChain's element table, so the solve allocates nothing.
+        std::vector<RigExecFkChainElement> elements;
     };
     std::vector<Solver> solvers;
     std::map<SdfPath, int> solverIndex;
@@ -615,7 +917,7 @@ struct RigExecBakedProgramImpl {
     std::vector<Constraint> constraints;
 
     // ---- the walk ----------------------------------------------------------
-    struct Step {
+    struct WalkStep {
         bool solverBatch = false;
         size_t level = 0;
         int index = 0;                                 // constraint slot
@@ -627,7 +929,36 @@ struct RigExecBakedProgramImpl {
         // chain quadratic.
         std::vector<std::pair<int, int>> propagate;
     };
-    std::vector<Step> steps;
+    std::vector<WalkStep> walkSteps;
+
+    // ---- the step graph ----------------------------------------------------
+    //
+    // Built from the tables above, once, at the end of Build. `steps` is in
+    // program order -- the order today's straight-line Run visited the same
+    // work in -- and every edge points forward in it.
+    std::vector<RigExecBakedStep> steps;
+    /// The compose pass, partitioned into contiguous subtrees at Build.
+    std::vector<RigExecBakedComposeGroup> composeGroups;
+    /// One per walk entry, in walk order; `walkSteps[w]` and `commits[w]`
+    /// describe the same commit.
+    std::vector<RigExecBakedCommit> commits;
+    /// (chain, revision) per dense revision id, and (chain, derived) per
+    /// dense derived id. Both are assigned chain by chain, so one chain's
+    /// revisions are a contiguous range and a chain-wide read is one range.
+    std::vector<std::pair<int, int>> revisionIndex;
+    std::vector<std::pair<int, int>> derivedIndex;
+    /// First and last-plus-one revision id of each chain.
+    std::vector<int> chainRevisionBegin, chainRevisionEnd;
+
+    /// Program constants the epilogue adds to the generation's counters.
+    ///
+    /// Both are structural, not observations: the dynamic path's override
+    /// rounds are the number of distinct batch levels the schedule holds,
+    /// and the baked meaning of solverEvaluations is the number of solver
+    /// computations the program requests, which is the sum of the batch
+    /// sizes and is the same every run.
+    size_t solverOverrideRounds = 0;
+    size_t solverEvaluations = 0;
 
     // ---- publication -------------------------------------------------------
     std::vector<int> jointSlots;
@@ -682,6 +1013,39 @@ struct RigExecBakedProgramImpl {
         /// bookkeeping the dynamic walk does when it reconnects a surviving
         /// VdfNetwork node instead of adding one.
         bool created = true;
+
+        // ---- what the four steps of a revision hand each other ------------
+        /// InfluenceFold writes these; RevisionStatic assembles against
+        /// them. Sized at Build, never resized in the region.
+        std::vector<GfMatrix4d> influences;
+        GfMatrix4d transform{1.0};
+        /// This revision's overlay of the run's snapshot store, built only
+        /// when the revision declares a read phase. Per revision, never one
+        /// buffer shared by the walk.
+        RigExecResolvedInputs revisionInputs;
+        /// RevisionStatic writes these three.
+        RigExecMoverParameters parameters;
+        RigExecMoverStatus status;
+        /// Whether this revision has to run at all: chain dirty so far, or
+        /// it never ran, or its packet or status moved. A VALUE comparison,
+        /// never a dirtiness flag -- a control dragged back to where it
+        /// started must not count as executed.
+        bool executed = false;
+        /// RevisionChunk writes this: the kernel accepted the packet.
+        bool chunkOk = false;
+        /// Which buffer holds the chain's points AFTER this revision: this
+        /// revision's index when its own output was kept, the index of an
+        /// earlier revision when it was not, and -1 for the chain's base.
+        /// The indirection is what replaces today's `revision.output =
+        /// current` copy of a revision that applied nothing.
+        int currentSource = -1;
+        /// The epoch-fixed skin layout, resolved in the prologue because
+        /// RigExecSkinTopologyCache::Resolve holds a mutex across the build
+        /// and no step body may take a lock. Null is a remembered refusal,
+        /// which is why `topologyResolved` and not the pointer says whether
+        /// the prologue answered.
+        std::shared_ptr<const RigExecSkinTopology> topology;
+        bool topologyResolved = false;
     };
     struct GeomChain {
         SdfPath target;
@@ -689,7 +1053,19 @@ struct RigExecBakedProgramImpl {
         std::vector<GeomRevision> revisions;
         VtVec3fArray lastBase;
         VtVec3fArray result;
+        /// The other half of the published double buffer. Publication
+        /// alternates between `result` and this one, so the array a consumer
+        /// may still hold from last frame is never the one being written --
+        /// which is the COW aliasing rule VtArray leaves to its callers.
+        VtVec3fArray spare;
         bool haveResult = false;
+        /// The base attribute read at this time, by the prologue. False
+        /// skips every step of the chain, exactly as today's `continue`
+        /// skips the chain and its counters.
+        bool haveBase = false;
+        /// Whether the chain's points moved before its first revision, which
+        /// is where the sticky chain-dirty bit starts.
+        bool baseDirty = false;
         /// This chain's schedule has to be built and that has not been
         /// reported yet. The dynamic path rebuilds a chain's schedule when
         /// the identity sequence of its revisions changed, and not for a
@@ -702,13 +1078,18 @@ struct RigExecBakedProgramImpl {
             GeomRevision revision;
             VtVec3fArray lastBase;
             VtVec3fArray result;
+            /// The other half of the published double buffer; see the
+            /// chain's.
+            VtVec3fArray spare;
             bool haveResult = false;
+            /// As the chain's, read by the prologue.
+            bool haveBase = false;
+            bool baseDirty = false;
         };
         std::vector<Derived> derived;
     };
     std::vector<GeomChain> chains;
 
-    std::vector<GfMatrix4d> influenceScratch;
 
     /// What each geometry-domain constraint measured, keyed by the MOVER
     /// that produced it: the delta between its solved frame and its target's
@@ -1027,18 +1408,48 @@ void RigExecBakedBuildGeometry(
     RigExecBakedBuildContext *ctx,
     const std::vector<RigExecBakedChainSpec> &chains);
 
-/// Runs the pose half of one frame: inputs, compose, the solver/constraint
-/// walk, the rest->pose matrices and the frame publication.
-///
-/// Returns false having published diagnostics when the frame cannot complete,
-/// exactly where today's straight-line Run returns false.
-bool RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
-                         RigExecRigPose *pose);
+/// Appends the pose half of the program in program order: the compose
+/// subtrees, then one Solve and one commit per walk entry, then the
+/// rest->pose matrices and the phased-read finals.
+void RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program);
 
-/// Runs the geometry half of one frame: every chain's revisions, the derived
-/// maintenance that reads their final points, and the mover-graph accounting.
-void RigExecBakedRunGeometry(RigExecBakedProgramImpl *program,
-                             UsdTimeCode time, RigExecRigPose *pose);
+/// Appends the geometry half: per revision an InfluenceFold, a
+/// RevisionStatic, its chunks and a RevisionFuse, then the chain's status
+/// sweep, then its derived targets.
+void RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program);
+
+/// Runs one pose step. Never touches the pose: everything it produces goes
+/// into \p step.
+void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
+                             RigExecBakedStep *step, UsdTimeCode time);
+
+/// Runs one geometry step, under the same rule.
+void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
+                                 RigExecBakedStep *step, UsdTimeCode time);
+
+/// The pose half of the prologue: the bound inputs, once per run.
+void RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time);
+
+/// The geometry half of the prologue: every chain's and derived target's
+/// authored base, the point-count-moved reset, the node-creation accounting,
+/// and the skin layouts -- the one lock a frame takes, kept out of the
+/// region.
+void RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
+                                     UsdTimeCode time, RigExecRigPose *pose);
+
+/// The pose half of the epilogue: the joint and control publication, the
+/// solver guides and the property-domain results.
+///
+/// Returns false where today's walk returns false from the same line: a
+/// joint with a valid, non-degenerate final frame whose rest or frame is
+/// not usable needs exec.
+bool RigExecBakedPublishPose(RigExecBakedProgramImpl *program,
+                             RigExecRigPose *pose);
+
+/// The geometry half of the epilogue: each chain's diagnostics and points
+/// and each derived target's, in chain order.
+void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
+                                 RigExecRigPose *pose);
 
 /// Bakes the weight object at \p path, and everything it composes, into
 /// \p ctx's table; returns its index, or -1 when there is nothing there.

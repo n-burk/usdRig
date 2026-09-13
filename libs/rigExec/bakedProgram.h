@@ -178,6 +178,15 @@ public:
     /// \p previous is left empty of the state it handed over.
     void AdoptGeometryStateFrom(RigExecBakedProgram &previous);
 
+    /// The step graph this program runs.
+    ///
+    /// The graph IS the program's structure, so the suite that asserts its
+    /// invariants -- every edge forward, every read written or sourced, no
+    /// two steps writing the same slot without an edge -- has to be able to
+    /// see it. RigExecBakedProgramImpl is declared in bakedProgramImpl.h,
+    /// which only this library's own sources and its tests include.
+    const RigExecBakedProgramImpl &GetStepGraph() const;
+
 private:
     explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);
     std::unique_ptr<RigExecBakedProgramImpl> _impl;

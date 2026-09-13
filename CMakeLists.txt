@@ -97,6 +97,7 @@ add_library(rigExec SHARED
     libs/rigExec/rigEvaluator.cpp
     libs/rigExec/bakedProgram.cpp
     libs/rigExec/bakedPose.cpp
+    libs/rigExec/bakedSchedule.cpp
     libs/rigExec/bakedGeometry.cpp
     libs/rigExec/bakedWeights.cpp
 )
@@ -393,6 +394,13 @@ add_executable(testRigExecBakedMode tests/testRigExecBakedMode.cpp)
 target_link_libraries(testRigExecBakedMode PRIVATE rigExec)
 target_compile_definitions(testRigExecBakedMode PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecBakedMode COMMAND testRigExecBakedMode
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# The step graph behind the baked program: the edges, not the values.
+add_executable(testRigExecBakedSchedule tests/testRigExecBakedSchedule.cpp)
+target_link_libraries(testRigExecBakedSchedule PRIVATE rigExec)
+target_compile_definitions(testRigExecBakedSchedule PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecBakedSchedule COMMAND testRigExecBakedSchedule
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecArm tests/testRigExecArm.cpp)

@@ -24,6 +24,7 @@
 #include "bakedProgram.h"
 
 #include "bakedProgramImpl.h"
+#include "bakedSchedule.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
 #include "rigEvaluator.h"
@@ -508,6 +509,14 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         destination->lastParameters = std::move(source->lastParameters);
         destination->lastStatus = source->lastStatus;
         destination->ran = source->ran;
+        // WHICH buffer the chain's running value was in, which is as much a
+        // part of the cached result as the buffer itself: a revision that
+        // does not execute publishes through this indirection, and a kept
+        // result with a lost source would publish the authored base. Valid
+        // in the new chain because keepRun is only true below the first
+        // divergence, where the two identity sequences agree position by
+        // position.
+        destination->currentSource = source->currentSource;
     };
     // A curvenet bind is cached against the layout it was cut from, which an
     // edit that rebuilds the program need not have touched; carrying the
@@ -1300,6 +1309,20 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     if (!ctx.ok) {
         return nullptr;
     }
+
+    // ---- the step graph -----------------------------------------------------
+    //
+    // Last, because it is derived from everything above: the steps are the
+    // straight line's pieces in the straight line's order, and the edges
+    // between them follow from the slot ranges each piece declares. Built
+    // once here, so that a frame costs the graph nothing.
+    RigExecBakedBuildPoseSteps(&B);
+    RigExecBakedBuildGeometrySteps(&B);
+    RigExecBakedBuildSchedule(&B);
+    if (RigExecBakedScheduleReportRequested()) {
+        const std::string report = RigExecBakedScheduleReport(B);
+        std::fwrite(report.data(), 1, report.size(), stderr);
+    }
     return std::unique_ptr<RigExecBakedProgram>(
         new RigExecBakedProgram(std::move(impl)));
 }
@@ -1319,43 +1342,117 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     RigExecRigEvaluator &E = *B.evaluator;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "Baked", "baked");
 
-    // ---- property chains ---------------------------------------------------
-    // A math mover's inputs are all authored on itself, so its chain owes exec
-    // nothing and resolves first -- which is why this op can be the same
-    // routine the dynamic path runs rather than a second copy of it.
-    B.propertyResults.clear();
-    B.constraintDeltas.clear();
-    B.resolvedInputs->Clear();
-    B.runSnapshots.Clear();
-    B.chainSnapshots->Clear();
-    // Interactive overrides are applied on BOTH sides of the property chains,
-    // for the reason _EvaluateDynamic gives at the same two points: an
-    // override can be either end of a chain and the two ends want opposite
-    // orderings, and which end a given one is at is not knowable here.
-    const bool dragging = !B.interactiveOverrides->empty();
-    if (dragging) {
-        E._ApplyInteractiveOverridesToResolved(B.resolvedInputs, nullptr);
-    }
-    if (B.hasPropertyChains) {
-        RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "PropertyChains", "property");
-        std::vector<RigExecValueOverride> overrides;
-        E._EvaluatePropertyChains(time, &B.propertyResults, &overrides,
-                                  &pose->diagnostics);
-        for (const auto &[path, value] : B.propertyResults) {
-            B.resolvedInputs->SetProperty(path, value);
+    // ---- prologue -----------------------------------------------------------
+    //
+    // Serial, always run, and the only part of a frame that may take a lock,
+    // read the stage through anything but a pinned query, or touch the pose
+    // as it goes. Everything the region needs from outside itself is settled
+    // here.
+    {
+        RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedPrologue", "baked");
+        // A math mover's inputs are all authored on itself, so its chain owes
+        // exec nothing and resolves first -- which is why this op can be the
+        // same routine the dynamic path runs rather than a second copy of it.
+        B.propertyResults.clear();
+        B.constraintDeltas.clear();
+        B.resolvedInputs->Clear();
+        B.runSnapshots.Clear();
+        B.chainSnapshots->Clear();
+        // Interactive overrides are applied on BOTH sides of the property
+        // chains, for the reason _EvaluateDynamic gives at the same two
+        // points: an override can be either end of a chain and the two ends
+        // want opposite orderings, and which end a given one is at is not
+        // knowable here.
+        const bool dragging = !B.interactiveOverrides->empty();
+        if (dragging) {
+            E._ApplyInteractiveOverridesToResolved(B.resolvedInputs, nullptr);
         }
-    }
-    if (dragging) {
-        E._ApplyInteractiveOverridesToResolved(B.resolvedInputs,
-                                               &B.propertyResults);
+        if (B.hasPropertyChains) {
+            RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "PropertyChains",
+                                      "property");
+            std::vector<RigExecValueOverride> overrides;
+            // Straight into the published diagnostics: the chains run before
+            // anything else on both paths, so their lines are the first of
+            // the generation and nothing has to replay them.
+            E._EvaluatePropertyChains(time, &B.propertyResults, &overrides,
+                                      &pose->diagnostics);
+            for (const auto &[path, value] : B.propertyResults) {
+                B.resolvedInputs->SetProperty(path, value);
+            }
+        }
+        if (dragging) {
+            E._ApplyInteractiveOverridesToResolved(B.resolvedInputs,
+                                                   &B.propertyResults);
+        }
+        RigExecBakedRunInputs(&B, time);
+        RigExecBakedRunGeometryPrologue(&B, time, pose);
     }
 
-    if (!RigExecBakedRunPose(&B, time, pose)) {
+    // ---- the region ---------------------------------------------------------
+    bool bailed = false;
+    {
+        RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedRegion", "baked");
+        bailed = !RigExecBakedRunSteps(&B, time);
+    }
+
+    // ---- epilogue -----------------------------------------------------------
+    RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedEpilogue", "baked");
+    RigExecBakedReplayStepTimings(B);
+    if (bailed) {
+        // A step gave the generation back. Before the curvenet drain, which
+        // is destructive: a frame that gave up must not spend the pending
+        // bind lines into a pose nobody publishes. The caller drops the
+        // program, cache and all, and the dynamic fallback emits its own
+        // lines because it re-resolves every bind against the evaluator's
+        // still-empty cache.
         return false;
     }
-    RigExecBakedRunGeometry(&B, time, pose);
+    if (!RigExecBakedPublishPose(&B, pose)) {
+        return false;  // the dynamic fallback needs exec
+    }
+    RigExecBakedPublishGeometry(&B, pose);
+
+    // The generation's work counters. Two of them are PROGRAM CONSTANTS
+    // rather than observations -- the dynamic path's override rounds are the
+    // number of distinct batch levels the schedule holds, and the baked
+    // meaning of solverEvaluations is the number of solver computations the
+    // program requests -- and the rest are the sum of what the steps did.
+    pose->solverOverrideRounds += B.solverOverrideRounds;
+    pose->solverEvaluations += B.solverEvaluations;
+    size_t chainsBuilt = 0, revisionsBuilt = 0;
+    for (const RigExecBakedStep &step : B.steps) {
+        pose->moverGraphRevisionsExecuted += step.counters.revisionsExecuted;
+        pose->moverGraphRevisionsCreated += step.counters.revisionsCreated;
+        pose->moverGraphSchedulesBuilt += step.counters.schedulesBuilt;
+        chainsBuilt += step.counters.chainsBuilt;
+        revisionsBuilt += step.counters.revisionsBuilt;
+    }
+
+    // Whatever the Profile Mover binds reported; drained so a cached bind
+    // stays silent on every later frame. Empty on a bakeable rig, drained
+    // anyway so a rig that starts binding reports the same lines the dynamic
+    // path does. It sits here, at the tail of the run and past every return
+    // above it: the position is the one the dynamic walk drains from --
+    // immediately before its summary line -- so a completed frame's
+    // diagnostics interleave identically.
+    for (std::string &message : B.curvenetBindings.TakeDiagnostics()) {
+        pose->diagnostics.push_back(std::move(message));
+    }
+    pose->diagnostics.push_back(
+        "mover graph: " + std::to_string(chainsBuilt) + " chain(s), " +
+        std::to_string(revisionsBuilt) + " revision(s); " +
+        std::to_string(pose->moverGraphRevisionsCreated) + " created, " +
+        std::to_string(pose->moverGraphRevisionsExecuted) + " executed, " +
+        std::to_string(pose->moverGraphSchedulesBuilt) +
+        " schedule(s) built");
     pose->valid = true;
     return true;
+}
+
+const RigExecBakedProgramImpl &
+RigExecBakedProgram::GetStepGraph() const
+{
+    return *_impl;
 }
 
 }  // namespace rigExec

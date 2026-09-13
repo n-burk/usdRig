@@ -28,6 +28,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
 #include "pxr/usd/usdGeom/metrics.h"
+#include "pxr/base/work/threadLimits.h"
 
 #include <algorithm>
 #include <array>
@@ -498,7 +499,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
 
     // ---- the walk ------------------------------------------------------------
     for (const RigExecBakedWalkEntry &entry : walk) {
-        RigExecBakedProgramImpl::Step st;
+        RigExecBakedProgramImpl::WalkStep st;
         st.solverBatch = entry.solverBatch;
         if (entry.solverBatch) {
             st.level = entry.level;
@@ -520,26 +521,668 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                                  &st.propagate);
             }
         }
-        B.steps.push_back(std::move(st));
+        B.walkSteps.push_back(std::move(st));
     }
     B.aggregates.resize(B.solvers.size());
 }
 
+
 // ---------------------------------------------------------------------------
-// One frame, pose half.
+// Build: the pose half of the program, in program order.
+//
+// Program order is today's straight line. What changes is that each piece of
+// it now says which slots it reads and which it writes, so that the edges
+// between the pieces follow from the declarations rather than from the order
+// -- and the order becomes one valid schedule instead of the only one.
 // ---------------------------------------------------------------------------
 
-bool
-RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
-                    RigExecRigPose *pose)
+namespace {
+
+/// Appends a step of \p kind about \p object and returns it.
+RigExecBakedStep &
+AddStep(RigExecBakedProgramImpl *program, RigExecBakedStepKind kind,
+        int object, int part = -1)
+{
+    RigExecBakedStep step;
+    step.kind = kind;
+    step.object = object;
+    step.part = part;
+    step.maxDiagnostics = 0;
+    program->steps.push_back(std::move(step));
+    return program->steps.back();
+}
+
+/// A commit split into delta / staging / apply once its descendant list is
+/// this long. Below it the three phases run as one step: the split buys
+/// parallelism inside one propagation and costs two more steps, which is a
+/// bad trade for the two- and three-descendant commits a rig is full of.
+constexpr size_t kPropagateSplitThreshold = 64;
+/// Descendants staged per PropagateChunk of a split commit.
+constexpr size_t kPropagateChunkSize = 64;
+
+}  // namespace
+
+void
+RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     const int N = int(B.paths.size());
+
+    // ---- compose, partitioned into subtrees ---------------------------------
+    //
+    // One step per provider would be ~2 500 steps on a biped for work that is
+    // a few hundred nanoseconds each. The partition cuts the provider forest
+    // into subtrees of about total/(4P) slots -- enough of them that the work
+    // spreads, few enough that a step is worth its edge. Slots are in
+    // namespace DFS pre-order, so a subtree is CONTIGUOUS: the whole compose
+    // pass is a sequence of adjacent ranges in increasing order, and each
+    // range's parents are either inside it or below its first slot.
+    {
+        std::vector<int> subtreeSize(size_t(N), 1);
+        for (int i = N - 1; i >= 0; --i) {
+            if (B.propParent[size_t(i)] >= 0) {
+                subtreeSize[size_t(B.propParent[size_t(i)])] +=
+                    subtreeSize[size_t(i)];
+            }
+        }
+        const int concurrency = std::max(1, int(WorkGetConcurrencyLimit()));
+        const int budget =
+            std::max(1, N / std::max(1, 4 * concurrency));
+        std::vector<int> starts;
+        for (int i = 0; i < N;) {
+            // The shallowest node whose whole subtree fits is a cut; one
+            // whose subtree does not starts a group of its own and the scan
+            // continues into its children, which is what "cut at the deepest
+            // nodes whose subtree exceeds the budget" comes to.
+            starts.push_back(i);
+            i += subtreeSize[size_t(i)] <= budget ? subtreeSize[size_t(i)] : 1;
+        }
+        // Then merge ADJACENT groups while the result is still inside the
+        // budget. Without this an internal node too big to be its own
+        // subtree becomes a one-slot step, and a biped -- whose controls
+        // hang off a handful of deep scopes -- ends up with a step per
+        // provider for exactly the work the budget exists to avoid. Merging
+        // is always sound: slots are in namespace DFS pre-order, so any
+        // contiguous range's parents are either inside it or below its first
+        // slot.
+        for (size_t k = 0; k < starts.size(); ++k) {
+            RigExecBakedComposeGroup group;
+            group.begin = starts[k];
+            group.end = k + 1 < starts.size() ? starts[k + 1] : N;
+            while (k + 1 < starts.size() &&
+                   (k + 2 < starts.size() ? starts[k + 2] : N) -
+                           group.begin <= budget) {
+                ++k;
+                group.end = k + 1 < starts.size() ? starts[k + 1] : N;
+            }
+            for (int slot = group.begin; slot < group.end; ++slot) {
+                const int parent = B.parent[size_t(slot)];
+                if (parent >= 0 && parent < group.begin) {
+                    group.parentSlots.push_back(parent);
+                }
+            }
+            std::sort(group.parentSlots.begin(), group.parentSlots.end());
+            group.parentSlots.erase(
+                std::unique(group.parentSlots.begin(),
+                            group.parentSlots.end()),
+                group.parentSlots.end());
+            B.composeGroups.push_back(std::move(group));
+        }
+    }
+    for (size_t g = 0; g < B.composeGroups.size(); ++g) {
+        const RigExecBakedComposeGroup &group = B.composeGroups[g];
+        RigExecBakedStep &step = AddStep(
+            &B, RigExecBakedStepKind::ComposeSubtree, int(g));
+        step.reads.push_back(RigExecBakedRange(
+            RigExecBakedSlotDomain::Avars, group.begin * 11, group.end * 11));
+        for (const int parent : group.parentSlots) {
+            step.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::PosedM, parent));
+        }
+        step.writes.push_back(RigExecBakedRange(
+            RigExecBakedSlotDomain::PoseBase, group.begin, group.end));
+        step.writes.push_back(RigExecBakedRange(
+            RigExecBakedSlotDomain::PoseFin, group.begin, group.end));
+        step.writes.push_back(RigExecBakedRange(
+            RigExecBakedSlotDomain::PosedM, group.begin, group.end));
+    }
+
+    // ---- the interleaved solver/constraint walk -----------------------------
+    B.commits.resize(B.walkSteps.size());
+    std::set<size_t> levels;
+    for (size_t w = 0; w < B.walkSteps.size(); ++w) {
+        const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
+        RigExecBakedCommit &commit = B.commits[w];
+        commit.solverOutput = walk.solverBatch;
+        commit.propagate = walk.propagate;
+        // The candidate table is dense and in SLOT order, because both
+        // halves of the commit -- the usability sweep and the write-back --
+        // walk it in slot order. Where each producer lands is decided here,
+        // so the merge is an indexed store and "last writer wins on a
+        // duplicate slot" survives as the order the stores happen in.
+        if (walk.solverBatch) {
+            levels.insert(walk.level);
+            B.solverEvaluations += walk.batchSolvers.size();
+            for (const int si : walk.batchSolvers) {
+                for (const auto &[slot, element] : B.solvers[size_t(si)]
+                                                       .outputs) {
+                    commit.slots.push_back(slot);
+                }
+            }
+        } else {
+            commit.moverPath = B.constraints[size_t(walk.index)].path;
+            if (B.constraints[size_t(walk.index)].target >= 0) {
+                commit.slots.push_back(
+                    B.constraints[size_t(walk.index)].target);
+            }
+            commit.sources.resize(
+                B.constraints[size_t(walk.index)].sources.size());
+        }
+        std::sort(commit.slots.begin(), commit.slots.end());
+        commit.slots.erase(
+            std::unique(commit.slots.begin(), commit.slots.end()),
+            commit.slots.end());
+        const auto positionOf = [&commit](int slot) {
+            const auto found = std::lower_bound(commit.slots.begin(),
+                                                commit.slots.end(), slot);
+            return found != commit.slots.end() && *found == slot
+                       ? int(found - commit.slots.begin())
+                       : -1;
+        };
+        commit.present.assign(commit.slots.size(), 0);
+        commit.frames.resize(commit.slots.size());
+        commit.deltas.assign(commit.slots.size(), GfMatrix4d(1.0));
+        commit.deltaOk.assign(commit.slots.size(), 0);
+        commit.staged.resize(commit.propagate.size());
+        commit.outcome.assign(commit.propagate.size(), 0);
+        commit.closestPos.reserve(commit.propagate.size());
+        for (const auto &[descendant, closest] : commit.propagate) {
+            commit.closestPos.push_back(positionOf(closest));
+        }
+        commit.split = commit.propagate.size() > kPropagateSplitThreshold;
+
+        if (walk.solverBatch) {
+            for (const int si : walk.batchSolvers) {
+                RigExecBakedProgramImpl::Solver &solver =
+                    B.solvers[size_t(si)];
+                solver.outFrames.resize(solver.outputs.size());
+                solver.outPresent.assign(solver.outputs.size(), 0);
+                solver.outPosition.clear();
+                for (const auto &[slot, element] : solver.outputs) {
+                    solver.outPosition.push_back(positionOf(slot));
+                }
+                solver.elements.resize(solver.controls.size());
+                RigExecBakedStep &step =
+                    AddStep(&B, RigExecBakedStepKind::Solve, si);
+                for (const int control : solver.controls) {
+                    if (control >= 0) {
+                        step.reads.push_back(RigExecBakedOne(
+                            RigExecBakedSlotDomain::PoseFin, control));
+                    }
+                }
+                for (const int control : {solver.root, solver.mid,
+                                          solver.end, solver.pole}) {
+                    if (control >= 0) {
+                        step.reads.push_back(RigExecBakedOne(
+                            RigExecBakedSlotDomain::PoseFin, control));
+                    }
+                }
+                // A BlendPointFrames input solver normally runs in an
+                // earlier batch; when it does not, the read is of last run's
+                // aggregate, which is why Aggregate is a source domain.
+                for (const int input : {solver.inA, solver.inB}) {
+                    if (input >= 0) {
+                        step.reads.push_back(RigExecBakedOne(
+                            RigExecBakedSlotDomain::Aggregate, input));
+                    }
+                }
+                step.writes.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::Aggregate, si));
+                step.writes.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::Candidates, si));
+            }
+        }
+
+        // The commit itself: one step that merges (or computes) the
+        // candidates, plus -- for a propagation long enough to be worth it --
+        // the delta / staging / apply split. Both arrangements call the same
+        // three functions, so there is one definition of what a commit means.
+        const RigExecBakedStepKind head =
+            walk.solverBatch ? RigExecBakedStepKind::SolverCommit
+                             : RigExecBakedStepKind::Constraint;
+        RigExecBakedStep &commitStep = AddStep(&B, head, int(w));
+        commitStep.maxDiagnostics = RigExecBakedMaxStepDiagnostics;
+        if (walk.solverBatch) {
+            for (const int si : walk.batchSolvers) {
+                commitStep.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::Candidates, si));
+            }
+        } else {
+            const RigExecBakedProgramImpl::Constraint &constraint =
+                B.constraints[size_t(walk.index)];
+            for (const int source : constraint.sources) {
+                if (source >= 0) {
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseFin, source));
+                }
+            }
+            if (constraint.target >= 0) {
+                commitStep.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, constraint.target));
+            }
+            if (constraint.worldUpObject >= 0) {
+                commitStep.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin,
+                    constraint.worldUpObject));
+            }
+        }
+        commitStep.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::CommitTable, int(w)));
+        // The commit reads its descendants and their closest revised
+        // ancestors and writes them back: a read-modify-write of both, which
+        // is what the propagation IS.
+        const auto declarePropagation =
+            [&B, &commit](RigExecBakedStep *step, bool writes) {
+            for (const auto &[descendant, closest] : commit.propagate) {
+                step->reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, descendant));
+                step->reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, closest));
+                if (!writes) {
+                    continue;
+                }
+                step->writes.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, descendant));
+                if (commit.solverOutput) {
+                    step->writes.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseBase, descendant));
+                }
+            }
+            if (!writes) {
+                return;
+            }
+            for (const int slot : commit.slots) {
+                step->writes.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, slot));
+                if (commit.solverOutput) {
+                    step->writes.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseBase, slot));
+                }
+            }
+        };
+        if (!commit.split) {
+            declarePropagation(&commitStep, /* writes = */ true);
+            if (!walk.solverBatch) {
+                commitStep.writes.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::Snapshots,
+                    int(B.steps.size()) - 1));
+            }
+            continue;
+        }
+        {
+            RigExecBakedStep &delta =
+                AddStep(&B, RigExecBakedStepKind::CommitDelta, int(w));
+            delta.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::CommitTable, int(w)));
+            for (const int slot : commit.slots) {
+                delta.reads.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, slot));
+            }
+            delta.writes.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::CommitDelta, int(w)));
+        }
+        for (size_t begin = 0; begin < commit.propagate.size();
+             begin += kPropagateChunkSize) {
+            const size_t end = std::min(begin + kPropagateChunkSize,
+                                        commit.propagate.size());
+            RigExecBakedStep &chunk =
+                AddStep(&B, RigExecBakedStepKind::PropagateChunk, int(w),
+                        int(begin / kPropagateChunkSize));
+            chunk.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::CommitTable, int(w)));
+            chunk.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::CommitDelta, int(w)));
+            for (size_t k = begin; k < end; ++k) {
+                chunk.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin,
+                    commit.propagate[k].first));
+                chunk.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin,
+                    commit.propagate[k].second));
+            }
+            chunk.writes.push_back(
+                RigExecBakedRange(RigExecBakedSlotDomain::CommitStaging,
+                                  int(begin), int(end)));
+        }
+        {
+            RigExecBakedStep &apply =
+                AddStep(&B, RigExecBakedStepKind::CommitApply, int(w));
+            apply.maxDiagnostics = RigExecBakedMaxStepDiagnostics;
+            apply.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::CommitTable, int(w)));
+            apply.reads.push_back(
+                RigExecBakedRange(RigExecBakedSlotDomain::CommitStaging, 0,
+                                  int(commit.propagate.size())));
+            declarePropagation(&apply, /* writes = */ true);
+            if (!walk.solverBatch) {
+                apply.writes.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::Snapshots,
+                                    int(B.steps.size()) - 1));
+            }
+        }
+    }
+    B.solverOverrideRounds = levels.size();
+
+    // ---- the rest->pose matrices --------------------------------------------
+    //
+    // Exactly the set today's lazy finalMatrixOf/baseMatrixOf computed:
+    // final for every published joint, and final or base per use for every
+    // matrix and influence a geometry revision reads. A ProviderMatrix step
+    // never gives the generation back -- RigExecPointsToMatrix leaves the
+    // identity and says so -- so the one bail of this phase stays where it
+    // is, in the joint publication.
+    B.needFinal.assign(size_t(N), 0);
+    B.needBase.assign(size_t(N), 0);
+    B.finalMatrix.assign(size_t(N), GfMatrix4d(1.0));
+    B.baseMatrix.assign(size_t(N), GfMatrix4d(1.0));
+    for (const int slot : B.jointSlots) {
+        if (slot >= 0) {
+            B.needFinal[size_t(slot)] = 1;
+        }
+    }
+    const auto needForRevision =
+        [&B](const RigExecBakedProgramImpl::GeomRevision &revision) {
+        std::vector<char> &table = revision.finalPhase ? B.needFinal
+                                                       : B.needBase;
+        if (revision.transformSlot >= 0) {
+            table[size_t(revision.transformSlot)] = 1;
+        }
+        for (const int slot : revision.influenceSlots) {
+            if (slot >= 0) {
+                table[size_t(slot)] = 1;
+            }
+        }
+    };
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            needForRevision(revision);
+        }
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            needForRevision(derived.revision);
+        }
+    }
+    for (int slot = 0; slot < N; ++slot) {
+        if (B.needFinal[size_t(slot)]) {
+            RigExecBakedStep &step = AddStep(
+                &B, RigExecBakedStepKind::ProviderMatrix, slot, 1);
+            step.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, slot));
+            step.writes.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::FinalMatrix, slot));
+        }
+        if (B.needBase[size_t(slot)]) {
+            RigExecBakedStep &step = AddStep(
+                &B, RigExecBakedStepKind::ProviderMatrix, slot, 0);
+            step.reads.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::PoseBase, slot));
+            step.writes.push_back(
+                RigExecBakedOne(RigExecBakedSlotDomain::BaseMatrix, slot));
+        }
+    }
+
+    // The store's other pose-half record: every provider's rest -> final
+    // matrix, which is what a `final` phase on a provider resolves to. Only
+    // a rig that declares a phase can look one up, so only such a rig pays
+    // for the step at all.
+    if (B.phasedReads) {
+        RigExecBakedStep &step =
+            AddStep(&B, RigExecBakedStepKind::SnapshotFinals, 0);
+        step.reads.push_back(
+            RigExecBakedRange(RigExecBakedSlotDomain::PoseFin, 0, N));
+        step.writes.push_back(RigExecBakedOne(
+            RigExecBakedSlotDomain::Snapshots, int(B.steps.size()) - 1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One frame, pose half.
+//
+// Everything below is a STEP BODY or one half of the serial prologue or
+// epilogue. A body touches no pose, takes no lock, opens no profile scope and
+// writes only the slots its step declared; whatever it has to say it says
+// into its own step.
+// ---------------------------------------------------------------------------
+
+void
+RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const RigExecResolvedInputs &R = *B.resolvedInputs;
+    RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
+    for (const auto &binding : B.avarBindings) {
+        B.avars[binding.slot] =
+            RigExecBakedRead(binding.input, R, time, &B.overridden);
+    }
+    // A drag lands on avars the bake captured as constants -- that is what
+    // dragging a control on a still rig IS -- so the varying list above is not
+    // the whole table while one stands. The constant slots are walked while a
+    // drag stands and once more after it is released, because the released
+    // slot holds the dragged value until something writes the constant back
+    // over it. Once per run: the pass and the flag update are the prologue's,
+    // not a step's, so no arrangement of the graph can perform them twice.
+    if (B.anyOverridden || B.avarsDisturbed) {
+        for (const auto &binding : B.avarConstantBindings) {
+            B.avars[binding.slot] =
+                B.overridden[size_t(binding.input.overrideIndex)]
+                    ? RigExecBakedRead(binding.input, R, time, &B.overridden)
+                    : binding.input.constant;
+        }
+        B.avarsDisturbed = B.anyOverridden;
+    }
+}
+
+namespace {
+
+/// The hierarchy delta each candidate of \p commit carries, once.
+///
+/// Today's loop computes this inside the descendant walk; it depends only on
+/// the candidate's frame and the ancestor's frame before the commit, neither
+/// of which the walk touches, so hoisting it changes no number and lets the
+/// descendants be staged in any order.
+void
+ComputeCommitDeltas(const RigExecBakedProgramImpl &B,
+                    RigExecBakedCommit *commit)
+{
+    for (size_t pos = 0; pos < commit->slots.size(); ++pos) {
+        if (!commit->present[pos]) {
+            commit->deltaOk[pos] = 0;
+            continue;
+        }
+        commit->deltas[pos] = GfMatrix4d(1.0);
+        commit->deltaOk[pos] =
+            RigExecPointsToMatrix(
+                B.fin[size_t(commit->slots[pos])].points,
+                commit->frames[pos].points, &commit->deltas[pos])
+                ? 1
+                : 2;
+    }
+}
+
+/// Stages descendants [\p begin, \p end) of \p commit.
+///
+/// Each pair is decided exactly where today's loop decides it and in the same
+/// order of tests; what it does with the answer is recorded rather than
+/// returned, because the pair that decides the commit is the LOWEST-indexed
+/// failing one and a chunk cannot know whether an earlier chunk failed.
+void
+StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
+                 size_t begin, size_t end)
+{
+    for (size_t k = begin; k < end; ++k) {
+        const auto &[descendant, closest] = commit->propagate[k];
+        const int pos = commit->closestPos[k];
+        if (pos < 0 || !commit->present[size_t(pos)]) {
+            // A solver published no element for this ancestor, so the baked
+            // propagation pairs no longer describe the walk.
+            commit->outcome[k] =
+                uint8_t(RigExecBakedPropagateOutcome::NoCandidate);
+            continue;
+        }
+        const RigExecPointFrame &current = B.fin[size_t(descendant)];
+        const RigExecPointFrame &before = B.fin[size_t(closest)];
+        if (commit->solverOutput &&
+            (!RigExecBakedUsable(current) || !RigExecBakedUsable(before) ||
+             !RigExecBakedUsable(commit->frames[size_t(pos)]))) {
+            commit->outcome[k] =
+                uint8_t(RigExecBakedPropagateOutcome::Skipped);
+            continue;
+        }
+        if (!RigExecBakedUsable(current)) {
+            commit->outcome[k] =
+                uint8_t(RigExecBakedPropagateOutcome::UnusableDescendant);
+            continue;
+        }
+        if (commit->deltaOk[size_t(pos)] != 1) {
+            commit->outcome[k] =
+                uint8_t(RigExecBakedPropagateOutcome::SingularDelta);
+            continue;
+        }
+        const RigExecPointFrame frame =
+            RigExecMatrixToPoints(current.points, commit->deltas[size_t(pos)]);
+        if (!RigExecBakedUsable(frame)) {
+            commit->outcome[k] =
+                uint8_t(RigExecBakedPropagateOutcome::InvalidResult);
+            continue;
+        }
+        commit->staged[k] = frame;
+        commit->outcome[k] = uint8_t(RigExecBakedPropagateOutcome::Staged);
+    }
+}
+
+/// The phased-read store's pose-half record: a provider's rest -> final
+/// matrix as it stood immediately AFTER one constraint. Mirrors the dynamic
+/// walk's recordFrame, including which frames it declines to record; the
+/// _snapshotPoints membership it tests per call was decided at bake, so a rig
+/// that declares no phase pays one branch per constraint.
+void
+RecordFrame(const RigExecBakedProgramImpl &B,
+            const RigExecBakedProgramImpl::Constraint &constraint,
+            RigExecBakedStep *step)
+{
+    if (!constraint.snapshotAfter || constraint.target < 0) {
+        return;
+    }
+    const RigExecPointFrame &frame = B.fin[size_t(constraint.target)];
+    if (!frame.IsValid()) {
+        return;
+    }
+    const RigExecPointFrame &rest = B.restFrames[size_t(constraint.target)];
+    const std::array<GfVec3d, 4> landmarks =
+        rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
+    GfMatrix4d matrix(1.0);
+    if (RigExecPointsToMatrix(landmarks, frame.points, &matrix)) {
+        step->snapshots.Record(B.paths[size_t(constraint.target)],
+                               constraint.path, VtValue(matrix));
+    }
+}
+
+/// Decides \p commit and writes it back, or says why it passed through.
+///
+/// The first pair that neither staged nor was stepped over decides, which is
+/// where today's loop returns; everything after it was staged for nothing and
+/// is dropped. A commit that passes through writes NOTHING -- not even its
+/// candidates -- which is what makes it atomic.
+void
+FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
+             RigExecBakedCommit *commit)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const RigExecBakedProgramImpl::Constraint *constraint =
+        commit->solverOutput
+            ? nullptr
+            : &B.constraints[size_t(
+                  B.walkSteps[size_t(step->object)].index)];
+    const auto record = [&] {
+        if (constraint) {
+            RecordFrame(B, *constraint, step);
+        }
+    };
+    if (commit->abandoned) {
+        record();
+        return;
+    }
+    const std::string mover = commit->moverPath.GetString();
+    for (size_t k = 0; k < commit->propagate.size(); ++k) {
+        const auto outcome = RigExecBakedPropagateOutcome(commit->outcome[k]);
+        if (outcome == RigExecBakedPropagateOutcome::Staged ||
+            outcome == RigExecBakedPropagateOutcome::Skipped) {
+            continue;
+        }
+        switch (outcome) {
+        case RigExecBakedPropagateOutcome::NoCandidate:
+            step->bail = true;
+            return;
+        case RigExecBakedPropagateOutcome::UnusableDescendant:
+            step->diagnostics.push_back(
+                mover + " could not propagate its pose revision through " +
+                B.paths[size_t(commit->propagate[k].first)].GetString() +
+                "; constraint passed through");
+            break;
+        case RigExecBakedPropagateOutcome::SingularDelta:
+            step->diagnostics.push_back(
+                mover + " produced a singular hierarchy delta; constraint "
+                "passed through");
+            break;
+        default:
+            step->diagnostics.push_back(
+                mover + " produced an invalid descendant frame for " +
+                B.paths[size_t(commit->propagate[k].first)].GetString() +
+                "; constraint passed through");
+            break;
+        }
+        record();
+        return;
+    }
+    // In slot order for the candidates -- which is the order the dense table
+    // is in -- then in propagation order for the descendants, exactly as the
+    // two write-back loops of commitConstraintFrames run.
+    for (size_t pos = 0; pos < commit->slots.size(); ++pos) {
+        if (!commit->present[pos]) {
+            continue;
+        }
+        B.fin[size_t(commit->slots[pos])] = commit->frames[pos];
+        if (commit->solverOutput) {
+            B.base[size_t(commit->slots[pos])] = commit->frames[pos];
+        }
+    }
+    for (size_t k = 0; k < commit->propagate.size(); ++k) {
+        if (RigExecBakedPropagateOutcome(commit->outcome[k]) !=
+            RigExecBakedPropagateOutcome::Staged) {
+            continue;
+        }
+        const int descendant = commit->propagate[k].first;
+        B.fin[size_t(descendant)] = commit->staged[k];
+        if (commit->solverOutput) {
+            B.base[size_t(descendant)] = commit->staged[k];
+        }
+    }
+    record();
+}
+
+}  // namespace
+
+void
+RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
+                        RigExecBakedStep *step, UsdTimeCode time)
+{
+    RigExecBakedProgramImpl &B = *program;
     const RigExecResolvedInputs &R = *B.resolvedInputs;
     // Every per-frame read goes through these two: `rd` reads one input the
-    // way this generation must (through the resolved inputs while an
-    // override stands on it, through the pinned query otherwise), and `live`
-    // answers whether a set of baked parameters has to be re-read at all.
+    // way this generation must (through the resolved inputs while an override
+    // stands on it, through the pinned query otherwise), and `live` answers
+    // whether a set of baked parameters has to be re-read at all.
     const auto rd = [&](const auto &input) {
         return RigExecBakedRead(input, R, time, &B.overridden);
     };
@@ -549,33 +1192,11 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 B.overridden[size_t(input.overrideIndex)]);
     };
 
-    // ---- the bound inputs --------------------------------------------------
-    {
-        RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
-        for (const auto &binding : B.avarBindings) {
-            B.avars[binding.slot] = rd(binding.input);
-        }
-        // A drag lands on avars the bake captured as constants -- that is
-        // what dragging a control on a still rig IS -- so the varying list
-        // above is not the whole table while one stands. The constant slots
-        // are walked while a drag stands and once more after it is released,
-        // because the released slot holds the dragged value until something
-        // writes the constant back over it.
-        if (B.anyOverridden || B.avarsDisturbed) {
-            for (const auto &binding : B.avarConstantBindings) {
-                B.avars[binding.slot] =
-                    B.overridden[size_t(binding.input.overrideIndex)]
-                        ? rd(binding.input)
-                        : binding.input.constant;
-            }
-            B.avarsDisturbed = B.anyOverridden;
-        }
-    }
-
-    // ---- provider frames ---------------------------------------------------
-    {
-        RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedCompose", "baked");
-        for (int i = 0; i < N; ++i) {
+    switch (step->kind) {
+    case RigExecBakedStepKind::ComposeSubtree: {
+        const RigExecBakedComposeGroup &group =
+            B.composeGroups[size_t(step->object)];
+        for (int i = group.begin; i < group.end; ++i) {
             if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
                 // An xform-derived slot is not composed from avars: the
                 // dynamic path seeds it from the stage, and until the program
@@ -586,301 +1207,228 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
             const double units = a[10];
             const GfMatrix4d avars = RigExecBakedComposeAvars(
                 a[0] * units, a[1] * units, a[2] * units, a[3], a[4], a[5],
-                a[6], a[7], a[8], a[9], B.rotOrder[i]);
+                a[6], a[7], a[8], a[9], B.rotOrder[size_t(i)]);
             const GfMatrix4d parentPosed =
-                B.parent[i] >= 0 ? B.posedM[B.parent[i]] : GfMatrix4d(1.0);
-            B.base[i] = RigExecFrameFromMatrix(
-                avars * B.selfD[i] * B.parentDinv[i] * parentPosed);
-            B.fin[i] = B.base[i];
+                B.parent[size_t(i)] >= 0
+                    ? B.posedM[size_t(B.parent[size_t(i)])]
+                    : GfMatrix4d(1.0);
+            B.base[size_t(i)] = RigExecFrameFromMatrix(
+                avars * B.selfD[size_t(i)] * B.parentDinv[size_t(i)] *
+                parentPosed);
+            B.fin[size_t(i)] = B.base[size_t(i)];
             // _SpaceFromFrame: an unusable frame selects the NaN sentinel, so
             // the failure survives into every descendant instead of being
             // scrubbed into a plausible identity.
             GfMatrix4d space(1.0);
-            if (!B.base[i].IsValid() || B.base[i].IsDegenerate() ||
+            if (!B.base[size_t(i)].IsValid() ||
+                B.base[size_t(i)].IsDegenerate() ||
                 !RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                       B.base[i].points, &space)) {
+                                       B.base[size_t(i)].points, &space)) {
                 space = GfMatrix4d(1.0);
                 space[3][0] = std::numeric_limits<double>::quiet_NaN();
             }
-            B.posedM[i] = space;
+            B.posedM[size_t(i)] = space;
         }
+        return;
     }
 
-    // The write bundle of one step, with the descendant propagation the bake
-    // already decided. Mirrors commitConstraintFrames in rigEvaluator.cpp,
-    // including which failures are diagnosed and which are silent.
-    std::map<int, RigExecPointFrame> candidates;
-    std::vector<std::pair<int, RigExecPointFrame>> propagated;
-    enum class _Commit { Applied, PassedThrough, Bail };
-    auto commit = [&](const SdfPath &moverPath,
-                      const std::vector<std::pair<int, int>> &propagate,
-                      bool solverOutput) {
-        if (!solverOutput) {
-            for (const auto &[slot, frame] : candidates) {
-                if (!RigExecBakedUsable(frame)) {
-                    pose->diagnostics.push_back(
-                        moverPath.GetString() +
-                        " produced an invalid or degenerate frame for " +
-                        B.paths[slot].GetString() +
-                        "; constraint passed through");
-                    return _Commit::PassedThrough;
+    case RigExecBakedStepKind::Solve: {
+        RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(step->object)];
+        RigExecPointFrameArray &aggregate = B.aggregates[size_t(step->object)];
+        aggregate.frames.clear();
+        aggregate.rests.clear();
+        s.fallbackJoints.clear();
+        // The one degeneracy guard, and it sits AFTER the clear: a solver
+        // whose joint binding the bake found malformed publishes the EMPTY
+        // aggregate its computation returns, and "publishes an empty
+        // aggregate" is what the clear makes true. The output loop below
+        // still runs, so every joint the solver names falls back to its rest
+        // chain and says so -- which is exactly what the dynamic path
+        // reports.
+        if (s.degenerate) {
+        } else if (s.type == "RigExecFkChain") {
+            for (size_t k = 0; k < s.controls.size(); ++k) {
+                s.elements[k].restPoints = s.controlRests[k];
+                s.elements[k].posePoints =
+                    s.controls[k] >= 0
+                        ? B.fin[size_t(s.controls[k])].points
+                        : RigExecIdentityLandmarks();
+                s.elements[k].parentIndex =
+                    s.parentRelative ? -1 : int(k) - 1;
+            }
+            aggregate.frames = RigExecSolveFkChain(s.elements);
+            aggregate.rests = s.controlRests;
+        } else if (s.type == "RigExecTwoBoneIk") {
+            RigExecTwoBoneIkParams params = s.ikParams;
+            if (live(s.bend) || live(s.stretch) || live(s.softness) ||
+                live(s.upperOffset) || live(s.lowerOffset)) {
+                params.preferredBendRadians = rd(s.bend);
+                params.stretch = rd(s.stretch);
+                params.softness = rd(s.softness);
+                params.upperLength = s.upperLengthBase + rd(s.upperOffset);
+                params.lowerLength = s.lowerLengthBase + rd(s.lowerOffset);
+            }
+            const auto frames = RigExecSolveTwoBoneIk(
+                B.fin[size_t(s.root)], B.fin[size_t(s.end)],
+                B.fin[size_t(s.pole)], s.ikRests, params);
+            aggregate.frames.assign(frames.begin(), frames.end());
+            aggregate.rests.assign(s.ikRests.begin(), s.ikRests.end());
+        } else if (s.type == "RigExecBlendPointFrames") {
+            const RigExecPointFrameArray &a = B.aggregates[size_t(s.inA)];
+            const RigExecPointFrameArray &b = B.aggregates[size_t(s.inB)];
+            const size_t n = a.GetSize();
+            // Clamp to [0, 1]: a blend weight outside the unit interval
+            // extrapolates past both inputs.
+            const double w =
+                std::min(std::max(double(rd(s.blendWeight)), 0.0), 1.0);
+            if (n == b.GetSize() && a.rests.size() == n) {
+                aggregate.frames.reserve(n);
+                aggregate.rests.reserve(n);
+                for (size_t k = 0; k < n; ++k) {
+                    aggregate.frames.push_back(RigExecBlendFrames(
+                        a.frames[k], b.frames[k], a.rests[k], w,
+                        RigExecRotationBlend::ShortestArc, s.scaleMode));
+                    aggregate.rests.push_back(a.rests[k]);
                 }
             }
-        }
-        propagated.clear();
-        for (const auto &[j, closest] : propagate) {
-            const RigExecPointFrame &current = B.fin[j];
-            const auto candidate = candidates.find(closest);
-            if (candidate == candidates.end()) {
-                // A solver published no element for this ancestor, so the
-                // baked propagation pairs no longer describe the walk.
-                return _Commit::Bail;
+        } else if (s.type == "RigExecSplineIk") {
+            RigExecSplineIkParams params = s.splineParams;
+            if (s.splineParamsVary || live(s.preserveVolume) ||
+                live(s.midFollowWeight) || live(s.roll) || live(s.twist) ||
+                live(s.minLengthRatio)) {
+                params.preserveVolume = rd(s.preserveVolume);
+                params.midFollowWeight = rd(s.midFollowWeight);
+                params.roll = GfDegreesToRadians(rd(s.roll));
+                params.twist = GfDegreesToRadians(rd(s.twist));
+                params.minLengthRatio = rd(s.minLengthRatio);
             }
-            const RigExecPointFrame &before = B.fin[closest];
-            if (solverOutput &&
-                (!RigExecBakedUsable(current) || !RigExecBakedUsable(before) ||
-                 !RigExecBakedUsable(candidate->second))) {
+            RigExecSplineIkControls controls;
+            controls.root = B.fin[size_t(s.root)];
+            controls.mid = B.fin[size_t(s.mid)];
+            controls.end = B.fin[size_t(s.end)];
+            RigExecSplineIkResult solved;
+            RigExecSolveSplineIk(s.splineRest, controls, params, &solved);
+            if (solved.joints.size() == s.splineCount) {
+                aggregate.frames.reserve(s.splineCount);
+                for (const auto &joint : solved.joints) {
+                    aggregate.frames.push_back(joint.frame);
+                }
+                aggregate.rests = s.splineJointRests;
+            }
+        }
+        for (size_t k = 0; k < s.outputs.size(); ++k) {
+            const auto &[slot, element] = s.outputs[k];
+            if (element < 0 || size_t(element) >= aggregate.GetSize()) {
+                s.outPresent[k] = 0;
+                s.fallbackJoints.push_back(B.paths[size_t(slot)]);
                 continue;
             }
-            if (!RigExecBakedUsable(current)) {
-                pose->diagnostics.push_back(
-                    moverPath.GetString() +
-                    " could not propagate its pose revision through " +
-                    B.paths[j].GetString() + "; constraint passed through");
-                return _Commit::PassedThrough;
-            }
-            GfMatrix4d delta(1.0);
-            if (!RigExecPointsToMatrix(before.points,
-                                       candidate->second.points, &delta)) {
-                pose->diagnostics.push_back(
-                    moverPath.GetString() +
-                    " produced a singular hierarchy delta; constraint passed "
-                    "through");
-                return _Commit::PassedThrough;
-            }
-            const RigExecPointFrame frame =
-                RigExecMatrixToPoints(current.points, delta);
-            if (!RigExecBakedUsable(frame)) {
-                pose->diagnostics.push_back(
-                    moverPath.GetString() +
-                    " produced an invalid descendant frame for " +
-                    B.paths[j].GetString() + "; constraint passed through");
-                return _Commit::PassedThrough;
-            }
-            propagated.emplace_back(j, frame);
+            s.outFrames[k] =
+                RigExecExtractElementFrame(&aggregate, size_t(element));
+            s.outPresent[k] = 1;
         }
-        for (const auto &[slot, frame] : candidates) {
-            B.fin[slot] = frame;
-            if (solverOutput) B.base[slot] = frame;
-        }
-        for (const auto &[slot, frame] : propagated) {
-            B.fin[slot] = frame;
-            if (solverOutput) B.base[slot] = frame;
-        }
-        return _Commit::Applied;
-    };
+        return;
+    }
 
-    // The phased-read store's pose-half record: a provider's rest -> final
-    // matrix as it stood immediately AFTER one constraint. Mirrors the
-    // dynamic walk's recordFrame, including which frames it declines to
-    // record; the _snapshotPoints membership it tests per call was decided at
-    // bake, so a rig that declares no phase pays one branch per constraint.
-    const auto recordFrame =
-        [&](const RigExecBakedProgramImpl::Constraint &c) {
-        if (!c.snapshotAfter || c.target < 0) {
+    case RigExecBakedStepKind::SolverCommit: {
+        RigExecBakedCommit &commit = B.commits[size_t(step->object)];
+        std::fill(commit.present.begin(), commit.present.end(), 0);
+        for (const int si : B.walkSteps[size_t(step->object)].batchSolvers) {
+            const RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(si)];
+            for (size_t k = 0; k < s.outputs.size(); ++k) {
+                if (!s.outPresent[k] || s.outPosition[k] < 0) {
+                    continue;
+                }
+                // Last writer wins on a duplicate slot, because the stores
+                // happen in batch order: `candidates[slot] = ...`.
+                commit.frames[size_t(s.outPosition[k])] = s.outFrames[k];
+                commit.present[size_t(s.outPosition[k])] = 1;
+            }
+        }
+        commit.abandoned = std::find(commit.present.begin(),
+                                     commit.present.end(), 1) ==
+                           commit.present.end();
+        if (commit.split || commit.abandoned) {
             return;
         }
-        const RigExecPointFrame &frame = B.fin[c.target];
-        if (!frame.IsValid()) {
-            return;
-        }
-        const RigExecPointFrame &rest = B.restFrames[c.target];
-        const std::array<GfVec3d, 4> landmarks =
-            rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
-        GfMatrix4d matrix(1.0);
-        if (RigExecPointsToMatrix(landmarks, frame.points, &matrix)) {
-            B.runSnapshots.Record(B.paths[c.target], c.path, VtValue(matrix));
-        }
-    };
+        ComputeCommitDeltas(B, &commit);
+        StageCommitPairs(B, &commit, 0, commit.propagate.size());
+        FinishCommit(&B, step, &commit);
+        return;
+    }
 
-    // ---- the interleaved solver/constraint walk ----------------------------
-    std::set<SdfPath> fallbackJoints;
-    std::set<size_t> visitedSolverLevels;
-    for (const RigExecBakedProgramImpl::Step &step : B.steps) {
-        if (step.solverBatch) {
-            RIGEXEC_PROFILE_SCOPE_CAT(
-                *B.profiler, "SolverBatch L" + std::to_string(step.level),
-                "pose");
-            candidates.clear();
-            for (int si : step.batchSolvers) {
-                RigExecBakedProgramImpl::Solver &s = B.solvers[si];
-                RigExecPointFrameArray &aggregate = B.aggregates[si];
-                aggregate.frames.clear();
-                aggregate.rests.clear();
-                // The one degeneracy guard, and it sits AFTER the clear: a
-                // solver whose joint binding the bake found malformed
-                // publishes the EMPTY aggregate its computation returns, and
-                // "publishes an empty aggregate" is what the clear makes
-                // true. The output loop below still runs, so every joint the
-                // solver names falls back to its rest chain and says so --
-                // which is exactly what the dynamic path reports.
-                if (s.degenerate) {
-                } else if (s.type == "RigExecFkChain") {
-                    std::vector<RigExecFkChainElement> elements(
-                        s.controls.size());
-                    for (size_t k = 0; k < s.controls.size(); ++k) {
-                        elements[k].restPoints = s.controlRests[k];
-                        elements[k].posePoints =
-                            s.controls[k] >= 0
-                                ? B.fin[s.controls[k]].points
-                                : RigExecIdentityLandmarks();
-                        elements[k].parentIndex =
-                            s.parentRelative ? -1 : int(k) - 1;
-                    }
-                    aggregate.frames = RigExecSolveFkChain(elements);
-                    aggregate.rests = s.controlRests;
-                } else if (s.type == "RigExecTwoBoneIk") {
-                    RigExecTwoBoneIkParams params = s.ikParams;
-                    if (live(s.bend) || live(s.stretch) ||
-                        live(s.softness) || live(s.upperOffset) ||
-                        live(s.lowerOffset)) {
-                        params.preferredBendRadians = rd(s.bend);
-                        params.stretch = rd(s.stretch);
-                        params.softness = rd(s.softness);
-                        params.upperLength =
-                            s.upperLengthBase + rd(s.upperOffset);
-                        params.lowerLength =
-                            s.lowerLengthBase + rd(s.lowerOffset);
-                    }
-                    const auto frames = RigExecSolveTwoBoneIk(
-                        B.fin[s.root], B.fin[s.end], B.fin[s.pole], s.ikRests,
-                        params);
-                    aggregate.frames.assign(frames.begin(), frames.end());
-                    aggregate.rests.assign(s.ikRests.begin(), s.ikRests.end());
-                } else if (s.type == "RigExecBlendPointFrames") {
-                    const RigExecPointFrameArray &a = B.aggregates[s.inA];
-                    const RigExecPointFrameArray &b = B.aggregates[s.inB];
-                    const size_t n = a.GetSize();
-                    // Clamp to [0, 1]: a blend weight outside the unit
-                    // interval extrapolates past both inputs.
-                    const double w = std::min(
-                        std::max(double(rd(s.blendWeight)), 0.0),
-                        1.0);
-                    if (n == b.GetSize() && a.rests.size() == n) {
-                        aggregate.frames.reserve(n);
-                        aggregate.rests.reserve(n);
-                        for (size_t k = 0; k < n; ++k) {
-                            aggregate.frames.push_back(RigExecBlendFrames(
-                                a.frames[k], b.frames[k], a.rests[k], w,
-                                RigExecRotationBlend::ShortestArc,
-                                s.scaleMode));
-                            aggregate.rests.push_back(a.rests[k]);
-                        }
-                    }
-                } else if (s.type == "RigExecSplineIk") {
-                    RigExecSplineIkParams params = s.splineParams;
-                    if (s.splineParamsVary || live(s.preserveVolume) ||
-                        live(s.midFollowWeight) || live(s.roll) ||
-                        live(s.twist) || live(s.minLengthRatio)) {
-                        params.preserveVolume = rd(s.preserveVolume);
-                        params.midFollowWeight =
-                            rd(s.midFollowWeight);
-                        params.roll =
-                            GfDegreesToRadians(rd(s.roll));
-                        params.twist =
-                            GfDegreesToRadians(rd(s.twist));
-                        params.minLengthRatio =
-                            rd(s.minLengthRatio);
-                    }
-                    RigExecSplineIkControls controls;
-                    controls.root = B.fin[s.root];
-                    controls.mid = B.fin[s.mid];
-                    controls.end = B.fin[s.end];
-                    RigExecSplineIkResult solved;
-                    RigExecSolveSplineIk(s.splineRest, controls, params,
-                                         &solved);
-                    if (solved.joints.size() == s.splineCount) {
-                        aggregate.frames.reserve(s.splineCount);
-                        for (const auto &joint : solved.joints) {
-                            aggregate.frames.push_back(joint.frame);
-                        }
-                        aggregate.rests = s.splineJointRests;
-                    }
-                }
-                for (const auto &[slot, element] : s.outputs) {
-                    if (element < 0 ||
-                        size_t(element) >= aggregate.GetSize()) {
-                        fallbackJoints.insert(B.paths[slot]);
-                        continue;
-                    }
-                    candidates[slot] =
-                        RigExecExtractElementFrame(&aggregate, size_t(element));
-                }
-            }
-            if (visitedSolverLevels.insert(step.level).second) {
-                ++pose->solverOverrideRounds;
-            }
-            pose->solverEvaluations += step.batchSolvers.size();
-            // A failed commit is a pass-through, exactly as in the dynamic
-            // walk, which ignores the result here and carries on.
-            if (!candidates.empty() &&
-                commit(SdfPath(), step.propagate, true) == _Commit::Bail) {
-                return false;
-            }
-            continue;
-        }
-
+    case RigExecBakedStepKind::Constraint: {
+        RigExecBakedCommit &commit = B.commits[size_t(step->object)];
+        commit.abandoned = true;
+        std::fill(commit.present.begin(), commit.present.end(), 0);
         const RigExecBakedProgramImpl::Constraint &c =
-            B.constraints[step.index];
-        RIGEXEC_PROFILE_SCOPE_CAT(
-            *B.profiler, c.type.GetString() + " " + c.path.GetName(), "pose");
+            B.constraints[size_t(B.walkSteps[size_t(step->object)].index)];
         // Every exit below records the target's frame, because the dynamic
         // walk does: a phase names a POINT in the walk, and a constraint that
         // passed through still leaves its target standing at that point.
+        // FinishCommit is the recorder, so that a split commit records after
+        // its write-back rather than before it.
+        const auto finish = [&] {
+            if (commit.split) {
+                return;  // CommitApply finishes, and records
+            }
+            if (!commit.abandoned) {
+                ComputeCommitDeltas(B, &commit);
+                StageCommitPairs(B, &commit, 0, commit.propagate.size());
+            }
+            FinishCommit(&B, step, &commit);
+        };
+        if (c.target < 0) {
+            // No slot to revise: nothing the walk can commit, and nothing to
+            // record. The dynamic path reaches its target through the frame
+            // map and finds nothing either.
+            finish();
+            return;
+        }
         if (!rd(c.enabled)) {
-            recordFrame(c);
-            continue;
+            finish();
+            return;
         }
         const double weight = rd(c.defaultWeight);
         if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
-            pose->diagnostics.push_back(
+            step->diagnostics.push_back(
                 c.path.GetString() +
                 " has inputs:defaultWeight outside finite [0, 1]; "
                 "constraint passed through");
-            recordFrame(c);
-            continue;
+            finish();
+            return;
         }
         if (weight <= 0.0) {
             // A zero envelope is an exact dormant pass-through, decided
-            // before any source is resolved so a malformed disconnected
-            // input cannot make a disabled constraint fail.
-            recordFrame(c);
-            continue;
+            // before any source is resolved so a malformed disconnected input
+            // cannot make a disabled constraint fail.
+            finish();
+            return;
         }
-        std::vector<RigExecConstraintSource> sources(c.sources.size());
         bool sourcesReady = true;
         for (size_t k = 0; k < c.sources.size(); ++k) {
-            const RigExecPointFrame &frame = B.fin[c.sources[k]];
+            const RigExecPointFrame &frame = B.fin[size_t(c.sources[k])];
             if (!frame.IsValid()) {
-                pose->diagnostics.push_back(
+                step->diagnostics.push_back(
                     c.path.GetString() + " could not resolve source " +
-                    B.paths[c.sources[k]].GetString());
+                    B.paths[size_t(c.sources[k])].GetString());
                 sourcesReady = false;
                 break;
             }
-            sources[k].frame = frame;
-            sources[k].normalizedWeight = c.sourceWeights[k].constant;
-            sources[k].translationOffset = c.translationOffsets[k];
-            sources[k].rotationOffsetDegrees = c.rotationOffsets[k];
+            commit.sources[k].frame = frame;
+            commit.sources[k].normalizedWeight = c.sourceWeights[k].constant;
+            commit.sources[k].translationOffset = c.translationOffsets[k];
+            commit.sources[k].rotationOffsetDegrees = c.rotationOffsets[k];
         }
         if (!sourcesReady) {
-            pose->diagnostics.push_back(
+            step->diagnostics.push_back(
                 c.path.GetString() +
                 " has unusable constraint inputs; constraint passed through");
-            recordFrame(c);
-            continue;
+            finish();
+            return;
         }
-        const RigExecPointFrame input = B.fin[c.target];
+        const std::vector<RigExecConstraintSource> &sources = commit.sources;
+        const RigExecPointFrame input = B.fin[size_t(c.target)];
         RigExecPointFrame candidate = input;
         bool candidateReady = true;
         RigExecConstraintAxisMask affect;
@@ -928,7 +1476,7 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
             for (const RigExecConstraintSource &source : sources) {
                 if (!std::isfinite(source.normalizedWeight) ||
                     source.normalizedWeight < 0) {
-                    pose->diagnostics.push_back(
+                    step->diagnostics.push_back(
                         c.path.GetString() +
                         " has an invalid source weight; constraint passed "
                         "through");
@@ -960,7 +1508,7 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
                     // origin as the object point.
                     params.worldUpDirection =
                         c.worldUpObjectNamed
-                            ? GfVec3d(B.fin[c.worldUpObject].Origin() -
+                            ? GfVec3d(B.fin[size_t(c.worldUpObject)].Origin() -
                                       input.Origin())
                             : GfVec3d(-input.Origin());
                 } else if (c.worldUpType == "objectRotationUp") {
@@ -970,8 +1518,8 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
                         GfMatrix4d up(1.0);
                         if (!RigExecPointsToMatrix(
                                 RigExecIdentityLandmarks(),
-                                B.fin[c.worldUpObject].points, &up)) {
-                            pose->diagnostics.push_back(
+                                B.fin[size_t(c.worldUpObject)].points, &up)) {
+                            step->diagnostics.push_back(
                                 c.path.GetString() +
                                 " has a degenerate world-up object");
                             candidateReady = false;
@@ -989,16 +1537,122 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
             }
         }
         if (candidateReady) {
-            candidates.clear();
-            candidates[c.target] = candidate;
-            if (commit(c.path, step.propagate, false) == _Commit::Bail) {
-                return false;
+            // The candidate sweep a constraint commit opens with: an unusable
+            // revision is diagnosed and the whole commit passes through.
+            if (!RigExecBakedUsable(candidate)) {
+                step->diagnostics.push_back(
+                    c.path.GetString() +
+                    " produced an invalid or degenerate frame for " +
+                    B.paths[size_t(c.target)].GetString() +
+                    "; constraint passed through");
+            } else {
+                commit.frames[0] = candidate;
+                commit.present[0] = 1;
+                commit.abandoned = false;
             }
         }
-        recordFrame(c);
+        finish();
+        return;
     }
 
-    // An incomplete solver is an authoring gap, not a silent one.
+    case RigExecBakedStepKind::CommitDelta: {
+        RigExecBakedCommit &commit = B.commits[size_t(step->object)];
+        if (!commit.abandoned) {
+            ComputeCommitDeltas(B, &commit);
+        }
+        return;
+    }
+
+    case RigExecBakedStepKind::PropagateChunk: {
+        RigExecBakedCommit &commit = B.commits[size_t(step->object)];
+        if (commit.abandoned) {
+            return;
+        }
+        const size_t begin = size_t(step->part) * 64;
+        const size_t end = std::min(begin + 64, commit.propagate.size());
+        StageCommitPairs(B, &commit, begin, end);
+        return;
+    }
+
+    case RigExecBakedStepKind::CommitApply: {
+        FinishCommit(&B, step, &B.commits[size_t(step->object)]);
+        return;
+    }
+
+    case RigExecBakedStepKind::ProviderMatrix: {
+        const size_t slot = size_t(step->object);
+        // Never a bail: RigExecPointsToMatrix leaves the identity and says
+        // so, and the one failure this phase can report -- a published joint
+        // whose rest or final frame is not usable -- is the epilogue's.
+        GfMatrix4d matrix(1.0);
+        if (step->part) {
+            if (RigExecBakedUsable(B.restFrames[slot]) &&
+                RigExecBakedUsable(B.fin[slot])) {
+                RigExecPointsToMatrix(B.restPts[slot], B.fin[slot].points,
+                                      &matrix);
+            }
+            B.finalMatrix[slot] = matrix;
+        } else {
+            if (RigExecBakedUsable(B.restFrames[slot]) &&
+                RigExecBakedUsable(B.base[slot])) {
+                RigExecPointsToMatrix(B.restPts[slot], B.base[slot].points,
+                                      &matrix);
+            }
+            B.baseMatrix[slot] = matrix;
+        }
+        return;
+    }
+
+    case RigExecBakedStepKind::SnapshotFinals: {
+        // The dynamic walk fills this for every provider it holds a usable
+        // rest and frame for; the program does the same, but only when
+        // something can look it up, because filling it otherwise would
+        // compute a matrix per slot per frame that no step reads.
+        for (size_t i = 0; i < B.paths.size(); ++i) {
+            if (!RigExecBakedUsable(B.restFrames[i]) ||
+                !RigExecBakedUsable(B.fin[i])) {
+                continue;
+            }
+            GfMatrix4d matrix(1.0);
+            if (RigExecPointsToMatrix(B.restPts[i], B.fin[i].points,
+                                      &matrix)) {
+                step->snapshots.RecordFinal(B.paths[i], VtValue(matrix));
+            }
+        }
+        return;
+    }
+
+    default:
+        return;
+    }
+}
+
+bool
+RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
+{
+    RigExecBakedProgramImpl &B = *program;
+    // The walk's diagnostics, in step order: commit lines, constraint lines,
+    // world-up lines. They were pushed into the pose as the walk produced
+    // them; they are replayed here instead, so that no step body ever touches
+    // the generation and the order is program order rather than completion
+    // order.
+    for (const RigExecBakedStep &step : B.steps) {
+        if (RigExecBakedIsGeometryStep(step.kind)) {
+            continue;
+        }
+        for (const std::string &diagnostic : step.diagnostics) {
+            pose->diagnostics.push_back(diagnostic);
+        }
+    }
+
+    // An incomplete solver is an authoring gap, not a silent one. Merged into
+    // one ordered set here rather than accumulated during the walk, because
+    // the set's ORDER is path order and a step must not hold a shared one.
+    std::set<SdfPath> fallbackJoints;
+    for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
+        fallbackJoints.insert(solver.fallbackJoints.begin(),
+                              solver.fallbackJoints.end());
+    }
     for (const SdfPath &jointPath : fallbackJoints) {
         const auto binding = (*B.jointSolverBinding).find(jointPath);
         const std::string solver =
@@ -1014,30 +1668,24 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
             "; joint fell back to its rest chain");
     }
 
-    // ---- rest->pose matrices ------------------------------------------------
-    // Emptied here and filled on demand below and by the geometry half, which
-    // must read exactly the matrices this half published; see
-    // RigExecBakedProgramImpl::FinalMatrixOf.
-    B.ResetMatrices(size_t(N));
-
     {
-        RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedMatrices", "baked");
+        RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedPublish", "baked");
         for (size_t k = 0; k < B.jointPaths.size(); ++k) {
             const int slot = B.jointSlots[k];
-            const RigExecPointFrame &baseFrame = B.base[slot];
-            const RigExecPointFrame &finalFrame = B.fin[slot];
+            const RigExecPointFrame &baseFrame = B.base[size_t(slot)];
+            const RigExecPointFrame &finalFrame = B.fin[size_t(slot)];
             pose->jointFramesBase[B.jointPaths[k]] = baseFrame;
             pose->jointFramesFinal[B.jointPaths[k]] = finalFrame;
             // The point frame is the status bearer; publishing an identity
             // matrix for a degenerate frame would let a matrix-only consumer
             // deform with a plausible-but-wrong transform.
             if (finalFrame.IsValid() && !finalFrame.IsDegenerate()) {
-                if (!RigExecBakedUsable(B.restFrames[slot]) ||
+                if (!RigExecBakedUsable(B.restFrames[size_t(slot)]) ||
                     !RigExecBakedUsable(finalFrame)) {
                     return false;  // the dynamic fallback needs exec
                 }
                 pose->jointMatricesFinal[B.jointPaths[k]] =
-                    B.FinalMatrixOf(slot);
+                    B.finalMatrix[size_t(slot)];
             } else {
                 pose->diagnostics.push_back(
                     "joint " + B.jointPaths[k].GetString() +
@@ -1048,26 +1696,8 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // control a constraint names publishes the revised one. Both are the
         // same slot here, because the walk wrote the revision into it.
         for (size_t k = 0; k < B.controlPaths.size(); ++k) {
-            pose->controlFrames[B.controlPaths[k]] = B.fin[B.controlSlots[k]];
-        }
-    }
-    // The store's other pose-half record: every provider's rest -> final
-    // matrix, which is what a `final` phase on a provider resolves to. The
-    // dynamic walk fills this for every provider it holds a usable rest and
-    // frame for; the program does the same, but only when something can look
-    // it up, because filling it otherwise would compute a matrix per slot per
-    // frame that no step reads.
-    if (B.phasedReads) {
-        for (int i = 0; i < N; ++i) {
-            if (!RigExecBakedUsable(B.restFrames[i]) ||
-                !RigExecBakedUsable(B.fin[i])) {
-                continue;
-            }
-            GfMatrix4d matrix(1.0);
-            if (RigExecPointsToMatrix(B.restPts[i], B.fin[i].points,
-                                      &matrix)) {
-                B.runSnapshots.RecordFinal(B.paths[i], VtValue(matrix));
-            }
+            pose->controlFrames[B.controlPaths[k]] =
+                B.fin[size_t(B.controlSlots[k])];
         }
     }
 
@@ -1076,10 +1706,12 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // walk produced, so the published array is that aggregate either way --
     // and it publishes nothing at all when the consumer disabled the guides
     // or the guide request never prepared, which this mirrors so a parity
-    // check compares like with like.
+    // check compares like with like. Read from the aggregates HERE, under the
+    // runtime toggle, rather than cached in a step: either half of the toggle
+    // can move without the epoch moving.
     if (*B.guideTaps && *B.solverGuidesEnabled) {
         for (const auto &[solverPath, si] : B.solverArrays) {
-            pose->solverFrames[solverPath] = B.aggregates[si].frames;
+            pose->solverFrames[solverPath] = B.aggregates[size_t(si)].frames;
         }
     }
 
@@ -1104,7 +1736,6 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
     for (const auto &[target, value] : B.propertyResults) {
         pose->movedProperties[target] = value;
     }
-
     return true;
 }
 
