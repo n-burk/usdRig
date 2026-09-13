@@ -563,8 +563,10 @@ private:
     };
     std::vector<_SolverBatch> _solverBatches;
     std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _solverJoints;
-    /// Solver -> the solvers and posed providers it reads, as Compile
-    /// derived them before they were levelled into batches.
+    /// Solver -> the solvers it reads, as Compile derived them before they
+    /// were levelled into batches. The values are ALWAYS solvers: a targeted
+    /// posed provider is resolved to the solver that binds its joint, so a
+    /// provider path never appears here, and every value is also a key.
     ///
     /// The batches themselves carry the same edges, but only for the solvers
     /// that are IN one: a solver that binds no joint and drives no geometry

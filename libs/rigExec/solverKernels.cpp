@@ -56,23 +56,18 @@ RigExecSampleRibbonFrames(const std::vector<GfVec3f> &posed,
 }
 
 // The twist weight defaulting, shared by the RigExecTwistDistribution exec
-// callback and by the baked program. The authored array arrives as floats
-// because that is the attribute's type; the positions are doubles because
-// that is what the distribution solves in.
-std::vector<double>
-RigExecResolveTwistWeights(const std::vector<float> &authored, int count)
+// callback and by the baked program. The caller drains the authored floats
+// into the vector first -- the attribute's type is float, the distribution
+// solves in double -- and this fills it only when nothing was authored.
+void
+RigExecResolveTwistWeights(int count, std::vector<double> *weights)
 {
-    std::vector<double> weights;
-    for (const float w : authored) {
-        weights.push_back(w);
-    }
-    if (weights.empty()) {
+    if (weights->empty()) {
         const int n = std::max(count, 1);
         for (int k = 0; k < n; ++k) {
-            weights.push_back(n == 1 ? 0.0 : double(k) / (n - 1));
+            weights->push_back(n == 1 ? 0.0 : double(k) / (n - 1));
         }
     }
-    return weights;
 }
 
 // The twist distribution, shared by the RigExecTwistDistribution exec

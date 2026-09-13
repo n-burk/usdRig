@@ -929,14 +929,15 @@ _ComputeTwistDistribution(const VdfContext &ctx)
     const std::array<GfVec3d, 4> eRest =
         endRest ? endRest->points : _IdentityLandmarks();
 
-    std::vector<float> authored;
+    // Drained here, defaulted there: the read iterator is the ctx half, the
+    // "nothing authored" rule is the half the bake must share.
+    std::vector<double> weights;
     VdfReadIterator<float> wIt(ctx, _tokens->weights);
     for (; !wIt.IsAtEnd(); ++wIt) {
-        authored.push_back(*wIt);
+        weights.push_back(*wIt);
     }
     const int *count = ctx.GetInputValuePtr<int>(_tokens->count);
-    const std::vector<double> weights =
-        rigExec::RigExecResolveTwistWeights(authored, count ? *count : 1);
+    rigExec::RigExecResolveTwistWeights(count ? *count : 1, &weights);
 
     return rigExec::RigExecSolveTwistDistribution(*start, *end, sRest, eRest,
         weights, _ScalarInput(ctx, _tokens->twistTurns, 0));

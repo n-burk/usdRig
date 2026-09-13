@@ -51,15 +51,20 @@ RigExecPointFrameArray RigExecSampleRibbonFrames(
     const std::vector<GfVec3f> &rest,
     int sampleCount);
 
-/// Resolves the sample positions of a RigExecTwistDistribution: the authored
-/// rigExec:weights when there are any, otherwise \p count positions spread
-/// evenly over [0, 1] (a single sample sits at the start).
+/// Resolves the sample positions of a RigExecTwistDistribution: leaves an
+/// authored \p weights alone, and fills an EMPTY one with \p count positions
+/// spread evenly over [0, 1] (a single sample sits at the start).
+///
+/// Defaults in place rather than answering a fresh vector so that a caller
+/// that has already drained the authored array into \p weights -- which both
+/// callers do, from a VdfReadIterator and from a VtArray -- pays for one
+/// vector per solver per frame and not two. Pass \p count = 1 for an
+/// unauthored rigExec:count; the clamp to >= 1 is the kernel's.
 ///
 /// ONE definition, called by the RigExecTwistDistribution exec callback and by
 /// the baked program, because "no weights authored" is a defaulting rule and
 /// not arithmetic the two paths may each invent.
-std::vector<double> RigExecResolveTwistWeights(
-    const std::vector<float> &authored, int count);
+void RigExecResolveTwistWeights(int count, std::vector<double> *weights);
 
 /// Distributes twist from \p start to \p end over \p weights and pairs every
 /// resulting frame with the START rest landmarks, which is what makes the
