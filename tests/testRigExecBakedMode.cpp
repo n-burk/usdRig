@@ -418,11 +418,36 @@ using _Edit = std::function<void(const UsdStageRefPtr &, const SdfPath &)>;
 // separate (CompareGenerationScalars) because the mover-graph counters
 // describe how warm an evaluator is, and several callers here hold a fresh
 // evaluator against a running one on purpose.
+//
+// Each of these three carries the coverage its NAME carries in the shared
+// header -- maps, scalars, both -- so that a test written later gets the
+// comparison it asked for rather than the one this file happened to bind to
+// the shortest name.
+static void
+CompareEveryMap(const std::string &where, const RigExecRigPose &reference,
+                const RigExecRigPose &baked)
+{
+    rigExecTest::CompareEveryMap(&failures, where, reference, baked);
+}
+
+// The work counters, the override rounds, the convergence flag and the
+// diagnostics in order -- for a test that is ABOUT the counters and says so.
+static void
+CompareGenerationScalars(const std::string &where,
+                         const RigExecRigPose &reference,
+                         const RigExecRigPose &baked)
+{
+    rigExecTest::CompareGenerationScalars(&failures, where, reference, baked);
+}
+
+// The whole generation: every map and every compared scalar. For the callers
+// whose two evaluators are at the same point in their lives, which is the
+// only place the work counters mean anything.
 static void
 ComparePose(const std::string &where, const RigExecRigPose &reference,
             const RigExecRigPose &baked)
 {
-    rigExecTest::CompareEveryMap(&failures, where, reference, baked);
+    rigExecTest::ComparePose(&failures, where, reference, baked);
 }
 
 // Bakes a rig, THEN edits the stage under it, and demands the eight
@@ -476,8 +501,8 @@ TestEditAfterTheBake(const std::string &examplesDir, const char *stageName,
         CHECK(reference.valid);
         CHECK(baked.valid);
         if (!reference.valid || !baked.valid) continue;
-        ComparePose(where + " frame " + std::to_string(int(frame)), reference,
-                    baked);
+        CompareEveryMap(where + " frame " + std::to_string(int(frame)),
+                        reference, baked);
         for (const auto &[path, frames] : baked.jointFramesFinal) {
             const auto found = before.jointFramesFinal.find(path);
             if (found == before.jointFramesFinal.end() ||
@@ -586,8 +611,8 @@ TestEditBeforeTheBake(const std::string &examplesDir, const char *stageName,
         CHECK(reference.valid);
         CHECK(baked.valid);
         if (!reference.valid || !baked.valid) continue;
-        ComparePose(where + " frame " + std::to_string(int(frame)), reference,
-                    baked);
+        CompareEveryMap(where + " frame " + std::to_string(int(frame)),
+                        reference, baked);
     }
     CHECK(bakedRig.GetBakedGenerationCount() == 8);
 }
@@ -753,7 +778,7 @@ TestAnUnrelatedEditLeavesTheProgramStanding(const std::string &examplesDir)
         std::printf("FAIL unrelated edit: the program was rebuilt (%zu -> "
                     "%zu)\n", builds, rig.GetBakedProgramBuildCount());
     }
-    ComparePose("an unrelated edit on Biped.usda", before, after);
+    CompareEveryMap("an unrelated edit on Biped.usda", before, after);
 }
 
 // An interactive override on a constraint's envelope. The avar case above is
@@ -794,8 +819,8 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
     CHECK(referenceRig.Compile(&errors));
     referenceRig.SetInteractiveOverrides(overrides);
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
-    ComparePose("a constraint weight override on Biped.usda", reference,
-                dragged);
+    CompareEveryMap("a constraint weight override on Biped.usda", reference,
+                    dragged);
 
     // The constraint may drive a control rather than a joint, so both
     // domains count: what matters is that the override reached the walk.
@@ -814,8 +839,8 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
     CHECK(moved);
     rig.ClearInteractiveOverrides();
     const RigExecRigPose released = rig.Evaluate(UsdTimeCode(1.0));
-    ComparePose("a released constraint weight override on Biped.usda", before,
-                released);
+    CompareEveryMap("a released constraint weight override on Biped.usda",
+                    before, released);
 }
 
 // A rig whose refusal is not a gap in the bake but a property of the rig:
@@ -936,9 +961,9 @@ TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
         CHECK(!fallen.jointFramesFinal.empty());
         CHECK(!fallen.controlFrames.empty());
         CHECK(!fallen.movedProperties.empty());
-        ComparePose(std::string(what) + " frame " +
-                        std::to_string(int(frame)),
-                    reference, fallen);
+        CompareEveryMap(std::string(what) + " frame " +
+                            std::to_string(int(frame)),
+                        reference, fallen);
         // Silent: the fallback is not a diagnostic on the generation, which
         // a consumer would have to filter out of a rig's real problems.
         CHECK(reference.diagnostics == fallen.diagnostics);
@@ -1024,15 +1049,15 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
         RigExecRigEvaluator referenceRig(referenceStage, rigPath);
         CHECK(referenceRig.Compile(&errors));
         referenceRig.SetInteractiveOverrides({override});
-        ComparePose(std::string(what) + " on Biped.usda",
-                    referenceRig.Evaluate(UsdTimeCode(1.0)), held);
+        CompareEveryMap(std::string(what) + " on Biped.usda",
+                        referenceRig.Evaluate(UsdTimeCode(1.0)), held);
     }
     // Releasing every one of them puts the rig back on the program.
     rig.ClearInteractiveOverrides();
     const size_t bakedGenerations = rig.GetBakedGenerationCount();
     const RigExecRigPose released = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(rig.GetBakedGenerationCount() == bakedGenerations + 1);
-    ComparePose("released, on Biped.usda", before, released);
+    CompareEveryMap("released, on Biped.usda", before, released);
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,8 +1222,8 @@ TestAnOverrideOnAConnectionSourceIsFollowed(const std::string &examplesDir)
     referenceRig.SetInteractiveOverrides(overrides);
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
     CHECK(reference.valid);
-    ComparePose("an override on a shared envelope, on Biped_anim.usda",
-                reference, dragged);
+    CompareEveryMap("an override on a shared envelope, on Biped_anim.usda",
+                    reference, dragged);
 
     // And it is a drag that DOES something, so an override silently dropped
     // on both paths could not pass this.
@@ -1208,8 +1233,8 @@ TestAnOverrideOnAConnectionSourceIsFollowed(const std::string &examplesDir)
     }
     CHECK(moved > 0);
     rig.ClearInteractiveOverrides();
-    ComparePose("a released shared-envelope override, on Biped_anim.usda",
-                before, rig.Evaluate(UsdTimeCode(1.0)));
+    CompareEveryMap("a released shared-envelope override, on Biped_anim.usda",
+                    before, rig.Evaluate(UsdTimeCode(1.0)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1577,7 +1602,7 @@ TestBakedModeRequestedOnADirtyEpoch(const std::string &examplesDir)
         CHECK(reference.valid);
         CHECK(baked.valid);
         if (!reference.valid || !baked.valid) continue;
-        ComparePose(where, reference, baked);
+        CompareEveryMap(where, reference, baked);
         CompareMaps("provider transform", where, reference.providerXforms,
                     baked.providerXforms,
                     [](const GfMatrix4d &a, const GfMatrix4d &b) {
@@ -1601,14 +1626,6 @@ TestBakedModeRequestedOnADirtyEpoch(const std::string &examplesDir)
 // its accounting over would report everything created, and say so in the
 // mover-graph diagnostic, for a rig that built nothing.
 // ---------------------------------------------------------------------------
-
-static void
-CompareGenerationScalars(const std::string &where,
-                         const RigExecRigPose &reference,
-                         const RigExecRigPose &baked)
-{
-    rigExecTest::CompareGenerationScalars(&failures, where, reference, baked);
-}
 
 // rest:tx on the biped's root joint: a captured constant, so the program
 // rebuilds, and a value the epoch digest is blind to, so nothing recompiles.
@@ -1663,7 +1680,7 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
         CHECK(baked.valid);
         CHECK(parity.valid);
         if (!reference.valid || !baked.valid) return;
-        ComparePose(where, reference, baked);
+        CompareEveryMap(where, reference, baked);
         CompareGenerationScalars(where, reference, baked);
         // The mode's own comparator over the same sequence, which is what a
         // caller gets when they ask rather than writing the loop above.
@@ -1719,6 +1736,12 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
 // starts baking is a line to delete here. Nothing else in the sweep can tell
 // the two apart, which is why the sweep used to print a decline and pass.
 //
+// Both directions are FAILURES, and so is an entry nothing matched. A list
+// that is only read when a rig declines goes stale silently -- a group that
+// bakes its feature and leaves its line here hands the next person a list
+// that no longer says what still has to be done, and re-declining that same
+// rig later would then be green.
+//
 // Populated from what actually declines today, read off
 // `rigExecPose <rig> --mode baked`; the reason each gives is beside it.
 static const char *const kExpectedToDecline[] = {
@@ -1732,7 +1755,8 @@ static const char *const kExpectedToDecline[] = {
     "08_AimEyes.usda",               // weight object on mover
     "09_PropertyMathMovers.usda",    // weight object on mover
     "10_AimXformTurret.usda",        // constraint target is a plain Xformable
-    "11_VolumeWeights.usda",         // provider type not baked (CurveWeight)
+    "11_VolumeWeights.usda",         // provider type not baked
+                                     // (RigExecCurveWeight)
     "12_CurvenetProfile.usda",       // mover operation not baked (curvenet)
     "13_ReadPhases.usda",            // ... (lattice)
     "ArmRig.usda",                   // ... (blendShape)
@@ -1746,6 +1770,16 @@ static const char *const kExpectedToDecline[] = {
     "rot_par_combo.usd",             // constraint target is a plain Xformable
     "rotateConstraint.usda",         // constraint target is a plain Xformable
 };
+
+// The index of \p name in kExpectedToDecline, or -1 if it is not listed.
+static int
+_ExpectedToDeclineIndex(const std::string &name)
+{
+    for (size_t i = 0; i < std::size(kExpectedToDecline); ++i) {
+        if (name == kExpectedToDecline[i]) return int(i);
+    }
+    return -1;
+}
 
 // The frames to sweep a stage at, from the stage's OWN authored range.
 //
@@ -1781,6 +1815,10 @@ TestEveryExampleStage(const std::string &examplesDir)
         TfGlob({examplesDir + "/*.usd*", examplesDir + "/biped/*.usda"});
     std::sort(stagePaths.begin(), stagePaths.end());
     size_t opened = 0, baked = 0, declined = 0;
+    // Which allowlist entries the sweep actually reached, so that a line
+    // nobody matched -- a rig that now bakes, or one that was renamed or
+    // deleted -- is reported instead of sitting there.
+    std::vector<bool> declineListHit(std::size(kExpectedToDecline), false);
     for (const std::string &stagePath : stagePaths) {
         // A payload file, a clip manifest, a sublayer: an example directory
         // holds plenty of .usd files that are not a rig, and none of them is
@@ -1806,9 +1844,19 @@ TestEveryExampleStage(const std::string &examplesDir)
         }
         std::vector<std::string> reasons;
         const bool bakeable = bakedRig.IsBakeable(&reasons);
+        const int listed = _ExpectedToDeclineIndex(name);
+        if (listed >= 0) declineListHit[listed] = true;
         if (bakeable) {
             ++baked;
             std::printf("  %-34s bakes\n", name.c_str());
+            // The other direction: the feature landed, and the line that
+            // allowed this rig to decline is now a hole in the sweep.
+            if (listed >= 0) {
+                ++failures;
+                std::printf("FAIL %s: bakes, and is still on the "
+                            "expected-to-decline list -- delete the line\n",
+                            name.c_str());
+            }
         } else {
             ++declined;
             // A silent fallback reads as the mode not working, so a rig that
@@ -1825,13 +1873,7 @@ TestEveryExampleStage(const std::string &examplesDir)
             // which is what this did, makes every refusal a passing test --
             // so nothing here can go red when a feature group's work is
             // incomplete, which is the one thing the sweep is for.
-            const bool expected =
-                std::find_if(std::begin(kExpectedToDecline),
-                             std::end(kExpectedToDecline),
-                             [&name](const char *allowed) {
-                                 return name == allowed;
-                             }) != std::end(kExpectedToDecline);
-            if (expected) {
+            if (listed >= 0) {
                 std::printf("  %-34s declines: %s\n", name.c_str(),
                             reasons.front().c_str());
             } else {
@@ -1853,13 +1895,13 @@ TestEveryExampleStage(const std::string &examplesDir)
             const RigExecRigPose answer = bakedRig.Evaluate(UsdTimeCode(frame));
             CHECK(reference.valid == answer.valid);
             if (!reference.valid || !answer.valid) continue;
-            ComparePose(where, reference, answer);
             // Both evaluators are fresh and have answered exactly the same
             // generations, so the work counters are comparable here in a way
             // they are not where a running evaluator is held against a new
             // one -- a rig that lands on the right points while reporting
-            // different work is still a second rig.
-            CompareGenerationScalars(where, reference, answer);
+            // different work is still a second rig. ComparePose is every map
+            // AND every scalar.
+            ComparePose(where, reference, answer);
         }
         // A bakeable rig must have ANSWERED from the program, or every
         // comparison above compared the dynamic path with itself.
@@ -1881,9 +1923,18 @@ TestEveryExampleStage(const std::string &examplesDir)
     // The glob found the examples at all: an empty sweep passes silently and
     // proves nothing.
     CHECK(opened > 10);
-    // The allowlist is a debt, not a configuration: when the last group
-    // lands it is empty and this becomes CHECK(declined == 0).
-    CHECK(declined <= std::size(kExpectedToDecline));
+    // The allowlist is a debt, not a configuration: every line has to be
+    // earned by a rig that declined in THIS run, and when the last group
+    // lands there are no lines left and `declined` is zero.
+    for (size_t i = 0; i < std::size(kExpectedToDecline); ++i) {
+        if (!declineListHit[i]) {
+            ++failures;
+            std::printf("FAIL %s: on the expected-to-decline list, but the "
+                        "sweep never reached it -- delete the line\n",
+                        kExpectedToDecline[i]);
+        }
+    }
+    CHECK(declined == std::size(kExpectedToDecline));
 }
 
 static std::string
