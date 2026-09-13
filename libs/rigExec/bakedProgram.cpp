@@ -1252,6 +1252,23 @@ RigExecComparePoses(const RigExecRigPose &reference,
                 return a.size() == b.size() &&
                        std::equal(a.begin(), a.end(), b.begin(), sameFrame);
             });
+    // The weight domains, which nothing bakeable fills TODAY -- every
+    // feature that publishes one still refuses the bake, so both maps are
+    // empty on both paths and these two calls cost a pair of empty walks.
+    // They are here anyway, and ahead of the operators that will fill them:
+    // the day a weight object bakes, its very first generation is measured
+    // against the dynamic path instead of against a comparator that was
+    // never taught to look. A field is equal iff it weights the same
+    // property with the same floats, bit for bit -- a resolved field is what
+    // a mover actually consumed, and an element one path clamped and the
+    // other did not is exactly the difference a size check cannot see.
+    compare(reference.weightFields, baked.weightFields, "weight field",
+            [](const RigExecResolvedWeightField &a,
+               const RigExecResolvedWeightField &b) {
+                return a.target == b.target && a.weights == b.weights;
+            });
+    compare(reference.weightFrames, baked.weightFrames, "weight frame",
+            sameMatrix);
 
     // The SCALARS of the generation. They are published state a consumer
     // reads -- an editor shows the work counters, a test asserts on them --
@@ -1283,6 +1300,19 @@ RigExecComparePoses(const RigExecRigPose &reference,
                  "mover graph schedules built");
     compareCount(reference.solverOverrideRounds, baked.solverOverrideRounds,
                  "solver override rounds");
+    // Convergence is a published scalar of the same kind, and the one whose
+    // wrong answer is the quietest: a consumer that reads it sees "the
+    // overrides settled" and reads the points below it as final. The baked
+    // path says true unconditionally today because only an incomplete exec
+    // snapshot clears it and there is no exec there -- which is an agreement
+    // exactly as long as the dynamic path's snapshot keeps completing.
+    if (reference.solverOverridesConverged != baked.solverOverridesConverged) {
+        out->diagnostics.push_back(
+            std::string("baked parity: solver overrides converged differs (") +
+            (reference.solverOverridesConverged ? "true" : "false") + " vs " +
+            (baked.solverOverridesConverged ? "true" : "false") + ")");
+        ++out->bakedParityMismatches;
+    }
     // solverEvaluations is deliberately NOT compared. It counts the solver
     // computations the dependency schedule actually REQUESTED, and the
     // dynamic path's per-batch exec cache lets it skip a batch whose time and
@@ -1292,6 +1322,16 @@ RigExecComparePoses(const RigExecRigPose &reference,
     // path that reported them; they are not two answers to one question, and
     // making them agree would mean either the program inventing a cache or
     // the dynamic path giving one up.
+    //
+    // movedPropertiesCpu, moverGraphParityMismatches and
+    // moverGraphParityAgreements are left out for the opposite reason: they
+    // are filled only by cpuParityMode, and cpuParityMode turns the baked
+    // path OFF (the independent CPU oracle is what that mode asks for, and
+    // the program is not it -- it shares the kernels). So in every
+    // generation this function ever sees, all three are empty or zero on
+    // both sides, and comparing them would assert a tautology. `valid` and
+    // `time` likewise: the parity generation publishes the DYNAMIC pose, so
+    // its own are the only ones a consumer reads.
     if (!sameDiagnostics) {
         out->diagnostics.push_back(
             "baked parity: diagnostics differ (" +
@@ -2668,14 +2708,21 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         }
     }
 
-    // Three published domains have no baked counterpart because bakeability
-    // rules out everything that fills them, so leaving them empty is what
-    // agrees with the dynamic path rather than a gap in the publication:
-    // providerXforms/providerBaseXforms come only from _xformDerivedProviders
-    // ("constraint target is a plain Xformable"), weightFrames only from
-    // volume weight objects, weightFields only from a mover's weight object.
-    // solverOverridesConverged stays true for the same kind of reason: it is
-    // cleared only by an incomplete exec snapshot, and there is no exec here.
+    // Four published domains have no baked counterpart YET, because
+    // bakeability still rules out everything that fills them -- so leaving
+    // them empty is what agrees with the dynamic path rather than a gap in
+    // the publication: providerXforms/providerBaseXforms come only from
+    // _xformDerivedProviders ("constraint target is a plain Xformable"),
+    // weightFrames only from volume weight objects, weightFields only from a
+    // mover's weight object. solverOverridesConverged stays true for the
+    // same kind of reason: it is cleared only by an incomplete exec
+    // snapshot, and there is no exec here.
+    //
+    // RigExecComparePoses compares all four regardless, so this block is a
+    // checklist rather than a licence: as each refusal above goes away, the
+    // domain it gated has to start being FILLED here, and the parity mode
+    // says so on the first generation that publishes one on the dynamic side
+    // and nothing on this one.
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.
