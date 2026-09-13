@@ -103,14 +103,28 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // SplineIk rest loops in computations.cpp). Resolving against the
             // relationship's target count instead would remap by the wrong
             // index, and would keep remapping where exec gives up.
+            //
+            // A PoseSeed slot is what "publishes computeRestFrame" means: an
+            // xform-derived slot exists in the table so a constraint can name
+            // it, but exec seeds it from the stage and it declares no rest
+            // computation, so it contributes no input here either.
             std::vector<int> restSlots;
             for (const SdfPath &joint : joints) {
                 const int slot = slotOf(joint);
-                if (slot >= 0) {
+                if (slot >= 0 && B.slotKind[size_t(slot)] ==
+                                     RigExecBakedSlotKind::PoseSeed) {
                     restSlots.push_back(slot);
                 }
             }
-            const bool remapped = !elements.empty();
+            // Only the two computations that DECLARE jointElements read it
+            // (computations.cpp's TwoBoneIk and SplineIk input lists); for
+            // FkChain and BlendPointFrames the attribute is not an input at
+            // all, so an authored one -- whatever its length -- changes
+            // nothing about what exec publishes and must not be allowed to
+            // make this solver degenerate.
+            const bool consumesElements =
+                s.type == "RigExecTwoBoneIk" || s.type == "RigExecSplineIk";
+            const bool remapped = consumesElements && !elements.empty();
             if (remapped && elements.size() != restSlots.size()) {
                 // "joint/rest element cardinality mismatch": the computation
                 // warns and returns an empty result.

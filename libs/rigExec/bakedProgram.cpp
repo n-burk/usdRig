@@ -313,17 +313,29 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             if (type == "RigExecTwoBoneIk") {
                 // Bone lengths are MEASURED from the rests of the joints the
                 // solver names; without all three there is nothing to bake.
+                //
+                // Resolved the way bakeSolver resolves it, so the two do not
+                // drift: one rest per rigExec:joints target that publishes
+                // computeRestFrame, and the remap indexed by position within
+                // THAT list. A cardinality mismatch is deliberately not a
+                // refusal here -- exec's computation warns and publishes an
+                // empty aggregate, and the bake reproduces that through
+                // Solver::degenerate rather than declining the rig.
                 std::array<bool, 3> seen{false, false, false};
-                const SdfPathVector joints =
-                    _Targets(prim, "rigExec:joints");
+                std::vector<SdfPath> rests;
+                for (const SdfPath &joint : _Targets(prim, "rigExec:joints")) {
+                    if (E._poseSeedFrames.count(joint)) {
+                        rests.push_back(joint);
+                    }
+                }
                 VtIntArray elements;
                 if (const UsdAttribute a = prim.GetAttribute(
                         TfToken("rigExec:jointElements"))) {
                     a.Get(&elements);
                 }
-                for (size_t k = 0; k < joints.size(); ++k) {
+                for (size_t k = 0; k < rests.size(); ++k) {
                     const int element =
-                        elements.size() == joints.size() ? elements[k] : int(k);
+                        elements.size() == rests.size() ? elements[k] : int(k);
                     if (element >= 0 && element < 3) seen[element] = true;
                 }
                 if (!(seen[0] && seen[1] && seen[2])) {
@@ -1034,6 +1046,16 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             // An xform-derived slot has no rest chain and no default-space
             // ladder: the dynamic path gives it the identity rest frame
             // outright and reads its pose off the stage.
+            //
+            // SI-6, invalidation-index coverage: skipping the block below
+            // also skips its B.prims.insert, so an xform-derived prim is NOT
+            // in the invalidation index and IsInvalidatedBy cannot answer a
+            // notice on it. That is right only while nothing reads such a
+            // slot's value -- today nothing writes one either, and IsBakeable
+            // refuses the rig outright. The feature that starts seeding them
+            // from the stage must insert the prim (and the ancestors whose
+            // transforms it composes) here, or an edit to the Xform will not
+            // rebuild the program.
             B.restFrames[i] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
             B.restPts[i] = B.restFrames[i].points;
             continue;
