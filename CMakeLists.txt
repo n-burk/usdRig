@@ -88,6 +88,7 @@ add_library(rigExec SHARED
     libs/rigExec/parallel.cpp
     libs/rigExec/computations.cpp
     libs/rigExec/moverKernels.cpp
+    libs/rigExec/solverKernels.cpp
     libs/rigExec/curvenetWeightComputations.cpp
     libs/rigExec/curvenetAdjuster.cpp
     libs/rigExec/moverGraph.cpp

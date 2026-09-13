@@ -563,6 +563,16 @@ private:
     };
     std::vector<_SolverBatch> _solverBatches;
     std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _solverJoints;
+    /// Solver -> the solvers and posed providers it reads, as Compile
+    /// derived them before they were levelled into batches.
+    ///
+    /// The batches themselves carry the same edges, but only for the solvers
+    /// that are IN one: a solver that binds no joint and drives no geometry
+    /// is required by nothing, so it never reaches a batch and is evaluated
+    /// only to publish its guides. The dynamic path hands that case to exec,
+    /// which re-derives the order; the baked program has no exec to ask, so
+    /// it orders its guide-only pass over these edges instead.
+    std::map<SdfPath, std::set<SdfPath>> _solverDependencies;
     /// Authored input prim -> batches reading it. Override-only Exec requests
     /// do not re-arm repeated value-invalidation callbacks in this USD build.
     std::map<SdfPath, std::set<size_t>> _solverInputBatches;

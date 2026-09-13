@@ -9,6 +9,7 @@
 //
 #include "types.h"
 #include "frameExtraction.h"
+#include "solverKernels.h"
 
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/pointFrame.h"
@@ -928,24 +929,17 @@ _ComputeTwistDistribution(const VdfContext &ctx)
     const std::array<GfVec3d, 4> eRest =
         endRest ? endRest->points : _IdentityLandmarks();
 
-    std::vector<double> weights;
+    std::vector<float> authored;
     VdfReadIterator<float> wIt(ctx, _tokens->weights);
     for (; !wIt.IsAtEnd(); ++wIt) {
-        weights.push_back(*wIt);
+        authored.push_back(*wIt);
     }
-    if (weights.empty()) {
-        const int *count = ctx.GetInputValuePtr<int>(_tokens->count);
-        const int n = count ? std::max(*count, 1) : 1;
-        for (int k = 0; k < n; ++k) {
-            weights.push_back(n == 1 ? 0.0 : double(k) / (n - 1));
-        }
-    }
+    const int *count = ctx.GetInputValuePtr<int>(_tokens->count);
+    const std::vector<double> weights =
+        rigExec::RigExecResolveTwistWeights(authored, count ? *count : 1);
 
-    result.frames =
-        rigExec::RigExecDistributeTwist(*start, *end, sRest, eRest, weights,
-            _ScalarInput(ctx, _tokens->twistTurns, 0));
-    result.rests.assign(result.frames.size(), sRest);
-    return result;
+    return rigExec::RigExecSolveTwistDistribution(*start, *end, sRest, eRest,
+        weights, _ScalarInput(ctx, _tokens->twistTurns, 0));
 }
 
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwistDistribution)
