@@ -636,7 +636,40 @@ PYBIND11_MODULE(_rigexec, m) {
                 out.push_back(d);
             }
             return out;
-        }, "The composed movers in execution order (reverse-sibling\npost-order: bottom-to-top stack walk, spec section 4.2).");
+        }, "The composed movers in execution order (reverse-sibling\npost-order: bottom-to-top stack walk, spec section 4.2).")
+        .def_property("profiling_enabled",
+            [](_Rig &r) { return r.evaluator->GetProfilingEnabled(); },
+            [](_Rig &r, bool v) { r.evaluator->SetProfilingEnabled(v); },
+            "When set, compile and evaluate record scoped phase timings.")
+        .def_property("solver_guides_enabled",
+            [](_Rig &r) { return r.evaluator->GetSolverGuidesEnabled(); },
+            [](_Rig &r, bool v) { r.evaluator->SetSolverGuidesEnabled(v); },
+            "When set (the default), evaluate fills pose solver guide frames. "
+            "Clear it when nothing reads solver_frames to skip the guide request.")
+        .def("clear_profile", [](_Rig &r) { r.evaluator->ClearProfile(); },
+             "Drops every recorded profile event.")
+        .def("write_profile_trace", [](_Rig &r, std::string path) {
+                 std::string error;
+                 if (!r.evaluator->WriteProfileTrace(path, &error)) {
+                     throw py::value_error(error);
+                 }
+             },
+             py::arg("path"),
+             "Writes the accumulated phase timings as Chrome Trace Event JSON.")
+        .def("profile_summary", [](const _Rig &r) {
+            std::vector<py::dict> out;
+            for (const rigExec::RigExecProfileSummaryRow &row :
+                 r.evaluator->GetProfiler().Summarize()) {
+                py::dict d;
+                d["name"] = row.name;
+                d["category"] = row.category;
+                d["count"] = row.count;
+                d["total_us"] = row.totalUs;
+                d["max_us"] = row.maxUs;
+                out.push_back(d);
+            }
+            return out;
+        }, "Per-phase timing totals, sorted by total cost descending.");
 
     // ---- Pose ---------------------------------------------------------------
 

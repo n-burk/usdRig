@@ -13,6 +13,7 @@
 #define RIGEXEC_RIG_EVALUATOR_H
 
 #include "moverGraph.h"
+#include "profiler.h"
 #include "tapSet.h"
 #include "types.h"
 
@@ -234,10 +235,80 @@ public:
     /// recompilation on the next Evaluate (spec §4.2, §6.3).
     size_t GetBindingEpochDigest() const { return _structureDigest; }
 
+    /// Aggregate solver path -> its dependency level in the compiled pose
+    /// schedule. Level 0 holds solvers with no solver prerequisites; each
+    /// other solver sits exactly one schedule wave above its deepest
+    /// prerequisite. Diagnostic access for the level audit: evaluation order
+    /// itself comes from the interleaved pose steps.
+    std::map<SdfPath, size_t> GetSolverBatchLevels() const
+    {
+        std::map<SdfPath, size_t> levels;
+        for (const _SolverBatch &batch : _solverBatches) {
+            for (const auto &[solver, tap] : batch.solvers) {
+                levels[solver] = batch.level;
+            }
+        }
+        return levels;
+    }
+
     /// When set, Evaluate verifies geometry against the CPU reference and
     /// publishes that reference in RigExecRigPose::movedPropertiesCpu.
     /// Disabled for interactive use so every deformation runs only once.
     bool cpuParityMode = false;
+
+    /// When set, Compile and Evaluate record scoped phase timings (property
+    /// chains, pose seed, each solver batch and constraint, the exec
+    /// snapshot, each geometry chain, derived maintenance, parity) into the
+    /// profiler. Disabled by default; enabling it does not change any
+    /// evaluated value.
+    void SetProfilingEnabled(bool enabled)
+    {
+        _profiler.SetEnabled(enabled);
+    }
+
+    bool GetProfilingEnabled() const
+    {
+        return _profiler.IsEnabled();
+    }
+
+    /// Observational solver-guide frames are viewport data: the imaging
+    /// bridge draws them and Python exposes them through solver_frames, but
+    /// no posed joint, matrix, or deformed point reads them. A headless
+    /// consumer (batch export, benchmarking) that never reads
+    /// RigExecRigPose::solverFrames disables them here and skips the whole
+    /// guide request. Enabled by default, so existing callers see no change.
+    void SetSolverGuidesEnabled(bool enabled)
+    {
+        _solverGuidesEnabled = enabled;
+    }
+
+    bool GetSolverGuidesEnabled() const
+    {
+        return _solverGuidesEnabled;
+    }
+
+    /// The timing harness. Events accumulate across evaluations until
+    /// ClearProfile, so one trace can hold a whole multi-frame scrub.
+    const RigExecProfiler &GetProfiler() const
+    {
+        return _profiler;
+    }
+
+    /// Drops every recorded profile event. Does not change the enabled
+    /// state.
+    void ClearProfile()
+    {
+        _profiler.Clear();
+    }
+
+    /// Writes the accumulated events as Chrome Trace Event JSON (openable
+    /// in Perfetto or chrome://tracing). Returns false with a message when
+    /// the file cannot be written.
+    bool WriteProfileTrace(const std::string &path,
+                           std::string *error = nullptr) const
+    {
+        return _profiler.WriteChromeTrace(path, error);
+    }
 
     /// The stage the rig evaluates against.
     ///
@@ -308,6 +379,15 @@ private:
     /// failing or unused aggregate solver degrades guide drawing with a
     /// diagnostic instead of invalidating the rig snapshot.
     std::unique_ptr<RigExecTapSet> _guideTaps;
+    /// Last observational guide request. Guides reuse the cached snapshot
+    /// only when the time, override tuple, and tap dirtiness all match; the
+    /// taps stay observational, so a stale cache can only omit guides, but
+    /// the epoch reset below keeps even that from surviving Compile.
+    std::vector<RigExecValueOverride> _guideInputs;
+    UsdTimeCode _guideTime = UsdTimeCode::Default();
+    RigExecSnapshot _guideSnapshot;
+    bool _guideDirty = true;
+    bool _solverGuidesEnabled = true;
 
     std::vector<SdfPath> _jointPaths;
     /// Every RigExecControl beneath the rig, discovered exactly the way the
@@ -357,12 +437,24 @@ private:
     /// Seed only transform providers before solving; geometry/aggregate taps
     /// are evaluated after the complete pose dependency schedule.
     std::unique_ptr<RigExecTapSet> _poseSeedTaps;
+    std::vector<RigExecValueOverride> _poseSeedInputs;
+    UsdTimeCode _poseSeedTime = UsdTimeCode::Default();
+    RigExecSnapshot _poseSeedSnapshot;
+    bool _poseSeedDirty = true;
     std::map<SdfPath, RigExecTapId> _poseSeedFrames;
     std::map<SdfPath, RigExecTapId> _poseSeedRests;
     /// Direct posed providers read by transform expressions, including
     /// parent:space reached through connected default-space expressions.
     std::map<SdfPath, std::set<SdfPath>> _poseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> _connectedPoseTaps;
+    struct _ConnectedPoseResult {
+        std::vector<RigExecValueOverride> inputs;
+        UsdTimeCode time = UsdTimeCode::Default();
+        RigExecPointFrame base;
+        RigExecPointFrame current;
+        bool cached = false;
+    };
+    std::map<SdfPath, _ConnectedPoseResult> _connectedPoseCache;
     std::vector<RigExecTapId> _jointFrameTaps;
     std::vector<RigExecTapId> _jointFinalFrameTaps;
     std::vector<RigExecTapId> _jointFinalMatrixTaps;
@@ -571,6 +663,20 @@ private:
     /// are keyed by the points target and evaluated after it -- the reason
     /// they cannot simply live in _graphChains.
     std::map<SdfPath, std::vector<_GraphRevision>> _graphDerivedChains;
+    /// Last derived result per normals/extent target, keyed by every input
+    /// the recompute consumes: the chain's final points, the authored
+    /// derived base, and the assembled topology/widths. An unchanged tuple
+    /// republishes the stored result without touching the derived graph.
+    struct _DerivedResult {
+        std::vector<GfVec3f> points;
+        VtVec3fArray base;
+        std::vector<int> topologyCounts;
+        std::vector<int> topologyIndices;
+        std::vector<float> widths;
+        VtVec3fArray result;
+        bool cached = false;
+    };
+    std::map<SdfPath, _DerivedResult> _derivedCache;
     std::vector<RigExecMoverRecord> _movers;
 
     /// Baked falloff remaps for every volumetric weight object reachable
@@ -600,6 +706,10 @@ private:
     TfNotice::Key _noticeKey;
     bool _structureDirty = true;
     bool _compiled = false;
+
+    /// Scoped phase timings for Compile and Evaluate. Off unless profiling
+    /// is enabled; see SetProfilingEnabled.
+    RigExecProfiler _profiler;
 };
 
 /// Test and diagnostic access to the constraint handler registry -- the one

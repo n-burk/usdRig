@@ -1246,6 +1246,15 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // its own caches before the next pull. External inputs can live anywhere
     // on the stage, so retain conservative structural checks after edits.
     _structureDirty = true;
+    // The seed, connected, and guide requests read authored values straight
+    // off the stage; an edit that leaves the override tuple unchanged (a
+    // rest attribute, a weight, a goal transform) still changes what they
+    // compute. Any stage edit therefore retires their cached snapshots, the
+    // same way it retires the affected solver batches below.
+    _poseSeedDirty = true;
+    _guideDirty = true;
+    _connectedPoseCache.clear();
+    _derivedCache.clear();
     const auto dirty = [this](const std::set<size_t> &batches) {
         for (size_t index : batches) {
             _solverBatches[index].dirty = true;
@@ -1283,6 +1292,18 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     // (spec §4.2, §6.3). Structural edits change it; numeric values and
     // shape-preserving enables do not.
     std::string digest;
+
+    const bool profileDigest = _profiler.IsEnabled();
+    uint64_t digestRegionStart =
+        profileDigest ? RigExecProfiler::NowUs() : 0;
+    auto stampDigestRegion = [&](const char *name) {
+        if (!profileDigest) {
+            return;
+        }
+        const uint64_t now = RigExecProfiler::NowUs();
+        _profiler.Record(name, "compile", digestRegionStart, now);
+        digestRegionStart = now;
+    };
 
     auto appendRelTargets =
         [this, &digest](const UsdPrim &prim, const char *name,
@@ -1590,6 +1611,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     }
     digest += '|';
 
+    stampDigestRegion("Digest.OutputSets");
     // Solver->joint wiring is epoch identity (view-free extraction,
     // user-directed 2026-07-25, replaces RigExecPointFrameView): each
     // solver's ORDERED rigExec:joints list decides which joint
@@ -1767,6 +1789,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
         }
     }
 
+    stampDigestRegion("Digest.Solvers");
     const UsdPrim movers =
         _stage->GetPrimAtPath(_rigPath.AppendChild(TfToken("Movers")));
     if (movers) {
@@ -1951,12 +1974,28 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             digest += ';';
         }
     }
+    stampDigestRegion("Digest.Movers");
     return std::hash<std::string>{}(digest);
 }
 
 bool
 RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 {
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile", "compile");
+    // Sequential region stamps: Compile is flat code with early returns,
+    // so RAII scopes cannot span its phases; each stamp closes the
+    // previous region and opens the next. One branch when disabled.
+    const bool profileCompile = _profiler.IsEnabled();
+    uint64_t compileRegionStart =
+        profileCompile ? RigExecProfiler::NowUs() : 0;
+    auto stampCompileRegion = [&](const char *name) {
+        if (!profileCompile) {
+            return;
+        }
+        const uint64_t now = RigExecProfiler::NowUs();
+        _profiler.Record(name, "compile", compileRegionStart, now);
+        compileRegionStart = now;
+    };
     auto reportError = [errors](const std::string &message) {
         if (errors) {
             errors->push_back(message);
@@ -3634,7 +3673,9 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    stampCompileRegion("Compile.DiscoverValidate");
     const size_t newDigest = _ComputeStructureDigest();
+    stampCompileRegion("Compile.StructureDigest");
 
     // Prepare replacement requests while retaining the previous requests and
     // their shared compiler context. The stock network handles changed USD
@@ -4626,7 +4667,12 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             batch.dependencies.insert(dependencies.begin(), dependencies.end());
             const auto &frames = solverFrameInputs[path];
             batch.frameInputs.insert(frames.begin(), frames.end());
-            if (!batch.taps->Prepare()) {
+            const bool batchPrepared = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(
+                    _profiler, "TapPrepare solverBatch", "compile");
+                return batch.taps->Prepare();
+            }();
+            if (!batchPrepared) {
                 reportError("failed to prepare solver dependency level");
                 restorePreviousEpoch();
                 return false;
@@ -4768,6 +4814,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         return false;
     }
 
+    stampCompileRegion("Compile.SolverSchedule");
     auto newPoseSeedTaps = std::make_unique<RigExecTapSet>(_stage);
     std::map<SdfPath, RigExecTapId> newPoseSeedFrames, newPoseSeedRests;
     auto seedProvider = [&](SdfPath path) {
@@ -4804,7 +4851,12 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         if (info.connectedPose && !newJointBinding.count(provider)) {
             auto taps = std::make_unique<RigExecTapSet>(_stage);
             taps->Add(RigExecValueAddress::Prim(provider, _computePointFrame));
-            if (!taps->Prepare()) {
+            const bool connectedPrepared = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(
+                    _profiler, "TapPrepare connected", "compile");
+                return taps->Prepare();
+            }();
+            if (!connectedPrepared) {
                 reportError("failed to prepare connected pose provider " + provider.GetString());
                 restorePreviousEpoch();
                 return false;
@@ -4814,13 +4866,25 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     }
     if (newPoseSeedFrames.empty()) {
         newPoseSeedTaps.reset();
-    } else if (!newPoseSeedTaps->Prepare()) {
-        reportError("failed to prepare pose provider inputs");
-        restorePreviousEpoch();
-        return false;
+    } else {
+        const bool seedPrepared = [&]() {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "TapPrepare poseSeed", "compile");
+            return newPoseSeedTaps->Prepare();
+        }();
+        if (!seedPrepared) {
+            reportError("failed to prepare pose provider inputs");
+            restorePreviousEpoch();
+            return false;
+        }
     }
 
-    if (!newTaps->Prepare()) {
+    const bool mainPrepared = [&]() {
+        RIGEXEC_PROFILE_SCOPE_CAT(
+            _profiler, "TapPrepare main", "compile");
+        return newTaps->Prepare();
+    }();
+    if (!mainPrepared) {
         reportError("failed to build a valid prepared request for the "
                     "new epoch");
         restorePreviousEpoch();
@@ -4835,11 +4899,18 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         newSolverArrayTaps[solverPath] = newGuideTaps->Add(
             RigExecValueAddress::Prim(solverPath, _computePointFrameArray));
     }
-    if (newSolverArrayTaps.empty() || !newGuideTaps->Prepare()) {
+    const bool guidesPrepared =
+        newSolverArrayTaps.empty() ? false : [&]() {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "TapPrepare guides", "compile");
+            return newGuideTaps->Prepare();
+        }();
+    if (!guidesPrepared) {
         newGuideTaps.reset();
         newSolverArrayTaps.clear();
     }
 
+    stampCompileRegion("Compile.PrepareRequests");
     // Commit the new epoch atomically with respect to evaluator state.
     _movers = std::move(newMovers);
     _jointPaths = std::move(newJointPaths);
@@ -4864,14 +4935,23 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _structureDigest = newDigest;
     _taps = std::move(newTaps);
     _guideTaps = std::move(newGuideTaps);
+    _guideInputs.clear();
+    _guideTime = UsdTimeCode::Default();
+    _guideSnapshot = RigExecSnapshot();
+    _guideDirty = true;
     _jointFrameTaps = std::move(newJointFrameTaps);
     _jointFinalFrameTaps = std::move(newJointFinalFrameTaps);
     _jointFinalMatrixTaps = std::move(newJointFinalMatrixTaps);
     _jointSolverBinding = std::move(newJointBinding);
     _poseProviderInputs = std::move(newPoseProviderInputs);
     _connectedPoseTaps = std::move(newConnectedPoseTaps);
+    _connectedPoseCache.clear();
     _poseSteps = std::move(newPoseSteps);
     _poseSeedTaps = std::move(newPoseSeedTaps);
+    _poseSeedInputs.clear();
+    _poseSeedTime = UsdTimeCode::Default();
+    _poseSeedSnapshot = RigExecSnapshot();
+    _poseSeedDirty = true;
     _poseSeedFrames = std::move(newPoseSeedFrames);
     _poseSeedRests = std::move(newPoseSeedRests);
     _solverBatches = std::move(newSolverBatches);
@@ -4880,9 +4960,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _solverArrayTaps = std::move(newSolverArrayTaps);
     _graphChains = std::move(newGraphChains);
     _graphDerivedChains = std::move(newGraphDerivedChains);
+    _derivedCache.clear();
     _propertyChains = std::move(newPropertyChains);
     _propertyChainOrder = std::move(newPropertyChainOrder);
 
+    stampCompileRegion("Compile.Commit");
     // Chain evaluation order.
     //
     // A chain that reads another chain's target at a non-base phase cannot
@@ -5101,6 +5183,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    stampCompileRegion("Compile.ChainOrderValidate");
     _compiled = true;
     // Remove targets that no longer publish an output. Existing target graphs
     // survive a new binding epoch and are spliced lazily on the next pull.
@@ -6760,6 +6843,8 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                  ": target attribute disappeared; chain skipped");
             continue;
         }
+        RIGEXEC_PROFILE_SCOPE_CAT(
+            _profiler, "PropertyChain " + target.GetString(), "property");
         const SdfValueTypeName valueType = attr.GetTypeName();
 
         // One shared revision loop over the three value domains. Each
@@ -7121,6 +7206,12 @@ _ApplyInteractiveOverrides(
 RigExecRigPose
 RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 {
+    RIGEXEC_PROFILE_SCOPE_CAT(
+        _profiler,
+        time.IsDefault()
+            ? std::string("Evaluate@default")
+            : "Evaluate@" + TfStringPrintf("%g", time.GetValue()),
+        "evaluate");
     RigExecRigPose pose;
     pose.time = time;
     if (!_compiled && !Compile(&pose.diagnostics)) {
@@ -7186,6 +7277,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             _interactiveOverrides, &baseOverrides, &_resolvedInputs);
     }
     if (!_propertyChains.empty()) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PropertyChains", "property");
         _EvaluatePropertyChains(time, &propertyResults, &baseOverrides,
                                 &pose.diagnostics);
         // Two delivery routes for one value, and they must not disagree.
@@ -7236,10 +7328,35 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     std::map<SdfPath, RigExecPointFrameArray> solvedAggregates;
     RigExecSnapshot seedSnapshot;
     if (_poseSeedTaps) {
-        seedSnapshot = _poseSeedTaps->Evaluate(time, baseOverrides);
-        if (!seedSnapshot.IsValid() || !seedSnapshot.IsComplete()) {
-            pose.diagnostics.push_back("pose provider input evaluation incomplete");
-            return pose;
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PoseSeed", "pose");
+        _poseSeedDirty = _poseSeedTaps->ConsumeDirty() || _poseSeedDirty;
+        const bool sameSeedInputs =
+            !_poseSeedDirty && _poseSeedTime == time &&
+            _poseSeedSnapshot.IsValid() && _poseSeedSnapshot.IsComplete() &&
+            baseOverrides.size() == _poseSeedInputs.size() &&
+            std::equal(baseOverrides.begin(), baseOverrides.end(),
+                       _poseSeedInputs.begin(),
+                       [](const RigExecValueOverride &a,
+                          const RigExecValueOverride &b) {
+                           return a.prim == b.prim &&
+                                  a.computation == b.computation &&
+                                  a.attribute == b.attribute &&
+                                  a.value == b.value;
+                       });
+        if (sameSeedInputs) {
+            seedSnapshot = _poseSeedSnapshot;
+        } else {
+            seedSnapshot = _poseSeedTaps->Evaluate(time, baseOverrides);
+            if (!seedSnapshot.IsValid() || !seedSnapshot.IsComplete()) {
+                _poseSeedDirty = true;
+                pose.diagnostics.push_back("pose provider input evaluation incomplete");
+                return pose;
+            }
+            _poseSeedSnapshot = seedSnapshot;
+            _poseSeedInputs = baseOverrides;
+            _poseSeedTime = time;
+            _poseSeedDirty = false;
+            _poseSeedTaps->ConsumeDirty();
         }
     }
 
@@ -7660,20 +7777,34 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             identity.insert(identity.end(), finalInputs.begin(), finalInputs.end());
             const auto cached = connectedInputCache.find(path);
             if (cached != connectedInputCache.end() && sameOverrides(cached->second, identity)) continue;
-            const RigExecSnapshot base = taps->second->Evaluate(time, baseInputs);
-            if (!base.IsValid() || !base.IsComplete()) {
-                pose.diagnostics.push_back("connected base pose input incomplete: " + path.GetString());
-                return false;
-            }
-            const RigExecPointFrame raw = base.Get<RigExecPointFrame>(0);
-            RigExecPointFrame current = raw;
-            if (!sameOverrides(baseInputs, finalInputs)) {
-                const RigExecSnapshot revised = taps->second->Evaluate(time, finalInputs);
-                if (!revised.IsValid() || !revised.IsComplete()) {
-                    pose.diagnostics.push_back("connected final pose input incomplete: " + path.GetString());
+            auto &stored = _connectedPoseCache[path];
+            const bool reuseStored =
+                stored.cached && stored.time == time &&
+                !taps->second->ConsumeDirty() &&
+                sameOverrides(stored.inputs, identity);
+            RigExecPointFrame raw;
+            RigExecPointFrame current;
+            if (reuseStored) {
+                raw = stored.base;
+                current = stored.current;
+            } else {
+                const RigExecSnapshot base = taps->second->Evaluate(time, baseInputs);
+                if (!base.IsValid() || !base.IsComplete()) {
+                    stored.cached = false;
+                    pose.diagnostics.push_back("connected base pose input incomplete: " + path.GetString());
                     return false;
                 }
-                current = revised.Get<RigExecPointFrame>(0);
+                raw = base.Get<RigExecPointFrame>(0);
+                current = raw;
+                if (!sameOverrides(baseInputs, finalInputs)) {
+                    const RigExecSnapshot revised = taps->second->Evaluate(time, finalInputs);
+                    if (!revised.IsValid() || !revised.IsComplete()) {
+                        stored.cached = false;
+                        pose.diagnostics.push_back("connected final pose input incomplete: " + path.GetString());
+                        return false;
+                    }
+                    current = revised.Get<RigExecPointFrame>(0);
+                }
             }
             // Maintain the base phase for namespace descendants independently
             // from the current constraint phase. Solver-provided sources are
@@ -7698,7 +7829,15 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 }
             }
             baseFrames[path] = raw;
-            if (!commitConstraintFrames(path, {{path, current}}, false, true)) return false;
+            if (!commitConstraintFrames(path, {{path, current}}, false, true)) {
+                stored.cached = false;
+                return false;
+            }
+            stored.inputs = identity;
+            stored.time = time;
+            stored.base = raw;
+            stored.current = current;
+            stored.cached = true;
             connectedInputCache[path] = std::move(identity);
         }
         return true;
@@ -7804,6 +7943,9 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     for (const _PoseStep &step : _poseSteps) {
         if (step.solverBatch) {
             _SolverBatch &batch = _solverBatches[step.index];
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler,
+                "SolverBatch L" + std::to_string(batch.level), "pose");
             std::map<SdfPath, RigExecPointFrame> candidates;
             // Only direct prerequisites enter this request. Copying all previous
             // joint overrides into every level would itself be quadratic for a
@@ -7835,6 +7977,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                     });
             if (batch.dirty || batch.time != time || !sameInputs ||
                 !batch.snapshot.IsValid() || !batch.snapshot.IsComplete()) {
+                RIGEXEC_PROFILE_SCOPE_CAT(
+                    _profiler, "ExecEvaluate", "exec");
                 const RigExecSnapshot refreshed = batch.taps->Evaluate(time, inputs);
                 if (!refreshed.IsValid() || !refreshed.IsComplete()) {
                     batch.dirty = true;
@@ -7879,6 +8023,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             continue;
         }
         const _FrameConstraint &constraint = _frameConstraints[step.index];
+        RIGEXEC_PROFILE_SCOPE_CAT(
+            _profiler,
+            constraint.schemaType.GetString() + " " +
+                constraint.moverPath.GetName(),
+            "pose");
         for (const SdfPath &target : constraint.targets) {
             if (!refreshPoseProvider(target)) return pose;
         }
@@ -8371,7 +8520,10 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // means some computation failed to compile or evaluate; refusing to
     // continue prevents default-constructed values from masquerading as
     // results (spec §6.6).
-    const RigExecSnapshot snapshot = _taps->Evaluate(time, jointOverrides);
+    const RigExecSnapshot snapshot = [&]() {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "AuthoritativeSnapshot", "exec");
+        return _taps->Evaluate(time, jointOverrides);
+    }();
     if (!snapshot.IsValid() || !snapshot.IsComplete()) {
         pose.diagnostics.push_back(
             snapshot.IsValid() ? "snapshot incomplete: missing tap values"
@@ -8472,8 +8624,10 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     }
 
     // Observational solver guides never gate the rig snapshot: an
-    // incomplete guide evaluation degrades to a diagnostic.
-    if (_guideTaps) {
+    // incomplete guide evaluation degrades to a diagnostic. A consumer that
+    // never reads pose.solverFrames disables them outright (see
+    // SetSolverGuidesEnabled) and skips the request entirely.
+    if (_guideTaps && _solverGuidesEnabled) {
         std::vector<RigExecValueOverride> guideOverrides = baseOverrides;
         guideOverrides.insert(guideOverrides.end(), _falloffLutOverrides.begin(),
                               _falloffLutOverrides.end());
@@ -8485,8 +8639,38 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             guideOverrides.push_back({provider, _computePointFrame, TfToken(),
                                       VtValue(finalFrames.at(provider))});
         }
-        const RigExecSnapshot guideSnapshot =
-            _guideTaps->Evaluate(time, guideOverrides);
+        _guideDirty = _guideTaps->ConsumeDirty() || _guideDirty;
+        const bool sameGuideInputs =
+            !_guideDirty && _guideTime == time &&
+            _guideSnapshot.IsValid() && _guideSnapshot.IsComplete() &&
+            guideOverrides.size() == _guideInputs.size() &&
+            std::equal(guideOverrides.begin(), guideOverrides.end(),
+                       _guideInputs.begin(),
+                       [](const RigExecValueOverride &a,
+                          const RigExecValueOverride &b) {
+                           return a.prim == b.prim &&
+                                  a.computation == b.computation &&
+                                  a.attribute == b.attribute &&
+                                  a.value == b.value;
+                       });
+        RigExecSnapshot guideSnapshot;
+        if (sameGuideInputs) {
+            guideSnapshot = _guideSnapshot;
+        } else {
+            guideSnapshot = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverGuides", "exec");
+                return _guideTaps->Evaluate(time, guideOverrides);
+            }();
+            if (guideSnapshot.IsComplete()) {
+                _guideSnapshot = guideSnapshot;
+                _guideInputs = guideOverrides;
+                _guideTime = time;
+                _guideDirty = false;
+                _guideTaps->ConsumeDirty();
+            } else {
+                _guideDirty = true;
+            }
+        }
         if (guideSnapshot.IsComplete()) {
             for (const auto &[solverPath, tap] : _solverArrayTaps) {
                 pose.solverFrames[solverPath] =
@@ -8570,6 +8754,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         if (chainIt == _graphChains.end()) {
             continue;
         }
+        RIGEXEC_PROFILE_SCOPE_CAT(
+            _profiler, "Chain " + target.GetString(), "geometry");
         const std::vector<_GraphRevision> &revisions = chainIt->second;
         VtVec3fArray basePoints;
         const UsdAttribute baseAttr = _stage->GetAttributeAtPath(target);
@@ -8754,6 +8940,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 // paid only by rigs that ask for it.
                 if (_currentPhaseWeights.count(
                         revision.binding.weightObject)) {
+                    RIGEXEC_PROFILE_SCOPE_CAT(
+                        _profiler, "CurrentPhaseEvaluate", "geometry");
                     const VtVec3fArray inFlight = graph.Evaluate(head);
                     const std::vector<GfVec3f> currentPoints(
                         inFlight.begin(), inFlight.end());
@@ -8861,9 +9049,14 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 }
             }
 
-            const RigExecMoverParameters parameters =
-                RigExecAssembleParameters(moverPrim, revision.op,
-                                          revision.binding, values, time);
+            const RigExecMoverParameters parameters = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(
+                    _profiler,
+                    "Assemble " + revision.moverPath.GetName(), "geometry");
+                return RigExecAssembleParameters(moverPrim, revision.op,
+                                                 revision.binding, values,
+                                                 time);
+            }();
             if (parameters.enabled && !parameters.valid &&
                 revision.binding.weightObject.IsEmpty()) {
                 const float scalar = _ResolvedRead(
@@ -8897,6 +9090,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             const auto wanted = _snapshotPoints.find(target);
             if (wanted != _snapshotPoints.end() &&
                 wanted->second.count(revision.moverPath)) {
+                RIGEXEC_PROFILE_SCOPE_CAT(
+                    _profiler, "SnapshotEvaluate", "geometry");
                 _chainSnapshots.Record(target, revision.moverPath,
                                        VtValue(graph.Evaluate(head)));
             }
@@ -8905,7 +9100,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             continue;
         }
 
-        const VtVec3fArray graphPoints = graph.Evaluate(head);
+        const VtVec3fArray graphPoints = [&]() {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "GraphEvaluate", "geometry");
+            return graph.Evaluate(head);
+        }();
         for (size_t i = 0; i < live->revisions.size(); ++i) {
             if (graph.GetRevisionStatus(live->revisions[i]).state == "moverFailed") {
                 pose.diagnostics.push_back("MoverFailed " + revisions[i].moverPath.GetString() +
@@ -8956,6 +9155,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         if (derivedIt == _graphDerivedChains.end()) {
             continue;
         }
+        RIGEXEC_PROFILE_SCOPE_CAT(
+            _profiler, "Derived " + target.GetString(), "geometry");
         for (const _GraphRevision &derived : derivedIt->second) {
             VtVec3fArray derivedBase;
             const UsdAttribute derivedAttr =
@@ -8967,10 +9168,29 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             values.resolved = &_resolvedInputs;
             values.basePoints.assign(graphPoints.begin(), graphPoints.end());
 
-            const RigExecMoverParameters parameters =
-                RigExecAssembleParameters(
+            const RigExecMoverParameters parameters = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(
+                    _profiler,
+                    "AssembleDerived " + derived.target.GetName(),
+                    "geometry");
+                return RigExecAssembleParameters(
                     _stage->GetPrimAtPath(derived.moverPath), derived.op,
                     derived.binding, values, time);
+            }();
+            // The recompute is a pure function of the assembled inputs: an
+            // unchanged tuple republishes the stored result and defers the
+            // derived graph entirely.
+            auto &deferred = _derivedCache[derived.target];
+            if (deferred.cached &&
+                parameters.auxPoints == deferred.points &&
+                derivedBase == deferred.base &&
+                parameters.topologyCounts == deferred.topologyCounts &&
+                parameters.topologyIndices == deferred.topologyIndices &&
+                parameters.widths == deferred.widths) {
+                pose.movedProperties[derived.target] = VtValue(deferred.result);
+                ++graphChainsBuilt;
+                continue;
+            }
             auto &derivedLive = _liveGraphs[derived.target];
             if (derivedLive && !derivedLive->graph.UpdatePointSource(
                     derivedLive->source, derivedBase)) {
@@ -8997,11 +9217,23 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 RigExecStatusForParameters(parameters, derived.moverPath));
             ++graphRevisionsBuilt;
 
-            const VtVec3fArray derivedResult =
-                derivedGraph.Evaluate(derivedHead);
+            const VtVec3fArray derivedResult = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(
+                    _profiler, "DerivedEvaluate", "geometry");
+                return derivedGraph.Evaluate(derivedHead);
+            }();
             if (derivedGraph.GetRevisionStatus(derivedHead).state == "moverFailed") {
+                deferred.cached = false;
                 pose.diagnostics.push_back("MoverFailed " + derived.target.GetString() +
                     ": derived geometry input/cardinality validation failed");
+            } else {
+                deferred.points = parameters.auxPoints;
+                deferred.base = derivedBase;
+                deferred.topologyCounts = parameters.topologyCounts;
+                deferred.topologyIndices = parameters.topologyIndices;
+                deferred.widths = parameters.widths;
+                deferred.result = derivedResult;
+                deferred.cached = true;
             }
             pose.moverGraphRevisionsExecuted +=
                 derivedGraph.GetRevisionExecutionCount() - derivedExecutions;
@@ -9019,6 +9251,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // why it can catch a packet-assembly drift rather than share one.
     size_t parityAgreements = 0;
     if (cpuParityMode) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Parity", "parity");
         std::map<SdfPath, std::vector<const RigExecMoverRecord *>> chains;
         for (const RigExecMoverRecord &mover : _movers) {
             for (const SdfPath &target : mover.targets) {
@@ -9051,6 +9284,8 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                     " skipped, its chain contains a RigExecCurvenetMover");
                 continue;
             }
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "ParityChain " + target.GetString(), "parity");
             std::vector<std::string> quiet;
             const VtVec3fArray reference =
                 _EvaluateChain(
@@ -9115,6 +9350,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // Optional CPU reference-kernel parity for the lowered chains
     // (scalar-reference goldens, spec §7.4).
     if (cpuParityMode) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ParityPublish", "parity");
         std::map<SdfPath, std::vector<const RigExecMoverRecord *>> chains;
         for (const RigExecMoverRecord &mover : _movers) {
             for (const SdfPath &target : mover.targets) {

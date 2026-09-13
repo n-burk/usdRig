@@ -263,6 +263,10 @@ add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 
+add_executable(testRigExecProfiler tests/testRigExecProfiler.cpp)
+target_link_libraries(testRigExecProfiler PRIVATE rigExec)
+add_test(NAME testRigExecProfiler COMMAND testRigExecProfiler)
+
 add_executable(testRigExecInteractive tests/testRigExecInteractive.cpp)
 target_link_libraries(testRigExecInteractive PRIVATE rigExec)
 target_compile_definitions(testRigExecInteractive PRIVATE

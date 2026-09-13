@@ -250,6 +250,11 @@ The easiest way to author a first rig is to copy
    curves, and blend targets, even when they also have time samples.
 6. Run `rigExecPose` while editing; it exits non-zero on compile or evaluation
    failure and can print joints, moved targets, and diagnostics.
+7. To find where evaluation time goes, pass `--profile <file.trace>`; it
+   records per-phase timings (compile, property chains, pose seed, each
+   solver batch and constraint, the exec snapshot, each geometry chain)
+   as Chrome Trace JSON for Perfetto or `chrome://tracing`, and prints a
+   per-phase summary.
 
 A rig may publish control guides, joints, placed volume guides, driven
 transforms, revised properties, or any combination of them. Control-only and

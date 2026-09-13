@@ -3010,6 +3010,135 @@ TestConnectedParentSpaceSolverInputs()
     }));
 }
 
+static void
+TestSolverGuidesGate()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Source"), TfToken("RigExecControl"));
+    source.GetAttribute(TfToken("avars:tx")).Set(2.0);
+    const SdfPath jointPath("/Asset/Rig/Joints/J0");
+    stage->DefinePrim(jointPath, TfToken("RigExecJoint"));
+    const SdfPath solverPath("/Asset/Rig/Solvers/Twist");
+    const UsdPrim twist = stage->DefinePrim(solverPath, TfToken("RigExecTwistDistribution"));
+    twist.GetRelationship(TfToken("rigExec:start")).SetTargets({source.GetPath()});
+    twist.GetRelationship(TfToken("rigExec:end")).SetTargets({source.GetPath()});
+    twist.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointPath});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetSolverGuidesEnabled());
+    const auto guided = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(guided.valid);
+    const auto guidedFrames = guided.solverFrames.find(solverPath);
+    CHECK(guidedFrames != guided.solverFrames.end() && guidedFrames->second.size() == 1);
+
+    // Headless consumers skip the whole guide request; everything else in
+    // the generation must be unchanged.
+    evaluator.SetSolverGuidesEnabled(false);
+    CHECK(!evaluator.GetSolverGuidesEnabled());
+    const auto unguided = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(unguided.valid);
+    CHECK(unguided.solverFrames.empty());
+    CHECK(unguided.jointFramesFinal.size() == guided.jointFramesFinal.size());
+    for (const auto &[path, frame] : guided.jointFramesFinal) {
+        const auto it = unguided.jointFramesFinal.find(path);
+        CHECK(it != unguided.jointFramesFinal.end());
+        if (it != unguided.jointFramesFinal.end()) {
+            CHECK(Near(it->second.Origin(), frame.Origin()));
+        }
+    }
+
+    // Re-enabling restores the exact guide frames.
+    evaluator.SetSolverGuidesEnabled(true);
+    const auto reguided = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(reguided.valid);
+    const auto reguidedFrames = reguided.solverFrames.find(solverPath);
+    CHECK(reguidedFrames != reguided.solverFrames.end() &&
+          reguidedFrames->second.size() == guidedFrames->second.size());
+    if (reguidedFrames != reguided.solverFrames.end() &&
+        reguidedFrames->second.size() == guidedFrames->second.size()) {
+        for (size_t i = 0; i < guidedFrames->second.size(); ++i) {
+            CHECK(Near(reguidedFrames->second[i].Origin(),
+                       guidedFrames->second[i].Origin()));
+        }
+    }
+}
+
+static void
+TestSolverBatchLevelAudit()
+{
+    // Diamond aggregate dependency: A feeds B and C through their joints,
+    // D blends B and C directly. Minimal longest-path layering puts A at 0,
+    // B and C together at 1, and D at 2 -- dense, with no wave wasted on
+    // schedule order.
+    const auto stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Source"), TfToken("RigExecControl"));
+    source.GetAttribute(TfToken("avars:tx")).Set(2.0);
+    const auto jointInput = [&](const SdfPath &jointPath) {
+        stage->DefinePrim(jointPath, TfToken("RigExecJoint"));
+        const UsdPrim child = stage->DefinePrim(
+            jointPath.AppendChild(TfToken("Input")), TfToken("RigExecControl"));
+        child.GetAttribute(TfToken("rest:tx")).Set(1.0);
+        child.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        return child.GetPath();
+    };
+    const SdfPath jointA("/Asset/Rig/Joints/JA");
+    const UsdPrim twistA = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/A"), TfToken("RigExecTwistDistribution"));
+    twistA.GetRelationship(TfToken("rigExec:start")).SetTargets({source.GetPath()});
+    twistA.GetRelationship(TfToken("rigExec:end")).SetTargets({source.GetPath()});
+    twistA.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointA});
+    const SdfPath inputA = jointInput(jointA);
+    const SdfPath jointB("/Asset/Rig/Joints/JB");
+    const UsdPrim twistB = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/B"), TfToken("RigExecTwistDistribution"));
+    twistB.GetRelationship(TfToken("rigExec:start")).SetTargets({inputA});
+    twistB.GetRelationship(TfToken("rigExec:end")).SetTargets({inputA});
+    twistB.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointB});
+    jointInput(jointB);
+    const SdfPath jointC("/Asset/Rig/Joints/JC");
+    const UsdPrim twistC = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/C"), TfToken("RigExecTwistDistribution"));
+    twistC.GetRelationship(TfToken("rigExec:start")).SetTargets({inputA});
+    twistC.GetRelationship(TfToken("rigExec:end")).SetTargets({inputA});
+    twistC.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointC});
+    jointInput(jointC);
+    const SdfPath jointD("/Asset/Rig/Joints/JD");
+    stage->DefinePrim(jointD, TfToken("RigExecJoint"));
+    const SdfPath solverA("/Asset/Rig/Solvers/A");
+    const SdfPath solverB("/Asset/Rig/Solvers/B");
+    const SdfPath solverC("/Asset/Rig/Solvers/C");
+    const SdfPath solverD("/Asset/Rig/Solvers/D");
+    const UsdPrim blend = stage->DefinePrim(solverD, TfToken("RigExecBlendPointFrames"));
+    blend.GetRelationship(TfToken("rigExec:inputA")).SetTargets({solverB});
+    blend.GetRelationship(TfToken("rigExec:inputB")).SetTargets({solverC});
+    blend.GetAttribute(TfToken("inputs:weight")).Set(0.5f);
+    blend.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointD});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+    const std::map<SdfPath, size_t> levels = evaluator.GetSolverBatchLevels();
+    CHECK(levels.size() == 4);
+    CHECK(levels.at(solverA) == 0);
+    CHECK(levels.at(solverB) == 1);
+    CHECK(levels.at(solverC) == 1);
+    CHECK(levels.at(solverD) == 2);
+    std::set<size_t> dense;
+    for (const auto &[solver, level] : levels) dense.insert(level);
+    CHECK((dense == std::set<size_t>{0, 1, 2}));
+    const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid && pose.solverOverridesConverged);
+    CHECK(pose.solverEvaluations == 4);
+    CHECK(pose.solverOverrideRounds == 3);
+}
+
 // ---------------------------------------------------------------------------
 // RigExecSplineIk: the control-driven spine solver, exercised through exec
 // (the aggregate tap, like TestTwoBoneIkRestFrameInputs) and through the
@@ -3705,6 +3834,8 @@ main()
     TestConstraintSolverDependencySchedule();
     TestConstrainedSolverInputAncestor();
     TestConnectedParentSpaceSolverInputs();
+    TestSolverGuidesGate();
+    TestSolverBatchLevelAudit();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

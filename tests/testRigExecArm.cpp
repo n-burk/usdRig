@@ -921,6 +921,128 @@ TestBlendDeltasUseBase()
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
 }
 
+static size_t
+DerivedEvaluateCount(const RigExecRigEvaluator &evaluator)
+{
+    size_t count = 0;
+    for (const RigExecProfileSummaryRow &row :
+         evaluator.GetProfiler().Summarize()) {
+        if (row.name.find("DerivedEvaluate") != std::string::npos) {
+            count += row.count;
+        }
+    }
+    return count;
+}
+
+static VtVec3fArray
+MovedArray(const RigExecRigPose &pose, const SdfPath &target)
+{
+    const auto it = pose.movedProperties.find(target);
+    CHECK(it != pose.movedProperties.end());
+    if (it == pose.movedProperties.end()) {
+        return {};
+    }
+    return it->second.Get<VtVec3fArray>();
+}
+
+// Derived normals/extent are a pure function of the chain's final points,
+// the authored base, and the assembled topology: an unchanged tuple
+// republishes the stored result without running the derived graphs, while a
+// moved mesh recomputes.
+static void
+TestDerivedMaintenanceDeferral()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    UsdPrim mesh = stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+    const VtVec3fArray base = {
+        GfVec3f(0, 0, 0), GfVec3f(1, 0, 0), GfVec3f(1, 1, 0),
+        GfVec3f(0, 1, 0)};
+    mesh.CreateAttribute(TfToken("points"),
+                         SdfValueTypeNames->Point3fArray).Set(base);
+    mesh.CreateAttribute(TfToken("faceVertexCounts"),
+                         SdfValueTypeNames->IntArray).Set(VtIntArray{4});
+    mesh.CreateAttribute(TfToken("faceVertexIndices"),
+                         SdfValueTypeNames->IntArray)
+        .Set(VtIntArray{0, 1, 2, 3});
+    mesh.CreateAttribute(TfToken("normals"),
+                         SdfValueTypeNames->Normal3fArray)
+        .Set(VtVec3fArray{base.size(), GfVec3f(0, 0, 1)});
+    mesh.CreateAttribute(TfToken("extent"),
+                         SdfValueTypeNames->Float3Array)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 1, 0)});
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    UsdPrim joint = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/J"),
+                                      TfToken("RigExecJoint"));
+    GfMatrix4d posedSpace(1.0);
+    posedSpace.SetTranslate(GfVec3d(0, 2, 0));
+    joint.CreateAttribute(TfToken("posed:space"),
+                          SdfValueTypeNames->Matrix4d)
+        .Set(posedSpace);
+    UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/All"), TfToken("RigExecStaticWeight"));
+    weight.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({SdfPath("/Asset/Geom/M.points")});
+    weight.CreateAttribute(TfToken("rigExec:representation"),
+                           SdfValueTypeNames->Token).Set(TfToken("dense"));
+    weight.CreateAttribute(TfToken("rigExec:values"),
+                           SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray{1, 1, 1, 1});
+    weight.CreateAttribute(TfToken("rigExec:defaultWeight"),
+                           SdfValueTypeNames->Float).Set(0.0f);
+    UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/MM"), TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/M.points")});
+    mover.CreateRelationship(TfToken("rigExec:transform"))
+        .SetTargets({joint.GetPath()});
+    mover.CreateRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({weight.GetPath()});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    evaluator.SetProfilingEnabled(true);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    const SdfPath normalsPath("/Asset/Geom/M.normals");
+    const SdfPath extentPath("/Asset/Geom/M.extent");
+    const auto first = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(first.valid);
+    const size_t derivedRuns = DerivedEvaluateCount(evaluator);
+    CHECK(derivedRuns == 2);
+    const VtVec3fArray firstNormals = MovedArray(first, normalsPath);
+    const VtVec3fArray firstExtent = MovedArray(first, extentPath);
+    CHECK(firstNormals.size() == 4 && firstExtent.size() == 2);
+
+    const auto second = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(second.valid);
+    CHECK(DerivedEvaluateCount(evaluator) == derivedRuns);
+    CHECK(second.moverGraphRevisionsExecuted == 0);
+    const VtVec3fArray secondNormals = MovedArray(second, normalsPath);
+    const VtVec3fArray secondExtent = MovedArray(second, extentPath);
+    CHECK(secondNormals.size() == firstNormals.size());
+    for (size_t i = 0; i < firstNormals.size() && i < secondNormals.size(); ++i) {
+        CHECK(Near(GfVec3d(secondNormals[i]), GfVec3d(firstNormals[i]), 1e-6));
+    }
+    CHECK(secondExtent.size() == firstExtent.size());
+    for (size_t i = 0; i < firstExtent.size() && i < secondExtent.size(); ++i) {
+        CHECK(Near(GfVec3d(secondExtent[i]), GfVec3d(firstExtent[i]), 1e-6));
+    }
+
+    GfMatrix4d movedSpace(1.0);
+    movedSpace.SetTranslate(GfVec3d(0, 3, 0));
+    joint.GetAttribute(TfToken("posed:space")).Set(movedSpace);
+    const auto third = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(third.valid);
+    CHECK(DerivedEvaluateCount(evaluator) > derivedRuns);
+    const VtVec3fArray thirdExtent = MovedArray(third, extentPath);
+    CHECK(thirdExtent.size() == 2);
+    if (thirdExtent.size() == 2) {
+        CHECK(Near(GfVec3d(thirdExtent[0]), GfVec3d(0, 3, 0), 1e-5));
+        CHECK(Near(GfVec3d(thirdExtent[1]), GfVec3d(1, 4, 0), 1e-5));
+    }
+}
+
 // -------------------------------------------------------------------------
 // Universal mover envelope
 // -------------------------------------------------------------------------
@@ -3938,6 +4060,7 @@ main(int argc, char **argv)
     TestConnectedWeightsRewireAndValidate();
     TestWeightDescriptorValidationAndEpoch();
     TestDerivedMaintenanceIgnoresOwnerLookalikes(examplesDir);
+    TestDerivedMaintenanceDeferral();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
