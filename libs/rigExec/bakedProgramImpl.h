@@ -23,6 +23,7 @@
 #include "profiler.h"
 #include "tapSet.h"
 #include "types.h"
+#include "weightPackets.h"
 
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/pointFrame.h"
@@ -648,6 +649,13 @@ struct RigExecBakedProgramImpl {
         RigExecRevisionBinding binding;
         std::vector<int> influenceSlots;
         int transformSlot = -1;
+        /// The solver whose aggregate supplies values.driverFrames, as an
+        /// index into `solvers`, or -1 when this revision reads none. The
+        /// dynamic path takes it off a per-revision tap on the solver's
+        /// computePointFrameArray; the program already holds that aggregate,
+        /// so the tap becomes a slot. Nothing fills it yet: IsBakeable still
+        /// refuses "driver frames on mover".
+        int driverFramesSolver = -1;
         bool finalPhase = false;
         /// Compile's judgement that none of this skin mover's layout arrays
         /// can change within the epoch, so the packet may carry the layout
@@ -701,6 +709,60 @@ struct RigExecBakedProgramImpl {
     std::vector<GeomChain> chains;
 
     std::vector<GfMatrix4d> influenceScratch;
+
+    /// What each geometry-domain constraint measured, keyed by the MOVER
+    /// that produced it: the delta between its solved frame and its target's
+    /// authored transform. Filled by the pose walk, consumed by the geometry
+    /// half's packet assembly, and emptied at the head of every run -- the
+    /// same in-memory hand-off, in the same direction, the dynamic walk
+    /// performs with its own constraintDeltas map. Empty on every rig that
+    /// bakes today: IsBakeable refuses a geometry-domain constraint.
+    std::map<SdfPath, GfMatrix4d> constraintDeltas;
+
+    // ---- weight objects ----------------------------------------------------
+    //
+    // One entry per weight object the epoch reaches, in DEPENDENCY ORDER
+    // (post-order over rigExec:baseWeight and rigExec:inputWeights, children
+    // before parents), so one forward pass per frame builds every packet and
+    // a composed object finds its inputs already built.
+    //
+    // The sharing matters as much as the order: exec's
+    // Relationship().TargetedObjects<RigExecWeightPacket>() accessor gives
+    // one packet per weight object per generation no matter how many movers
+    // bind it. Building one per REVISION would be numerically identical and
+    // would recompute a volume field over a whole mesh once per mover, which
+    // is a performance regression rather than a parity one -- so the table is
+    // keyed by the object, not by the consumer.
+    struct WeightObject {
+        SdfPath path;
+        TfToken type;
+        TfToken representation, rangePolicy, operation;
+        // RigExecStaticWeight: every field is uniform, so all three fold --
+        // but they are still REGISTERED, so a drag on a painted weight can
+        // be placed.
+        std::vector<float> values;
+        std::vector<int> indices;
+        RigExecBakedInput<float> defaultWeight;
+        /// rigExec:baseWeight, as an index into `weightObjects`, or -1.
+        int base = -1;
+        /// rigExec:inputWeights in AUTHORED order (subtract and overlay are
+        /// order dependent), as indices into `weightObjects`.
+        std::vector<int> inputs;
+        // RigExecDynamicWeight.
+        RigExecBakedInput<float> driver, scale, bias;
+        // Combine.
+        TfToken combineMode;
+        RigExecBakedInput<float> strength, invert;
+        size_t weightTargetCount = 0;
+        /// True when anything this object reads can move between frames --
+        /// its own bound inputs, or any object it composes. A false one is
+        /// built once and replayed.
+        bool varying = false;
+        RigExecWeightPacket cached;
+        bool haveCached = false;
+    };
+    std::vector<WeightObject> weightObjects;
+    std::map<SdfPath, int> weightIndex;
 
     // ---- the invalidation index --------------------------------------------
     //
@@ -961,6 +1023,27 @@ bool RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
 /// maintenance that reads their final points, and the mover-graph accounting.
 void RigExecBakedRunGeometry(RigExecBakedProgramImpl *program,
                              UsdTimeCode time, RigExecRigPose *pose);
+
+/// Bakes the weight object at \p path, and everything it composes, into
+/// \p ctx's table; returns its index, or -1 when there is nothing there.
+///
+/// Memoized on RigExecBakedProgramImpl::weightIndex, so a weight object ten
+/// movers bind is baked once and every consumer gets the same index. Binds
+/// every readable field through the build context, which is what keeps the
+/// invalidation index and interactive-override placement honest with no
+/// further code.
+int RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
+                                 const SdfPath &path);
+
+/// The packet \p object publishes this frame.
+///
+/// \p packets holds the packets already built for the objects BEFORE this
+/// one in the table, which dependency order guarantees are the ones it
+/// composes.
+RigExecWeightPacket RigExecBakedWeightPacket(
+    const RigExecBakedProgramImpl &program,
+    const RigExecBakedProgramImpl::WeightObject &object,
+    const std::vector<RigExecWeightPacket> &packets, UsdTimeCode time);
 
 }  // namespace rigExec
 

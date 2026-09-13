@@ -98,6 +98,7 @@ add_library(rigExec SHARED
     libs/rigExec/bakedProgram.cpp
     libs/rigExec/bakedPose.cpp
     libs/rigExec/bakedGeometry.cpp
+    libs/rigExec/bakedWeights.cpp
 )
 target_include_directories(rigExec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>

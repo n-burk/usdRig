@@ -1302,6 +1302,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // nothing and resolves first -- which is why this op can be the same
     // routine the dynamic path runs rather than a second copy of it.
     B.propertyResults.clear();
+    B.constraintDeltas.clear();
     B.resolvedInputs->Clear();
     B.runSnapshots.Clear();
     B.chainSnapshots->Clear();

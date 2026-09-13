@@ -225,6 +225,23 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
                             : B.BaseMatrixOf(revision.transformSlot);
             values.transform = &transform;
         }
+        // A geometry-domain constraint's delta, if one was measured for this
+        // mover: the pose walk solved the constraint and stashed the map from
+        // the target's authored transform to the solved one, and THIS is the
+        // Matrix revision that same constraint contributes. Find-guarded and
+        // in the dynamic chain loop's position, right after the transform
+        // provider is read.
+        //
+        // The dynamic path applies it before the final-phase substitution
+        // rather than after. The two orders can only disagree for a revision
+        // that has both a bound transform provider and a delta, which cannot
+        // arise: a geometry-domain constraint's binding.transform is empty --
+        // that is what makes the delta the only source of the matrix.
+        if (const auto delta = B.constraintDeltas.find(revision.moverPath);
+            delta != B.constraintDeltas.end()) {
+            transform = delta->second;
+            values.transform = &transform;
+        }
         B.influenceScratch.clear();
         if (!revision.influenceSlots.empty()) {
             B.influenceScratch.reserve(revision.influenceSlots.size());
