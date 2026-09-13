@@ -246,8 +246,11 @@ TestOneFixture(const std::string &examplesDir,
 
     // The rigger's drag: an operator's own input, which places by a
     // different rule -- the prim has to be routed through the generation's
-    // resolved inputs, not merely registered as a bound value.
-    {
+    // resolved inputs, not merely registered as a bound value. Empty only
+    // for a stage that authors no operator at all (components/spider_leg.usd
+    // is a joint hierarchy and nothing else); the table refuses a record
+    // that names one half of the pair, so this cannot hide a typo.
+    if (*fixture.operatorPrim) {
         const SdfPath op(fixture.operatorPrim);
         const TfToken input(fixture.operatorInput);
         const UsdPrim prim = stage->GetPrimAtPath(op);

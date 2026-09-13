@@ -23,7 +23,8 @@ struct RigExecExampleFixture {
     /// The avar on \p controlPrim to drag; double-valued.
     const char *controlAvar;
     /// A mover, weight or constraint prim: the other kind of drag, the one
-    /// that lands on an operator's own input.
+    /// that lands on an operator's own input. "" only for a stage that
+    /// authors no operator at all.
     const char *operatorPrim;
     /// The attribute on \p operatorPrim to drag; float- or double-valued.
     const char *operatorInput;

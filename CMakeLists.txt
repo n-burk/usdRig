@@ -268,9 +268,18 @@ rigexec_add_baked_parity_test(testRigExecConstraints)
 #             keyword once its operator group lands
 function(rigexec_add_example_parity_test)
     cmake_parse_arguments(A "GUIDES;DISABLED" "NAME;RIG;FRAMES" "" ${ARGN})
-    if (NOT A_NAME OR NOT A_RIG OR NOT A_FRAMES)
+    # DEFINED, not truthiness: a fixture whose frame list is the single
+    # frame 0 is a perfectly good entry, and CMake reads "0" as false.
+    if (NOT DEFINED A_NAME OR NOT DEFINED A_RIG OR NOT DEFINED A_FRAMES)
         message(FATAL_ERROR "rigexec_add_example_parity_test: "
                             "NAME, RIG and FRAMES are all required")
+    endif()
+    # A misspelled keyword is otherwise dropped in silence, and the entry
+    # quietly registers as enabled -- the one mistake this function must not
+    # swallow, since DISABLED is how a non-baking rig stays green.
+    if (A_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "rigexec_add_example_parity_test: unknown "
+                            "argument(s): ${A_UNPARSED_ARGUMENTS}")
     endif()
     set(_guides "")
     if (A_GUIDES)
@@ -291,8 +300,10 @@ function(rigexec_add_example_parity_test)
     # The tool finds the codeless schema through its compiled-in resource
     # directory; this is for a run that inherits a different PXR_PLUGINPATH.
     # APPEND, because ENVIRONMENT is one value.
+    set(_schema_resources
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     set_property(TEST example_parity_${A_NAME} APPEND PROPERTY ENVIRONMENT
-        "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+        "PXR_PLUGINPATH_NAME=${_schema_resources}")
     if (A_DISABLED)
         set_tests_properties(example_parity_${A_NAME} PROPERTIES
             DISABLED TRUE)

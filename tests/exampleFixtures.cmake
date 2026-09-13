@@ -30,7 +30,11 @@
 #                 '||' would silently lose a column)
 #   operatorPrim  a mover, weight or constraint prim -- the OTHER kind of
 #                 drag, the one that lands on an operator's own input and
-#                 needs the prim to be routed through the resolved inputs
+#                 needs the prim to be routed through the resolved inputs.
+#                 '-' only for a stage that authors no operator at all
+#                 (components/spider_leg.usd is joints and nothing else);
+#                 the pair must be empty together, which the loop below
+#                 enforces so a half-filled record cannot skip a drag
 #   operatorInput the attribute on it to drag; float- or double-valued
 #   bakes         YES when RigExecBakedProgram::Build accepts the rig today
 #   blocker       when it does not, the operator group whose refusal is the
@@ -46,9 +50,9 @@
 #       carry no RigExecRoot -- they are geometry or layer fragments
 #   simple_rig_flattened.usd, biped/Biped_layered_center.usda
 #       are sublayer arms that do not compile when opened on their own
-# Every other stage under examples/ (and examples/biped/) has an entry, so a
-# new example that nobody wired up is a visible omission rather than a
-# silently skipped test.
+# Every other stage under examples/, examples/biped/ and examples/components/
+# has an entry, so a new example that nobody wired up is a visible omission
+# rather than a silently skipped test.
 # ---------------------------------------------------------------------------
 set(RIGEXEC_EXAMPLE_FIXTURES
     # -- the numbered tour -------------------------------------------------
@@ -78,6 +82,12 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "ArmRig.usda|1001,1024,1048|/ArmAsset/Rig/Controls/HandIK|avars:tx|/ArmAsset/Rig/Solvers/IK|inputs:softness|NO|geometry-ops"
     "ArmShotAnim.usda|1001,1012,1013,1024,1048|/Shot/HeroArm/Rig/Controls/HandIK|avars:ty|/Shot/HeroArm/Rig/Solvers/IK|inputs:softness|NO|geometry-ops"
     # -- the stages that bake today ----------------------------------------
+    # The two component layers the spider assembly is built from are rigs in
+    # their own right and open on their own; spider_leg.usd is the one stage
+    # in the tour with no operator of any kind, so it exercises the frame
+    # sweep and nothing else.
+    "components/spider_leg.usd|1,2,3|-|-|-|-|YES|-"
+    "components/spider_leg_ik.usd|1,2,3|/RigRoot/Controller/hip|avars:ry|/RigRoot/Solvers/RigExecTwoBoneIk1|inputs:softness|YES|-"
     "simple_rig.usd|1,2,3|/World/RigExecRoot/Controllers/Root|avars:tx|/World/RigExecRoot/Movers/RigExecMatrixMover1|inputs:defaultWeight|YES|-"
     "simple_rig_anim.usd|0,12,40,51,79,100|/World/RigExecRoot/Controllers/Root|avars:tx|/World/RigExecRoot/Movers/RigExecMatrixMover1|inputs:defaultWeight|YES|-"
     "spider_legs_assembly_ref.usda|1,2,3|/World/RigExecRoot1/Xform1/Controller/hip|avars:ry|/World/RigExecRoot1/Xform1/Solvers/RigExecTwoBoneIk1|inputs:softness|YES|-"
@@ -114,11 +124,29 @@ foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
     endif()
     # '-' is the table's empty field; the header carries a real empty string
     # so the C++ side tests one thing rather than two.
-    foreach(_optional IN ITEMS _control_prim _control_avar _blocker)
+    foreach(_optional IN ITEMS _control_prim _control_avar _operator_prim
+                              _operator_input _blocker)
         if ("${${_optional}}" STREQUAL "-")
             set(${_optional} "")
         endif()
     endforeach()
+    # A prim without its attribute, or the reverse, would make the C++ suite
+    # skip that drag silently -- exactly the vacuous pass this table exists
+    # to prevent -- so a half-filled pair is an error at configure time.
+    string(COMPARE EQUAL "${_control_prim}" "" _no_control_prim)
+    string(COMPARE EQUAL "${_control_avar}" "" _no_control_avar)
+    if (NOT _no_control_prim STREQUAL _no_control_avar)
+        message(FATAL_ERROR
+            "example fixture '${_fixture}': the control prim and its avar "
+            "have to be given together, or both left as '-'")
+    endif()
+    string(COMPARE EQUAL "${_operator_prim}" "" _no_operator_prim)
+    string(COMPARE EQUAL "${_operator_input}" "" _no_operator_input)
+    if (NOT _no_operator_prim STREQUAL _no_operator_input)
+        message(FATAL_ERROR
+            "example fixture '${_fixture}': the operator prim and its input "
+            "have to be given together, or both left as '-'")
+    endif()
     string(APPEND RIGEXEC_EXAMPLE_FIXTURE_ROWS
         "    {\"${_stage}\", \"${_frames}\", \"${_control_prim}\","
         " \"${_control_avar}\", \"${_operator_prim}\","
