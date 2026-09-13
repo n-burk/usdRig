@@ -762,6 +762,9 @@ struct RigExecBakedProgramImpl {
         bool haveCached = false;
     };
     std::vector<WeightObject> weightObjects;
+    /// Path to index in weightObjects. A NEGATIVE entry is an object whose
+    /// composition walk is under way (the bake is depth first and enters the
+    /// table on the way out), so meeting one is a cycle.
     std::map<SdfPath, int> weightIndex;
 
     // ---- the invalidation index --------------------------------------------
@@ -1039,10 +1042,11 @@ void RigExecBakedRunGeometry(RigExecBakedProgramImpl *program,
 /// \p ctx's table; returns its index, or -1 when there is nothing there.
 ///
 /// Memoized on RigExecBakedProgramImpl::weightIndex, so a weight object ten
-/// movers bind is baked once and every consumer gets the same index. Binds
-/// every readable field through the build context, which is what keeps the
-/// invalidation index and interactive-override placement honest with no
-/// further code.
+/// movers bind is baked once and every consumer gets the same index; the
+/// same map carries an under-way marker, so a composition cycle is refused
+/// rather than recursed into. Binds every readable field through the build
+/// context, which is what keeps the invalidation index and interactive-
+/// override placement honest with no further code.
 int RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
                                  const SdfPath &path);
 

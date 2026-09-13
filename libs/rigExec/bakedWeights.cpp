@@ -48,18 +48,31 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     if (path.IsEmpty()) {
         return -1;
     }
-    // Memoized BEFORE the composition walk below, so an object bound by ten
-    // movers is baked once -- which is the sharing exec's targeted-objects
-    // accessor gives the dynamic path for free.
+    // Baked once however many movers and constraints bind it -- the sharing
+    // exec's targeted-objects accessor gives the dynamic path for free -- and
+    // the same map answers re-entrancy. The table is in dependency order, so
+    // an object cannot be entered in it until its inputs are; what marks it
+    // as under way meanwhile is a NEGATIVE index, and meeting one on the way
+    // down is a cycle. The epoch compile diagnoses weight cycles before a
+    // program is ever built, but this is the entry point Phase 3 calls and a
+    // recursion that only terminates because somebody else checked first is
+    // not one to leave in place.
     const auto seen = B.weightIndex.find(path);
     if (seen != B.weightIndex.end()) {
+        if (seen->second < 0) {
+            ctx->Refuse("weight object composition contains a cycle", path);
+        }
         return seen->second;
     }
     const UsdPrim prim = B.stage->GetPrimAtPath(path);
     if (!prim) {
+        // No marker left behind: there is nothing to recurse into, so a
+        // second bind of the same missing prim should say so again rather
+        // than be reported as a cycle.
         ctx->Refuse("weight object prim is missing", path);
         return -1;
     }
+    B.weightIndex[path] = -1;
 
     RigExecBakedProgramImpl::WeightObject object;
     object.path = path;
@@ -132,7 +145,7 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     }
 
     const int index = int(B.weightObjects.size());
-    B.weightIndex[path] = index;
+    B.weightIndex[path] = index;  // replaces the under-way marker
     B.weightObjects.push_back(std::move(object));
     return index;
 }
