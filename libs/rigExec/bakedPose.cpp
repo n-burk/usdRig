@@ -95,10 +95,31 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                     prim.GetAttribute(TfToken("rigExec:jointElements"))) {
                 a.Get(&elements);
             }
-            for (size_t k = 0; k < joints.size(); ++k) {
-                restRefs.emplace_back(
-                    slotOf(joints[k]),
-                    elements.size() == joints.size() ? elements[k] : int(k));
+            // exec binds ONE rest input per rigExec:joints target that
+            // PUBLISHES computeRestFrame -- a target that publishes none
+            // contributes no input at all -- and the computation then
+            // compares the AUTHORED jointElements length against THAT count
+            // and indexes the remap by position within it (the TwoBoneIk and
+            // SplineIk rest loops in computations.cpp). Resolving against the
+            // relationship's target count instead would remap by the wrong
+            // index, and would keep remapping where exec gives up.
+            std::vector<int> restSlots;
+            for (const SdfPath &joint : joints) {
+                const int slot = slotOf(joint);
+                if (slot >= 0) {
+                    restSlots.push_back(slot);
+                }
+            }
+            const bool remapped = !elements.empty();
+            if (remapped && elements.size() != restSlots.size()) {
+                // "joint/rest element cardinality mismatch": the computation
+                // warns and returns an empty result.
+                s.degenerate = true;
+            }
+            const bool useRemap = remapped && !s.degenerate;
+            for (size_t k = 0; k < restSlots.size(); ++k) {
+                restRefs.emplace_back(restSlots[k],
+                                      useRemap ? elements[k] : int(k));
             }
         }
         for (const auto &[joint, element] : jointOutputs) {
@@ -187,12 +208,22 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.splineCount = count;
             std::vector<RigExecPointFrame> restJoints(count);
             s.splineJointRests.resize(count);
+            // The remap must be a PERMUTATION of the chain slots: a slot
+            // filled twice leaves another empty, and the computation refuses
+            // to build a rest curve out of that ("chain slot %d is filled
+            // twice") rather than solving against a hole.
+            std::vector<bool> filled(count, false);
             for (const auto &[slot, element] : restRefs) {
                 if (slot < 0 || element < 0 || size_t(element) >= count) {
                     refuse("SplineIk joint element is out of range",
                            solverPath);
                     continue;
                 }
+                if (filled[size_t(element)]) {
+                    s.degenerate = true;
+                    continue;
+                }
+                filled[size_t(element)] = true;
                 restJoints[size_t(element)] = B.restFrames[slot];
                 s.splineJointRests[size_t(element)] = B.restPts[slot];
             }
@@ -648,7 +679,15 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 RigExecPointFrameArray &aggregate = B.aggregates[si];
                 aggregate.frames.clear();
                 aggregate.rests.clear();
-                if (s.type == "RigExecFkChain") {
+                // The one degeneracy guard, and it sits AFTER the clear: a
+                // solver whose joint binding the bake found malformed
+                // publishes the EMPTY aggregate its computation returns, and
+                // "publishes an empty aggregate" is what the clear makes
+                // true. The output loop below still runs, so every joint the
+                // solver names falls back to its rest chain and says so --
+                // which is exactly what the dynamic path reports.
+                if (s.degenerate) {
+                } else if (s.type == "RigExecFkChain") {
                     std::vector<RigExecFkChainElement> elements(
                         s.controls.size());
                     for (size_t k = 0; k < s.controls.size(); ++k) {

@@ -499,6 +499,13 @@ struct RigExecBakedProgramImpl {
     struct Solver {
         SdfPath path;
         TfToken type;
+        /// The bake found this solver's rigExec:joints / jointElements
+        /// binding malformed in one of the ways its exec computation checks
+        /// at runtime. Such a computation warns and returns an EMPTY
+        /// aggregate, so the program publishes one too: every joint the
+        /// solver names then falls back to its rest chain, with the
+        /// diagnostic that carries.
+        bool degenerate = false;
         // FkChain
         std::vector<int> controls;
         bool parentRelative = false;
