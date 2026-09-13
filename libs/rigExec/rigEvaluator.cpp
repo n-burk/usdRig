@@ -8347,10 +8347,16 @@ RigExecRigEvaluator::_ReportBakeRequired(const std::string &detail,
     // and answering differently are the same failure, and one regex should
     // catch both. Nothing published moves -- the pose is the dynamic path's,
     // which is the reference the mode compares against anyway.
-    pose->diagnostics.push_back(
+    const std::string message =
         "baked parity mismatch: bake required, evaluated dynamically: " +
-        detail);
+        detail;
+    pose->diagnostics.push_back(message);
     ++pose->bakedParityMismatches;
+    // Same one line on stderr a real disagreement gets, for the same
+    // reason: a suite that never reads pose.diagnostics is exactly the
+    // suite this variable exists to re-run, and it can only fail on what
+    // it prints.
+    TF_WARN("rigExec: %s on %s", message.c_str(), _rigPath.GetText());
 }
 
 void

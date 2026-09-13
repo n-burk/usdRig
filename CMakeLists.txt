@@ -493,7 +493,13 @@ target_link_libraries(testRigExecInteractive PRIVATE rigExec)
 target_compile_definitions(testRigExecInteractive PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecInteractive COMMAND testRigExecInteractive)
-rigexec_add_baked_parity_test(testRigExecInteractive)
+# REQUIRE_BAKE: every generation this suite runs comes from the program
+# today, so a fallback to the dynamic path is a regression rather than a
+# refusal still waiting on an operator group. The other three baked-parity
+# suites still fall back (plain-Xformable constraint targets, SingleChainIK,
+# weight objects on movers, authored posed:space and rest overrides), so
+# they get REQUIRE_BAKE in the commit that bakes their operators.
+rigexec_add_baked_parity_test(testRigExecInteractive REQUIRE_BAKE)
 
 add_executable(testRigExecDefaultSpaces tests/testRigExecDefaultSpaces.cpp)
 target_link_libraries(testRigExecDefaultSpaces PRIVATE rigExec)
