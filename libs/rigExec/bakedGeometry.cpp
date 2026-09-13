@@ -159,6 +159,24 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
         }
         chain->scheduleDirty = false;
     };
+    // WHICH points a revision is assembled against, stated once because the
+    // two callers below pass different ones and the difference is invisible
+    // until an operator reads them:
+    //
+    //  * a CHAIN revision gets the chain's AUTHORED base -- the attribute as
+    //    the stage holds it -- for every revision of the chain, not the
+    //    running value. The dynamic walk reads the base once per target and
+    //    hands that same array to every revision (the values.basePoints
+    //    assignment in the chain loop), so a lattice's rest points and a
+    //    volumeCorrect's reference volume are measured against the mesh as
+    //    authored however deep in the chain they sit.
+    //  * a DERIVED revision gets the chain's FINAL points, which is what it
+    //    is for: recomputeNormals and recomputeExtent take auxPoints =
+    //    basePoints and must describe the geometry as published.
+    //
+    // Skin and Matrix -- the only two operations IsBakeable admits today --
+    // read neither, so this is the contract being made right before an
+    // operator that does read them arrives.
     auto assemble = [&](RigExecBakedProgramImpl::GeomRevision &revision,
                         const std::vector<GfVec3f> &basePoints) {
         RigExecProviderValues values;
@@ -244,11 +262,12 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
         accountForChain(&chain);
         bool dirty = !chain.haveResult || basePoints != chain.lastBase;
         chain.lastBase = basePoints;
-        std::vector<GfVec3f> current(basePoints.begin(), basePoints.end());
+        const std::vector<GfVec3f> base(basePoints.begin(), basePoints.end());
+        std::vector<GfVec3f> current = base;
         for (RigExecBakedProgramImpl::GeomRevision &revision :
                  chain.revisions) {
             const RigExecMoverParameters parameters =
-                assemble(revision, current);
+                assemble(revision, base);
             if (parameters.enabled && !parameters.valid) {
                 float scalar = 1.0f;
                 if (const UsdAttribute a = revision.moverPrim.GetAttribute(
@@ -345,6 +364,8 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
             const bool derivedDirty =
                 !derived.haveResult || derivedBase != derived.lastBase;
             derived.lastBase = derivedBase;
+            // The chain's FINAL points, deliberately: see the assemble
+            // contract above.
             const RigExecMoverParameters parameters =
                 assemble(derived.revision, current);
             const RigExecMoverStatus status = RigExecStatusForParameters(
