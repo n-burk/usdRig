@@ -45,6 +45,7 @@
 #include "pxr/usd/usd/timeCode.h"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -595,9 +596,22 @@ struct RigExecBakedStep {
     /// Program indices, sorted; every entry of preds is < this step's index.
     std::vector<int> preds, succs;
 
-    /// Filled by the clustering pass; the serial executor ignores both.
+    /// Filled by the clustering pass; the serial executor ignores all four.
+    /// `level` is the longest-path level the packing groups by, `sizeUnits`
+    /// the size term of the cost model (§5.1) and `cost` the microseconds
+    /// that model predicts.
     int cluster = -1;
+    int level = 0;
+    double sizeUnits = 0;
     double cost = 0;
+
+    /// What the calibration mode measured: the summed interval of this step
+    /// over the frames it watched, and how many of them it saw. Untouched
+    /// unless RIGEXEC_BAKED_SCHEDULE_CALIBRATE asked for a measurement, and
+    /// written only by the serial executor on the one thread it runs on --
+    /// which is what "lock-free per-step timer" comes to.
+    double measuredUs = 0;
+    uint32_t measuredRuns = 0;
 
     /// This run's output, all of it per step so that nothing in a body
     /// touches shared state.
@@ -619,13 +633,79 @@ struct RigExecBakedStep {
 
     /// Empties this run's output. Called by the executor before the body, so
     /// that a step that is skipped keeps last run's lines for the epilogue
-    /// to replay.
+    /// to replay. The timestamps are NOT cleared here for that same reason:
+    /// a skipped step never reaches this, so RigExecBakedRunSteps clears
+    /// every step's interval at the start of the run instead.
     void BeginRun() {
         diagnostics.clear();
         counters.Clear();
         snapshots.Clear();
         bail = false;
     }
+};
+
+/// One cluster: the steps one task runs, back to back, on one thread.
+///
+/// A cluster's members are in increasing PROGRAM index, which is always a
+/// topological order because every edge of the step graph points forward in
+/// program order (§4.1). So a cluster needs no internal schedule: the loop
+/// that runs its members in order is the schedule.
+struct RigExecBakedCluster {
+    /// Step indices, strictly increasing.
+    std::vector<int> members;
+    /// Cluster indices, sorted and deduplicated.
+    std::vector<int> preds, succs;
+    /// The summed cost of the members, in the cost model's microseconds.
+    double cost = 0;
+    /// The highest step level in the cluster, which is what the packing
+    /// grouped by and what the report sorts on.
+    int level = 0;
+
+    // ---- what the last run did, filled by the parallel executor ----------
+    /// When the cluster's last predecessor finished, when it started and
+    /// when it ended, as RigExecProfiler::NowUs() reads. Recorded only while
+    /// the schedule report or the profiler asks for them, so a production
+    /// frame pays no clock reads for a table nobody prints.
+    uint64_t readyUs = 0, startUs = 0, endUs = 0;
+};
+
+/// A partition of one program's steps into clusters.
+///
+/// A VALUE, not program state: RigExecBakedBuildClusters computes one from a
+/// program and a grain without touching it, which is what lets a test ask
+/// the same program for the schedule at three different grains and compare
+/// them. The program holds one of these -- the partition Build chose -- and
+/// the parallel executor runs that one.
+struct RigExecBakedClustering {
+    std::vector<RigExecBakedCluster> clusters;
+    /// The cluster of each step, one entry per step. Every step is in
+    /// exactly one cluster.
+    std::vector<int> clusterOf;
+    /// The grain this partition was packed to, in microseconds. Zero means
+    /// "one step per cluster", which is the finest schedule the graph admits
+    /// and the strongest test of it.
+    double grainUs = 0;
+    /// The summed cost of every step, and the longest path through the
+    /// cluster graph by cost. Their ratio is the speed-up this schedule can
+    /// reach with threads to spare.
+    double serialCost = 0, criticalPathCost = 0;
+    /// Whether the last run stamped the per-cluster times above. Only the
+    /// parallel executor has clusters to time: a serial run walks the steps
+    /// and never asks which cluster they are in, so its run report says so
+    /// rather than printing a table of zeros that reads as "every cluster
+    /// was free".
+    bool lastRunTimed = false;
+};
+
+/// The remaining-predecessor counter of one cluster.
+///
+/// One cache line each. Two counters in one line would make every finishing
+/// cluster's decrement invalidate its neighbour's line, which on a graph
+/// this wide is the only contention the executor has -- and the only lock,
+/// mutex or condition variable in the whole region is this atomic (§2.2).
+struct alignas(64) RigExecBakedClusterCounter {
+    std::atomic<int> remaining{0};
+    char padding[64 - sizeof(std::atomic<int>)] = {};
 };
 
 /// One contiguous group of provider slots the compose pass runs as one step.
@@ -958,6 +1038,17 @@ struct RigExecBakedProgramImpl {
     std::vector<std::pair<int, int>> derivedIndex;
     /// First and last-plus-one revision id of each chain.
     std::vector<int> chainRevisionBegin, chainRevisionEnd;
+
+    /// The partition of `steps` the parallel executor runs, chosen once at
+    /// Build. Its grain comes from the cost model and the machine's
+    /// concurrency, never from a measurement: a schedule that depended on
+    /// what the box was doing at Build time would make "the same program
+    /// produces the same answers at every grain" a claim nobody could test.
+    RigExecBakedClustering clustering;
+    /// One remaining-predecessor counter per cluster, allocated at Build so
+    /// that the region allocates nothing. An array rather than a vector
+    /// because std::atomic is neither copyable nor movable.
+    std::unique_ptr<RigExecBakedClusterCounter[]> clusterCounters;
 
     /// Program constants the epilogue adds to the generation's counters.
     ///

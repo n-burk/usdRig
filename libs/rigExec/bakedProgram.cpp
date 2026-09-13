@@ -1398,6 +1398,16 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // ---- epilogue -----------------------------------------------------------
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedEpilogue", "baked");
     RigExecBakedReplayStepTimings(B);
+    if (RigExecBakedScheduleCalibrationRequested()) {
+        RigExecBakedScheduleCalibrate(&B);
+    }
+    if (RigExecBakedScheduleReportRequested()) {
+        // What the schedule DID, as against what Build predicted it would:
+        // the structural half was printed once, at Build, and this is the
+        // only half that needs a frame to have happened.
+        const std::string report = RigExecBakedScheduleRunReport(B);
+        std::fwrite(report.data(), 1, report.size(), stderr);
+    }
     if (bailed) {
         // A step gave the generation back. Before the curvenet drain, which
         // is destructive: a frame that gave up must not spend the pending
