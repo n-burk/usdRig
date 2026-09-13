@@ -12,6 +12,7 @@
 #include "types.h"
 #include "moverGraph.h"
 #include "frameExtraction.h"
+#include "weightPackets.h"
 
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/envelope.h"
@@ -146,167 +147,20 @@ TF_DEFINE_PRIVATE_TOKENS(
 
 namespace {
 
-// Applies the range policy to a candidate weight; returns false on a
-// strict violation or non-finite input (spec §4.1 RangePolicy).
-bool
-_ApplyRangePolicy(const TfToken &policy, float *w)
-{
-    if (!std::isfinite(*w)) {
-        return false;
-    }
-    if (*w < 0.0f || *w > 1.0f) {
-        if (policy == "clamp") {
-            *w = std::min(std::max(*w, 0.0f), 1.0f);
-            return true;
-        }
-        return false;
-    }
-    return true;
-}
-
-RigExecWeightPacket
-_BuildStaticWeightPacket(const VdfContext &ctx)
-{
-    RigExecWeightPacket packet;
-    static const TfToken constant("constant");
-    static const TfToken strict("strict");
-    const TfToken *repr =
-        ctx.GetInputValuePtr<TfToken>(_tokens->representation);
-    const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->rangePolicy);
-    packet.representation = repr ? *repr : constant;
-    packet.rangePolicy = policy ? *policy : strict;
-    // Unknown structural tokens are rejected, never coerced (spec §4.1);
-    // allowedTokens metadata alone is not validation.
-    if (packet.representation != "constant" &&
-        packet.representation != "dense" &&
-        packet.representation != "sparse") {
-        return packet;
-    }
-    if (packet.rangePolicy != "strict" && packet.rangePolicy != "clamp") {
-        return packet;
-    }
-    const float *def = ctx.GetInputValuePtr<float>(_tokens->defaultWeight);
-    packet.defaultWeight = def ? *def : 0.0f;
-
-    std::vector<std::pair<int, float>> pairs;
-    {
-        VdfReadIterator<float> vIt(ctx, _tokens->values);
-        VdfReadIterator<int> iIt(ctx, _tokens->indices);
-        if (packet.representation == "sparse") {
-            for (; !vIt.IsAtEnd() && !iIt.IsAtEnd(); ++vIt, ++iIt) {
-                pairs.emplace_back(*iIt, *vIt);
-            }
-            if (!vIt.IsAtEnd() || !iIt.IsAtEnd()) {
-                return packet;  // size mismatch: invalid
-            }
-        } else {
-            for (; !vIt.IsAtEnd(); ++vIt) {
-                packet.values.push_back(*vIt);
-            }
-        }
-    }
-    // Canonical sorted sparse support; authored pair order is
-    // non-semantic and duplicates are rejected (spec §4.1).
-    if (packet.representation == "sparse") {
-        std::sort(pairs.begin(), pairs.end());
-        for (size_t i = 0; i < pairs.size(); ++i) {
-            if (i > 0 && pairs[i].first == pairs[i - 1].first) {
-                return packet;  // duplicate index: invalid
-            }
-            packet.indices.push_back(pairs[i].first);
-            packet.values.push_back(pairs[i].second);
-        }
-    }
-    if (packet.representation == "dense" && packet.defaultWeight != 0.0f) {
-        return packet;  // canonical dense default is zero
-    }
-
-    for (float &w : packet.values) {
-        if (!_ApplyRangePolicy(packet.rangePolicy, &w)) {
-            return packet;
-        }
-    }
-    if (!_ApplyRangePolicy(packet.rangePolicy, &packet.defaultWeight)) {
-        return packet;
-    }
-    packet.valid = true;
-    return packet;
-}
-
-RigExecWeightPacket
-_BuildDynamicWeightPacket(const VdfContext &ctx)
-{
-    RigExecWeightPacket packet;
-    static const TfToken constant("constant");
-    static const TfToken strict("strict");
-    const TfToken *repr =
-        ctx.GetInputValuePtr<TfToken>(_tokens->representation);
-    const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->rangePolicy);
-    packet.representation = repr ? *repr : constant;
-    packet.rangePolicy = policy ? *policy : strict;
-    if (packet.representation != "constant" &&
-        packet.representation != "dense" &&
-        packet.representation != "sparse") {
-        return packet;
-    }
-    if (packet.rangePolicy != "strict" && packet.rangePolicy != "clamp") {
-        return packet;
-    }
-
-    const float *driver = ctx.GetInputValuePtr<float>(_tokens->inputsDriver);
-    const float *scale = ctx.GetInputValuePtr<float>(_tokens->inputsScale);
-    const float *bias = ctx.GetInputValuePtr<float>(_tokens->inputsBias);
-    const float d = driver ? *driver : 1.0f;
-    const float s = scale ? *scale : 1.0f;
-    const float a = bias ? *bias : 0.0f;
-
-    const RigExecWeightPacket *base =
-        ctx.GetInputValuePtr<RigExecWeightPacket>(_tokens->basePacket);
-    if (!base) {
-        // Without a base only constant is legal and b_i = 1 (spec §4.1).
-        if (packet.representation != "constant") {
-            return packet;
-        }
-        packet.defaultWeight = (1.0f * d) * s + a;
-        if (!_ApplyRangePolicy(packet.rangePolicy, &packet.defaultWeight)) {
-            return packet;
-        }
-        packet.valid = true;
-        return packet;
-    }
-    if (!base->valid || base->representation != packet.representation) {
-        return packet;
-    }
-
-    // r_i = (b_i d) s + a over the base field; dense keeps canonical
-    // packet default zero (spec §4.1).
-    packet.indices = base->indices;
-    packet.values.reserve(base->values.size());
-    for (float b : base->values) {
-        float r = (b * d) * s + a;
-        if (!_ApplyRangePolicy(packet.rangePolicy, &r)) {
-            return packet;
-        }
-        packet.values.push_back(r);
-    }
-    if (packet.representation == "dense") {
-        packet.defaultWeight = 0.0f;
-    } else {
-        packet.defaultWeight = (base->defaultWeight * d) * s + a;
-        if (!_ApplyRangePolicy(packet.rangePolicy, &packet.defaultWeight)) {
-            return packet;
-        }
-    }
-    packet.valid = true;
-    return packet;
-}
-
 // ---------------------------------------------------------------------------
-// Volumetric weight objects (spec §4.1 volumetric extension).
+// Weight objects (spec §4.1).
 //
-// One shared body: read the placement and the band, pick a distance
-// function, remap, and publish a dense packet. Only the distance function
-// and the extra inputs it needs differ between sphere, plane, and curve.
+// The packet arithmetic lives in weightPackets.h, not here: the baked
+// evaluation program has to publish the identical packet from the values
+// it bound at compile time, and the only way to guarantee that is one
+// definition called from both sides. What is left below is the adapter --
+// it turns a VdfContext into the plain values those kernels take, and
+// nothing else.
+//
+// Absent inputs are defaulted HERE rather than inside the kernels,
+// because exec distinguishes "the input has no value" from "the attribute
+// is authored empty" and a kernel that collapsed the two would accept a
+// rig exec rejects.
 // ---------------------------------------------------------------------------
 
 // Collects a vectorized GfVec3f input into a plain vector.
@@ -322,6 +176,18 @@ _CollectPoints(const VdfContext &ctx, const TfToken &input)
     return points;
 }
 
+// The same for a vectorized scalar input (rigExec:values, rigExec:indices).
+template <typename T>
+std::vector<T>
+_CollectScalars(const VdfContext &ctx, const TfToken &input)
+{
+    std::vector<T> values;
+    for (VdfReadIterator<T> it(ctx, input); !it.IsAtEnd(); ++it) {
+        values.push_back(*it);
+    }
+    return values;
+}
+
 float
 _Scalar(const VdfContext &ctx, const TfToken &input, float fallback)
 {
@@ -329,50 +195,49 @@ _Scalar(const VdfContext &ctx, const TfToken &input, float fallback)
     return v ? *v : fallback;
 }
 
-// The rigid placement of a volume weight, inverted.
-//
-// Built from computePointFrame, NOT computeMatrix. computeMatrix is the
-// rest->posed target-local map -- a DEFORMATION, which is exactly what a
-// matrix mover wants and exactly what a placement is not. An unanimated
-// volume has posed == rest, so its computeMatrix is the identity, and a
-// volume authored at rest:space Y=5 would generate its field about the
-// origin. The posed frame is the absolute location, so the placement is
-// the map taking the identity landmarks to it.
-//
-// Scale and shear are then REMOVED rather than inverted along with the
-// rest: the guide a viewer draws is built from the orthonormalized posed
-// frame (guides are rigid), so a scale left in the matrix would deform
-// the field without deforming the drawn volume, and the artist would be
-// painting with a shape they cannot see. inputs:scaleX/Y/Z is the sole
-// authority on anisotropy, and it is applied per axis below.
-bool
-_RigidWorldToLocal(const VdfContext &ctx, GfMatrix4d *result)
+RigExecWeightPacket
+_BuildStaticWeightPacket(const VdfContext &ctx)
 {
-    const RigExecPointFrame *posed =
-        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->selfMatrix);
-    if (!posed || !posed->IsValid() || posed->IsDegenerate()) {
-        return false;
-    }
-    GfMatrix4d placement(1.0);
-    if (!rigExec::RigExecPointsToMatrix(
-            rigExec::RigExecIdentityLandmarks(), posed->points, &placement)) {
-        return false;
-    }
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (!std::isfinite(placement[i][j])) {
-                return false;
-            }
-        }
-    }
-    GfMatrix4d rigid = placement.RemoveScaleShear();
-    const double det = rigid.GetDeterminant();
-    if (!std::isfinite(det) || std::abs(det) < 1e-12) {
-        return false;
-    }
-    *result = rigid.GetInverse();
-    return true;
+    static const TfToken constant("constant");
+    static const TfToken strict("strict");
+    rigExec::RigExecStaticWeightInputs inputs;
+    const TfToken *repr =
+        ctx.GetInputValuePtr<TfToken>(_tokens->representation);
+    const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->rangePolicy);
+    inputs.representation = repr ? *repr : constant;
+    inputs.rangePolicy = policy ? *policy : strict;
+    const float *def = ctx.GetInputValuePtr<float>(_tokens->defaultWeight);
+    inputs.defaultWeight = def ? *def : 0.0f;
+    inputs.values = _CollectScalars<float>(ctx, _tokens->values);
+    inputs.indices = _CollectScalars<int>(ctx, _tokens->indices);
+    return rigExec::RigExecBuildStaticWeightPacket(inputs);
 }
+
+RigExecWeightPacket
+_BuildDynamicWeightPacket(const VdfContext &ctx)
+{
+    static const TfToken constant("constant");
+    static const TfToken strict("strict");
+    rigExec::RigExecDynamicWeightInputs inputs;
+    const TfToken *repr =
+        ctx.GetInputValuePtr<TfToken>(_tokens->representation);
+    const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->rangePolicy);
+    inputs.representation = repr ? *repr : constant;
+    inputs.rangePolicy = policy ? *policy : strict;
+    inputs.driver = _Scalar(ctx, _tokens->inputsDriver, 1.0f);
+    inputs.scale = _Scalar(ctx, _tokens->inputsScale, 1.0f);
+    inputs.bias = _Scalar(ctx, _tokens->inputsBias, 0.0f);
+    return rigExec::RigExecBuildDynamicWeightPacket(
+        inputs, ctx.GetInputValuePtr<RigExecWeightPacket>(_tokens->basePacket));
+}
+
+// ---------------------------------------------------------------------------
+// Volumetric weight objects (spec §4.1 volumetric extension).
+//
+// The three shapes share a prologue (placement, band, sampled points) and
+// differ only in the extra inputs their distance function needs, so the
+// common half is read once here and each callback adds its own.
+// ---------------------------------------------------------------------------
 
 // Reads the band, the invert/strength pair, and the baked remap.
 rigExec::RigExecFalloffParams
@@ -391,252 +256,89 @@ _ReadFalloffParams(const VdfContext &ctx)
     return params;
 }
 
-// Per-axis divisors. Non-positive or non-finite collapses the volume, so
-// it invalidates the packet rather than dividing by zero.
-bool
-_ReadScales(const VdfContext &ctx, GfVec3f *scales)
+// Per-axis divisors. Whether they describe a volume at all is the
+// kernel's judgement (see RigExecBuildVolumeWeightPacket); this reads.
+void
+_ReadAxisScales(const VdfContext &ctx, GfVec3f *scales)
 {
     (*scales)[0] = _Scalar(ctx, _tokens->inputsScaleX, 1.0f);
     (*scales)[1] = _Scalar(ctx, _tokens->inputsScaleY, 1.0f);
     (*scales)[2] = _Scalar(ctx, _tokens->inputsScaleZ, 1.0f);
-    for (int a = 0; a < 3; ++a) {
-        if (!std::isfinite((*scales)[a]) || (*scales)[a] <= 0.0f) {
-            return false;
-        }
-    }
-    return true;
 }
 
-// The shared prologue: structural tokens, placement, band, and the points
-// the field is measured over. Returns false when the packet is invalid.
-bool
-_BeginVolumeWeight(
-    const VdfContext &ctx,
-    RigExecWeightPacket *packet,
-    GfMatrix4d *worldToLocal,
-    rigExec::RigExecFalloffParams *params,
-    std::vector<GfVec3f> *points)
+// The inputs every volumetric shape reads, in the order the callbacks
+// used to read them.
+rigExec::RigExecVolumeWeightInputs
+_ReadVolumeWeightInputs(const VdfContext &ctx)
 {
     static const TfToken dense("dense");
     static const TfToken clamp("clamp");
+    rigExec::RigExecVolumeWeightInputs inputs;
     const TfToken *repr =
         ctx.GetInputValuePtr<TfToken>(_tokens->representation);
     const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->rangePolicy);
-    packet->representation = repr ? *repr : dense;
-    packet->rangePolicy = policy ? *policy : clamp;
-    // A generated field has a value at every element, so dense is the only
-    // representation it can honestly publish. Rejected, never coerced.
-    if (packet->representation != "dense") {
-        return false;
+    inputs.representation = repr ? *repr : dense;
+    inputs.rangePolicy = policy ? *policy : clamp;
+    // The placement comes from computePointFrame, NOT computeMatrix; see
+    // RigExecRigidWorldToLocal for why that distinction is load bearing.
+    if (const RigExecPointFrame *posed =
+            ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->selfMatrix)) {
+        inputs.placement = *posed;
+        inputs.hasPlacement = true;
     }
-    if (packet->rangePolicy != "strict" && packet->rangePolicy != "clamp") {
-        return false;
-    }
-    if (!_RigidWorldToLocal(ctx, worldToLocal)) {
-        return false;
-    }
-    *params = _ReadFalloffParams(ctx);
-
-    // rigExec:sampleSource, when authored, replaces the weightTarget for
-    // SAMPLING only -- the weighted domain stays the target, so the two
-    // must still agree in cardinality.
-    const std::vector<GfVec3f> target =
-        _CollectPoints(ctx, _tokens->weightTargetPoints);
-    if (target.empty()) {
-        return false;
-    }
-    std::vector<GfVec3f> source =
-        _CollectPoints(ctx, _tokens->sampleSourcePoints);
-    if (!source.empty() && source.size() != target.size()) {
-        return false;  // a reference shape of another cardinality is a lie
-    }
-    *points = source.empty() ? target : std::move(source);
-    return true;
-}
-
-// The shared epilogue: range policy over the generated field.
-bool
-_FinishVolumeWeight(
-    RigExecWeightPacket *packet, std::vector<float> *weights)
-{
-    for (float &w : *weights) {
-        if (!_ApplyRangePolicy(packet->rangePolicy, &w)) {
-            return false;
-        }
-    }
-    packet->values = std::move(*weights);
-    packet->defaultWeight = 0.0f;  // canonical dense default
-    packet->valid = true;
-    return true;
-}
-
-// Divides local coordinates by the per-axis scales, turning the sphere's
-// iso-surfaces into ellipsoids and the curve's tube into an elliptical
-// one. Folded into the matrix so the hot loop stays a single transform.
-GfMatrix4d
-_ApplyAxisScales(const GfMatrix4d &worldToLocal, const GfVec3f &scales)
-{
-    GfMatrix4d divide(1.0);
-    divide.SetScale(GfVec3d(1.0 / double(scales[0]), 1.0 / double(scales[1]),
-                            1.0 / double(scales[2])));
-    return worldToLocal * divide;
+    inputs.params = _ReadFalloffParams(ctx);
+    inputs.targetPoints = _CollectPoints(ctx, _tokens->weightTargetPoints);
+    inputs.samplePoints = _CollectPoints(ctx, _tokens->sampleSourcePoints);
+    return inputs;
 }
 
 RigExecWeightPacket
 _BuildSphereWeightPacket(const VdfContext &ctx)
 {
-    RigExecWeightPacket packet;
-    GfMatrix4d worldToLocal;
-    rigExec::RigExecFalloffParams params;
-    std::vector<GfVec3f> points;
-    if (!_BeginVolumeWeight(ctx, &packet, &worldToLocal, &params, &points)) {
-        return packet;
-    }
-    GfVec3f scales;
-    if (!_ReadScales(ctx, &scales)) {
-        return packet;
-    }
-    std::vector<float> weights;
-    rigExec::RigExecSphereWeightField(
-        points, _ApplyAxisScales(worldToLocal, scales), params, &weights);
-    if (!_FinishVolumeWeight(&packet, &weights)) {
-        return RigExecWeightPacket();
-    }
-    return packet;
+    static const TfToken sphereType("RigExecSphereWeight");
+    rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
+    _ReadAxisScales(ctx, &inputs.scales);
+    return rigExec::RigExecBuildVolumeWeightPacket(sphereType, inputs);
 }
 
 RigExecWeightPacket
 _BuildPlaneWeightPacket(const VdfContext &ctx)
 {
-    RigExecWeightPacket packet;
-    GfMatrix4d worldToLocal;
-    rigExec::RigExecFalloffParams params;
-    std::vector<GfVec3f> points;
-    if (!_BeginVolumeWeight(ctx, &packet, &worldToLocal, &params, &points)) {
-        return packet;
-    }
+    static const TfToken planeType("RigExecPlaneWeight");
     static const TfToken yAxis("y");
-    const TfToken *axisToken =
-        ctx.GetInputValuePtr<TfToken>(_tokens->planeAxisAttr);
-    const TfToken axis = axisToken ? *axisToken : yAxis;
-    int axisIndex;
-    if (axis == "x") {
-        axisIndex = 0;
-    } else if (axis == "y") {
-        axisIndex = 1;
-    } else if (axis == "z") {
-        axisIndex = 2;
-    } else {
-        return packet;  // unknown structural token: rejected, not coerced
-    }
-
-    // Bounded clips the field to the in-plane rectangle; unbounded is
-    // the infinite half-space gradient. The extents are read ONLY in the
-    // bounded arm: unbounded does not consult them for the field (they
-    // still size the drawn guide), so a bad extent there is a legibility
-    // problem, not a reason to invalidate the whole rig.
     static const TfToken unbounded("unbounded");
-    static const TfToken bounded("bounded");
-    const TfToken *boundsToken =
+    rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
+    const TfToken *axis = ctx.GetInputValuePtr<TfToken>(_tokens->planeAxisAttr);
+    const TfToken *bounds =
         ctx.GetInputValuePtr<TfToken>(_tokens->planeBoundsAttr);
-    const TfToken boundsMode = boundsToken ? *boundsToken : unbounded;
-    rigExec::RigExecPlaneBounds extent;
-    const rigExec::RigExecPlaneBounds *extentPtr = nullptr;
-    if (boundsMode == bounded) {
-        extent.extentU = _Scalar(ctx, _tokens->inputsExtentU, 1.0f);
-        extent.extentV = _Scalar(ctx, _tokens->inputsExtentV, 1.0f);
-        for (const float e : {extent.extentU, extent.extentV}) {
-            if (!std::isfinite(e) || e <= 0.0f) {
-                return packet;  // no such rectangle; same rule as scales
-            }
-        }
-        extentPtr = &extent;
-    } else if (boundsMode != unbounded) {
-        return packet;  // unknown structural token: rejected, not coerced
-    }
-
-    std::vector<float> weights;
-    rigExec::RigExecPlaneWeightField(
-        points, worldToLocal, axisIndex, params, &weights, extentPtr);
-    if (!_FinishVolumeWeight(&packet, &weights)) {
-        return RigExecWeightPacket();
-    }
-    return packet;
+    inputs.planeAxis = axis ? *axis : yAxis;
+    inputs.planeBounds = bounds ? *bounds : unbounded;
+    inputs.extentU = _Scalar(ctx, _tokens->inputsExtentU, 1.0f);
+    inputs.extentV = _Scalar(ctx, _tokens->inputsExtentV, 1.0f);
+    return rigExec::RigExecBuildVolumeWeightPacket(planeType, inputs);
 }
 
 RigExecWeightPacket
 _BuildCurveWeightPacket(const VdfContext &ctx)
 {
-    RigExecWeightPacket packet;
-    GfMatrix4d worldToLocal;
-    rigExec::RigExecFalloffParams params;
-    std::vector<GfVec3f> points;
-    if (!_BeginVolumeWeight(ctx, &packet, &worldToLocal, &params, &points)) {
-        return packet;
-    }
-    GfVec3f scales;
-    if (!_ReadScales(ctx, &scales)) {
-        return packet;
-    }
-    const std::vector<GfVec3f> curve =
-        _CollectPoints(ctx, _tokens->curvePoints);
-    if (curve.empty()) {
-        return packet;  // a curve weight with no curve is not a field
-    }
-    std::vector<float> weights;
-    rigExec::RigExecCurveWeightField(
-        points, curve, _ApplyAxisScales(worldToLocal, scales), params,
-        &weights);
-    if (!_FinishVolumeWeight(&packet, &weights)) {
-        return RigExecWeightPacket();
-    }
-    return packet;
+    static const TfToken curveType("RigExecCurveWeight");
+    rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
+    _ReadAxisScales(ctx, &inputs.scales);
+    inputs.curvePoints = _CollectPoints(ctx, _tokens->curvePoints);
+    return rigExec::RigExecBuildVolumeWeightPacket(curveType, inputs);
 }
 
-// Composition. Every input is resolved to a dense field over the same
-// element count before folding, so a static sparse paint and a generated
-// volume field compose without either knowing about the other.
 RigExecWeightPacket
 _BuildCombineWeightPacket(const VdfContext &ctx)
 {
-    RigExecWeightPacket packet;
     static const TfToken dense("dense");
     static const TfToken clamp("clamp");
+    static const TfToken multiply("multiply");
     const TfToken *repr =
         ctx.GetInputValuePtr<TfToken>(_tokens->representation);
     const TfToken *policy = ctx.GetInputValuePtr<TfToken>(_tokens->rangePolicy);
-    packet.representation = repr ? *repr : dense;
-    packet.rangePolicy = policy ? *policy : clamp;
-    if (packet.representation != "dense") {
-        return packet;
-    }
-    if (packet.rangePolicy != "strict" && packet.rangePolicy != "clamp") {
-        return packet;
-    }
-
-    static const TfToken multiply("multiply");
-    const TfToken *modeToken =
+    const TfToken *mode =
         ctx.GetInputValuePtr<TfToken>(_tokens->combineModeAttr);
-    const TfToken modeName = modeToken ? *modeToken : multiply;
-    rigExec::RigExecWeightCombine mode;
-    if (modeName == "multiply") {
-        mode = rigExec::RigExecWeightCombine::Multiply;
-    } else if (modeName == "add") {
-        mode = rigExec::RigExecWeightCombine::Add;
-    } else if (modeName == "subtract") {
-        mode = rigExec::RigExecWeightCombine::Subtract;
-    } else if (modeName == "max") {
-        mode = rigExec::RigExecWeightCombine::Max;
-    } else if (modeName == "min") {
-        mode = rigExec::RigExecWeightCombine::Min;
-    } else if (modeName == "average") {
-        mode = rigExec::RigExecWeightCombine::Average;
-    } else if (modeName == "overlay") {
-        mode = rigExec::RigExecWeightCombine::Overlay;
-    } else {
-        return packet;
-    }
-
     // Authored target order is preserved: subtract and overlay are order
     // dependent by design (see the schema doc).
     std::vector<RigExecWeightPacket> inputs;
@@ -646,68 +348,15 @@ _BuildCombineWeightPacket(const VdfContext &ctx)
             inputs.push_back(*it);
         }
     }
-    // Element count. A dense input carries it; when every input is
-    // CONSTANT -- which is the schema default for an authored weight, so
-    // it is not an exotic case -- nothing among the inputs knows the
-    // cardinality and the combine has to get it from its own
-    // rigExec:weightTarget.
-    //
-    // Reading the target here is not belt-and-braces: without it a
-    // constant-only combine publishes an invalid packet and the mover
-    // passes through, while the CPU oracle resolves every constant to
-    // `count` values and moves the points. That divergence is a parity
-    // mismatch, and it is reachable the first time someone multiplies
-    // two freshly created static weights together.
-    size_t elementCount = 0;
-    for (const RigExecWeightPacket &in : inputs) {
-        if (!in.valid) {
-            return packet;  // one bad input fails the fold atomically
-        }
-        if (in.representation == "dense") {
-            if (elementCount && in.values.size() != elementCount) {
-                return packet;
-            }
-            elementCount = in.values.size();
-        }
-    }
-    if (!elementCount) {
-        VdfReadIterator<GfVec3f> it(ctx, _tokens->weightTargetPoints);
-        elementCount = it.ComputeSize();
-    }
-    if (!elementCount) {
-        return packet;
-    }
-
-    std::vector<std::vector<float>> fields;
-    fields.reserve(inputs.size());
-    for (const RigExecWeightPacket &in : inputs) {
-        std::vector<float> field(elementCount);
-        for (size_t i = 0; i < elementCount; ++i) {
-            field[i] = in.Resolve(i, elementCount);
-            if (field[i] < 0.0f) {
-                return packet;  // cardinality mismatch
-            }
-        }
-        fields.push_back(std::move(field));
-    }
-
-    std::vector<float> folded;
-    if (!rigExec::RigExecCombineWeightFields(
-            mode, fields, elementCount, &folded)) {
-        return packet;
-    }
-    const float strength = _Scalar(ctx, _tokens->strengthAttr, 1.0f);
-    const float invert = _Scalar(ctx, _tokens->inputsInvert, 0.0f);
-    for (float &w : folded) {
-        w = (w + (1.0f - 2.0f * w) * invert) * strength;
-        if (!_ApplyRangePolicy(packet.rangePolicy, &w)) {
-            return RigExecWeightPacket();
-        }
-    }
-    packet.values = std::move(folded);
-    packet.defaultWeight = 0.0f;
-    packet.valid = true;
-    return packet;
+    // rigExec:weightTarget is only ever read for its SIZE, when no input
+    // is dense enough to carry the cardinality itself -- so take the size
+    // and never the points.
+    VdfReadIterator<GfVec3f> target(ctx, _tokens->weightTargetPoints);
+    return rigExec::RigExecBuildCombineWeightPacket(
+        repr ? *repr : dense, policy ? *policy : clamp,
+        mode ? *mode : multiply, inputs, target.ComputeSize(),
+        _Scalar(ctx, _tokens->strengthAttr, 1.0f),
+        _Scalar(ctx, _tokens->inputsInvert, 0.0f));
 }
 
 RigExecBlendSampleData
