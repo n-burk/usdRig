@@ -56,9 +56,10 @@ RigExecBuildStaticWeightPacket(const RigExecStaticWeightInputs &inputs)
                 return packet;  // size mismatch: invalid
             }
         } else {
-            for (const float v : inputs.values) {
-                packet.values.push_back(v);
-            }
+            // One sized copy, not a push_back loop: the caller already
+            // holds the values in a vector, and a dense paint is one
+            // float per mesh element.
+            packet.values = inputs.values;
         }
     }
     // Canonical sorted sparse support; authored pair order is
@@ -188,8 +189,8 @@ RigExecRigidWorldToLocal(const RigExecPointFrame &posed, GfMatrix4d *result)
 
 namespace {
 
-// Per-axis divisors. Non-positive or non-finite collapses the volume, so
-// it invalidates the packet rather than dividing by zero.
+// Per-axis divisors have to describe a volume: see _CheckVolumePrologue,
+// which is the only caller.
 bool
 _ValidateScales(const GfVec3f &scales)
 {
@@ -201,10 +202,53 @@ _ValidateScales(const GfVec3f &scales)
     return true;
 }
 
+// True for the shapes whose distance function divides local coordinates
+// by inputs.scales. The plane ignores them, so a plane whose scaleX is
+// zero is still a perfectly good plane.
+bool
+_UsesAxisScales(const TfToken &typeName)
+{
+    static const TfToken sphere("RigExecSphereWeight");
+    static const TfToken curve("RigExecCurveWeight");
+    return typeName == sphere || typeName == curve;
+}
+
+// Everything a volumetric weight can settle before it looks at a single
+// point: the structural tokens, the placement, and the divisors the shape
+// is about to divide by. Kept separate from the rest of the prologue so a
+// caller that has to gather a whole mesh to fill in targetPoints can ask
+// first -- see RigExecVolumeWeightCanBuild.
+bool
+_CheckVolumePrologue(
+    bool usesScales,
+    const RigExecVolumeWeightInputs &inputs,
+    GfMatrix4d *worldToLocal)
+{
+    // A generated field has a value at every element, so dense is the only
+    // representation it can honestly publish. Rejected, never coerced.
+    if (inputs.representation != "dense") {
+        return false;
+    }
+    if (inputs.rangePolicy != "strict" && inputs.rangePolicy != "clamp") {
+        return false;
+    }
+    if (!inputs.hasPlacement ||
+        !RigExecRigidWorldToLocal(inputs.placement, worldToLocal)) {
+        return false;
+    }
+    // Non-positive or non-finite collapses the volume, so it invalidates
+    // the packet rather than dividing by zero.
+    if (usesScales && !_ValidateScales(inputs.scales)) {
+        return false;
+    }
+    return true;
+}
+
 // The shared prologue: structural tokens, placement, band, and the points
 // the field is measured over. Returns false when the packet is invalid.
 bool
 _BeginVolumeWeight(
+    bool usesScales,
     const RigExecVolumeWeightInputs &inputs,
     RigExecWeightPacket *packet,
     GfMatrix4d *worldToLocal,
@@ -212,16 +256,7 @@ _BeginVolumeWeight(
 {
     packet->representation = inputs.representation;
     packet->rangePolicy = inputs.rangePolicy;
-    // A generated field has a value at every element, so dense is the only
-    // representation it can honestly publish. Rejected, never coerced.
-    if (packet->representation != "dense") {
-        return false;
-    }
-    if (packet->rangePolicy != "strict" && packet->rangePolicy != "clamp") {
-        return false;
-    }
-    if (!inputs.hasPlacement ||
-        !RigExecRigidWorldToLocal(inputs.placement, worldToLocal)) {
+    if (!_CheckVolumePrologue(usesScales, inputs, worldToLocal)) {
         return false;
     }
 
@@ -277,10 +312,9 @@ _BuildSphereWeightPacket(const RigExecVolumeWeightInputs &inputs)
     RigExecWeightPacket packet;
     GfMatrix4d worldToLocal;
     const std::vector<GfVec3f> *points = nullptr;
-    if (!_BeginVolumeWeight(inputs, &packet, &worldToLocal, &points)) {
-        return packet;
-    }
-    if (!_ValidateScales(inputs.scales)) {
+    if (!_BeginVolumeWeight(
+            /* usesScales = */ true, inputs, &packet, &worldToLocal,
+            &points)) {
         return packet;
     }
     std::vector<float> weights;
@@ -299,7 +333,9 @@ _BuildPlaneWeightPacket(const RigExecVolumeWeightInputs &inputs)
     RigExecWeightPacket packet;
     GfMatrix4d worldToLocal;
     const std::vector<GfVec3f> *points = nullptr;
-    if (!_BeginVolumeWeight(inputs, &packet, &worldToLocal, &points)) {
+    if (!_BeginVolumeWeight(
+            /* usesScales = */ false, inputs, &packet, &worldToLocal,
+            &points)) {
         return packet;
     }
     int axisIndex;
@@ -318,9 +354,11 @@ _BuildPlaneWeightPacket(const RigExecVolumeWeightInputs &inputs)
     // the bounded arm: unbounded does not use them for the field (they
     // still size the drawn guide), so a bad extent there is a legibility
     // problem, not a reason to invalidate the whole rig.
+    static const TfToken unbounded("unbounded");
+    static const TfToken bounded("bounded");
     RigExecPlaneBounds extent;
     const RigExecPlaneBounds *extentPtr = nullptr;
-    if (inputs.planeBounds == "bounded") {
+    if (inputs.planeBounds == bounded) {
         extent.extentU = inputs.extentU;
         extent.extentV = inputs.extentV;
         for (const float e : {extent.extentU, extent.extentV}) {
@@ -329,7 +367,7 @@ _BuildPlaneWeightPacket(const RigExecVolumeWeightInputs &inputs)
             }
         }
         extentPtr = &extent;
-    } else if (inputs.planeBounds != "unbounded") {
+    } else if (inputs.planeBounds != unbounded) {
         return packet;  // unknown structural token: rejected, not coerced
     }
 
@@ -348,10 +386,9 @@ _BuildCurveWeightPacket(const RigExecVolumeWeightInputs &inputs)
     RigExecWeightPacket packet;
     GfMatrix4d worldToLocal;
     const std::vector<GfVec3f> *points = nullptr;
-    if (!_BeginVolumeWeight(inputs, &packet, &worldToLocal, &points)) {
-        return packet;
-    }
-    if (!_ValidateScales(inputs.scales)) {
+    if (!_BeginVolumeWeight(
+            /* usesScales = */ true, inputs, &packet, &worldToLocal,
+            &points)) {
         return packet;
     }
     if (inputs.curvePoints.empty()) {
@@ -370,6 +407,15 @@ _BuildCurveWeightPacket(const RigExecVolumeWeightInputs &inputs)
 
 }  // namespace
 
+bool
+RigExecVolumeWeightCanBuild(
+    const TfToken &typeName, const RigExecVolumeWeightInputs &inputs)
+{
+    GfMatrix4d worldToLocal(1.0);
+    return _CheckVolumePrologue(
+        _UsesAxisScales(typeName), inputs, &worldToLocal);
+}
+
 RigExecWeightPacket
 RigExecBuildVolumeWeightPacket(
     const TfToken &typeName, const RigExecVolumeWeightInputs &inputs)
@@ -386,7 +432,13 @@ RigExecBuildVolumeWeightPacket(
     if (typeName == curve) {
         return _BuildCurveWeightPacket(inputs);
     }
-    return RigExecWeightPacket();
+    // Shaped like every other rejection rather than a bare packet, so a
+    // caller that mistypes the token sees the same failure object a
+    // rejected representation produces instead of a subtly different one.
+    RigExecWeightPacket packet;
+    packet.representation = inputs.representation;
+    packet.rangePolicy = inputs.rangePolicy;
+    return packet;
 }
 
 // Composition. Every input is resolved to a dense field over the same

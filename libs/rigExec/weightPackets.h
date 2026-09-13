@@ -133,9 +133,25 @@ struct RigExecVolumeWeightInputs {
     std::vector<GfVec3f> curvePoints;  ///< rigExec:curve points (curve)
 };
 
+/// True when a volumetric weight could still produce a field once its
+/// points are known: its structural tokens are ones the shape accepts,
+/// its placement inverts, and the divisors it is about to divide by
+/// describe a volume. Nothing it consults costs anything to gather.
+///
+/// It exists so that a caller which must COPY a whole mesh to fill in
+/// targetPoints -- the exec adapter reads its rigExec:weightTarget
+/// through a read iterator -- can ask first and skip the copy for a
+/// volume that is going to be rejected anyway. It is advisory only:
+/// RigExecBuildVolumeWeightPacket repeats every one of these checks, so a
+/// caller that never asks still gets exactly the same packet.
+bool RigExecVolumeWeightCanBuild(
+    const TfToken &typeName, const RigExecVolumeWeightInputs &inputs);
+
 /// Builds the dense field a volumetric weight publishes. \p typeName is
 /// the concrete schema type ("RigExecSphereWeight", "RigExecPlaneWeight",
-/// "RigExecCurveWeight"); anything else yields an invalid packet.
+/// "RigExecCurveWeight"); anything else yields an invalid packet
+/// carrying the caller's representation and range policy, exactly as a
+/// rejected one does.
 ///
 /// Dispatch is on the type token rather than three entry points because
 /// every caller but the exec adapters -- which know their own type

@@ -182,7 +182,9 @@ std::vector<T>
 _CollectScalars(const VdfContext &ctx, const TfToken &input)
 {
     std::vector<T> values;
-    for (VdfReadIterator<T> it(ctx, input); !it.IsAtEnd(); ++it) {
+    VdfReadIterator<T> it(ctx, input);
+    values.reserve(it.ComputeSize());
+    for (; !it.IsAtEnd(); ++it) {
         values.push_back(*it);
     }
     return values;
@@ -209,7 +211,12 @@ _BuildStaticWeightPacket(const VdfContext &ctx)
     const float *def = ctx.GetInputValuePtr<float>(_tokens->defaultWeight);
     inputs.defaultWeight = def ? *def : 0.0f;
     inputs.values = _CollectScalars<float>(ctx, _tokens->values);
-    inputs.indices = _CollectScalars<int>(ctx, _tokens->indices);
+    // rigExec:indices pairs with the values in the sparse representation
+    // and means nothing in the other two, which is why the callback this
+    // replaced never dereferenced its iterator outside that arm either.
+    if (inputs.representation == "sparse") {
+        inputs.indices = _CollectScalars<int>(ctx, _tokens->indices);
+    }
     return rigExec::RigExecBuildStaticWeightPacket(inputs);
 }
 
@@ -266,8 +273,12 @@ _ReadAxisScales(const VdfContext &ctx, GfVec3f *scales)
     (*scales)[2] = _Scalar(ctx, _tokens->inputsScaleZ, 1.0f);
 }
 
-// The inputs every volumetric shape reads, in the order the callbacks
-// used to read them.
+// The inputs every volumetric shape reads, LESS the point arrays.
+//
+// The points are a whole mesh, so they are gathered separately, after
+// RigExecVolumeWeightCanBuild has said the volume can produce a field at
+// all -- the callbacks this replaced checked the placement before
+// touching a single point for the same reason.
 rigExec::RigExecVolumeWeightInputs
 _ReadVolumeWeightInputs(const VdfContext &ctx)
 {
@@ -287,9 +298,16 @@ _ReadVolumeWeightInputs(const VdfContext &ctx)
         inputs.hasPlacement = true;
     }
     inputs.params = _ReadFalloffParams(ctx);
-    inputs.targetPoints = _CollectPoints(ctx, _tokens->weightTargetPoints);
-    inputs.samplePoints = _CollectPoints(ctx, _tokens->sampleSourcePoints);
     return inputs;
+}
+
+// The weighted domain and, when authored, the shape it is sampled on.
+void
+_ReadVolumeWeightPoints(
+    const VdfContext &ctx, rigExec::RigExecVolumeWeightInputs *inputs)
+{
+    inputs->targetPoints = _CollectPoints(ctx, _tokens->weightTargetPoints);
+    inputs->samplePoints = _CollectPoints(ctx, _tokens->sampleSourcePoints);
 }
 
 RigExecWeightPacket
@@ -298,6 +316,9 @@ _BuildSphereWeightPacket(const VdfContext &ctx)
     static const TfToken sphereType("RigExecSphereWeight");
     rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
     _ReadAxisScales(ctx, &inputs.scales);
+    if (rigExec::RigExecVolumeWeightCanBuild(sphereType, inputs)) {
+        _ReadVolumeWeightPoints(ctx, &inputs);
+    }
     return rigExec::RigExecBuildVolumeWeightPacket(sphereType, inputs);
 }
 
@@ -307,14 +328,23 @@ _BuildPlaneWeightPacket(const VdfContext &ctx)
     static const TfToken planeType("RigExecPlaneWeight");
     static const TfToken yAxis("y");
     static const TfToken unbounded("unbounded");
+    static const TfToken bounded("bounded");
     rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
     const TfToken *axis = ctx.GetInputValuePtr<TfToken>(_tokens->planeAxisAttr);
     const TfToken *bounds =
         ctx.GetInputValuePtr<TfToken>(_tokens->planeBoundsAttr);
     inputs.planeAxis = axis ? *axis : yAxis;
     inputs.planeBounds = bounds ? *bounds : unbounded;
-    inputs.extentU = _Scalar(ctx, _tokens->inputsExtentU, 1.0f);
-    inputs.extentV = _Scalar(ctx, _tokens->inputsExtentV, 1.0f);
+    // Only the bounded arm consults the extents; an unbounded plane is an
+    // infinite half-space gradient and a bad extent on one is a
+    // legibility problem, not a reason to invalidate the rig.
+    if (inputs.planeBounds == bounded) {
+        inputs.extentU = _Scalar(ctx, _tokens->inputsExtentU, 1.0f);
+        inputs.extentV = _Scalar(ctx, _tokens->inputsExtentV, 1.0f);
+    }
+    if (rigExec::RigExecVolumeWeightCanBuild(planeType, inputs)) {
+        _ReadVolumeWeightPoints(ctx, &inputs);
+    }
     return rigExec::RigExecBuildVolumeWeightPacket(planeType, inputs);
 }
 
@@ -324,7 +354,10 @@ _BuildCurveWeightPacket(const VdfContext &ctx)
     static const TfToken curveType("RigExecCurveWeight");
     rigExec::RigExecVolumeWeightInputs inputs = _ReadVolumeWeightInputs(ctx);
     _ReadAxisScales(ctx, &inputs.scales);
-    inputs.curvePoints = _CollectPoints(ctx, _tokens->curvePoints);
+    if (rigExec::RigExecVolumeWeightCanBuild(curveType, inputs)) {
+        _ReadVolumeWeightPoints(ctx, &inputs);
+        inputs.curvePoints = _CollectPoints(ctx, _tokens->curvePoints);
+    }
     return rigExec::RigExecBuildVolumeWeightPacket(curveType, inputs);
 }
 
