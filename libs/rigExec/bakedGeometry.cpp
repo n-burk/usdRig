@@ -58,10 +58,22 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         out.snapshotAfter = r.snapshotAfter;
         // A declared phase is the only thing that reads the snapshot store,
         // and the pose half fills its half of that store only when one
-        // exists. transformPhase is counted too: an AtPrim transform is
-        // answered out of the same store.
-        if (!r.binding.phases.empty() ||
-            r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim) {
+        // exists. All THREE consumers the dynamic walk has are counted: the
+        // per-input phases, an AtPrim transform (answered out of the same
+        // store), and a blend sample whose points carry a phase -- that last
+        // one reads chain-point records, which the geometry half writes
+        // ungated, but leaving it out would make this flag mean "some phases"
+        // rather than "some phased read", which is what the next consumer
+        // will read it as.
+        bool phased = !r.binding.phases.empty() ||
+                      r.binding.transformPhase.kind ==
+                          RigExecReadPhaseKind::AtPrim;
+        for (const auto &[input, samples] : r.binding.blendSamples) {
+            for (const RigExecBlendSampleBinding &sample : samples) {
+                phased = phased || !sample.phase.IsBase();
+            }
+        }
+        if (phased) {
             B.phasedReads = true;
         }
         if (!out.moverPrim) {
@@ -168,6 +180,20 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
         }
         chain->scheduleDirty = false;
     };
+    // One overlay per revision: the generation-wide resolved inputs, plus
+    // whatever THIS revision's declared phases resolve to out of the run's
+    // snapshot store. The assembler reads inputs by path and never learns a
+    // phase exists, which is what lets a phase apply to any input. Built only
+    // for a revision that declares one -- with none the overlay is a copy of
+    // the resolved inputs with nothing added to it, and the copy is the whole
+    // cost.
+    //
+    // Run-scope scratch, deliberately: one buffer reused by every revision of
+    // every chain, which is sound only while the walk is serial. It is the
+    // same class of shared mutable state as runSnapshots and
+    // constraintDeltas, and a step graph has to treat it the same way -- one
+    // overlay buffer per revision step, never this one.
+    RigExecResolvedInputs revisionInputs;
     // WHICH points a revision is assembled against, stated once because the
     // two callers below pass different ones and the difference is invisible
     // until an operator reads them:
@@ -185,17 +211,13 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
     //
     // Skin and Matrix -- the only two operations IsBakeable admits today --
     // read neither, so this is the contract being made right before an
-    // operator that does read them arrives.
-    // One overlay per revision: the generation-wide resolved inputs, plus
-    // whatever THIS revision's declared phases resolve to out of the run's
-    // snapshot store. The assembler reads inputs by path and never learns a
-    // phase exists, which is what lets a phase apply to any input. Built only
-    // for a revision that declares one -- with none the overlay is a copy of
-    // the resolved inputs with nothing added to it, and the copy is the whole
-    // cost.
-    RigExecResolvedInputs revisionInputs;
+    // operator that does read them arrives. Taken as a range rather than a
+    // vector because the two callers hold the points in different containers
+    // and RigExecProviderValues copies them anyway: materialising the
+    // authored base into a vector of its own would be one mesh-sized copy per
+    // chain per frame that nobody reads.
     auto assemble = [&](RigExecBakedProgramImpl::GeomRevision &revision,
-                        const std::vector<GfVec3f> &basePoints) {
+                        const GfVec3f *basePoints, size_t basePointCount) {
         RigExecProviderValues values;
         values.resolved = &R;
         if (!revision.binding.phases.empty()) {
@@ -252,7 +274,7 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
             }
             values.influenceTransforms = &B.influenceScratch;
         }
-        values.basePoints = basePoints;
+        values.basePoints.assign(basePoints, basePoints + basePointCount);
         // Epoch-fixed layouts resolve through the evaluator's cache, exactly
         // as the dynamic path's assembly does -- the same cache, so the two
         // paths cannot even hold different arrays.
@@ -316,12 +338,11 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
         accountForChain(&chain);
         bool dirty = !chain.haveResult || basePoints != chain.lastBase;
         chain.lastBase = basePoints;
-        const std::vector<GfVec3f> base(basePoints.begin(), basePoints.end());
-        std::vector<GfVec3f> current = base;
+        std::vector<GfVec3f> current(basePoints.begin(), basePoints.end());
         for (RigExecBakedProgramImpl::GeomRevision &revision :
                  chain.revisions) {
             const RigExecMoverParameters parameters =
-                assemble(revision, base);
+                assemble(revision, basePoints.cdata(), basePoints.size());
             if (parameters.enabled && !parameters.valid) {
                 float scalar = 1.0f;
                 if (const UsdAttribute a = revision.moverPrim.GetAttribute(
@@ -431,7 +452,7 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
             // The chain's FINAL points, deliberately: see the assemble
             // contract above.
             const RigExecMoverParameters parameters =
-                assemble(derived.revision, current);
+                assemble(derived.revision, current.data(), current.size());
             const RigExecMoverStatus status = RigExecStatusForParameters(
                 parameters, derived.revision.moverPath);
             ++graphRevisionsBuilt;
@@ -497,10 +518,15 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // stays silent on every later frame. Empty on a bakeable rig, drained
     // anyway so a rig that starts binding reports the same lines the dynamic
     // path does. It sits here, at the tail of the run and past every bail
-    // return above it, because a drain is destructive: a frame that gave up
-    // and handed the generation to the dynamic path must leave the pending
-    // lines for the dynamic path to emit, and this is the position the
-    // dynamic walk drains from too -- immediately before its summary line.
+    // return above it [P14]. Both halves of that matter. The position is the
+    // one the dynamic walk drains from -- immediately before its summary
+    // line -- so a completed frame's diagnostics interleave identically. And
+    // a drain is destructive, so a frame that gave up must not spend the
+    // pending lines into a pose nobody publishes; what it must NOT be said to
+    // do, now that SI-5 made the cache the program's own, is leave them for
+    // the dynamic path to emit -- the caller drops the program, cache and
+    // all, and the dynamic fallback emits its own lines because it re-resolves
+    // every bind against the evaluator's still-empty cache.
     for (std::string &message : B.curvenetBindings.TakeDiagnostics()) {
         pose->diagnostics.push_back(std::move(message));
     }

@@ -712,11 +712,13 @@ struct RigExecBakedProgramImpl {
 
     /// What each geometry-domain constraint measured, keyed by the MOVER
     /// that produced it: the delta between its solved frame and its target's
-    /// authored transform. Filled by the pose walk, consumed by the geometry
-    /// half's packet assembly, and emptied at the head of every run -- the
-    /// same in-memory hand-off, in the same direction, the dynamic walk
-    /// performs with its own constraintDeltas map. Empty on every rig that
-    /// bakes today: IsBakeable refuses a geometry-domain constraint.
+    /// authored transform. Emptied at the head of every run and consumed by
+    /// the geometry half's packet assembly; the WRITER is the pose walk's
+    /// geometry-domain constraint, which does not exist yet -- IsBakeable
+    /// refuses one, so the map is empty on every rig that bakes today. The
+    /// hand-off is here, in the same direction, because it is the one the
+    /// dynamic walk performs with its own constraintDeltas map, and the
+    /// group that adds the writer should not have to invent it.
     std::map<SdfPath, GfMatrix4d> constraintDeltas;
 
     // ---- weight objects ----------------------------------------------------
