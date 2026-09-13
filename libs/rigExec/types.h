@@ -156,6 +156,52 @@ struct RigExecBlendChannel {
     }
 };
 
+/// The per-point influence layout of one skin mover, resolved once per
+/// binding epoch.
+///
+/// rigExec:jointIndices and rigExec:jointWeights are the largest static
+/// inputs any mover reads -- one int and one float per influence slot per
+/// point -- and they are LAYOUT: which joints move a point and how much,
+/// which is exactly what a binding epoch fixes. Carrying them by value in
+/// the packet meant re-reading them off the stage, re-copying them into the
+/// packet, and re-validating every element on every frame, all to arrive at
+/// the same arrays the frame before had.
+///
+/// Held by shared_ptr and compared by identity, for the same reason
+/// RigExecProfileMoverBinding is: two packets naming the same layout name
+/// the same arrays, and that identity IS the equality that matters.
+struct RigExecSkinTopology {
+    std::vector<int> indices;     ///< pointCount * elementSize
+    std::vector<float> weights;   ///< parallel to indices
+    int elementSize = 0;          ///< influence slots per point
+    size_t pointCount = 0;        ///< indices.size() / elementSize
+    /// The influence-table size the indices were range-checked against.
+    /// Epoch state (rigExec:influences is), and the O(1) guard that lets the
+    /// kernel trust the range check without repeating it.
+    size_t influenceCount = 0;
+    /// The shape, the index range and the weight values all passed; only
+    /// the influence matrices and the point count are still frame business.
+    bool validated = false;
+
+    /// Whether two layouts describe the same binding.
+    ///
+    /// Packets compare layouts by POINTER, which is the equality that
+    /// matters once a layout is shared. This is the one place the arrays are
+    /// compared by value: a cache that has been dropped and re-filled asks
+    /// it once, to decide whether it can hand back the pointer it already
+    /// had -- which is what keeps an edit that touched nothing about the
+    /// binding from re-running the per-point kernel.
+    bool operator==(const RigExecSkinTopology &o) const {
+        return elementSize == o.elementSize && pointCount == o.pointCount &&
+               influenceCount == o.influenceCount &&
+               validated == o.validated && indices == o.indices &&
+               weights == o.weights;
+    }
+    bool operator!=(const RigExecSkinTopology &o) const {
+        return !(*this == o);
+    }
+};
+
 /// Immutable per-mover parameter packet (spec §4.1: every concrete mover
 /// schema owns a statically registered computeMoverParameters). The kind
 /// token names the owning operation; unused fields stay default.
@@ -212,6 +258,12 @@ struct RigExecMoverParameters {
     int skinElementSize = 0;
     TfToken skinningMethod;
 
+    /// The epoch-fixed layout, when the evaluator resolved one. Set means
+    /// skinIndices/skinWeights are empty and the kernel reads the arrays
+    /// here instead -- which avoids re-reading, re-copying and re-validating
+    /// them once per frame.
+    std::shared_ptr<const RigExecSkinTopology> skinTopology;
+
     /// Profile Mover state: the epoch's cut-mesh and factorization, shared
     /// rather than copied because it is large and identity IS the equality
     /// that matters -- two packets naming the same binding name the same
@@ -236,6 +288,7 @@ struct RigExecMoverParameters {
                skinTransforms == o.skinTransforms &&
                skinIndices == o.skinIndices &&
                skinWeights == o.skinWeights &&
+               skinTopology == o.skinTopology &&
                skinElementSize == o.skinElementSize &&
                skinningMethod == o.skinningMethod &&
                curvenetBinding == o.curvenetBinding &&

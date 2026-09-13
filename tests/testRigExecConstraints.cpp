@@ -2906,6 +2906,121 @@ TestConstrainedSolverInputAncestor()
     }
 }
 
+// Namespace propagation must STOP at a path that owns its own pose.
+//
+// A constraint that moves an ancestor publishes a delta its namespace
+// descendants ride, but a joint a solver writes is an absolute posed
+// override: neither it nor anything beneath it may take that ride. Every
+// other test asserts the ride; this one asserts the stop, and its negative
+// control is the same subtree with the joint unbound, which must ride.
+//
+// The constraint's source is itself solver-driven, so the constraint is
+// scheduled after every solver batch and nothing rewrites the blocked frames
+// afterwards -- with the constraint first, a later solver commit would
+// re-derive the subtree from its own output and hide a lost boundary.
+static void
+TestSolverOwnedJointBlocksNamespacePropagation()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    // rest:tx is parent-relative: the asset-space origins below are the sums
+    // spelled out in the expectations.
+    const auto provider = [&](const char *path, const char *type, double x) {
+        const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken(type));
+        prim.GetAttribute(TfToken("rest:tx")).Set(x);
+        prim.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        return prim;
+    };
+    const auto control = [&](const char *path, double x) {
+        return provider(path, "RigExecControl", x);
+    };
+    const auto joint = [&](const char *path, double x) {
+        return provider(path, "RigExecJoint", x);
+    };
+    const auto fkChain = [&](const char *name, const UsdPrim &driver,
+                             const SdfPath &drivenJoint) {
+        const UsdPrim solver = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Solvers/") + name),
+            TfToken("RigExecFkChain"));
+        solver.GetRelationship(TfToken("rigExec:controls"))
+            .SetTargets({driver.GetPath()});
+        solver.GetRelationship(TfToken("rigExec:joints")).SetTargets({drivenJoint});
+        return solver;
+    };
+
+    const UsdPrim lead = control("/Asset/Rig/Controls/Lead", 0);
+    lead.GetAttribute(TfToken("avars:tx")).Set(2.0, UsdTimeCode(1.0));
+    lead.GetAttribute(TfToken("avars:tx")).Set(5.0, UsdTimeCode(2.0));
+    const UsdPrim leadJoint = joint("/Asset/Rig/Joints/Lead", 0);
+    fkChain("Lead", lead, leadJoint.GetPath());
+
+    // The moved subtree. Bound is solver-owned and Free is not; each carries
+    // a deeper provider that inherits its namespace pose.
+    const UsdPrim group = control("/Asset/Rig/Controls/Group", 0);
+    const UsdPrim bound = joint("/Asset/Rig/Controls/Group/Bound", 1);
+    const SdfPath boundTip = control("/Asset/Rig/Controls/Group/Bound/Tip", 2).GetPath();
+    const UsdPrim free = joint("/Asset/Rig/Controls/Group/Free", 10);
+    const SdfPath freeTip = control("/Asset/Rig/Controls/Group/Free/Tip", 11).GetPath();
+    const UsdPrim boundDriver = control("/Asset/Rig/Controls/BoundDriver", 1);
+    const UsdPrim boundSolver = fkChain("Bound", boundDriver, bound.GetPath());
+
+    const UsdPrim move = MakeConstraint(
+        stage, "MoveGroup", "RigExecPositionConstraint", {group.GetPath()});
+    move.GetRelationship(TfToken("rigExec:sources")).SetTargets({leadJoint.GetPath()});
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+
+    // `delta` is where the constraint takes Group, and therefore the shift
+    // every unblocked descendant must show.
+    const auto check = [&](double time, double delta, bool blocked) {
+        const auto pose = evaluator.Evaluate(UsdTimeCode(time));
+        CHECK(pose.valid);
+        if (!pose.valid) return;
+        const auto joints = [&](const SdfPath &path) {
+            const auto frame = pose.jointFramesFinal.find(path);
+            CHECK(frame != pose.jointFramesFinal.end());
+            return frame == pose.jointFramesFinal.end()
+                ? GfVec3d(std::numeric_limits<double>::quiet_NaN())
+                : frame->second.Origin();
+        };
+        const auto controls = [&](const SdfPath &path) {
+            const auto frame = pose.controlFrames.find(path);
+            CHECK(frame != pose.controlFrames.end());
+            return frame == pose.controlFrames.end()
+                ? GfVec3d(std::numeric_limits<double>::quiet_NaN())
+                : frame->second.Origin();
+        };
+        CHECK(Near(controls(group.GetPath()), GfVec3d(delta, 0, 0)));
+        // Unowned: the whole subtree rides the delta.
+        CHECK(Near(joints(free.GetPath()), GfVec3d(10 + delta, 0, 0)));
+        CHECK(Near(controls(freeTip), GfVec3d(21 + delta, 0, 0)));
+        // Owned by a solver: the joint holds its solved frame and its own
+        // descendant stays with it. Unbind the solver and both ride.
+        CHECK(Near(joints(bound.GetPath()),
+                   GfVec3d(blocked ? 1 : 1 + delta, 0, 0)));
+        CHECK(Near(controls(boundTip),
+                   GfVec3d(blocked ? 3 : 3 + delta, 0, 0)));
+    };
+    // Two times: the ownership table is rebuilt per evaluation, and a table
+    // that survived one would be wrong on the next.
+    check(1.0, 2.0, true);
+    check(2.0, 5.0, true);
+
+    // Negative control: the same rig with Bound bound to nothing.
+    joint("/Asset/Rig/Joints/Decoy", 0);
+    boundSolver.GetRelationship(TfToken("rigExec:joints"))
+        .SetTargets({SdfPath("/Asset/Rig/Joints/Decoy")});
+    errors.clear();
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+    check(1.0, 2.0, false);
+    check(2.0, 5.0, false);
+}
+
 static void
 TestConnectedParentSpaceSolverInputs()
 {
@@ -2936,6 +3051,41 @@ TestConnectedParentSpaceSolverInputs()
     const UsdPrim bridge = control("/Asset/Rig/Controls/Bridge", 0);
     bridge.GetAttribute(TfToken("default:space"))
         .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
+    // Bridge's own namespace descendants: the connected refresh has to carry
+    // the BASE phase of a descendant with its connected ancestor, and has to
+    // honour the same ownership boundary the constraint walk honours. Rider
+    // inherits its pose and must follow; Owner is written by a solver of its
+    // own and must not. Owner has to be solver-bound for the boundary to be
+    // observable at all: a descendant the refresh walk visits in its own
+    // right recomputes its base frame from its own tap straight afterwards,
+    // while a solver-bound joint is skipped, so what the carry leaves on it
+    // is what the pose publishes.
+    const UsdPrim rider = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Bridge/Rider"), TfToken("RigExecJoint"));
+    rider.GetAttribute(TfToken("rest:tx")).Set(1.0);
+    rider.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    const UsdPrim owner = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Bridge/Owner"), TfToken("RigExecJoint"));
+    owner.GetAttribute(TfToken("rest:tx")).Set(1.0);
+    owner.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    // A descendant a constraint owns is skipped by the refresh walk too, so
+    // its base phase is exactly what the loop leaves behind.
+    const UsdPrim held = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Bridge/Held"), TfToken("RigExecJoint"));
+    held.GetAttribute(TfToken("rest:tx")).Set(2.0);
+    held.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    MakeXform(stage, SdfPath("/Asset/HeldTarget"), Matrix(GfVec3d(9, 0, 0)));
+    MakeConstraint(stage, "MoveHeld", "RigExecPositionConstraint", {held.GetPath()})
+        .GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/HeldTarget")});
+    const UsdPrim ownerDriver = control("/Asset/Rig/Controls/OwnerDriver", 7);
+    {
+        const UsdPrim fk = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Solvers/Owner"), TfToken("RigExecFkChain"));
+        fk.GetRelationship(TfToken("rigExec:controls"))
+            .SetTargets({ownerDriver.GetPath()});
+        fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({owner.GetPath()});
+    }
     const UsdPrim goal = control("/Asset/Rig/Controls/Goal", 2);
     goal.GetAttribute(TfToken("parent:space"))
         .SetConnections({bridge.GetPath().AppendProperty(TfToken("posed:defaultSpace"))});
@@ -2968,37 +3118,56 @@ TestConnectedParentSpaceSolverInputs()
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const size_t epoch = evaluator.GetBindingEpochDigest();
-    auto check = [&](double expected, size_t evaluations) {
+    // `riderBase` is where Bridge's BASE phase leaves its inheriting
+    // descendant, which is one unit past Bridge's own base frame and lags
+    // the final phase whenever a constraint has revised Bridge's input.
+    auto check = [&](double expected, size_t evaluations, double riderBase) {
         const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(pose.valid);
         CHECK(pose.solverEvaluations == evaluations);
         if (pose.valid) {
             CHECK(Near(pose.controlFrames.at(goal.GetPath()).Origin(), GfVec3d(expected, 0, 0)));
             CHECK(Near(pose.jointFramesFinal.at(joints[2]).Origin(), GfVec3d(expected, 0, 0)));
+            // Both phases of a connected provider carry its descendants.
+            CHECK(Near(pose.jointFramesBase.at(rider.GetPath()).Origin(),
+                       GfVec3d(riderBase, 0, 0)));
+            CHECK(Near(pose.jointFramesFinal.at(rider.GetPath()).Origin(),
+                       pose.controlFrames.at(bridge.GetPath()).Origin() +
+                           GfVec3d(1, 0, 0)));
+            // Held sits one unit further out and is carried by the same
+            // write, with its own constraint owning only the final phase.
+            CHECK(Near(pose.jointFramesBase.at(held.GetPath()).Origin(),
+                       GfVec3d(riderBase + 1, 0, 0)));
+            CHECK(Near(pose.jointFramesFinal.at(held.GetPath()).Origin(),
+                       GfVec3d(9, 0, 0)));
+            // ... and neither may cross an ownership boundary: Owner keeps
+            // the frame its own solver wrote, in both phases.
+            CHECK(Near(pose.jointFramesBase.at(owner.GetPath()).Origin(), GfVec3d(7, 0, 0)));
+            CHECK(Near(pose.jointFramesFinal.at(owner.GetPath()).Origin(), GfVec3d(7, 0, 0)));
         }
         return pose;
     };
-    const auto first = check(7, 3);
+    const auto first = check(7, 4, 5);
     if (first.valid) {
         CHECK(Near(first.jointFramesBase.at(source.GetPath()).Origin(), GfVec3d(4, 0, 0)));
         CHECK(Near(first.jointFramesFinal.at(source.GetPath()).Origin(), GfVec3d(5, 0, 0)));
     }
-    check(7, 0);
+    check(7, 0, 5);
     goal.GetAttribute(TfToken("rest:tx")).Set(3.0);
-    check(8, 1);
+    check(8, 1, 5);
     target.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(6, 0, 0)));
-    check(9, 1);
+    check(9, 1, 5);
     CHECK(evaluator.GetBindingEpochDigest() == epoch);
     bridge.GetAttribute(TfToken("default:space"))
         .SetConnections({altRelay.GetPath().AppendProperty(TfToken("parent:space"))});
-    check(5, 3);
+    check(5, 4, 3);
     CHECK(evaluator.GetBindingEpochDigest() != epoch);
     target.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(7, 0, 0)));
-    check(5, 0);
+    check(5, 0, 3);
     altDriver.GetAttribute(TfToken("avars:tx")).Set(1.0);
-    check(6, 2);
+    check(6, 2, 4);
     altDriver.GetAttribute(TfToken("avars:tx")).Set(2.0);
-    check(7, 2);
+    check(7, 2, 5);
     // Connected space ancestry participates in cycle validation.
     bridge.GetAttribute(TfToken("default:space"))
         .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
@@ -3833,6 +4002,7 @@ main()
     TestSolverTransitiveConnectionInvalidation();
     TestConstraintSolverDependencySchedule();
     TestConstrainedSolverInputAncestor();
+    TestSolverOwnedJointBlocksNamespacePropagation();
     TestConnectedParentSpaceSolverInputs();
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();

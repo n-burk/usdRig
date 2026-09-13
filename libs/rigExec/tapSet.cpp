@@ -177,8 +177,12 @@ RigExecTapSet::Prepare()
             _dirty = true;
         },
         [this](const ExecRequestIndexSet &) {
+            // A time change invalidates values, not the request: the compiled
+            // network and its schedule are time-independent. Clearing
+            // _prepared here would rebuild and re-schedule every request on
+            // every animated frame, which is the whole cost of scrubbing a
+            // rig that has time samples.
             _dirty = true;
-            _prepared = false;
         }));
     if (!_request->IsValid()) {
         return false;
@@ -186,6 +190,22 @@ RigExecTapSet::Prepare()
     system->PrepareRequest(*_request);
     _prepared = true;
     return true;
+}
+
+void
+RigExecTapSet::Warm(UsdTimeCode time)
+{
+    if (!_prepared || (_request && !_request->IsValid())) {
+        Prepare();
+    }
+    if (_addresses.empty() || !_request || !_request->IsValid()) {
+        return;
+    }
+    ExecUsdSystem *const system = GetSystem();
+    system->ChangeTime(time);
+    // The cache view is deliberately dropped: the point is the computation it
+    // leaves behind in the shared executor, not the values.
+    system->Compute(*_request);
 }
 
 RigExecSnapshot
@@ -198,7 +218,12 @@ RigExecSnapshot
 RigExecTapSet::Evaluate(
     UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides)
 {
-    if (!_prepared) {
+    // Rebuild on expiry as well as on an explicit tap-list change. A request
+    // can be invalidated under us by a structural edit -- a prim deactivated
+    // and reactivated, a variant switched away and back, a payload unloaded
+    // and reloaded, a delete undone -- and nothing else would ever rebuild it,
+    // leaving the tap set returning nothing for the rest of the session.
+    if (!_prepared || (_request && !_request->IsValid())) {
         Prepare();
     }
 

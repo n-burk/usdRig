@@ -85,6 +85,7 @@ set_target_properties(rigExecMath PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ---------------------------------------------------------------------------
 add_library(rigExec SHARED
     libs/rigExec/types.cpp
+    libs/rigExec/parallel.cpp
     libs/rigExec/computations.cpp
     libs/rigExec/moverKernels.cpp
     libs/rigExec/curvenetWeightComputations.cpp
@@ -92,13 +93,14 @@ add_library(rigExec SHARED
     libs/rigExec/moverGraph.cpp
     libs/rigExec/tapSet.cpp
     libs/rigExec/rigEvaluator.cpp
+    libs/rigExec/bakedProgram.cpp
 )
 target_include_directories(rigExec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExec PUBLIC
     rigExecMath
-    plug sdf usd usdGeom
+    plug sdf usd usdGeom work
     exec execUsd ef vdf
 )
 
@@ -208,6 +210,25 @@ target_compile_definitions(testRigExecConstraints PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 
+# The suites this one and two below are re-run under the baked mode's parity
+# check.
+#
+# Nothing in them knows the mode exists: RIGEXEC_EVALUATION_MODE selects the
+# initial mode of every evaluator they build, and each generation then runs
+# BOTH paths and compares them with exact equality. The dynamic answer is
+# still what gets published, so every assertion those suites make is
+# unchanged and a disagreement cannot make one of them pass; the disagreement
+# is reported on stderr instead, and FAIL_REGULAR_EXPRESSION is what turns it
+# into a failure here. This is the only way to hold the program against the
+# several hundred rigs these suites already build.
+function(rigexec_add_baked_parity_test name)
+    add_test(NAME ${name}BakedParity COMMAND ${name} ${ARGN})
+    set_tests_properties(${name}BakedParity PROPERTIES
+        ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+endfunction()
+rigexec_add_baked_parity_test(testRigExecConstraints)
+
 add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
 target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecStandalone PRIVATE ${_rigexec_schema_resource_define})
@@ -235,10 +256,19 @@ add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
 target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)
 add_test(NAME testRigExecWeightFields COMMAND testRigExecWeightFields)
 
+# The baked evaluation mode against the dynamic path, on the shipped biped.
+add_executable(testRigExecBakedMode tests/testRigExecBakedMode.cpp)
+target_link_libraries(testRigExecBakedMode PRIVATE rigExec)
+target_compile_definitions(testRigExecBakedMode PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecBakedMode COMMAND testRigExecBakedMode
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
 add_executable(testRigExecArm tests/testRigExecArm.cpp)
 target_link_libraries(testRigExecArm PRIVATE rigExec)
 target_compile_definitions(testRigExecArm PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecArm COMMAND testRigExecArm
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+rigexec_add_baked_parity_test(testRigExecArm
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecImaging tests/testRigExecImaging.cpp)
@@ -263,6 +293,68 @@ add_executable(testRigExecMoverGraph tests/testRigExecMoverGraph.cpp)
 target_link_libraries(testRigExecMoverGraph PRIVATE rigExec)
 add_test(NAME testRigExecMoverGraph COMMAND testRigExecMoverGraph)
 
+# The epoch-fixed skin layout: what has to invalidate it, and what Compile
+# has to refuse to cache in the first place.
+add_executable(testRigExecSkinTopology tests/testRigExecSkinTopology.cpp)
+target_link_libraries(testRigExecSkinTopology PRIVATE rigExec)
+target_compile_definitions(testRigExecSkinTopology PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSkinTopology COMMAND testRigExecSkinTopology)
+
+# The static input cache's three rules -- admission, typing, and the
+# worker-thread bypass -- asserted directly, because each one's failure mode
+# is either order-dependent or probabilistic through a rig.
+add_executable(testRigExecStaticInputCache
+    tests/testRigExecStaticInputCache.cpp)
+target_link_libraries(testRigExecStaticInputCache PRIVATE rigExec)
+add_test(NAME testRigExecStaticInputCache COMMAND testRigExecStaticInputCache)
+
+# When the epoch may hold the rests once, and what has to put them back on
+# the per-frame path: animated, connected and chain-written rest channels,
+# before and after Compile, and a drag standing on one.
+add_executable(testRigExecEpochRests tests/testRigExecEpochRests.cpp)
+target_link_libraries(testRigExecEpochRests PRIVATE rigExec)
+target_compile_definitions(testRigExecEpochRests PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# And again under the parity check. A rest that moves on one path and not the
+# other is exactly what the comparator is for, and this is the suite that
+# moves rests on purpose.
+rigexec_add_baked_parity_test(testRigExecEpochRests
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# Bit-identical results from the parallel per-point kernels, both ways round:
+# against the scalar reference, and against the same binary run serially.
+add_executable(testRigExecParallelKernels tests/testRigExecParallelKernels.cpp)
+target_link_libraries(testRigExecParallelKernels PRIVATE rigExec work)
+add_test(NAME testRigExecParallelKernels COMMAND testRigExecParallelKernels)
+add_test(NAME testRigExecParallelKernelsSerial
+    COMMAND testRigExecParallelKernels)
+set_tests_properties(testRigExecParallelKernelsSerial PROPERTIES
+    ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
+
+# One task per chain inside a dependency level: the same values as the serial
+# walk, the same diagnostics order, and the same classification. Run twice,
+# the second time down the serial branch.
+add_executable(testRigExecChainLevels tests/testRigExecChainLevels.cpp)
+target_link_libraries(testRigExecChainLevels PRIVATE rigExec work)
+target_compile_definitions(testRigExecChainLevels PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecChainLevels COMMAND testRigExecChainLevels)
+add_test(NAME testRigExecChainLevelsSerial COMMAND testRigExecChainLevels)
+set_tests_properties(testRigExecChainLevelsSerial PROPERTIES
+    ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
+# And again, repeatedly. The two guards that make the level-parallel walk
+# memory-safe -- the pre-created graph nodes and the static cache's owning
+# thread -- fail probabilistically when they are broken, not deterministically:
+# a broken build passes a single run roughly three times in four. Each entry
+# above asserts the invariant directly; this one runs the whole file until it
+# fails, so a regression that slips past the invariants still lands red rather
+# than one CI run in twenty. The file costs well under a tenth of a second.
+add_test(NAME testRigExecChainLevelsRepeat
+    COMMAND testRigExecChainLevels 20)
+
 add_executable(testRigExecProfiler tests/testRigExecProfiler.cpp)
 target_link_libraries(testRigExecProfiler PRIVATE rigExec)
 add_test(NAME testRigExecProfiler COMMAND testRigExecProfiler)
@@ -272,6 +364,7 @@ target_link_libraries(testRigExecInteractive PRIVATE rigExec)
 target_compile_definitions(testRigExecInteractive PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecInteractive COMMAND testRigExecInteractive)
+rigexec_add_baked_parity_test(testRigExecInteractive)
 
 add_executable(testRigExecDefaultSpaces tests/testRigExecDefaultSpaces.cpp)
 target_link_libraries(testRigExecDefaultSpaces PRIVATE rigExec)
@@ -436,6 +529,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testInterveningXform COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_intervening_xform.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecEpochConstants COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_epoch_constants.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
     # Headless usdview-plugin tests (Qt-free modules under plugin/).
     # testGizmoMath and testGizmoScreen are written by later tasks; they
@@ -500,7 +596,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecFkControlSpacePython
                          testRigExecBake testRigExecInverse
                          testRestLocal testRestMigration
-                         testInterveningXform
+                         testInterveningXform testRigExecEpochConstants
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testLayerOpinionsModel testCompositionArcsModel
                          testAvarEditorModel
@@ -566,6 +662,12 @@ endif()
 # covered by having been added, not by being remembered here.
 get_property(_rigexec_tests DIRECTORY PROPERTY TESTS)
 foreach(_rigexec_test IN LISTS _rigexec_tests)
+    # The slowest entry here runs in a few seconds, so anything still going
+    # after two minutes is wedged, not slow. ctest's default is 1500 s, which
+    # is long enough for one hung python test -- a usdview harness waiting on
+    # a window that will never appear -- to hold a whole queue for 25 minutes
+    # and then report the same failure it would have reported at once.
+    set_tests_properties(${_rigexec_test} PROPERTIES TIMEOUT 120)
     if (WIN32)
         set_property(TEST ${_rigexec_test} APPEND PROPERTY
             ENVIRONMENT_MODIFICATION

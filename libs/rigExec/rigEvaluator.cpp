@@ -4,6 +4,7 @@
 #include "rigEvaluator.h"
 #include "curvenetWeightComputations.h"
 #include "curvenetAdjuster.h"
+#include "parallel.h"
 
 #include "frameExtraction.h"
 #include "rigExecMath/dualQuat.h"
@@ -16,8 +17,11 @@
 
 #include "pxr/base/gf/dualQuatd.h"
 #include "pxr/base/gf/rotation.h"
+#include "pxr/base/work/dispatcher.h"
+#include "pxr/base/work/withScopedParallelism.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/diagnostic.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -39,10 +43,31 @@
 #include <optional>
 #include <functional>
 #include <set>
+#include <unordered_map>
 
 namespace rigExec {
 
 namespace {
+
+// Composed connections for an attribute, skipping the composition entirely
+// when the attribute carries no authored connection opinion.
+//
+// UsdAttribute::GetConnections builds a Pcp property index and then a target
+// index for the attribute on every call, and PcpBuildTargetIndex derives its
+// targets from authored ConnectionPaths opinions alone -- so on an attribute
+// that has no such opinion anywhere in its composition the whole index build
+// can only ever come back empty. Compile and evaluate ask nearly every
+// attribute on the rig for its connections while only a small minority are
+// connected at all, so the cheap authored-metadata test comes first.
+SdfPathVector
+_AuthoredConnections(const UsdAttribute &attribute)
+{
+    SdfPathVector sources;
+    if (attribute && attribute.HasAuthoredConnections()) {
+        attribute.GetConnections(&sources);
+    }
+    return sources;
+}
 
 // A static input read that prefers what the current generation already
 // resolved.
@@ -488,8 +513,7 @@ _ValidateScalarConnection(
         ~_EraseOnReturn() { paths->erase(path); }
     } erase{visiting, attribute.GetPath()};
 
-    SdfPathVector sources;
-    attribute.GetConnections(&sources);
+    const SdfPathVector sources = _AuthoredConnections(attribute);
     if (sources.size() > 1) {
         *error = attribute.GetPath().GetString() +
                  ": scalar input must have at most one connection";
@@ -1029,8 +1053,7 @@ _CollectAttributeConnectionInputs(const UsdPrim &prim)
         }
         const UsdAttribute attribute = prim.GetStage()->GetAttributeAtPath(path);
         if (attribute) {
-            SdfPathVector sources;
-            attribute.GetConnections(&sources);
+            const SdfPathVector sources = _AuthoredConnections(attribute);
             pending.insert(pending.end(), sources.begin(), sources.end());
         }
     }
@@ -1065,6 +1088,29 @@ static bool
 _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
     const UsdPrim &rig, std::string *error)
 {
+    // The closure below exists to report exactly one thing: a consumer that
+    // reads a RigExecCurvenetAdjustment frame. With no Adjustment prim on the
+    // stage at all there is nothing for it to find, so the whole walk -- every
+    // attribute of every rig prim, every connection it reaches, every
+    // default-space fallback -- is skipped without changing the answer.
+    //
+    // The test scans the whole stage, not the rig subtree, because the walk
+    // follows connections and relationship targets that may leave the rig; and
+    // it uses the all-prims predicate plus instance proxies so that an
+    // Adjustment that is inactive, undefined, or behind an instance still
+    // takes the slow path, matching every prim GetPrimAtPath can hand back.
+    const bool stageHasAdjustment = [&stage]() {
+        for (const UsdPrim &prim : UsdPrimRange::Stage(
+                 stage, UsdTraverseInstanceProxies(UsdPrimAllPrimsPredicate))) {
+            if (prim.GetTypeName() == "RigExecCurvenetAdjustment") {
+                return true;
+            }
+        }
+        return false;
+    }();
+    if (!stageHasAdjustment) {
+        return true;
+    }
     const auto isFrame = [](const UsdPrim &prim) {
         return prim && prim.GetAttribute(TfToken("rest:space")) &&
             prim.GetAttribute(TfToken("avars:tx"));
@@ -1086,7 +1132,7 @@ _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
         // Connections are followed as exact attributes, never promoted to
         // provider reads solely because their owner is an Adjustment.
         for (const auto &attr : prim.GetAttributes()) {
-            SdfPathVector sources; attr.GetConnections(&sources);
+            const SdfPathVector sources = _AuthoredConnections(attr);
             for (const auto &source : sources) pending.emplace_back(source, prim.GetPath());
         }
         std::vector<const char *> frameRelationships;
@@ -1133,7 +1179,7 @@ _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
         }
         const auto attr = stage->GetAttributeAtPath(path);
         if (!attr) continue;
-        SdfPathVector sources; attr.GetConnections(&sources);
+        const SdfPathVector sources = _AuthoredConnections(attr);
         for (const auto &source : sources) pending.emplace_back(source, consumer);
         if (!isFrame(prim)) continue;
         const auto name = attr.GetName();
@@ -1174,8 +1220,7 @@ _CollectPoseInputInfo(const UsdPrim &prim)
         info.attributes.insert(path);
         const UsdAttribute attribute = prim.GetStage()->GetAttributeAtPath(path);
         if (!attribute) continue;
-        SdfPathVector sources;
-        attribute.GetConnections(&sources);
+        const SdfPathVector sources = _AuthoredConnections(attribute);
         for (const SdfPath &source : sources) pending.emplace_back(source, true);
         const UsdPrim provider = attribute.GetPrim();
         if (provider.GetTypeName() != "RigExecJoint" &&
@@ -1215,11 +1260,118 @@ _CollectPoseInputInfo(const UsdPrim &prim)
 
 }  // namespace
 
+namespace {
+
+// The evaluation mode every new evaluator starts in.
+//
+// Not a code path: it selects the initial value of a setting callers can set
+// themselves, so nothing here behaves differently for having been reached
+// through the environment. It exists so an EXISTING suite can be re-run under
+// the baked mode without every test in it learning about the mode -- which is
+// the only way to check the program against the several hundred rigs those
+// suites already build. Unset, or anything unrecognised, means Dynamic.
+//
+// Read ONCE per process, at the construction of the first evaluator, and
+// fixed from then on: the function-local static below is initialised on its
+// first call and never re-reads the environment. Changing the variable after
+// that -- with setenv, or between two tests in one binary -- changes nothing;
+// SetEvaluationMode is the only way to move an evaluator afterwards, and it
+// moves that evaluator alone.
+RigExecEvaluationMode
+_DefaultEvaluationMode()
+{
+    static const RigExecEvaluationMode mode = [] {
+        const std::string requested =
+            TfGetenv("RIGEXEC_EVALUATION_MODE", "");
+        if (requested == "baked") {
+            return RigExecEvaluationMode::Baked;
+        }
+        if (requested == "parity") {
+            return RigExecEvaluationMode::BakedWithParityCheck;
+        }
+        if (!requested.empty() && requested != "dynamic") {
+            TF_WARN("rigExec: RIGEXEC_EVALUATION_MODE=%s is not one of "
+                    "dynamic, baked, parity; using dynamic",
+                    requested.c_str());
+        }
+        return RigExecEvaluationMode::Dynamic;
+    }();
+    return mode;
+}
+
+// Every authored input computeRestFrame reads.
+//
+// Exactly the seven AttributeValue inputs of the computation
+// (computations.cpp, RIGEXEC_REGISTER_XFORMABLE) -- rest:space and the six
+// rest avars. Its eighth input is the NamespaceAncestor's own
+// computeRestFrame, which reads these same seven on the ancestor, so the
+// closure over a provider and its RigExec ancestors is the closure over this
+// list. Nothing else can move a rest frame, which is what makes both the
+// epoch-constancy test and the override test below exact rather than
+// approximate.
+const std::vector<TfToken> &
+_RestInputNames()
+{
+    static const std::vector<TfToken> names = {
+        TfToken("rest:space"), TfToken("rest:tx"), TfToken("rest:ty"),
+        TfToken("rest:tz"),    TfToken("rest:rx"), TfToken("rest:ry"),
+        TfToken("rest:rz")};
+    return names;
+}
+
+bool
+_IsRestInputName(const TfToken &name)
+{
+    const std::vector<TfToken> &names = _RestInputNames();
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+// Whether any rest channel of \p provider can move within an epoch.
+//
+// Three ways it can, and the epoch-constant rest path is refused for all
+// three: an authored connection (which can reach anything, including an
+// animated avar, so it counts without being followed); time samples anywhere
+// in the composition -- BOTH tests, because ValueMightBeTimeVarying() is
+// false for exactly one sample of a non-composable type while Default and a
+// numeric read still disagree about it; and a property chain writing the
+// attribute, which recomputes it every generation (the same guard the skin
+// layout already applies to its own three attributes).
+bool
+_ProviderRestMightVary(const UsdStageRefPtr &stage, const SdfPath &provider,
+                       const std::set<SdfPath> &chainTargets)
+{
+    const UsdPrim prim = stage ? stage->GetPrimAtPath(provider) : UsdPrim();
+    if (!prim) {
+        return true;
+    }
+    for (const TfToken &name : _RestInputNames()) {
+        if (chainTargets.count(provider.AppendProperty(name))) {
+            return true;
+        }
+        const UsdAttribute attribute = prim.GetAttribute(name);
+        if (!attribute) {
+            continue;
+        }
+        if (attribute.HasAuthoredConnections() ||
+            attribute.ValueMightBeTimeVarying() ||
+            attribute.GetNumTimeSamples() > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 RigExecRigEvaluator::RigExecRigEvaluator(
     const UsdStageRefPtr &stage, const SdfPath &rigPath)
     : _stage(stage)
     , _rigPath(rigPath)
+    , _evaluationMode(_DefaultEvaluationMode())
 {
+    // The static-input cache lives here and is consulted through the
+    // resolved-input lookup every read already goes through.
+    _resolvedInputs.SetStaticCache(&_staticInputs);
     if (_stage) {
         _noticeKey = TfNotice::Register(
             TfCreateWeakPtr(this), &RigExecRigEvaluator::_OnObjectsChanged,
@@ -1246,6 +1398,33 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // its own caches before the next pull. External inputs can live anywhere
     // on the stage, so retain conservative structural checks after edits.
     _structureDirty = true;
+    // Authored values may have moved anywhere on the stage, and the static
+    // cache holds authored values: the whole of it is dropped, on every
+    // notice, for the same reason the structure is re-checked on every one.
+    _staticInputs.Clear();
+    // Epoch-scoped geometry caches. A weight-paint edit and a points edit are
+    // both VALUE edits: the digest does not change, so no new epoch begins,
+    // and nothing else here would ever let go of the arrays they replaced.
+    // Dropping them on every notice is the conservative answer, and the only
+    // one that cannot be wrong -- rebuilding costs one read per skinned mesh.
+    _skinTopologies.Clear();
+    for (auto &[target, live] : _liveGraphs) {
+        if (live) live->basePointsPushed = false;
+    }
+    // The baked program captured values, and the epoch digest is deliberately
+    // blind to values, so the digest cannot say whether one of them moved.
+    // The program's own index of what the bake read can: a notice that hits
+    // it asks for a rebuild, and one that misses it -- a value on an input
+    // read per frame, anything on a prim the bake never looked at -- leaves
+    // the program standing, which is what keeps an edit elsewhere in the
+    // scene from degrading the rig to the dynamic path.
+    if (_bakedProgram && _bakedProgram->IsInvalidatedBy(notice)) {
+        _bakedProgramStale = true;
+        // The rebuild is allowed to refuse where the standing program did
+        // not, and a refusal remembered from before this notice would
+        // otherwise answer for a stage that has since changed.
+        _bakeRefused = false;
+    }
     // The seed, connected, and guide requests read authored values straight
     // off the stage; an edit that leaves the override tuple unchanged (a
     // rest attribute, a weight, a goal transform) still changes what they
@@ -1254,7 +1433,9 @@ RigExecRigEvaluator::_OnObjectsChanged(
     _poseSeedDirty = true;
     _guideDirty = true;
     _connectedPoseCache.clear();
-    _derivedCache.clear();
+    for (auto &[target, derived] : _derivedCache) {
+        derived.cached = false;
+    }
     const auto dirty = [this](const std::set<size_t> &batches) {
         for (size_t index : batches) {
             _solverBatches[index].dirty = true;
@@ -1372,8 +1553,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             digest += a.GetPath().GetString() + ":" +
                       a.GetTypeName().GetAsToken().GetString() + ":samples:" +
                       std::to_string(a.GetNumTimeSamples()) + "->";
-            SdfPathVector sources;
-            a.GetConnections(&sources);
+            const SdfPathVector sources = _AuthoredConnections(a);
             for (const SdfPath &source : sources) {
                 const UsdAttribute sourceAttr =
                     _stage->GetAttributeAtPath(source);
@@ -1618,7 +1798,37 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     // self-extracts which aggregate element, so adding, removing, or
     // reordering joints changes what compile Pass 0 synthesizes. Order is
     // semantic (position = element index), so this list is never sorted.
-    const auto appendSolverInputConnections = [this, &digest](const UsdPrim &prim) {
+    //
+    // The block a prim contributes is a pure function of (prim, composed
+    // stage) -- it reads connections and namespace-frame providers and
+    // nothing else -- and the stage cannot change underneath a const digest
+    // computation, so the block is memoized for the duration of THIS digest
+    // and the emitted bytes are exactly the bytes the uncached walk emits.
+    // It avoids re-walking the same prim once per ancestor of every target
+    // of every relationship of every aggregate solver, which on a rig whose
+    // joints share a deep parent:space chain re-walks the near-root joints
+    // hundreds of times.
+    //
+    // The caches are function-local: nothing survives the call, so a stage
+    // edit between two digests is still seen. They are deliberately NOT
+    // evaluator members -- a member cache would have to be invalidated by
+    // _OnObjectsChanged, and the whole point of the digest is to be the
+    // thing that does not trust incremental invalidation.
+    std::unordered_map<SdfPath, _PoseInputInfo, SdfPath::Hash> poseInfoCache;
+    std::unordered_map<SdfPath, std::string, SdfPath::Hash> solverInputBlocks;
+    // One attribute can sit in many blocks (every joint's parent:space chain
+    // republishes its ancestors' attributes), so resolve each path's
+    // "path:type->sources|" text once too.
+    std::unordered_map<SdfPath, std::string, SdfPath::Hash> connectionText;
+    const auto appendSolverInputConnections =
+        [this, &digest, &poseInfoCache, &solverInputBlocks,
+         &connectionText](const UsdPrim &prim) {
+        const SdfPath primPath = prim ? prim.GetPath() : SdfPath();
+        const auto cached = solverInputBlocks.find(primPath);
+        if (cached != solverInputBlocks.end()) {
+            digest += cached->second;
+            return;
+        }
         std::set<SdfPath> paths = _CollectAttributeConnectionInputs(prim);
         std::set<SdfPath> visitedProviders;
         std::vector<UsdPrim> pending{prim};
@@ -1626,26 +1836,43 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             const UsdPrim provider = pending.back();
             pending.pop_back();
             if (!provider || !visitedProviders.insert(provider.GetPath()).second) continue;
-            const auto info = _CollectPoseInputInfo(provider);
-            paths.insert(info.attributes.begin(), info.attributes.end());
-            for (const SdfPath &input : info.providers) {
+            auto info = poseInfoCache.find(provider.GetPath());
+            if (info == poseInfoCache.end()) {
+                info = poseInfoCache.emplace(
+                    provider.GetPath(), _CollectPoseInputInfo(provider)).first;
+            }
+            paths.insert(info->second.attributes.begin(),
+                         info->second.attributes.end());
+            for (const SdfPath &input : info->second.providers) {
                 pending.push_back(_stage->GetPrimAtPath(input));
             }
         }
+        std::string block;
         for (const SdfPath &path : paths) {
-            const UsdAttribute attribute = _stage->GetAttributeAtPath(path);
-            digest += path.GetString() + ":" +
-                (attribute ? attribute.GetTypeName().GetAsToken().GetString()
-                           : std::string("missing")) + "->";
-            if (attribute) {
-                SdfPathVector sources;
-                attribute.GetConnections(&sources);
-                for (const SdfPath &source : sources) {
-                    digest += source.GetString() + ",";
+            auto text = connectionText.find(path);
+            if (text == connectionText.end()) {
+                const UsdAttribute attribute = _stage->GetAttributeAtPath(path);
+                std::string entry = path.GetString();
+                entry += ':';
+                entry += attribute
+                    ? attribute.GetTypeName().GetAsToken().GetString()
+                    : std::string("missing");
+                entry += "->";
+                if (attribute) {
+                    const SdfPathVector sources =
+                        _AuthoredConnections(attribute);
+                    for (const SdfPath &source : sources) {
+                        entry += source.GetString();
+                        entry += ',';
+                    }
                 }
+                entry += '|';
+                text = connectionText.emplace(path, std::move(entry)).first;
             }
-            digest += '|';
+            block += text->second;
         }
+        digest += block;
+        solverInputBlocks.emplace(primPath, std::move(block));
     };
     if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
         // Recursive over the composed rig subtree (not GetChildren):
@@ -1982,6 +2209,20 @@ bool
 RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 {
     RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile", "compile");
+    // The program describes the epoch this call is about to replace, so it
+    // stops being the rig's program here: a Compile that fails and restores
+    // the previous epoch returns before the rebuild at the tail, this local
+    // goes out of scope, and the rig is left dynamic -- slower and never
+    // wrong. Retired rather than destroyed, because its persistent GEOMETRY
+    // state (which node ran with which packet) is not about the epoch: the
+    // dynamic path keeps its _liveGraphs across a recompile and reconnects
+    // whichever nodes survive, and the rebuild below does the same.
+    std::unique_ptr<RigExecBakedProgram> retiringBakedProgram =
+        std::move(_bakedProgram);
+    _bakedProgramStale = false;
+    // A new epoch is a new question: whatever refused the last one said
+    // nothing about this one.
+    _bakeRefused = false;
     // Sequential region stamps: Compile is flat code with early returns,
     // so RAII scopes cannot span its phases; each stamp closes the
     // previous region and opens the next. One branch when disabled.
@@ -2085,6 +2326,22 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             }
             TF_WARN("%s", message.c_str());
         };
+        // Resolving a prim's purpose walks up the namespace to the first
+        // authored opinion, and this pass asks for it once per provider and
+        // then again for every descendant of every provider -- so a joint
+        // deep in a chain is resolved once per ancestor provider. Purpose is
+        // a pure function of the composed stage, which does not change while
+        // a compile runs, so resolve each prim once.
+        std::unordered_map<SdfPath, TfToken, SdfPath::Hash> purposeCache;
+        const auto resolvedPurpose = [&purposeCache](const UsdPrim &prim) {
+            auto it = purposeCache.find(prim.GetPath());
+            if (it == purposeCache.end()) {
+                it = purposeCache.emplace(
+                    prim.GetPath(),
+                    UsdGeomImageable(prim).ComputePurpose()).first;
+            }
+            return it->second;
+        };
         // Every Boundable provider, aggregate solvers included: they
         // inherit Boundable/Xformable too, so an authored op on one is
         // applied by BBoxCache to an already-baked extent while the guide
@@ -2134,6 +2391,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             // still not a transform authority, which is a different claim
             // and still true.
 
+            // Hoisted out of the walk: the provider's own purpose is the
+            // same for every one of its descendants.
+            const TfToken providerPurpose = resolvedPurpose(prim);
+
             // A provider's extent covers the guides beneath it, and only
             // those. Authored geometry parented under one is invisible to
             // it -- and to every ancestor, because UsdGeomBBoxCache stops
@@ -2149,12 +2410,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 // bounding-box cache files it under the ancestor's. Nobody
                 // reading the namespace would guess that, so say it.
                 if (descendant.IsA<UsdGeomImageable>()) {
-                    const UsdGeomImageable descendantImageable(descendant);
-                    const UsdGeomImageable providerImageable(prim);
                     const TfToken descendantPurpose =
-                        descendantImageable.ComputePurpose();
-                    const TfToken providerPurpose =
-                        providerImageable.ComputePurpose();
+                        resolvedPurpose(descendant);
                     if (!descendantPurpose.IsEmpty() &&
                         !providerPurpose.IsEmpty() &&
                         descendantPurpose != providerPurpose &&
@@ -2212,6 +2469,52 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                         : curves[0];
             }
         }
+    }
+
+    // Warm the shared exec network, off the critical path.
+    //
+    // Every request this compile prepares -- fourteen solver batches, the
+    // pose seed, the main epoch request, the guides -- compiles into the SAME
+    // exec network for this stage, and whichever request asks for a provider
+    // first pays to compile it. Asking for all of them at once, here, builds
+    // that shared network in one wide parallel round rather than in a series
+    // of narrow ones, and it runs beside the scheduling work below that has
+    // to happen anyway. It is pure preparation: no value is read from it, and
+    // a request that cannot be built valid simply leaves the real
+    // preparations to compile what they need, and to report their own
+    // failure.
+    //
+    // The tap set is constructed here and destroyed here, on the compiling
+    // thread: its constructor and destructor mutate the tap context's client
+    // set, which is not guarded. Only Prepare() runs on the task, and nothing
+    // between the Run() below and the Wait() before the first real
+    // preparation enters exec at all.
+    auto warmupTaps = std::make_unique<RigExecTapSet>(_stage);
+    for (const std::vector<SdfPath> *providers :
+         {&newJointPaths, &newControlPaths, &newVolumeWeightPaths}) {
+        for (const SdfPath &path : *providers) {
+            warmupTaps->Add(
+                RigExecValueAddress::Prim(path, _computePointFrame));
+            warmupTaps->Add(RigExecValueAddress::Prim(
+                path, TfToken("computeRestFrame")));
+        }
+    }
+    for (const SdfPath &path : solverArrayPaths) {
+        warmupTaps->Add(
+            RigExecValueAddress::Prim(path, _computePointFrameArray));
+    }
+    WorkDispatcher warmupDispatcher;
+    const auto prepareWarmupTaps = [this, &warmupTaps]() {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "TapPrepare warmup", "compile");
+        warmupTaps->Prepare();
+    };
+    // The kill switch runs the same work on this thread instead of skipping
+    // it: the warm-up is what the real preparations below are cheap because
+    // of, so dropping it would change what is being measured.
+    if (RigExecParallelEvaluationEnabled()) {
+        warmupDispatcher.Run(prepareWarmupTaps);
+    } else {
+        prepareWarmupTaps();
     }
 
     // Mover discovery: reverse-sibling post-order walk of the composed Movers
@@ -3553,8 +3856,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                                 _stage->GetPrimAtPath(jointPath)) {
                             if (const UsdAttribute posed = srcJoint.GetAttribute(
                                     TfToken("posed:space"))) {
-                                SdfPathVector conns;
-                                posed.GetConnections(&conns);
+                                const SdfPathVector conns =
+                                    _AuthoredConnections(posed);
                                 if (!conns.empty()) {
                                     reportError(who + ": joint " +
                                                 jointPath.GetString() +
@@ -3674,7 +3977,26 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     }
 
     stampCompileRegion("Compile.DiscoverValidate");
-    const size_t newDigest = _ComputeStructureDigest();
+    // The structure digest is a pure read of the composed stage that boils it
+    // down to one number, and that number is not consulted until the epoch is
+    // committed far below: nothing in between reads it, and compile authors
+    // nothing to the stage for it to miss. So it runs beside the schedule and
+    // request passes instead of ahead of them, and its cost disappears into
+    // theirs.
+    //
+    // newDigest is declared before the dispatcher so it outlives it, and
+    // WorkDispatcher's destructor waits -- which is what covers the early
+    // returns between here and the join below.
+    size_t newDigest = 0;
+    WorkDispatcher digestDispatcher;
+    const auto computeDigest = [this, &newDigest]() {
+        newDigest = _ComputeStructureDigest();
+    };
+    if (RigExecParallelEvaluationEnabled()) {
+        digestDispatcher.Run(computeDigest);
+    } else {
+        computeDigest();
+    }
     stampCompileRegion("Compile.StructureDigest");
 
     // Prepare replacement requests while retaining the previous requests and
@@ -3891,7 +4213,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // authored on the mover and are sampled during Evaluate().
     std::vector<_FrameConstraint> newFrameConstraints;
     std::map<SdfPath, std::vector<SdfPath>> newFrameChains;
-    std::map<SdfPath, RigExecTapId> newProviderRestFrameTaps;
     std::map<SdfPath, RigExecTapId> newProviderBaseFrameTaps;
 
     auto getTargets = [](const UsdPrim &prim, const char *name) {
@@ -4157,19 +4478,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
-    // Rest frames, only for providers that actually publish one. A plain
-    // UsdGeomXformable has no computeRestFrame -- requesting it is a hard exec
-    // failure, not a missing value -- and needs none: its rest is identity,
-    // which is what the published revision is measured against.
-    for (const auto &[provider, revisions] : newFrameChains) {
-        if (newXformDerivedProviders.count(provider)) {
-            continue;
-        }
-        newProviderRestFrameTaps[provider] =
-            newTaps->Add(RigExecValueAddress::Prim(
-                provider, TfToken("computeRestFrame")));
-    }
-
     for (const SdfPath &jointPath : newJointPaths) {
         newJointFrameTaps.push_back(newTaps->Add(RigExecValueAddress::Prim(
             jointPath, _computePointFrame, basePhase)));
@@ -4243,8 +4551,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 if (newPropertyChains.count(a.GetPath())) {
                     dependsOn[consumer].insert(a.GetPath());
                 }
-                SdfPathVector connections;
-                a.GetConnections(&connections);
+                const SdfPathVector connections = _AuthoredConnections(a);
                 for (const SdfPath &sourcePath : connections) {
                     walk(_stage->GetAttributeAtPath(sourcePath));
                 }
@@ -4406,6 +4713,37 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     newTaps->Add(RigExecValueAddress::Prim(
                         input, TfToken("computeBlendChannel"))));
             }
+            if (revision.op == RigExecRevisionOp::Skin) {
+                // Whether the per-point layout can change WITHIN this epoch
+                // is a question about the stage, so it is answered here once
+                // rather than guessed at per frame. The three ways it can:
+                // an authored time sample (the arrays differ per time code),
+                // an authored connection (the value comes from somewhere
+                // else, which may itself be animated), and a property chain
+                // writing the attribute (the evaluator computes it per
+                // generation). Anything else is epoch-constant by the same
+                // definition the digest uses, so the layout is resolved once
+                // and shared instead of re-read, re-copied and re-validated
+                // on every frame.
+                revision.skinTopologyFixed = true;
+                for (const char *name : {"rigExec:jointIndices",
+                                         "rigExec:jointWeights",
+                                         "rigExec:elementSize"}) {
+                    const SdfPath propertyPath =
+                        mover.moverPath.AppendProperty(TfToken(name));
+                    if (newPropertyChains.count(propertyPath)) {
+                        revision.skinTopologyFixed = false;
+                        break;
+                    }
+                    const UsdAttribute a =
+                        moverPrim.GetAttribute(TfToken(name));
+                    if (a && (a.ValueMightBeTimeVarying() ||
+                              a.HasAuthoredConnections())) {
+                        revision.skinTopologyFixed = false;
+                        break;
+                    }
+                }
+            }
             newGraphChains[target].push_back(revision);
         }
     }
@@ -4511,7 +4849,33 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                         _IsVolumeWeightType(prim.GetTypeName()));
     };
     std::map<SdfPath, _PoseInputInfo> newPoseInputInfo;
-    auto poseProviderClosure = [&](const SdfPath &input) {
+    // Two stage closures that the schedule and request passes below ask for
+    // over and over about the same prims: a prim's connection-input set, and
+    // the pose-provider closure of one input path. The same joint is an input
+    // to many solvers, many constraints and many batches, and each ask
+    // re-walks the whole chain to the rig root.
+    //
+    // Both are pure functions of the composed stage and of the joint binding
+    // this compile has already decided above; neither changes while a compile
+    // runs, so a memoized answer is the answer a recomputation would give.
+    // These are compile-local, deliberately separate from the digest's own
+    // caches: the digest must stay a self-contained recomputation.
+    std::unordered_map<SdfPath, std::set<SdfPath>, SdfPath::Hash>
+        attributeInputCache;
+    std::unordered_map<SdfPath, std::set<SdfPath>, SdfPath::Hash>
+        poseClosureCache;
+    auto collectAttributeInputs =
+        [&](const SdfPath &path) -> const std::set<SdfPath> & {
+        auto it = attributeInputCache.find(path);
+        if (it == attributeInputCache.end()) {
+            it = attributeInputCache.emplace(
+                path,
+                _CollectAttributeConnectionInputs(
+                    _stage->GetPrimAtPath(path))).first;
+        }
+        return it->second;
+    };
+    auto computePoseProviderClosure = [&](const SdfPath &input) {
         std::set<SdfPath> closure;
         std::vector<SdfPath> pending{input};
         while (!pending.empty()) {
@@ -4535,6 +4899,15 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             }
         }
         return closure;
+    };
+    auto poseProviderClosure =
+        [&](const SdfPath &input) -> const std::set<SdfPath> & {
+        auto it = poseClosureCache.find(input);
+        if (it == poseClosureCache.end()) {
+            it = poseClosureCache.emplace(
+                input, computePoseProviderClosure(input)).first;
+        }
+        return it->second;
     };
     auto inheritsFrame = [&](const SdfPath &input, const SdfPath &target) {
         if (!input.HasPrefix(target)) {
@@ -4566,7 +4939,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     std::map<SdfPath, std::set<SdfPath>> solverPoseReads;
     for (const auto &[solver, inputs] : solverFrameInputs) {
         for (const SdfPath &input : inputs) {
-            const auto closure = poseProviderClosure(input);
+            const std::set<SdfPath> &closure = poseProviderClosure(input);
             solverPoseReads[solver].insert(closure.begin(), closure.end());
             for (const SdfPath &provider : closure) {
                 const auto owner = newJointBinding.find(provider);
@@ -4653,6 +5026,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             poseConsumers[dependency].push_back(path);
         }
     }
+    {
+        // Join the warm-up: everything below this point talks to exec.
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.WarmupJoin", "compile");
+        warmupDispatcher.Wait();
+    }
     size_t scheduledPose = 0;
     size_t poseLevel = 0;
     while (!readyPose.empty()) {
@@ -4683,8 +5061,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                      !path.IsEmpty() && path != SdfPath::AbsoluteRootPath();
                      path = followParents ? path.GetParentPath() : SdfPath()) {
                     newSolverInputBatches[path].insert(batchIndex);
-                    for (const SdfPath &attribute : _CollectAttributeConnectionInputs(
-                             _stage->GetPrimAtPath(path))) {
+                    for (const SdfPath &attribute :
+                         collectAttributeInputs(path)) {
                         newSolverInputBatches[attribute.GetPrimPath()].insert(batchIndex);
                     }
                     if (newJointBinding.count(path)) break;
@@ -4817,14 +5195,15 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     stampCompileRegion("Compile.SolverSchedule");
     auto newPoseSeedTaps = std::make_unique<RigExecTapSet>(_stage);
     std::map<SdfPath, RigExecTapId> newPoseSeedFrames, newPoseSeedRests;
+    // The rest taps are added below, once the provider set is closed, because
+    // whether they belong in the per-frame request or in the epoch request
+    // depends on the whole set (see newRestsMightVary).
     auto seedProvider = [&](SdfPath path) {
         for (; !path.IsEmpty() && path != SdfPath::AbsoluteRootPath();
              path = path.GetParentPath()) {
             if (!isFrameProvider(path) || newPoseSeedFrames.count(path)) continue;
             newPoseSeedFrames[path] = newPoseSeedTaps->Add(
                 RigExecValueAddress::Prim(path, _computePointFrame));
-            newPoseSeedRests[path] = newPoseSeedTaps->Add(
-                RigExecValueAddress::Prim(path, TfToken("computeRestFrame")));
         }
     };
     for (const SdfPath &path : newJointPaths) seedProvider(path);
@@ -4864,6 +5243,47 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             newConnectedPoseTaps[provider] = std::move(taps);
         }
     }
+    // Rest frames: one request for the whole epoch, or per-frame taps when
+    // some provider's rest channels can move with time.
+    //
+    // computeRestFrame reads rest:space and the six rest avars of the
+    // provider and of every RigExec ancestor, and nothing else. When none of
+    // those can change within the epoch, every frame's answer is the same
+    // answer, so it is pulled once here instead of 326 times per second. A
+    // rest channel that is connected, that carries time samples anywhere in
+    // its composition, or that a property chain writes keeps the old
+    // per-frame taps: the frozen value would be wrong for it.
+    //
+    // Compile is not the last word on this. The epoch digest hashes no rest
+    // channel, so an edit that ANIMATES one later does not recompile by
+    // itself; _SettleEpoch re-asks the same question on every notice and
+    // rebuilds the epoch when the answer has changed.
+    bool newRestsMightVary = false;
+    auto newRestTaps = std::make_unique<RigExecTapSet>(_stage);
+    std::map<SdfPath, RigExecTapId> newRestTapIds;
+    {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "RestTimeVarying", "compile");
+        std::set<SdfPath> chainTargets;
+        for (const auto &[target, revisions] : newPropertyChains) {
+            chainTargets.insert(target);
+        }
+        for (const auto &[provider, tap] : newPoseSeedFrames) {
+            if (_ProviderRestMightVary(_stage, provider, chainTargets)) {
+                newRestsMightVary = true;
+                break;
+            }
+        }
+    }
+    for (const auto &[provider, tap] : newPoseSeedFrames) {
+        const RigExecValueAddress address =
+            RigExecValueAddress::Prim(provider, TfToken("computeRestFrame"));
+        if (newRestsMightVary) {
+            newPoseSeedRests[provider] = newPoseSeedTaps->Add(address);
+        } else {
+            newRestTapIds[provider] = newRestTaps->Add(address);
+        }
+    }
+
     if (newPoseSeedFrames.empty()) {
         newPoseSeedTaps.reset();
     } else {
@@ -4909,6 +5329,67 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         newGuideTaps.reset();
         newSolverArrayTaps.clear();
     }
+    // The epoch's rest frames, pulled once, at the stage's start time -- the
+    // frame a session opens on, and, with no time-varying rest channel in
+    // the epoch, the same frames every other time code would give.
+    //
+    // A real time code and never Default: a Default pull is a different mode
+    // for exec, not a different instant. Values it computes into the shared
+    // executor are time-independent by construction and a later ChangeTime
+    // to a real frame does not invalidate them, so a Default pull here would
+    // hand the first frame values that ignore its time samples
+    // (testRigExecConstraints' autoDetect IK case catches exactly that).
+    const UsdTimeCode restTime =
+        UsdTimeCode(_stage ? _stage->GetStartTimeCode() : 0.0);
+
+    // Pay the first frame's warm compute here.
+    //
+    // Every Evaluate warms the shared executor before its override-bearing
+    // pull (see PoseSeed), and the first warm of a session computes the whole
+    // seed network from an empty cache -- which is most of what makes the
+    // first frame cost several times the frames after it. None of that work
+    // depends on which frame is asked for first, so it is done once here, at
+    // the time a session opens on. It is the same call the first Evaluate
+    // would make; nothing is read from it and no value is published.
+    //
+    // Before the rest pull below, not after: a provider's rest frame is an
+    // input to its point frame, so the warm computes the rests too and the
+    // pull becomes a copy-out of values that are already there.
+    if (newPoseSeedTaps) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.WarmPoseSeed", "compile");
+        newPoseSeedTaps->Warm(restTime);
+    }
+
+    std::map<SdfPath, RigExecPointFrame> newEpochRestFrames;
+    if (!newRestTapIds.empty()) {
+        const bool restsPrepared = [&]() {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "TapPrepare restFrames", "compile");
+            return newRestTaps->Prepare();
+        }();
+        RigExecSnapshot restSnapshot;
+        if (restsPrepared) {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "Compile.RestFrames", "compile");
+            restSnapshot = newRestTaps->Evaluate(restTime);
+        }
+        if (!restsPrepared || !restSnapshot.IsValid() ||
+            !restSnapshot.IsComplete()) {
+            reportError("failed to evaluate the rig's rest frames");
+            restorePreviousEpoch();
+            return false;
+        }
+        for (const auto &[provider, tap] : newRestTapIds) {
+            newEpochRestFrames.emplace_hint(
+                newEpochRestFrames.end(), provider,
+                restSnapshot.Get<RigExecPointFrame>(tap));
+        }
+    }
+
+    // Every real request is prepared; the warm-up has nothing left to hold
+    // open. Destroyed here, on the compiling thread, for the reason its
+    // construction is here.
+    warmupTaps.reset();
 
     stampCompileRegion("Compile.PrepareRequests");
     // Commit the new epoch atomically with respect to evaluator state.
@@ -4918,7 +5399,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _controlFrameTaps = std::move(newControlFrameTaps);
     _frameConstraints = std::move(newFrameConstraints);
     _frameChains = std::move(newFrameChains);
-    _providerRestFrameTaps = std::move(newProviderRestFrameTaps);
     _providerBaseFrameTaps = std::move(newProviderBaseFrameTaps);
     _xformDerivedProviders = std::move(newXformDerivedProviders);
     _ribbonDriverPoints = std::move(newRibbonDriverPoints);
@@ -4932,6 +5412,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _currentPhaseWeights = std::move(newCurrentPhaseWeights);
     _volumeWeightMatrixTaps = std::move(newVolumeWeightMatrixTaps);
     _volumeWeightMatrices.clear();
+    {
+        // Join the digest task: from here on its result is read.
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.DigestJoin", "compile");
+        digestDispatcher.Wait();
+    }
     _structureDigest = newDigest;
     _taps = std::move(newTaps);
     _guideTaps = std::move(newGuideTaps);
@@ -4954,13 +5439,59 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _poseSeedDirty = true;
     _poseSeedFrames = std::move(newPoseSeedFrames);
     _poseSeedRests = std::move(newPoseSeedRests);
+    _restTaps = std::move(newRestTaps);
+    _restTapIds = std::move(newRestTapIds);
+    _epochRestFrames = std::move(newEpochRestFrames);
+    _restTime = restTime;
+    // Anchors and intervening-Xform candidates for the new epoch. Both are
+    // pure namespace topology; recomputing them per frame cost an xform-cache
+    // query per provider only to be told "identity" on every rig that has no
+    // such Xform, which is nearly all of them.
+    _poseProviderAnchors.clear();
+    _interveningXformProviders.clear();
+    {
+        const SdfPath assetRootPath = _rigPath.GetParentPath();
+        for (const auto &[provider, tap] : _poseSeedFrames) {
+            SdfPath anchorPath;
+            for (SdfPath walk = provider.GetParentPath();
+                 !walk.IsEmpty() && !walk.IsAbsoluteRootPath() &&
+                     walk != assetRootPath;
+                 walk = walk.GetParentPath()) {
+                if (_poseSeedFrames.count(walk)) {
+                    anchorPath = walk;
+                    break;
+                }
+            }
+            _poseProviderAnchors[provider] = anchorPath;
+            if (provider.GetParentPath() !=
+                (anchorPath.IsEmpty() ? assetRootPath : anchorPath)) {
+                _interveningXformProviders.push_back(provider);
+            }
+        }
+    }
     _solverBatches = std::move(newSolverBatches);
     _solverJoints = std::move(newSolverJoints);
     _solverInputBatches = std::move(newSolverInputBatches);
     _solverArrayTaps = std::move(newSolverArrayTaps);
     _graphChains = std::move(newGraphChains);
     _graphDerivedChains = std::move(newGraphDerivedChains);
+    // Both caches below are keyed by nothing but a path, so the epoch they
+    // belong to has to be stated by emptying them when it ends: the
+    // influence table a layout was range-checked against and the base points
+    // a source holds are both things a recompile can have changed.
+    _skinTopologies.Clear();
+    for (auto &[target, live] : _liveGraphs) {
+        if (live) live->basePointsPushed = false;
+    }
+    // Derived results are keyed by target like the live graphs, and the
+    // walk may read them from several tasks at once: every entry exists
+    // before a generation starts, so no task ever inserts into the map.
     _derivedCache.clear();
+    for (const auto &[chainTarget, revisions] : _graphDerivedChains) {
+        for (const _GraphRevision &derived : revisions) {
+            _derivedCache[derived.target];
+        }
+    }
     _propertyChains = std::move(newPropertyChains);
     _propertyChainOrder = std::move(newPropertyChainOrder);
 
@@ -5040,6 +5571,36 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             return false;
         }
         _chainOrder = std::move(order);
+
+        // Dependency levels over that order: a new level begins where a chain
+        // reads one already in the current level. Greedy over _chainOrder
+        // rather than "longest path from a root", so every level is a
+        // CONTIGUOUS run of the order the walk takes anyway -- which is what
+        // lets a level be spread over tasks without moving anything the walk
+        // publishes.
+        _chainLevels.clear();
+        std::set<SdfPath> inCurrentLevel;
+        for (const SdfPath &target : _chainOrder) {
+            bool readsCurrentLevel = false;
+            const auto producers = dependsOn.find(target);
+            if (producers != dependsOn.end()) {
+                for (const SdfPath &producer : producers->second) {
+                    if (inCurrentLevel.count(producer)) {
+                        readsCurrentLevel = true;
+                        break;
+                    }
+                }
+            }
+            if (_chainLevels.empty() || readsCurrentLevel) {
+                _chainLevels.emplace_back();
+                inCurrentLevel.clear();
+            }
+            _chainLevels.back().targets.push_back(target);
+            inCurrentLevel.insert(target);
+        }
+        for (_ChainLevel &level : _chainLevels) {
+            level.parallel = _IsChainLevelParallelSafe(level.targets);
+        }
     }
 
     // Validate every declared phase, and reduce it to the one revision it
@@ -5196,7 +5757,108 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         if (!retainedTargets.count(it->first)) it = _liveGraphs.erase(it);
         else ++it;
     }
+    // Every node the walk will index, created now rather than on the frame
+    // that first needs it: chains in one level run concurrently, and a map
+    // insertion under a concurrent read is a race. The mapped graph stays
+    // null until its chain first runs, which is what it already meant.
+    for (const SdfPath &target : retainedTargets) {
+        _liveGraphs[target];
+    }
     _structureDirty = false;
+    // The baked program is epoch state like every other compiled table, so
+    // it is built here rather than lazily on the first frame -- which would
+    // charge one interactive frame for the whole bake.
+    // An epoch the program cannot express is not a compile error: the rig
+    // evaluates dynamically and IsBakeable says why.
+    _RebuildBakedProgram(std::move(retiringBakedProgram));
+    return true;
+}
+
+std::vector<SdfPath>
+RigExecRigEvaluator::GetChainLevelTargets(size_t level) const
+{
+    return level < _chainLevels.size() ? _chainLevels[level].targets
+                                       : std::vector<SdfPath>();
+}
+
+bool
+RigExecRigEvaluator::IsChainLevelParallel(size_t level) const
+{
+    return level < _chainLevels.size() && _chainLevels[level].parallel;
+}
+
+bool
+RigExecRigEvaluator::_IsChainLevelParallelSafe(
+    const std::vector<SdfPath> &targets) const
+{
+    // Two chains are not enough work to pay for the dispatch and the join,
+    // and a rig with two deformed meshes is far more common than one with
+    // twenty.
+    if (targets.size() < 3) {
+        return false;
+    }
+    std::set<SdfPath> levelWeightObjects;
+    for (const SdfPath &target : targets) {
+        const auto chain = _graphChains.find(target);
+        if (chain == _graphChains.end()) {
+            return false;
+        }
+        std::set<SdfPath> chainWeightObjects;
+        for (const _GraphRevision &revision : chain->second) {
+            // A Profile Mover reads its curvenet's posed points out of the
+            // generation being built and binds through a cut/factorization
+            // cache every profile chain shares. Both are things a serial walk
+            // has finished with before the next chain asks.
+            if (revision.op == RigExecRevisionOp::Curvenet) {
+                return false;
+            }
+            // Defence in depth against a future edge type, not a hazard the
+            // dependency graph can currently produce: a phased read is an
+            // edge addEdge already records, so a phased reader and the chain
+            // that produces what it reads land in different levels, and a
+            // phase read WITHIN a chain is served from that task's own
+            // snapshots. No level the partition builds today holds a phased
+            // read across its own chains. It stays because the cost is one
+            // level's parallelism on a rig that has any phased read at all,
+            // and the alternative is that a new edge kind -- one addEdge does
+            // not know to record -- would make a level silently read the
+            // chain-snapshot store mid-level, where what this level's chains
+            // have recorded has not arrived yet.
+            if (!revision.binding.phases.empty()) {
+                return false;
+            }
+            for (const auto &blendInput : revision.binding.blendSamples) {
+                for (const RigExecBlendSampleBinding &sample :
+                         blendInput.second) {
+                    if (!sample.phase.IsBase()) {
+                        return false;
+                    }
+                }
+            }
+            if (revision.binding.weightObject.IsEmpty()) {
+                continue;
+            }
+            // A `current` sample phase measures the field against the points
+            // as they stand mid-chain, which re-enters weight resolution --
+            // the one part of assembling a packet that is not a pure read of
+            // the stage and this generation's results.
+            if (_currentPhaseWeights.count(revision.binding.weightObject)) {
+                return false;
+            }
+            chainWeightObjects.insert(revision.binding.weightObject);
+        }
+        // One weight object driving two chains in the level: they publish the
+        // same pose.weightFields entry, so which field a rigger is shown
+        // would become a question about the walk rather than about the rig.
+        // Schema validation reaches that case first today -- a weight
+        // object's target has to be the mover's own -- so this is the walk
+        // declining to depend on a rule enforced somewhere else.
+        for (const SdfPath &weightObject : chainWeightObjects) {
+            if (!levelWeightObjects.insert(weightObject).second) {
+                return false;
+            }
+        }
+    }
     return true;
 }
 
@@ -6997,6 +7659,42 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
     }
 }
 
+// Whether the epoch's rest frames may no longer be epoch constants.
+//
+// Asked once per notice that did not recompile, never per frame: the answer
+// can only change when the stage does, and a notice is the only way it does.
+bool
+RigExecRigEvaluator::_EpochRestsMightVary() const
+{
+    std::set<SdfPath> chainTargets;
+    for (const auto &[target, revisions] : _propertyChains) {
+        chainTargets.insert(target);
+    }
+    for (const auto &[provider, frame] : _epochRestFrames) {
+        if (_ProviderRestMightVary(_stage, provider, chainTargets)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+RigExecRigEvaluator::_RefreshEpochRestFrames()
+{
+    if (!_restTaps || _restTapIds.empty()) {
+        return true;
+    }
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "RestFramesRefresh", "evaluate");
+    const RigExecSnapshot rests = _restTaps->Evaluate(_restTime);
+    if (!rests.IsValid() || !rests.IsComplete()) {
+        return false;
+    }
+    for (const auto &[provider, tap] : _restTapIds) {
+        _epochRestFrames[provider] = rests.Get<RigExecPointFrame>(tap);
+    }
+    return true;
+}
+
 bool
 RigExecRigEvaluator::_ComposeInterveningXforms(
     const UsdPrim &assetRoot,
@@ -7009,27 +7707,25 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
     if (!assetRoot || !xformCache) {
         return true;
     }
-    const SdfPath assetRootPath = assetRoot.GetPath();
+    // No provider has anything standing between it and its anchor, so there
+    // is no transform to compose and nothing to ask the xform cache.
+    if (_interveningXformProviders.empty()) {
+        return true;
+    }
 
     // X(P) per provider, and which provider (if any) anchors it. The anchor
     // is the nearest RigExec ancestor -- exec has already folded that one's
-    // rest:space and avars in -- and the asset root otherwise.
+    // rest:space and avars in -- and the asset root otherwise. Only a
+    // provider with an intervening prim can have a non-identity X(P); the
+    // rest are anchored to their own parent.
     std::map<SdfPath, GfMatrix4d> intervening;
-    std::map<SdfPath, SdfPath> anchorOf;
+    const std::map<SdfPath, SdfPath> &anchorOf = _poseProviderAnchors;
     bool anyIntervening = false;
     for (const auto &[provider, tap] : _poseSeedFrames) {
-        SdfPath anchorPath;
-        for (SdfPath walk = provider.GetParentPath();
-             !walk.IsEmpty() && !walk.IsAbsoluteRootPath() &&
-                 walk != assetRootPath;
-             walk = walk.GetParentPath()) {
-            if (_poseSeedFrames.count(walk)) {
-                anchorPath = walk;
-                break;
-            }
-        }
-        anchorOf[provider] = anchorPath;
-
+        intervening[provider] = GfMatrix4d(1.0);
+    }
+    for (const SdfPath &provider : _interveningXformProviders) {
+        const SdfPath &anchorPath = anchorOf.at(provider);
         const UsdPrim anchor = anchorPath.IsEmpty()
             ? assetRoot : _stage->GetPrimAtPath(anchorPath);
         const UsdPrim parent = _stage->GetPrimAtPath(provider.GetParentPath());
@@ -7142,12 +7838,37 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     std::vector<RigExecValueOverride> overrides)
 {
     _interactiveOverrides = std::move(overrides);
+    // Defence in depth, not a correctness requirement: every attribute
+    // override is written into the resolved inputs before anything reads
+    // one, and GetAttribute consults the cache only where the resolved map
+    // has no entry, so an overridden attribute never reaches the cache at
+    // all. Dropping it anyway costs one map clear per drag start and takes
+    // the whole question off the table; ClearInteractiveOverrides does the
+    // same so the two halves of a drag cannot be asymmetric.
+    _staticInputs.Clear();
+    // An override is a value the static reads must prefer over the stage,
+    // and the skin layout is read through exactly that route -- so a layout
+    // resolved before the override set changed was resolved against a
+    // different answer.
+    _skinTopologies.Clear();
+    // Nothing to invalidate: the program is asked to PLACE these at the top
+    // of every generation (Evaluate), and it runs only for a set it can place
+    // exactly. An override it cannot place -- one standing on a value folded
+    // into bake state, or a computation only exec can answer -- makes that
+    // generation dynamic instead, which is the same answer more slowly.
 }
 
 void
 RigExecRigEvaluator::ClearInteractiveOverrides()
 {
     _interactiveOverrides.clear();
+    // Both halves of a drag invalidate the same two caches. See
+    // SetInteractiveOverrides: the static-input clear is defence in depth
+    // rather than a correctness requirement, and an invalidation that runs
+    // on the way in and not on the way out is the shape of bug that is only
+    // ever found the hard way.
+    _staticInputs.Clear();
+    _skinTopologies.Clear();
 }
 
 // Appends the interactive overrides to \p overrides, replacing any entry
@@ -7203,6 +7924,22 @@ _ApplyInteractiveOverrides(
     }
 }
 
+void
+RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
+    RigExecResolvedInputs *resolved,
+    std::map<SdfPath, VtValue> *published) const
+{
+    _ApplyInteractiveOverrides(_interactiveOverrides, /* overrides = */
+                               nullptr, resolved, published);
+}
+
+// ---------------------------------------------------------------------------
+// The evaluation-mode dispatch. The dynamic generation below is unchanged by
+// it: Baked is a request that reaches _EvaluateDynamic whenever there is no
+// program to run, and the parity mode runs this same function as its
+// reference.
+// ---------------------------------------------------------------------------
+
 RigExecRigPose
 RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 {
@@ -7212,22 +7949,202 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             ? std::string("Evaluate@default")
             : "Evaluate@" + TfStringPrintf("%g", time.GetValue()),
         "evaluate");
-    RigExecRigPose pose;
-    pose.time = time;
-    if (!_compiled && !Compile(&pose.diagnostics)) {
-        return pose;
+    // Settle the epoch first: choosing a path before knowing whether the rig
+    // still compiles to the same one is choosing it blind, and it is also
+    // what would otherwise make the first frame of every session dynamic.
+    std::vector<std::string> settled;
+    if (!_SettleEpoch(&settled)) {
+        RigExecRigPose failed;
+        failed.time = time;
+        failed.diagnostics = std::move(settled);
+        return failed;
+    }
+    // A notice hit the program's capture index, so what it folded in is no
+    // longer what the stage says. A structural edit would already have
+    // rebuilt it through Compile just now; this covers the edit that moved a
+    // value and nothing else, which is the case the digest cannot see.
+    if (_bakedProgramStale) {
+        _bakedProgramStale = false;
+        // Handed over rather than dropped: the op list is what the edit
+        // invalidated, not the geometry state around it, and starting that
+        // over re-runs every per-point kernel and reports nodes as built
+        // that were never rebuilt.
+        _RebuildBakedProgram(std::move(_bakedProgram));
+    }
+    // The mode was asked for while the epoch was dirty -- a scene edit
+    // between the compile and the request, which is every request made by a
+    // UI after the artist has touched anything. SetEvaluationMode could not
+    // build then, because the epoch it would have baked was about to be
+    // re-settled; now it has been, so build here. Once per epoch: a rig the
+    // program cannot express refuses for reasons the epoch fixes, and
+    // re-asking every frame pays for the refusal every frame.
+    if (_evaluationMode != RigExecEvaluationMode::Dynamic && _compiled &&
+        !_bakedProgram && !_bakeRefused) {
+        _RebuildBakedProgram();
+    }
+    // An override the program cannot place would make it answer a question
+    // nobody asked; that generation runs dynamically instead.
+    const bool overridesPlaceable =
+        !_bakedProgram || _bakedProgram->SetOverrides(_interactiveOverrides);
+    // cpuParityMode publishes an independent scalar oracle for the geometry
+    // chains. The program is not that oracle -- it shares the kernels -- so
+    // asking for the oracle asks for the dynamic path.
+    const bool runBaked = _bakedProgram && !cpuParityMode &&
+        overridesPlaceable &&
+        _evaluationMode != RigExecEvaluationMode::Dynamic;
+    if (!runBaked) {
+        return _EvaluateDynamic(time, std::move(settled));
+    }
+    RigExecRigPose baked;
+    baked.time = time;
+    baked.diagnostics = settled;
+    if (!_bakedProgram->Run(time, &baked)) {
+        // The program handed the generation back mid-flight, so its per-frame
+        // caches no longer describe a completed frame. Drop it rather than
+        // reuse it, and answer from the path that cannot decline.
+        _bakedProgram.reset();
+        return _EvaluateDynamic(time, std::move(settled));
+    }
+    ++_bakedGenerations;
+    if (_evaluationMode == RigExecEvaluationMode::Baked) {
+        return baked;
+    }
+    // BakedWithParityCheck publishes the DYNAMIC generation: it is the
+    // reference, so a disagreement must not also change what consumers see.
+    RigExecRigPose reference = _EvaluateDynamic(time, std::move(settled));
+    RigExecComparePoses(reference, baked, &reference);
+    if (reference.bakedParityMismatches) {
+        // The mode exists to be believed or disbelieved, and a count that
+        // only a caller who thought to read it can see is neither. One line
+        // on stderr is also what lets an existing suite be re-run under the
+        // mode and FAIL on a disagreement it never looks for itself.
+        TF_WARN("rigExec: %zu baked parity mismatch(es) on %s at %s",
+                reference.bakedParityMismatches, _rigPath.GetText(),
+                time.IsDefault()
+                    ? "default"
+                    : TfStringPrintf("%g", time.GetValue()).c_str());
+    }
+    return reference;
+}
+
+void
+RigExecRigEvaluator::SetEvaluationMode(RigExecEvaluationMode mode)
+{
+    if (mode == _evaluationMode) {
+        return;
+    }
+    _evaluationMode = mode;
+    _bakedProgramStale = false;
+    // An explicit request is a new question even where the last one was
+    // refused, so it does not inherit the epoch's refusal.
+    _bakeRefused = false;
+    if (_compiled && !_structureDirty) {
+        // Baked <-> parity keeps the geometry state: the program is rebuilt
+        // because the DISPATCH changed, and nothing about the rig did.
+        _RebuildBakedProgram(std::move(_bakedProgram));
+    } else {
+        // Dynamic, or an epoch that has not settled. Either way this
+        // evaluator has no program until Evaluate builds one.
+        _bakedProgram.reset();
+    }
+    // A dirty epoch is not a refusal: Evaluate builds the program once the
+    // epoch has settled, which is where it can know what it would be baking.
+}
+
+void
+RigExecRigEvaluator::_RebuildBakedProgram(
+    std::unique_ptr<RigExecBakedProgram> outgoing)
+{
+    if (_evaluationMode == RigExecEvaluationMode::Dynamic) {
+        _bakedProgram.reset();
+        return;
+    }
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.Bake", "compile");
+    ++_bakedProgramBuildAttempts;
+    _bakedProgram = RigExecBakedProgram::Build(this, nullptr);
+    if (_bakedProgram) {
+        ++_bakedProgramBuilds;
+        if (outgoing) {
+            // The replacement inherits the geometry nodes that survive,
+            // matched the way the dynamic walk matches its VdfNetwork nodes.
+            // Without it a rebuilt program re-runs every per-point kernel and
+            // publishes "created"/"schedule(s) built" counters, and the mover
+            // graph diagnostic, for nodes nothing rebuilt -- while the
+            // dynamic path, whose graphs stood through the same edit, reports
+            // none of it.
+            _bakedProgram->AdoptGeometryStateFrom(*outgoing);
+        }
+    }
+    // Refusing is a property of the epoch, not of the moment: remember it so
+    // the lazy build in Evaluate asks once rather than once per frame.
+    _bakeRefused = !_bakedProgram;
+}
+
+bool
+RigExecRigEvaluator::IsBakeable(std::vector<std::string> *reasons) const
+{
+    return RigExecBakedProgram::IsBakeable(*this, reasons);
+}
+
+bool
+RigExecRigEvaluator::_SettleEpoch(std::vector<std::string> *diagnostics)
+{
+    if (!_compiled && !Compile(diagnostics)) {
+        return false;
     }
     // Structural edits begin a new epoch: recompile when the composed
     // mover topology digest changed (spec §4.2, §6.3).
+    const bool edited = _structureDirty;
+    bool recompiled = false;
     if (_structureDirty && _ComputeStructureDigest() != _structureDigest) {
-        if (!Compile(&pose.diagnostics)) {
-            pose.diagnostics.push_back(
-                "structural recompilation failed");
-            return pose;
+        if (!Compile(diagnostics)) {
+            diagnostics->push_back("structural recompilation failed");
+            return false;
         }
-        pose.diagnostics.push_back("structural edit: epoch rebuilt");
+        recompiled = true;
+        diagnostics->push_back("structural edit: epoch rebuilt");
     }
     _structureDirty = false;
+    if (edited && !recompiled) {
+        // An edit that did not change the digest can still have changed the
+        // KIND of a rest channel -- authored the first time sample on one,
+        // connected it, unmuted a layer that animates it. The epoch-constant
+        // rest frames then stop being a legal simplification of the
+        // per-frame ones, and the digest is blind to that as well, so the
+        // classification is re-asked here and answered by recompiling. This
+        // is the only place the rest taps can be moved back into the
+        // per-frame pose-seed request, which is what the fallback is.
+        if (!_restTapIds.empty() && _EpochRestsMightVary()) {
+            if (!Compile(diagnostics)) {
+                diagnostics->push_back("structural recompilation failed");
+                return false;
+            }
+            _structureDirty = false;
+            diagnostics->push_back(
+                "rest channel became time-varying: epoch rebuilt");
+            return true;
+        }
+        // Otherwise the kind is unchanged and only the VALUES can have
+        // moved. A recompile has just pulled fresh rests; anything else that
+        // edited the stage has to.
+        if (!_RefreshEpochRestFrames()) {
+            diagnostics->push_back("rest frame evaluation incomplete");
+            return false;
+        }
+    }
+    return true;
+}
+
+RigExecRigPose
+RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
+                                      std::vector<std::string> diagnostics)
+{
+    RigExecRigPose pose;
+    pose.time = time;
+    pose.diagnostics = std::move(diagnostics);
+    if (!_SettleEpoch(&pose.diagnostics)) {
+        return pose;
+    }
 
     // 0. Solver aggregates first, then each solver-posed joint's frame as an
     // override on the authoritative request. This is the whole of the
@@ -7346,6 +8263,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         if (sameSeedInputs) {
             seedSnapshot = _poseSeedSnapshot;
         } else {
+            // Warm the shared executor before the override-bearing pull, so
+            // the sub-executor that serves the overrides inherits a populated
+            // cache instead of recomputing the whole network behind every
+            // override.
+            _poseSeedTaps->Warm(time);
             seedSnapshot = _poseSeedTaps->Evaluate(time, baseOverrides);
             if (!seedSnapshot.IsValid() || !seedSnapshot.IsComplete()) {
                 _poseSeedDirty = true;
@@ -7401,12 +8323,65 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 
     // Seed every reachable RigExec frame provider before any pose operation.
     // Solvers will replace their owned joint frames when their inputs are ready.
+    // The three maps are empty here and _poseSeedFrames hands its keys over
+    // already ordered, so each insertion goes straight to the end instead of
+    // searching the tree it is building.
+    // The rests are the epoch's, pulled once at Compile -- unless this epoch
+    // has a rest channel that can move with time, in which case they rode in
+    // on the seed snapshot with the frames.
+    if (_poseSeedRests.empty()) {
+        // ... or unless a drag is standing on a rest channel. An interactive
+        // override is a value that stands in for an authored one, so it has
+        // to move a rest frame exactly as authoring it would: the drag and
+        // the commit of that same drag must agree, and jointMatricesFinal is
+        // the rest->pose map, so a pose that moved against a rest that did
+        // not is not a pose of this rig at all. The epoch pull carries no
+        // overrides, so for as long as one stands the rests are pulled
+        // per frame with them, through the same request and at the frame's
+        // own time code -- which is exactly what the per-frame rest taps
+        // used to do.
+        //
+        // Only a rest input can do it: computeRestFrame reads the seven
+        // names below on the provider and on its RigExec ancestors and
+        // nothing else (see _RestInputNames), and this epoch has no rest
+        // channel with an authored connection -- _ProviderRestMightVary
+        // refuses the epoch path outright when one does -- so no override on
+        // any other attribute can reach a rest frame. A computation override
+        // names a computation this cannot inspect, so it counts.
+        const bool restOverridden = [this]() {
+            for (const RigExecValueOverride &o : _interactiveOverrides) {
+                if (o.attribute.IsEmpty() || _IsRestInputName(o.attribute)) {
+                    return true;
+                }
+            }
+            return false;
+        }();
+        if (restOverridden && _restTaps && !_restTapIds.empty()) {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "RestFramesOverridden", "pose");
+            const RigExecSnapshot rests =
+                _restTaps->Evaluate(time, baseOverrides);
+            if (!rests.IsValid() || !rests.IsComplete()) {
+                pose.diagnostics.push_back(
+                    "rest frame evaluation incomplete under an override");
+                return pose;
+            }
+            for (const auto &[provider, tap] : _restTapIds) {
+                restFrames[provider] = rests.Get<RigExecPointFrame>(tap);
+            }
+        } else {
+            restFrames = _epochRestFrames;
+        }
+    }
     for (const auto &[provider, tap] : _poseSeedFrames) {
         const RigExecPointFrame frame = seedSnapshot.Get<RigExecPointFrame>(tap);
-        baseFrames[provider] = frame;
-        finalFrames[provider] = frame;
-        restFrames[provider] = seedSnapshot.Get<RigExecPointFrame>(
-            _poseSeedRests.at(provider));
+        baseFrames.emplace_hint(baseFrames.end(), provider, frame);
+        finalFrames.emplace_hint(finalFrames.end(), provider, frame);
+        if (!_poseSeedRests.empty()) {
+            restFrames.emplace_hint(restFrames.end(), provider,
+                seedSnapshot.Get<RigExecPointFrame>(
+                    _poseSeedRests.at(provider)));
+        }
     }
     // Compose the transform of any plain Xformable lying between the asset
     // root and a provider, which exec resolves as identity and therefore
@@ -7614,13 +8589,57 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         for (const char *name : {"parent:space"}) {
             const UsdAttribute attribute = prim.GetAttribute(TfToken(name));
             SdfPathVector connections;
-            if (attribute && attribute.GetConnections(&connections) &&
+            // HasAuthoredConnections first: see _AuthoredConnections.
+            if (attribute && attribute.HasAuthoredConnections() &&
+                attribute.GetConnections(&connections) &&
                 !connections.empty()) return false;
             GfMatrix4d authored(1.0);
             if (attribute && attribute.Get(&authored, time) &&
                 authored != GfMatrix4d(1.0)) return false;
         }
         return true;
+    };
+
+    // Nearest pose-owning ancestor-or-self of a path, memoized for this
+    // evaluation.
+    //
+    // Namespace propagation stops at a path that owns its own pose -- a joint
+    // a solver writes, or a provider whose parent:space is authored rather
+    // than inherited. Both walks below need that answer for a provider
+    // relative to some ancestor, and both used to rediscover it by climbing
+    // the namespace and re-reading parent:space off the stage at every step,
+    // once per propagated descendant: quadratic along a joint chain, and the
+    // reason a long spine costs more at its root than at its tip. The nearest
+    // owner depends only on the path, so it is computed once and shared.
+    //
+    // The climb closes over every path element, not only the known providers:
+    // a provider's parent need not itself be a provider.
+    std::map<SdfPath, SdfPath> nearestBlockingCache;
+    const auto ownsItsPose = [&](const SdfPath &path) {
+        return _jointSolverBinding.count(path) ||
+            (hierarchicalProviders.count(path) && !inheritsNamespacePose(path));
+    };
+    const auto nearestBlocking = [&](const SdfPath &path) {
+        std::vector<SdfPath> pending;
+        SdfPath walk = path;
+        SdfPath owner;
+        for (; !walk.IsEmpty(); walk = walk.GetParentPath()) {
+            const auto cached = nearestBlockingCache.find(walk);
+            if (cached != nearestBlockingCache.end()) {
+                owner = cached->second;
+                break;
+            }
+            if (ownsItsPose(walk)) {
+                nearestBlockingCache[walk] = walk;
+                owner = walk;
+                break;
+            }
+            pending.push_back(walk);
+        }
+        for (const SdfPath &seen : pending) {
+            nearestBlockingCache[seen] = owner;
+        }
+        return owner;
     };
 
     std::set<SdfPath> constrainedProviders;
@@ -7667,15 +8686,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             }
             // An independently solved joint is an absolute posed override.
             // Namespace propagation cannot pass through that ownership boundary.
-            bool blocked = false;
-            for (SdfPath path = provider; path != closest; path = path.GetParentPath()) {
-                if (_jointSolverBinding.count(path) ||
-                    (hierarchicalProviders.count(path) && !inheritsNamespacePose(path))) {
-                    blocked = true;
-                    break;
-                }
+            const SdfPath blocker = nearestBlocking(provider);
+            if (!blocker.IsEmpty() && blocker != closest &&
+                blocker.HasPrefix(closest)) {
+                continue;
             }
-            if (blocked) continue;
             const auto before = finalFrames.find(closest);
             if (solverOutput && (before == finalFrames.end() ||
                 !_IsUsableConstraintFrame(current) ||
@@ -7738,6 +8753,13 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             });
     };
     refreshPoseProvider = [&](const SdfPath &requested) {
+        // Nothing to refresh when no provider has a connected tap: the walk
+        // below would visit the whole pose DAG to discover that at every
+        // constraint target of every frame. Its only other effect is the
+        // cycle diagnostic, and Compile already rejects a cyclic pose DAG.
+        if (_connectedPoseTaps.empty()) {
+            return true;
+        }
         std::vector<std::pair<SdfPath, bool>> pending{{requested, false}};
         std::set<SdfPath> active, complete;
         while (!pending.empty()) {
@@ -7816,15 +8838,9 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 for (auto it = baseFrames.upper_bound(path);
                      it != baseFrames.end() && it->first.HasPrefix(path); ++it) {
                     if (!hierarchicalProviders.count(it->first)) continue;
-                    bool blocked = false;
-                    for (SdfPath ancestor = it->first; ancestor != path;
-                         ancestor = ancestor.GetParentPath()) {
-                        if (_jointSolverBinding.count(ancestor) ||
-                            (hierarchicalProviders.count(ancestor) && !inheritsNamespacePose(ancestor))) {
-                            blocked = true;
-                            break;
-                        }
-                    }
+                    const SdfPath blocker = nearestBlocking(it->first);
+                    const bool blocked = !blocker.IsEmpty() &&
+                        blocker != path && blocker.HasPrefix(path);
                     if (!blocked) it->second = RigExecMatrixToPoints(it->second.points, delta);
                 }
             }
@@ -7854,9 +8870,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                      "avars:sx", "avars:sy", "avars:sz"}) {
                 const UsdAttribute attr = joint.GetAttribute(TfToken(name));
                 SdfPathVector connections;
+                // HasAuthoredConnections first: see _AuthoredConnections.
                 if (attr &&
                     (attr.GetNumTimeSamples() > 0 ||
-                     (attr.GetConnections(&connections) &&
+                     (attr.HasAuthoredConnections() &&
+                      attr.GetConnections(&connections) &&
                       !connections.empty()))) {
                     return true;
                 }
@@ -8749,29 +9767,108 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // dependency stated in general -- a cage read at `final` needs the cage's
     // chain first, exactly as the net does -- so the special case became one
     // edge in a topological sort and the heuristic went away.
-    for (const SdfPath &target : _chainOrder) {
+    // What one chain produced, held apart from the pose until the walk folds
+    // it in.
+    //
+    // Independent chains can run at the same time, and two of them appending
+    // to one diagnostics vector or inserting into one map would be a data
+    // race -- and, worse, whichever finished first would decide the order the
+    // rig reports things in. So a chain writes only into its own buffer and
+    // the walk merges the buffers in chain order: what a serial walk wrote,
+    // in the order it wrote it, however the tasks were scheduled.
+    struct _ChainWork {
+        std::vector<std::string> diagnostics;
+        std::vector<std::pair<SdfPath, VtValue>> movedProperties;
+        std::map<SdfPath, RigExecResolvedWeightField> weightFields;
+        std::vector<std::pair<SdfPath, RigExecPointFrame>> controlFrames;
+        RigExecChainSnapshots snapshots;
+        size_t revisionsCreated = 0;
+        size_t revisionsExecuted = 0;
+        size_t schedulesBuilt = 0;
+        size_t chainsBuilt = 0;
+        size_t revisionsBuilt = 0;
+    };
+    const auto mergeChainWork = [&](_ChainWork &work) {
+        for (std::string &message : work.diagnostics) {
+            pose.diagnostics.push_back(std::move(message));
+        }
+        for (auto &[path, value] : work.movedProperties) {
+            pose.movedProperties[path] = std::move(value);
+        }
+        for (auto &[path, field] : work.weightFields) {
+            pose.weightFields[path] = std::move(field);
+        }
+        for (const auto &[path, frame] : work.controlFrames) {
+            pose.controlFrames[path] = frame;
+        }
+        _chainSnapshots.Merge(std::move(work.snapshots));
+        pose.moverGraphRevisionsCreated += work.revisionsCreated;
+        pose.moverGraphRevisionsExecuted += work.revisionsExecuted;
+        pose.moverGraphSchedulesBuilt += work.schedulesBuilt;
+        graphChainsBuilt += work.chainsBuilt;
+        graphRevisionsBuilt += work.revisionsBuilt;
+    };
+
+    // One chain, start to finish. Everything it touches outside `work` is
+    // read-only for the duration: the compiled bindings, the exec snapshot
+    // this generation extracted, the pose as the constraint walk left it, and
+    // its own live graph, which no other chain can reach.
+    const auto runChain = [&](const SdfPath &target, _ChainWork &work,
+                              UsdGeomXformCache &chainXformCache) {
+        // This chain's own records answer first. A phase that names a mover
+        // in THIS chain is answered by what the chain has recorded so far,
+        // which is in this task's buffer and does not reach the evaluator's
+        // store until the walk merges it; everything else -- a provider's
+        // frame from the pose walk, another chain from an earlier level --
+        // is already there and unchanging while this runs.
+        const auto lookupChainSnapshot =
+            [&](const SdfPath &path, const RigExecReadPhase &phase,
+                const SdfPath &reader) -> const VtValue * {
+            if (const VtValue *recorded =
+                    work.snapshots.Lookup(path, phase, reader)) {
+                return recorded;
+            }
+            return _chainSnapshots.Lookup(path, phase, reader);
+        };
         const auto chainIt = _graphChains.find(target);
         if (chainIt == _graphChains.end()) {
-            continue;
+            return;
         }
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "Chain " + target.GetString(), "geometry");
         const std::vector<_GraphRevision> &revisions = chainIt->second;
         VtVec3fArray basePoints;
-        const UsdAttribute baseAttr = _stage->GetAttributeAtPath(target);
-        if (!baseAttr || !baseAttr.Get(&basePoints, time)) {
-            continue;
-        }
-
+        // Compile created a node for every chain and derived target, so this
+        // never inserts. An insertion here would be a write into a map the
+        // other chains of this level are reading at the same time.
         auto &live = _liveGraphs[target];
-        if (live && !live->graph.UpdatePointSource(live->source, basePoints)) {
-            // A time-varying point count changes VDF element masks. Replace
-            // this target's graph only; independent targets keep their caches.
-            live.reset();
-        }
-        if (!live) {
-            live = std::make_unique<_LiveGraph>();
-            live->source = live->graph.AddPointSource(target, basePoints);
+        if (live && live->basePointsPushed && live->basePointsStatic) {
+            // Already in the source, and an authored base that is not
+            // time-varying cannot have moved since: this skips the attribute
+            // read and the element-by-element compare inside
+            // UpdatePointSource, both of which can only conclude "unchanged".
+            // The array itself is still needed below (blend deltas, painted
+            // weight fields), and handing it over is a refcount.
+            basePoints = live->basePoints;
+        } else {
+            const UsdAttribute baseAttr = _stage->GetAttributeAtPath(target);
+            if (!baseAttr || !baseAttr.Get(&basePoints, time)) {
+                return;
+            }
+            if (live &&
+                !live->graph.UpdatePointSource(live->source, basePoints)) {
+                // A time-varying point count changes VDF element masks.
+                // Replace this target's graph only; independent targets keep
+                // their caches.
+                live.reset();
+            }
+            if (!live) {
+                live = std::make_unique<_LiveGraph>();
+                live->source = live->graph.AddPointSource(target, basePoints);
+            }
+            live->basePoints = basePoints;
+            live->basePointsPushed = true;
+            live->basePointsStatic = !baseAttr.ValueMightBeTimeVarying();
         }
         // Match stable operation identities, reconnect surviving nodes, and
         // delete removed nodes. A rebind only updates packets; insertion,
@@ -8796,7 +9893,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 } else {
                     output = live->graph.AddRevision(identity.second, previous,
                         RigExecMoverParameters(), RigExecMoverStatus());
-                    ++pose.moverGraphRevisionsCreated;
+                    ++work.revisionsCreated;
                 }
                 outputs.push_back(output);
                 previous = output;
@@ -8827,7 +9924,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             // ones added later, without touching the assembler.
             RigExecResolvedInputs revisionInputs = _resolvedInputs;
             for (const auto &[inputPath, phase] : revision.binding.phases) {
-                if (const VtValue *v = _chainSnapshots.Lookup(
+                if (const VtValue *v = lookupChainSnapshot(
                         inputPath, phase, revision.moverPath)) {
                     revisionInputs.SetProperty(inputPath, *v);
                 } else if (phase.kind != RigExecReadPhaseKind::Preceding) {
@@ -8835,7 +9932,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                     // reader is the chain's first revision, so its preceding
                     // value IS the base). Anything else means the phase named
                     // something that produced nothing.
-                    pose.diagnostics.push_back(
+                    work.diagnostics.push_back(
                         "diag " + revision.moverPath.GetString() +
                         ": read phase '" + phase.GetAsString() + "' for " +
                         inputPath.GetString() +
@@ -8876,7 +9973,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 // The provider's frame as of a named point in the pose walk,
                 // rather than its base or its final. Same store the point
                 // chains use; the value here is a matrix instead of an array.
-                if (const VtValue *v = _chainSnapshots.Lookup(
+                if (const VtValue *v = lookupChainSnapshot(
                         revision.binding.transform,
                         revision.binding.transformPhase,
                         revision.moverPath)) {
@@ -8905,7 +10002,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                         }
                     } else if (revision.binding.transformPhase.kind ==
                                RigExecReadPhaseKind::AtPrim) {
-                        if (const VtValue *v = _chainSnapshots.Lookup(
+                        if (const VtValue *v = lookupChainSnapshot(
                                 provider, revision.binding.transformPhase,
                                 revision.moverPath)) {
                             if (v->IsHolding<GfMatrix4d>()) {
@@ -8962,7 +10059,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                         // field instead would silently be a different
                         // deformation.
                         weights = RigExecWeightPacket();
-                        pose.diagnostics.push_back(
+                        work.diagnostics.push_back(
                             "current-phase weight failed: " + weightError);
                     }
                 }
@@ -8973,7 +10070,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             // the geometry -- not a re-derivation that could drift.
             if (revision.weightTap >= 0 && weights.valid) {
                 RigExecResolvedWeightField &field =
-                    pose.weightFields[revision.binding.weightObject];
+                    work.weightFields[revision.binding.weightObject];
                 SdfPathVector declaredTargets;
                 if (const UsdPrim weightPrim = _stage->GetPrimAtPath(
                         revision.binding.weightObject)) {
@@ -8996,6 +10093,10 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 }
             }
             values.basePoints.assign(basePoints.begin(), basePoints.end());
+            if (revision.op == RigExecRevisionOp::Skin &&
+                revision.skinTopologyFixed) {
+                values.skinTopologyCache = &_skinTopologies;
+            }
             if (revision.op == RigExecRevisionOp::Curvenet) {
                 values.curvenetCache = &_curvenetBindings;
                 // The curvenet's own chain result if it has one; pass 0 above
@@ -9024,7 +10125,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                             _resolvedInputs.GetAttribute(samplePrim.GetAttribute(TfToken("rigExec:activation")),
                                                          time, &sample.activation);
                             VtVec3fArray points;
-                            const VtValue *phased = _chainSnapshots.Lookup(
+                            const VtValue *phased = lookupChainSnapshot(
                                 binding.points, binding.phase, revision.moverPath);
                             if (phased && phased->IsHolding<VtVec3fArray>()) {
                                 points = phased->UncheckedGet<VtVec3fArray>();
@@ -9064,7 +10165,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                     1.0f, time);
                 if (!std::isfinite(scalar) || scalar < 0.0f ||
                     scalar > 1.0f) {
-                    pose.diagnostics.push_back(
+                    work.diagnostics.push_back(
                         "MoverFailed " + revision.moverPath.GetString() +
                         ": inputs:defaultWeight must be finite and in "
                         "[0, 1]; revision passed through");
@@ -9072,7 +10173,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             } else if (parameters.enabled && !parameters.valid &&
                        !revision.binding.weightObject.IsEmpty() &&
                        (!values.weights || !values.weights->valid)) {
-                pose.diagnostics.push_back(
+                work.diagnostics.push_back(
                     "MoverFailed " + revision.moverPath.GetString() +
                     ": rigExec:weightObject produced an invalid common "
                     "envelope; revision passed through");
@@ -9081,7 +10182,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             graph.UpdateRevision(
                 head, parameters,
                 RigExecStatusForParameters(parameters, revision.moverPath));
-            ++graphRevisionsBuilt;
+            ++work.revisionsBuilt;
 
             // Snapshot only where a phased read named this revision. The
             // compile pass reduced every phase to one revision, so this is
@@ -9092,12 +10193,12 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 wanted->second.count(revision.moverPath)) {
                 RIGEXEC_PROFILE_SCOPE_CAT(
                     _profiler, "SnapshotEvaluate", "geometry");
-                _chainSnapshots.Record(target, revision.moverPath,
+                work.snapshots.Record(target, revision.moverPath,
                                        VtValue(graph.Evaluate(head)));
             }
         }
         if (!built) {
-            continue;
+            return;
         }
 
         const VtVec3fArray graphPoints = [&]() {
@@ -9107,7 +10208,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         }();
         for (size_t i = 0; i < live->revisions.size(); ++i) {
             if (graph.GetRevisionStatus(live->revisions[i]).state == "moverFailed") {
-                pose.diagnostics.push_back("MoverFailed " + revisions[i].moverPath.GetString() +
+                work.diagnostics.push_back("MoverFailed " + revisions[i].moverPath.GetString() +
                     ": execution rejected its inputs; revision passed through");
             }
             if (revisions[i].op == RigExecRevisionOp::CurvenetAdjuster &&
@@ -9131,29 +10232,31 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                     netToAsset = netToAsset * local;
                     if (reset) {
                         netToAsset = netToAsset *
-                            constraintXformCache.GetLocalToWorldTransform(assetRoot).GetInverse();
+                            chainXformCache.GetLocalToWorldTransform(assetRoot).GetInverse();
                         break;
                     }
                 }
                 for (size_t j = 0; j < std::min(frames.size(), paths.size()); ++j) {
-                    pose.controlFrames[paths[j]] = RigExecFrameFromMatrix(frames[j] * netToAsset);
+                    work.controlFrames.emplace_back(
+                        paths[j],
+                        RigExecFrameFromMatrix(frames[j] * netToAsset));
                 }
             }
         }
-        pose.moverGraphRevisionsExecuted +=
+        work.revisionsExecuted +=
             graph.GetRevisionExecutionCount() - executionsBefore;
-        pose.moverGraphSchedulesBuilt +=
+        work.schedulesBuilt +=
             graph.GetScheduleBuildCount() - schedulesBefore;
-        pose.movedProperties[target] = VtValue(graphPoints);
+        work.movedProperties.emplace_back(target, VtValue(graphPoints));
         // `final` costs nothing extra: this is the value the chain publishes.
-        _chainSnapshots.RecordFinal(target, VtValue(graphPoints));
-        ++graphChainsBuilt;
+        work.snapshots.RecordFinal(target, VtValue(graphPoints));
+        ++work.chainsBuilt;
 
         // Derived maintenance reads this chain's final points, which is why it
         // runs here rather than as another entry in _graphChains.
         const auto derivedIt = _graphDerivedChains.find(target);
         if (derivedIt == _graphDerivedChains.end()) {
-            continue;
+            return;
         }
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "Derived " + target.GetString(), "geometry");
@@ -9187,10 +10290,15 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 parameters.topologyCounts == deferred.topologyCounts &&
                 parameters.topologyIndices == deferred.topologyIndices &&
                 parameters.widths == deferred.widths) {
-                pose.movedProperties[derived.target] = VtValue(deferred.result);
-                ++graphChainsBuilt;
+                work.movedProperties.emplace_back(
+                    derived.target, VtValue(deferred.result));
+                // A republished revision is still a revision the chain
+                // holds; the count is what the walk reports.
+                ++work.revisionsBuilt;
+                ++work.chainsBuilt;
                 continue;
             }
+            // Pre-created at Compile with every other chain node.
             auto &derivedLive = _liveGraphs[derived.target];
             if (derivedLive && !derivedLive->graph.UpdatePointSource(
                     derivedLive->source, derivedBase)) {
@@ -9205,7 +10313,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                         derived.op, derivedLive->source, parameters,
                         RigExecStatusForParameters(parameters,
                                                    derived.moverPath)));
-                ++pose.moverGraphRevisionsCreated;
+                ++work.revisionsCreated;
             }
             RigExecMoverGraph &derivedGraph = derivedLive->graph;
             const size_t derivedExecutions =
@@ -9215,7 +10323,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             derivedGraph.UpdateRevision(
                 derivedHead, parameters,
                 RigExecStatusForParameters(parameters, derived.moverPath));
-            ++graphRevisionsBuilt;
+            ++work.revisionsBuilt;
 
             const VtVec3fArray derivedResult = [&]() {
                 RIGEXEC_PROFILE_SCOPE_CAT(
@@ -9224,7 +10332,7 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
             }();
             if (derivedGraph.GetRevisionStatus(derivedHead).state == "moverFailed") {
                 deferred.cached = false;
-                pose.diagnostics.push_back("MoverFailed " + derived.target.GetString() +
+                work.diagnostics.push_back("MoverFailed " + derived.target.GetString() +
                     ": derived geometry input/cardinality validation failed");
             } else {
                 deferred.points = parameters.auxPoints;
@@ -9235,12 +10343,57 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
                 deferred.result = derivedResult;
                 deferred.cached = true;
             }
-            pose.moverGraphRevisionsExecuted +=
+            work.revisionsExecuted +=
                 derivedGraph.GetRevisionExecutionCount() - derivedExecutions;
-            pose.moverGraphSchedulesBuilt +=
+            work.schedulesBuilt +=
                 derivedGraph.GetScheduleBuildCount() - derivedSchedules;
-            pose.movedProperties[derived.target] = VtValue(derivedResult);
-            ++graphChainsBuilt;
+            work.movedProperties.emplace_back(derived.target, VtValue(derivedResult));
+            ++work.chainsBuilt;
+        }
+    };
+
+    // Level by level, and inside a level one task per chain wherever Compile
+    // classified that as safe. A level that is not -- and every level when
+    // the kill switch is off -- is walked in order on this thread, which is
+    // what the whole walk was before levels existed.
+    const auto runChainHere = [&](const SdfPath &target) {
+        _ChainWork work;
+        runChain(target, work, constraintXformCache);
+        mergeChainWork(work);
+    };
+    if (_chainLevels.empty()) {
+        // No partition at all -- a rig with no point chains. The chain order
+        // is then the whole walk, and it is empty too.
+        for (const SdfPath &target : _chainOrder) {
+            runChainHere(target);
+        }
+    }
+    for (const _ChainLevel &level : _chainLevels) {
+        if (!level.parallel || !RigExecParallelEvaluationEnabled()) {
+            for (const SdfPath &target : level.targets) {
+                runChainHere(target);
+            }
+            continue;
+        }
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ChainLevel", "geometry");
+        std::vector<_ChainWork> levelWork(level.targets.size());
+        WorkWithScopedParallelism([&]() {
+            WorkDispatcher dispatcher;
+            for (size_t i = 0; i < level.targets.size(); ++i) {
+                dispatcher.Run([&, i]() {
+                    // Its own transform cache: the cache memoizes, so one
+                    // shared between tasks would be a shared mutable map, and
+                    // what it memoizes is a stage read each task can make for
+                    // itself.
+                    UsdGeomXformCache taskXformCache(time);
+                    runChain(level.targets[i], levelWork[i], taskXformCache);
+                });
+            }
+            // The dispatcher joins on the way out of this scope, so nothing
+            // below reads a buffer a task is still writing.
+        });
+        for (_ChainWork &work : levelWork) {
+            mergeChainWork(work);
         }
     }
     // The same chains against the scalar CPU reference (spec §7.4). This is

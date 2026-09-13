@@ -526,6 +526,32 @@ _PythonToDependencyPaths(
 // Rig: the evaluator wrapper.
 // ---------------------------------------------------------------------------
 
+const char *
+_ModeName(rigExec::RigExecEvaluationMode mode)
+{
+    switch (mode) {
+    case rigExec::RigExecEvaluationMode::Baked: return "baked";
+    case rigExec::RigExecEvaluationMode::BakedWithParityCheck: return "parity";
+    case rigExec::RigExecEvaluationMode::Dynamic: break;
+    }
+    return "dynamic";
+}
+
+rigExec::RigExecEvaluationMode
+_ParseMode(const std::string &name)
+{
+    if (name == "baked") return rigExec::RigExecEvaluationMode::Baked;
+    if (name == "parity") {
+        return rigExec::RigExecEvaluationMode::BakedWithParityCheck;
+    }
+    if (name != "dynamic") {
+        throw py::value_error(
+            "evaluation_mode must be 'dynamic', 'baked' or 'parity' (got '" +
+            name + "')");
+    }
+    return rigExec::RigExecEvaluationMode::Dynamic;
+}
+
 struct _Rig {
     UsdStageRefPtr stage;  ///< keeps the stage alive for the rig's lifetime
     SdfPath rigPath;
@@ -618,6 +644,25 @@ PYBIND11_MODULE(_rigexec, m) {
         .def_property("cpu_parity_mode",
             [](_Rig &r) { return r.evaluator->cpuParityMode; },
             [](_Rig &r, bool v) { r.evaluator->cpuParityMode = v; })
+        .def_property("evaluation_mode",
+            [](_Rig &r) { return _ModeName(r.evaluator->GetEvaluationMode()); },
+            [](_Rig &r, std::string v) {
+                r.evaluator->SetEvaluationMode(_ParseMode(v));
+            },
+            "'dynamic' (OpenExec plus the pose walk), 'baked' (the flattened\n"
+            "epoch when the rig allows it, dynamic otherwise), or 'parity'\n"
+            "(both, compared with exact equality; see\n"
+            "Pose.baked_parity_mismatches). Baked is a request: setting it\n"
+            "can never change an answer, only how fast it arrives.")
+        .def("is_bakeable", [](const _Rig &r) {
+            return r.evaluator->IsBakeable(nullptr);
+        }, "Whether the compiled epoch can be expressed as a baked program.")
+        .def("bakeability_reasons", [](const _Rig &r) {
+            std::vector<std::string> reasons;
+            r.evaluator->IsBakeable(&reasons);
+            return reasons;
+        }, "One reason per feature that stops the rig from baking; empty\n"
+           "when is_bakeable() is true.")
         .def("binding_epoch_digest", [](const _Rig &r) {
             return r.evaluator->GetBindingEpochDigest();
         })
@@ -684,6 +729,8 @@ PYBIND11_MODULE(_rigexec, m) {
         })
         .def_property_readonly("mover_graph_parity_mismatches",
             [](const rigExec::RigExecRigPose &p) { return p.moverGraphParityMismatches; })
+        .def_property_readonly("baked_parity_mismatches",
+            [](const rigExec::RigExecRigPose &p) { return p.bakedParityMismatches; })
         .def_readonly("mover_graph_revisions_created",
             &rigExec::RigExecRigPose::moverGraphRevisionsCreated)
         .def_readonly("mover_graph_revisions_executed",

@@ -255,6 +255,42 @@ The easiest way to author a first rig is to copy
    solver batch and constraint, the exec snapshot, each geometry chain)
    as Chrome Trace JSON for Perfetto or `chrome://tracing`, and prints a
    per-phase summary.
+8. `--mode baked` asks for the flattened evaluation path: the compiled epoch
+   as an op list over dense slots, with no exec round trip per frame. It is a
+   REQUEST -- a rig using a feature the program cannot express evaluates
+   dynamically and the tool prints one reason per feature -- so it can never
+   change an answer, only how fast it arrives. `--mode parity` runs both
+   paths and reports any disagreement (exit status is non-zero if there is
+   one).
+9. The baked program survives scene edits. It records which properties it
+   read and which prims it read them from, and a notice that misses that
+   index -- a value on an input it re-reads every frame, anything on a prim
+   it never looked at -- leaves it standing. A notice that hits it rebuilds
+   the program alone, without recompiling the epoch, because the epoch digest
+   is deliberately blind to values and is unchanged by exactly the edits that
+   make a captured constant wrong. An interactive override is placed into the
+   program for as long as it stands, unless it names a value folded in at
+   bake time or a prim computation, in which case that generation evaluates
+   dynamically rather than answering from state the override cannot reach.
+   Setting `RIGEXEC_EVALUATION_MODE` to `baked` or `parity` picks the initial
+   mode of every evaluator in the process; it is how the existing test suites
+   are re-run under the program (`ctest -R BakedParity`) and changes nothing
+   a caller could not set itself. The variable is read ONCE per process, when
+   the first evaluator is constructed, and the value is then fixed for the
+   life of the process: changing the environment afterwards has no effect,
+   and the only way to change an evaluator's mode is `SetEvaluationMode`.
+10. Evaluation spreads two kinds of work across cores: the per-point geometry
+    kernels (linear blend skinning and the envelope blend, split by point
+    range), and the geometry chain walk, whose mutually independent chains run
+    one task each when Compile classified their dependency level as safe.
+    Both splits are bit-identical to the serial walk by construction -- a
+    point range is an independent sub-layout, and a level's per-chain buffers
+    are merged in compiled chain order, not completion order -- so the result
+    does not depend on the thread count. Setting `RIGEXEC_ENABLE_PARALLEL_EVAL`
+    to `0` runs all of it, and the two compile-time tasks, inline on the
+    calling thread; it exists so a suspected threading regression can be
+    bisected without `PXR_WORK_THREAD_LIMIT`, which also changes what USD
+    itself does.
 
 A rig may publish control guides, joints, placed volume guides, driven
 transforms, revised properties, or any combination of them. Control-only and
