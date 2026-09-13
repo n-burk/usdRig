@@ -351,6 +351,25 @@ RigExecBakedOpName(RigExecRevisionOp op)
 // The program.
 // ---------------------------------------------------------------------------
 
+/// What a provider slot IS, which decides both what writes it and what the
+/// walk may do with it.
+///
+/// The dynamic path keeps one frame map covering both families and tells them
+/// apart by asking whether the path is in _poseSeedFrames -- its
+/// `hierarchicalProviders` set. The program answers the same question off a
+/// dense table instead, because it asks it once per descendant per commit.
+enum class RigExecBakedSlotKind {
+    /// An exec-seeded RigExec provider: composed from avars, propagated to as
+    /// a descendant, and the only kind a solver or the compose writes.
+    PoseSeed,
+    /// A plain Xformable a constraint targets. The dynamic walk seeds it from
+    /// the stage and revises it like any other target, but deliberately keeps
+    /// it out of hierarchicalProviders, so it is never propagated TO -- while
+    /// it can still be the closest revised ancestor a RigExec descendant
+    /// rides.
+    XformDerived,
+};
+
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
@@ -383,12 +402,23 @@ struct RigExecBakedProgramImpl {
     bool hasPropertyChains = false;
 
     // ---- dense provider slots, namespace DFS order ------------------------
-    // _poseSeedFrames is keyed by SdfPath, whose order IS namespace DFS
-    // pre-order, so a provider's parent always has a lower slot than it does
-    // and one forward pass composes the whole hierarchy.
+    // The slot table is the ordered UNION of the two provider families the
+    // dynamic walk holds in one frame map: the RigExec providers exec seeds
+    // (_poseSeedFrames) and the plain Xformables a constraint targets
+    // (_xformDerivedProviders). Both are keyed by SdfPath, whose order IS
+    // namespace DFS pre-order, so a provider's parent always has a lower slot
+    // than it does and one forward pass composes the whole hierarchy.
     std::vector<SdfPath> paths;
     std::map<SdfPath, int> index;
+    std::vector<RigExecBakedSlotKind> slotKind;
+    /// Nearest COMPOSE ancestor -- the nearest PoseSeed slot above this one.
+    /// The compose ladder inherits from it, because exec's NamespaceAncestor
+    /// resolves only RigExec provider types and skips anything else.
     std::vector<int> parent;
+    /// Nearest ancestor slot of ANY kind, which is what the dynamic walk's
+    /// pure namespace climb finds when it looks for the closest revised
+    /// ancestor a propagated descendant rides.
+    std::vector<int> propParent;
 
     // ---- epoch constants resolved at bake ---------------------------------
     std::vector<GfMatrix4d> restM;                     // asset-space rest

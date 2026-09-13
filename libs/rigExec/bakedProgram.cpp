@@ -958,18 +958,49 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.rebuild.insert(SdfPath::AbsoluteRootPath());
 
     // ---- dense provider slots ---------------------------------------------
-    for (const auto &[path, tap] : E._poseSeedFrames) {
-        B.index[path] = int(B.paths.size());
-        B.paths.push_back(path);
+    //
+    // The ordered union of the two families, which is the set the dynamic
+    // walk's frame maps hold: the exec-seeded providers and the plain
+    // Xformables a constraint targets. Both are already in SdfPath order, so
+    // merging them through one ordered map keeps namespace DFS pre-order and
+    // with it the "a parent has a lower slot" invariant the compose relies
+    // on. The two sets are disjoint by construction (only what isFrameProvider
+    // accepts is seeded); PoseSeed wins a collision, because that is the kind
+    // the compose can actually write.
+    {
+        std::map<SdfPath, RigExecBakedSlotKind> ordered;
+        for (const auto &[path, tap] : E._poseSeedFrames) {
+            ordered.emplace(path, RigExecBakedSlotKind::PoseSeed);
+        }
+        for (const SdfPath &path : E._xformDerivedProviders) {
+            ordered.emplace(path, RigExecBakedSlotKind::XformDerived);
+        }
+        for (const auto &[path, kind] : ordered) {
+            B.index[path] = int(B.paths.size());
+            B.paths.push_back(path);
+            B.slotKind.push_back(kind);
+        }
     }
     const int N = int(B.paths.size());
     B.parent.assign(N, -1);
+    B.propParent.assign(N, -1);
     for (int i = 0; i < N; ++i) {
+        // One climb fills both: the first slot found is the propagation
+        // parent whatever its kind, and the climb continues past an
+        // xform-derived one because the compose ladder can only inherit from
+        // a provider exec composed.
         for (SdfPath p = B.paths[i].GetParentPath();
              !p.IsEmpty() && p != SdfPath::AbsoluteRootPath();
              p = p.GetParentPath()) {
             const auto it = B.index.find(p);
-            if (it != B.index.end()) {
+            if (it == B.index.end()) {
+                continue;
+            }
+            if (B.propParent[i] < 0) {
+                B.propParent[i] = it->second;
+            }
+            if (B.slotKind[size_t(it->second)] ==
+                RigExecBakedSlotKind::PoseSeed) {
                 B.parent[i] = it->second;
                 break;
             }
@@ -995,6 +1026,14 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     std::vector<GfMatrix4d> restRoundTrip(N, GfMatrix4d(1.0));
     std::vector<GfMatrix4d> defaultRoundTrip(N, GfMatrix4d(1.0));
     for (int i = 0; i < N; ++i) {
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+            // An xform-derived slot has no rest chain and no default-space
+            // ladder: the dynamic path gives it the identity rest frame
+            // outright and reads its pose off the stage.
+            B.restFrames[i] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
+            B.restPts[i] = B.restFrames[i].points;
+            continue;
+        }
         const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
         B.prims.insert(B.paths[i]);
         // The ladder is resolved once and folded into restM/selfD, so every
@@ -1070,6 +1109,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // ---- the input binding table -------------------------------------------
     B.avarConstants.assign(size_t(N) * 11, 0.0);
     for (int i = 0; i < N; ++i) {
+        // An xform-derived slot binds no avars -- its pose is the stage's --
+        // so the bound/varying counts and the overridable set stay exactly
+        // what the RigExec providers alone make them.
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+            continue;
+        }
         const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
         for (int c = 0; c < 11; ++c) {
             const size_t slot = size_t(i) * 11 + size_t(c);

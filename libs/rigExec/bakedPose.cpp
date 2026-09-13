@@ -418,18 +418,30 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             coveredRoot = root;
             for (int j = root + 1; j < N; ++j) {
                 if (!B.paths[j].HasPrefix(B.paths[root])) break;
+                // The dynamic walk enumerates descendants out of
+                // hierarchicalProviders, which holds the exec-seeded
+                // providers alone: a plain Xformable a constraint targets is
+                // never propagated TO, only seeded and revised. It still
+                // takes a slot, so the scan passes over it rather than
+                // stopping at it.
+                if (B.slotKind[size_t(j)] != RigExecBakedSlotKind::PoseSeed) {
+                    continue;
+                }
                 if (candidateSet.count(j) || !covered.insert(j).second) {
                     continue;
                 }
-                int closest = B.parent[j];
+                // The closest revised ancestor is a PURE namespace climb in
+                // the dynamic walk, so it rides propParent and not parent: an
+                // xform-derived ancestor can be the revised one.
+                int closest = B.propParent[j];
                 while (closest >= 0 && !candidateSet.count(closest)) {
-                    closest = B.parent[closest];
+                    closest = B.propParent[closest];
                 }
                 if (closest < 0) continue;
                 // An independently solved joint is an absolute posed
                 // override: propagation cannot pass through it.
                 bool blocked = false;
-                for (int p = j; p >= 0 && p != closest; p = B.parent[p]) {
+                for (int p = j; p >= 0 && p != closest; p = B.propParent[p]) {
                     if (ownedBySolver[p]) { blocked = true; break; }
                 }
                 if (blocked) continue;
@@ -518,6 +530,12 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedCompose", "baked");
         for (int i = 0; i < N; ++i) {
+            if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+                // An xform-derived slot is not composed from avars: the
+                // dynamic path seeds it from the stage, and until the program
+                // does the same nothing writes it.
+                continue;
+            }
             const double *a = &B.avars[size_t(i) * 11];
             const double units = a[10];
             const GfMatrix4d avars = RigExecBakedComposeAvars(
