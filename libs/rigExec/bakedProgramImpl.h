@@ -26,6 +26,7 @@
 #include "weightPackets.h"
 
 #include "rigExecMath/avarScale.h"
+#include "rigExecMath/dualQuat.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/splineIk.h"
@@ -958,6 +959,14 @@ struct RigExecBakedProgramImpl {
     std::vector<std::pair<int, int>> derivedIndex;
     /// First and last-plus-one revision id of each chain.
     std::vector<int> chainRevisionBegin, chainRevisionEnd;
+    /// The RevisionOut domain is indexed by CHUNK, not by revision: a
+    /// revision's chunks write disjoint vertex ranges of one buffer, and two
+    /// steps that declared the same slot would be ordered against each other
+    /// for a conflict they do not have. These are the dense chunk ids --
+    /// [chunkBase, chunkBase + chunkCount) per revision, handed out revision
+    /// by revision, so one chain's chunks are a contiguous range too.
+    std::vector<int> revisionChunkBase, revisionChunkCount;
+    std::vector<int> chainChunkBegin, chainChunkEnd;
 
     /// Program constants the epilogue adds to the generation's counters.
     ///
@@ -981,6 +990,46 @@ struct RigExecBakedProgramImpl {
     // assembled by the SAME RigExecAssembleParameters the dynamic path calls
     // and the kernel is the same shared kernel, so only the plumbing around
     // them is baked.
+    /// One contiguous vertex range of one revision, and the influences the
+    /// vertices in it reference.
+    ///
+    /// A chunk is SPECULATIVE: it starts as soon as its own influences are
+    /// final, without waiting for the revision's validity fold, and writes
+    /// its range of the revision's own output buffer. The fuse is what
+    /// decides afterwards whether the revision applied at all; a chunk whose
+    /// work is not wanted is discarded rather than undone.
+    struct GeomChunk {
+        /// The range, half-open, in the vertex order the mesh is authored
+        /// in. Vertex order is never permuted: chunk boundaries are the only
+        /// thing the partition chooses.
+        int begin = 0, end = 0;
+        /// The influence positions the range's vertices index, ascending.
+        /// An upper bound is safe and a missing entry is not, so this is the
+        /// UNION over the range, computed from the same indices the kernel
+        /// reads.
+        std::vector<int> key;
+        /// The revision's influence table as this chunk sees it: identity
+        /// everywhere, with the key's entries copied from the matrix slots
+        /// each run. Linear blend skinning reads an entry only through an
+        /// index of one of its own vertices, so the identities are never
+        /// read -- they are there so the table has the shape the layout
+        /// describes rather than to contribute a value.
+        std::vector<GfMatrix4d> transforms;
+        /// The same table narrowed for the SIMD path, and split for the
+        /// dual-quaternion one. Filled entry by entry beside `transforms`,
+        /// so the chunk pays for |key| matrices rather than for all of them.
+        std::vector<float> rows;
+        std::vector<RigExecScaledDualQuat> palette;
+        /// Whether the chunk's key matrices moved since it last ran, decided
+        /// while they are copied in. A chunk whose own influences stand
+        /// still, over points that stand still, already holds its answer.
+        bool keyChanged = false;
+        /// The range of the output buffer holds this run's value for it.
+        /// Sticky across a run the chunk sat out, which is what makes the
+        /// skip above sound.
+        bool ok = false;
+    };
+
     struct GeomRevision {
         SdfPath moverPath;
         SdfPath target;
@@ -1023,9 +1072,18 @@ struct RigExecBakedProgramImpl {
         /// VdfNetwork node instead of adding one.
         bool created = true;
 
-        // ---- what the four steps of a revision hand each other ------------
-        /// InfluenceFold writes these; RevisionStatic assembles against
-        /// them. Sized at Build, never resized in the region.
+        // ---- what the steps of a revision hand each other -----------------
+        /// The influence table the PACKET carries, which for a skin revision
+        /// is identity and nothing else: the packet is assembled before the
+        /// matrices are folded, precisely so a chunk can start on its own
+        /// joints without waiting for every joint of the rig. The assembler
+        /// checks the table's shape and its elements' finiteness, which
+        /// identities pass; the real table's check is the fold's, and the
+        /// fuse ANDs it in where the assembler's would have landed. Written
+        /// once, at Build.
+        std::vector<GfMatrix4d> packetInfluences;
+        /// InfluenceFold writes these; every operation but a skin assembles
+        /// against them. Sized at Build, never resized in the region.
         std::vector<GfMatrix4d> influences;
         GfMatrix4d transform{1.0};
         /// Whether `transform` holds one at all this run: a bound transform
@@ -1045,8 +1103,63 @@ struct RigExecBakedProgramImpl {
         /// never a dirtiness flag -- a control dragged back to where it
         /// started must not count as executed.
         bool executed = false;
-        /// RevisionChunk writes this: the kernel accepted the packet.
-        bool chunkOk = false;
+        // ---- the vertex partition ------------------------------------------
+        /// The revision's vertex chunks, in vertex order, covering
+        /// [0, pointCount) exactly once. Always at least one; more only for
+        /// a skin revision whose layout the epoch fixed (see
+        /// RigExecBakedPartitionRevision).
+        std::vector<GeomChunk> chunks;
+        /// Where this revision's chunks start in the RevisionOut domain.
+        int chunkBase = 0;
+        /// The layout the partition was cut from, so a frame can tell in
+        /// O(1) whether the keys still describe the vertices. The handle is
+        /// the identity the skin topology cache preserves across a notice
+        /// that touched no layout, so an unchanged binding never re-cuts and
+        /// a changed one always does.
+        std::shared_ptr<const RigExecSkinTopology> partitionTopology;
+        int partitionElementSize = 0;
+        size_t partitionIndexCount = 0;
+        size_t partitionPointCount = 0;
+        /// The keys are used -- more than one chunk, so an influence outside
+        /// a chunk's key is an influence that chunk will not see.
+        bool chunked = false;
+
+        // ---- what RevisionStatic decides for the whole array ---------------
+        /// The layout half of the skin kernel's validation (the matrix half
+        /// is `influencesValid` below).
+        bool layoutUsable = false;
+        /// The envelope, resolved ONCE at the full point count because it
+        /// resolves atomically, and the predicate that says the blend is the
+        /// identity and the resolution therefore dead.
+        std::vector<float> envelope;
+        bool envelopeOk = false;
+        bool fullStrength = false;
+        /// The points this revision is applied to, which is the size every
+        /// chunk writes within.
+        size_t precedingCount = 0;
+        /// The packet or the status moved, or the revision never ran. The
+        /// chain's sticky bit and the influence table's compare are ORed in
+        /// by the fuse; this is only what the static half saw.
+        bool staticDirty = false;
+        /// The partition no longer describes the layout the packet carries,
+        /// so the keys cannot be trusted and the fuse runs the revision
+        /// whole rather than a chunk deforming a vertex against an identity.
+        bool partitionStale = false;
+
+        // ---- what InfluenceFold decides for the whole array ----------------
+        /// Every influence matrix finite and affine. For a skin revision the
+        /// packet cannot answer this -- it is assembled before the matrices
+        /// are folded -- so the fuse ANDs this in where the dynamic path's
+        /// assembler would have failed the packet.
+        bool influencesValid = false;
+        /// The table moved since the last run, which is the half of the
+        /// executed decision the packet comparison no longer carries.
+        bool influencesChanged = false;
+        /// The table in the two forms the kernels want it in, for a revision
+        /// whose single chunk skins against the whole table. A chunked
+        /// revision fills its chunks' own instead and leaves these empty.
+        std::vector<float> rows;
+        std::vector<RigExecScaledDualQuat> palette;
         /// Which buffer holds the chain's points AFTER this revision: this
         /// revision's index when its own output was kept, the index of an
         /// earlier revision when it was not, and -1 for the chain's base.
@@ -1464,6 +1577,33 @@ bool RigExecBakedPublishPose(RigExecBakedProgramImpl *program,
 /// and each derived target's, in chain order.
 void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                                  RigExecRigPose *pose);
+
+/// Cuts \p revision's vertices into chunks, from \p indices and
+/// \p elementSize.
+///
+/// Contiguous ranges of RIGEXEC_BAKED_CHUNK_VERTS vertices, capped at
+/// RIGEXEC_BAKED_MAX_CHUNKS (the range grows to meet the cap); each range's
+/// key is the union of its vertices' influence positions; adjacent ranges
+/// merge while they stay under the vertex cap and one key contains the
+/// other, because a range that waits for a superset of another's joints is
+/// not waiting any longer for holding both. Vertex order is never permuted.
+///
+/// \p chunkCount, when positive, is the number of chunks the caller must
+/// end up with -- the number of STEPS a revision is made of is fixed at
+/// Build, so a re-cut against a layout that moved redistributes the same
+/// number of ranges rather than changing the program.
+void RigExecBakedPartitionRevision(
+    RigExecBakedProgramImpl::GeomRevision *revision,
+    const int *indices, size_t indexCount, int elementSize, int chunkCount);
+
+/// The partition statistics of every skin revision, for the schedule report.
+///
+/// Per revision: how many chunks, how many vertices each holds, the key
+/// sizes, how many chunks depend on half the influences or more, and each
+/// chunk's influence positions -- which is what makes "the arm vertices no
+/// longer wait for the leg constraints" a measured claim per asset rather
+/// than a design intention.
+std::string RigExecBakedGeometryReport(const RigExecBakedProgramImpl &program);
 
 /// Bakes the weight object at \p path, and everything it composes, into
 /// \p ctx's table; returns its index, or -1 when there is nothing there.

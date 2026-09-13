@@ -379,6 +379,61 @@ ComposeSubtree → Solve/Commit → Constraint and propagation → ProviderMatri
 contains i → fuse → derived → publish. The revision-level validity fold is a separate, cheap
 reduction over all influences [P3].
 
+### 6.1 As built
+
+The chunked skin landed as described above, with five differences the code makes and this section
+records so the two do not drift:
+
+* **The packet carries an IDENTITY influence table** (`GeomRevision::packetInfluences`, written once
+  at Build). `RevisionStatic` must not depend on the matrices, and `RigExecAssembleSkinParameters`
+  puts them in the packet and validates them there -- so the packet gets a table of the right SHAPE
+  whose elements trivially pass the assembler's finite/affine check, and the real table's check is
+  `InfluenceFold`'s (`RigExecSkinTransformsAreUsable`), which the fuse ANDs in exactly where the
+  assembler's answer would have landed. The half of the executed decision that used to read
+  `skinTransforms == o.skinTransforms` is the fold's own compare. Consequence, and it is the point:
+  `revision.status` for a revision with a bad influence says "ok" where the dynamic path's says
+  "moverFailed", and the fuse publishes `moverFailed` anyway through the `!applied` branch -- the
+  published token, the diagnostic and the executed counter are identical, the intermediate is not.
+* **The step order is Static, Fold, chunks, Fuse for a skin revision** and Fold, Static, chunk, Fuse
+  for every other operation, whose packet does carry the matrix it was folded from. The fold reads
+  `RevisionPacket` for the skinning method, which decides which form of the table the chunks want.
+* **The `inputs:defaultWeight` diagnostic moved from RevisionStatic to RevisionFuse**, which is the
+  first step that knows both halves of "the packet is valid". Diagnostic ORDER is unchanged: no step
+  between them emits one.
+* **Only a skin revision whose layout the epoch fixed (`skinTopologyFixed`) is cut into more than
+  one chunk.** A layout that can move within the epoch is one a Build-time cut cannot promise
+  anything about, and such a mover already re-reads and re-validates every element of its arrays
+  once per frame. Everything else is one chunk over the whole array -- the degenerate case of the
+  same step, which then skins against the fold's table through the full-range kernel and keeps the
+  threading it has today.
+* **A chunked DQS revision builds its own palette per chunk** rather than reading
+  `RevisionTransforms`: the split is per matrix, so a chunk's palette agrees entry for entry with
+  the revision's over every entry the chunk's own vertices index, and keeping the chunk off the
+  fold is what the speculation is for. Per-chunk rows are maintained the same way, entry by entry
+  beside the matrices, so a run costs |key| narrowings rather than |influences|.
+
+Two mechanisms exist that the specification does not name:
+
+* **Re-cut in the prologue.** The partition is Build state cut from the authored arrays; the packet
+  carries the layout the evaluator's skin topology cache resolved. That cache hands back the SAME
+  pointer for a binding that did not move, so the prologue re-cuts (serially, keeping the chunk
+  COUNT, which is the step count and may not change) exactly when the pointer changes -- once per
+  epoch, and to the same ranges when the arrays are the same, because it runs the same algorithm.
+  `RevisionStatic` still checks in O(1) that the partition describes the packet's layout, and a
+  `partitionStale` revision is run WHOLE by the fuse: a chunk skinning a vertex against an identity
+  it never noticed is a silently wrong deformation, so the keys are trusted only while they are
+  provably current.
+* **A chunk that skipped keeps its answer.** Its gate is `ChainDirty(r-1) || staticDirty ||
+  its own key moved` -- decided while the key's matrices are copied in, which costs nothing extra.
+  Another chunk's joints moving makes the REVISION execute; it does not make this range's vertices
+  land anywhere else, and the range of the output buffer still holds their positions. `ok` is
+  sticky for the same reason.
+
+Measured on the biped (`tests/testRigExecBakedSchedule` prints it): the one skin revision holds
+26 276 vertices over 137 influences and cuts into 7 chunks of 4 096 (the last 1 700), |key| 24 min /
+41.3 mean / 58 max, and NO chunk reaches half the influences -- so no vertex range waits for more
+than 42% of the rig's joints, against 100% before.
+
 ## 7. Cone re-execution (drags and static frames) [S24-S28][P20-P22]
 
 Source steps are the only steps that read outside the program: Inputs, ChainBase, PropertyChains
