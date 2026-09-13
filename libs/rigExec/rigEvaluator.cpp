@@ -5471,6 +5471,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     }
     _solverBatches = std::move(newSolverBatches);
     _solverJoints = std::move(newSolverJoints);
+    _solverDependencies = std::move(newSolverDependencies);
     _solverInputBatches = std::move(newSolverInputBatches);
     _solverArrayTaps = std::move(newSolverArrayTaps);
     _graphChains = std::move(newGraphChains);

@@ -12,6 +12,7 @@
 #include "types.h"
 #include "moverGraph.h"
 #include "frameExtraction.h"
+#include "solverKernels.h"
 #include "weightPackets.h"
 
 #include "rigExecMath/pointFrame.h"
@@ -883,10 +884,12 @@ _EvaluateScratchKernel(const VdfContext &ctx, const TfToken &expectedKind,
 // RigExecRibbon solver: rotation-minimizing frame samples along the
 // driver curve, published with paired rest frames (spec §7.5). The rest
 // driver points are the compiler-captured bind-time curve value.
+//
+// The sampling itself is RigExecSampleRibbonFrames, which the baked program
+// calls as well; only the reads below are exec's.
 RigExecPointFrameArray
 _ComputeRibbonFrames(const VdfContext &ctx)
 {
-    RigExecPointFrameArray result;
     const int *countPtr = ctx.GetInputValuePtr<int>(_tokens->sampleCountAttr);
     const int sampleCount = countPtr ? *countPtr : 5;
     const RigExecPointsPacket *const posedPtr =
@@ -897,35 +900,7 @@ _ComputeRibbonFrames(const VdfContext &ctx)
         posedPtr ? posedPtr->points : std::vector<GfVec3f>();
     const std::vector<GfVec3f> rest =
         restPtr ? restPtr->points : std::vector<GfVec3f>();
-    if (posed.empty() || rest.empty() || sampleCount < 2) {
-        return result;
-    }
-    const rigExec::RigExecCurveFrameSamples posedSamples =
-        rigExec::RigExecSampleCurveRMF(posed, sampleCount);
-    const rigExec::RigExecCurveFrameSamples restSamples =
-        rigExec::RigExecSampleCurveRMF(rest, sampleCount);
-    if (posedSamples.GetSize() != size_t(sampleCount) ||
-        restSamples.GetSize() != size_t(sampleCount)) {
-        return result;
-    }
-    result.frames.reserve(sampleCount);
-    result.rests.reserve(sampleCount);
-    for (int k = 0; k < sampleCount; ++k) {
-        RigExecPointFrame frame;
-        frame.points = {
-            GfVec3d(posedSamples.positions[k]),
-            GfVec3d(posedSamples.positions[k] + posedSamples.tangents[k]),
-            GfVec3d(posedSamples.positions[k] + posedSamples.normals[k]),
-            GfVec3d(posedSamples.positions[k] + posedSamples.binormals[k])};
-        frame.flags = rigExec::RigExecPointFrameValid;
-        result.frames.push_back(frame);
-        result.rests.push_back({
-            GfVec3d(restSamples.positions[k]),
-            GfVec3d(restSamples.positions[k] + restSamples.tangents[k]),
-            GfVec3d(restSamples.positions[k] + restSamples.normals[k]),
-            GfVec3d(restSamples.positions[k] + restSamples.binormals[k])});
-    }
-    return result;
+    return rigExec::RigExecSampleRibbonFrames(posed, rest, sampleCount);
 }
 
 
