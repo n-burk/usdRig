@@ -11,10 +11,23 @@
 //               [--joints] [--targets] [--joints-out <file.usda>]
 //               [--pose-out <file.txt>]
 //               [--profile <file.trace>] [--mode dynamic|baked|parity]
+//               [--guides] [--require-baked]
 //
 // With no --frames it evaluates the stage's start time code (or Default when
 // the stage has no time range). Exit status is non-zero when the rig fails to
 // compile or an evaluation comes back invalid, so it can gate a build.
+//
+// --guides re-enables the observational solver-guide request, which is off
+// by default here. pose.solverFrames is one of the domains the parity check
+// compares, and with guides off both paths fill it with nothing -- so a
+// ctest built on this tool compares an empty map unless it asks for them.
+//
+// --require-baked turns a fallback into a failure: it sets
+// RIGEXEC_BAKE_REQUIRED for the evaluator, fails when a non-dynamic mode
+// finds the rig unbakeable, and fails when fewer generations came from the
+// program than frames were asked for. The second half is the one that
+// catches a silent fallback that is not a refusal -- an interactive override
+// the program cannot place, or a Run that handed the generation back.
 //
 // --profile records scoped phase timings (compile, property chains, pose
 // seed, each solver batch and constraint, the exec snapshot, each geometry
@@ -39,6 +52,7 @@
 #include "rigExec/types.h"
 #include "rigExecMath/pointFrame.h"
 
+#include "pxr/base/arch/env.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/range3f.h"
 #include "pxr/base/plug/registry.h"
@@ -409,13 +423,13 @@ private:
     bool _inconsistent = false;
 };
 
-std::vector<double>
+std::vector<UsdTimeCode>
 ParseFrames(const std::string &text)
 {
-    std::vector<double> frames;
+    std::vector<UsdTimeCode> frames;
     for (const std::string &piece : TfStringSplit(text, ",")) {
         if (!piece.empty()) {
-            frames.push_back(std::atof(piece.c_str()));
+            frames.push_back(UsdTimeCode(std::atof(piece.c_str())));
         }
     }
     return frames;
@@ -431,7 +445,8 @@ main(int argc, char **argv)
             "usage: rigExecPose <stage> [--rig <primPath>] "
             "[--frames a,b,c] [--joints] [--targets] "
             "[--joints-out <file.usda>] [--pose-out <file.txt>] "
-            "[--profile <file.trace>] [--mode dynamic|baked|parity]\n");
+            "[--profile <file.trace>] [--mode dynamic|baked|parity] "
+            "[--guides] [--require-baked]\n");
         return 2;
     }
     std::string stagePath = argv[1];
@@ -441,9 +456,11 @@ main(int argc, char **argv)
     std::string profileOut;
     rigExec::RigExecEvaluationMode mode =
         rigExec::RigExecEvaluationMode::Dynamic;
-    std::vector<double> frames;
+    std::vector<UsdTimeCode> frames;
     bool showJoints = false;
     bool showTargets = false;
+    bool solverGuides = false;
+    bool requireBaked = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--rig" && i + 1 < argc) {
@@ -454,6 +471,10 @@ main(int argc, char **argv)
             showJoints = true;
         } else if (arg == "--targets") {
             showTargets = true;
+        } else if (arg == "--guides") {
+            solverGuides = true;
+        } else if (arg == "--require-baked") {
+            requireBaked = true;
         } else if (arg == "--joints-out" && i + 1 < argc) {
             jointsOut = argv[++i];
         } else if (arg == "--pose-out" && i + 1 < argc) {
@@ -479,6 +500,18 @@ main(int argc, char **argv)
         }
     }
 
+    // The evaluator reads RIGEXEC_BAKE_REQUIRED once, into a function-local
+    // static, so it has to be in the environment before the first evaluator
+    // exists -- which is why this sits above the stage open rather than
+    // beside the IsBakeable check it belongs with. It makes the evaluator
+    // report a generation that fell back to the dynamic path as a baked
+    // parity mismatch; the two checks below are this tool's own, independent
+    // half, so --require-baked still means something in a build whose
+    // evaluator does not honour the variable.
+    if (requireBaked) {
+        ArchSetEnv("RIGEXEC_BAKE_REQUIRED", "1", /* overwrite = */ true);
+    }
+
     const std::string resources = SchemaResourceDir();
     if (!resources.empty() &&
         PlugRegistry::GetInstance().RegisterPlugins(resources).empty()) {
@@ -502,8 +535,11 @@ main(int argc, char **argv)
 
     rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
     // This tool reports joints, targets, and diagnostics; it never reads
-    // pose.solverFrames, so the observational guide request is skipped.
-    evaluator.SetSolverGuidesEnabled(false);
+    // pose.solverFrames, so the observational guide request is skipped --
+    // unless --guides asks for it, which is what a parity run needs: the
+    // guide frames are a compared domain, and two empty maps compare equal
+    // no matter what the program would have put in them.
+    evaluator.SetSolverGuidesEnabled(solverGuides);
     // Enabled before Compile so the trace holds the compile itself plus
     // every evaluated frame.
     if (!profileOut.empty()) {
@@ -524,6 +560,7 @@ main(int argc, char **argv)
     if (!compiled) {
         return 1;
     }
+    int status = 0;
     // Only in a non-default mode: the reasons are the actionable half of a
     // fallback, and printing them unasked would change every existing run.
     if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
@@ -532,6 +569,12 @@ main(int argc, char **argv)
             std::printf("  not bakeable; evaluating dynamically\n");
             for (const std::string &reason : reasons) {
                 std::printf("    %s\n", reason.c_str());
+            }
+            // A fallback is a correct answer, so it is only a failure when
+            // the caller said the bake was the point.
+            if (requireBaked) {
+                std::printf("  FAIL: not bakeable\n");
+                status = 1;
             }
         }
     }
@@ -548,9 +591,14 @@ main(int argc, char **argv)
     }
 
     if (frames.empty()) {
+        // Default, not the NaN behind it: a stage with no authored range is
+        // an unanimated asset, and the default time code is the time it
+        // authors its values at. (The two are the same object -- UsdTimeCode
+        // stores Default AS a NaN and IsDefault() tests for it -- so this
+        // says what was already meant rather than changing it.)
         frames.push_back(stage->HasAuthoredTimeCodeRange()
-                             ? stage->GetStartTimeCode()
-                             : UsdTimeCode::Default().GetValue());
+                             ? UsdTimeCode(stage->GetStartTimeCode())
+                             : UsdTimeCode::Default());
     }
 
     // Rest values, so displacements are reported against the authored
@@ -566,19 +614,18 @@ main(int argc, char **argv)
             return 2;
         }
     }
-    int status = 0;
-    for (double frame : frames) {
+    for (UsdTimeCode frame : frames) {
         const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
         if (!jointsOut.empty()) {
-            jointExport.Add(pose, frame);
+            jointExport.Add(pose, frame.GetValue());
         }
         if (poseDump) {
-            WritePoseDump(poseDump, pose, frame);
+            WritePoseDump(poseDump, pose, frame.GetValue());
         }
         std::printf("\n  frame %g: %s  (%zu moved properties, "
                     "%zu parity agreements / %zu mismatches, "
                     "%zu override rounds%s)\n",
-                    frame, pose.valid ? "valid" : "INVALID",
+                    frame.GetValue(), pose.valid ? "valid" : "INVALID",
                     pose.movedProperties.size(),
                     pose.moverGraphParityAgreements,
                     pose.moverGraphParityMismatches,
@@ -622,6 +669,29 @@ main(int argc, char **argv)
                                  : VtVec3fArray();
             }
             ReportPoints(path.GetString(), value, rest[path]);
+        }
+    }
+
+    // The accounting, in every non-dynamic mode. A run that reports a mode
+    // it never took is the failure this tool used to print as success, and a
+    // human reading the output should see the same fact a ctest asserts.
+    if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
+        std::printf("\n  baked: %zu/%zu generation(s), %zu build(s), "
+                    "%zu attempt(s)\n",
+                    evaluator.GetBakedGenerationCount(), frames.size(),
+                    evaluator.GetBakedProgramBuildCount(),
+                    evaluator.GetBakedProgramBuildAttemptCount());
+        // Asked after the loop rather than per frame: an in-epoch rebuild is
+        // legal and still answers its generation from the program. This is
+        // the half that catches a fallback which is NOT a refusal -- an
+        // override the program cannot place, or a Run that declined -- since
+        // neither of those makes IsBakeable false.
+        if (requireBaked &&
+            evaluator.GetBakedGenerationCount() != frames.size()) {
+            std::printf("  FAIL: only %zu of %zu generation(s) came from the "
+                        "program\n",
+                        evaluator.GetBakedGenerationCount(), frames.size());
+            status = 1;
         }
     }
 
