@@ -2734,14 +2734,10 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         return RigExecAssembleParameters(revision.moverPrim, revision.op,
                                          revision.binding, values, time);
     };
-    // The same fast path _RunScratchKernel takes, through the same predicate
-    // -- one definition in moverGraph.h, so the two loops cannot disagree
-    // about when skipping the blend is safe.
-    auto fullStrengthEnvelope = [](const RigExecWeightPacket &w) {
-        return RigExecEnvelopeIsFullStrength(w);
-    };
-    // The envelope is applied exactly once, against the preceding revision --
-    // _RunScratchKernel / _ComputeRecomputed in moverGraph.cpp.
+    // The envelope is applied exactly once, against the preceding revision.
+    // Derived maintenance below is the last caller: the chain loop runs it
+    // through RigExecRunRevisionKernel, which owns the same blend, and this
+    // copy goes when the derived path joins it.
     auto blendEnvelope = [](const RigExecMoverParameters &parameters,
                             const std::vector<GfVec3f> &preceding,
                             std::vector<GfVec3f> *result) {
@@ -2812,30 +2808,20 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                 parameters != revision.lastParameters ||
                 status != revision.lastStatus) {
                 ++pose->moverGraphRevisionsExecuted;
-                const bool fullStrength =
-                    fullStrengthEnvelope(parameters.weights);
                 std::vector<GfVec3f> scratch = current;
-                const size_t precedingSize = scratch.size();
-                std::vector<GfVec3f> preceding;
-                if (!fullStrength) {
-                    preceding = scratch;
-                }
-                // The same dispatch _RevisionNode::Compute performs, over
-                // the same kernels: skin blends its finished result against
-                // the preceding revision, matrix folds the envelope into the
-                // movement itself.
-                bool applied = status.AllowsApply() && parameters.valid;
-                if (applied && parameters.kind == "skin") {
-                    applied =
-                        RigExecApplySkinKernel(parameters, &scratch) &&
-                        (fullStrength
-                             ? scratch.size() == precedingSize
-                             : blendEnvelope(parameters, preceding, &scratch));
-                } else if (applied && parameters.kind == "matrix") {
-                    applied = RigExecApplyMatrixKernel(parameters, &scratch);
-                } else {
-                    applied = false;
-                }
+                // Not a second dispatch that mirrors _RevisionNode::Compute
+                // -- the same function the node calls. The packet check, the
+                // full-strength fast path, the kernel and the "apply once"
+                // blend all live in RigExecRunRevisionKernel, so an operation
+                // cannot mean one thing here and another there.
+                //
+                // Only skin and matrix reach this loop today: IsBakeable
+                // refuses every other operation, and the curvenet adjuster's
+                // control frames therefore have nowhere to be written yet.
+                const bool applied =
+                    status.AllowsApply() &&
+                    RigExecRunRevisionKernel(revision.op, parameters, &scratch,
+                                             /*controlFrames=*/nullptr);
                 revision.resultStatus = status.state;
                 if (applied) {
                     current.swap(scratch);
