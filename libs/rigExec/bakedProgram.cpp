@@ -320,11 +320,20 @@ const double _kAvarDefaults[11] = {0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1};
 bool
 _IsBakedConstraintType(const TfToken &type)
 {
-    return type == "RigExecPositionConstraint" ||
+    const bool baked = type == "RigExecPositionConstraint" ||
            type == "RigExecRotationConstraint" ||
            type == "RigExecScaleConstraint" ||
            type == "RigExecParentConstraint" ||
            type == "RigExecAimConstraint";
+    // RigExecRigEvaluator::GetConstraintOperatorTypeNames() is the authority
+    // on which operators exist; this is the subset the program can express,
+    // and it must stay a subset. A name here the evaluator does not register
+    // is a typo that refuses nothing and bakes nothing, and it would read as
+    // an operator that simply never takes the baked path.
+    TF_VERIFY(!baked || RigExecRigEvaluator::IsConstraintOperatorType(type),
+              "rigExec: %s is baked but is not a registered constraint "
+              "operator", type.GetText());
+    return baked;
 }
 
 bool

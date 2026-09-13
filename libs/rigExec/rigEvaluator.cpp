@@ -1299,6 +1299,27 @@ _DefaultEvaluationMode()
     return mode;
 }
 
+// Whether a fallback to the dynamic path is a FAILURE.
+//
+// Not a code path either: it changes no evaluated value and no dispatch,
+// only whether a generation that ran dynamically while the mode asked for
+// the program says so on the pose it publishes. It exists because a suite
+// whose fixtures all decline the bake reports zero parity mismatches and
+// goes green having compared nothing -- which is the one way a parity run
+// can lie, and the way it lies about exactly the rigs a new operator was
+// supposed to make bakeable.
+//
+// Read ONCE per process, in a function-local static for the same reason the
+// mode above is: a tool sets it before the first evaluator exists, and
+// nothing may change the answer between two tests in one binary.
+bool
+_BakeRequired()
+{
+    static const bool required =
+        TfGetenvBool("RIGEXEC_BAKE_REQUIRED", false);
+    return required;
+}
+
 // Every authored input computeRestFrame reads.
 //
 // Exactly the seven AttributeValue inputs of the computation
@@ -1424,6 +1445,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
         // not, and a refusal remembered from before this notice would
         // otherwise answer for a stage that has since changed.
         _bakeRefused = false;
+        _bakeRefusalReasons.clear();
     }
     // The seed, connected, and guide requests read authored values straight
     // off the stage; an edit that leaves the override tuple unchanged (a
@@ -2223,6 +2245,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // A new epoch is a new question: whatever refused the last one said
     // nothing about this one.
     _bakeRefused = false;
+    _bakeRefusalReasons.clear();
     // Sequential region stamps: Compile is flat code with early returns,
     // so RAII scopes cannot span its phases; each stamp closes the
     // previous region and opens the next. One branch when disabled.
@@ -7933,6 +7956,271 @@ RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
                                nullptr, resolved, published);
 }
 
+namespace {
+
+// One per-frame array of constraint source parameters, read RAW.
+//
+// Straight off the attribute at the frame's time: no connection walk, no
+// resolved-input lookup, no interactive override. A source weight is an
+// input of the constraint operator, not of the rig, and the evaluator and
+// the program have to read it the same way -- so both read it here, and the
+// cardinality diagnostic has one wording rather than one per caller.
+//
+// An absent or empty array is not a failure: it means the neutral value on
+// every source, which is what an unauthored blend has always meant.
+bool
+_ReadConstraintSourceWeights(const UsdPrim &prim,
+                             const char *name,
+                             size_t count,
+                             UsdTimeCode time,
+                             std::vector<std::string> *diagnostics,
+                             std::vector<double> *weights)
+{
+    VtFloatArray authored;
+    if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+        a.Get(&authored, time);
+    }
+    if (!authored.empty() && authored.size() != count) {
+        diagnostics->push_back(
+            prim.GetPath().GetString() + " " + name + " has " +
+            std::to_string(authored.size()) + " entries for " +
+            std::to_string(count) + " sources");
+        return false;
+    }
+    weights->assign(count, 1.0);
+    for (size_t i = 0; i < authored.size(); ++i) {
+        (*weights)[i] = authored[i];
+    }
+    return true;
+}
+
+// The same read for a per-source offset array, whose neutral value is zero.
+bool
+_ReadConstraintSourceOffsets(const UsdPrim &prim,
+                             const char *name,
+                             size_t count,
+                             UsdTimeCode time,
+                             std::vector<std::string> *diagnostics,
+                             std::vector<GfVec3d> *offsets)
+{
+    VtVec3dArray authored;
+    if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+        a.Get(&authored, time);
+    }
+    if (!authored.empty() && authored.size() != count) {
+        diagnostics->push_back(
+            prim.GetPath().GetString() + " " + name + " has " +
+            std::to_string(authored.size()) + " entries for " +
+            std::to_string(count) + " sources");
+        return false;
+    }
+    offsets->assign(count, GfVec3d(0));
+    for (size_t i = 0; i < authored.size(); ++i) {
+        (*offsets)[i] = authored[i];
+    }
+    return true;
+}
+
+// `neverTS` retains current rotations/root placement while rebuilding
+// child placement and handle lengths from rest frames. A joint without
+// any authored rest transform has the schema's identity fallback, which
+// is not an actual chain rest layout; use its current static layout in
+// that case. The public math solver can therefore keep measuring its
+// input chain; evaluator-side preparation decides whether those
+// measurements are rest- or animation-derived.
+bool
+_PrepareRestDerivedIkChain(const std::vector<RigExecPointFrame> &current,
+                           const std::vector<RigExecPointFrame> &rest,
+                           std::vector<RigExecPointFrame> *prepared)
+{
+    if (current.size() != rest.size() || current.empty()) {
+        return false;
+    }
+    bool usableRestLayout = true;
+    for (size_t i = 1; i < rest.size(); ++i) {
+        const double segmentLength =
+            (rest[i].Origin() - rest[i - 1].Origin()).GetLength();
+        if (!std::isfinite(segmentLength) || segmentLength <= 0.0) {
+            usableRestLayout = false;
+            break;
+        }
+    }
+    const std::vector<RigExecPointFrame> &lengthReference =
+        usableRestLayout ? rest : current;
+    prepared->clear();
+    prepared->reserve(current.size());
+    for (size_t i = 0; i < current.size(); ++i) {
+        if (!_IsUsableConstraintFrame(current[i]) ||
+            !_IsUsableConstraintFrame(rest[i])) {
+            return false;
+        }
+        GfVec3d origin = current[i].Origin();
+        if (i > 0) {
+            GfMatrix4d parentRest(1.0), parentPrepared(1.0);
+            if (!RigExecPointsToMatrix(
+                    RigExecIdentityLandmarks(),
+                    lengthReference[i - 1].points,
+                    &parentRest) ||
+                !RigExecPointsToMatrix(
+                    RigExecIdentityLandmarks(), prepared->back().points,
+                    &parentPrepared)) {
+                return false;
+            }
+            origin = parentPrepared.TransformAffine(
+                parentRest.GetInverse().TransformAffine(
+                    lengthReference[i].Origin()));
+        }
+
+        RigExecPointFrame frame = current[i];
+        frame.points[0] = origin;
+        for (size_t axis = 1; axis < frame.points.size(); ++axis) {
+            GfVec3d direction =
+                current[i].points[axis] - current[i].Origin();
+            const double directionLength = direction.GetLength();
+            const double length =
+                (lengthReference[i].points[axis] -
+                 lengthReference[i].Origin()).GetLength();
+            if (!std::isfinite(length) || length <= 0.0 ||
+                !std::isfinite(directionLength) ||
+                directionLength <= 0.0) {
+                return false;
+            }
+            direction /= directionLength;
+            frame.points[axis] = origin + direction * length;
+        }
+        if (!_IsUsableConstraintFrame(frame)) {
+            return false;
+        }
+        prepared->push_back(frame);
+    }
+    return true;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// The pieces of the pose walk that are not the walk: frames read off the
+// stage, the deltas a native source rides, the placements a commit
+// republishes. Each one is called from the dynamic walk below and is written
+// to be callable from the baked program over its dense slots, because a
+// second implementation of any of them is a second answer.
+// ---------------------------------------------------------------------------
+
+bool
+RigExecRigEvaluator::_FrameFromXformRelativeToAsset(
+    const UsdPrim &assetRoot,
+    UsdGeomXformCache *xformCache,
+    const SdfPath &path,
+    RigExecPointFrame *outFrame,
+    GfMatrix4d *outMatrix) const
+{
+    const UsdPrim prim = _stage->GetPrimAtPath(path);
+    if (!prim || !assetRoot || !UsdGeomXformable(prim)) {
+        return false;
+    }
+    bool resetsBelowAsset = false;
+    const GfMatrix4d relative =
+        xformCache->ComputeRelativeTransform(prim, assetRoot,
+                                             &resetsBelowAsset);
+    if (outFrame) {
+        *outFrame = RigExecFrameFromMatrix(relative);
+    }
+    if (outMatrix) {
+        *outMatrix = relative;
+    }
+    return true;
+}
+
+bool
+RigExecRigEvaluator::_ResolveNativeXformSource(
+    const UsdPrim &assetRoot,
+    UsdGeomXformCache *xformCache,
+    const SdfPath &xformPath,
+    const RigExecPoseFrameEnumerator &providers,
+    RigExecPointFrame *out) const
+{
+    if (!_FrameFromXformRelativeToAsset(assetRoot, xformCache, xformPath, out,
+                                        nullptr) ||
+        !out->IsValid()) {
+        return false;
+    }
+    // A native source that is not itself a written provider may still
+    // sit beneath a constrained transform provider. The closest
+    // revised ancestor contains all higher ancestor deltas, so apply
+    // it once to the stage-derived source frame.
+    SdfPath closest;
+    RigExecPointFrame closestBase, closestCurrent;
+    auto select = [&](const SdfPath &provider,
+                      const RigExecPointFrame &base,
+                      const RigExecPointFrame &current) {
+        if (provider == xformPath || !xformPath.HasPrefix(provider) ||
+            current.points == base.points) {
+            return;
+        }
+        if (closest.IsEmpty() ||
+            provider.GetPathElementCount() >
+                closest.GetPathElementCount()) {
+            closest = provider;
+            closestBase = base;
+            closestCurrent = current;
+        }
+    };
+    providers(select);
+    if (!closest.IsEmpty()) {
+        GfMatrix4d delta(1.0);
+        if (!RigExecPointsToMatrix(
+                closestBase.points, closestCurrent.points, &delta)) {
+            return false;
+        }
+        *out = RigExecMatrixToPoints(out->points, delta);
+    }
+    return out->IsValid();
+}
+
+void
+RigExecRigEvaluator::_UpdateVolumePlacements(
+    const RigExecPoseFrameLookup &finalFrameOf,
+    RigExecRigPose *pose)
+{
+    _volumeWeightMatrices.clear();
+    for (const auto &[path, tap] : _volumeWeightMatrixTaps) {
+        RigExecPointFrame frame;
+        GfMatrix4d placement(1.0);
+        if (finalFrameOf(path, &frame) && _IsUsableConstraintFrame(frame)) {
+            RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                  frame.points, &placement);
+        }
+        _volumeWeightMatrices[path] = placement;
+    }
+    pose->weightFrames = _volumeWeightMatrices;
+}
+
+bool
+RigExecRigEvaluator::_IkUsesAnimatedTs(const std::vector<SdfPath> &chain) const
+{
+    for (const SdfPath &path : chain) {
+        if (_jointSolverBinding.count(path)) {
+            return true;
+        }
+        const UsdPrim joint = _stage->GetPrimAtPath(path);
+        for (const char *name : {
+                 "posed:space", "avars:tx", "avars:ty", "avars:tz",
+                 "avars:sx", "avars:sy", "avars:sz"}) {
+            const UsdAttribute attr = joint.GetAttribute(TfToken(name));
+            SdfPathVector connections;
+            // HasAuthoredConnections first: see _AuthoredConnections.
+            if (attr &&
+                (attr.GetNumTimeSamples() > 0 ||
+                 (attr.HasAuthoredConnections() &&
+                  attr.GetConnections(&connections) &&
+                  !connections.empty()))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // The evaluation-mode dispatch. The dynamic generation below is unchanged by
 // it: Baked is a request that reaches _EvaluateDynamic whenever there is no
@@ -7993,7 +8281,21 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         overridesPlaceable &&
         _evaluationMode != RigExecEvaluationMode::Dynamic;
     if (!runBaked) {
-        return _EvaluateDynamic(time, std::move(settled));
+        RigExecRigPose dynamic = _EvaluateDynamic(time, std::move(settled));
+        // cpuParityMode is not a fallback: it ASKS for the dynamic path, so
+        // a rig that bakes perfectly still runs here and has nothing to
+        // report. The other two ways in do: either no program was built, or
+        // one was and could not answer the question the drag asks.
+        if (_BakeRequired() && !cpuParityMode) {
+            _ReportBakeRequired(
+                overridesPlaceable
+                    ? (_bakeRefusalReasons.empty()
+                           ? std::string("no baked program")
+                           : _bakeRefusalReasons.front())
+                    : std::string("interactive overrides are not placeable"),
+                &dynamic);
+        }
+        return dynamic;
     }
     RigExecRigPose baked;
     baked.time = time;
@@ -8003,7 +8305,11 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         // caches no longer describe a completed frame. Drop it rather than
         // reuse it, and answer from the path that cannot decline.
         _bakedProgram.reset();
-        return _EvaluateDynamic(time, std::move(settled));
+        RigExecRigPose dynamic = _EvaluateDynamic(time, std::move(settled));
+        if (_BakeRequired()) {
+            _ReportBakeRequired("program run failed", &dynamic);
+        }
+        return dynamic;
     }
     ++_bakedGenerations;
     if (_evaluationMode == RigExecEvaluationMode::Baked) {
@@ -8028,6 +8334,25 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
 }
 
 void
+RigExecRigEvaluator::_ReportBakeRequired(const std::string &detail,
+                                         RigExecRigPose *pose) const
+{
+    if (!_BakeRequired() ||
+        _evaluationMode == RigExecEvaluationMode::Dynamic) {
+        return;
+    }
+    // The same prefix a real disagreement carries, and deliberately so: to a
+    // suite asking "did the program answer this generation", falling back
+    // and answering differently are the same failure, and one regex should
+    // catch both. Nothing published moves -- the pose is the dynamic path's,
+    // which is the reference the mode compares against anyway.
+    pose->diagnostics.push_back(
+        "baked parity mismatch: bake required, evaluated dynamically: " +
+        detail);
+    ++pose->bakedParityMismatches;
+}
+
+void
 RigExecRigEvaluator::SetEvaluationMode(RigExecEvaluationMode mode)
 {
     if (mode == _evaluationMode) {
@@ -8038,6 +8363,7 @@ RigExecRigEvaluator::SetEvaluationMode(RigExecEvaluationMode mode)
     // An explicit request is a new question even where the last one was
     // refused, so it does not inherit the epoch's refusal.
     _bakeRefused = false;
+    _bakeRefusalReasons.clear();
     if (_compiled && !_structureDirty) {
         // Baked <-> parity keeps the geometry state: the program is rebuilt
         // because the DISPATCH changed, and nothing about the rig did.
@@ -8061,7 +8387,13 @@ RigExecRigEvaluator::_RebuildBakedProgram(
     }
     RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.Bake", "compile");
     ++_bakedProgramBuildAttempts;
-    _bakedProgram = RigExecBakedProgram::Build(this, nullptr);
+    // A refusal is only reportable if somebody collected it: Build is the
+    // one thing that knows why, and it fills a reasons vector only when it
+    // is given one. Production passes nullptr and pays nothing to build
+    // strings no caller reads -- the dispatch needs the yes/no alone.
+    std::vector<std::string> reasons;
+    _bakedProgram = RigExecBakedProgram::Build(
+        this, _BakeRequired() ? &reasons : nullptr);
     if (_bakedProgram) {
         ++_bakedProgramBuilds;
         if (outgoing) {
@@ -8076,8 +8408,11 @@ RigExecRigEvaluator::_RebuildBakedProgram(
         }
     }
     // Refusing is a property of the epoch, not of the moment: remember it so
-    // the lazy build in Evaluate asks once rather than once per frame.
+    // the lazy build in Evaluate asks once rather than once per frame. The
+    // reasons ride with it: the fallback that reports them happens per
+    // frame, long after the one build that could say why.
     _bakeRefused = !_bakedProgram;
+    _bakeRefusalReasons = std::move(reasons);
 }
 
 bool
@@ -8304,21 +8639,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     auto frameFromXform = [&](const SdfPath &path,
                               RigExecPointFrame *out,
                               GfMatrix4d *matrix) {
-        const UsdPrim prim = _stage->GetPrimAtPath(path);
-        if (!prim || !assetRoot || !UsdGeomXformable(prim)) {
-            return false;
-        }
-        bool resetsBelowAsset = false;
-        const GfMatrix4d relative =
-            constraintXformCache.ComputeRelativeTransform(
-                prim, assetRoot, &resetsBelowAsset);
-        if (out) {
-            *out = RigExecFrameFromMatrix(relative);
-        }
-        if (matrix) {
-            *matrix = relative;
-        }
-        return true;
+        return _FrameFromXformRelativeToAsset(
+            assetRoot, &constraintXformCache, path, out, matrix);
     };
 
     // Seed every reachable RigExec frame provider before any pose operation.
@@ -8408,18 +8730,30 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         baseFrames[provider] = base;
         finalFrames[provider] = base;
     }
-    auto updateVolumePlacements = [&]() {
-        _volumeWeightMatrices.clear();
-        for (const auto &[path, tap] : _volumeWeightMatrixTaps) {
-            const auto frame = finalFrames.find(path);
-            GfMatrix4d placement(1.0);
-            if (frame != finalFrames.end() && _IsUsableConstraintFrame(frame->second)) {
-                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
-                                      frame->second.points, &placement);
-            }
-            _volumeWeightMatrices[path] = placement;
+    // The walk's frame store, in the two shapes the routines it shares with
+    // the baked program ask for it: one provider by path, and every provider
+    // it holds a base frame for. Both answer straight out of the maps as the
+    // walk has left them -- the store is never copied into a third shape in
+    // order to be read.
+    auto finalFrameOf = [&](const SdfPath &path, RigExecPointFrame *frame) {
+        const auto found = finalFrames.find(path);
+        if (found == finalFrames.end()) {
+            return false;
         }
-        pose.weightFrames = _volumeWeightMatrices;
+        *frame = found->second;
+        return true;
+    };
+    auto enumerateProviderFrames = [&](const RigExecPoseFrameVisitor &visit) {
+        for (const auto &[provider, current] : finalFrames) {
+            const auto base = baseFrames.find(provider);
+            if (base == baseFrames.end()) {
+                continue;
+            }
+            visit(provider, base->second, current);
+        }
+    };
+    auto updateVolumePlacements = [&]() {
+        _UpdateVolumePlacements(finalFrameOf, &pose);
     };
     updateVolumePlacements();
 
@@ -8438,81 +8772,23 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             return out->IsValid();
         }
         if (!binding.xformPath.IsEmpty()) {
-            if (!frameFromXform(binding.xformPath, out, nullptr) ||
-                !out->IsValid()) {
-                return false;
-            }
-            // A native source that is not itself a written provider may still
-            // sit beneath a constrained transform provider. The closest
-            // revised ancestor contains all higher ancestor deltas, so apply
-            // it once to the stage-derived source frame.
-            SdfPath closest;
-            for (const auto &[provider, current] : finalFrames) {
-                const auto base = baseFrames.find(provider);
-                if (provider == binding.xformPath ||
-                    !binding.xformPath.HasPrefix(provider) ||
-                    base == baseFrames.end() ||
-                    current.points == base->second.points) {
-                    continue;
-                }
-                if (closest.IsEmpty() ||
-                    provider.GetPathElementCount() >
-                        closest.GetPathElementCount()) {
-                    closest = provider;
-                }
-            }
-            if (!closest.IsEmpty()) {
-                GfMatrix4d delta(1.0);
-                if (!RigExecPointsToMatrix(
-                        baseFrames[closest].points,
-                        finalFrames[closest].points, &delta)) {
-                    return false;
-                }
-                *out = RigExecMatrixToPoints(out->points, delta);
-            }
-            return out->IsValid();
+            return _ResolveNativeXformSource(
+                assetRoot, &constraintXformCache, binding.xformPath,
+                enumerateProviderFrames, out);
         }
         return false;
     };
 
     auto readWeights = [&](const UsdPrim &prim, const char *name,
                            size_t count, std::vector<double> *weights) {
-        VtFloatArray authored;
-        if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-            a.Get(&authored, time);
-        }
-        if (!authored.empty() && authored.size() != count) {
-            pose.diagnostics.push_back(
-                prim.GetPath().GetString() + " " + name + " has " +
-                std::to_string(authored.size()) + " entries for " +
-                std::to_string(count) + " sources");
-            return false;
-        }
-        weights->assign(count, 1.0);
-        for (size_t i = 0; i < authored.size(); ++i) {
-            (*weights)[i] = authored[i];
-        }
-        return true;
+        return _ReadConstraintSourceWeights(prim, name, count, time,
+                                            &pose.diagnostics, weights);
     };
 
     auto readOffsets = [&](const UsdPrim &prim, const char *name,
                            size_t count, std::vector<GfVec3d> *offsets) {
-        VtVec3dArray authored;
-        if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-            a.Get(&authored, time);
-        }
-        if (!authored.empty() && authored.size() != count) {
-            pose.diagnostics.push_back(
-                prim.GetPath().GetString() + " " + name + " has " +
-                std::to_string(authored.size()) + " entries for " +
-                std::to_string(count) + " sources");
-            return false;
-        }
-        offsets->assign(count, GfVec3d(0));
-        for (size_t i = 0; i < authored.size(); ++i) {
-            (*offsets)[i] = authored[i];
-        }
-        return true;
+        return _ReadConstraintSourceOffsets(prim, name, count, time,
+                                            &pose.diagnostics, offsets);
     };
 
     auto buildSources = [&](const _FrameConstraint &constraint,
@@ -8859,104 +9135,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         return true;
     };
 
-    auto ikUsesAnimatedTs = [&](const std::vector<SdfPath> &chain) {
-        for (const SdfPath &path : chain) {
-            if (_jointSolverBinding.count(path)) {
-                return true;
-            }
-            const UsdPrim joint = _stage->GetPrimAtPath(path);
-            for (const char *name : {
-                     "posed:space", "avars:tx", "avars:ty", "avars:tz",
-                     "avars:sx", "avars:sy", "avars:sz"}) {
-                const UsdAttribute attr = joint.GetAttribute(TfToken(name));
-                SdfPathVector connections;
-                // HasAuthoredConnections first: see _AuthoredConnections.
-                if (attr &&
-                    (attr.GetNumTimeSamples() > 0 ||
-                     (attr.HasAuthoredConnections() &&
-                      attr.GetConnections(&connections) &&
-                      !connections.empty()))) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-
-    // `neverTS` retains current rotations/root placement while rebuilding
-    // child placement and handle lengths from rest frames. A joint without
-    // any authored rest transform has the schema's identity fallback, which
-    // is not an actual chain rest layout; use its current static layout in
-    // that case. The public math solver can therefore keep measuring its
-    // input chain; evaluator-side preparation decides whether those
-    // measurements are rest- or animation-derived.
-    auto ikWithoutAnimatedTs =
-        [&](const std::vector<RigExecPointFrame> &current,
-            const std::vector<RigExecPointFrame> &rest,
-            std::vector<RigExecPointFrame> *prepared) {
-        if (current.size() != rest.size() || current.empty()) {
-            return false;
-        }
-        bool usableRestLayout = true;
-        for (size_t i = 1; i < rest.size(); ++i) {
-            const double segmentLength =
-                (rest[i].Origin() - rest[i - 1].Origin()).GetLength();
-            if (!std::isfinite(segmentLength) || segmentLength <= 0.0) {
-                usableRestLayout = false;
-                break;
-            }
-        }
-        const std::vector<RigExecPointFrame> &lengthReference =
-            usableRestLayout ? rest : current;
-        prepared->clear();
-        prepared->reserve(current.size());
-        for (size_t i = 0; i < current.size(); ++i) {
-            if (!_IsUsableConstraintFrame(current[i]) ||
-                !_IsUsableConstraintFrame(rest[i])) {
-                return false;
-            }
-            GfVec3d origin = current[i].Origin();
-            if (i > 0) {
-                GfMatrix4d parentRest(1.0), parentPrepared(1.0);
-                if (!RigExecPointsToMatrix(
-                        RigExecIdentityLandmarks(),
-                        lengthReference[i - 1].points,
-                        &parentRest) ||
-                    !RigExecPointsToMatrix(
-                        RigExecIdentityLandmarks(), prepared->back().points,
-                        &parentPrepared)) {
-                    return false;
-                }
-                origin = parentPrepared.TransformAffine(
-                    parentRest.GetInverse().TransformAffine(
-                        lengthReference[i].Origin()));
-            }
-
-            RigExecPointFrame frame = current[i];
-            frame.points[0] = origin;
-            for (size_t axis = 1; axis < frame.points.size(); ++axis) {
-                GfVec3d direction =
-                    current[i].points[axis] - current[i].Origin();
-                const double directionLength = direction.GetLength();
-                const double length =
-                    (lengthReference[i].points[axis] -
-                     lengthReference[i].Origin()).GetLength();
-                if (!std::isfinite(length) || length <= 0.0 ||
-                    !std::isfinite(directionLength) ||
-                    directionLength <= 0.0) {
-                    return false;
-                }
-                direction /= directionLength;
-                frame.points[axis] = origin + direction * length;
-            }
-            if (!_IsUsableConstraintFrame(frame)) {
-                return false;
-            }
-            prepared->push_back(frame);
-        }
-        return true;
-    };
-
     std::set<size_t> visitedSolverLevels;
     for (const _PoseStep &step : _poseSteps) {
         if (step.solverBatch) {
@@ -9223,7 +9401,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             const bool useAnimatedTs =
                 evaluationMode == "alwaysTS" ||
                 (evaluationMode == "autoDetect" &&
-                 ikUsesAnimatedTs(constraint.ikChain));
+                 _IkUsesAnimatedTs(constraint.ikChain));
             if (inputsValid && !useAnimatedTs) {
                 std::vector<RigExecPointFrame> rest;
                 rest.reserve(constraint.ikChain.size());
@@ -9236,7 +9414,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     rest.push_back(frame->second);
                 }
                 if (!inputsValid ||
-                    !ikWithoutAnimatedTs(chain, rest, &solveChain)) {
+                    !_PrepareRestDerivedIkChain(chain, rest,
+                                                &solveChain)) {
                     pose.diagnostics.push_back(
                         constraint.moverPath.GetString() +
                         " could not prepare rest-derived IK inputs; "
@@ -10539,6 +10718,28 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
 
     pose.valid = true;
     return pose;
+}
+
+const std::vector<TfToken> &
+RigExecRigEvaluator::GetConstraintOperatorTypeNames()
+{
+    // Built from the table itself rather than written out again, so an
+    // operator added there is named here without anyone remembering to.
+    static const std::vector<TfToken> names = [] {
+        std::vector<TfToken> types;
+        types.reserve(_ConstraintHandlers().size());
+        for (const _ConstraintHandler &handler : _ConstraintHandlers()) {
+            types.push_back(TfToken(handler.schemaType));
+        }
+        return types;
+    }();
+    return names;
+}
+
+bool
+RigExecRigEvaluator::IsConstraintOperatorType(const TfToken &schemaType)
+{
+    return _FindConstraintHandler(schemaType) != nullptr;
 }
 
 size_t
