@@ -692,8 +692,11 @@ bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
 /// kernel and unlike the point3f[] ops: the deltas are added to the preceding
 /// revision and blended back against it in one pass.
 ///
-/// Shared by the mover-graph revision node and by the baked program, which
-/// runs the same operation with no VdfNetwork around it.
+/// ONE definition, called by the mover-graph revision node and by the baked
+/// program, which runs the same operation with no VdfNetwork around it: a
+/// second copy of the blend would have to agree about where the envelope is
+/// folded in, and the rigs that would show a disagreement are the ones no
+/// fixture happened to have.
 bool RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
                                   std::vector<GfVec3f> *pts);
 
@@ -705,8 +708,10 @@ bool RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
 /// The envelope is resolved and applied INSIDE the kernel, as for the matrix
 /// and blend-shape kernels.
 ///
-/// Shared by the mover-graph revision node and by the baked program, which
-/// runs the same operation with no VdfNetwork around it.
+/// ONE definition, called by the mover-graph revision node and by the baked
+/// program, which maintains the same property with no VdfNetwork around it:
+/// two copies would have to keep agreeing about the cardinality rules that
+/// decide when a recomputation fails instead of truncating.
 bool RigExecApplyDerivedKernel(RigExecRevisionOp op,
                                const RigExecMoverParameters &p,
                                std::vector<GfVec3f> *pts);

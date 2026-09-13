@@ -179,7 +179,9 @@ _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
     const RigExecMoverParameters *params =
         ctx.GetInputValuePtr<RigExecMoverParameters>(_tokens->parameters);
     auto passThrough = [&ctx, resultStatus]() {
-        if (_StatusAllowsApply(ctx)) resultStatus->state = TfToken("moverFailed");
+        if (_StatusAllowsApply(ctx)) {
+            resultStatus->state = TfToken("moverFailed");
+        }
         ctx.SetOutputToReferenceInput(_tokens->previous);
     };
     // RigExecRunRevisionKernel owns the packet check; repeating it here is
@@ -192,6 +194,12 @@ _RunRevisionOp(const VdfContext &ctx, RigExecRevisionOp op,
         return;
     }
 
+    // Every kernel reads the preceding points as a contiguous array, so the
+    // callback materialises one for all of them. The blend-shape revision
+    // used to stream through the READWRITE connector instead and now pays a
+    // copy of the points it already allocates an envelope for; deciding here
+    // which ops could still stream would put back into the node exactly the
+    // per-operation knowledge this hoist took out of it.
     std::vector<GfVec3f> scratch;
     {
         VdfReadIterator<GfVec3f> previous(ctx, _tokens->previous);
