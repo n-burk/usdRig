@@ -1137,6 +1137,15 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // _FrameConstraint are private to the evaluator and bakedPose.cpp is not
     // its friend. The restatement is a copy of the structure only: every
     // VALUE the bake reads still comes off the stage, through the context.
+    // Whether a read phase asked for \p target's value as of \p mover. The
+    // dynamic path asks this per call, inside recordFrame and beside every
+    // chain revision; the program asks it once, here.
+    const auto snapshotAfter = [&E](const SdfPath &target,
+                                    const SdfPath &mover) {
+        const auto wanted = E._snapshotPoints.find(target);
+        return wanted != E._snapshotPoints.end() &&
+               wanted->second.count(mover) > 0;
+    };
     std::vector<RigExecBakedWalkEntry> walk;
     for (const RigExecRigEvaluator::_PoseStep &step : E._poseSteps) {
         RigExecBakedWalkEntry entry;
@@ -1158,6 +1167,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             entry.constraint.moverPath = fc.moverPath;
             entry.constraint.schemaType = fc.schemaType;
             entry.constraint.targets = fc.targets;
+            entry.constraint.snapshotAfter =
+                !fc.targets.empty() &&
+                snapshotAfter(fc.targets[0], fc.moverPath);
             for (const auto &source : fc.sources) {
                 entry.constraint.sources.push_back(source.sourcePath);
             }
@@ -1191,7 +1203,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // the evaluator.
     std::vector<RigExecBakedChainSpec> chainSpecs;
     const auto revisionSpec =
-        [](const RigExecRigEvaluator::_GraphRevision &r) {
+        [&snapshotAfter](const RigExecRigEvaluator::_GraphRevision &r) {
             RigExecBakedRevisionSpec spec;
             spec.moverPath = r.moverPath;
             spec.target = r.target;
@@ -1199,6 +1211,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             spec.binding = r.binding;
             spec.transformFinalPhase = r.transformFinalPhase;
             spec.skinTopologyFixed = r.skinTopologyFixed;
+            spec.snapshotAfter = snapshotAfter(r.target, r.moverPath);
             return spec;
         };
     for (const SdfPath &target : E._chainOrder) {
@@ -1286,6 +1299,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // routine the dynamic path runs rather than a second copy of it.
     B.propertyResults.clear();
     B.resolvedInputs->Clear();
+    B.runSnapshots.Clear();
     B.chainSnapshots->Clear();
     // Interactive overrides are applied on BOTH sides of the property chains,
     // for the reason _EvaluateDynamic gives at the same two points: an

@@ -284,6 +284,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         RigExecBakedProgramImpl::Constraint c;
         c.path = fc.moverPath;
         c.type = fc.schemaType;
+        c.snapshotAfter = fc.snapshotAfter;
         const UsdPrim prim = B.stage->GetPrimAtPath(fc.moverPath);
         c.target = fc.targets.empty() ? -1 : slotOf(fc.targets[0]);
         for (const SdfPath &source : fc.sources) {
@@ -665,6 +666,29 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
         return _Commit::Applied;
     };
 
+    // The phased-read store's pose-half record: a provider's rest -> final
+    // matrix as it stood immediately AFTER one constraint. Mirrors the
+    // dynamic walk's recordFrame, including which frames it declines to
+    // record; the _snapshotPoints membership it tests per call was decided at
+    // bake, so a rig that declares no phase pays one branch per constraint.
+    const auto recordFrame =
+        [&](const RigExecBakedProgramImpl::Constraint &c) {
+        if (!c.snapshotAfter || c.target < 0) {
+            return;
+        }
+        const RigExecPointFrame &frame = B.fin[c.target];
+        if (!frame.IsValid()) {
+            return;
+        }
+        const RigExecPointFrame &rest = B.restFrames[c.target];
+        const std::array<GfVec3d, 4> landmarks =
+            rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
+        GfMatrix4d matrix(1.0);
+        if (RigExecPointsToMatrix(landmarks, frame.points, &matrix)) {
+            B.runSnapshots.Record(B.paths[c.target], c.path, VtValue(matrix));
+        }
+    };
+
     // ---- the interleaved solver/constraint walk ----------------------------
     std::set<SdfPath> fallbackJoints;
     std::set<size_t> visitedSolverLevels;
@@ -796,7 +820,11 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
             B.constraints[step.index];
         RIGEXEC_PROFILE_SCOPE_CAT(
             *B.profiler, c.type.GetString() + " " + c.path.GetName(), "pose");
+        // Every exit below records the target's frame, because the dynamic
+        // walk does: a phase names a POINT in the walk, and a constraint that
+        // passed through still leaves its target standing at that point.
         if (!rd(c.enabled)) {
+            recordFrame(c);
             continue;
         }
         const double weight = rd(c.defaultWeight);
@@ -805,12 +833,14 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 c.path.GetString() +
                 " has inputs:defaultWeight outside finite [0, 1]; "
                 "constraint passed through");
+            recordFrame(c);
             continue;
         }
         if (weight <= 0.0) {
             // A zero envelope is an exact dormant pass-through, decided
             // before any source is resolved so a malformed disconnected
             // input cannot make a disabled constraint fail.
+            recordFrame(c);
             continue;
         }
         std::vector<RigExecConstraintSource> sources(c.sources.size());
@@ -833,6 +863,7 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
             pose->diagnostics.push_back(
                 c.path.GetString() +
                 " has unusable constraint inputs; constraint passed through");
+            recordFrame(c);
             continue;
         }
         const RigExecPointFrame input = B.fin[c.target];
@@ -950,6 +981,7 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 return false;
             }
         }
+        recordFrame(c);
     }
 
     // An incomplete solver is an authoring gap, not a silent one.
@@ -1005,6 +1037,26 @@ RigExecBakedRunPose(RigExecBakedProgramImpl *program, UsdTimeCode time,
             pose->controlFrames[B.controlPaths[k]] = B.fin[B.controlSlots[k]];
         }
     }
+    // The store's other pose-half record: every provider's rest -> final
+    // matrix, which is what a `final` phase on a provider resolves to. The
+    // dynamic walk fills this for every provider it holds a usable rest and
+    // frame for; the program does the same, but only when something can look
+    // it up, because filling it otherwise would compute a matrix per slot per
+    // frame that no step reads.
+    if (B.phasedReads) {
+        for (int i = 0; i < N; ++i) {
+            if (!RigExecBakedUsable(B.restFrames[i]) ||
+                !RigExecBakedUsable(B.fin[i])) {
+                continue;
+            }
+            GfMatrix4d matrix(1.0);
+            if (RigExecPointsToMatrix(B.restPts[i], B.fin[i].points,
+                                      &matrix)) {
+                B.runSnapshots.RecordFinal(B.paths[i], VtValue(matrix));
+            }
+        }
+    }
+
     // Observational solver guides. The dynamic path re-evaluates them through
     // a second exec request whose per-solver override IS the aggregate the
     // walk produced, so the published array is that aggregate either way --

@@ -55,6 +55,15 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         out.binding = r.binding;
         out.finalPhase = r.transformFinalPhase;
         out.skinTopologyFixed = r.skinTopologyFixed;
+        out.snapshotAfter = r.snapshotAfter;
+        // A declared phase is the only thing that reads the snapshot store,
+        // and the pose half fills its half of that store only when one
+        // exists. transformPhase is counted too: an AtPrim transform is
+        // answered out of the same store.
+        if (!r.binding.phases.empty() ||
+            r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim) {
+            B.phasedReads = true;
+        }
         if (!out.moverPrim) {
             refuse("mover prim is missing", r.moverPath);
         }
@@ -177,10 +186,38 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // Skin and Matrix -- the only two operations IsBakeable admits today --
     // read neither, so this is the contract being made right before an
     // operator that does read them arrives.
+    // One overlay per revision: the generation-wide resolved inputs, plus
+    // whatever THIS revision's declared phases resolve to out of the run's
+    // snapshot store. The assembler reads inputs by path and never learns a
+    // phase exists, which is what lets a phase apply to any input. Built only
+    // for a revision that declares one -- with none the overlay is a copy of
+    // the resolved inputs with nothing added to it, and the copy is the whole
+    // cost.
+    RigExecResolvedInputs revisionInputs;
     auto assemble = [&](RigExecBakedProgramImpl::GeomRevision &revision,
                         const std::vector<GfVec3f> &basePoints) {
         RigExecProviderValues values;
         values.resolved = &R;
+        if (!revision.binding.phases.empty()) {
+            revisionInputs = R;
+            for (const auto &[inputPath, phase] : revision.binding.phases) {
+                if (const VtValue *recorded = B.runSnapshots.Lookup(
+                        inputPath, phase, revision.moverPath)) {
+                    revisionInputs.SetProperty(inputPath, *recorded);
+                } else if (phase.kind != RigExecReadPhaseKind::Preceding) {
+                    // Preceding falling through to the stage is correct: the
+                    // reader is the chain's first revision, so its preceding
+                    // value IS the base. Anything else means the phase named
+                    // something that produced nothing.
+                    pose->diagnostics.push_back(
+                        "diag " + revision.moverPath.GetString() +
+                        ": read phase '" + phase.GetAsString() + "' for " +
+                        inputPath.GetString() +
+                        " resolved to nothing; read the authored base");
+                }
+            }
+            values.resolved = &revisionInputs;
+        }
         GfMatrix4d transform(1.0);
         if (revision.transformSlot >= 0) {
             transform = revision.finalPhase
@@ -316,6 +353,14 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
             } else {
                 current = revision.output;
             }
+            // Snapshot only where a phased read named this revision, which
+            // is the whole cost of the feature for a rig that uses it and
+            // nothing at all for one that does not.
+            if (revision.snapshotAfter) {
+                B.runSnapshots.Record(
+                    chain.target, revision.moverPath,
+                    VtValue(VtVec3fArray(current.begin(), current.end())));
+            }
         }
         for (const RigExecBakedProgramImpl::GeomRevision &revision :
                  chain.revisions) {
@@ -329,6 +374,8 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
         chain.result = VtVec3fArray(current.begin(), current.end());
         chain.haveResult = true;
         pose->movedProperties[chain.target] = VtValue(chain.result);
+        // `final` costs nothing extra: this is the value the chain publishes.
+        B.runSnapshots.RecordFinal(chain.target, VtValue(chain.result));
         ++graphChainsBuilt;
 
         // Derived maintenance reads this chain's FINAL points, which is why

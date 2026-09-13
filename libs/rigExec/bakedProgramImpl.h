@@ -382,6 +382,13 @@ struct RigExecBakedProgramImpl {
     // in, the profiler is switched on mid-session -- so the program reads what
     // the evaluator holds NOW and can never answer from a stale copy.
     RigExecResolvedInputs *resolvedInputs = nullptr;
+    /// The evaluator's phased-read store, EMPTIED at the head of a run
+    /// exactly as the dynamic walk empties it at the head of its own, so the
+    /// two paths leave the evaluator in the same state. Nothing is ever
+    /// recorded into it: in a parity generation the baked run precedes the
+    /// dynamic one over the same evaluator, and a record left here would be
+    /// read back by the dynamic walk as if its own pose walk had produced it.
+    /// The program records into `runSnapshots` below instead.
     RigExecChainSnapshots *chainSnapshots = nullptr;
     RigExecSkinTopologyCache *skinTopologies = nullptr;
     RigExecCurvenetBindCache *curvenetBindings = nullptr;
@@ -450,6 +457,19 @@ struct RigExecBakedProgramImpl {
     /// and the pose half publishes it; program-owned so the two halves cannot
     /// be handed different maps.
     std::map<SdfPath, VtValue> propertyResults;
+
+    /// This run's phased-read store: what each chain held at each point of
+    /// the walk, and what each provider's matrix was after each constraint
+    /// that named it. Run-local by design (see `chainSnapshots` above), and
+    /// the only store the program looks a phase up in -- the evaluator's
+    /// holds the previous generation's dynamic records.
+    RigExecChainSnapshots runSnapshots;
+    /// True when some revision of this epoch declares a read phase, which is
+    /// the only thing that can LOOK the store up. While it is false nothing
+    /// can observe a record, so the pose half does not pay to fill it -- and
+    /// in particular the rest -> final matrix of a provider no step reads is
+    /// still never computed, which is the lazy set this program keeps.
+    bool phasedReads = false;
 
     // ---- rest->pose matrices, resolved on demand once per frame ------------
     //
@@ -567,6 +587,12 @@ struct RigExecBakedProgramImpl {
         GfVec3d sceneUp{0, 1, 0};
         int worldUpObject = -1;
         bool worldUpObjectNamed = false;
+        /// A read phase named this constraint as the point in the walk it
+        /// wants its target's frame from, so the walk records the target's
+        /// matrix after it. Decided at bake out of the evaluator's
+        /// _snapshotPoints, which is the same membership the dynamic
+        /// recordFrame tests per call.
+        bool snapshotAfter = false;
     };
     std::vector<Constraint> constraints;
 
@@ -621,6 +647,10 @@ struct RigExecBakedProgramImpl {
         RigExecMoverParameters lastParameters;
         RigExecMoverStatus lastStatus;
         bool ran = false;
+        /// A read phase named this revision as the point in the chain it
+        /// wants the target's points from, so the chain records them after
+        /// it. Decided at bake out of the evaluator's _snapshotPoints.
+        bool snapshotAfter = false;
         /// This node is new to the rig's geometry state and its creation has
         /// not been reported yet. Cleared by AdoptGeometryStateFrom for a
         /// node the outgoing program already held, which is the same
@@ -763,6 +793,9 @@ struct RigExecBakedConstraintSpec {
     SdfPath moverPath;
     TfToken schemaType;
     SdfPathVector targets;
+    /// Whether a read phase asked for the target's frame as of this
+    /// constraint (the evaluator's _snapshotPoints membership).
+    bool snapshotAfter = false;
     /// One source path per binding, in the compiled order.
     SdfPathVector sources;
     /// Empty when the aim constraint named no world-up object.
@@ -777,6 +810,9 @@ struct RigExecBakedRevisionSpec {
     RigExecRevisionBinding binding;
     bool transformFinalPhase = false;
     bool skinTopologyFixed = false;
+    /// Whether a read phase asked for the target's points as of this
+    /// revision (the evaluator's _snapshotPoints membership).
+    bool snapshotAfter = false;
 };
 
 /// One geometry chain and the derived targets maintained from its result.
