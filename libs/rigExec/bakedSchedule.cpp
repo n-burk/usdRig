@@ -10,11 +10,22 @@
 
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/token.h"
+#include "pxr/base/vt/value.h"
+#include "pxr/base/work/dispatcher.h"
+#include "pxr/base/work/threadLimits.h"
+#include "pxr/base/work/withScopedParallelism.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
+#include <memory>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -104,6 +115,542 @@ RigExecBakedScheduleReportRequested()
 }
 
 // ---------------------------------------------------------------------------
+// The cost model.
+//
+// cost = a[kind] + b[kind] x size(step), in microseconds. Two constants per
+// step kind and one size per step, which is as much model as a scheduler can
+// use: the packing only ever asks "is this bin about a grain yet", so what it
+// needs is the RATIO between a skin chunk and a constraint, not either one's
+// absolute time.
+//
+// The size of a step is the count that its body's inner loop runs over:
+//
+//   ComposeSubtree   provider slots in the group
+//   Solve            controls for an FK chain, joints for a spline IK,
+//                    published elements otherwise
+//   SolverCommit     candidate slots + propagation pairs -- BOTH halves of
+//   Constraint       the commit walk the two of them, and a batch with forty
+//                    candidates and no descendants is not free
+//   CommitDelta      candidate slots
+//   PropagateChunk   the staging slots this chunk writes, which IS its share
+//                    of the propagation
+//   CommitApply      candidate slots + propagation pairs
+//   ProviderMatrix   one matrix; the whole step is its fixed term
+//   SnapshotFinals   provider slots
+//   InfluenceFold    influences -- NOT vertices; the fold is O(joints)
+//   RevisionStatic   the target's vertices (ResolveAll of the envelope)
+//   RevisionChunk    vertices x elementSize, NOT x influences: elementSize IS
+//                    the influences per vertex the layout stores, and
+//                    multiplying by the revision's whole influence count
+//                    would make a 90-joint skin look thirty times the work a
+//                    3-influence gather does
+//   RevisionFuse     one decision
+//   ChainStatus      revisions of the chain
+//   Derived          the CHAIN's vertices, which is what recomputeNormals
+//                    and recomputeExtent walk -- an extent is two vectors
+//                    however large the mesh behind it is
+//
+// The constants below were fitted by RIGEXEC_BAKED_SCHEDULE_CALIBRATE=1 over
+// eight frames of examples/biped/Biped_anim.usda on a 20-core box (see
+// RigExecBakedScheduleCalibrationRequested). They are a machine's
+// numbers, so they will be wrong on another machine by some factor -- which
+// costs a schedule that is packed a little coarse or a little fine, and never
+// an answer. Build must not measure: a schedule that depended on what the box
+// was doing while the program was built could not be tested for producing the
+// same values at every grain.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// The two constants of one step kind, in microseconds.
+struct StepCostConstants {
+    double fixedUs = 0;
+    double perUnitUs = 0;
+};
+
+constexpr size_t kStepKindCount =
+    size_t(RigExecBakedStepKind::Derived) + 1;
+
+// Indexed by RigExecBakedStepKind, in the enum's order. Deliberately a
+// deduced-extent array with the assertion below it: a std::array with a
+// stated size accepts too few rows and zero-fills the rest, which would make
+// a newly added step kind free and the schedule silently wrong.
+constexpr StepCostConstants kStepCosts[] = {
+    {0.0401, 0.087594},   // ComposeSubtree   93 samples
+    {0.0000, 0.385597},   // Solve            14
+    {0.0862, 0.024661},   // SolverCommit     14
+    {1.2290, 0.014504},   // Constraint       65
+    {0.0000, 0.066000},   // CommitDelta       2
+    {0.0324, 0.016869},   // PropagateChunk    4
+    {0.0000, 0.004088},   // CommitApply       2
+    {0.0000, 0.051952},   // ProviderMatrix  252
+    {1.0000, 0.200000},   // SnapshotFinals    0 -- unmeasured, see below
+    {0.0000, 0.003781},   // InfluenceFold     1
+    {0.0000, 0.000487},   // RevisionStatic    1
+    {0.0000, 0.000914},   // RevisionChunk     1 -- see below
+    {0.0000, 0.594000},   // RevisionFuse      1
+    {0.0000, 7.791875},   // ChainStatus       1
+    {0.0000, 0.003744},   // Derived           1
+};
+static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
+              "rigExec: every baked step kind needs a cost row");
+
+// Two rows are worth reading twice before they are trusted:
+//
+//  * SnapshotFinals does not exist on any rig that bakes today, so nothing
+//    measured it and the row is the guess it started as. It is a per-provider
+//    matrix pass, so it should land near ProviderMatrix's per-unit cost when a
+//    phased rig finally fits it.
+//  * RevisionChunk was measured as ONE chunk over a whole 105k-vertex skin,
+//    and RigExecApplySkinKernel spreads a range that large over the arena
+//    itself. So the row describes the wall time of an internally parallel
+//    step, not the work in it, and it will read low once the vertex partition
+//    cuts revisions into chunks that each stay under the kernel's own
+//    threshold. Re-run the calibration when that lands.
+
+
+/// What a task costs to hand to the arena and pick up again, in the same
+/// microseconds. The absorb rule compares a cluster against twice this: a
+/// cluster that does not cost two dispatches is cheaper to run inside its
+/// predecessor than to schedule.
+constexpr double kSpawnCostUs = 1.0;
+
+/// The vertex counts the geometry cost terms need, one entry per dense
+/// revision id and per dense derived id.
+///
+/// Read from the stage ONCE, at Build, at the earliest time the attribute
+/// answers to. A points array whose length moves with time makes this an
+/// estimate rather than a fact -- which is all a cost model is, and the
+/// program resets such a chain in its prologue anyway.
+struct GeometrySizes {
+    std::vector<double> revisionUnits;   ///< vertices x elementSize
+    std::vector<double> revisionPoints;  ///< vertices
+    /// The CHAIN's vertices, per derived id: recomputeNormals and
+    /// recomputeExtent loop over the points they are maintained FROM, and
+    /// an extent's own array is two vectors however large the mesh is.
+    std::vector<double> derivedPoints;
+};
+
+size_t
+PointCountOf(const UsdAttributeQuery &query)
+{
+    VtValue value;
+    if (!query.IsValid() || !query.Get(&value, UsdTimeCode::EarliestTime()) ||
+        !value.IsArrayValued()) {
+        return 0;
+    }
+    return value.GetArraySize();
+}
+
+/// The influence slots one vertex of \p revision stores, which is what the
+/// skin gather loops over per point. One is the schema's own fallback (see
+/// moverGraph.cpp's layout resolution), so an unauthored elementSize costs a
+/// per-vertex term of one rather than nothing.
+double
+ElementSizeOf(const RigExecBakedProgramImpl::GeomRevision &revision)
+{
+    if (revision.op != RigExecRevisionOp::Skin || !revision.moverPrim) {
+        return 1;
+    }
+    static const TfToken elementSize("rigExec:elementSize");
+    int size = 1;
+    if (const UsdAttribute attribute =
+            revision.moverPrim.GetAttribute(elementSize)) {
+        attribute.Get(&size, UsdTimeCode::EarliestTime());
+    }
+    return size < 1 ? 1 : double(size);
+}
+
+GeometrySizes
+MeasureGeometry(const RigExecBakedProgramImpl &B)
+{
+    GeometrySizes sizes;
+    sizes.revisionUnits.assign(B.revisionIndex.size(), 0);
+    sizes.revisionPoints.assign(B.revisionIndex.size(), 0);
+    sizes.derivedPoints.assign(B.derivedIndex.size(), 0);
+    std::vector<double> chainPoints(B.chains.size(), 0);
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        chainPoints[c] = double(PointCountOf(B.chains[c].baseQuery));
+    }
+    for (size_t id = 0; id < B.revisionIndex.size(); ++id) {
+        const auto &[chain, revision] = B.revisionIndex[id];
+        sizes.revisionPoints[id] = chainPoints[size_t(chain)];
+        sizes.revisionUnits[id] =
+            chainPoints[size_t(chain)] *
+            ElementSizeOf(B.chains[size_t(chain)].revisions[size_t(revision)]);
+    }
+    for (size_t id = 0; id < B.derivedIndex.size(); ++id) {
+        sizes.derivedPoints[id] = chainPoints[size_t(B.derivedIndex[id].first)];
+    }
+    return sizes;
+}
+
+/// How many slots of \p domain \p step declares it writes.
+double
+WrittenSlots(const RigExecBakedStep &step, RigExecBakedSlotDomain domain)
+{
+    double count = 0;
+    for (const RigExecBakedSlotRange &range : step.writes) {
+        if (range.domain == domain) {
+            count += double(range.end) - double(range.begin);
+        }
+    }
+    return count;
+}
+
+double
+StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
+         const RigExecBakedStep &step)
+{
+    const size_t object = size_t(step.object);
+    switch (step.kind) {
+    case RigExecBakedStepKind::ComposeSubtree: {
+        const RigExecBakedComposeGroup &group = B.composeGroups[object];
+        return double(group.end - group.begin);
+    }
+    case RigExecBakedStepKind::Solve: {
+        const RigExecBakedProgramImpl::Solver &solver = B.solvers[object];
+        if (!solver.controls.empty()) {
+            return double(solver.controls.size());
+        }
+        if (solver.splineCount) {
+            return double(solver.splineCount);
+        }
+        return double(std::max<size_t>(solver.outputs.size(), 1));
+    }
+    case RigExecBakedStepKind::SolverCommit:
+    case RigExecBakedStepKind::Constraint:
+    case RigExecBakedStepKind::CommitApply: {
+        const RigExecBakedCommit &commit = B.commits[object];
+        return double(commit.slots.size() + commit.propagate.size());
+    }
+    case RigExecBakedStepKind::CommitDelta:
+        return double(B.commits[object].slots.size());
+    case RigExecBakedStepKind::PropagateChunk:
+        return WrittenSlots(step, RigExecBakedSlotDomain::CommitStaging);
+    case RigExecBakedStepKind::ProviderMatrix:
+    case RigExecBakedStepKind::RevisionFuse:
+        return 1;
+    case RigExecBakedStepKind::SnapshotFinals:
+        return double(B.paths.size());
+    case RigExecBakedStepKind::InfluenceFold: {
+        const auto &[chain, revision] = B.revisionIndex[object];
+        return double(B.chains[size_t(chain)]
+                          .revisions[size_t(revision)]
+                          .influenceSlots.size());
+    }
+    case RigExecBakedStepKind::RevisionStatic:
+        return geometry.revisionPoints[object];
+    case RigExecBakedStepKind::RevisionChunk:
+        // One chunk over the whole revision today; the vertex partition
+        // divides this between the chunks and changes nothing else.
+        return geometry.revisionUnits[object];
+    case RigExecBakedStepKind::ChainStatus:
+        return double(B.chains[object].revisions.size());
+    case RigExecBakedStepKind::Derived:
+        return geometry.derivedPoints[object];
+    }
+    return 1;
+}
+
+}  // namespace
+
+void
+RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const GeometrySizes geometry = MeasureGeometry(B);
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        RigExecBakedStep &step = B.steps[size_t(index)];
+        const StepCostConstants &constants = kStepCosts[size_t(step.kind)];
+        step.sizeUnits = StepSize(B, geometry, step);
+        step.cost = constants.fixedUs + constants.perUnitUs * step.sizeUnits;
+        // Longest path from a source, which is the level the packing groups
+        // by. One forward pass, because program order is a topological order.
+        int level = 0;
+        for (const int pred : step.preds) {
+            level = std::max(level, B.steps[size_t(pred)].level);
+        }
+        step.level = level + 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clustering.
+// ---------------------------------------------------------------------------
+
+double
+RigExecBakedScheduleGrainUs(double totalCost)
+{
+    // Read once: a grain that could move between two frames of one session
+    // would make "the program produced two schedules" a question about when
+    // the variable was read.
+    static const double override = [] {
+        const std::string text = TfGetenv("RIGEXEC_BAKED_GRAIN_US", "");
+        if (text.empty()) {
+            return -1.0;
+        }
+        const double value = std::strtod(text.c_str(), nullptr);
+        return value < 0 ? 0.0 : value;
+    }();
+    if (override >= 0) {
+        return override;
+    }
+    const double concurrency =
+        double(std::max<size_t>(WorkGetConcurrencyLimit(), 1));
+    // Enough work per task that the dispatch is noise, few enough tasks that
+    // no thread is left holding the only remaining one: four bins per thread
+    // is the usual compromise, and the clamp keeps a tiny rig from packing
+    // everything into one cluster and a huge one from making ten thousand.
+    return std::min(50.0, std::max(5.0, totalCost / (4.0 * concurrency)));
+}
+
+namespace {
+
+/// The cluster edges implied by \p clusterOf, with the members collected.
+///
+/// Recomputed from the step graph after every merge rather than patched:
+/// the merge rules are stated on the CURRENT quotient graph (§5.1), and a
+/// patched adjacency that had drifted would let a merge fire on a
+/// predecessor set that no longer exists -- which is the one way this
+/// algorithm could produce a cycle.
+void
+BuildQuotient(const RigExecBakedProgramImpl &B, RigExecBakedClustering *out)
+{
+    const size_t count = out->clusters.size();
+    for (RigExecBakedCluster &cluster : out->clusters) {
+        cluster.members.clear();
+        cluster.preds.clear();
+        cluster.succs.clear();
+        cluster.cost = 0;
+        cluster.level = 0;
+    }
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        const int owner = out->clusterOf[size_t(index)];
+        RigExecBakedCluster &cluster = out->clusters[size_t(owner)];
+        cluster.members.push_back(index);
+        cluster.cost += step.cost;
+        cluster.level = std::max(cluster.level, step.level);
+        for (const int pred : step.preds) {
+            const int from = out->clusterOf[size_t(pred)];
+            if (from != owner) {
+                cluster.preds.push_back(from);
+                out->clusters[size_t(from)].succs.push_back(owner);
+            }
+        }
+    }
+    for (size_t c = 0; c < count; ++c) {
+        RigExecBakedCluster &cluster = out->clusters[c];
+        std::sort(cluster.preds.begin(), cluster.preds.end());
+        cluster.preds.erase(
+            std::unique(cluster.preds.begin(), cluster.preds.end()),
+            cluster.preds.end());
+        std::sort(cluster.succs.begin(), cluster.succs.end());
+        cluster.succs.erase(
+            std::unique(cluster.succs.begin(), cluster.succs.end()),
+            cluster.succs.end());
+    }
+}
+
+/// Drops empty clusters and renumbers what is left by first member, so that
+/// the partition a caller sees does not depend on how many merges produced
+/// it.
+void
+Compact(const RigExecBakedProgramImpl &B, RigExecBakedClustering *out)
+{
+    std::vector<int> order;
+    for (size_t c = 0; c < out->clusters.size(); ++c) {
+        if (!out->clusters[c].members.empty()) {
+            order.push_back(int(c));
+        }
+    }
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return out->clusters[size_t(a)].members.front() <
+               out->clusters[size_t(b)].members.front();
+    });
+    std::vector<int> renumbered(out->clusters.size(), -1);
+    for (size_t position = 0; position < order.size(); ++position) {
+        renumbered[size_t(order[position])] = int(position);
+    }
+    for (int &owner : out->clusterOf) {
+        owner = renumbered[size_t(owner)];
+    }
+    std::vector<RigExecBakedCluster> kept(order.size());
+    out->clusters.swap(kept);
+    BuildQuotient(B, out);
+}
+
+/// The longest path through the cluster graph by cost -- the wall time the
+/// schedule could not beat with any number of threads.
+double
+CriticalPath(const RigExecBakedClustering &clustering)
+{
+    std::vector<double> finish(clustering.clusters.size(), 0);
+    double longest = 0;
+    // Kahn, not a scan over cluster ids: a merge can leave a cluster whose
+    // first member precedes its predecessor's, so id order is not a
+    // topological order of the quotient graph even though program order is
+    // one of the step graph.
+    std::vector<int> ready;
+    std::vector<int> remaining(clustering.clusters.size(), 0);
+    for (size_t c = 0; c < clustering.clusters.size(); ++c) {
+        remaining[c] = int(clustering.clusters[c].preds.size());
+        if (!remaining[c]) {
+            ready.push_back(int(c));
+        }
+    }
+    for (size_t head = 0; head < ready.size(); ++head) {
+        const int c = ready[head];
+        const RigExecBakedCluster &cluster = clustering.clusters[size_t(c)];
+        finish[size_t(c)] += cluster.cost;
+        longest = std::max(longest, finish[size_t(c)]);
+        for (const int succ : cluster.succs) {
+            finish[size_t(succ)] =
+                std::max(finish[size_t(succ)], finish[size_t(c)]);
+            if (--remaining[size_t(succ)] == 0) {
+                ready.push_back(succ);
+            }
+        }
+    }
+    return longest;
+}
+
+}  // namespace
+
+RigExecBakedClustering
+RigExecBakedBuildClusters(const RigExecBakedProgramImpl &B, double grainUs)
+{
+    RigExecBakedClustering out;
+    out.grainUs = grainUs;
+    out.clusterOf.assign(B.steps.size(), 0);
+    for (const RigExecBakedStep &step : B.steps) {
+        out.serialCost += step.cost;
+    }
+    if (B.steps.empty()) {
+        return out;
+    }
+    if (grainUs <= 0) {
+        // One step per cluster: the finest schedule the edges admit, and the
+        // one that says most about them. Neither fusion nor the absorb rule
+        // runs, because both exist to make clusters coarser and this grain
+        // asked for the opposite.
+        out.clusters.resize(B.steps.size());
+        std::iota(out.clusterOf.begin(), out.clusterOf.end(), 0);
+        BuildQuotient(B, &out);
+        out.criticalPathCost = CriticalPath(out);
+        return out;
+    }
+
+    // ---- level packing ------------------------------------------------------
+    //
+    // With longest-path levels no edge joins two steps of ONE level, so any
+    // grouping within a level is acyclic however the bins fall. That is the
+    // whole correctness argument for the packing, and it is why the levels
+    // are longest-path and not depth-first depths.
+    int levels = 0;
+    for (const RigExecBakedStep &step : B.steps) {
+        levels = std::max(levels, step.level);
+    }
+    std::vector<std::vector<int>> byLevel(size_t(levels) + 1);
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        byLevel[size_t(B.steps[size_t(index)].level)].push_back(index);
+    }
+    const int concurrency = std::max(1, int(WorkGetConcurrencyLimit()));
+    int next = 0;
+    for (const std::vector<int> &level : byLevel) {
+        if (level.empty()) {
+            continue;
+        }
+        double total = 0;
+        for (const int index : level) {
+            total += B.steps[size_t(index)].cost;
+        }
+        const int bins = std::max(
+            1, std::min(concurrency, int(std::ceil(total / grainUs))));
+        // Contiguous bins in PROGRAM order, cut where the running cost
+        // crosses each bin's share. Contiguity is not cosmetic: it keeps a
+        // cluster's members adjacent in the program, which is what makes the
+        // slots they touch adjacent too.
+        const double share = total / double(bins);
+        const int first = next;
+        next += bins;
+        double running = 0;
+        int bin = 0;
+        for (const int index : level) {
+            out.clusterOf[size_t(index)] = first + bin;
+            running += B.steps[size_t(index)].cost;
+            while (bin + 1 < bins && running >= share * double(bin + 1)) {
+                ++bin;
+            }
+        }
+    }
+    out.clusters.resize(size_t(next));
+    BuildQuotient(B, &out);
+    Compact(B, &out);
+
+    // ---- chain fusion -------------------------------------------------------
+    //
+    // Contract (A, B) when B is A's only successor and A is B's only
+    // predecessor: nothing else can run while A holds B up, so the edge buys
+    // no parallelism and costs a dispatch. Contracting such an edge cannot
+    // close a cycle -- every path out of A starts with A -> B, so there is no
+    // second A ~> B path to close one with.
+    bool merged = true;
+    while (merged) {
+        merged = false;
+        for (size_t a = 0; a < out.clusters.size() && !merged; ++a) {
+            const RigExecBakedCluster &from = out.clusters[a];
+            if (from.members.empty() || from.succs.size() != 1) {
+                continue;
+            }
+            const int b = from.succs.front();
+            if (out.clusters[size_t(b)].preds.size() != 1) {
+                continue;
+            }
+            for (int &owner : out.clusterOf) {
+                if (owner == b) {
+                    owner = int(a);
+                }
+            }
+            BuildQuotient(B, &out);
+            merged = true;
+        }
+    }
+
+    // ---- absorb -------------------------------------------------------------
+    //
+    // A cluster too small to be worth a task joins its predecessor when it
+    // has exactly one. The invariant is evaluated on the CURRENT quotient
+    // graph after every merge, which is what makes it sound: with
+    // pred(s) = {C}, a second C ~> s path would have to pass through another
+    // predecessor of s, and s has none.
+    merged = true;
+    while (merged) {
+        merged = false;
+        for (size_t s = 0; s < out.clusters.size() && !merged; ++s) {
+            const RigExecBakedCluster &cluster = out.clusters[s];
+            if (cluster.members.empty() ||
+                cluster.cost >= 2.0 * kSpawnCostUs ||
+                cluster.preds.size() != 1) {
+                continue;
+            }
+            const int owner = cluster.preds.front();
+            for (int &entry : out.clusterOf) {
+                if (entry == int(s)) {
+                    entry = owner;
+                }
+            }
+            BuildQuotient(B, &out);
+            merged = true;
+        }
+    }
+    Compact(B, &out);
+    out.criticalPathCost = CriticalPath(out);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Edges.
 // ---------------------------------------------------------------------------
 
@@ -159,6 +706,28 @@ void
 RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
+    if (B.phasedReads) {
+        // The run's phased-read store is ONE container, and a step's records
+        // reach it through a fold the executor performs. Slot-per-step
+        // declarations order each record against the steps that read it, but
+        // they leave two RECORDERS free to run at once -- and two folds into
+        // one store at once is a race whatever the slots say. So on a rig
+        // that can look a record up, every recorder declares the whole store
+        // up to its own point, which makes the recorders a chain in program
+        // order and leaves the readers where they were. Declared writes are
+        // an upper bound, so widening one is always sound; it is only ever
+        // paid for by a rig that declares a read phase, and nothing else
+        // about the schedule changes.
+        for (int index = 0; index < int(B.steps.size()); ++index) {
+            for (RigExecBakedSlotRange &range :
+                     B.steps[size_t(index)].writes) {
+                if (range.domain == RigExecBakedSlotDomain::Snapshots) {
+                    range.begin = 0;
+                    range.end = uint32_t(index) + 1;
+                }
+            }
+        }
+    }
     std::array<std::vector<SlotInterval>, RigExecBakedSlotDomainCount>
         writers, readers;
     for (int index = 0; index < int(B.steps.size()); ++index) {
@@ -219,39 +788,93 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
             B.steps[size_t(pred)].succs.push_back(index);
         }
     }
+
+    // The schedule the parallel executor runs, chosen once here so that a
+    // frame costs it nothing: the cost model, the packing, and one padded
+    // counter per cluster.
+    RigExecBakedAssignStepCosts(&B);
+    B.clustering = RigExecBakedBuildClusters(
+        B, RigExecBakedScheduleGrainUs(
+               std::accumulate(B.steps.begin(), B.steps.end(), 0.0,
+                               [](double sum, const RigExecBakedStep &step) {
+                                   return sum + step.cost;
+                               })));
+    for (int index = 0; index < int(B.steps.size()); ++index) {
+        B.steps[size_t(index)].cluster = B.clustering.clusterOf[size_t(index)];
+    }
+    B.clusterCounters = std::make_unique<RigExecBakedClusterCounter[]>(
+        std::max<size_t>(B.clustering.clusters.size(), 1));
 }
 
 // ---------------------------------------------------------------------------
-// The serial executor.
+// The executors.
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// Runs one step's body and checks what it produced against what it declared.
+void
+RunStepBody(RigExecBakedProgramImpl *B, RigExecBakedStep *step,
+            UsdTimeCode time)
+{
+    // A run's output is cleared HERE rather than in the body, so that the
+    // clearing is the executor's promise and not something fifteen bodies
+    // each have to remember.
+    step->BeginRun();
+    if (RigExecBakedIsGeometryStep(step->kind)) {
+        RigExecBakedRunGeometryStep(B, step, time);
+    } else {
+        RigExecBakedRunPoseStep(B, step, time);
+    }
+    // Bodies size their own lists at Build; a body that grew past what it
+    // declared is a step allocating inside the region, which is the thing
+    // the declaration exists to prevent.
+    TF_VERIFY(step->diagnostics.size() <= step->maxDiagnostics,
+              "rigExec: baked step emitted %zu diagnostics, at most %zu "
+              "declared", step->diagnostics.size(), step->maxDiagnostics);
+}
+
+/// The same clock RigExecProfiler::NowUs reads, in NANOseconds.
+///
+/// The profiler's microseconds are the right unit for a trace and the wrong
+/// one for a cost model: most steps of a biped frame are under a microsecond,
+/// and a table fitted from integer microseconds would call all of them free.
+uint64_t
+NowNs()
+{
+    return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count());
+}
+
 bool
-RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time)
+RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
-    // The mode is read for the report and for the shape of this loop; the
-    // parallel executor lands with the clustering pass, and until it does an
-    // asked-for parallel run is a correct serial one rather than no run.
-    const bool profiling = B.profiler && B.profiler->IsEnabled();
-    uint64_t mark = profiling ? RigExecProfiler::NowUs() : 0;
+    const bool timing = B.profiler && B.profiler->IsEnabled();
+    // Calibration measures the same boundaries on a finer clock, into each
+    // step's own accumulator: no lock, no shared counter, and nothing that
+    // survives the frame but a sum.
+    const bool calibrating = RigExecBakedScheduleCalibrationRequested();
+    uint64_t mark = timing ? RigExecProfiler::NowUs() : 0;
+    uint64_t markNs = calibrating ? NowNs() : 0;
     for (RigExecBakedStep &step : B.steps) {
-        // A run's output is cleared HERE rather than in the body, so that the
-        // clearing is the executor's promise and not something fifteen bodies
-        // each have to remember.
-        step.BeginRun();
-        if (RigExecBakedIsGeometryStep(step.kind)) {
-            RigExecBakedRunGeometryStep(&B, &step, time);
-        } else {
-            RigExecBakedRunPoseStep(&B, &step, time);
+        RunStepBody(&B, &step, time);
+        if (calibrating) {
+            const uint64_t now = NowNs();
+            step.measuredUs += double(now - markNs) / 1000.0;
+            ++step.measuredRuns;
+            markNs = now;
         }
-        if (profiling) {
+        if (timing) {
             // ONE clock read per step boundary, not two per step: a biped's
             // graph is several hundred steps and a thousand reads of a
             // vDSO clock is a measurable part of the frame being measured.
             // What each interval then covers is the step plus the few
             // instructions of bookkeeping below it, which is where the time
             // went. The parallel executor cannot share a boundary this way
-            // and will take its own pair per cluster, which it can afford.
+            // and takes its own pair per step, which it can afford because
+            // it only takes them while something is asking for them.
             const uint64_t now = RigExecProfiler::NowUs();
             step.startUs = mark;
             step.endUs = now;
@@ -264,12 +887,6 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time)
         if (!step.snapshots.IsEmpty()) {
             B.runSnapshots.Merge(std::move(step.snapshots));
         }
-        // Bodies size their own lists at Build; a body that grew past what it
-        // declared is a step allocating inside the region, which is the thing
-        // the declaration exists to prevent.
-        TF_VERIFY(step.diagnostics.size() <= step.maxDiagnostics,
-                  "rigExec: baked step emitted %zu diagnostics, at most %zu "
-                  "declared", step.diagnostics.size(), step.maxDiagnostics);
         if (step.bail) {
             // The generation is going back to the dynamic path, so nothing
             // after this step is worth running -- and nothing it would have
@@ -278,6 +895,287 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time)
         }
     }
     return true;
+}
+
+/// What one parallel region's tasks share.
+///
+/// Everything mutable in here is either an atomic or a slot the graph says
+/// one step owns. There is no mutex, no spin lock and no condition variable:
+/// the remaining-predecessor counters and WorkDispatcher's own task queue
+/// are the whole of the synchronisation (§2.2).
+struct ParallelRun {
+    RigExecBakedProgramImpl *program = nullptr;
+    UsdTimeCode time;
+    WorkDispatcher *dispatcher = nullptr;
+    RigExecBakedClusterCounter *counters = nullptr;
+    /// A step gave the generation back. Nothing after it is worth running,
+    /// so clusters still to start give up -- but a step already running is
+    /// never interrupted, because a half-written slot is a different kind of
+    /// wrong from a slot nobody publishes.
+    std::atomic<bool> bailed{false};
+    bool profiling = false;
+    bool timing = false;
+    /// Whether a step's phased-read records are folded into the run's store
+    /// as the region goes. See RunStepsParallel for why that is safe only
+    /// when the program has a reader for them.
+    bool mergeInline = false;
+
+    void RunFrom(int cluster);
+};
+
+void
+ParallelRun::RunFrom(int start)
+{
+    RigExecBakedProgramImpl &B = *program;
+    int current = start;
+    while (current >= 0) {
+        RigExecBakedCluster &cluster =
+            B.clustering.clusters[size_t(current)];
+        if (timing) {
+            cluster.startUs = RigExecProfiler::NowUs();
+        }
+        for (const int index : cluster.members) {
+            if (bailed.load(std::memory_order_relaxed)) {
+                break;
+            }
+            RigExecBakedStep &step = B.steps[size_t(index)];
+            const uint64_t began = profiling ? RigExecProfiler::NowUs() : 0;
+            RunStepBody(&B, &step, time);
+            if (profiling) {
+                // Two stores into storage this step alone owns. No profile
+                // scope: RIGEXEC_PROFILE_SCOPE takes three mutexes even with
+                // recording off, and the epilogue replays these intervals in
+                // step order, which makes the trace deterministic as well as
+                // lock-free.
+                step.startUs = began;
+                step.endUs = RigExecProfiler::NowUs();
+            }
+            if (mergeInline && !step.snapshots.IsEmpty()) {
+                B.runSnapshots.Merge(std::move(step.snapshots));
+            }
+            if (step.bail) {
+                bailed.store(true, std::memory_order_relaxed);
+                break;
+            }
+        }
+        if (timing) {
+            cluster.endUs = RigExecProfiler::NowUs();
+        }
+        // Release what this cluster wrote to whoever picks its successors
+        // up, and acquire it on the thread that sees the last decrement.
+        int next = -1;
+        for (const int succ : cluster.succs) {
+            if (counters[succ].remaining.fetch_sub(
+                    1, std::memory_order_acq_rel) != 1) {
+                continue;
+            }
+            if (timing) {
+                // Written by the thread that made the cluster runnable,
+                // which is the same thread that then spawns or runs it --
+                // so there is no second writer and no race with startUs.
+                B.clustering.clusters[size_t(succ)].readyUs =
+                    RigExecProfiler::NowUs();
+            }
+            if (next >= 0) {
+                const int spawn = next;
+                dispatcher->Run([this, spawn]() { RunFrom(spawn); });
+            }
+            next = succ;
+        }
+        // All but one spawned; the last runs here, on the thread that has
+        // this cluster's writes in its cache already.
+        current = next;
+    }
+}
+
+bool
+RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
+{
+    RigExecBakedProgramImpl &B = *program;
+    if (B.clustering.clusters.empty() || !B.clusterCounters) {
+        return RunStepsSerial(program, time);
+    }
+    ParallelRun run;
+    run.program = &B;
+    run.time = time;
+    run.counters = B.clusterCounters.get();
+    run.profiling = B.profiler && B.profiler->IsEnabled();
+    run.timing = run.profiling || RigExecBakedScheduleReportRequested();
+    // The run's phased-read store is one container, and folding a step's
+    // records into it is a write to it. When some revision declares a read
+    // phase the graph orders every writer and reader of the store against
+    // each other (see the widening in RigExecBakedBuildSchedule), so the
+    // fold may happen where the serial executor does it. When nothing
+    // declares one, nothing can LOOK a record up before the epilogue, so the
+    // folds all wait until after the region -- in step order, which is the
+    // order that decides what the store ends up holding.
+    run.mergeInline = B.phasedReads;
+
+    std::vector<int> seeds;
+    const uint64_t opened = run.timing ? RigExecProfiler::NowUs() : 0;
+    for (size_t c = 0; c < B.clustering.clusters.size(); ++c) {
+        RigExecBakedCluster &cluster = B.clustering.clusters[c];
+        run.counters[c].remaining.store(int(cluster.preds.size()),
+                                        std::memory_order_relaxed);
+        cluster.readyUs = cluster.startUs = cluster.endUs = opened;
+        if (cluster.preds.empty()) {
+            seeds.push_back(int(c));
+        }
+    }
+
+    // Isolated: Run is never entered from an exec callback, but a client may
+    // call Evaluate from a TBB task, and without isolation this dispatcher's
+    // Wait could pick up that outer task's work and re-enter the region.
+    WorkWithScopedParallelism([&run, &seeds]() {
+        WorkDispatcher dispatcher;
+        run.dispatcher = &dispatcher;
+        for (size_t i = 0; i + 1 < seeds.size(); ++i) {
+            const int seed = seeds[i];
+            dispatcher.Run([&run, seed]() { run.RunFrom(seed); });
+        }
+        if (!seeds.empty()) {
+            run.RunFrom(seeds.back());
+        }
+        dispatcher.Wait();
+    });
+
+    if (!run.mergeInline) {
+        for (RigExecBakedStep &step : B.steps) {
+            if (!step.snapshots.IsEmpty()) {
+                B.runSnapshots.Merge(std::move(step.snapshots));
+            }
+        }
+    }
+    return !run.bailed.load(std::memory_order_relaxed);
+}
+
+}  // namespace
+
+bool
+RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time)
+{
+    // Calibration times the steps to fit the cost table, so it runs the
+    // reference order whatever the mode asks for: a step's interval in a
+    // parallel frame includes the memory traffic of every other step that
+    // happened to be running beside it.
+    if (RigExecBakedScheduleModeFromEnvironment() ==
+            RigExecBakedScheduleMode::Parallel &&
+        !RigExecBakedScheduleCalibrationRequested()) {
+        return RunStepsParallel(program, time);
+    }
+    return RunStepsSerial(program, time);
+}
+
+// ---------------------------------------------------------------------------
+// Calibration.
+// ---------------------------------------------------------------------------
+
+bool
+RigExecBakedScheduleCalibrationRequested()
+{
+    static const bool requested =
+        TfGetenvInt("RIGEXEC_BAKED_SCHEDULE_CALIBRATE", 0) > 0;
+    return requested;
+}
+
+namespace {
+
+/// How many frames the calibration watches before it prints.
+///
+/// RIGEXEC_BAKED_SCHEDULE_CALIBRATE=1 means "the usual number", because 1 is
+/// what an opt-in flag is usually set to; any larger value is taken as the
+/// count. The first frame is watched like the rest: it is the cold one, and
+/// a cost model that ignored cold frames would under-count exactly the work
+/// a first frame does.
+int
+CalibrationFrames()
+{
+    static const int frames = [] {
+        const int value = TfGetenvInt("RIGEXEC_BAKED_SCHEDULE_CALIBRATE", 0);
+        return value > 1 ? value : 8;
+    }();
+    return frames;
+}
+
+/// Least squares of t = a + b x size over one kind's steps.
+StepCostConstants
+FitKind(const std::vector<std::pair<double, double>> &samples,
+        const StepCostConstants &fallback)
+{
+    const double n = double(samples.size());
+    if (samples.empty()) {
+        return fallback;
+    }
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (const auto &[size, microseconds] : samples) {
+        sx += size;
+        sy += microseconds;
+        sxx += size * size;
+        sxy += size * microseconds;
+    }
+    StepCostConstants fitted;
+    const double denominator = n * sxx - sx * sx;
+    if (denominator > 1e-9) {
+        fitted.perUnitUs = (n * sxy - sx * sy) / denominator;
+        fitted.fixedUs = (sy - fitted.perUnitUs * sx) / n;
+    }
+    if (denominator > 1e-9 && fitted.perUnitUs >= 0 && fitted.fixedUs >= 0) {
+        return fitted;
+    }
+    // The samples could not separate the two terms -- one sample, or every
+    // sample the same size -- or the separation came out negative. Then fit
+    // through the ORIGIN and give the whole of the measurement to the
+    // per-unit term, because that is the term that extrapolates: a rig whose
+    // mesh is ten times this one's should be predicted to cost about ten
+    // times as much, not the same.
+    fitted.fixedUs = 0;
+    fitted.perUnitUs = sx > 0 ? sy / sx : 0;
+    if (sx <= 0) {
+        fitted.fixedUs = sy / n;
+    }
+    return fitted;
+}
+
+}  // namespace
+
+void
+RigExecBakedScheduleCalibrate(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    static int framesSeen = 0;
+    if (framesSeen >= CalibrationFrames()) {
+        return;
+    }
+    if (++framesSeen < CalibrationFrames()) {
+        return;
+    }
+    std::array<std::vector<std::pair<double, double>>, kStepKindCount>
+        samples;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (!step.measuredRuns) {
+            continue;
+        }
+        samples[size_t(step.kind)].emplace_back(
+            step.sizeUnits, step.measuredUs / double(step.measuredRuns));
+    }
+    std::string table =
+        "rigExec baked schedule: cost table fitted over " +
+        std::to_string(CalibrationFrames()) +
+        " frame(s); paste over kStepCosts in bakedSchedule.cpp\n"
+        "constexpr StepCostConstants kStepCosts[] = {\n";
+    char line[256];
+    for (size_t kind = 0; kind < kStepKindCount; ++kind) {
+        const StepCostConstants fitted =
+            FitKind(samples[kind], kStepCosts[kind]);
+        std::snprintf(line, sizeof(line),
+                      "    {%.4f, %.6f},   // %-16s %zu sample(s)\n",
+                      fitted.fixedUs, fitted.perUnitUs,
+                      RigExecBakedStepKindName(RigExecBakedStepKind(kind)),
+                      samples[kind].size());
+        table += line;
+    }
+    table += "};\n";
+    std::fwrite(table.data(), 1, table.size(), stderr);
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +1249,16 @@ AppendRanges(std::string *out, const char *what,
     *out += "\n";
 }
 
+/// A number with two decimals, because std::to_string gives six and the
+/// report is read by people.
+std::string
+Fixed(double value)
+{
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.2f", value);
+    return text;
+}
+
 }  // namespace
 
 std::string
@@ -362,6 +1270,11 @@ RigExecBakedScheduleReport(const RigExecBakedProgramImpl &B)
         edges += step.preds.size();
         ++byKind[RigExecBakedStepKindName(step.kind)];
     }
+    const RigExecBakedClustering &schedule = B.clustering;
+    size_t clusterEdges = 0;
+    for (const RigExecBakedCluster &cluster : schedule.clusters) {
+        clusterEdges += cluster.preds.size();
+    }
     std::string out = "rigExec baked schedule: " +
                       std::to_string(B.steps.size()) + " step(s), " +
                       std::to_string(edges) + " edge(s), " +
@@ -371,9 +1284,38 @@ RigExecBakedScheduleReport(const RigExecBakedProgramImpl &B)
                    RigExecBakedScheduleMode::Parallel
                ? "parallel"
                : "serial";
+    out += " grain=" + Fixed(schedule.grainUs) + "us concurrency=" +
+           std::to_string(WorkGetConcurrencyLimit()) + "\n";
+    out += "  clusters=" + std::to_string(schedule.clusters.size()) + " (" +
+           std::to_string(clusterEdges) + " edge(s)) serial=" +
+           Fixed(schedule.serialCost) + "us criticalPath=" +
+           Fixed(schedule.criticalPathCost) + "us";
+    if (schedule.criticalPathCost > 0) {
+        out += " (" +
+               Fixed(schedule.serialCost / schedule.criticalPathCost) + "x)";
+    }
     out += "\n";
     for (const auto &[kind, count] : byKind) {
         out += "  " + kind + " " + std::to_string(count) + "\n";
+    }
+    for (size_t c = 0; c < schedule.clusters.size(); ++c) {
+        const RigExecBakedCluster &cluster = schedule.clusters[c];
+        out += "  cluster [" + std::to_string(c) + "] level " +
+               std::to_string(cluster.level) + " cost " +
+               Fixed(cluster.cost) + "us " +
+               std::to_string(cluster.members.size()) + " step(s)\n";
+        out += "        preds";
+        if (cluster.preds.empty()) {
+            out += " -";
+        }
+        for (const int pred : cluster.preds) {
+            out += " " + std::to_string(pred);
+        }
+        out += "\n        members";
+        for (const int member : cluster.members) {
+            out += " " + std::to_string(member);
+        }
+        out += "\n";
     }
     for (int index = 0; index < int(B.steps.size()); ++index) {
         const RigExecBakedStep &step = B.steps[size_t(index)];
@@ -381,6 +1323,9 @@ RigExecBakedScheduleReport(const RigExecBakedProgramImpl &B)
         if (step.part >= 0) {
             out += " #" + std::to_string(step.part);
         }
+        out += " cluster " + std::to_string(step.cluster) + " level " +
+               std::to_string(step.level) + " size " +
+               Fixed(step.sizeUnits) + " cost " + Fixed(step.cost) + "us";
         out += "\n";
         AppendRanges(&out, "reads ", step.reads);
         AppendRanges(&out, "writes", step.writes);
@@ -396,6 +1341,38 @@ RigExecBakedScheduleReport(const RigExecBakedProgramImpl &B)
     return out;
 }
 
+
+std::string
+RigExecBakedScheduleRunReport(const RigExecBakedProgramImpl &B)
+{
+    const RigExecBakedClustering &schedule = B.clustering;
+    std::string out = "rigExec baked schedule, last run: " +
+                      std::to_string(schedule.clusters.size()) +
+                      " cluster(s)\n";
+    // The region opened when the earliest cluster became ready, which is
+    // when the seeds were stamped. Times are relative to it, so two runs of
+    // one frame can be laid beside each other.
+    uint64_t opened = 0;
+    bool haveOpened = false;
+    for (const RigExecBakedCluster &cluster : schedule.clusters) {
+        if (!haveOpened || cluster.readyUs < opened) {
+            opened = cluster.readyUs;
+            haveOpened = true;
+        }
+    }
+    for (size_t c = 0; c < schedule.clusters.size(); ++c) {
+        const RigExecBakedCluster &cluster = schedule.clusters[c];
+        const double ready = double(cluster.readyUs - opened);
+        const double started = double(cluster.startUs - opened);
+        out += "  cluster [" + std::to_string(c) + "] ready " +
+               Fixed(ready) + "us wait " + Fixed(started - ready) +
+               "us run " +
+               Fixed(double(cluster.endUs) - double(cluster.startUs)) +
+               "us cost " + Fixed(cluster.cost) + "us " +
+               std::to_string(cluster.members.size()) + " step(s)\n";
+    }
+    return out;
+}
 
 // ---------------------------------------------------------------------------
 // Profiling.

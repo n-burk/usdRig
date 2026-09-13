@@ -34,6 +34,7 @@
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/stage.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -270,6 +271,130 @@ TestTheGraphDescribesTheProgram(const std::string &stagePath,
                 edges);
 }
 
+/// The clustering is a partition of the steps, and the graph it induces is
+/// acyclic -- at every grain, because a grain is a performance knob and a
+/// knob that could change an answer is not one.
+///
+/// Three grains: 0, which puts every step in its own cluster and exposes
+/// every edge the graph has; the one Build chose; and 200 microseconds,
+/// which on any of these rigs packs most of the program into a handful of
+/// clusters. The acceptance matrix runs the rigs under all three, so what
+/// this suite adds is the structural claim the dumps cannot see.
+void
+TestTheClusteringIsSound(const std::string &stagePath, const char *name)
+{
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    const double grains[3] = {0.0, B.clustering.grainUs, 200.0};
+    for (const double grain : grains) {
+        const RigExecBakedClustering schedule =
+            RigExecBakedBuildClusters(B, grain);
+        if (schedule.clusterOf.size() != B.steps.size()) {
+            ++failures;
+            std::printf("FAIL %s grain %g: %zu step assignments for %zu "
+                        "steps\n", name, grain, schedule.clusterOf.size(),
+                        B.steps.size());
+            continue;
+        }
+
+        // (1) Every step is in exactly one cluster, and it is the cluster
+        // clusterOf names.
+        std::vector<int> seen(B.steps.size(), 0);
+        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
+            for (const int member : schedule.clusters[c].members) {
+                if (member < 0 || size_t(member) >= B.steps.size()) {
+                    ++failures;
+                    std::printf("FAIL %s grain %g: cluster %zu names step "
+                                "%d\n", name, grain, c, member);
+                    continue;
+                }
+                ++seen[size_t(member)];
+                if (schedule.clusterOf[size_t(member)] != int(c)) {
+                    ++failures;
+                    std::printf("FAIL %s grain %g: step %d is in cluster %zu "
+                                "but assigned to %d\n", name, grain, member,
+                                c, schedule.clusterOf[size_t(member)]);
+                }
+            }
+        }
+        for (size_t index = 0; index < seen.size(); ++index) {
+            if (seen[index] != 1) {
+                ++failures;
+                std::printf("FAIL %s grain %g: step %zu is in %d cluster(s)\n",
+                            name, grain, index, seen[index]);
+            }
+        }
+
+        // (2) Members are in increasing program order, which is what lets a
+        // cluster run them with no schedule of its own: program order is a
+        // topological order of the step graph.
+        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
+            const std::vector<int> &members = schedule.clusters[c].members;
+            for (size_t i = 1; i < members.size(); ++i) {
+                if (members[i - 1] >= members[i]) {
+                    ++failures;
+                    std::printf("FAIL %s grain %g: cluster %zu lists step %d "
+                                "before %d\n", name, grain, c,
+                                members[i - 1], members[i]);
+                }
+            }
+        }
+
+        // (3) The quotient graph is acyclic. A cycle would deadlock the
+        // parallel executor outright -- two clusters each waiting on the
+        // other's counter -- so this is the one property the executor cannot
+        // check for itself.
+        std::vector<int> remaining(schedule.clusters.size(), 0);
+        std::vector<int> ready;
+        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
+            remaining[c] = int(schedule.clusters[c].preds.size());
+            if (!remaining[c]) {
+                ready.push_back(int(c));
+            }
+        }
+        size_t drained = 0;
+        for (size_t head = 0; head < ready.size(); ++head) {
+            ++drained;
+            const RigExecBakedCluster &cluster =
+                schedule.clusters[size_t(ready[head])];
+            for (const int succ : cluster.succs) {
+                if (--remaining[size_t(succ)] == 0) {
+                    ready.push_back(succ);
+                }
+            }
+        }
+        if (drained != schedule.clusters.size()) {
+            ++failures;
+            std::printf("FAIL %s grain %g: the cluster graph has a cycle "
+                        "(%zu of %zu clusters reachable)\n", name, grain,
+                        drained, schedule.clusters.size());
+        }
+
+        // (4) preds and succs describe one relation, which the counters the
+        // executor resets from depend on.
+        for (size_t c = 0; c < schedule.clusters.size(); ++c) {
+            for (const int pred : schedule.clusters[c].preds) {
+                const std::vector<int> &succs =
+                    schedule.clusters[size_t(pred)].succs;
+                if (std::find(succs.begin(), succs.end(), int(c)) ==
+                    succs.end()) {
+                    ++failures;
+                    std::printf("FAIL %s grain %g: cluster %zu names "
+                                "predecessor %d, which does not name it "
+                                "back\n", name, grain, c, pred);
+                }
+            }
+        }
+        std::printf("  %s grain %g: %zu cluster(s), serial %.1fus, critical "
+                    "path %.1fus\n", name, grain, schedule.clusters.size(),
+                    schedule.serialCost, schedule.criticalPathCost);
+    }
+}
+
 /// Two builds of one stage produce the same schedule, character for
 /// character. Without this the report is a debugging aid nobody can diff;
 /// with it, a schedule change shows up in a review.
@@ -351,6 +476,9 @@ main(int argc, char **argv)
     TestTheGraphDescribesTheProgram(examplesDir + "/biped/Biped_anim.usda",
                                     "Biped_anim");
     TestTheGraphDescribesTheProgram(
+        examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs");
+    TestTheClusteringIsSound(examplesDir + "/biped/Biped.usda", "Biped");
+    TestTheClusteringIsSound(
         examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs");
     TestTheReportIsDeterministic(examplesDir + "/biped/Biped.usda");
     if (failures) {

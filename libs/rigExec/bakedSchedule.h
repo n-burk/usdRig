@@ -27,9 +27,9 @@ enum class RigExecBakedScheduleMode {
     /// Steps in program order on one thread. The reference, and what
     /// RIGEXEC_BAKED_SCHEDULE=serial asks for.
     Serial,
-    /// Clusters spread across the work arena. Not yet built: the mode is
-    /// accepted and currently runs the serial executor, so that a caller
-    /// asking for it gets the right answers rather than none.
+    /// Clusters spread across the work arena, one task per cluster, with a
+    /// padded atomic remaining-predecessor counter deciding what becomes
+    /// runnable. What RIGEXEC_BAKED_SCHEDULE=parallel asks for.
     Parallel,
 };
 
@@ -53,6 +53,35 @@ RigExecBakedScheduleMode RigExecBakedScheduleModeFromEnvironment();
 /// follow).
 void RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program);
 
+/// Assigns every step its size, its cost and its longest-path level.
+///
+/// The cost model is `a[kind] + b[kind] x size`, with the constants in the
+/// table at the head of bakedSchedule.cpp and the sizes §5.1 names. It is
+/// evaluated at Build from the program's own shape and never from a
+/// measurement -- see RigExecBakedScheduleCalibrationRequested for how the
+/// table is replaced when the shape stops predicting the machine.
+void RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program);
+
+/// Partitions \p program's steps into clusters at \p grainUs microseconds.
+///
+/// Pure: it reads the program and returns a partition, so a caller may ask
+/// the same program for the schedule at several grains and compare them --
+/// which is exactly what the byte-identity-across-grains argument needs.
+/// A grain of zero means one step per cluster.
+///
+/// Level-pack (§5.1): steps are grouped by longest-path level, each level is
+/// cut into contiguous bins of about one grain, single-successor chains are
+/// fused to a fixpoint and a cluster too small to be worth a task joins its
+/// one predecessor. Every one of those transformations preserves acyclicity
+/// of the quotient graph, which is what makes any cluster order that
+/// respects the cluster edges a valid execution order.
+RigExecBakedClustering RigExecBakedBuildClusters(
+    const RigExecBakedProgramImpl &program, double grainUs);
+
+/// The grain Build uses: RIGEXEC_BAKED_GRAIN_US when it is set, and
+/// otherwise `clamp(total cost / (4 x concurrency), 5us, 50us)`.
+double RigExecBakedScheduleGrainUs(double totalCost);
+
 /// Runs every step of \p program, returning false when one of them gave the
 /// generation back.
 ///
@@ -72,6 +101,20 @@ bool RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time);
 /// finished.
 void RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &program);
 
+/// Whether RIGEXEC_BAKED_SCHEDULE_CALIBRATE asks for a measured cost table.
+///
+/// Opt-in, and serial: the mode runs the program the reference way, times
+/// every step with two clock reads into that step's own accumulator -- no
+/// lock, no shared counter -- and after the requested number of frames fits
+/// the two constants of every step kind by least squares and prints a table
+/// ready to paste over the one in bakedSchedule.cpp. Build itself never
+/// measures anything.
+bool RigExecBakedScheduleCalibrationRequested();
+
+/// Folds this run's per-step intervals into the calibration accumulators and,
+/// once enough frames have been seen, prints the replacement table.
+void RigExecBakedScheduleCalibrate(RigExecBakedProgramImpl *program);
+
 /// A line-per-step dump of the graph: kinds, declared ranges, edges and
 /// totals.
 ///
@@ -79,6 +122,14 @@ void RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &program);
 /// map iteration order -- so two builds of one stage produce the same text,
 /// which is what makes it usable as a golden.
 std::string RigExecBakedScheduleReport(const RigExecBakedProgramImpl &program);
+
+/// The last run's per-cluster wait and run times, one line per cluster.
+///
+/// Separate from the structural report because it is the only part of the
+/// schedule that is an observation: the structure can be printed at Build,
+/// this can only be printed after a frame.
+std::string RigExecBakedScheduleRunReport(
+    const RigExecBakedProgramImpl &program);
 
 /// Whether RIGEXEC_BAKED_SCHEDULE_REPORT asks for that dump on stderr.
 bool RigExecBakedScheduleReportRequested();

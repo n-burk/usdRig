@@ -273,10 +273,17 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     RigExecBakedSlotDomain::ChainBase, int(c)));
                 // Which earlier buffer holds the preceding points is a
                 // runtime indirection, so the declaration is the upper
-                // bound: every buffer this chain has filled before it.
+                // bound: every buffer this chain has filled before it -- AND
+                // the indirection itself, which is the `currentSource` each
+                // earlier fuse published into RevisionDone. Declaring the
+                // buffers alone left a chunk free to run before the fuse that
+                // decides which of them to read, which a serial order hides
+                // and one cluster per step finds immediately.
                 if (id > first) {
                     chunk.reads.push_back(RigExecBakedRange(
                         RigExecBakedSlotDomain::RevisionOut, first, id));
+                    chunk.reads.push_back(RigExecBakedRange(
+                        RigExecBakedSlotDomain::RevisionDone, first, id));
                 }
                 chunk.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::RevisionOut, id));
