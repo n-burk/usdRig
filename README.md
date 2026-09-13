@@ -261,7 +261,13 @@ The easiest way to author a first rig is to copy
    dynamically and the tool prints one reason per feature -- so it can never
    change an answer, only how fast it arrives. `--mode parity` runs both
    paths and reports any disagreement (exit status is non-zero if there is
-   one).
+   one). `--mode parity --require-baked` is the form a test uses: it fails
+   the run when the rig declines the bake, and fails it when fewer
+   generations came from the program than frames were asked for -- which is
+   what catches a fallback that is not a refusal, such as an interactive
+   override the program cannot place. `--guides` adds the solver guide
+   frames to what is evaluated and therefore to what parity compares; they
+   are off by default because nothing else in the tool reads them.
 9. The baked program survives scene edits. It records which properties it
    read and which prims it read them from, and a notice that misses that
    index -- a value on an input it re-reads every frame, anything on a prim

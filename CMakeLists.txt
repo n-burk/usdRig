@@ -221,13 +221,129 @@ add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 # is reported on stderr instead, and FAIL_REGULAR_EXPRESSION is what turns it
 # into a failure here. This is the only way to hold the program against the
 # several hundred rigs these suites already build.
+#
+# REQUIRE_BAKE, anywhere in the argument list, additionally puts
+# RIGEXEC_BAKE_REQUIRED=1 in the environment, which turns a generation that
+# fell back to the dynamic path into a reported mismatch instead of a silent
+# success. Without it a suite whose fixtures all DECLINE the bake passes
+# here having compared nothing. It is opt-in per suite because turning it on
+# for a suite whose operators do not bake yet is red by construction: add it
+# in the same commit that removes that suite's refusal.
 function(rigexec_add_baked_parity_test name)
-    add_test(NAME ${name}BakedParity COMMAND ${name} ${ARGN})
+    set(_args "${ARGN}")
+    set(_require_bake OFF)
+    list(FIND _args "REQUIRE_BAKE" _require_bake_at)
+    if (NOT _require_bake_at EQUAL -1)
+        list(REMOVE_AT _args ${_require_bake_at})
+        set(_require_bake ON)
+    endif()
+    add_test(NAME ${name}BakedParity COMMAND ${name} ${_args})
     set_tests_properties(${name}BakedParity PROPERTIES
         ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
         FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    if (_require_bake)
+        # APPEND, because ENVIRONMENT holds ONE ';'-separated value and
+        # setting it again would drop the mode above.
+        set_property(TEST ${name}BakedParity APPEND PROPERTY ENVIRONMENT
+            "RIGEXEC_BAKE_REQUIRED=1")
+    endif()
 endfunction()
 rigexec_add_baked_parity_test(testRigExecConstraints)
+
+# The per-example parity entries: one named red/green signal per shipped rig.
+#
+# rigExecPose runs both paths in one generation and compares them exactly;
+# --require-baked is what stops the entry passing vacuously when the rig
+# declines the bake, and --guides adds the solver-guide frames, which are a
+# compared domain the tool otherwise leaves empty on both sides. The frames,
+# and which rigs bake today, come from tests/exampleFixtures.cmake -- the
+# same table the C++ drag suite reads.
+#
+#   NAME      the ctest entry is example_parity_<name>
+#   RIG       stage path under examples/
+#   FRAMES    comma-separated, passed straight to --frames
+#   GUIDES    ask for the solver guides
+#   DISABLED  the rig does not bake yet; registered so it is visible as
+#             "Not Run" rather than missing, and enabled by deleting the
+#             keyword once its operator group lands
+function(rigexec_add_example_parity_test)
+    cmake_parse_arguments(A "GUIDES;DISABLED" "NAME;RIG;FRAMES" "" ${ARGN})
+    if (NOT A_NAME OR NOT A_RIG OR NOT A_FRAMES)
+        message(FATAL_ERROR "rigexec_add_example_parity_test: "
+                            "NAME, RIG and FRAMES are all required")
+    endif()
+    set(_guides "")
+    if (A_GUIDES)
+        set(_guides "--guides")
+    endif()
+    add_test(NAME example_parity_${A_NAME} COMMAND rigExecPose
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}"
+        --frames "${A_FRAMES}" --mode parity --require-baked ${_guides})
+    # Two regexes, not one: ';' is CMake's list separator. The first is the
+    # evaluator's own warning, the second this tool's own two gates.
+    #
+    # The mode is on the command line as well as in the environment, and both
+    # say the same thing; the variable is what fixes the mode of the evaluator
+    # from its construction, which is the state the sibling suites run in.
+    set_tests_properties(example_parity_${A_NAME} PROPERTIES
+        ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch;FAIL:")
+    # The tool finds the codeless schema through its compiled-in resource
+    # directory; this is for a run that inherits a different PXR_PLUGINPATH.
+    # APPEND, because ENVIRONMENT is one value.
+    set_property(TEST example_parity_${A_NAME} APPEND PROPERTY ENVIRONMENT
+        "PXR_PLUGINPATH_NAME=${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    if (A_DISABLED)
+        set_tests_properties(example_parity_${A_NAME} PROPERTIES
+            DISABLED TRUE)
+    endif()
+endfunction()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.cmake")
+foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
+    string(REPLACE "|" ";" _fixture_fields "${_fixture}")
+    list(GET _fixture_fields 0 _fixture_stage)
+    list(GET _fixture_fields 1 _fixture_frames)
+    list(GET _fixture_fields 6 _fixture_bakes)
+    # The entry name is the stage path with the separators CMake test names
+    # cannot carry replaced: biped/Biped_anim.usda -> biped_Biped_anim.
+    string(REGEX REPLACE "\\.(usda|usd)$" "" _fixture_name "${_fixture_stage}")
+    string(REPLACE "/" "_" _fixture_name "${_fixture_name}")
+    if (_fixture_bakes STREQUAL "YES")
+        rigexec_add_example_parity_test(NAME ${_fixture_name}
+            RIG ${_fixture_stage} FRAMES ${_fixture_frames} GUIDES)
+    else()
+        # Registered but not run: the rig refuses the bake today, so
+        # --require-baked would fail it. The table's blocker column names the
+        # operator group that turns each one on; deleting DISABLED is that
+        # group's job, in the commit that removes the refusal.
+        rigexec_add_example_parity_test(NAME ${_fixture_name}
+            RIG ${_fixture_stage} FRAMES ${_fixture_frames} GUIDES DISABLED)
+    endif()
+endforeach()
+
+# The other half of the same table, in process: every fixture that bakes is
+# compiled under the parity check, evaluated across its frames, then dragged
+# on its control avar and on an operator input. A drag the program cannot
+# place is not wrong, it is slow -- the generation falls back and every value
+# still agrees -- so the assertion that matters is that the generations came
+# from the program.
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/tests/exampleFixtures.h.in"
+               "${CMAKE_CURRENT_BINARY_DIR}/tests/rigExecExampleFixtures.h"
+               @ONLY)
+add_executable(testRigExecExampleParity tests/testRigExecExampleParity.cpp)
+target_link_libraries(testRigExecExampleParity PRIVATE rigExec)
+target_include_directories(testRigExecExampleParity PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecExampleParity PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecExampleParity COMMAND testRigExecExampleParity
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# It sets the mode itself, so RIGEXEC_EVALUATION_MODE must stay unset here --
+# but a fallback inside it must still be loud.
+set_tests_properties(testRigExecExampleParity PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
 
 add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
 target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
