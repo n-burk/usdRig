@@ -391,7 +391,6 @@ struct RigExecBakedProgramImpl {
     /// The program records into `runSnapshots` below instead.
     RigExecChainSnapshots *chainSnapshots = nullptr;
     RigExecSkinTopologyCache *skinTopologies = nullptr;
-    RigExecCurvenetBindCache *curvenetBindings = nullptr;
     RigExecProfiler *profiler = nullptr;
     const std::vector<RigExecValueOverride> *interactiveOverrides = nullptr;
     /// Joint -> (solver, element), which names the solver in the diagnostic a
@@ -464,6 +463,24 @@ struct RigExecBakedProgramImpl {
     /// the only store the program looks a phase up in -- the evaluator's
     /// holds the previous generation's dynamic records.
     RigExecChainSnapshots runSnapshots;
+
+    /// The program's OWN curvenet bind cache, not the evaluator's.
+    ///
+    /// Two reasons, and either alone would be enough. It is drained by
+    /// TakeDiagnostics, so sharing one cache with the dynamic path means
+    /// whichever ran first reports the bind lines and the other reports none
+    /// -- which in a parity generation is a diagnostic difference the
+    /// comparator is right to call a mismatch. And the cache has no locking
+    /// at all, so it belongs to one walk at a time.
+    ///
+    /// THREAD SAFETY, for the step graph being built over this: Resolve()
+    /// mutates the entry map and appends to the pending diagnostics with no
+    /// synchronisation whatever. It may only ever be touched from serial
+    /// code -- the run's prologue or its epilogue -- and never from a step
+    /// body. Carried across a rebuild by AdoptGeometryStateFrom, because a
+    /// bind survives an edit that rebuilds the program the same way a
+    /// revision's cached result does.
+    RigExecCurvenetBindCache curvenetBindings;
     /// True when some revision of this epoch declares a read phase, which is
     /// the only thing that can LOOK the store up. While it is false nothing
     /// can observe a record, so the pose half does not pay to fill it -- and

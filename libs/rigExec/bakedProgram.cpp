@@ -497,6 +497,11 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         destination->lastStatus = source->lastStatus;
         destination->ran = source->ran;
     };
+    // A curvenet bind is cached against the layout it was cut from, which an
+    // edit that rebuilds the program need not have touched; carrying the
+    // cache is the same judgement the revision results below get, and it also
+    // carries any bind diagnostic the outgoing program had not drained yet.
+    B.curvenetBindings = std::move(P.curvenetBindings);
     std::map<SdfPath, RigExecBakedProgramImpl::GeomChain *> outgoing;
     for (RigExecBakedProgramImpl::GeomChain &chain : P.chains) {
         outgoing.emplace(chain.target, &chain);
@@ -917,7 +922,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.resolvedInputs = &E._resolvedInputs;
     B.chainSnapshots = &E._chainSnapshots;
     B.skinTopologies = &E._skinTopologies;
-    B.curvenetBindings = &E._curvenetBindings;
     B.profiler = &E._profiler;
     B.interactiveOverrides = &E._interactiveOverrides;
     B.jointSolverBinding = &E._jointSolverBinding;

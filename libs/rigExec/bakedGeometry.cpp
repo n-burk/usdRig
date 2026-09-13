@@ -478,9 +478,13 @@ RigExecBakedRunGeometry(RigExecBakedProgramImpl *program, UsdTimeCode time,
 
     // Whatever the Profile Mover binds reported; drained so a cached bind
     // stays silent on every later frame. Empty on a bakeable rig, drained
-    // anyway so the two paths leave the evaluator in the same state.
-    for (std::string &message :
-             B.curvenetBindings->TakeDiagnostics()) {
+    // anyway so a rig that starts binding reports the same lines the dynamic
+    // path does. It sits here, at the tail of the run and past every bail
+    // return above it, because a drain is destructive: a frame that gave up
+    // and handed the generation to the dynamic path must leave the pending
+    // lines for the dynamic path to emit, and this is the position the
+    // dynamic walk drains from too -- immediately before its summary line.
+    for (std::string &message : B.curvenetBindings.TakeDiagnostics()) {
         pose->diagnostics.push_back(std::move(message));
     }
     pose->diagnostics.push_back(
