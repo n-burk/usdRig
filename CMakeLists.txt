@@ -96,6 +96,8 @@ add_library(rigExec SHARED
     libs/rigExec/tapSet.cpp
     libs/rigExec/rigEvaluator.cpp
     libs/rigExec/bakedProgram.cpp
+    libs/rigExec/bakedPose.cpp
+    libs/rigExec/bakedGeometry.cpp
 )
 target_include_directories(rigExec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>

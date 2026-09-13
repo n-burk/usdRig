@@ -36,6 +36,9 @@ namespace rigExec {
 
 class RigExecRigEvaluator;
 struct RigExecRigPose;
+/// The program's whole state, declared in bakedProgramImpl.h so that the
+/// files building and running each domain of it can name the same type.
+struct RigExecBakedProgramImpl;
 
 /// Which path RigExecRigEvaluator::Evaluate takes.
 ///
@@ -176,9 +179,8 @@ public:
     void AdoptGeometryStateFrom(RigExecBakedProgram &previous);
 
 private:
-    struct _Impl;
-    explicit RigExecBakedProgram(std::unique_ptr<_Impl> impl);
-    std::unique_ptr<_Impl> _impl;
+    explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);
+    std::unique_ptr<RigExecBakedProgramImpl> _impl;
 };
 
 }  // namespace rigExec

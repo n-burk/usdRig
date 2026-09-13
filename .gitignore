@@ -14,6 +14,8 @@ docs/papers/
 # CMake/Ninja build output
 build/
 build-*/
+# scratchpad/verify.sh writes its dumps and logs here
+verify-out/
 
 # harnesses
 .codex*/
