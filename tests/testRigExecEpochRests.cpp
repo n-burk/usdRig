@@ -479,25 +479,25 @@ TestAnOverrideElsewhereLeavesTheRestsAlone(const std::string &examplesDir)
 //
 // WHY IT IS STILL REFUSED, measured rather than assumed. The correction is
 // not confined to the walk. It rewrites the REST frames as well as the base
-// ones, and the two halves reach different consumers:
-//
-//   * pose.jointMatricesFinal and the walk's own finalMatrices are built
-//     from the CORRECTED rest and the CORRECTED final, so they follow it;
-//   * a geometry mover's base-phase matrix is exec's computeMatrix tap
-//     (rigEvaluator.cpp, RigExecValueAddress::Prim(transform,
-//     "computeMatrix")), which knows nothing about the grouping transform,
-//     so it does NOT follow it;
-//   * a solver's element rests come from exec's computeRestFrame through
-//     computePointFrameArray, so they do not follow it either.
+// ones, and the two halves do not reach the same consumers: the walk's
+// frames are pushed back into exec as computePointFrame overrides before
+// the authoritative snapshot, so exec's computeMatrix is built from the
+// CORRECTED pose and the UN-corrected rest, while the walk's own
+// jointMatricesFinal is built from both corrected. Two matrices, one slot,
+// one generation -- see
+// TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix below, which
+// measures both of them on this very fixture. A solver's element rests are
+// a third reader on the exec side: they come from computeRestFrame, which
+// no override touches.
 //
 // The program holds ONE rest per slot and derives both matrices from it, so
 // expressing that means holding an exec rest and a walk rest side by side
 // and routing every consumer to the right one -- which is the same rework
 // an animated rest:tx needs, and is why the animated case below is a second
 // refusal rather than a second arm of the first. A bake that corrected the
-// one rest the program has would agree with these fixtures' joint frames and
-// silently move a skinned mesh and a solver's rests; that is exactly the
-// shape of wrong the refusal is in front of.
+// one rest the program has would publish the right joint matrices and move
+// a skinned mesh somewhere nobody asked for, or the reverse; that is
+// exactly the shape of wrong the refusal is in front of.
 // ---------------------------------------------------------------------------
 
 // \p animated keys the grouping transform instead of authoring it plainly;
@@ -678,6 +678,127 @@ TestAnAnimatedXformAboveAProvider()
     CHECK(quiet == 0);
 }
 
+// WHY the refusals above are still refusals, as a running measurement of the
+// DYNAMIC path rather than a paragraph about it.
+//
+// The correction rewrites the walk's rest frames as well as its base ones,
+// and the two halves do not reach the same consumers. The walk's frames are
+// pushed BACK INTO EXEC as computePointFrame overrides before the
+// authoritative snapshot is evaluated (`_taps->Evaluate(time,
+// jointOverrides)`), and every exec computation downstream of a frame then
+// sees the corrected pose -- while computeRestFrame, which no override
+// touches, goes on reading the authored rest:space and rest avars and knows
+// nothing about the grouping transform. So exec's computeMatrix, which a
+// geometry mover reads in the base phase, is
+//
+//     PointsToMatrix(rest_exec, pose_corrected)
+//
+// while pose.jointMatricesFinal, built in the walk, is
+//
+//     PointsToMatrix(rest_corrected, pose_corrected).
+//
+// On this fixture those are two different matrices -- translate (2, 3, 1)
+// and translate (2, 0, 1) -- and both are published in the same generation.
+// A program that holds ONE rest per slot can produce one of them or the
+// other and not both: correcting its rest publishes the right joint matrix
+// and moves the mesh to the wrong place, and leaving it uncorrected does the
+// reverse. That is the rework the refusals above are in front of (an exec
+// rest and a walk rest side by side, every consumer routed to the right
+// one), and it is the same rework an animated rest:tx needs.
+//
+// Pinned here as three assertions about today's dynamic answers, so the
+// branch that lands the correction has to decide about this case
+// deliberately: if any of the three moves, the dynamic path's answer
+// changed, and that is a decision rather than a test to update.
+void
+TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix()
+{
+    // The same rig twice, with and without the grouping transform. Nothing
+    // else differs, so every difference below is X(P) and only X(P).
+    const UsdStageRefPtr withXform = MakeAnInterveningXformRig(false);
+    const UsdStageRefPtr withoutXform = MakeAnInterveningXformRig(false);
+    {
+        bool resets = false;
+        const std::vector<UsdGeomXformOp> ops =
+            UsdGeomXform(
+                withoutXform->GetPrimAtPath(SdfPath("/Asset/Rig/Group")))
+                .GetOrderedXformOps(&resets);
+        CHECK(ops.size() == 1);
+        if (ops.size() != 1) return;
+        ops.front().Set(GfVec3d(0, 0, 0));
+    }
+
+    const SdfPath rigPath("/Asset/Rig");
+    RigExecRigEvaluator moved(withXform, rigPath);
+    RigExecRigEvaluator plain(withoutXform, rigPath);
+    CHECK(moved.Compile());
+    CHECK(plain.Compile());
+    const RigExecRigPose a = moved.Evaluate(UsdTimeCode(1.0));
+    const RigExecRigPose b = plain.Evaluate(UsdTimeCode(1.0));
+    CHECK(a.valid && b.valid);
+    if (!a.valid || !b.valid) return;
+
+    // 1. The published FRAMES follow the grouping Xform: the correction is
+    //    what put them in the group's space.
+    const SdfPath tipPath("/Asset/Rig/Group/Arm/Tip");
+    const auto tipA = a.jointFramesFinal.find(tipPath);
+    const auto tipB = b.jointFramesFinal.find(tipPath);
+    CHECK(tipA != a.jointFramesFinal.end());
+    CHECK(tipB != b.jointFramesFinal.end());
+    if (tipA == a.jointFramesFinal.end() ||
+        tipB == b.jointFramesFinal.end()) {
+        return;
+    }
+    CHECK(std::abs((tipA->second.points[0][1] - tipB->second.points[0][1]) -
+                   3.0) < 1e-9);
+
+    // 2. The published MATRIX does not. Rest and pose are corrected
+    //    together, so X cancels out of the rest-to-pose map -- translate
+    //    (2, 0, 1) either way.
+    const auto matrixA = a.jointMatricesFinal.find(tipPath);
+    const auto matrixB = b.jointMatricesFinal.find(tipPath);
+    CHECK(matrixA != a.jointMatricesFinal.end());
+    CHECK(matrixB != b.jointMatricesFinal.end());
+    if (matrixA != a.jointMatricesFinal.end() &&
+        matrixB != b.jointMatricesFinal.end()) {
+        CHECK(matrixA->second == matrixB->second);
+        CHECK(GfIsClose(matrixA->second.ExtractTranslation(),
+                        GfVec3d(2, 0, 1), 1e-9));
+    }
+
+    // 3. And the mesh a base-phase mover drives off that same joint DOES
+    //    follow it, by exactly X: exec composed its matrix from the
+    //    overridden pose and the un-overridden rest. Two answers, one
+    //    generation, one slot.
+    const SdfPath target("/Asset/Geom/M.points");
+    const auto pointsA = a.movedProperties.find(target);
+    const auto pointsB = b.movedProperties.find(target);
+    CHECK(pointsA != a.movedProperties.end());
+    CHECK(pointsB != b.movedProperties.end());
+    if (pointsA == a.movedProperties.end() ||
+        pointsB == b.movedProperties.end()) {
+        return;
+    }
+    const VtVec3fArray movedWith = pointsA->second.Get<VtVec3fArray>();
+    const VtVec3fArray movedWithout = pointsB->second.Get<VtVec3fArray>();
+    CHECK(movedWith.size() == movedWithout.size());
+    if (movedWith.size() != movedWithout.size()) return;
+    for (size_t i = 0; i < movedWith.size(); ++i) {
+        if (!GfIsClose(GfVec3f(movedWith[i] - movedWithout[i]),
+                       GfVec3f(0, 3, 0), 1e-5)) {
+            ++failures;
+            std::printf("FAIL an intervening Xform: moved point %zu did not "
+                        "follow the grouping transform (%g %g %g against "
+                        "%g %g %g); the asymmetry the refusal stands in "
+                        "front of has changed\n",
+                        i, movedWith[i][0], movedWith[i][1], movedWith[i][2],
+                        movedWithout[i][0], movedWithout[i][1],
+                        movedWithout[i][2]);
+            break;
+        }
+    }
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -715,6 +836,7 @@ main(int argc, char **argv)
     TestAnOverrideElsewhereLeavesTheRestsAlone(examplesDir);
     TestAnInterveningXformAboveAProvider();
     TestAnAnimatedXformAboveAProvider();
+    TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

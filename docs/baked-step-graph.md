@@ -560,15 +560,23 @@ no rig to compare against is a second rig.
   program can use. It is the third named mechanism for keeping locks out of step bodies, beside
   the prologue's resolved values and the program-owned caches.
 * **Intervening and animated Xforms above a provider.** Still refused, and now with fixtures that
-  reach both refusals by name and assert the fallback is exact. The correction rewrites the REST
-  frames as well as the base ones, and the two halves reach different consumers:
-  `jointMatricesFinal` and the walk's `finalMatrices` follow it, a geometry mover's base-phase
-  matrix (exec's `computeMatrix` tap) does not, and a solver's element rests (exec's
-  `computeRestFrame`) do not either. The program holds ONE rest per slot, so expressing this means
-  holding an exec rest and a walk rest side by side and routing every consumer to the right one --
-  the same rework an animated `rest:tx` needs. A working implementation of the static half was
-  measured and reverted: its joint frames and matrices agreed exactly and its moved points did
-  not.
+  reach both refusals by name, assert the fallback is exact, and MEASURE why the refusal stands.
+  The correction rewrites the REST frames as well as the base ones, and the two halves do not reach
+  the same consumers -- but not by the route the first reading of it suggested. The walk's frames
+  are pushed back into exec as `computePointFrame` overrides before the authoritative snapshot
+  (`_taps->Evaluate(time, jointOverrides)`), so every exec computation downstream of a frame sees
+  the CORRECTED pose, while `computeRestFrame`, which no override touches, keeps reading the
+  authored rest. So exec's `computeMatrix` -- what a geometry mover reads in the base phase -- is
+  `PointsToMatrix(rest_exec, pose_corrected)`, and `pose.jointMatricesFinal`, built in the walk,
+  is `PointsToMatrix(rest_corrected, pose_corrected)`. On the fixture those are translate
+  (2, 3, 1) and translate (2, 0, 1), published in one generation off one slot; a solver's element
+  rests (exec's `computeRestFrame`, un-overridden) are a third reader on the exec side. A program
+  holding ONE rest per slot can publish one of those matrices or the other and not both, so
+  expressing this means holding an exec rest and a walk rest side by side and routing every
+  consumer to the right one -- the same rework an animated `rest:tx` needs. A working
+  implementation of the static half was measured and reverted; the three numbers are pinned by
+  `TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix`, which fails if the dynamic path's
+  asymmetry ever changes.
 
 ### What holds it to account
 
