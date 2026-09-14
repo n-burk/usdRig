@@ -1227,7 +1227,15 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 arrays.weights == arrays.lastWeights &&
                 arrays.translationOffsets == arrays.lastTranslationOffsets &&
                 arrays.rotationOffsets == arrays.lastRotationOffsets &&
-                arrays.diagnostics == arrays.lastDiagnostics) {
+                arrays.diagnostics == arrays.lastDiagnostics &&
+                // The pole half is read at a different point in the walk and
+                // owns its own diagnostic, but it is the same kind of thing:
+                // a table the prologue re-read, so a table this run must be
+                // compared by value against. Leaving it out let an animated
+                // inputs:poleVectorWeights hold a stale solve.
+                arrays.poleOk == arrays.lastPoleOk &&
+                arrays.poleWeights == arrays.lastPoleWeights &&
+                arrays.poleDiagnostics == arrays.lastPoleDiagnostics) {
                 continue;
             }
             for (const int cluster : cones.constraintArrayClusters[k]) {
@@ -1335,6 +1343,9 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         arrays.lastTranslationOffsets = arrays.translationOffsets;
         arrays.lastRotationOffsets = arrays.rotationOffsets;
         arrays.lastDiagnostics = arrays.diagnostics;
+        arrays.lastPoleOk = arrays.poleOk;
+        arrays.lastPoleWeights = arrays.poleWeights;
+        arrays.lastPoleDiagnostics = arrays.poleDiagnostics;
     }
     B.lastOverridden = B.overridden;
     B.lastPropertyResults = B.propertyResults;

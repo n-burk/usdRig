@@ -4019,6 +4019,144 @@ TestSplineIkEvaluatorBinding()
 }
 
 
+// The three inputs nothing but a SingleChainIK reads: inputs:poleVector and
+// inputs:twistDegrees, which its RotatePlane mode reads directly, and the
+// inputs:poleVectorWeights table its object pole mode blends its poles with.
+// Each has to move the solve when TIME moves and when an interactive drag
+// holds it, and that is what is checked here -- but the reason this test
+// exists is what it does under RIGEXEC_EVALUATION_MODE=parity, where every
+// Evaluate below compares the baked program against the dynamic walk. No
+// other rig or fixture in the tree animates or drags one of these, so
+// nothing else can tell whether the baked constraint step is dirtied when
+// one of them moves: an input the step never declared, or a source table
+// never compared, simply holds the previous frame's solve and says nothing.
+static void
+TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag()
+{
+    const SdfPath ikPath("/Asset/Rig/Movers/IK");
+    const SdfPath midPath("/Asset/Rig/Joints/Root/Mid");
+    // The MIDDLE joint, because the pole and the twist turn the chain about
+    // the root-to-effector axis without moving either end of it: an end-joint
+    // check would pass with the pole ignored entirely.
+    const auto mid = [&midPath](const RigExecRigPose &pose, GfVec3d *out) {
+        const auto found = pose.jointFramesFinal.find(midPath);
+        if (found == pose.jointFramesFinal.end()) {
+            return false;
+        }
+        *out = found->second.Origin();
+        return true;
+    };
+    // 1. An animated inputs:poleVector.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        const UsdAttribute pole = stage->GetPrimAtPath(ikPath).GetAttribute(
+            TfToken("inputs:poleVector"));
+        pole.Clear();
+        pole.Set(GfVec3d(0, 0, 1), UsdTimeCode(1.0));
+        pole.Set(GfVec3d(0, 1, 0), UsdTimeCode(2.0));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+        const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+        GfVec3d one, two;
+        CHECK(atOne.valid && atTwo.valid);
+        CHECK(mid(atOne, &one) && mid(atTwo, &two));
+        CHECK(!Near(one, two));
+    }
+
+    // 2. An animated inputs:twistDegrees.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        const UsdPrim ik = stage->GetPrimAtPath(ikPath);
+        const UsdAttribute twist = ik.CreateAttribute(
+            TfToken("inputs:twistDegrees"), SdfValueTypeNames->Double);
+        twist.Set(0.0, UsdTimeCode(1.0));
+        twist.Set(80.0, UsdTimeCode(2.0));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+        const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+        GfVec3d one, two;
+        CHECK(atOne.valid && atTwo.valid);
+        CHECK(mid(atOne, &one) && mid(atTwo, &two));
+        CHECK(!Near(one, two));
+    }
+
+    // 3. An animated inputs:poleVectorWeights, which is not an input of the
+    //    step at all but a TABLE the prologue re-reads -- so it is the
+    //    source comparison, and not the varying-input flag, that has to
+    //    notice it. Two poles on opposite sides, blended one to the other.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        MakeXform(stage, SdfPath("/Asset/Sources/PoleA"),
+                  Matrix(GfVec3d(2, 0, 8)));
+        MakeXform(stage, SdfPath("/Asset/Sources/PoleB"),
+                  Matrix(GfVec3d(2, 8, 0)));
+        const UsdPrim ik = stage->GetPrimAtPath(ikPath);
+        ik.GetAttribute(TfToken("rigExec:poleVectorMode"))
+            .Set(TfToken("object"));
+        ik.CreateRelationship(TfToken("rigExec:poleVectorObjects"))
+            .SetTargets({SdfPath("/Asset/Sources/PoleA"),
+                         SdfPath("/Asset/Sources/PoleB")});
+        const UsdAttribute weights = ik.CreateAttribute(
+            TfToken("inputs:poleVectorWeights"),
+            SdfValueTypeNames->FloatArray);
+        weights.Set(VtFloatArray{1, 0}, UsdTimeCode(1.0));
+        weights.Set(VtFloatArray{0, 1}, UsdTimeCode(2.0));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+        const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+        GfVec3d one, two;
+        CHECK(atOne.valid && atTwo.valid);
+        CHECK(mid(atOne, &one) && mid(atTwo, &two));
+        CHECK(!Near(one, two));
+    }
+
+    // 4. The same two inputs under a DRAG, on a stage where nothing is
+    //    animated: an override is the other way a per-frame input moves, and
+    //    it moves without the time moving, which is the case a program that
+    //    keys its dirtiness off the clock gets wrong.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose rest =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        GfVec3d held, dragged;
+        CHECK(rest.valid && mid(rest, &held));
+
+        evaluator.SetInteractiveOverrides({RigExecValueOverride{
+            ikPath, TfToken(), TfToken("inputs:twistDegrees"),
+            VtValue(80.0)}});
+        const RigExecRigPose twisted =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(twisted.valid && mid(twisted, &dragged));
+        CHECK(!Near(held, dragged));
+
+        evaluator.SetInteractiveOverrides({RigExecValueOverride{
+            ikPath, TfToken(), TfToken("inputs:poleVector"),
+            VtValue(GfVec3d(0, 1, 0))}});
+        const RigExecRigPose poled =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(poled.valid && mid(poled, &dragged));
+        CHECK(!Near(held, dragged));
+
+        // And releasing it comes back to where it started, rather than to
+        // whatever the last drag step left in the program's storage.
+        evaluator.ClearInteractiveOverrides();
+        const RigExecRigPose released =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        GfVec3d back;
+        CHECK(released.valid && mid(released, &back));
+        CHECK(Near(held, back));
+    }
+}
+
 // An AUTHORED posed:space is the pose: exec returns its frame and reads
 // neither the avars nor the parent, so the baked program says the same and
 // the epoch bakes. An ANIMATED one does not -- and the test that matters is
@@ -4132,6 +4270,7 @@ main()
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();
     TestAuthoredPosedSpaceBakesAndAnimatedOneDoesNot();
+    TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

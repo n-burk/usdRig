@@ -1465,8 +1465,18 @@ NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
     NoteInput(constraint.upVector, step);
     NoteInput(constraint.rotationOffset, step);
     NoteInput(constraint.worldUpVector, step);
-    // The authored source-weight and offset tables are folded -- an animated
-    // one is refused at bake -- so there is nothing per-frame about them.
+    // The two SingleChainIK-only inputs. Bound only in RotatePlane mode, so
+    // in every other mode these are the default-constructed inputs and note
+    // nothing -- which is the same answer as not listing them, and a good
+    // deal harder to forget.
+    NoteInput(constraint.poleVector, step);
+    NoteInput(constraint.twistDegrees, step);
+    // The authored source-weight, offset and pole-weight tables are NOT
+    // noted here: they are not inputs the step reads at all. The prologue
+    // re-reads them off the stage each run and compares them by value, and
+    // `constraintArrayClusters` is what dirties this step when one moved
+    // (RigExecBakedComputeClosure) -- the §7 source mechanism, not the
+    // varying-input one.
 }
 
 }  // namespace
