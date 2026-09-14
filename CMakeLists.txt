@@ -413,6 +413,42 @@ foreach(_schedule serial parallel)
         "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
 endforeach()
 
+# The geometry operations that bake with no shipped rig to say so:
+# blendShape, curvenet, emitGuidePoints, ribbon and the two read phases that
+# come out of the run's snapshot store. Every rig that authors them is held
+# on the dynamic path by a refusal belonging to another group, so this suite
+# unbinds that refusal in memory and holds the operations themselves against
+# the dynamic path; see the file's own header. It is registered by hand
+# rather than through rigexec_add_baked_parity_test because, like the
+# example sweep above, it fixes its own evaluation mode.
+add_executable(testRigExecGeometryOpsBakedParity
+    tests/testRigExecGeometryOpsBakedParity.cpp)
+target_link_libraries(testRigExecGeometryOpsBakedParity PRIVATE rigExec)
+target_compile_definitions(testRigExecGeometryOpsBakedParity PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecGeometryOpsBakedParity
+    COMMAND testRigExecGeometryOpsBakedParity
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
+# The mode is the suite's own, so RIGEXEC_EVALUATION_MODE stays unset here --
+# but a generation that fell back must still be loud.
+set_tests_properties(testRigExecGeometryOpsBakedParity PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecGeometryOpsBakedParityCones_${_schedule}
+        COMMAND testRigExecGeometryOpsBakedParity
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
+    set_tests_properties(testRigExecGeometryOpsBakedParityCones_${_schedule}
+        PROPERTIES ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    set_property(TEST testRigExecGeometryOpsBakedParityCones_${_schedule}
+        APPEND PROPERTY ENVIRONMENT
+        "RIGEXEC_BAKED_VERIFY_CONES=1"
+        "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+endforeach()
+
 add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
 target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecStandalone PRIVATE ${_rigexec_schema_resource_define})
