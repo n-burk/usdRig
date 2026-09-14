@@ -732,6 +732,138 @@ no rig to compare against is a second rig.
   `rest:tx`, which no shipped rig can stand in for, because on every example the composes share a
   cluster with skin sources that run on every frame. With the hook deleted that case reports the
   mismatch in all four entries; every other suite and all 93 example runs stay green.
+* `testRigExecBakedMode` -- every DELIBERATE negative in the tree, in one place and deliberately
+  NOT a parity entry, because a suite that declines on purpose cannot live under a bake
+  requirement: a connected `posed:space`, three unplaceable override shapes plus an array override
+  on a curvenet weight, a constrained volume weight, and -- as of the Phase 4 merge -- the two
+  intervening-Xform refusals that were written against the rest suite. Each asserts its refusal by
+  NAME and then compares the fallback generation with a plain dynamic evaluator over every map
+  domain, so a refusal cannot quietly become a wrong answer, and the day a feature lands its
+  fixture fails rather than going green in silence.
+
+### State at the end of the work
+
+Phase 4 is merged: the provider ladder, the four deferrals and the performance stage, in that
+order, on top of the Phase 3 step graph. This section is the state of the tree at that merge --
+what the program answers, what it still hands back, what a frame costs, and the knobs. It is meant
+to be read first by whoever picks the work up, and every number in it was measured on the merged
+tree rather than carried over from a branch.
+
+**What bakes.** Every rig in `examples/` -- all 23 of them, all 32 rows of
+`tests/exampleFixtures.cmake` -- runs `--mode parity --require-baked` with `RIGEXEC_BAKE_REQUIRED=1`
+at zero fallbacks and zero mismatches, in both schedule modes. `kExpectedToDecline` is empty and
+has no entries to add back. Six of the seven `rigexec_add_baked_parity_test` suites carry
+REQUIRE_BAKE and CONE_VERIFY and report zero fallbacks in both modes
+(`testRigExecCurvenetAdjuster`, `testRigExecSolverBake`, `testRigExecArm`,
+`testRigExecVolumeWeights`, `testRigExecEpochRests`, `testRigExecInteractive`); the seventh is
+`testRigExecConstraints`, below.
+
+The three features Phase 4 added to that list, each with the fixture that fails without it:
+
+* **The provider ladder is per-frame.** `rest:space` and the six rest avars, `default:space` and
+  its six, `posed:space` and `avars:rotationOrder` are inputs of the compose rather than epoch
+  constants, and an `FkChain`'s control rests, a `TwoBoneIk`'s bone lengths, a `SplineIk`'s rest
+  curve and a twist's endpoints are rebuilt from them per frame. An animated, connected or
+  chain-written rest bakes, and a drag on one places: `rest:tx`, `rest:ry` and `default:tx` on
+  `02_TwoBoneIkLeg`'s knee each report "baked: 7 of 7 drag generation(s)" with the cone verifier
+  on. `testRigExecEpochRests` is the scoreboard.
+* **Three of the four Phase 3 deferrals are answered.** An `AtPrim` read phase on
+  `rigExec:transform`, a volume weight object bound to a constraint, and `RigExecCurvenetWeight`
+  (by holding its bind, with the shared kernel cut at the lock).
+  `examples/14_VolumeConstrainedSweep.usda` ships the second; the third is
+  `testRigExecCurvenetAdjuster` at REQUIRE_BAKE.
+* **The schedule got cheaper and the cost table got honest.** A skin revision is cut only where
+  the cut buys a spread of ready levels, the property chains bind their reads once per epoch, a
+  derived revision keeps its points by handle, and the three cost rows that were guesses were
+  re-fitted warm.
+
+**What is refused, by design, and the negative that proves each one.** All seven are reached by a
+fixture; no shipped rig reaches any of them. Counts are fallback generations under
+`RIGEXEC_EVALUATION_MODE=parity RIGEXEC_BAKE_REQUIRED=1`, identical in both schedules.
+
+| refusal text | gens | reached by | why it stands |
+|---|---|---|---|
+| `connected default:space on provider` (+ `connected-space provider`) | 8 | `testRigExecConstraints`, `TestConnectedParentSpaceSolverInputs` | The one MISSING FEATURE left in the fixture suites, and the only thing between that suite and REQUIRE_BAKE. A provider's space chain reaches another provider's POSED frame, which the dynamic path re-evaluates through exec at defined points in the walk, in a base and a final phase, carrying to namespace descendants no solver owns. It needs `rigEvaluator.cpp`'s `refreshPoseProvider` expressed as steps. The printed warning names the sorted-FIRST reason, not the blocking one -- read the whole reasons vector. |
+| `connected posed:space on provider` | 8 | `testRigExecBakedMode`, `TestANonBakeableRigFallsBack` | `computePointFrame` takes `posed:space` through an explicit `Connections` input, so the value is an exec answer computed from the middle of the pose walk rather than a stage read. Same feature as the row above. |
+| `connected rest:space on provider` | 0 | `testRigExecEpochRests`, `TestARestSpaceConnectedToAComputedSpaceRefusesTheBake` (compiles and asks `IsBakeable`; never evaluates, because a REQUIRE_BAKE suite turns an evaluated fallback into a mismatch line) | Narrow by construction: a connected `rest:space` BAKES unless its connection walk ends at one of the six computed spaces. `TestAConnectedRestSpaceIsPulledPerFrame` is the positive half. |
+| `interactive overrides are not placeable` | 6 + 2 | `testRigExecBakedMode`, `TestAnUnplaceableOverrideFallsBack` and `TestAnArrayOverrideOnACurvenetWeightFallsBack` | A folded space expression, a property the bake never read, a computation override -- and an ARRAY override on a curvenet weight's own prim, which exec type-rejects and the program must therefore not honour either. Falling back is the correct answer to all four. |
+| `constraint target is both exec-seeded and xform-derived` | 4 | `testRigExecBakedMode`, `TestAConstrainedVolumeWeightFallsBack` | A volume a constraint targets is catalogued as a plain `UsdGeomXformable` AND placed from its avars by `computeWeightPacket` -- two placements, one slot. The DYNAMIC path does not say which is meant either (its own `cpuParityMode` refuses to publish the generation), so the program refuses rather than picking. |
+| `intervening Xform above provider` | 8 | `testRigExecBakedMode`, `TestAnInterveningXformAboveAProvider` | The fourth deferral, now reachable and still refused -- see the measurement in *Phase 4: the four deferrals*. The correction rewrites REST frames as well as base ones and the two halves reach different consumers, so a program holding ONE rest per slot can publish the right joint matrix or move the mesh to the right place, not both. |
+| `animated Xform above provider` | 12 | `testRigExecBakedMode`, `TestAnAnimatedXformAboveAProvider` | Same rework. The second arm of that fixture is the shape an "is it identity today" test cannot see: every sample the sweep reads IS the identity and it is still refused, because the epoch is not a frame. |
+
+The three intervening-Xform fixtures live in `testRigExecBakedMode` rather than in
+`testRigExecEpochRests`, where they were written. They moved at the Phase 4 merge: the ladder work
+put REQUIRE_BAKE on the rest suite, a bake requirement reports a fallback with the same
+`baked parity mismatch` prefix a real disagreement carries, and a fixture that declines on purpose
+therefore cannot share a suite with a scoreboard that must read zero. `testRigExecBakedMode` is
+where this tree keeps its deliberate negatives and is deliberately not a parity entry.
+
+The structural refusals -- `constraint names no target`, `provider type not baked (...)`,
+`solver type not baked (...)`, `weight object type not baked (...)`, `pose provider has no prim`
+and the rest of that family -- are unchanged and are about malformed or unknown rigs rather than
+about features.
+
+**What a frame costs, on the merged tree.** Interleaved in one session, round-robin over the
+binaries so no column owns a quiet minute; `--mode baked --repeat`; minimum of three rounds,
+us/frame. `base` is the merge base `a1c2ea9`, built in a scratch worktree of its own -- the
+reference binary left in `agent-tmp` resolves `librigExec.so` from `wt-p2/build` and now loads the
+MERGED library, so it is not a reference any more and was not used.
+
+| rig | frames | base (a1c2ea9) | merged serial | merged parallel |
+|---|---|---|---|---|
+| `biped/Biped_anim` | 2-8 | 713.6 | **588.4** | 618.0 |
+| `spider_legs_assembly_ref` | 1-3 | 1.2 | 1.2 | 1.4 |
+| `04_BlendShapeFace` | 4 | 8.6 | 8.4 | 8.8 |
+| `05_TwistRibbonSpine` | 4 | 17.7 | 17.4 | 31.7 |
+| `06_LatticeBulge` | 4 | 11.2 | 11.3 | 11.6 |
+| `11_VolumeWeights` | 4 | 10.1 | 10.0 | 10.4 |
+| `12_CurvenetProfile` | 4 | 256.5 | 254.7 | 261.7 |
+| `13_ReadPhases` | 4 | 8.5 | 8.5 | 8.9 |
+| `ArmRig` | 3 | 20.6 | 19.2 | 31.6 |
+
+A drag is the other half of the workload: `Biped.usda`, `hips_ctl.avars:ty`, 60 steps, median of
+each run, three runs -- base 770.6 / 845.4 / 858.8us against the merged tree's 551.0 / 568.9 /
+602.4us.
+
+**Where the biped's 125us went, attributed rather than assumed.** The same interleaved measurement
+across four binaries, serial, minimum of three rounds: `a1c2ea9` 715.5, the ladder branch alone
+715.0, the perf branch alone 587.9, the merged tree 588.4. So the whole gain is the performance
+stage; the ladder costs nothing measurable on a rig whose ladder cannot move (its per-frame path
+checks `ladderVarying` and skips the recompose), the deferrals cost nothing on a rig that reaches
+none of them, and the three together cost nothing on top of each other.
+
+**Parallel is still slower than serial on every rig measured**, and the default is still serial.
+The reason is unchanged and is in *What a frame costs*: the narrow steps roughly double when the
+arena is awake while the one wide step gets faster, which is a memory-bandwidth story rather than
+a scheduling one. The lead to pull is the geometry kernels' own concurrency --
+`PXR_WORK_THREAD_LIMIT=4..8` is worth 5-10% of the biped frame in BOTH modes and the gain vanishes
+with `RIGEXEC_ENABLE_PARALLEL_EVAL=false`, which locates it inside `WorkParallelForN`'s fixed grain
+of 512 in `moverGraph.cpp`/`parallel.h`, not in the step region.
+
+**The knobs**, in three groups. The scheduler's own are in *The environment* above
+(`RIGEXEC_BAKED_SCHEDULE`, `_GRAIN_US`, `_CHUNK_VERTS`, `_MAX_CHUNKS`, `_CHUNK_ALWAYS`,
+`_VERIFY_CONES`, `_SCHEDULE_REPORT`, `_SCHEDULE_CALIBRATE`, `_STEP_TIMING`). Two more decide
+WHICH path runs and whether a fallback is a failure:
+
+| variable | default | what it does |
+|---|---|---|
+| `RIGEXEC_EVALUATION_MODE` | `dynamic` | `dynamic`, `baked`, or `parity` (both paths in one generation, compared exactly). An explicit `SetEvaluationMode` outranks it. |
+| `RIGEXEC_BAKE_REQUIRED` | off | a generation that fell back to the dynamic path reports `baked parity mismatch: bake required, evaluated dynamically: <reason>`. Changes no value and no dispatch -- it is how a suite asks "did the PROGRAM answer this?". Read once, so setting it mid-process does nothing. |
+
+And three that belong to the evaluator rather than to the bake: `RIGEXEC_ENABLE_PARALLEL_EVAL`
+(TfEnvSetting, default true; forces the serial schedule when off), `RIGEXEC_ENABLE_SIMD` (default
+true) and `RIGEXEC_TEST_BAKED_PATH`, which `testRigExecVolumeWeights` uses to run its own fixtures
+through the program.
+
+**What the next group inherits.** One refusal cluster, not two: connected-space providers
+(`refreshPoseProvider` as steps) is the only missing feature the fixture suites still reach, and
+`testRigExecConstraints`' REQUIRE_BAKE flag is its scoreboard. Behind it, and needing the same
+rework, is the intervening-Xform correction: both want a slot to hold an EXEC rest and a WALK rest
+side by side with every consumer routed to the right one.
+`TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix` pins the three dynamic-path answers that
+rework has to decide about deliberately. After that: the geometry kernels' grain (above), the two
+remaining 315KB copies of a derived revision's input, and the `VolumePlacements`/`SnapshotFinals`
+cost rows, which are still one-sample fits through the origin.
 
 ---
 
