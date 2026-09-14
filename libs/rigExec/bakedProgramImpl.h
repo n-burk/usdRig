@@ -444,6 +444,7 @@ enum class RigExecBakedSlotDomain : uint8_t {
     ChainPoints,         ///< the chain's published points
     DerivedOut,          ///< one derived target's output
     WeightPacket,        ///< one weight object's packet for this frame
+    WeightFrames,        ///< where every volume weight is placed, as one slot
     Snapshots,           ///< the phased-read records one step made
 };
 /// Derived from the last enumerator rather than written out: an array
@@ -553,6 +554,7 @@ enum class RigExecBakedStepKind {
     CommitApply,      ///< a split commit's decision and write-back
     ProviderMatrix,   ///< one provider's rest -> final or rest -> base matrix
     SnapshotFinals,   ///< every provider's final matrix, for a phased read
+    VolumePlacements, ///< every volume weight's placement, from the walk
     WeightPacket,     ///< one weight object's packet, built once per frame
     InfluenceFold,    ///< one revision's influence table
     RevisionStatic,   ///< one revision's packet, status and executed decision
@@ -621,6 +623,7 @@ struct RigExecBakedStep {
     ///     PropagateChunk/CommitApply                index into commits
     ///   ProviderMatrix                              provider slot
     ///   SnapshotFinals                              unused
+    ///   VolumePlacements                            unused
     ///   WeightPacket                                index into weightObjects
     ///   InfluenceFold/RevisionStatic/
     ///     RevisionChunk/RevisionFuse                index into revisionIndex
@@ -1608,6 +1611,12 @@ struct RigExecBakedProgramImpl {
         /// The property the published field says it weights: the mover for
         /// an operation-domain object, the chain's target otherwise.
         SdfPath weightFieldTarget;
+        /// The field is measured against the points ENTERING this revision,
+        /// so the shared packet is not this revision's answer: it patches a
+        /// copy of its own, exactly the fields the dynamic path patches, and
+        /// assembles against that.
+        bool weightCurrentPhase = false;
+        RigExecWeightPacket currentPhasePacket;
         /// The field this revision published this run, and whether it
         /// published one at all. Written by RevisionStatic -- which is where
         /// the dynamic path publishes it, from the packet the mover is about
@@ -1796,6 +1805,28 @@ struct RigExecBakedProgramImpl {
     std::function<bool(const SdfPath &, size_t, UsdTimeCode,
                        std::vector<float> *, std::string *,
                        const std::vector<GfVec3f> *)> resolveWeights;
+
+    /// Where each volume weight object is placed, as the walk left it.
+    ///
+    /// A POINTER to the evaluator's own _volumeWeightMatrices, because the
+    /// oracle reads that member and nothing else: a program-owned copy would
+    /// be a second map the oracle never looks at. Written by the one
+    /// VolumePlacements step, which declares it, so no two steps can be
+    /// inside it at once.
+    std::map<SdfPath, GfMatrix4d> *volumeWeightMatrices = nullptr;
+    /// RigExecRigEvaluator::_UpdateVolumePlacements, bound at Build.
+    ///
+    /// The body has a subtlety worth not restating: a frame no matrix can be
+    /// built from leaves whatever the failed decomposition wrote, over an
+    /// identity seed, rather than the identity. Calling the evaluator's own
+    /// is how the program cannot drift from that.
+    std::function<void(const std::function<
+        bool(const SdfPath &, RigExecPointFrame *)> &)> updateVolumePlacements;
+    /// Weight objects whose field is measured against the points AS THEY
+    /// STAND at the revision that binds them, rather than the authored base
+    /// (the evaluator's _currentPhaseWeights). A combine is in here when
+    /// anything inside it is.
+    std::set<SdfPath> currentPhaseWeights;
 
     /// Every volumetric weight object's baked falloff remap, by prim path.
     ///
@@ -2090,8 +2121,9 @@ void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
-/// Appends one WeightPacket step per weight object, in the table's
-/// dependency order, between the pose half and the geometry half.
+/// Appends the placement step, if the epoch has any volume weight at all,
+/// then one WeightPacket step per weight object in the table's dependency
+/// order -- all of it between the pose half and the geometry half.
 void RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program);
 
 /// Runs one WeightPacket step, under the same rule as the other two.
@@ -2324,6 +2356,7 @@ struct RigExecBakedRunShadow {
         bool staticDirty = false, partitionStale = false;
         bool layoutUsable = false, envelopeOk = false, fullStrength = false;
         std::vector<float> weightField;
+        RigExecWeightPacket currentPhasePacket;
         bool weightFieldPublished = false;
     };
     struct DerivedState {

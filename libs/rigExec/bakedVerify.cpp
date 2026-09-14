@@ -380,6 +380,7 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->staticDirty = revision.staticDirty;
     state->partitionStale = revision.partitionStale;
     state->weightField = revision.weightField;
+    state->currentPhasePacket = revision.currentPhasePacket;
     state->weightFieldPublished = revision.weightFieldPublished;
     state->layoutUsable = revision.layoutUsable;
     state->envelopeOk = revision.envelopeOk;
@@ -423,6 +424,7 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->staticDirty = state.staticDirty;
     revision->partitionStale = state.partitionStale;
     revision->weightField = state.weightField;
+    revision->currentPhasePacket = state.currentPhasePacket;
     revision->weightFieldPublished = state.weightFieldPublished;
     revision->layoutUsable = state.layoutUsable;
     revision->envelopeOk = state.envelopeOk;
@@ -494,6 +496,8 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
     // beside this generation's points.
     CompareVector(differences, count, where + " weightField",
                   shadow.weightField, revision.weightField);
+    CompareValue(differences, count, where + " currentPhasePacket",
+                 shadow.currentPhasePacket, revision.currentPhasePacket);
     CompareValue(differences, count, where + " weightFieldPublished",
                  shadow.weightFieldPublished, revision.weightFieldPublished);
     CompareValue(differences, count, where + " influencesValid",

@@ -58,6 +58,7 @@ RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain)
     case RigExecBakedSlotDomain::ChainPoints: return "ChainPoints";
     case RigExecBakedSlotDomain::DerivedOut: return "DerivedOut";
     case RigExecBakedSlotDomain::WeightPacket: return "WeightPacket";
+    case RigExecBakedSlotDomain::WeightFrames: return "WeightFrames";
     case RigExecBakedSlotDomain::Snapshots: return "Snapshots";
     }
     return "unknown";
@@ -76,6 +77,7 @@ RigExecBakedStepKindName(RigExecBakedStepKind kind)
     case RigExecBakedStepKind::CommitApply: return "CommitApply";
     case RigExecBakedStepKind::ProviderMatrix: return "ProviderMatrix";
     case RigExecBakedStepKind::SnapshotFinals: return "SnapshotFinals";
+    case RigExecBakedStepKind::VolumePlacements: return "VolumePlacements";
     case RigExecBakedStepKind::WeightPacket: return "WeightPacket";
     case RigExecBakedStepKind::InfluenceFold: return "InfluenceFold";
     case RigExecBakedStepKind::RevisionStatic: return "RevisionStatic";
@@ -192,6 +194,7 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0000, 0.004088},   // CommitApply       2
     {0.0000, 0.051952},   // ProviderMatrix  252
     {1.0000, 0.200000},   // SnapshotFinals    0 -- unmeasured, see below
+    {0.5000, 0.010000},   // VolumePlacements  0 -- unmeasured, see below
     {0.0000, 0.050000},   // WeightPacket      0 -- unmeasured, see below
     {0.0000, 0.003781},   // InfluenceFold     1
     {0.0000, 0.000487},   // RevisionStatic    1
@@ -366,6 +369,10 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
         return 1;
     case RigExecBakedStepKind::SnapshotFinals:
         return double(B.paths.size());
+    case RigExecBakedStepKind::VolumePlacements:
+        // One decomposition per volume, and there are never many.
+        return WrittenSlots(step, RigExecBakedSlotDomain::WeightFrames) *
+               double(std::max<size_t>(step.reads.size(), 1));
     case RigExecBakedStepKind::WeightPacket: {
         // The ELEMENTS the packet carries, which is what every one of the
         // builders costs per unit: a painted table's values, a volume's
@@ -1310,7 +1317,8 @@ RunStepBody(RigExecBakedProgramImpl *B, RigExecBakedStep *step,
     // clearing is the executor's promise and not something fifteen bodies
     // each have to remember.
     step->BeginRun();
-    if (step->kind == RigExecBakedStepKind::WeightPacket) {
+    if (step->kind == RigExecBakedStepKind::WeightPacket ||
+        step->kind == RigExecBakedStepKind::VolumePlacements) {
         // Neither half's: a weight object is bound by movers and by
         // constraints, so its packet is built between the two rather than
         // inside either (bakedWeights.cpp).
@@ -1876,6 +1884,8 @@ StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step)
                (step.part ? " final" : " base");
     case RigExecBakedStepKind::SnapshotFinals:
         return "every provider";
+    case RigExecBakedStepKind::VolumePlacements:
+        return "every volume weight";
     case RigExecBakedStepKind::WeightPacket:
         return B.weightObjects[size_t(step.object)].path.GetString();
     case RigExecBakedStepKind::InfluenceFold:

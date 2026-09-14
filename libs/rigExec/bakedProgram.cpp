@@ -244,9 +244,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     for (const SdfPath &path : E._xformDerivedProviders) {
         say("constraint target is a plain Xformable", path);
     }
-    for (const SdfPath &path : E._currentPhaseWeights) {
-        say("current-phase volume weight", path);
-    }
     for (const auto &[path, movers] : E._snapshotPoints) {
         say("read-phase snapshot required on", path);
     }
@@ -1055,6 +1052,20 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // recomputed: these are the same bytes the authoritative snapshot hands
     // exec, and resampling the curve again here would risk a different
     // answer for a spline edited between Compile and Build.
+    B.volumeWeightMatrices = &E._volumeWeightMatrices;
+    B.currentPhaseWeights = E._currentPhaseWeights;
+    B.updateVolumePlacements =
+        [evaluator](const std::function<
+                        bool(const SdfPath &, RigExecPointFrame *)> &lookup) {
+            // The pose is the routine's second output and this call wants
+            // only its first: what the program publishes is the MAP, which
+            // the epilogue copies where the dynamic walk assigns it from.
+            // One empty pose per frame, and nothing in it but the same
+            // handful of matrices.
+            RigExecRigPose unused;
+            evaluator->_UpdateVolumePlacements(
+                RigExecPoseFrameLookup(lookup), &unused);
+        };
     // The oracle a constraint's envelope resolves through, bound here
     // because this is the only translation unit the evaluator's friendship
     // reaches. `evaluator` outlives the program -- the evaluator owns it and
@@ -1696,27 +1707,13 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     if (!RigExecBakedPublishPose(&B, pose)) {
         return false;  // the dynamic fallback needs exec
     }
-    // Every volume weight object's placement, from the frames the walk ended
-    // with. The dynamic path republishes this after every successful commit
-    // because a weight resolved mid-walk reads the map as it stands then;
-    // nothing the program resolves reads it mid-walk -- a mover's packet is
-    // placed from the volume's own base slot, and a volume weight object on a
-    // constraint is still refused -- so the one call that decides what the
-    // pose carries is this one, and it is the walk's LAST state either way.
-    // The feature that resolves a weight inside the walk is the feature that
-    // has to move it.
-    {
-        const auto finalFrameOf = [&B](const SdfPath &provider,
-                                       RigExecPointFrame *frame) {
-            const auto slot = B.index.find(provider);
-            if (slot == B.index.end()) {
-                return false;
-            }
-            *frame = B.fin[size_t(B.finLast[size_t(slot->second)])];
-            return true;
-        };
-        E._UpdateVolumePlacements(
-            RigExecPoseFrameLookup(finalFrameOf), pose);
+    // Where every volume weight ended up, as the VolumePlacements step left
+    // it. The dynamic walk assigns the pose from the same map at the same
+    // point -- the last refresh before anything reads it -- and a run whose
+    // cone skipped the step is a run in which no volume's final frame moved,
+    // so the map it kept is still this generation's.
+    if (B.volumeWeightMatrices) {
+        pose->weightFrames = *B.volumeWeightMatrices;
     }
     RigExecBakedPublishGeometry(&B, pose);
 

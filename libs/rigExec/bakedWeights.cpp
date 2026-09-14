@@ -424,6 +424,42 @@ void
 RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
+    // Where every volume weight ended up, as one step and one slot.
+    //
+    // It exists for two readers. pose.weightFrames is one; the other is the
+    // ORACLE, which places a volume from this map and is what a constraint's
+    // envelope and a current-phase field resolve through. The dynamic path
+    // refreshes it after every commit and the geometry walk runs after all of
+    // them, so one refresh at the end of the pose half is the same map every
+    // reader of it sees -- and making it a step is what orders those readers
+    // against it instead of leaving the refresh somewhere in the epilogue
+    // where a parallel schedule could have read it already.
+    bool anyVolume = false;
+    for (const RigExecBakedProgramImpl::WeightObject &weight :
+             B.weightObjects) {
+        anyVolume = anyVolume || weight.providerSlot >= 0;
+    }
+    for (size_t i = 0; i < B.noScaleAvars.size() && !anyVolume; ++i) {
+        // A volume bound to no mover still has a placement and still
+        // publishes a weightFrames entry, so the provider table decides this
+        // and not the weight-object table.
+        anyVolume = B.noScaleAvars[i] != 0;
+    }
+    if (anyVolume) {
+        RigExecBakedStep step;
+        step.kind = RigExecBakedStepKind::VolumePlacements;
+        step.object = 0;
+        step.maxDiagnostics = 0;
+        for (size_t i = 0; i < B.noScaleAvars.size(); ++i) {
+            if (B.noScaleAvars[i] != 0) {
+                step.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, int(i)));
+            }
+        }
+        step.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::WeightFrames, 0));
+        B.steps.push_back(std::move(step));
+    }
     // The slot storage, sized once. A consumer holds a pointer into it for
     // the whole region, so it is never resized inside one.
     B.weightPackets.assign(B.weightObjects.size(), RigExecWeightPacket());
@@ -463,6 +499,22 @@ RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
                           RigExecBakedStep *step, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
+    if (step->kind == RigExecBakedStepKind::VolumePlacements) {
+        // The evaluator's own routine, over the frames this walk ended with.
+        // Not a second copy of it: a frame no matrix can be built from leaves
+        // whatever the failed decomposition wrote rather than the identity,
+        // and that is exactly the kind of detail a second copy loses.
+        B.updateVolumePlacements(
+            [&B](const SdfPath &provider, RigExecPointFrame *frame) {
+                const auto slot = B.index.find(provider);
+                if (slot == B.index.end()) {
+                    return false;
+                }
+                *frame = B.fin[size_t(B.finLast[size_t(slot->second)])];
+                return true;
+            });
+        return;
+    }
     const RigExecBakedProgramImpl::WeightObject &weight =
         B.weightObjects[size_t(step->object)];
     // Rebuilt every frame rather than replayed out of `cached`.

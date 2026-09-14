@@ -51,6 +51,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((dualQuaternion, "dualQuaternion"))
     ((jointIndices, "rigExec:jointIndices"))
     ((elementSize, "rigExec:elementSize"))
+    ((denseRepresentation, "dense"))
 );
 
 namespace rigExec {
@@ -151,6 +152,8 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                 declared.size() == 1 && declared[0] == r.moverPath;
             out.weightFieldTarget =
                 out.weightOperationDomain ? r.moverPath : r.target;
+            out.weightCurrentPhase =
+                B.currentPhaseWeights.count(r.binding.weightObject) > 0;
         }
         return out;
     };
@@ -574,6 +577,28 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     assemble.reads.push_back(
                         RigExecBakedOne(RigExecBakedSlotDomain::WeightPacket,
                                         revision.weightObject));
+                }
+                if (revision.weightCurrentPhase) {
+                    // A current-phase field is measured against the points
+                    // ENTERING this revision, so the assemble of a revision
+                    // that would otherwise read nothing but the stage now
+                    // waits for every buffer this chain has filled before
+                    // it -- and for the indirection that says which of them
+                    // holds the running value, exactly as a chunk does.
+                    // The placement the oracle reads comes from the walk, so
+                    // it waits for that too.
+                    assemble.maxDiagnostics += 1;
+                    assemble.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::WeightFrames, 0));
+                    if (id > first) {
+                        assemble.reads.push_back(RigExecBakedRange(
+                            RigExecBakedSlotDomain::RevisionOut, chunkFirst,
+                            revision.chunkBase));
+                        assemble.reads.push_back(RigExecBakedRange(
+                            RigExecBakedSlotDomain::RevisionDone, first, id));
+                        assemble.reads.push_back(RigExecBakedOne(
+                            RigExecBakedSlotDomain::ChainDirty, id - 1));
+                    }
                 }
                 if (!revision.binding.phases.empty()) {
                     assemble.reads.push_back(RigExecBakedRange(
@@ -1098,7 +1123,9 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     // beside it -- the assembler falls back to that scalar only when no
     // packet is bound at all.
     if (revision->weightObject >= 0) {
-        values.weights = &B.weightPackets[size_t(revision->weightObject)];
+        values.weights = revision->weightCurrentPhase
+                             ? &revision->currentPhasePacket
+                             : &B.weightPackets[size_t(revision->weightObject)];
     }
     values.basePoints.assign(basePoints, basePoints + basePointCount);
     // Epoch-fixed layouts were resolved in the PROLOGUE, through the same
@@ -1514,6 +1541,51 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
     }
 
     case RigExecBakedStepKind::RevisionStatic: {
+        // rigExec:samplePhase = "current": the field is measured against the
+        // points AS THEY STAND HERE, not the authored base, so the volume
+        // grabs whatever is inside it right now.
+        //
+        // This one copies the ORACLE and not exec (see bakedWeights.cpp):
+        // the dynamic path cannot get it from exec either -- a revision
+        // node's parameters are a VDF constant, so nothing in the packet can
+        // depend on a value the graph has not computed yet -- and it patches
+        // the tapped packet with what _ResolveWeights measured. So the patch
+        // starts from the SAME packet and touches the SAME fields:
+        // representation, values, indices, defaultWeight and valid, and not
+        // rangePolicy, which the dynamic path leaves at whatever the tapped
+        // packet had. A freshly constructed packet would differ there, and
+        // the difference would move moverGraphRevisionsExecuted through the
+        // parameters comparison below rather than move a point.
+        if (revision.weightCurrentPhase && revision.weightObject >= 0) {
+            revision.currentPhasePacket =
+                B.weightPackets[size_t(revision.weightObject)];
+            const GfVec3f *entering = nullptr;
+            size_t enteringCount = 0;
+            PointsBefore(chain, size_t(revisionIndex), &entering,
+                         &enteringCount);
+            const std::vector<GfVec3f> current(entering,
+                                               entering + enteringCount);
+            std::vector<float> field;
+            std::string error;
+            if (B.resolveWeights(
+                    B.weightObjects[size_t(revision.weightObject)].path,
+                    current.size(), time, &field, &error, &current)) {
+                revision.currentPhasePacket.representation =
+                    _tokens->denseRepresentation;
+                revision.currentPhasePacket.values = std::move(field);
+                revision.currentPhasePacket.indices.clear();
+                revision.currentPhasePacket.defaultWeight = 0.0f;
+                revision.currentPhasePacket.valid = true;
+            } else {
+                // An invalid packet is the kernel's atomic MoverFailed
+                // pass-through, which is the right answer here: publishing
+                // the reference-phase field instead would silently be a
+                // different deformation.
+                revision.currentPhasePacket = RigExecWeightPacket();
+                step->diagnostics.push_back("current-phase weight failed: " +
+                                            error);
+            }
+        }
         revision.parameters =
             AssembleRevision(B, &revision, chain.lastBase.cdata(),
                              chain.lastBase.size(), time, step);
@@ -1559,7 +1631,9 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         revision.weightFieldPublished = false;
         if (revision.weightObject >= 0) {
             const RigExecWeightPacket &packet =
-                B.weightPackets[size_t(revision.weightObject)];
+                revision.weightCurrentPhase
+                    ? revision.currentPhasePacket
+                    : B.weightPackets[size_t(revision.weightObject)];
             if (packet.valid) {
                 const size_t logicalCount =
                     revision.weightOperationDomain ? size_t(1)
@@ -1735,7 +1809,10 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             }
         } else if (revision.parameters.enabled && !packetValid &&
                    revision.weightObject >= 0 &&
-                   !B.weightPackets[size_t(revision.weightObject)].valid) {
+                   !(revision.weightCurrentPhase
+                         ? revision.currentPhasePacket
+                         : B.weightPackets[size_t(revision.weightObject)])
+                        .valid) {
             // The other half of the same sentence, and the reason the arms
             // are exclusive: with a weight object bound, the assembler never
             // reads inputs:defaultWeight, so a rig whose scalar is out of
