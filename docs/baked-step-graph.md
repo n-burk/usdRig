@@ -25,6 +25,11 @@ A skin revision is cut into contiguous vertex chunks at Build (§6); each chunk 
 `FinalMatrix`/`BaseMatrix` slots of ITS OWN influences and for nothing else, writes its range of
 the revision's own buffer, and the fuse decides afterwards whether the revision applied at all.
 
+Every writer of a pose slot has storage of its own (§3.1). The frames are SSA: a reader binds at
+Build to the entry holding the version live where it runs, so no version is ever overwritten and
+a step that skipped a run leaves every reader bound to it exactly what it is entitled to. That is
+what lets a drag run its own cone instead of the program.
+
 A frame runs only the CLOSURE of what its sources say moved (§7). Sources always run and are
 compared by value; a skipped cluster keeps its slots, its diagnostics and its structural counters.
 `RIGEXEC_BAKED_VERIFY_CONES=1` runs every generation twice -- once as the cone decided, once
@@ -52,9 +57,9 @@ cone verifier on in each.
 ### The schedule, on the biped
 
 ```
-rigExec baked schedule: 458 step(s), 1068 edge(s), 326 provider slot(s)
+rigExec baked schedule: 458 step(s), 1066 edge(s), 326 provider slot(s)
   mode=serial grain=6.98us concurrency=20
-  clusters=57 (289 edge(s)) serial=558.08us criticalPath=294.46us (1.90x)
+  clusters=57 (288 edge(s)) serial=558.08us criticalPath=294.46us (1.90x)
   ChainStatus 1        CommitApply 2      CommitDelta 2      ComposeSubtree 93
   Constraint 65        Derived 1          InfluenceFold 1    PropagateChunk 4
   ProviderMatrix 252   RevisionChunk 7    RevisionFuse 1     RevisionStatic 1
@@ -102,6 +107,14 @@ Serial is 12.5% FASTER than the straight line and runs on half the CPU. §8.4's 
 5% of `b705950`) therefore passes with room; its second half -- parallel faster than serial -- does
 not, and **`RIGEXEC_BAKED_SCHEDULE` still defaults to `serial`**. What follows is why, measured
 rather than argued, so that nobody repeats the experiment.
+
+Versioned storage (§3.1) did not move that. The two libraries were measured A/B through one
+`rigExecPose --repeat 150`, twelve interleaved pairs on a busier box: min 666.8 -> 665.1us, median
+716.2 -> 700.4us in serial, and 713.7 -> 725.9us (min) in parallel. The carry copies are the only
+per-frame work the version table adds and they measure nothing -- compiled out, the serial min
+moves 666.2 -> 660.4us, inside a box whose samples are bimodal at 670 and 720. Measure both
+libraries in one session before quoting either: a single-sided run of the same pair read +1.6% the
+other way an hour earlier.
 
 **Where the frame goes** (`RIGEXEC_BAKED_STEP_TIMING=40`, us/frame; the instrument costs about 5%
 of what it reports, so read the shares, not the total). Both executors time a step with a PAIR of
@@ -202,37 +215,69 @@ strength of one asset.
 
 ### What a drag costs
 
-No tool takes a drag, so this is 50 `SetInteractiveOverrides` + `Evaluate` iterations on one
-control of `Biped.usda`, best of five, us per frame:
+`rigExecPose --drag <prim> <attr> <steps>` is the manipulator's frame: an override placed through
+`SetInteractiveOverrides`, a generation asked for, a pose drawn, over and over on one control at one
+time. The displacements are a triangle wave of twenty distinct values, so no step ever hands the rig
+the value the step before it did -- a ramp that repeated itself would measure a cone skipping
+everything and call it a fast drag.
 
-| control | dynamic | baked | baked, without the per-override `_skinTopologies.Clear()` |
-|---|---|---|---|
-| `arm_l_fk_wrist_l_bind` (small cone) | 7800 | 1167 | 759 |
-| `hips_ctl` (large cone) | 9290 | 1373 | 929 |
+Median of 60 steps, min of three runs, `Biped.usda`, µs per drag step. The `b705950` columns are
+this same tool's source compiled against the straight-line library, so the two sides differ only in
+the library. "wide clear" is the old unconditional `_skinTopologies.Clear()` on every override set:
 
-The baked path is 6.7-7.7x the dynamic one on a drag. Of what is left, the single largest line
-item is the cache clear [S29] names: dropping `_skinTopologies` on every override set costs
-~405us on the wrist drag (35% of the frame) and ~430us on the hips drag (31%), because the
-prologue then re-reads and re-compares 105k layout elements. It buys nothing numerically -- the
-cache keeps the previous layout as a CANDIDATE and hands back the same pointer for arrays that
-compare equal, which is exactly why the packet does not change and the revision does not
-re-execute. **The clear is left alone**, because a third of a drag frame is a large cost and not a
-dominating one, and because the narrow version is not as simple as it looks: the predicate
-"the override set names a skin mover property" has to follow the same connection walk the layout
-attributes are read through, or an override one hop upstream of a connected `jointIndices` is
-missed and the deformation is silently stale. The number is recorded here so the group that lands
-the narrow clear lands the connection walk and a test with it.
+| control | b705950 dynamic | b705950 baked | serial | parallel | serial, wide clear | parallel, wide clear |
+|---|---|---|---|---|---|---|
+| `neck_end_ctl` (head end) | 7000 | 1135 | **746** | 769 | 1045 | 1262 |
+| `arm_l_fk_wrist_l_bind` | 7108 | 1140 | **565** | 661 | 1014 | 926 |
+| `hips_ctl` | 7626 | 1147 | **759** | 814 | 1069 | 1121 |
+| `spine_end_ctl` | 7441 | 1177 | **729** | 801 | 1054 | 1087 |
 
-Both drags run every cluster of the program (57 of 57), and that is the restore closure doing its
-job rather than failing to: a constraint READ-MODIFY-WRITES its target's frame, so restoring the
-version it read pulls in the compose that wrote it, and everything downstream of that compose
-comes with it. Where cone re-execution pays on this rig is the case it was written for:
+The biped authors no `brow` control -- the `brow_*_bind` prims are joints -- so the head end of the
+control chain stands in for the smallest facial cone the rig has.
 
-| | clusters run |
-|---|---|
-| `Biped_anim`, a frame already evaluated at that time | 8 of 57 |
-| `Biped.usda`, a control overridden with its own authored value and held | 8 of 57, 0 revisions executed |
-| `spider_legs`, a repeated frame | 0 of 1 |
+Two changes account for the drop from 1135-1177 to 565-759. The larger is the topology clear
+[S29]: dropping every skin layout on every override set costs 280-460µs of a drag frame, because
+the prologue then re-reads and re-compares 105k layout elements that no manipulator touched. It
+buys nothing numerically -- `RigExecSkinTopologyCache` keeps the previous layout as a CANDIDATE and
+hands back the same pointer for arrays that compare equal, which is exactly why the packet does not
+change and the revision does not re-execute -- so the whole cost is the re-read. The rule now is:
+
+> Drop the layouts only for an override set that can REACH a skin mover's layout, and decide
+> "can reach" with the same connection walk the layout is read through
+> (`RigExecResolvedInputs::GetAttribute`: one authored connection per hop, the resolved map
+> consulted at every hop). The set is each skin mover's `rigExec:jointIndices`,
+> `rigExec:jointWeights`, `rigExec:elementSize` and `rigExec:skinningMethod`, plus every attribute
+> upstream of one of them along that walk -- an override one hop upstream of a connected
+> `jointIndices` is the case that separates a re-read from a silently stale deformation. Answer YES
+> wherever the predicate is unsure: a computation override names no property to compare, and a rig
+> whose movers are not resolved yet has nothing to compare against. The answer is cached and
+> dropped exactly where the layouts are (every notice, every recompile), so the two can never
+> describe different epochs. `inputs:enabled` and `inputs:defaultWeight` are deliberately NOT in
+> the set: they are read per frame and never cached, so an override on one reaches the next
+> generation without anything being dropped.
+>
+> The dynamic path shares the cache, so this changes no published value on either path.
+> `testRigExecSkinTopology` holds both halves: an override one hop upstream of a connected
+> `rigExec:skinningMethod` drops the layouts and the deformation follows it, and an override on a
+> control avar keeps them while the deformation still follows the drag.
+
+The smaller is the cone. With versioned pose storage (§3.1) a drag runs only what it can reach:
+
+| | clusters run, before | after |
+|---|---|---|
+| `Biped_anim`, a frame already evaluated at that time | 8 of 57 | **1 of 57** |
+| `Biped.usda`, a control overridden with its own authored value and held | 8 of 57 | **1 of 57**, 0 revisions executed |
+| a constraint-input drag (`elbowTwist_l_bind_aim.inputs:defaultWeight`) | 57 of 57 | **42 of 57** |
+| a leaf control drag (`arm_l_fk_wrist_l_bind.avars:rz`) | 57 of 57 | **52 of 57** (the graph's own bound: 52) |
+| `spider_legs`, a repeated frame | 0 of 1 | 0 of 1 |
+
+The leaf-control cone is large because the compose partition is coarse -- one `ComposeSubtree` step
+covers a whole branch of the provider forest, so a wrist avar dirties the cluster that composes its
+whole arm, and every matrix and skin chunk below it. That is a partition question, not a cone one:
+the assertion in `testRigExecBakedSchedule` is against the bound the graph itself computes, so a
+finer partition tightens the number and the test with it.
+
+The baked drag is still 9-13x the dynamic path's, which is the point of the exercise.
 
 ### Deviations from §§1-10, each with its reason
 
