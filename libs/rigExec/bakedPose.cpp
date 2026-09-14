@@ -1798,12 +1798,21 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
 
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedPublish", "baked");
+        // A biped frame publishes about 850 keys into five ordered maps and
+        // every one of them used to be a search from the root. The two
+        // passes below split that walk in half: the first decides, in the
+        // publication list's own order, which joints publish a matrix and
+        // which say why they do not -- the order those lines have always
+        // been in -- and the second fills the maps in PATH order, where
+        // every key belongs immediately past the one before it and a hint at
+        // the map's end makes the insertion one comparison.
+        //
+        // Deciding first also settles the bail: a frame that cannot publish
+        // returns before a single key is inserted, where it used to return
+        // with the maps half filled. The caller drops the pose either way.
         for (size_t k = 0; k < B.jointPaths.size(); ++k) {
             const int slot = B.jointSlots[k];
-            const RigExecPointFrame &baseFrame = B.base[size_t(slot)];
             const RigExecPointFrame &finalFrame = B.fin[size_t(slot)];
-            pose->jointFramesBase[B.jointPaths[k]] = baseFrame;
-            pose->jointFramesFinal[B.jointPaths[k]] = finalFrame;
             // The point frame is the status bearer; publishing an identity
             // matrix for a degenerate frame would let a matrix-only consumer
             // deform with a plausible-but-wrong transform.
@@ -1812,20 +1821,39 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
                     !RigExecBakedUsable(finalFrame)) {
                     return false;  // the dynamic fallback needs exec
                 }
-                pose->jointMatricesFinal[B.jointPaths[k]] =
-                    B.finalMatrix[size_t(slot)];
+                B.jointMatrixPublished[k] = 1;
             } else {
+                B.jointMatrixPublished[k] = 0;
                 pose->diagnostics.push_back(
                     "joint " + B.jointPaths[k].GetString() +
                     " has a degenerate final frame; matrix omitted");
             }
         }
+        const bool jointsInOrder = B.jointPathsAscending;
+        for (const int index : B.jointPublishOrder) {
+            const size_t k = size_t(index);
+            const int slot = B.jointSlots[k];
+            RigExecBakedEmplace(&pose->jointFramesBase, jointsInOrder,
+                                B.jointPaths[k], B.base[size_t(slot)]);
+            RigExecBakedEmplace(&pose->jointFramesFinal, jointsInOrder,
+                                B.jointPaths[k], B.fin[size_t(slot)]);
+            if (B.jointMatrixPublished[k]) {
+                // A skipped key leaves the hint at the last one that landed,
+                // which is still the largest in the map: omitting entries
+                // keeps the sequence ascending.
+                RigExecBakedEmplace(&pose->jointMatricesFinal, jointsInOrder,
+                                    B.jointPaths[k],
+                                    B.finalMatrix[size_t(slot)]);
+            }
+        }
         // Most controls are animator inputs and publish their base frame; a
         // control a constraint names publishes the revised one. Both are the
         // same slot here, because the walk wrote the revision into it.
-        for (size_t k = 0; k < B.controlPaths.size(); ++k) {
-            pose->controlFrames[B.controlPaths[k]] =
-                B.fin[size_t(B.controlSlots[k])];
+        for (const int index : B.controlPublishOrder) {
+            const size_t k = size_t(index);
+            RigExecBakedEmplace(&pose->controlFrames, B.controlPathsAscending,
+                                B.controlPaths[k],
+                                B.fin[size_t(B.controlSlots[k])]);
         }
     }
 
@@ -1838,8 +1866,10 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // runtime toggle, rather than cached in a step: either half of the toggle
     // can move without the epoch moving.
     if (*B.guideTaps && *B.solverGuidesEnabled) {
-        for (const auto &[solverPath, si] : B.solverArrays) {
-            pose->solverFrames[solverPath] = B.aggregates[size_t(si)].frames;
+        for (const int index : B.solverPublishOrder) {
+            const auto &[solverPath, si] = B.solverArrays[size_t(index)];
+            RigExecBakedEmplace(&pose->solverFrames, B.solverArraysAscending,
+                                solverPath, B.aggregates[size_t(si)].frames);
         }
     }
 
@@ -1861,8 +1891,12 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.
+    //
+    // propertyResults is itself an ordered map and movedProperties is empty
+    // until here, so this walk is always ascending -- no flag to consult.
     for (const auto &[target, value] : B.propertyResults) {
-        pose->movedProperties[target] = value;
+        pose->movedProperties.emplace_hint(pose->movedProperties.end(),
+                                           target, value);
     }
     return true;
 }

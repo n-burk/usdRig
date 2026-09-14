@@ -49,6 +49,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <set>
 #include <string>
 #include <utility>
@@ -1243,6 +1244,40 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
         B.solverArrays.emplace_back(solverPath, it->second);
     }
+    // Sorted once, here, so the epilogue can fill each published map from
+    // its end instead of searching it for every key. The lists themselves
+    // are NOT in path order -- the biped's 252 joints and 74 controls both
+    // arrive in binding order -- so the permutation is the whole point.
+    const auto publishOrder = [](const std::vector<SdfPath> &paths,
+                                 std::vector<int> *order) {
+        order->resize(paths.size());
+        std::iota(order->begin(), order->end(), 0);
+        std::sort(order->begin(), order->end(), [&](int a, int b) {
+            return paths[size_t(a)] < paths[size_t(b)];
+        });
+        // Strictly ascending, not merely sorted: a repeated path would make
+        // an emplace keep the first value where the assignment it replaces
+        // kept the last, so a list that names one twice is published the
+        // old way.
+        for (size_t k = 1; k < order->size(); ++k) {
+            if (!(paths[size_t((*order)[k - 1])] <
+                  paths[size_t((*order)[k])])) {
+                return false;
+            }
+        }
+        return true;
+    };
+    B.jointPathsAscending = publishOrder(B.jointPaths, &B.jointPublishOrder);
+    B.controlPathsAscending =
+        publishOrder(B.controlPaths, &B.controlPublishOrder);
+    std::vector<SdfPath> solverPaths;
+    solverPaths.reserve(B.solverArrays.size());
+    for (const auto &entry : B.solverArrays) {
+        solverPaths.push_back(entry.first);
+    }
+    B.solverArraysAscending = publishOrder(solverPaths, &B.solverPublishOrder);
+    // Sized at Build so the epilogue's two passes allocate nothing.
+    B.jointMatrixPublished.assign(B.jointPaths.size(), 0);
 
     // ---- geometry ------------------------------------------------------------
     //

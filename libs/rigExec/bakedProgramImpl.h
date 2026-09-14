@@ -317,6 +317,28 @@ RigExecBakedRead(const RigExecBakedInput<T> &input,
     return value;
 }
 
+/// Publishes \p value at \p key into \p map, in one comparison when the
+/// caller walks its keys in ascending order.
+///
+/// \p inOrder is the caller's promise that every key it publishes into this
+/// map is strictly greater than the last one it published, which makes the
+/// map's end the correct hint and the insertion O(1) rather than a search
+/// from the root. Strictly greater matters twice over: it is what makes the
+/// hint right, and it is what makes an emplace the same publication as the
+/// assignment it replaced, because no key is ever published twice. Without
+/// the promise this IS that assignment.
+template <class Map, class Value>
+inline void
+RigExecBakedEmplace(Map *map, bool inOrder, const SdfPath &key,
+                    const Value &value)
+{
+    if (inOrder) {
+        map->emplace_hint(map->end(), key, value);
+    } else {
+        (*map)[key] = value;
+    }
+}
+
 // True when \p input has to be re-read; used only to size the report.
 template <class T>
 inline bool
@@ -1250,6 +1272,34 @@ struct RigExecBakedProgramImpl {
     std::vector<int> controlSlots;
     std::vector<SdfPath> controlPaths;
     std::vector<std::pair<SdfPath, int>> solverArrays;  // guide publication
+    /// The order to fill the published maps in: the publication list's
+    /// indices, sorted by path.
+    ///
+    /// A biped frame publishes about 850 keys into five ordered maps and
+    /// every one of them used to be a search from the root. Filled in path
+    /// order instead, each key belongs immediately past the one before it,
+    /// so a hint at the map's end makes the insertion one comparison. The
+    /// order is a PERMUTATION and not the list itself, because the lists
+    /// arrive from the evaluator in binding order -- measured on the biped,
+    /// neither the joints nor the controls come out in path order, so the
+    /// obvious "just walk the list" is wrong on the one rig this was written
+    /// for. Everything the walk ORDER is observable through (the degenerate
+    /// frame diagnostics) stays in the list's own order; only the map
+    /// filling moves.
+    std::vector<int> jointPublishOrder;
+    std::vector<int> controlPublishOrder;
+    std::vector<int> solverPublishOrder;
+    /// Whether the sorted orders above are STRICTLY ascending -- which they
+    /// are unless a list names one path twice. A repeated path would make an
+    /// emplace keep the first value where the assignment it replaces kept
+    /// the last, so such a list is published the old way.
+    bool jointPathsAscending = false;
+    bool controlPathsAscending = false;
+    bool solverArraysAscending = false;
+    /// Per joint, whether this run's final frame earned a published matrix.
+    /// Written by the diagnostic pass, read by the fill pass; sized at
+    /// Build, so the epilogue allocates nothing.
+    std::vector<char> jointMatrixPublished;
 
     // ---- geometry ----------------------------------------------------------
     // One entry per revision of one chain, in chain order. The packet is
