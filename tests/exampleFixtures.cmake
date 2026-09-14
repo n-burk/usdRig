@@ -71,7 +71,7 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "13_ReadPhases.usda|1001,1012,1024,1036,1048|/ReadPhaseAsset/Rig/Controls/LiftCtl|avars:ty|/ReadPhaseAsset/Rig/Weights/CageW|rigExec:defaultWeight|NO|geometry-ops"
     # -- the constraint stages: every one aims at a plain UsdGeomXformable --
     "aimtest.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"
-    "aimtest_points.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|NO|constraints-providers"
+    "aimtest_points.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"
     "rotateConstraint.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecRotationConstraint1|inputs:defaultWeight|YES|-"
     "rigexec_flat.usda|0,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"
     "par_rot_aim.usd|0,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"

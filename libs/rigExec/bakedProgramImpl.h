@@ -433,6 +433,7 @@ enum class RigExecBakedSlotDomain : uint8_t {
     CommitTable,         ///< one commit's merged candidate table
     CommitDelta,         ///< one commit's per-candidate hierarchy delta
     CommitStaging,       ///< one propagation pair's staged frame and outcome
+    ConstraintDelta,     ///< one geometry-domain constraint's measured delta
     PropertyResult,      ///< propertyResults[t]; filled by the prologue
     ChainBase,           ///< chains[c].lastBase; filled by the prologue
     RevisionPacket,      ///< one revision's assembled packet, status, executed
@@ -889,6 +890,9 @@ struct RigExecBakedCones {
     /// frame the prologue read for it. What a moved stage transform under a
     /// constraint source makes dirty.
     std::vector<std::vector<int>> nativeSourceClusters;
+    /// Geometry-domain delta base -> the cluster of the constraint step that
+    /// measures against it.
+    std::vector<std::vector<int>> deltaBaseClusters;
     /// Steps whose dirtiness depends on time or on a standing override.
     std::vector<int> varyingSteps, overrideSteps;
 };
@@ -967,9 +971,18 @@ struct RigExecBakedCommit {
     /// propagated descendant and the second write carries the first.
     std::vector<uint32_t> slotCarry, slotBaseCarry;
     std::vector<uint32_t> descendantCarry, descendantBaseCarry;
-    /// A constraint's own reads: one per source, plus the world-up object.
+    /// A constraint's own reads: one per source, plus the world-up object,
+    /// plus the target frame it solves FROM -- which a geometry-domain
+    /// constraint reads without ever declaring the target a candidate.
     std::vector<uint32_t> sourceReads;
     uint32_t worldUpRead = 0;
+    uint32_t targetRead = 0;
+    /// Whether this run's exit records the target's frame for a read phase.
+    /// True for every transform-domain exit and for a geometry-domain
+    /// constraint that never got as far as solving; false once a
+    /// geometry-domain constraint has its sources, which is where the
+    /// dynamic walk stops recording for one.
+    bool recordAfter = true;
     /// One provider above a NATIVE Xformable source: the slot, and the
     /// versions of its base and final frames live where this commit runs.
     /// The deepest one whose points moved is the revision such a source
@@ -1297,6 +1310,14 @@ struct RigExecBakedProgramImpl {
         bool preserveInputUp = false;
         TfToken worldUpType;
         GfVec3d sceneUp{0, 1, 0};
+        /// The GEOMETRY domain: non-empty when rigExec:moves named
+        /// <prim>.points, in which case this constraint revises no
+        /// transform at all -- it measures a delta against the target's own
+        /// authored transform and hands it to the Matrix revision the same
+        /// mover contributes. `deltaBase` indexes the dense delta tables.
+        SdfPath pointsTarget;
+        SdfPath deltaBasePath;
+        int deltaBase = -1;
         int worldUpObject = -1;
         int worldUpNative = -1;
         SdfPath worldUpPath;
@@ -1514,6 +1535,11 @@ struct RigExecBakedProgramImpl {
         RigExecRevisionBinding binding;
         std::vector<int> influenceSlots;
         int transformSlot = -1;
+        /// The geometry-domain constraint whose delta IS this revision's
+        /// transform, as an index into the dense delta tables, or -1. Joined
+        /// on the mover path at Build, because that is the key the dynamic
+        /// walk's own hand-off uses.
+        int constraintDelta = -1;
         /// The solver whose aggregate supplies values.driverFrames, as an
         /// index into `solvers`, or -1 when this revision reads none. The
         /// dynamic path takes it off a per-revision tap on the solver's
@@ -1714,16 +1740,28 @@ struct RigExecBakedProgramImpl {
     std::vector<GeomChain> chains;
 
 
-    /// What each geometry-domain constraint measured, keyed by the MOVER
-    /// that produced it: the delta between its solved frame and its target's
-    /// authored transform. Emptied at the head of every run and consumed by
-    /// the geometry half's packet assembly; the WRITER is the pose walk's
-    /// geometry-domain constraint, which does not exist yet -- IsBakeable
-    /// refuses one, so the map is empty on every rig that bakes today. The
-    /// hand-off is here, in the same direction, because it is the one the
-    /// dynamic walk performs with its own constraintDeltas map, and the
-    /// group that adds the writer should not have to invent it.
-    std::map<SdfPath, GfMatrix4d> constraintDeltas;
+    /// What each geometry-domain constraint measured: the delta between its
+    /// solved frame and its target's own authored transform, which is the
+    /// matrix the Matrix revision that same mover contributes rides. Dense
+    /// and indexed by `Constraint::deltaBase`, because it is written by a
+    /// STEP -- a shared std::map is an allocation and a race, whatever the
+    /// slots say -- and read by the InfluenceFold of the revision whose
+    /// mover produced it, which is the same hand-off the dynamic walk's own
+    /// constraintDeltas map performs, in the same direction.
+    ///
+    /// It is a SLOT and not a per-run delta: what a skipped constraint step
+    /// leaves here is what it would have measured again, so it is kept
+    /// across runs rather than cleared at the head of one.
+    std::vector<GfMatrix4d> deltaValues;
+    std::vector<char> deltaPresent;
+    /// Per geometry-domain constraint, the target's own transform relative
+    /// to the asset root -- a STAGE read, made by the prologue, and a source
+    /// the cone compares by value. It is the AUTHORED transform even when
+    /// the target is a RigExecJoint: RigExecXformable inherits Xformable and
+    /// the dynamic walk measures against the stage unconditionally.
+    std::vector<SdfPath> deltaBasePaths;
+    std::vector<GfMatrix4d> deltaBaseMatrix, lastDeltaBaseMatrix;
+    std::vector<char> deltaBaseOk, lastDeltaBaseOk;
 
     // ---- weight objects ----------------------------------------------------
     //
@@ -1890,6 +1928,9 @@ struct RigExecBakedConstraintSpec {
     /// for a RigExec provider, whose frame the walk always has.
     SdfPathVector sources;
     SdfPathVector sourceXforms;
+    /// Non-empty when rigExec:moves named <prim>.points: the constraint
+    /// writes the GEOMETRY domain and revises no transform.
+    SdfPath pointsTarget;
     /// Empty when the aim constraint named no world-up object.
     SdfPath worldUpObject;
     SdfPath worldUpXform;
@@ -2285,7 +2326,8 @@ struct RigExecBakedRunShadow {
     std::vector<CommitState> commits;
     std::vector<ChainState> chains;
     std::vector<StepState> steps;
-    std::map<SdfPath, GfMatrix4d> constraintDeltas;
+    std::vector<GfMatrix4d> deltaValues;
+    std::vector<char> deltaPresent;
     bool avarsDisturbed = false;
 };
 

@@ -79,6 +79,17 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         out.finalPhase = r.transformFinalPhase;
         out.skinTopologyFixed = r.skinTopologyFixed;
         out.snapshotAfter = r.snapshotAfter;
+        // The geometry-domain constraint whose measured delta IS this
+        // revision's transform. The join key is the MOVER path, which is
+        // what the dynamic walk's own constraintDeltas map is keyed by; the
+        // pose half is baked first, so the constraint is already here.
+        for (const RigExecBakedProgramImpl::Constraint &constraint :
+                 B.constraints) {
+            if (constraint.deltaBase >= 0 && constraint.path == r.moverPath) {
+                out.constraintDelta = constraint.deltaBase;
+                break;
+            }
+        }
         // A declared phase is the only thing that reads the snapshot store,
         // and the pose half fills its half of that store only when one
         // exists. All THREE consumers the dynamic walk has are counted: the
@@ -529,6 +540,14 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 RigExecBakedStep &fold = AddGeometryStep(
                     &B, RigExecBakedStepKind::InfluenceFold, id);
                 DeclareMatrixReads(revision, &fold);
+                // The delta a geometry-domain constraint measured for this
+                // mover IS this revision's transform, so the fold waits for
+                // the constraint step that writes it.
+                if (revision.constraintDelta >= 0) {
+                    fold.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::ConstraintDelta,
+                        revision.constraintDelta));
+                }
                 if (skin) {
                     fold.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::RevisionPacket, id));
@@ -799,9 +818,9 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
     // both a bound transform provider and a delta, which cannot arise: a
     // geometry-domain constraint's binding.transform is empty -- that is what
     // makes the delta the only source of the matrix.
-    if (const auto delta = B.constraintDeltas.find(revision->moverPath);
-        delta != B.constraintDeltas.end()) {
-        revision->transform = delta->second;
+    if (revision->constraintDelta >= 0 &&
+        B.deltaPresent[size_t(revision->constraintDelta)]) {
+        revision->transform = B.deltaValues[size_t(revision->constraintDelta)];
         revision->haveTransform = true;
     }
     for (size_t k = 0; k < revision->influenceSlots.size(); ++k) {

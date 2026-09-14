@@ -527,7 +527,8 @@ RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
     base = program.base;
     fin = program.fin;
     aggregates = program.aggregates;
-    constraintDeltas = program.constraintDeltas;
+    deltaValues = program.deltaValues;
+    deltaPresent = program.deltaPresent;
     avarsDisturbed = program.avarsDisturbed;
 
     solvers.resize(program.solvers.size());
@@ -591,7 +592,8 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
     B.base = base;
     B.fin = fin;
     B.aggregates = aggregates;
-    B.constraintDeltas = constraintDeltas;
+    B.deltaValues = deltaValues;
+    B.deltaPresent = deltaPresent;
     B.avarsDisturbed = avarsDisturbed;
     // Run-local by construction: the prologue empties it, so a second run
     // over one frame has to start with it empty too or every record lands in
@@ -663,12 +665,14 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
                   program.baseMatrix);
     CompareVector(differences, &count, "aggregates", aggregates,
                   program.aggregates);
-    // The geometry half's hand-off from the pose half. Empty on every rig
-    // that bakes today -- IsBakeable refuses a geometry-domain constraint --
-    // and compared anyway, because the group that adds the writer will want
-    // to know whether a skipped constraint left a hole in it (§10).
-    CompareValue(differences, &count, "constraintDeltas", constraintDeltas,
-                 program.constraintDeltas);
+    // The geometry half's hand-off from the pose half: what each
+    // geometry-domain constraint measured, and whether it measured anything
+    // at all. A cone that skipped the constraint and kept last run's answer
+    // has to agree with a whole run that measured it again.
+    CompareVector(differences, &count, "constraint deltas", deltaValues,
+                  program.deltaValues);
+    CompareVector(differences, &count, "constraint delta present",
+                  deltaPresent, program.deltaPresent);
     for (size_t s = 0; s < program.solvers.size() && s < solvers.size(); ++s) {
         const std::string where =
             "solver " + program.solvers[s].path.GetString();

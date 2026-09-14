@@ -417,6 +417,17 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 c.rotationOffsets[k] = rotations[k];
             }
         }
+        // The GEOMETRY domain, decided once. The delta is measured against
+        // the TARGET PRIM's authored transform, which is a stage read the
+        // prologue makes; the prim goes into the resync index only, because
+        // nothing about its value is captured.
+        c.pointsTarget = fc.pointsTarget;
+        if (!fc.pointsTarget.IsEmpty() && !fc.targets.empty()) {
+            c.deltaBasePath = fc.targets[0];
+            c.deltaBase = int(B.deltaBasePaths.size());
+            B.deltaBasePaths.push_back(fc.targets[0]);
+            B.prims.insert(fc.targets[0]);
+        }
         c.order = RigExecBakedParseEulerOrder(
             readToken(prim, "rigExec:rotationOrder", "XYZ"));
 
@@ -570,7 +581,12 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             buildPropagation(candidates, &st.propagate);
         } else {
             st.index = bakeConstraint(entry.constraint);
-            if (B.constraints[st.index].target >= 0) {
+            // A geometry-domain constraint revises NO transform: it measures
+            // a delta and hands it to a Matrix revision. It still reads its
+            // target's frame as the input it solves from, which is the
+            // commit's targetRead and not a candidate.
+            if (B.constraints[st.index].target >= 0 &&
+                B.constraints[st.index].pointsTarget.IsEmpty()) {
                 buildPropagation({B.constraints[st.index].target},
                                  &st.propagate);
             }
@@ -694,6 +710,11 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
                 commit.sourceReads.push_back(readFin(source));
             }
             commit.worldUpRead = readFin(constraint.worldUpObject);
+            // The frame the constraint solves FROM, whichever domain it
+            // writes. For a transform-domain constraint this is the same
+            // version its one candidate reads; a geometry-domain one has no
+            // candidate at all and this is its only read of the target.
+            commit.targetRead = readFin(constraint.target);
             // A native source rides the deepest ancestor the walk has moved
             // BY THIS POINT, so both halves of every candidate ancestor --
             // its base and its final -- are read at the versions live here.
@@ -900,7 +921,8 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             }
         } else {
             commit.moverPath = B.constraints[size_t(walk.index)].path;
-            if (B.constraints[size_t(walk.index)].target >= 0) {
+            if (B.constraints[size_t(walk.index)].target >= 0 &&
+                B.constraints[size_t(walk.index)].pointsTarget.IsEmpty()) {
                 commit.slots.push_back(
                     B.constraints[size_t(walk.index)].target);
             }
@@ -1002,6 +1024,13 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             if (constraint.target >= 0) {
                 commitStep.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::PoseFin, constraint.target));
+            }
+            // A geometry-domain constraint's one write: the delta the Matrix
+            // revision of the same mover rides.
+            if (constraint.deltaBase >= 0) {
+                commitStep.writes.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::ConstraintDelta,
+                                    constraint.deltaBase));
             }
             if (constraint.worldUpObject >= 0) {
                 commitStep.reads.push_back(RigExecBakedOne(
@@ -1554,9 +1583,12 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         }
     };
     const auto record = [&] {
-        if (constraint) {
+        if (constraint && commit->recordAfter) {
+            // A geometry-domain constraint declares no candidate, so the
+            // version its target stands at here is the one it READ -- there
+            // is no write of its own to name.
             RecordFrame(B, *constraint,
-                        commit->slotWrites.empty() ? 0
+                        commit->slotWrites.empty() ? commit->targetRead
                                                    : commit->slotWrites[0],
                         step);
         }
@@ -1839,6 +1871,17 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             FinishCommit(&B, step, &commit);
         };
+        // The GEOMETRY domain writes no transform: it measures a delta
+        // against the target's authored transform and hands it to the Matrix
+        // revision the same mover contributes. Both halves of what makes it
+        // different are set up here -- the delta is absent until this run
+        // produces one, and the target's frame is recorded for a read phase
+        // only on the exits the dynamic walk records it on.
+        const int deltaBase = c.deltaBase;
+        commit.recordAfter = true;
+        if (deltaBase >= 0) {
+            B.deltaPresent[size_t(deltaBase)] = 0;
+        }
         if (c.target < 0) {
             // No slot to revise: nothing the walk can commit, and nothing to
             // record. The dynamic path reaches its target through the frame
@@ -1862,7 +1905,14 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         if (weight <= 0.0) {
             // A zero envelope is an exact dormant pass-through, decided
             // before any source is resolved so a malformed disconnected input
-            // cannot make a disabled constraint fail.
+            // cannot make a disabled constraint fail. A DORMANT geometry
+            // constraint still publishes a delta -- the identity one -- so
+            // that the revision it feeds moves the points nowhere rather
+            // than falling back to whatever matrix it last held.
+            if (deltaBase >= 0) {
+                B.deltaValues[size_t(deltaBase)] = GfMatrix4d(1.0);
+                B.deltaPresent[size_t(deltaBase)] = 1;
+            }
             finish();
             return;
         }
@@ -1923,8 +1973,18 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             finish();
             return;
         }
+        // Past this point the dynamic walk records nothing for a
+        // geometry-domain constraint: it revises no transform, so there is
+        // no "the target as of this mover" to record.
+        commit.recordAfter = deltaBase < 0;
+        // The envelope is applied exactly ONCE. In the transform domain the
+        // kernel's per-channel blend carries it; in the geometry domain the
+        // per-point lerp does, so the solve runs UNWEIGHTED and hands back
+        // the full-strength delta. Passing the envelope to both would square
+        // it, and 0.5 would come out as 0.25 on points.
+        const double solveWeight = deltaBase < 0 ? weight : 1.0;
         const std::vector<RigExecConstraintSource> &sources = commit.sources;
-        const RigExecPointFrame input = B.fin[size_t(commit.slotReads[0])];
+        const RigExecPointFrame input = B.fin[size_t(commit.targetRead)];
         RigExecPointFrame candidate = input;
         bool candidateReady = true;
         RigExecConstraintAxisMask affect;
@@ -1935,20 +1995,20 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             RigExecPositionConstraintParams params;
             params.offset = rd(c.offset);
             params.affect = affect;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyPositionConstraint(input, sources, params);
         } else if (c.type == "RigExecRotationConstraint") {
             RigExecRotationConstraintParams params;
             params.offsetDegrees = rd(c.offset);
             params.affect = affect;
             params.rotationOrder = c.order;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyRotationConstraint(input, sources, params);
         } else if (c.type == "RigExecScaleConstraint") {
             RigExecScaleConstraintParams params;
             params.offset = rd(c.offset);
             params.affect = affect;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyScaleConstraint(input, sources, params);
         } else if (c.type == "RigExecParentConstraint") {
             RigExecParentConstraintParams params;
@@ -1962,7 +2022,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.scaleAxes.y = rd(c.sY);
             params.scaleAxes.z = rd(c.sZ);
             params.rotationOrder = c.order;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyParentConstraint(input, sources, params);
         } else {
             // Aim: the same weighted source set reduced to the target point
@@ -1992,7 +2052,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 params.rotationOffsetDegrees = rd(c.rotationOffset);
                 params.affectRotation = affect;
                 params.rotationOrder = c.order;
-                params.weight = weight;
+                params.weight = solveWeight;
                 params.preserveInputUp = c.preserveInputUp;
                 const GfVec3d authoredWorldUp = rd(c.worldUpVector);
                 if (c.worldUpType == "sceneUp") {
@@ -2059,7 +2119,34 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 }
             }
         }
-        if (candidateReady) {
+        if (candidateReady && deltaBase >= 0) {
+            // The solve produced the same full-strength frame the transform
+            // domain would publish; the delta against the prim's own base
+            // transform is what the points ride.
+            //
+            //     D = F_solved * F_base^-1
+            //
+            // The prim's transform is NOT revised: a geometry-domain
+            // constraint writes points and nothing else.
+            const GfMatrix4d &baseMatrix =
+                B.deltaBaseMatrix[size_t(deltaBase)];
+            GfMatrix4d solvedMatrix(1.0);
+            if (RigExecBakedUsable(candidate) &&
+                B.deltaBaseOk[size_t(deltaBase)] &&
+                std::isfinite(baseMatrix.GetDeterminant()) &&
+                baseMatrix.GetDeterminant() != 0.0 &&
+                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                      candidate.points, &solvedMatrix)) {
+                B.deltaValues[size_t(deltaBase)] =
+                    solvedMatrix * baseMatrix.GetInverse();
+                B.deltaPresent[size_t(deltaBase)] = 1;
+            } else {
+                step->diagnostics.push_back(
+                    c.path.GetString() + " could not measure its delta "
+                    "against " + c.deltaBasePath.GetString() +
+                    "; constraint passed through");
+            }
+        } else if (candidateReady) {
             // The candidate sweep a constraint commit opens with: an unusable
             // revision is diagnosed and the whole commit passes through.
             if (!RigExecBakedUsable(candidate)) {

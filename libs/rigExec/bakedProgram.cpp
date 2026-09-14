@@ -353,9 +353,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
 
     // ---- constraints -------------------------------------------------------
     for (const auto &constraint : E._frameConstraints) {
-        if (!constraint.pointsTarget.IsEmpty()) {
-            say("geometry-domain constraint", constraint.moverPath);
-        }
         if (constraint.schemaType == "RigExecSingleChainIkConstraint") {
             say("SingleChainIK constraint", constraint.moverPath);
             continue;
@@ -1233,6 +1230,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             entry.constraint.snapshotAfter =
                 !fc.targets.empty() &&
                 snapshotAfter(fc.targets[0], fc.moverPath);
+            entry.constraint.pointsTarget = fc.pointsTarget;
             for (const auto &source : fc.sources) {
                 entry.constraint.sources.push_back(source.sourcePath);
                 entry.constraint.sourceXforms.push_back(source.xformPath);
@@ -1246,6 +1244,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // The native sources the walk registered, and the two buffers the
     // prologue fills and the cone compares. Sized here, once, and never
     // resized in a run.
+    B.deltaValues.assign(B.deltaBasePaths.size(), GfMatrix4d(1.0));
+    B.deltaPresent.assign(B.deltaBasePaths.size(), 0);
+    B.deltaBaseMatrix.assign(B.deltaBasePaths.size(), GfMatrix4d(1.0));
+    B.lastDeltaBaseMatrix = B.deltaBaseMatrix;
+    B.deltaBaseOk.assign(B.deltaBasePaths.size(), 0);
+    B.lastDeltaBaseOk = B.deltaBaseOk;
     B.nativeFrames.assign(B.nativeSources.size(), RigExecPointFrame());
     B.lastNativeFrames = B.nativeFrames;
     B.nativeFrameOk.assign(B.nativeSources.size(), 0);
@@ -1453,7 +1457,8 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // False means a target's transform could not be resolved at all, which
     // is the one thing the dynamic walk gives the generation back for here.
     const auto stageFrames = [&B, &E, time, pose]() {
-        if (B.xformSlots.empty() && B.nativeSources.empty()) {
+        if (B.xformSlots.empty() && B.nativeSources.empty() &&
+            B.deltaBasePaths.empty()) {
             return true;
         }
         UsdGeomXformCache cache(time);
@@ -1473,6 +1478,17 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
             B.xformBase[k] = matrix;
             B.base[slot] = frame;
             B.fin[slot] = frame;
+        }
+        // And the target transform each geometry-domain constraint measures
+        // its delta against. A stage read even when the target is a
+        // RigExecJoint, because RigExecXformable inherits Xformable and the
+        // dynamic walk measures against the authored transform rather than
+        // the rig frame. Do not "improve" this: parity says mirror it.
+        for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
+            GfMatrix4d matrix(1.0);
+            B.deltaBaseOk[k] = E._FrameFromXformRelativeToAsset(
+                B.assetRoot, &cache, B.deltaBasePaths[k], nullptr, &matrix);
+            B.deltaBaseMatrix[k] = matrix;
         }
         // And the plain Xformables a constraint reads as a SOURCE. Only the
         // stage half is settled here: the delta such a source rides is the
@@ -1505,17 +1521,12 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // exec nothing and resolves first -- which is why this op can be the
         // same routine the dynamic path runs rather than a second copy of it.
         B.propertyResults.clear();
-        // RUN-LOCAL, and therefore a cone hazard the group that lands the
-        // writer has to answer (§7): this map is emptied here and filled by
-        // the pose walk's geometry-domain constraint, which does not exist
-        // yet. A run that SKIPS that constraint would leave the entry
-        // missing rather than leaving last run's value in it, and the
-        // assemble that find-guards it would deform as though no constraint
-        // had ever measured a delta. The two answers are to keep the map
-        // across runs the way a slot is kept, or to force a full run the way
-        // `phasedReads` does for the snapshot store. Whichever, it is a
-        // decision, not something to leave to the first frame that skips.
-        B.constraintDeltas.clear();
+        // The geometry-domain constraint deltas are NOT emptied here. They
+        // are slots: what a skipped constraint step left is what it would
+        // have measured again, and clearing them would make a cone that
+        // skips one deform as though no constraint had ever measured a
+        // delta. That was the hazard §7 named; keeping them across runs the
+        // way a slot is kept is the answer it offered.
         B.resolvedInputs->Clear();
         B.runSnapshots.Clear();
         B.chainSnapshots->Clear();

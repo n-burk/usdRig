@@ -1760,7 +1760,6 @@ static const char *const kExpectedToDecline[] = {
     "13_ReadPhases.usda",            // ... (lattice)
     "ArmRig.usda",                   // ... (blendShape)
     "ArmShotAnim.usda",              // ... (blendShape), through ArmRig
-    "aimtest_points.usda",           // geometry-domain constraint
 };
 
 // The index of \p name in kExpectedToDecline, or -1 if it is not listed.

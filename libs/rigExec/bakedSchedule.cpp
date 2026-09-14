@@ -57,6 +57,7 @@ RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain)
     case RigExecBakedSlotDomain::ChainDirty: return "ChainDirty";
     case RigExecBakedSlotDomain::ChainPoints: return "ChainPoints";
     case RigExecBakedSlotDomain::DerivedOut: return "DerivedOut";
+    case RigExecBakedSlotDomain::ConstraintDelta: return "ConstraintDelta";
     case RigExecBakedSlotDomain::Snapshots: return "Snapshots";
     }
     return "unknown";
@@ -1031,8 +1032,10 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             break;
         }
     }
-    // Which constraint steps a native source's stage transform reaches.
+    // Which constraint steps a native source's stage transform reaches, and
+    // which one each geometry-domain delta base reaches.
     cones.nativeSourceClusters.assign(B.nativeSources.size(), {});
+    cones.deltaBaseClusters.assign(B.deltaBasePaths.size(), {});
     for (const RigExecBakedStep &step : B.steps) {
         if (step.kind != RigExecBakedStepKind::Constraint) {
             continue;
@@ -1053,6 +1056,10 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         if (constraint.worldUpNative >= 0) {
             cones.nativeSourceClusters[size_t(constraint.worldUpNative)]
                 .push_back(step.cluster);
+        }
+        if (constraint.deltaBase >= 0) {
+            cones.deltaBaseClusters[size_t(constraint.deltaBase)].push_back(
+                step.cluster);
         }
     }
     for (std::vector<int> &clusters : cones.nativeSourceClusters) {
@@ -1204,6 +1211,16 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 dirty.Set(cones.avarCluster[size_t(B.xformSlots[k])]);
             }
         }
+        // And the transform each geometry-domain constraint measures its
+        // delta against, which is its target prim's own authored one.
+        for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
+            if (B.deltaBaseOk[k] != B.lastDeltaBaseOk[k] ||
+                B.deltaBaseMatrix[k] != B.lastDeltaBaseMatrix[k]) {
+                for (const int cluster : cones.deltaBaseClusters[k]) {
+                    dirty.Set(cluster);
+                }
+            }
+        }
         // And the transforms of the plain Xformables a constraint names as
         // a SOURCE, compared the same way -- frame and read-or-not together,
         // because a source that stopped resolving has moved as surely as one
@@ -1286,6 +1303,8 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     B.lastXformBase = B.xformBase;
     B.lastNativeFrames = B.nativeFrames;
     B.lastNativeFrameOk = B.nativeFrameOk;
+    B.lastDeltaBaseMatrix = B.deltaBaseMatrix;
+    B.lastDeltaBaseOk = B.deltaBaseOk;
     B.lastOverridden = B.overridden;
     B.lastPropertyResults = B.propertyResults;
     B.lastHaveBase.resize(B.chains.size());
