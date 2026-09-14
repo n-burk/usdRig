@@ -9,7 +9,7 @@
 //
 //   rigExecPose <stage> [--rig <primPath>] [--frames 1001,1024,1048]
 //               [--joints] [--targets] [--joints-out <file.usda>]
-//               [--pose-out <file.txt>]
+//               [--pose-out <file.txt>] [--repeat N]
 //               [--profile <file.trace>] [--mode dynamic|baked|parity]
 //               [--guides] [--require-baked]
 //
@@ -34,6 +34,14 @@
 // chain, derived maintenance) across every evaluated frame, writes them as
 // Chrome Trace Event JSON to <file.trace> -- openable in Perfetto
 // (ui.perfetto.dev) or chrome://tracing -- and prints a per-phase summary.
+//
+// --repeat N cycles the frame list N times instead of once. Only the last
+// pass reports: the N-1 before it evaluate and throw the pose away, so the
+// printed output of `--repeat 1` -- and of a command line that never names
+// the option -- is exactly what it always was, while the wall clock of the
+// process divides by N frames instead of one. It exists because the frames
+// of this rig cost a few hundred microseconds each and a process start
+// costs half a second; timing one frame means timing the process.
 //
 // --pose-out writes every published domain of every evaluated generation in
 // a canonical text form (%.17g doubles, %.9g floats), so two runs -- two
@@ -69,6 +77,7 @@
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -457,6 +466,7 @@ main(int argc, char **argv)
     rigExec::RigExecEvaluationMode mode =
         rigExec::RigExecEvaluationMode::Dynamic;
     std::vector<UsdTimeCode> frames;
+    int repeat = 1;
     bool showJoints = false;
     bool showTargets = false;
     bool solverGuides = false;
@@ -479,6 +489,12 @@ main(int argc, char **argv)
             jointsOut = argv[++i];
         } else if (arg == "--pose-out" && i + 1 < argc) {
             poseOut = argv[++i];
+        } else if (arg == "--repeat" && i + 1 < argc) {
+            repeat = std::atoi(argv[++i]);
+            if (repeat < 1) {
+                std::printf("--repeat wants a count of 1 or more\n");
+                return 2;
+            }
         } else if (arg == "--profile" && i + 1 < argc) {
             profileOut = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
@@ -605,6 +621,30 @@ main(int argc, char **argv)
     // geometry rather than against the previous frame.
     std::map<SdfPath, VtVec3fArray> rest;
 
+    // The silent passes. They are the same call the reporting loop makes,
+    // so they cost what a frame costs -- including the pose the evaluator
+    // returns by value, which is most of what a caller pays for. Timed here
+    // rather than around the process, because a process start costs more
+    // than half a second and swamps the microseconds being compared.
+    if (repeat > 1) {
+        const auto began = std::chrono::steady_clock::now();
+        for (int pass = 1; pass < repeat; ++pass) {
+            for (UsdTimeCode frame : frames) {
+                const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
+                if (!pose.valid || pose.moverGraphParityMismatches ||
+                    pose.bakedParityMismatches) {
+                    status = 1;
+                }
+            }
+        }
+        const double seconds =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - began).count();
+        const size_t ran = frames.size() * size_t(repeat - 1);
+        std::printf("  repeat: %zu frame(s) in %.3fs (%.1fus/frame)\n", ran,
+                    seconds, ran ? seconds * 1e6 / double(ran) : 0.0);
+    }
+
     JointExport jointExport;
     FILE *poseDump = nullptr;
     if (!poseOut.empty()) {
@@ -676,9 +716,12 @@ main(int argc, char **argv)
     // it never took is the failure this tool used to print as success, and a
     // human reading the output should see the same fact a ctest asserts.
     if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
+        // frames.size() * repeat, which is frames.size() itself unless
+        // --repeat asked for more: the line a reader has always seen.
+        const size_t evaluated = frames.size() * size_t(repeat);
         std::printf("\n  baked: %zu/%zu generation(s), %zu build(s), "
                     "%zu attempt(s)\n",
-                    evaluator.GetBakedGenerationCount(), frames.size(),
+                    evaluator.GetBakedGenerationCount(), evaluated,
                     evaluator.GetBakedProgramBuildCount(),
                     evaluator.GetBakedProgramBuildAttemptCount());
         // Asked after the loop rather than per frame: an in-epoch rebuild is
@@ -687,10 +730,10 @@ main(int argc, char **argv)
         // override the program cannot place, or a Run that declined -- since
         // neither of those makes IsBakeable false.
         if (requireBaked &&
-            evaluator.GetBakedGenerationCount() != frames.size()) {
+            evaluator.GetBakedGenerationCount() != evaluated) {
             std::printf("  FAIL: only %zu of %zu generation(s) came from the "
                         "program\n",
-                        evaluator.GetBakedGenerationCount(), frames.size());
+                        evaluator.GetBakedGenerationCount(), evaluated);
             status = 1;
         }
     }
