@@ -928,8 +928,8 @@ than 42% of the rig's joints, against 100% before.
 ## 7. Cone re-execution (drags and static frames) [S24-S28][P20-P22]
 
 Source steps are the only steps that read outside the program: Inputs, ChainBase, PropertyChains,
-SolverSources (all prologue), RevisionStatic, and Phase 3 weight-object readers. Every other step is a pure
-function of its declared reads. Sources ALWAYS run and compare their outputs by VALUE against last
+SolverSources (all prologue), RevisionStatic, and Phase 3 weight-object readers. Every other step
+is a pure function of its declared reads. Sources ALWAYS run and compare their outputs by VALUE against last
 run (11 doubles per provider, the base arrays, per-target property results, the static packet);
 "time changed" or "overridden" is never the predicate. This is what makes an override on a
 `resolvedRoutedPrims` prim (which sets no `overridden` flag, :1341-1345), a released drag

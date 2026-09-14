@@ -250,11 +250,15 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                     ? RigExecScaleBlend::Linear
                     : RigExecScaleBlend::Log;
             // The fallback is the only mode there is, so an unauthored
-            // token is never degenerate; anything else warns and publishes
-            // an empty array.
+            // token is never rejected; anything else warns and publishes an
+            // empty array -- but only once the computation has TWO inputs in
+            // hand. A null input returns the other before the token is ever
+            // read, so this cannot be `degenerate`, which would answer the
+            // half-wired blend with an empty aggregate the computation never
+            // publishes.
             if (readToken(prim, "rigExec:rotationBlend", "shortestArc") !=
                 "shortestArc") {
-                s.degenerate = true;
+                s.blendRotationRejected = true;
             }
         } else if (s.type == "RigExecSplineIk") {
             const auto r = targets(prim, "rigExec:rootControl");
@@ -429,6 +433,17 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 // it folded -- a value edit on the curve rebuilds, and an
                 // override on it cannot be placed, which is right because
                 // the dynamic path would ignore that override.
+                //
+                // Inside the read, and deliberately so: a resolved path
+                // that names nothing on this stage was never read, and the
+                // day an attribute appears there it is the epoch digest
+                // that sees it -- creating a property is a structural edit,
+                // so the epoch recompiles and this program is rebuilt with
+                // it before the next generation chooses a path. Registering
+                // a path the bake could not read would claim an
+                // invalidation this index does not owe. The fixture "the
+                // driver curve's points created later" is where that is
+                // measured.
                 B.rebuild.insert(s.ribbonPointsPath);
                 B.folded.insert(s.ribbonPointsPath);
                 B.named.insert(s.ribbonPointsPath);
@@ -1281,6 +1296,14 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // and not publishing is the same published generation, because
     // RigExecBakedRead only READS the override table and the epilogue
     // consults the toggle where the dynamic path does.
+    //
+    // The one thing it does move with the guides off is the static-input
+    // cache: RigExecBakedRead's resolved path goes through
+    // RigExecResolvedInputs::GetAttribute, whose hit/miss/bypass counters
+    // are an observable of their own (spec 5.2 [P37][S36]). Nothing in the
+    // pose can see it, and no rig asserts on those counters for a
+    // guide-only solver -- but anyone measuring that cache should know the
+    // guide pass is a client of it whether the guides are drawn or not.
     for (const int si : B.guideSolvers) {
         RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
         solver.elements.resize(solver.controls.size());
@@ -1911,6 +1934,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 if (b) aggregate = *b;
             } else if (!b) {
                 aggregate = *a;
+            } else if (s.blendRotationRejected) {
+                // Both bound, so the token is reached: the computation warns
+                // and returns nothing. The aggregate is already clear.
             } else {
                 const size_t n = a->GetSize();
                 // Clamp to [0, 1]: a blend weight outside the unit interval

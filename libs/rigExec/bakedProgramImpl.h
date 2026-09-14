@@ -1171,6 +1171,12 @@ struct RigExecBakedProgramImpl {
         int inA = -1, inB = -1;
         RigExecBakedInput<float> blendWeight;
         RigExecScaleBlend scaleMode = RigExecScaleBlend::Log;
+        /// An unsupported rigExec:rotationBlend, which is NOT a
+        /// `degenerate`: the computation returns the surviving input before
+        /// it ever looks at the token, so the rejection only bites when
+        /// BOTH inputs are bound. It is checked where the computation
+        /// checks it -- in the arm that has two aggregates in hand.
+        bool blendRotationRejected = false;
         // SplineIk: the rest description is a pure function of epoch-constant
         // rests, so exec's per-evaluation rebuild bakes out.
         RigExecSplineIkRest splineRest;

@@ -36,6 +36,7 @@
 
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -521,7 +522,7 @@ MakeGuideOnlyBlendRig()
 }
 
 // ---------------------------------------------------------------------------
-// The latent guards: RigExecTwoBoneIk, RigExecSplineIk, RigExecBlendPointFrames.
+// The latent guards: RigExecTwoBoneIk, RigExecSplineIk and the blend.
 //
 // Every one of these malformed bindings makes the computation warn and
 // publish an EMPTY aggregate; the warning never reaches the pose, so the
@@ -783,6 +784,249 @@ MakeBlendRigWithANonSolverInput()
     return stage;
 }
 
+/// Both at once: an unsupported rigExec:rotationBlend AND an input that
+/// publishes no aggregate.
+///
+/// The ORDER of the computation's two checks is the whole fixture. It
+/// returns the surviving input before it ever looks at the token, so the
+/// blend passes the FK chain through and poses the three joints -- while a
+/// bake that treated the token as a whole-solver degeneracy publishes
+/// nothing and drops all three to their rest chains. Each half alone is
+/// above, and each half alone agrees; only the conjunction tells the two
+/// orderings apart.
+UsdStageRefPtr
+MakeBlendRigWithLinearRotationAndANonSolverInput()
+{
+    const UsdStageRefPtr stage = MakeBlendRigWithANonSolverInput();
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/Blend"))
+        .GetAttribute(TfToken("rigExec:rotationBlend"))
+        .Set(TfToken("linear"));
+    return stage;
+}
+
+// ---------------------------------------------------------------------------
+// The driver curve, which is the one solver input that is scene data.
+// ---------------------------------------------------------------------------
+
+/// The driver curve's bind pose is folded into bake state, so a drag on its
+/// points must be REFUSED rather than placed.
+///
+/// The dynamic path reads that attribute straight off the stage with
+/// UsdAttribute::Get, so it ignores an override on it entirely; a program
+/// that placed one would answer a question no other path asks. Refusing is
+/// what sends the generation down the dynamic path instead.
+///
+/// Asked of the PROGRAM rather than through Evaluate on purpose: a
+/// deliberate fallback reports itself as a parity mismatch on the pose when
+/// RIGEXEC_BAKE_REQUIRED=1, which is how this suite is run.
+void
+CheckRibbonPointsOverrideIsRefused()
+{
+    const UsdStageRefPtr stage = MakeAnimatedRibbonRig();
+    RigExecRigEvaluator rig(stage, kRigPath);
+    std::vector<std::string> errors;
+    if (!rig.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL a drag on the driver curve: the fixture does not "
+                    "compile\n");
+        return;
+    }
+    std::vector<std::string> reasons;
+    const std::unique_ptr<RigExecBakedProgram> program =
+        RigExecBakedProgram::Build(&rig, &reasons);
+    CHECK(program != nullptr);
+    if (!program) return;
+    const VtVec3fArray held{GfVec3f(0, 0, 0), GfVec3f(1.0f, 2.7f, 0),
+                            GfVec3f(2.0f, 5.3f, 0), GfVec3f(3.0f, 8, 0)};
+    CHECK(!program->SetOverrides({RigExecValueOverride{
+        SdfPath("/Asset/Geom/SpineCurve"), TfToken(), TfToken("points"),
+        VtValue(held)}}));
+    // Two reasons refuse it and either is enough -- the path is folded, and
+    // it is in no binding table -- which is the point: no future rewiring
+    // of one of them can make this drag placeable quietly.
+    //
+    // The control: rigExec:sampleCount is a per-frame input of the same
+    // solver and IS placeable, so a program that refused everything would
+    // pass the line above while saying nothing.
+    CHECK(program->SetOverrides({RigExecValueOverride{
+        SdfPath("/Asset/Rig/Solvers/SpineRibbon"), TfToken(),
+        TfToken("rigExec:sampleCount"), VtValue(int(4))}}));
+}
+
+/// A ribbon whose rigExec:driverCurve names a prim that has no `points` at
+/// all -- a plain Xform, where `points` is not even a schema attribute, so
+/// the path the compiler resolves names nothing on this stage.
+///
+/// A BasisCurves cannot pose this question: `points` is builtin there, so
+/// the attribute exists whether or not anything is authored on it, and the
+/// bake reads it and registers it like any other.
+UsdStageRefPtr
+MakeRibbonRigWithNoPointsYet()
+{
+    const UsdStageRefPtr stage = MakeRibbonRig();
+    const UsdPrim future = Define(stage, "/Asset/Geom/FutureCurve", "Xform");
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineRibbon")),
+               "rigExec:driverCurve", {future.GetPath()});
+    return stage;
+}
+
+/// Authors that prim's points, keyed the way DefineDriverCurve keys them.
+void
+AuthorDriverPoints(const UsdStageRefPtr &stage)
+{
+    const VtVec3fArray rest{GfVec3f(0, 0, 0), GfVec3f(0, 2.7f, 0),
+                            GfVec3f(0, 5.3f, 0), GfVec3f(0, 8, 0)};
+    UsdAttribute points =
+        stage->GetPrimAtPath(SdfPath("/Asset/Geom/FutureCurve"))
+            .CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray);
+    points.Set(rest);
+    points.Set(rest, UsdTimeCode(1.0));
+    points.Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0.4f, 2.7f, 0),
+                            GfVec3f(1.4f, 5.3f, 0), GfVec3f(2.8f, 7.6f, 0)},
+               UsdTimeCode(3.0));
+    points.Set(rest, UsdTimeCode(5.0));
+}
+
+/// The driver curve's points CREATED after the program was built.
+///
+/// The bake read no attribute and captured two empty curves, so nothing
+/// about that path is in the program's invalidation index -- and the day
+/// the attribute appears the dynamic path starts sampling it. What catches
+/// that is the epoch digest, not the index: creating a property is a
+/// structural edit, so the epoch recompiles and the program is rebuilt with
+/// it. This is the fixture that says so; a program that answered the new
+/// curve with the empty aggregate it baked would fail here.
+void
+CheckRibbonPointsCreatedAfterTheBake()
+{
+    const char *const what = "the driver curve's points created later";
+    const UsdStageRefPtr referenceStage = MakeRibbonRigWithNoPointsYet();
+    const UsdStageRefPtr bakedStage = MakeRibbonRigWithNoPointsYet();
+    CHECK(referenceStage && bakedStage);
+    if (!referenceStage || !bakedStage) return;
+
+    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baked(bakedStage, kRigPath);
+    std::vector<std::string> errors;
+    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        return;
+    }
+    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    const RigExecRigPose before = baked.Evaluate(UsdTimeCode(3.0));
+    CHECK(before.valid);
+    if (baked.GetBakedGenerationCount() != 1) {
+        ++failures;
+        std::printf("FAIL %s: the first generation was not the program's\n",
+                    what);
+        return;
+    }
+
+    AuthorDriverPoints(referenceStage);
+    AuthorDriverPoints(bakedStage);
+
+    const RigExecRigPose a = reference.Evaluate(UsdTimeCode(3.0));
+    const RigExecRigPose b = baked.Evaluate(UsdTimeCode(3.0));
+    CHECK(a.valid && b.valid);
+    if (b.bakedParityMismatches) {
+        ++failures;
+        std::printf("FAIL %s: %zu baked parity mismatch(es)\n", what,
+                    b.bakedParityMismatches);
+        for (const std::string &line : b.diagnostics) {
+            std::printf("    %s\n", line.c_str());
+        }
+    }
+    rigExecTest::ComparePose(&failures, what, a, b);
+    if (baked.GetBakedGenerationCount() != 2) {
+        ++failures;
+        std::printf("FAIL %s: the generation after the edit was not the "
+                    "program's\n", what);
+    }
+    if (b.jointFramesFinal == before.jointFramesFinal) {
+        ++failures;
+        std::printf("FAIL %s: the new curve moved nothing\n", what);
+    }
+}
+
+/// Compares the two paths across an edit to the driver curve's points made
+/// AFTER the program was built.
+///
+/// The bind-pose half of that curve is folded into bake state, so an edit
+/// to it has to REBUILD the program: one that kept the rest it captured
+/// would sample against the bind pose it was baked with, and no frame sweep
+/// would ever say so. The live half is read per frame, and an edit to a
+/// time sample has to be followed too.
+void
+CheckRibbonPointsEdit(const char *what, bool editDefault)
+{
+    const UsdStageRefPtr referenceStage = MakeAnimatedRibbonRig();
+    const UsdStageRefPtr bakedStage = MakeAnimatedRibbonRig();
+    CHECK(referenceStage && bakedStage);
+    if (!referenceStage || !bakedStage) return;
+
+    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baked(bakedStage, kRigPath);
+    std::vector<std::string> errors;
+    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        return;
+    }
+    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    const RigExecRigPose before = baked.Evaluate(UsdTimeCode(3.0));
+    CHECK(before.valid);
+    // The program answered that generation, so what follows is a comparison
+    // between the two paths and not between the dynamic path and itself.
+    if (baked.GetBakedGenerationCount() != 1) {
+        ++failures;
+        std::printf("FAIL %s: the first generation was not the program's\n",
+                    what);
+        return;
+    }
+
+    const VtVec3fArray edited{GfVec3f(0, 0, 0), GfVec3f(1.1f, 2.7f, 0),
+                              GfVec3f(2.3f, 5.3f, 0), GfVec3f(3.5f, 7.6f, 0)};
+    for (const UsdStageRefPtr &stage : {referenceStage, bakedStage}) {
+        UsdAttribute points = stage->GetAttributeAtPath(
+            SdfPath("/Asset/Geom/SpineCurve.points"));
+        CHECK(points);
+        if (editDefault) {
+            points.Set(edited);
+        } else {
+            points.Set(edited, UsdTimeCode(3.0));
+        }
+    }
+
+    const RigExecRigPose a = reference.Evaluate(UsdTimeCode(3.0));
+    const RigExecRigPose b = baked.Evaluate(UsdTimeCode(3.0));
+    CHECK(a.valid && b.valid);
+    if (b.bakedParityMismatches) {
+        ++failures;
+        std::printf("FAIL %s: %zu baked parity mismatch(es)\n", what,
+                    b.bakedParityMismatches);
+        for (const std::string &line : b.diagnostics) {
+            std::printf("    %s\n", line.c_str());
+        }
+    }
+    rigExecTest::ComparePose(&failures, what, a, b);
+    // A folded value the edit moved REBUILDS the program; it does not make
+    // it refuse the rig, and a generation answered dynamically would have
+    // agreed with the dynamic path for the wrong reason.
+    if (baked.GetBakedGenerationCount() != 2) {
+        ++failures;
+        std::printf("FAIL %s: the generation after the edit was not the "
+                    "program's\n", what);
+    }
+    // And the edit has to have MOVED something, or nothing above followed
+    // anything.
+    if (b.jointFramesFinal == before.jointFramesFinal) {
+        ++failures;
+        std::printf("FAIL %s: the edit moved nothing\n", what);
+    }
+}
+
 }  // namespace
 
 static std::string
@@ -851,6 +1095,10 @@ main(int argc, char **argv)
                 MakeBlendRigWithLinearRotation, frames, true);
     CheckParity("ik/fk blend with a non-solver input",
                 MakeBlendRigWithANonSolverInput, frames, true);
+    CheckParity("ik/fk blend with a linear rotation blend AND a non-solver "
+                "input",
+                MakeBlendRigWithLinearRotationAndANonSolverInput, frames,
+                true);
 
     CheckParity("guide-only ribbon", MakeGuideOnlyRibbonRig, frames, true);
     CheckParity("guide-only twist distribution", MakeGuideOnlyTwistRig,
@@ -871,6 +1119,14 @@ main(int argc, char **argv)
     CheckDrag("a drag on a guide-only solver's turns", MakeGuideOnlyBlendRig,
               SdfPath("/Asset/Rig/Solvers/SecondTwist"), "inputs:twistTurns",
               VtValue(0.2));
+    CheckRibbonPointsOverrideIsRefused();
+
+    // The driver curve edited after the bake, in both of its halves.
+    CheckRibbonPointsEdit("an edit to the driver curve's bind pose",
+                          /* editDefault = */ true);
+    CheckRibbonPointsEdit("an edit to a driver curve time sample",
+                          /* editDefault = */ false);
+    CheckRibbonPointsCreatedAfterTheBake();
 
     if (failures) {
         std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);

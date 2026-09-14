@@ -309,7 +309,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             if (!_IsBakedSolverType(type)) {
                 say("solver type not baked (" + type.GetString() + ")",
                     solverPath);
-                continue;
             }
             // A TwoBoneIk that does not bind three joint rests used to be
             // refused here, resolved a second time by a copy of bakeSolver's
