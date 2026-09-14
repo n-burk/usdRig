@@ -21,6 +21,10 @@ namespace {
 
 constexpr double kEps = 1e-12;
 
+// std::acos(-1) rather than M_PI: the latter is not a standard C++ macro
+// (it needs _USE_MATH_DEFINES on MSVC and a non-strict mode on glibc).
+const double kPi = std::acos(-1);
+
 GfVec3d _ToD(const GfVec3f &v) { return GfVec3d(v[0], v[1], v[2]); }
 
 double _SafeNormalize(GfVec3d *v)
@@ -245,7 +249,7 @@ GfMatrix3d RigExecSmallestRotation(const GfVec3d &from, const GfVec3d &to)
     if (c < -1.0 + 1e-12) {
         // Antipodal: the rotation is a half turn about any perpendicular.
         // Deterministic choice so a rest/posed pair cannot disagree.
-        return _AxisAngle(_AnyPerpendicular(a), M_PI);
+        return _AxisAngle(_AnyPerpendicular(a), kPi);
     }
     GfVec3d axis = GfCross(a, b);
     _SafeNormalize(&axis);

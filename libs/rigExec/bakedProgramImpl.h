@@ -60,6 +60,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace rigExec {
@@ -812,6 +816,26 @@ struct alignas(64) RigExecBakedClusterCounter {
     char padding[64 - sizeof(std::atomic<int>)] = {};
 };
 
+/// Population count of one 64-bit word, on every supported compiler.
+///
+/// MSVC has no __builtin_popcountll; its equivalent is __popcnt64 from
+/// <intrin.h>. The bit-twiddling fallback is for a compiler with neither
+/// (C++20's std::popcount is not available under this project's C++17).
+inline size_t _RigExecPopcount64(uint64_t word)
+{
+#if defined(_MSC_VER)
+    return size_t(__popcnt64(word));
+#elif defined(__GNUC__) || defined(__clang__)
+    return size_t(__builtin_popcountll(word));
+#else
+    word -= (word >> 1) & uint64_t(0x5555555555555555);
+    word = (word & uint64_t(0x3333333333333333)) +
+           ((word >> 2) & uint64_t(0x3333333333333333));
+    word = (word + (word >> 4)) & uint64_t(0x0f0f0f0f0f0f0f0f);
+    return size_t((word * uint64_t(0x0101010101010101)) >> 56);
+#endif
+}
+
 /// A bitset over clusters, as many 64-bit words as the program needs.
 ///
 /// Cone re-execution is a handful of set unions per frame over sets whose
@@ -860,7 +884,7 @@ struct RigExecBakedClusterSet {
     size_t Count() const {
         size_t count = 0;
         for (const uint64_t word : words) {
-            count += size_t(__builtin_popcountll(word));
+            count += _RigExecPopcount64(word);
         }
         return count;
     }

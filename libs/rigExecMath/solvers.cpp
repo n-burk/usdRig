@@ -42,6 +42,10 @@ RigExecSolveFkChain(const std::vector<RigExecFkChainElement> &elements)
 
 namespace {
 
+// std::acos(-1) rather than M_PI: the latter is not a standard C++ macro
+// (it needs _USE_MATH_DEFINES on MSVC and a non-strict mode on glibc).
+const double kPi = std::acos(-1);
+
 // Rotates v about unit axis by angle (Rodrigues).
 GfVec3d
 _Rotate(const GfVec3d &v, const GfVec3d &axis, double angle)
@@ -186,7 +190,7 @@ RigExecSolveTwoBoneIk(
     GfVec3d bendAxis = GfCross(aim, bendUp);
     if (bendAxis.GetLength() < 1e-12) {
         // bendUp is guaranteed off-aim by construction; guard anyway.
-        bendAxis = GfCross(aim, _Rotate(bendUp, aim, 0.5 * M_PI));
+        bendAxis = GfCross(aim, _Rotate(bendUp, aim, 0.5 * kPi));
     }
     bendAxis.Normalize();
 

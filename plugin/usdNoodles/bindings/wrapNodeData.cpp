@@ -480,9 +480,9 @@ void _GraphModel_syncNodesFromModels(GraphModel& self, const dict& pyNodes) {
 // _GraphModel_syncNodesFromModels; called only on structural change.
 void _GraphModel_syncLinksFromModels(GraphModel& self, const list& pyLinks) {
   std::vector<LinkData> links;
-  ssize_t n = len(pyLinks);
+  Py_ssize_t n = len(pyLinks);
   links.reserve(static_cast<size_t>(n));
-  for (ssize_t i = 0; i < n; ++i) {
+  for (Py_ssize_t i = 0; i < n; ++i) {
     extract<LinkData&> linkExtract(pyLinks[i]);
     if (!linkExtract.check()) {
       continue;

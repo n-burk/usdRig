@@ -106,6 +106,82 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
         ;;
 esac
 
+# macOS only: fall back to an older SDK when the default one cannot link.
+#
+# The selected toolchain and the default SDK drift independently: a Command
+# Line Tools update can install a MacOSX27 SDK whose .tbd files name an
+# architecture the Xcode-selected linker's TAPI cannot parse, and every
+# link then fails with "unknown architecture" / tapi errors. When that is
+# the state of this machine, point SDKROOT at the newest SDK the toolchain
+# CAN link against, so the helpers build instead of failing. An explicit
+# SDKROOT is always respected and never overridden.
+#
+# This costs one trivial link on a healthy machine and does nothing at all
+# when the default links: the fallback search runs only after the default
+# has already failed, and when no installed SDK links the environment is
+# left alone so the real build reports the real error.
+if [ -z "${SDKROOT:-}" ]; then
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        Darwin)
+            _rigexec_sdk_cxx="${CXX:-c++}"
+            if command -v "$_rigexec_sdk_cxx" >/dev/null 2>&1; then
+                _rigexec_sdk_probe="$(mktemp -d "${TMPDIR:-/tmp}/rigexec-sdkprobe.XXXXXX" 2>/dev/null || echo "")"
+                if [ -n "$_rigexec_sdk_probe" ] && [ -d "$_rigexec_sdk_probe" ]; then
+                    printf 'int main(){return 0;}\n' > "$_rigexec_sdk_probe/t.cpp"
+                    if ! "$_rigexec_sdk_cxx" -o "$_rigexec_sdk_probe/t" "$_rigexec_sdk_probe/t.cpp" >/dev/null 2>&1; then
+                        : > "$_rigexec_sdk_probe/cands"
+                        _rigexec_sdk_seen=""
+                        for _rigexec_sdk_root in /Library/Developer/CommandLineTools/SDKs \
+                                "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs"; do
+                            [ -d "$_rigexec_sdk_root" ] || continue
+                            for _rigexec_sdk in "$_rigexec_sdk_root"/MacOSX*.sdk; do
+                                [ -d "$_rigexec_sdk" ] || continue
+                                _rigexec_sdk_resolved="$(cd "$_rigexec_sdk" 2>/dev/null && pwd -P 2>/dev/null || echo "")"
+                                [ -n "$_rigexec_sdk_resolved" ] || continue
+                                case " $_rigexec_sdk_seen " in
+                                    *" $_rigexec_sdk_resolved "*) continue ;;
+                                esac
+                                _rigexec_sdk_seen="${_rigexec_sdk_seen:+$_rigexec_sdk_seen }$_rigexec_sdk_resolved"
+                                _rigexec_sdk_ver="$(basename "$_rigexec_sdk_resolved" .sdk)"
+                                _rigexec_sdk_ver="${_rigexec_sdk_ver#MacOSX}"
+                                _rigexec_sdk_major="${_rigexec_sdk_ver%%.*}"
+                                _rigexec_sdk_minor="0"
+                                case "$_rigexec_sdk_ver" in
+                                    *.*) _rigexec_sdk_minor="${_rigexec_sdk_ver#*.}"
+                                         _rigexec_sdk_minor="${_rigexec_sdk_minor%%.*}" ;;
+                                esac
+                                case "$_rigexec_sdk_major" in ''|*[!0-9]*) continue ;; esac
+                                case "$_rigexec_sdk_minor" in ''|*[!0-9]*) _rigexec_sdk_minor=0 ;; esac
+                                printf '%05d%05d %s\n' "$_rigexec_sdk_major" "$_rigexec_sdk_minor" \
+                                    "$_rigexec_sdk_resolved" >> "$_rigexec_sdk_probe/cands"
+                            done
+                        done
+                        _rigexec_sdk_pick=""
+                        while read -r _rigexec_sdk_key _rigexec_sdk_try; do
+                            [ -n "${_rigexec_sdk_try:-}" ] || continue
+                            if SDKROOT="$_rigexec_sdk_try" "$_rigexec_sdk_cxx" -o "$_rigexec_sdk_probe/t" \
+                                    "$_rigexec_sdk_probe/t.cpp" >/dev/null 2>&1; then
+                                _rigexec_sdk_pick="$_rigexec_sdk_try"
+                                break
+                            fi
+                        done <<_RIGEXEC_SDK_EOF
+$(sort -rn "$_rigexec_sdk_probe/cands" 2>/dev/null)
+_RIGEXEC_SDK_EOF
+                        if [ -n "$_rigexec_sdk_pick" ]; then
+                            export SDKROOT="$_rigexec_sdk_pick"
+                            echo "NOTE: the default macOS SDK cannot link with this toolchain;" >&2
+                            echo "      using $SDKROOT instead (SDKROOT). To choose another," >&2
+                            echo "      export SDKROOT yourself; to fix the toolchain, update" >&2
+                            echo "      Xcode or run: sudo xcode-select -s /Library/Developer/CommandLineTools" >&2
+                        fi
+                    fi
+                    rm -rf "$_rigexec_sdk_probe"
+                fi
+            fi
+            ;;
+    esac
+fi
+
 # build/python is where the build stages the UsdNoodles package beside its
 # native module; see rigexec_register_usdnoodles below.
 export PYTHONPATH="$RIG/plugin/rigExecUsdview:$RIG/plugin/museAssistant:$RIG/build/python${PY_SITE:+:$PY_SITE}${PYTHONPATH:+:$PYTHONPATH}"

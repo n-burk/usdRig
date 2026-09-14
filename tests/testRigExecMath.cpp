@@ -22,6 +22,10 @@ using namespace rigExec;
 
 static int failures = 0;
 
+// std::acos(-1) rather than M_PI: the latter is not a standard C++ macro
+// (it needs _USE_MATH_DEFINES on MSVC and a non-strict mode on glibc).
+static const double kPi = std::acos(-1);
+
 #define CHECK(cond)                                                        \
     do {                                                                   \
         if (!(cond)) {                                                     \
@@ -260,7 +264,7 @@ TestOrthogonalReconstruction()
 
     // Twist rotates transverse axes about aim.
     args.policy = RigExecFramePolicy::Rigid;
-    args.twist = M_PI / 2;
+    args.twist = kPi / 2;
     const RigExecPointFrame t =
         RigExecReconstructFrame(kUnitRest, kUnitRest, args);
     CHECK(Near(t.Y() - t.Origin(), GfVec3d(0, 0, 1), 1e-9));
@@ -503,7 +507,7 @@ TestTwistSideScaleInteraction()
     // (spec §5.2): a mirrored side landmark stays mirrored under twist.
     RigExecFrameReconstructionArgs args;
     args.policy = RigExecFramePolicy::Orthogonal;
-    args.twist = M_PI / 2;
+    args.twist = kPi / 2;
 
     std::array<GfVec3d, 4> mirrored = {
         GfVec3d(0, 0, 0), GfVec3d(1, 0, 0), GfVec3d(0, 1, 0),
@@ -723,7 +727,7 @@ TestFbxRotationConstraintKernel()
     // From 170 degrees the shortest deltas are +20 and -20.  Their 1:3
     // weighted mean is -10; the global +20 offset makes +10, and global
     // weight 0.5 lands at 175 degrees rather than crossing the long arc.
-    const double radians = 175.0 * M_PI / 180.0;
+    const double radians = 175.0 * kPi / 180.0;
     const GfVec3d outputX =
         (output.X() - output.Origin()).GetNormalized();
     CHECK(Near(outputX, GfVec3d(std::cos(radians), std::sin(radians), 0),
@@ -866,7 +870,7 @@ TestFbxParentConstraintKernel()
     CHECK(Near(after.translation, GfVec3d(9.75, 4, 21.75), 1e-8));
     CHECK(Near(after.scale, GfVec3d(4.5, 3, 6.5), 1e-8));
     CHECK(Near(after.shear, before.shear, 1e-8));
-    const double radians = 12.5 * M_PI / 180.0;
+    const double radians = 12.5 * kPi / 180.0;
     CHECK(Near(after.rotation.Transform(GfVec3d(1, 0, 0)),
                GfVec3d(std::cos(radians), std::sin(radians), 0), 1e-8));
 
