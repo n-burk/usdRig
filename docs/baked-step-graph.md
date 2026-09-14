@@ -104,7 +104,11 @@ not, and **`RIGEXEC_BAKED_SCHEDULE` still defaults to `serial`**. What follows i
 rather than argued, so that nobody repeats the experiment.
 
 **Where the frame goes** (`RIGEXEC_BAKED_STEP_TIMING=40`, us/frame; the instrument costs about 5%
-of what it reports, so read the shares, not the total):
+of what it reports, so read the shares, not the total). Both executors time a step with a PAIR of
+clock reads around the body and nothing else, so the two columns measure the same interval and may
+be read against each other; the trace's per-step intervals are a different measurement (serial
+shares one read per step boundary there, so a trace interval also covers the bookkeeping under the
+step) and the two must not be mixed:
 
 | | serial | parallel |
 |---|---|---|
@@ -119,7 +123,10 @@ of what it reports, so read the shares, not the total):
 
 **The parallel region is slower because every step in it is slower, not because the schedule is
 wrong.** The same bodies, doing the same arithmetic, cost 888us of step time in parallel against
-535us in serial. The three control experiments say where that comes from:
+535us in serial. (Those two figures predate the pairing described above: the serial column was
+measured with the rolling boundary and so carries the snapshot merge and the skipped-step scan with
+it, worth about 2% of the region -- 12us of 550 -- which makes the gap wider, not narrower. Every
+later comparison uses the pair.) The three control experiments say where that comes from:
 
 | control | us/frame |
 |---|---|

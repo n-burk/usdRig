@@ -1385,7 +1385,6 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
                               RigExecBakedStepTimingRequested()) &&
                              !B.measurementSuspended;
     uint64_t mark = timing ? RigExecProfiler::NowUs() : 0;
-    uint64_t markNs = calibrating ? NowNs() : 0;
     for (RigExecBakedStep &step : B.steps) {
         // A source already ran, before the dirty set that decided the rest
         // could be computed; a step outside the closed set is this run's
@@ -1393,22 +1392,30 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
         if (step.isSource || !B.closed.Test(step.cluster)) {
             continue;
         }
+        // A PAIR around the body, the same interval the parallel executor
+        // takes -- not the rolling boundary this loop uses for the trace.
+        // The two modes' step times are read against each other (it is the
+        // whole reason a step time is interesting), so they have to measure
+        // the same thing: a boundary that rolled from the last executed
+        // step would charge serial for the snapshot merge below and for the
+        // scan over every step skipped since, and make the comparison
+        // flatter than the frame is. Affordable because nothing reads a
+        // clock here unless a calibration or a step timing asked.
+        const uint64_t beganNs = calibrating ? NowNs() : 0;
         RunStepBody(&B, &step, time);
         if (calibrating) {
-            const uint64_t now = NowNs();
-            step.measuredUs += double(now - markNs) / 1000.0;
+            step.measuredUs += double(NowNs() - beganNs) / 1000.0;
             ++step.measuredRuns;
-            markNs = now;
         }
         if (timing) {
             // ONE clock read per step boundary, not two per step: a biped's
             // graph is several hundred steps and a thousand reads of a
             // vDSO clock is a measurable part of the frame being measured.
-            // What each interval then covers is the step plus the few
+            // What each TRACE interval then covers is the step plus the few
             // instructions of bookkeeping below it, which is where the time
-            // went. The parallel executor cannot share a boundary this way
-            // and takes its own pair per step, which it can afford because
-            // it only takes them while something is asking for them.
+            // went -- the trace is a picture of the frame and wants the
+            // whole of it. The step times above are the other question,
+            // "what does this body cost", and take their own pair.
             const uint64_t now = RigExecProfiler::NowUs();
             step.startUs = mark;
             step.endUs = now;
