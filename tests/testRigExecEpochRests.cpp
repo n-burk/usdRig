@@ -35,7 +35,9 @@
 #include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/xform.h"
 
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -454,6 +456,228 @@ TestAnOverrideElsewhereLeavesTheRestsAlone(const std::string &examplesDir)
                  rig.Evaluate(UsdTimeCode(kFrames[1])));
 }
 
+// ---------------------------------------------------------------------------
+// A plain Xform standing BETWEEN a provider and its anchor.
+//
+// Exec resolves such a prim as the identity and drops it, so the rig would
+// evaluate as if the grouping transform were not there at all. The dynamic
+// walk composes it back in at evaluation (_ComposeInterveningXforms): X(P)
+// lands BETWEEN a provider and its anchor, which is a uniform right-multiply
+// only while every such Xform sits above every chain root, and is not one
+// otherwise.
+//
+// The program refuses both shapes of it -- a non-identity transform, and one
+// that is identity today but animates -- and refused them BLIND: no rig and
+// no fixture in the tree tripped either, so there was no parity evidence
+// either way and no way to tell a correct bake from a plausible one.
+//
+// These fixtures are that evidence. They assert the refusal by NAME and then
+// assert the fallback generation is a plain dynamic evaluator's, every
+// published domain of it, so the refusal cannot quietly become a wrong
+// answer -- and the day the correction is baked, the one line each case
+// carries flips from false to true.
+//
+// WHY IT IS STILL REFUSED, measured rather than assumed. The correction is
+// not confined to the walk. It rewrites the REST frames as well as the base
+// ones, and the two halves reach different consumers:
+//
+//   * pose.jointMatricesFinal and the walk's own finalMatrices are built
+//     from the CORRECTED rest and the CORRECTED final, so they follow it;
+//   * a geometry mover's base-phase matrix is exec's computeMatrix tap
+//     (rigEvaluator.cpp, RigExecValueAddress::Prim(transform,
+//     "computeMatrix")), which knows nothing about the grouping transform,
+//     so it does NOT follow it;
+//   * a solver's element rests come from exec's computeRestFrame through
+//     computePointFrameArray, so they do not follow it either.
+//
+// The program holds ONE rest per slot and derives both matrices from it, so
+// expressing that means holding an exec rest and a walk rest side by side
+// and routing every consumer to the right one -- which is the same rework
+// an animated rest:tx needs, and is why the animated case below is a second
+// refusal rather than a second arm of the first. A bake that corrected the
+// one rest the program has would agree with these fixtures' joint frames and
+// silently move a skinned mesh and a solver's rests; that is exactly the
+// shape of wrong the refusal is in front of.
+// ---------------------------------------------------------------------------
+
+// \p animated keys the grouping transform instead of authoring it plainly;
+// \p identityToday additionally makes every sample the identity at the frames
+// the sweep reads, which is the case the "is it identity" test cannot see.
+UsdStageRefPtr
+MakeAnInterveningXformRig(bool animated, bool identityToday = false)
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+    // The grouping Xform. Every rig has these -- a Scope named Joints, a
+    // Scope named Controls -- and they compose to the identity, which is
+    // why the program's candidate list is not by itself a refusal. This one
+    // carries a transform.
+    const UsdGeomXform group =
+        UsdGeomXform::Define(stage, SdfPath("/Asset/Rig/Group"));
+    const UsdGeomXformOp op = group.AddTranslateOp();
+    if (animated) {
+        op.Set(GfVec3d(0, identityToday ? 0 : 3, 0), UsdTimeCode(1.0));
+        op.Set(GfVec3d(0, identityToday ? 0 : 6, 0), UsdTimeCode(3.0));
+    } else {
+        op.Set(GfVec3d(0, 3, 0));
+    }
+
+    const UsdPrim joint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Group/Arm"), TfToken("RigExecJoint"));
+    joint.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+        .Set(2.0);
+    // A child of the joint, so the correction is exercised where it is NOT a
+    // uniform right-multiply: the child's own anchor is the joint, which the
+    // pass has already corrected.
+    const UsdPrim tip = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Group/Arm/Tip"), TfToken("RigExecJoint"));
+    tip.CreateAttribute(TfToken("avars:tz"), SdfValueTypeNames->Double)
+        .Set(1.0);
+
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Points"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0)});
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/M.points")});
+    mover.CreateRelationship(TfToken("rigExec:transform"))
+        .SetTargets({tip.GetPath()});
+    return stage;
+}
+
+// Compiles \p stage in baked mode, reports whether it bakes and why not, and
+// compares every published domain against a dynamic evaluator over the
+// sweep. Returns the baked generation count.
+size_t
+BakedAgreesWithDynamic(const char *what, const UsdStageRefPtr &stage,
+                       const UsdStageRefPtr &referenceStage,
+                       bool expectBakeable,
+                       std::vector<std::string> *refusals = nullptr)
+{
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator baked(stage, rig);
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    if (!baked.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        return 0;
+    }
+    std::vector<std::string> reasons;
+    const bool bakeable = baked.IsBakeable(&reasons);
+    if (bakeable != expectBakeable) {
+        ++failures;
+        std::printf("FAIL %s: bakeable=%d, expected %d\n", what, int(bakeable),
+                    int(expectBakeable));
+    }
+    if (refusals) {
+        *refusals = reasons;
+    }
+
+    RigExecRigEvaluator reference(referenceStage, rig);
+    errors.clear();
+    CHECK(reference.Compile(&errors));
+    for (double frame : {1.0, 2.0, 3.0}) {
+        const RigExecRigPose expected = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose actual = baked.Evaluate(UsdTimeCode(frame));
+        CHECK(expected.valid && actual.valid);
+        CHECK(!actual.movedProperties.empty());
+        ComparePoses(std::string(what) + " frame " +
+                         std::to_string(int(frame)),
+                     expected, actual);
+    }
+    return baked.GetBakedGenerationCount();
+}
+
+// Asserts that \p reasons names \p expected, so a refusal that changed its
+// mind about WHY is a failure rather than a pass.
+void
+RefusalNames(const char *what, const std::vector<std::string> &reasons,
+             const char *expected)
+{
+    for (const std::string &reason : reasons) {
+        if (reason.find(expected) != std::string::npos) {
+            return;
+        }
+    }
+    ++failures;
+    std::printf("FAIL %s: no refusal mentions \"%s\"\n", what, expected);
+    for (const std::string &reason : reasons) {
+        std::printf("    %s\n", reason.c_str());
+    }
+}
+
+void
+TestAnInterveningXformAboveAProvider()
+{
+    // The grouping transform reaches the pose: without it the tip would sit
+    // at (2, 0, 1) and the mesh with it. Measured, not assumed, because a
+    // program that dropped X(P) would agree with a reference that also
+    // dropped it -- and the reference here is the DYNAMIC path, which does
+    // not.
+    const UsdStageRefPtr probeStage = MakeAnInterveningXformRig(false);
+    RigExecRigEvaluator probe(probeStage, SdfPath("/Asset/Rig"));
+    CHECK(probe.Compile());
+    const RigExecRigPose pose = probe.Evaluate(UsdTimeCode(1.0));
+    CHECK(pose.valid);
+    const auto tip = pose.jointFramesFinal.find(
+        SdfPath("/Asset/Rig/Group/Arm/Tip"));
+    CHECK(tip != pose.jointFramesFinal.end());
+    if (tip != pose.jointFramesFinal.end()) {
+        CHECK(std::abs(tip->second.points[0][1] - 3.0) < 1e-9);
+    }
+
+    // The refusal, by name, and the fallback, in full.
+    std::vector<std::string> refusals;
+    const char *const what = "an intervening Xform above a provider";
+    const size_t generations = BakedAgreesWithDynamic(
+        what, MakeAnInterveningXformRig(false),
+        MakeAnInterveningXformRig(false), /* expectBakeable = */ false,
+        &refusals);
+    RefusalNames(what, refusals, "intervening Xform above provider");
+    // Nothing ran baked, and the comparison above still held: the fallback
+    // is the dynamic path, not a program that answered anyway.
+    CHECK(generations == 0);
+}
+
+void
+TestAnAnimatedXformAboveAProvider()
+{
+    std::vector<std::string> refusals;
+    const char *const what = "an animated Xform above a provider";
+    const size_t generations = BakedAgreesWithDynamic(
+        what, MakeAnInterveningXformRig(true), MakeAnInterveningXformRig(true),
+        /* expectBakeable = */ false, &refusals);
+    RefusalNames(what, refusals, "animated Xform above provider");
+    CHECK(generations == 0);
+
+    // And the shape an "is it identity today" test cannot see: every sample
+    // the sweep reads IS the identity, so the transform composes to nothing
+    // at every frame anyone looks at -- and it is still refused, because the
+    // epoch is not a frame. A bake that judged the transform once would pass
+    // this one and be wrong about the case above.
+    refusals.clear();
+    const char *const quietWhat =
+        "an identity-valued animated Xform above a provider";
+    const size_t quiet = BakedAgreesWithDynamic(
+        quietWhat, MakeAnInterveningXformRig(true, /* identityToday = */ true),
+        MakeAnInterveningXformRig(true, /* identityToday = */ true),
+        /* expectBakeable = */ false, &refusals);
+    RefusalNames(quietWhat, refusals, "animated Xform above provider");
+    CHECK(quiet == 0);
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -489,6 +713,8 @@ main(int argc, char **argv)
     TestAPropertyChainOnARestRefusesTheEpochPath(examplesDir);
     TestAnInteractiveOverrideOnARestIsFollowed(examplesDir);
     TestAnOverrideElsewhereLeavesTheRestsAlone(examplesDir);
+    TestAnInterveningXformAboveAProvider();
+    TestAnAnimatedXformAboveAProvider();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
