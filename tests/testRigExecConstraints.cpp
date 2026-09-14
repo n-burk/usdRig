@@ -4018,6 +4018,67 @@ TestSplineIkEvaluatorBinding()
     }
 }
 
+
+// An AUTHORED posed:space is the pose: exec returns its frame and reads
+// neither the avars nor the parent, so the baked program says the same and
+// the epoch bakes. An ANIMATED one does not -- and the test that matters is
+// the one whose Default value is the schema identity, because that is the
+// shape a bake could judge at Default, call static, and then compose through
+// the ladder while exec used the authored matrix at every numeric frame.
+static void
+TestAuthoredPosedSpaceBakesAndAnimatedOneDoesNot()
+{
+    const auto build = [](bool animate) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim root = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/Root"), TfToken("RigExecJoint"));
+        const UsdPrim child = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/Root/Child"), TfToken("RigExecJoint"));
+        const UsdAttribute posed = child.CreateAttribute(
+            TfToken("posed:space"), SdfValueTypeNames->Matrix4d);
+        if (animate) {
+            posed.Set(Matrix(GfVec3d(1, 0, 0)), UsdTimeCode(1.0));
+            posed.Set(Matrix(GfVec3d(3, 0, 0)), UsdTimeCode(2.0));
+        } else {
+            posed.Set(Matrix(GfVec3d(2, 0, 0)));
+        }
+        (void)root;
+        return stage;
+    };
+
+    const UsdStageRefPtr stable = build(/* animate = */ false);
+    RigExecRigEvaluator still(stable, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(still.Compile(&errors));
+    std::vector<std::string> reasons;
+    CHECK(still.IsBakeable(&reasons));
+    if (!reasons.empty()) {
+        for (const std::string &reason : reasons) {
+            std::printf("    unexpected refusal: %s\n", reason.c_str());
+        }
+    }
+    const RigExecRigPose pose = still.Evaluate(UsdTimeCode::Default());
+    const auto posed =
+        pose.jointFramesFinal.find(SdfPath("/Asset/Rig/Joints/Root/Child"));
+    CHECK(posed != pose.jointFramesFinal.end());
+    if (posed != pose.jointFramesFinal.end()) {
+        CHECK(Near(posed->second.Origin(), GfVec3d(2, 0, 0)));
+    }
+
+    const UsdStageRefPtr moving = build(/* animate = */ true);
+    RigExecRigEvaluator animated(moving, SdfPath("/Asset/Rig"));
+    CHECK(animated.Compile(&errors));
+    reasons.clear();
+    CHECK(!animated.IsBakeable(&reasons));
+    bool named = false;
+    for (const std::string &reason : reasons) {
+        named = named ||
+                reason.find("animated posed:space") != std::string::npos;
+    }
+    CHECK(named);
+}
+
 int
 main()
 {
@@ -4070,6 +4131,7 @@ main()
     TestConnectedParentSpaceSolverInputs();
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();
+    TestAuthoredPosedSpaceBakesAndAnimatedOneDoesNot();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

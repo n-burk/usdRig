@@ -28,6 +28,7 @@
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/singleChainIk.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/splineIk.h"
 
@@ -917,6 +918,15 @@ struct RigExecBakedComposeGroup {
 /// an indexed store rather than a map insertion, and "last writer wins on a
 /// duplicate slot" stays what it is today.
 struct RigExecBakedCommit {
+    /// One provider above a NATIVE Xformable source: the slot, and the
+    /// versions of its base and final frames live where this commit runs.
+    /// The deepest one whose points moved is the revision such a source
+    /// rides (RigExecApplyRevisedAncestorDelta).
+    struct AncestorRead {
+        int slot = -1;
+        uint32_t fin = 0;
+        uint32_t base = 0;
+    };
     /// Empty for a solver batch, whose diagnostics carry no mover path.
     SdfPath moverPath;
     bool solverOutput = false;
@@ -980,21 +990,24 @@ struct RigExecBakedCommit {
     std::vector<uint32_t> sourceReads;
     uint32_t worldUpRead = 0;
     uint32_t targetRead = 0;
+    /// Per target, the version live where this commit runs. Used to record
+    /// the target of a commit that declares no candidate for it.
+    std::vector<uint32_t> targetReads;
+    /// The SingleChainIK bindings' reads, in the same two shapes a source's
+    /// are: the version of a slot, and the ancestors of a native Xformable.
+    uint32_t effectorRead = 0;
+    std::vector<AncestorRead> effectorAncestors;
+    std::vector<uint32_t> poleReads;
+    std::vector<std::vector<AncestorRead>> poleAncestors;
+    /// Scratch for the chain the solver is handed and the chain it returns,
+    /// sized at Build so a step allocates nothing.
+    std::vector<RigExecPointFrame> ikChain, ikPrepared, ikRest, ikSolved;
     /// Whether this run's exit records the target's frame for a read phase.
     /// True for every transform-domain exit and for a geometry-domain
     /// constraint that never got as far as solving; false once a
     /// geometry-domain constraint has its sources, which is where the
     /// dynamic walk stops recording for one.
     bool recordAfter = true;
-    /// One provider above a NATIVE Xformable source: the slot, and the
-    /// versions of its base and final frames live where this commit runs.
-    /// The deepest one whose points moved is the revision such a source
-    /// rides (RigExecApplyRevisedAncestorDelta).
-    struct AncestorRead {
-        int slot = -1;
-        uint32_t fin = 0;
-        uint32_t base = 0;
-    };
     /// Parallel to `sources`, and empty for a source the walk holds a frame
     /// for: the ancestor slots of a native source, in increasing depth.
     std::vector<std::vector<AncestorRead>> sourceAncestors;
@@ -1115,6 +1128,14 @@ struct RigExecBakedProgramImpl {
         std::vector<GfVec3d> lastTranslationOffsets, lastRotationOffsets;
         std::vector<std::string> lastDiagnostics;
         bool lastOk = true;
+        /// inputs:poleVectorWeights, read the same way for a SingleChainIK
+        /// in object pole mode. Separate because it is read at a different
+        /// point in the walk and owns its own diagnostic.
+        bool readPole = false;
+        size_t poleCount = 0;
+        std::vector<double> poleWeights, lastPoleWeights;
+        std::vector<std::string> poleDiagnostics, lastPoleDiagnostics;
+        bool poleOk = true, lastPoleOk = true;
     };
     std::vector<ConstraintArrays> constraintArrays;
 
@@ -1142,6 +1163,13 @@ struct RigExecBakedProgramImpl {
     std::vector<char> nativeFrameOk, lastNativeFrameOk;
 
     // ---- epoch constants resolved at bake ---------------------------------
+    /// A non-identity AUTHORED posed:space, per slot. Exec returns its frame
+    /// directly and reads neither the avars nor the parent, so the compose
+    /// takes the same branch: the flag is the "authored" test
+    /// computations.cpp makes, decided once because the value is an epoch
+    /// constant (an animated or connected one still refuses the bake).
+    std::vector<char> posedAuthored;
+    std::vector<GfMatrix4d> posedAuthoredM;
     std::vector<GfMatrix4d> restM;                     // asset-space rest
     std::vector<std::array<GfVec3d, 4>> restPts;
     std::vector<RigExecPointFrame> restFrames;
@@ -1313,6 +1341,12 @@ struct RigExecBakedProgramImpl {
         SdfPath path;
         TfToken type;
         int target = -1;
+        /// Every target this constraint names, in compiled order, and which
+        /// of them a read phase wants recorded after it. `target` is the
+        /// first of them, which is the only one an ordinary constraint
+        /// revises.
+        std::vector<int> targetSlots;
+        std::vector<char> snapshotTargets;
         /// Per source, in compiled order: the slot the walk holds a frame
         /// for, or -1; the entry in `nativeSources` read off the stage when
         /// it does not; and the path either way, which is what a diagnostic
@@ -1351,12 +1385,33 @@ struct RigExecBakedProgramImpl {
         int worldUpNative = -1;
         SdfPath worldUpPath;
         bool worldUpObjectNamed = false;
-        /// A read phase named this constraint as the point in the walk it
-        /// wants its target's frame from, so the walk records the target's
-        /// matrix after it. Decided at bake out of the evaluator's
-        /// _snapshotPoints, which is the same membership the dynamic
-        /// recordFrame tests per call.
+        /// True when any target wants a record, which is the one branch a
+        /// rig with no read phase pays per constraint.
         bool snapshotAfter = false;
+
+        // ---- SingleChainIK -------------------------------------------------
+        //
+        // The one multi-target built-in: it revises its whole inferred joint
+        // chain atomically, so `targetSlots` IS the chain and the commit
+        // declares every one of them.
+        bool singleChainIk = false;
+        RigExecSingleChainIkMode ikMode =
+            RigExecSingleChainIkMode::RotatePlane;
+        /// rigExec:poleVectorMode == "object", and rigExec:evaluationMode
+        /// resolved against _IkUsesAnimatedTs. Both are uniform tokens over
+        /// epoch-structural state, so both are settled at Build.
+        bool poleModeObject = false;
+        bool useAnimatedTs = false;
+        /// The effector and the pole objects, as source references: a slot
+        /// when the walk holds a frame, an entry in `nativeSources` when the
+        /// stage does.
+        int effector = -1, effectorNative = -1;
+        SdfPath effectorPath;
+        std::vector<int> poleObjects, poleObjectNatives;
+        /// Read only in RotatePlane mode, which is where the dynamic walk
+        /// reads them.
+        RigExecBakedInput<GfVec3d> poleVector;
+        RigExecBakedInput<double> twistDegrees;
     };
     std::vector<Constraint> constraints;
 
@@ -1948,9 +2003,20 @@ struct RigExecBakedConstraintSpec {
     SdfPath moverPath;
     TfToken schemaType;
     SdfPathVector targets;
-    /// Whether a read phase asked for the target's frame as of this
-    /// constraint (the evaluator's _snapshotPoints membership).
-    bool snapshotAfter = false;
+    /// Per target, whether a read phase asked for its frame as of this
+    /// constraint (the evaluator's _snapshotPoints membership). A
+    /// SingleChainIK names its whole chain here, and the dynamic walk
+    /// records every one of them.
+    std::vector<char> snapshotTargets;
+    /// SingleChainIK: the inferred joint chain, first joint through end, and
+    /// the two bindings it resolves beside its sources.
+    SdfPathVector ikChain;
+    SdfPath effector, effectorXform;
+    SdfPathVector poleObjects, poleObjectXforms;
+    /// _IkUsesAnimatedTs over the chain, answered where the evaluator's
+    /// private state is visible. "autoDetect" resolves against it; the other
+    /// two modes ignore it.
+    bool ikUsesAnimatedTs = false;
     /// One source path per binding, in the compiled order, and beside it the
     /// plain Xformable the binding reads off the stage when the walk holds
     /// no frame for it (the compiled _FrameSourceBinding::xformPath). Empty

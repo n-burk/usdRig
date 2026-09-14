@@ -8153,7 +8153,7 @@ RigExecRigEvaluator::_ReadConstraintSourceOffsets(
 // input chain; evaluator-side preparation decides whether those
 // measurements are rest- or animation-derived.
 bool
-RigExecRigEvaluator::_PrepareRestDerivedIkChain(
+RigExecPrepareRestDerivedIkChain(
     const std::vector<RigExecPointFrame> &current,
     const std::vector<RigExecPointFrame> &rest,
     std::vector<RigExecPointFrame> *prepared)
@@ -9557,8 +9557,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     rest.push_back(frame->second);
                 }
                 if (!inputsValid ||
-                    !_PrepareRestDerivedIkChain(chain, rest,
-                                                &solveChain)) {
+                    !RigExecPrepareRestDerivedIkChain(
+                        chain, rest, &solveChain)) {
                     pose.diagnostics.push_back(
                         constraint.moverPath.GetString() +
                         " could not prepare rest-derived IK inputs; "

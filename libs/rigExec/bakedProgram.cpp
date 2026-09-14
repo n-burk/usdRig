@@ -99,7 +99,8 @@ _IsBakedConstraintType(const TfToken &type)
            type == "RigExecRotationConstraint" ||
            type == "RigExecScaleConstraint" ||
            type == "RigExecParentConstraint" ||
-           type == "RigExecAimConstraint";
+           type == "RigExecAimConstraint" ||
+           type == "RigExecSingleChainIkConstraint";
     // RigExecRigEvaluator::GetConstraintOperatorTypeNames() is the authority
     // on which operators exist; this is the subset the program can express,
     // and it must stay a subset. A name here the evaluator does not register
@@ -247,11 +248,38 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         if (type != "RigExecJoint" && type != "RigExecControl") {
             say("provider type not baked (" + type.GetString() + ")", path);
         }
-        // A space expression the compose cannot express: the program builds
-        // the default-space ladder from rest + default avars and follows the
-        // namespace parent, which is exactly what exec does only while these
-        // stay unauthored and unconnected.
-        for (const char *name : {"posed:space", "parent:space",
+        // A non-identity AUTHORED posed:space is not a ladder at all: exec
+        // uses it directly and reads neither the avars nor the parent
+        // (computations.cpp's _ComputeXformablePointFrame, step 2). That is
+        // an epoch constant unless it animates, so the compose expresses it
+        // and only the CONNECTED case -- an arbitrary exec computation --
+        // still refuses.
+        {
+            const UsdAttribute posed =
+                prim.GetAttribute(TfToken("posed:space"));
+            SdfPathVector connections;
+            if (posed && posed.HasAuthoredConnections() &&
+                posed.GetConnections(&connections) && !connections.empty()) {
+                say("connected posed:space on provider", path);
+            } else if (RigExecBakedAnimatedOrConnected(posed)) {
+                // Unconditionally, and NOT "is it identity at Default".
+                // An attribute with only time samples reads back as the
+                // schema identity at Default and as a real matrix at a
+                // numeric time, so a bake that judged it at Default would
+                // take the ladder while exec took the authored matrix --
+                // which is a divergence with no diagnostic in front of it.
+                say("animated posed:space on provider", path);
+            }
+            if (chainTargets.count(
+                    path.AppendProperty(TfToken("posed:space")))) {
+                say("property chain writes posed:space on provider", path);
+            }
+        }
+        // The other four ARE the ladder: the program builds the
+        // default-space chain from rest + default avars and follows the
+        // namespace parent, which is what exec does only while these stay
+        // unauthored and unconnected.
+        for (const char *name : {"parent:space",
                                  "parent:defaultSpace", "avars:defaultSpace",
                                  "posed:defaultSpace"}) {
             bool connected = false;
@@ -353,10 +381,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
 
     // ---- constraints -------------------------------------------------------
     for (const auto &constraint : E._frameConstraints) {
-        if (constraint.schemaType == "RigExecSingleChainIkConstraint") {
-            say("SingleChainIK constraint", constraint.moverPath);
-            continue;
-        }
         if (!_IsBakedConstraintType(constraint.schemaType)) {
             say("constraint type not baked (" +
                     constraint.schemaType.GetString() + ")",
@@ -366,19 +390,22 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         if (!constraint.weightObject.IsEmpty()) {
             say("weight object on constraint", constraint.moverPath);
         }
-        if (constraint.targets.size() != 1) {
-            say("constraint does not write exactly one target",
-                constraint.moverPath);
+        if (constraint.targets.empty()) {
+            say("constraint names no target", constraint.moverPath);
             continue;
         }
         // Either provider family: an exec-seeded one, or a plain Xformable
         // the program seeds from the stage in its prologue. Both take a slot
         // in the same table, which is what the dynamic walk's one frame map
-        // holds.
-        if (!E._poseSeedFrames.count(constraint.targets[0]) &&
-            !E._xformDerivedProviders.count(constraint.targets[0])) {
-            say("constraint target is not a seeded pose provider",
-                constraint.targets[0]);
+        // holds. EVERY target, not only the first: a SingleChainIK revises
+        // its whole chain atomically, and the dynamic walk records every
+        // target of every constraint whatever it revises.
+        for (const SdfPath &target : constraint.targets) {
+            if (!E._poseSeedFrames.count(target) &&
+                !E._xformDerivedProviders.count(target)) {
+                say("constraint target is not a seeded pose provider",
+                    target);
+            }
         }
     }
 
@@ -1051,6 +1078,8 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // eight computations; every input to them is epoch-constant on a bakeable
     // rig, so both resolve once here. The frame round trips exec performs
     // between computations are reproduced, not simplified away.
+    B.posedAuthored.assign(size_t(N), 0);
+    B.posedAuthoredM.assign(size_t(N), GfMatrix4d(1.0));
     B.restM.assign(N, GfMatrix4d(1.0));
     B.restPts.resize(N);
     B.restFrames.resize(N);
@@ -1107,6 +1136,18 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             B.folded.insert(walk.begin(), walk.end());
             return RigExecBakedRead(input, E._resolvedInputs, capture);
         };
+        // A non-identity authored posed:space stands in for the whole
+        // compose: exec returns its frame and reads nothing else about the
+        // provider, so the compose does the same and the rest chain below
+        // still resolves, because the REST frame is a different question.
+        if (const UsdAttribute posed =
+                prim.GetAttribute(TfToken("posed:space"))) {
+            GfMatrix4d value(1.0);
+            if (posed.Get(&value) && value != GfMatrix4d(1.0)) {
+                B.posedAuthored[size_t(i)] = 1;
+                B.posedAuthoredM[size_t(i)] = value;
+            }
+        }
         GfMatrix4d space(1.0);
         fold(prim, "rest:space");
         if (const UsdAttribute a = prim.GetAttribute(TfToken("rest:space"))) {
@@ -1227,10 +1268,20 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             entry.constraint.moverPath = fc.moverPath;
             entry.constraint.schemaType = fc.schemaType;
             entry.constraint.targets = fc.targets;
-            entry.constraint.snapshotAfter =
-                !fc.targets.empty() &&
-                snapshotAfter(fc.targets[0], fc.moverPath);
+            for (const SdfPath &target : fc.targets) {
+                entry.constraint.snapshotTargets.push_back(
+                    snapshotAfter(target, fc.moverPath) ? 1 : 0);
+            }
             entry.constraint.pointsTarget = fc.pointsTarget;
+            entry.constraint.ikChain = fc.ikChain;
+            entry.constraint.ikUsesAnimatedTs =
+                !fc.ikChain.empty() && E._IkUsesAnimatedTs(fc.ikChain);
+            entry.constraint.effector = fc.effector.sourcePath;
+            entry.constraint.effectorXform = fc.effector.xformPath;
+            for (const auto &pole : fc.poleObjects) {
+                entry.constraint.poleObjects.push_back(pole.sourcePath);
+                entry.constraint.poleObjectXforms.push_back(pole.xformPath);
+            }
             for (const auto &source : fc.sources) {
                 entry.constraint.sources.push_back(source.sourcePath);
                 entry.constraint.sourceXforms.push_back(source.xformPath);
@@ -1544,6 +1595,14 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                                                  GfVec3d(0));
                 arrays.rotationOffsets.assign(arrays.sourceCount,
                                               GfVec3d(0));
+            }
+            if (arrays.readPole) {
+                arrays.poleDiagnostics.clear();
+                arrays.poleOk =
+                    RigExecRigEvaluator::_ReadConstraintSourceWeights(
+                        arrays.prim, "inputs:poleVectorWeights",
+                        arrays.poleCount, time, &arrays.poleDiagnostics,
+                        &arrays.poleWeights);
             }
         }
     };

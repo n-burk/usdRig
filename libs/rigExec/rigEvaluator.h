@@ -230,6 +230,24 @@ bool RigExecApplyRevisedAncestorDelta(
     const RigExecPoseFrameEnumerator &providers,
     RigExecPointFrame *frame);
 
+/// Rebuilds a SingleChainIK input chain from its rest layout.
+///
+/// `neverTS` retains current rotations and root placement while rebuilding
+/// child placement and handle lengths from the rest frames. A joint with no
+/// authored rest transform carries the schema's identity fallback, which is
+/// not a chain rest layout at all; its current static layout stands in.
+///
+/// Pure frame math over two chains, which is why it is a free function and
+/// not a member: the solver keeps measuring its input chain, and the
+/// preparation decides only whether those measurements are rest- or
+/// animation-derived. Both the dynamic walk and the baked program's
+/// constraint step call it, and a step body cannot reach a private member of
+/// the evaluator.
+bool RigExecPrepareRestDerivedIkChain(
+    const std::vector<RigExecPointFrame> &current,
+    const std::vector<RigExecPointFrame> &rest,
+    std::vector<RigExecPointFrame> *prepared);
+
 /// Compiles and evaluates one RigExecRoot prim.
 class RigExecRigEvaluator : public TfWeakBase {
 public:
@@ -1047,20 +1065,6 @@ private:
         const UsdPrim &prim, const char *name, size_t count,
         UsdTimeCode time, std::vector<std::string> *diagnostics,
         std::vector<GfVec3d> *offsets);
-
-    /// Rebuilds a SingleChainIK input chain from its rest layout.
-    ///
-    /// `neverTS` retains current rotations and root placement while
-    /// rebuilding child placement and handle lengths from the rest frames. A
-    /// joint with no authored rest transform carries the schema's identity
-    /// fallback, which is not a chain rest layout at all; its current static
-    /// layout stands in. Pure frame math, so the solver keeps measuring its
-    /// input chain and the preparation decides only whether those
-    /// measurements are rest- or animation-derived.
-    static bool _PrepareRestDerivedIkChain(
-        const std::vector<RigExecPointFrame> &current,
-        const std::vector<RigExecPointFrame> &rest,
-        std::vector<RigExecPointFrame> *prepared);
 
     /// Whether a SingleChainIK chain's joints can move with time at all.
     ///
