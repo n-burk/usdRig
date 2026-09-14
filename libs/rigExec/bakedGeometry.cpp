@@ -1333,27 +1333,6 @@ AssembleRevision(RigExecBakedProgramImpl &B,
                                      revision->binding, values, time);
 }
 
-/// The envelope is applied exactly once, against the preceding revision.
-/// Derived maintenance is the last caller: the chain's own revisions run
-/// through RigExecRunRevisionKernel, which owns the same blend, and this copy
-/// goes when the derived path joins it.
-bool
-BlendEnvelope(const RigExecMoverParameters &parameters,
-              const std::vector<GfVec3f> &preceding,
-              std::vector<GfVec3f> *result)
-{
-    if (result->size() != preceding.size()) return false;
-    std::vector<float> envelope;
-    if (!parameters.weights.ResolveAll(result->size(), &envelope)) {
-        return false;
-    }
-    for (size_t i = 0; i < result->size(); ++i) {
-        (*result)[i] =
-            RigExecBlendEnvelope(preceding[i], (*result)[i], envelope[i]);
-    }
-    return true;
-}
-
 /// The skin revision over its whole array, out of the fuse.
 ///
 /// The path where the partition no longer describes the layout the packet
@@ -1639,30 +1618,19 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             step->counters.revisionsExecuted = 1;
             const std::vector<GfVec3f> preceding(derived.lastBase.begin(),
                                                  derived.lastBase.end());
-            std::vector<GfVec3f> values;
-            const bool wanted =
-                status.AllowsApply() && parameters.valid &&
-                parameters.kind ==
-                    (revision.op == RigExecRevisionOp::RecomputeExtent
-                         ? "recomputeExtent"
-                         : "recomputeNormals");
-            if (wanted) {
-                values = revision.op == RigExecRevisionOp::RecomputeExtent
-                             ? RigExecComputeExtent(parameters.auxPoints,
-                                                    parameters.widths)
-                             : RigExecComputeVertexNormals(
-                                   parameters.auxPoints,
-                                   parameters.topologyCounts,
-                                   parameters.topologyIndices);
-            }
-            bool applied =
-                wanted && !values.empty() &&
-                (revision.op != RigExecRevisionOp::RecomputeExtent ||
-                 values.size() == 2) &&
-                // The derived property keeps its authored cardinality: an
-                // in-place write cannot resize it.
-                values.size() == preceding.size() &&
-                BlendEnvelope(parameters, preceding, &values);
+            std::vector<GfVec3f> values = preceding;
+            // The same function the revision node calls, and not a second
+            // arrangement of the same rules: the kind check, the empty and
+            // size-2 guards, the derived property keeping its authored
+            // cardinality (an in-place write cannot resize it) and the
+            // envelope folded into the recomputation's own arithmetic all
+            // live in RigExecApplyDerivedKernel. The status is the one half
+            // the kernel does not own, because the packet is what it is told
+            // about and the status is what the graph decided.
+            const bool applied =
+                status.AllowsApply() &&
+                RigExecRunRevisionKernel(revision.op, parameters, &values,
+                                         /*controlFrames=*/nullptr);
             revision.resultStatus = status.state;
             if (!applied) {
                 values = preceding;
