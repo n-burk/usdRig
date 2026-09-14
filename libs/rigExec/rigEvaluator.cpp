@@ -8080,8 +8080,6 @@ RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
                                nullptr, resolved, published);
 }
 
-namespace {
-
 // One per-frame array of constraint source parameters, read RAW.
 //
 // Straight off the attribute at the frame's time: no connection walk, no
@@ -8093,12 +8091,13 @@ namespace {
 // An absent or empty array is not a failure: it means the neutral value on
 // every source, which is what an unauthored blend has always meant.
 bool
-_ReadConstraintSourceWeights(const UsdPrim &prim,
-                             const char *name,
-                             size_t count,
-                             UsdTimeCode time,
-                             std::vector<std::string> *diagnostics,
-                             std::vector<double> *weights)
+RigExecRigEvaluator::_ReadConstraintSourceWeights(
+    const UsdPrim &prim,
+    const char *name,
+    size_t count,
+    UsdTimeCode time,
+    std::vector<std::string> *diagnostics,
+    std::vector<double> *weights)
 {
     VtFloatArray authored;
     if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
@@ -8120,12 +8119,13 @@ _ReadConstraintSourceWeights(const UsdPrim &prim,
 
 // The same read for a per-source offset array, whose neutral value is zero.
 bool
-_ReadConstraintSourceOffsets(const UsdPrim &prim,
-                             const char *name,
-                             size_t count,
-                             UsdTimeCode time,
-                             std::vector<std::string> *diagnostics,
-                             std::vector<GfVec3d> *offsets)
+RigExecRigEvaluator::_ReadConstraintSourceOffsets(
+    const UsdPrim &prim,
+    const char *name,
+    size_t count,
+    UsdTimeCode time,
+    std::vector<std::string> *diagnostics,
+    std::vector<GfVec3d> *offsets)
 {
     VtVec3dArray authored;
     if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
@@ -8153,9 +8153,10 @@ _ReadConstraintSourceOffsets(const UsdPrim &prim,
 // input chain; evaluator-side preparation decides whether those
 // measurements are rest- or animation-derived.
 bool
-_PrepareRestDerivedIkChain(const std::vector<RigExecPointFrame> &current,
-                           const std::vector<RigExecPointFrame> &rest,
-                           std::vector<RigExecPointFrame> *prepared)
+RigExecPrepareRestDerivedIkChain(
+    const std::vector<RigExecPointFrame> &current,
+    const std::vector<RigExecPointFrame> &rest,
+    std::vector<RigExecPointFrame> *prepared)
 {
     if (current.size() != rest.size() || current.empty()) {
         return false;
@@ -8220,8 +8221,6 @@ _PrepareRestDerivedIkChain(const std::vector<RigExecPointFrame> &current,
     return true;
 }
 
-}  // namespace
-
 // ---------------------------------------------------------------------------
 // The pieces of the pose walk that are not the walk: frames read off the
 // stage, the deltas a native source rides, the placements a commit
@@ -8256,22 +8255,20 @@ RigExecRigEvaluator::_FrameFromXformRelativeToAsset(
 }
 
 bool
-RigExecRigEvaluator::_ResolveNativeXformSource(
-    const UsdPrim &assetRoot,
-    UsdGeomXformCache *xformCache,
+RigExecApplyRevisedAncestorDelta(
     const SdfPath &xformPath,
     const RigExecPoseFrameEnumerator &providers,
-    RigExecPointFrame *out) const
+    RigExecPointFrame *frame)
 {
-    if (!_FrameFromXformRelativeToAsset(assetRoot, xformCache, xformPath, out,
-                                        nullptr) ||
-        !out->IsValid()) {
-        return false;
-    }
     // A native source that is not itself a written provider may still
     // sit beneath a constrained transform provider. The closest
     // revised ancestor contains all higher ancestor deltas, so apply
     // it once to the stage-derived source frame.
+    //
+    // The comparison is over POINTS and not whole frames: a provider whose
+    // flags differ from its base while its points do not has not moved, and
+    // comparing the frames would make it the closest revised ancestor and
+    // ride the source on an identity that is not one.
     SdfPath closest;
     RigExecPointFrame closestBase, closestCurrent;
     auto select = [&](const SdfPath &provider,
@@ -8296,9 +8293,25 @@ RigExecRigEvaluator::_ResolveNativeXformSource(
                 closestBase.points, closestCurrent.points, &delta)) {
             return false;
         }
-        *out = RigExecMatrixToPoints(out->points, delta);
+        *frame = RigExecMatrixToPoints(frame->points, delta);
     }
-    return out->IsValid();
+    return frame->IsValid();
+}
+
+bool
+RigExecRigEvaluator::_ResolveNativeXformSource(
+    const UsdPrim &assetRoot,
+    UsdGeomXformCache *xformCache,
+    const SdfPath &xformPath,
+    const RigExecPoseFrameEnumerator &providers,
+    RigExecPointFrame *out) const
+{
+    if (!_FrameFromXformRelativeToAsset(assetRoot, xformCache, xformPath, out,
+                                        nullptr) ||
+        !out->IsValid()) {
+        return false;
+    }
+    return RigExecApplyRevisedAncestorDelta(xformPath, providers, out);
 }
 
 void
@@ -9544,8 +9557,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     rest.push_back(frame->second);
                 }
                 if (!inputsValid ||
-                    !_PrepareRestDerivedIkChain(chain, rest,
-                                                &solveChain)) {
+                    !RigExecPrepareRestDerivedIkChain(
+                        chain, rest, &solveChain)) {
                     pose.diagnostics.push_back(
                         constraint.moverPath.GetString() +
                         " could not prepare rest-derived IK inputs; "

@@ -466,20 +466,84 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         return slot;
     };
 
+    // One plain Xformable a constraint reads off the stage, registered once
+    // however many bindings name it.
+    //
+    // The ancestor list is pure namespace topology -- every slot that is a
+    // STRICT prefix of the path, shallowest first -- so it is settled here;
+    // WHICH of them the source rides is a per-frame question about frames
+    // the step reads out of declared slots. The prim and its ancestors go
+    // into the resync index only: the transform is re-read every frame, so
+    // a value edit on it must not rebuild the program.
+    auto nativeSource = [&](const SdfPath &path) {
+        for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+            if (B.nativeSources[k].path == path) {
+                return int(k);
+            }
+        }
+        RigExecBakedProgramImpl::NativeXformSource source;
+        source.path = path;
+        for (int i = 0; i < N; ++i) {
+            if (B.paths[size_t(i)] != path &&
+                path.HasPrefix(B.paths[size_t(i)])) {
+                source.ancestorSlots.push_back(i);
+            }
+        }
+        for (SdfPath p = path;
+             !p.IsEmpty() && p != SdfPath::AbsoluteRootPath();
+             p = p.GetParentPath()) {
+            B.prims.insert(p);
+            if (p == B.assetRootPath) {
+                break;
+            }
+        }
+        B.nativeSources.push_back(std::move(source));
+        return int(B.nativeSources.size()) - 1;
+    };
+
     // ---- constraints --------------------------------------------------------
     auto bakeConstraint = [&](const RigExecBakedConstraintSpec &fc) {
         RigExecBakedProgramImpl::Constraint c;
         c.path = fc.moverPath;
         c.type = fc.schemaType;
-        c.snapshotAfter = fc.snapshotAfter;
+        c.singleChainIk = fc.schemaType == "RigExecSingleChainIkConstraint";
         const UsdPrim prim = B.stage->GetPrimAtPath(fc.moverPath);
-        c.target = fc.targets.empty() ? -1 : slotOf(fc.targets[0]);
-        for (const SdfPath &source : fc.sources) {
-            const int slot = slotOf(source);
+        // Every target, in compiled order, with the read-phase membership
+        // the dynamic recordFrame tests per call. A SingleChainIK's targets
+        // ARE its joint chain (rigEvaluator's compile sets the two equal),
+        // so this is also the chain the commit revises atomically.
+        for (size_t k = 0; k < fc.targets.size(); ++k) {
+            const int slot = slotOf(fc.targets[k]);
             if (slot < 0) {
-                refuse("constraint source is not a pose provider", source);
+                refuse("constraint target is not a seeded pose provider",
+                       fc.targets[k]);
+                continue;
+            }
+            c.targetSlots.push_back(slot);
+            c.snapshotTargets.push_back(
+                k < fc.snapshotTargets.size() ? fc.snapshotTargets[k] : 0);
+            c.snapshotAfter = c.snapshotAfter || c.snapshotTargets.back();
+        }
+        c.target = c.targetSlots.empty() ? -1 : c.targetSlots[0];
+        for (size_t k = 0; k < fc.sources.size(); ++k) {
+            // resolveBinding's order, decided once: the walk's own frame
+            // when it holds one -- which is every RigExec provider and every
+            // plain Xformable some constraint targets -- and the stage
+            // otherwise. A source that is itself an xform-derived target must
+            // take the SLOT, or a constraint chained onto another
+            // constraint's target would read the unrevised transform.
+            const int slot = slotOf(fc.sources[k]);
+            const SdfPath &xform =
+                k < fc.sourceXforms.size() ? fc.sourceXforms[k] : SdfPath();
+            const int native =
+                slot < 0 && !xform.IsEmpty() ? nativeSource(xform) : -1;
+            if (slot < 0 && native < 0) {
+                refuse("constraint source is not a pose provider",
+                       fc.sources[k]);
             }
             c.sources.push_back(slot);
+            c.sourceNatives.push_back(native);
+            c.sourcePaths.push_back(fc.sources[k]);
         }
         c.enabled = bind(prim, "inputs:enabled", true);
         c.defaultWeight = bind(prim, "inputs:defaultWeight", 1.0f);
@@ -497,61 +561,124 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             B.resolvedRoutedPrims.insert(c.weightObject);
         }
 
-        // inputs:sourceWeights / the parent offsets are authored tables, read
-        // as arrays rather than as a per-source scalar.
-        const size_t n = c.sources.size();
-        VtFloatArray weights;
-        fold(prim, "inputs:sourceWeights");
-        if (const UsdAttribute a =
-                prim.GetAttribute(TfToken("inputs:sourceWeights"))) {
-            if (RigExecBakedAnimatedOrConnected(a)) {
-                refuse("animated inputs:sourceWeights", fc.moverPath);
+        // inputs:sourceWeights and the parent offsets are authored TABLES
+        // the operator reads raw, once per frame, at the frame's own time.
+        // They are re-read rather than captured, so an animated blend
+        // between two parents bakes -- and the cardinality diagnostic the
+        // dynamic walk gives a malformed one is reproduced from this run's
+        // numbers rather than refused at bake.
+        //
+        // FoldShape and not Fold: nothing about the VALUE is folded, so an
+        // interactive override on one of these tables is not placeable --
+        // which agrees with the dynamic path, whose raw read ignores such an
+        // override too. What FoldShape does NOT buy is edit-time cheapness:
+        // like Fold it puts the property in `rebuild`, so authoring a new
+        // weight rebuilds the program even though the run would have re-read
+        // it anyway. Conservative and correct; the day that costs a rigger
+        // scrubbing a blend curve, the fix is a `Name` that indexes without
+        // rebuilding, not a quieter comment here.
+        {
+            RigExecBakedProgramImpl::ConstraintArrays arrays;
+            arrays.prim = prim;
+            arrays.sourceCount = c.sources.size();
+            arrays.parentOffsets =
+                fc.schemaType == "RigExecParentConstraint";
+            foldShape(prim, "inputs:sourceWeights");
+            if (prim.GetAttribute(TfToken("inputs:sourceWeights"))) {
+                ++B.boundInputs;
             }
-            a.Get(&weights);
-            ++B.boundInputs;
-        }
-        c.authoredSourceWeights = weights.size();
-        c.sourceWeights.resize(n);
-        for (size_t k = 0; k < n; ++k) {
-            c.sourceWeights[k].constant = k < weights.size() ? weights[k] : 1.0f;
-        }
-        if (!weights.empty() && weights.size() != n) {
-            // The dynamic path diagnoses this and passes the constraint
-            // through; the program refuses instead of reproducing a
-            // malformed-input message from baked state.
-            refuse("inputs:sourceWeights cardinality", fc.moverPath);
-        }
-        c.translationOffsets.assign(n, GfVec3d(0));
-        c.rotationOffsets.assign(n, GfVec3d(0));
-        if (fc.schemaType == "RigExecParentConstraint") {
-            VtVec3dArray translations, rotations;
-            for (const char *name : {"inputs:translationOffsets",
-                                     "inputs:rotationOffsets"}) {
-                fold(prim, name);
-                if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-                    if (RigExecBakedAnimatedOrConnected(a)) {
-                        refuse(std::string("animated ") + name, fc.moverPath);
+            if (arrays.parentOffsets) {
+                for (const char *name : {"inputs:translationOffsets",
+                                         "inputs:rotationOffsets"}) {
+                    foldShape(prim, name);
+                    if (prim.GetAttribute(TfToken(name))) {
+                        ++B.boundInputs;
                     }
-                    ++B.boundInputs;
                 }
             }
-            if (const UsdAttribute a = prim.GetAttribute(
-                    TfToken("inputs:translationOffsets"))) {
-                a.Get(&translations);
+            c.arrays = int(B.constraintArrays.size());
+            B.constraintArrays.push_back(std::move(arrays));
+        }
+        // The GEOMETRY domain, decided once. The delta is measured against
+        // the TARGET PRIM's authored transform, which is a stage read the
+        // prologue makes; the prim goes into the resync index only, because
+        // nothing about its value is captured.
+        c.pointsTarget = fc.pointsTarget;
+        if (!fc.pointsTarget.IsEmpty() && !fc.targets.empty()) {
+            c.deltaBasePath = fc.targets[0];
+            c.deltaBase = int(B.deltaBasePaths.size());
+            B.deltaBasePaths.push_back(fc.targets[0]);
+            B.prims.insert(fc.targets[0]);
+        }
+        // ---- SingleChainIK ------------------------------------------------
+        //
+        // Three uniform tokens, read the way the dynamic walk reads them
+        // (plain Get, no time), plus the two bindings it resolves beside
+        // them. The evaluation mode's "autoDetect" is settled here because
+        // _IkUsesAnimatedTs asks only structural questions -- a solver
+        // binding, a time sample, a connection -- and the attributes it
+        // inspects are folded for their SHAPE so that authoring one rebuilds
+        // the program rather than silently changing the answer.
+        if (c.singleChainIk) {
+            c.ikMode = readToken(prim, "rigExec:solverMode", "rotatePlane") ==
+                               "singleChain"
+                           ? RigExecSingleChainIkMode::SingleChain
+                           : RigExecSingleChainIkMode::RotatePlane;
+            c.poleModeObject =
+                readToken(prim, "rigExec:poleVectorMode", "vector") ==
+                "object";
+            const TfToken evaluationMode =
+                readToken(prim, "rigExec:evaluationMode", "neverTS");
+            c.useAnimatedTs =
+                evaluationMode == "alwaysTS" ||
+                (evaluationMode == "autoDetect" &&
+                 fc.ikUsesAnimatedTs);
+            for (const SdfPath &joint : fc.ikChain) {
+                const UsdPrim jointPrim = B.stage->GetPrimAtPath(joint);
+                for (const char *name : {"posed:space", "avars:tx",
+                                         "avars:ty", "avars:tz", "avars:sx",
+                                         "avars:sy", "avars:sz"}) {
+                    foldShape(jointPrim, name);
+                }
             }
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("inputs:rotationOffsets"))) {
-                a.Get(&rotations);
+            const auto bindSource = [&](const SdfPath &path,
+                                        const SdfPath &xform, int *slot,
+                                        int *native) {
+                *slot = path.IsEmpty() ? -1 : slotOf(path);
+                *native = *slot < 0 && !xform.IsEmpty() ? nativeSource(xform)
+                                                        : -1;
+            };
+            bindSource(fc.effector, fc.effectorXform, &c.effector,
+                       &c.effectorNative);
+            c.effectorPath = fc.effector;
+            for (size_t k = 0; k < fc.poleObjects.size(); ++k) {
+                int slot = -1, native = -1;
+                bindSource(fc.poleObjects[k],
+                           k < fc.poleObjectXforms.size()
+                               ? fc.poleObjectXforms[k]
+                               : SdfPath(),
+                           &slot, &native);
+                c.poleObjects.push_back(slot);
+                c.poleObjectNatives.push_back(native);
             }
-            if ((!translations.empty() && translations.size() != n) ||
-                (!rotations.empty() && rotations.size() != n)) {
-                refuse("parent constraint offset cardinality", fc.moverPath);
+            // Bound only in RotatePlane mode, which is the only mode the
+            // dynamic walk reads them in: binding them everywhere would let
+            // an override on one place itself on a solve that ignores it.
+            if (c.ikMode == RigExecSingleChainIkMode::RotatePlane) {
+                c.poleVector =
+                    bind(prim, "inputs:poleVector", GfVec3d(0, 1, 0));
+                c.twistDegrees = bind(prim, "inputs:twistDegrees", 0.0);
             }
-            for (size_t k = 0; k < translations.size() && k < n; ++k) {
-                c.translationOffsets[k] = translations[k];
-            }
-            for (size_t k = 0; k < rotations.size() && k < n; ++k) {
-                c.rotationOffsets[k] = rotations[k];
+            RigExecBakedProgramImpl::ConstraintArrays &arrays =
+                B.constraintArrays[size_t(c.arrays)];
+            arrays.readPole =
+                c.ikMode == RigExecSingleChainIkMode::RotatePlane &&
+                c.poleModeObject && !c.poleObjects.empty();
+            arrays.poleCount = c.poleObjects.size();
+            if (arrays.readPole &&
+                prim.GetAttribute(TfToken("inputs:poleVectorWeights"))) {
+                foldShape(prim, "inputs:poleVectorWeights");
+                ++B.boundInputs;
             }
         }
         c.order = RigExecBakedParseEulerOrder(
@@ -615,9 +742,15 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             c.preserveInputUp =
                 targets(prim, "rigExec:sources").empty();
             c.worldUpObjectNamed = !fc.worldUpObject.IsEmpty();
+            c.worldUpPath = fc.worldUpObject;
             c.worldUpObject =
                 c.worldUpObjectNamed ? slotOf(fc.worldUpObject) : -1;
-            if (c.worldUpObjectNamed && c.worldUpObject < 0) {
+            if (c.worldUpObjectNamed && c.worldUpObject < 0 &&
+                !fc.worldUpXform.IsEmpty()) {
+                c.worldUpNative = nativeSource(fc.worldUpXform);
+            }
+            if (c.worldUpObjectNamed && c.worldUpObject < 0 &&
+                c.worldUpNative < 0) {
                 refuse("aim world-up object is not a pose provider",
                        fc.worldUpObject);
             }
@@ -701,8 +834,20 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             buildPropagation(candidates, &st.propagate);
         } else {
             st.index = bakeConstraint(entry.constraint);
-            if (B.constraints[st.index].target >= 0) {
-                buildPropagation({B.constraints[st.index].target},
+            const RigExecBakedProgramImpl::Constraint &baked =
+                B.constraints[size_t(st.index)];
+            // A geometry-domain constraint revises NO transform: it measures
+            // a delta and hands it to a Matrix revision. It still reads its
+            // target's frame as the input it solves from, which is the
+            // commit's targetRead and not a candidate. A SingleChainIK
+            // revises its whole chain atomically, so the propagation is
+            // built over all of it at once -- buildPropagation already
+            // collapses a nested chain to its root, which is what the
+            // dynamic commitConstraintFrames does with a candidate set.
+            if (baked.target >= 0 && baked.pointsTarget.IsEmpty()) {
+                buildPropagation(baked.singleChainIk
+                                     ? baked.targetSlots
+                                     : std::vector<int>{baked.target},
                                  &st.propagate);
             }
         }
@@ -806,6 +951,9 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     const auto readFin = [&liveFin, n](int slot) {
         return slot >= 0 && size_t(slot) < n ? liveFin[size_t(slot)] : 0u;
     };
+    const auto readBase = [&liveBase, n](int slot) {
+        return slot >= 0 && size_t(slot) < n ? liveBase[size_t(slot)] : 0u;
+    };
     // One solver's frame reads, bound to the versions live where it runs.
     // Written once because two callers need it at two different points of
     // the sweep: a batch's solvers read the versions live where their batch
@@ -841,6 +989,48 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
                 commit.sourceReads.push_back(readFin(source));
             }
             commit.worldUpRead = readFin(constraint.worldUpObject);
+            // The frame the constraint solves FROM, whichever domain it
+            // writes. For a transform-domain constraint this is the same
+            // version its one candidate reads; a geometry-domain one has no
+            // candidate at all and this is its only read of the target.
+            commit.targetRead = readFin(constraint.target);
+            commit.targetReads.clear();
+            for (const int slot : constraint.targetSlots) {
+                commit.targetReads.push_back(readFin(slot));
+            }
+            // A native source rides the deepest ancestor the walk has moved
+            // BY THIS POINT, so both halves of every candidate ancestor --
+            // its base and its final -- are read at the versions live here.
+            const auto ancestorReads =
+                [&](int native,
+                    std::vector<RigExecBakedCommit::AncestorRead> *out) {
+                out->clear();
+                if (native < 0) {
+                    return;
+                }
+                for (const int slot :
+                         B.nativeSources[size_t(native)].ancestorSlots) {
+                    out->push_back({slot, readFin(slot), readBase(slot)});
+                }
+            };
+            commit.sourceAncestors.resize(constraint.sources.size());
+            for (size_t k = 0; k < constraint.sourceNatives.size(); ++k) {
+                ancestorReads(constraint.sourceNatives[k],
+                              &commit.sourceAncestors[k]);
+            }
+            ancestorReads(constraint.worldUpNative,
+                          &commit.worldUpAncestors);
+            commit.effectorRead = readFin(constraint.effector);
+            ancestorReads(constraint.effectorNative,
+                          &commit.effectorAncestors);
+            commit.poleReads.clear();
+            commit.poleAncestors.assign(constraint.poleObjects.size(), {});
+            for (size_t k = 0; k < constraint.poleObjects.size(); ++k) {
+                commit.poleReads.push_back(
+                    readFin(constraint.poleObjects[k]));
+                ancestorReads(constraint.poleObjectNatives[k],
+                              &commit.poleAncestors[k]);
+            }
         }
         commit.slotReads.clear();
         for (const int slot : commit.slots) {
@@ -1031,13 +1221,24 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 }
             }
         } else {
-            commit.moverPath = B.constraints[size_t(walk.index)].path;
-            if (B.constraints[size_t(walk.index)].target >= 0) {
-                commit.slots.push_back(
-                    B.constraints[size_t(walk.index)].target);
+            const RigExecBakedProgramImpl::Constraint &constraint =
+                B.constraints[size_t(walk.index)];
+            commit.moverPath = constraint.path;
+            if (constraint.target >= 0 && constraint.pointsTarget.IsEmpty()) {
+                if (constraint.singleChainIk) {
+                    // The one multi-target built-in: every chain joint is a
+                    // candidate, and the commit is atomic over all of them.
+                    commit.slots.insert(commit.slots.end(),
+                                        constraint.targetSlots.begin(),
+                                        constraint.targetSlots.end());
+                } else {
+                    commit.slots.push_back(constraint.target);
+                }
             }
-            commit.sources.resize(
-                B.constraints[size_t(walk.index)].sources.size());
+            commit.sources.resize(constraint.sources.size());
+            commit.ikChain.resize(constraint.targetSlots.size());
+            commit.ikRest.resize(constraint.targetSlots.size());
+            commit.ikPrepared.reserve(constraint.targetSlots.size());
         }
         std::sort(commit.slots.begin(), commit.slots.end());
         commit.slots.erase(
@@ -1144,10 +1345,55 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 commitStep.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::PoseFin, constraint.target));
             }
+            // A geometry-domain constraint's one write: the delta the Matrix
+            // revision of the same mover rides.
+            if (constraint.deltaBase >= 0) {
+                commitStep.writes.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::ConstraintDelta,
+                                    constraint.deltaBase));
+            }
             if (constraint.worldUpObject >= 0) {
                 commitStep.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::PoseFin,
                     constraint.worldUpObject));
+            }
+            // Both frames of every provider a native source might ride: the
+            // step compares them to decide which ancestor moved, so both are
+            // reads whatever this frame's answer turns out to be.
+            const auto declareNative = [&B, &commitStep](int native) {
+                if (native < 0) {
+                    return;
+                }
+                for (const int slot :
+                         B.nativeSources[size_t(native)].ancestorSlots) {
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseFin, slot));
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseBase, slot));
+                }
+            };
+            for (const int native : constraint.sourceNatives) {
+                declareNative(native);
+            }
+            declareNative(constraint.worldUpNative);
+            // A SingleChainIK reads its whole chain, its effector and every
+            // pole object.
+            for (const int slot : constraint.targetSlots) {
+                commitStep.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, slot));
+            }
+            if (constraint.effector >= 0) {
+                commitStep.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, constraint.effector));
+            }
+            declareNative(constraint.effectorNative);
+            for (size_t k = 0; k < constraint.poleObjects.size(); ++k) {
+                if (constraint.poleObjects[k] >= 0) {
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseFin,
+                        constraint.poleObjects[k]));
+                }
+                declareNative(constraint.poleObjectNatives[k]);
             }
         }
         commitStep.writes.push_back(
@@ -1494,8 +1740,18 @@ NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
     NoteInput(constraint.upVector, step);
     NoteInput(constraint.rotationOffset, step);
     NoteInput(constraint.worldUpVector, step);
-    // The authored source-weight and offset tables are folded -- an animated
-    // one is refused at bake -- so there is nothing per-frame about them.
+    // The two SingleChainIK-only inputs. Bound only in RotatePlane mode, so
+    // in every other mode these are the default-constructed inputs and note
+    // nothing -- which is the same answer as not listing them, and a good
+    // deal harder to forget.
+    NoteInput(constraint.poleVector, step);
+    NoteInput(constraint.twistDegrees, step);
+    // The authored source-weight, offset and pole-weight tables are NOT
+    // noted here: they are not inputs the step reads at all. The prologue
+    // re-reads them off the stage each run and compares them by value, and
+    // `constraintArrayClusters` is what dirties this step when one moved
+    // (RigExecBakedComputeClosure) -- the §7 source mechanism, not the
+    // varying-input one.
 }
 
 }  // namespace
@@ -1677,26 +1933,49 @@ StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
 void
 RecordFrame(const RigExecBakedProgramImpl &B,
             const RigExecBakedProgramImpl::Constraint &constraint,
-            uint32_t targetVersion, RigExecBakedStep *step)
+            const RigExecBakedCommit &commit, RigExecBakedStep *step)
 {
-    if (!constraint.snapshotAfter || constraint.target < 0) {
+    if (!constraint.snapshotAfter) {
         return;
     }
-    // The target as THIS commit left it, which is the commit's own version
-    // of the slot whether it revised it or carried the one it found: a
-    // phase names a point in the walk, and a constraint that passed through
-    // still leaves its target standing at that point.
-    const RigExecPointFrame &frame = B.fin[size_t(targetVersion)];
-    if (!frame.IsValid()) {
-        return;
-    }
-    const RigExecPointFrame &rest = B.restFrames[size_t(constraint.target)];
-    const std::array<GfVec3d, 4> landmarks =
-        rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
-    GfMatrix4d matrix(1.0);
-    if (RigExecPointsToMatrix(landmarks, frame.points, &matrix)) {
-        step->snapshots.Record(B.paths[size_t(constraint.target)],
-                               constraint.path, VtValue(matrix));
+    // Every target, or just the first: which one this exit is was decided
+    // by the step, because the dynamic walk decides it per exit (see
+    // RigExecBakedCommit::recordEveryTarget).
+    const size_t count =
+        commit.recordEveryTarget
+            ? constraint.targetSlots.size()
+            : std::min<size_t>(1, constraint.targetSlots.size());
+    for (size_t k = 0; k < count; ++k) {
+        if (!constraint.snapshotTargets[k]) {
+            continue;
+        }
+        const size_t slot = size_t(constraint.targetSlots[k]);
+        // The target as THIS commit left it: the commit's own version of the
+        // slot when it declared one -- whether it revised it or carried the
+        // one it found -- and otherwise the version it read, which is where
+        // a geometry-domain constraint leaves its target. A phase names a
+        // point in the walk, and a constraint that passed through still
+        // leaves its target standing at that point.
+        const auto found = std::lower_bound(commit.slots.begin(),
+                                            commit.slots.end(),
+                                            constraint.targetSlots[k]);
+        const uint32_t version =
+            found != commit.slots.end() &&
+                    *found == constraint.targetSlots[k]
+                ? commit.slotWrites[size_t(found - commit.slots.begin())]
+                : commit.targetReads[k];
+        const RigExecPointFrame &frame = B.fin[size_t(version)];
+        if (!frame.IsValid()) {
+            continue;
+        }
+        const RigExecPointFrame &rest = B.restFrames[slot];
+        const std::array<GfVec3d, 4> landmarks =
+            rest.IsValid() ? rest.points : RigExecIdentityLandmarks();
+        GfMatrix4d matrix(1.0);
+        if (RigExecPointsToMatrix(landmarks, frame.points, &matrix)) {
+            step->snapshots.Record(B.paths[slot], constraint.path,
+                                   VtValue(matrix));
+        }
     }
 }
 
@@ -1751,11 +2030,8 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         }
     };
     const auto record = [&] {
-        if (constraint) {
-            RecordFrame(B, *constraint,
-                        commit->slotWrites.empty() ? 0
-                                                   : commit->slotWrites[0],
-                        step);
+        if (constraint && commit->recordAfter) {
+            RecordFrame(B, *constraint, *commit, step);
         }
     };
     if (commit->abandoned) {
@@ -1861,26 +2137,38 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 // does the same nothing writes it.
                 continue;
             }
-            const double *a = &B.avars[size_t(i) * 11];
-            const double units = a[10];
-            // A volume weight's placement is RIGID: its shape is
-            // inputs:scaleX/Y/Z's alone, so the transform-scale avars are
-            // read and discarded here rather than zeroed at bake -- exec
-            // never binds them at all, and a captured zero would be walked
-            // straight past by an override or an animated channel.
-            const bool noScale = B.noScaleAvars[size_t(i)] != 0;
-            const GfMatrix4d avars = RigExecBakedComposeAvars(
-                a[0] * units, a[1] * units, a[2] * units,
-                noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
-                noScale ? 1.0 : a[5],
-                a[6], a[7], a[8], a[9], B.rotOrder[size_t(i)]);
-            const GfMatrix4d parentPosed =
-                B.parent[size_t(i)] >= 0
-                    ? B.posedM[size_t(B.parent[size_t(i)])]
-                    : GfMatrix4d(1.0);
-            B.base[size_t(i)] = RigExecFrameFromMatrix(
-                avars * B.selfD[size_t(i)] * B.parentDinv[size_t(i)] *
-                parentPosed);
+            if (B.posedAuthored[size_t(i)]) {
+                // A non-identity authored posed:space is the pose: exec
+                // returns its frame and reads neither the avars nor the
+                // parent, so neither does this.
+                B.base[size_t(i)] =
+                    RigExecFrameFromMatrix(B.posedAuthoredM[size_t(i)]);
+            } else {
+                const double *a = &B.avars[size_t(i) * 11];
+                const double units = a[10];
+                // A volume weight's placement is RIGID: its shape is
+                // inputs:scaleX/Y/Z's alone, so the transform-scale avars
+                // are read and discarded here rather than zeroed at bake --
+                // exec never binds them at all, and a captured zero would be
+                // walked straight past by an override or an animated
+                // channel. The suppression belongs to THIS branch only: the
+                // authored-posed:space branch above reads no avar at all, so
+                // a volume that takes it discards the scale for free, which
+                // is what exec does with the same rig.
+                const bool noScale = B.noScaleAvars[size_t(i)] != 0;
+                const GfMatrix4d avars = RigExecBakedComposeAvars(
+                    a[0] * units, a[1] * units, a[2] * units,
+                    noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
+                    noScale ? 1.0 : a[5],
+                    a[6], a[7], a[8], a[9], B.rotOrder[size_t(i)]);
+                const GfMatrix4d parentPosed =
+                    B.parent[size_t(i)] >= 0
+                        ? B.posedM[size_t(B.parent[size_t(i)])]
+                        : GfMatrix4d(1.0);
+                B.base[size_t(i)] = RigExecFrameFromMatrix(
+                    avars * B.selfD[size_t(i)] * B.parentDinv[size_t(i)] *
+                    parentPosed);
+            }
             B.fin[size_t(i)] = B.base[size_t(i)];
             // _SpaceFromFrame: an unusable frame selects the NaN sentinel, so
             // the failure survives into every descendant instead of being
@@ -2088,6 +2376,18 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             FinishCommit(&B, step, &commit);
         };
+        // The GEOMETRY domain writes no transform: it measures a delta
+        // against the target's authored transform and hands it to the Matrix
+        // revision the same mover contributes. Both halves of what makes it
+        // different are set up here -- the delta is absent until this run
+        // produces one, and the target's frame is recorded for a read phase
+        // only on the exits the dynamic walk records it on.
+        const int deltaBase = c.deltaBase;
+        commit.recordAfter = true;
+        commit.recordEveryTarget = true;
+        if (deltaBase >= 0) {
+            B.deltaPresent[size_t(deltaBase)] = 0;
+        }
         if (c.target < 0) {
             // No slot to revise: nothing the walk can commit, and nothing to
             // record. The dynamic path reaches its target through the frame
@@ -2136,25 +2436,222 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         if (weight <= 0.0) {
             // A zero envelope is an exact dormant pass-through, decided
             // before any source is resolved so a malformed disconnected input
-            // cannot make a disabled constraint fail.
+            // cannot make a disabled constraint fail. A DORMANT geometry
+            // constraint still publishes a delta -- the identity one -- so
+            // that the revision it feeds moves the points nowhere rather
+            // than falling back to whatever matrix it last held.
+            if (deltaBase >= 0) {
+                B.deltaValues[size_t(deltaBase)] = GfMatrix4d(1.0);
+                B.deltaPresent[size_t(deltaBase)] = 1;
+            }
             finish();
             return;
         }
-        bool sourcesReady = true;
-        for (size_t k = 0; k < c.sources.size(); ++k) {
-            const RigExecPointFrame &frame =
-                B.fin[size_t(commit.sourceReads[k])];
-            if (!frame.IsValid()) {
+        // One frame source, resolved in resolveBinding's order: the walk's
+        // own frame when it holds one, and otherwise the transform the
+        // prologue read off the stage, ridden on the revision of the deepest
+        // provider above it that the walk has already moved. The ride is the
+        // shared routine both paths call, so the two cannot pick different
+        // ancestors or measure different deltas.
+        const auto resolveSource =
+            [&B](int slot, uint32_t finRead, int native,
+                 const std::vector<RigExecBakedCommit::AncestorRead>
+                     &ancestors,
+                 RigExecPointFrame *out) {
+            if (slot >= 0) {
+                *out = B.fin[size_t(finRead)];
+                return out->IsValid();
+            }
+            if (native < 0 || !B.nativeFrameOk[size_t(native)]) {
+                return false;
+            }
+            *out = B.nativeFrames[size_t(native)];
+            if (!out->IsValid()) {
+                return false;
+            }
+            const auto enumerate =
+                [&B, &ancestors](const RigExecPoseFrameVisitor &visit) {
+                for (const RigExecBakedCommit::AncestorRead &a : ancestors) {
+                    visit(B.paths[size_t(a.slot)], B.base[size_t(a.base)],
+                          B.fin[size_t(a.fin)]);
+                }
+            };
+            const RigExecPoseFrameEnumerator providers(enumerate);
+            return RigExecApplyRevisedAncestorDelta(
+                B.nativeSources[size_t(native)].path, providers, out);
+        };
+        // This constraint's authored tables, as the prologue read them at
+        // this frame's time.
+        const RigExecBakedProgramImpl::ConstraintArrays &arrays =
+            B.constraintArrays[size_t(c.arrays)];
+        if (c.singleChainIk) {
+            // The one multi-target built-in, in the dynamic walk's order:
+            // the chain, the effector, the parameters, the pole, the
+            // rest-derived preparation, the solve, one atomic validity
+            // check, and then a commit over the whole chain.
+            bool inputsValid = true;
+            for (size_t k = 0; k < c.targetSlots.size(); ++k) {
+                commit.ikChain[k] = B.fin[size_t(commit.targetReads[k])];
+            }
+            RigExecPointFrame effector;
+            if (!resolveSource(c.effector, commit.effectorRead,
+                               c.effectorNative, commit.effectorAncestors,
+                               &effector)) {
+                step->diagnostics.push_back(
+                    c.path.GetString() +
+                    " could not resolve its effector; constraint passed "
+                    "through");
+                inputsValid = false;
+            }
+            RigExecSingleChainIkParams params;
+            params.mode = c.ikMode;
+            params.weight = weight;
+            // Read BEFORE the pole mode is consulted, and only in
+            // RotatePlane mode, which is where the dynamic walk reads them:
+            // object mode then overwrites params.pole. A different read
+            // order is numerically invisible and changes which inputs a drag
+            // reaches.
+            if (c.ikMode == RigExecSingleChainIkMode::RotatePlane) {
+                params.pole = rd(c.poleVector);
+                params.twistDegrees = rd(c.twistDegrees);
+            }
+            if (inputsValid &&
+                c.ikMode == RigExecSingleChainIkMode::RotatePlane &&
+                c.poleModeObject) {
+                if (c.poleObjects.empty()) {
+                    step->diagnostics.push_back(
+                        c.path.GetString() +
+                        " uses object pole mode with no pole-vector objects; "
+                        "constraint passed through");
+                    inputsValid = false;
+                }
+                if (inputsValid && !arrays.poleOk) {
+                    for (const std::string &line : arrays.poleDiagnostics) {
+                        step->diagnostics.push_back(line);
+                    }
+                    inputsValid = false;
+                }
+                GfVec3d polePoint(0);
+                double total = 0;
+                for (size_t k = 0;
+                     inputsValid && k < c.poleObjects.size(); ++k) {
+                    RigExecPointFrame poleFrame;
+                    if (!resolveSource(c.poleObjects[k], commit.poleReads[k],
+                                       c.poleObjectNatives[k],
+                                       commit.poleAncestors[k], &poleFrame) ||
+                        !std::isfinite(arrays.poleWeights[k]) ||
+                        arrays.poleWeights[k] < 0) {
+                        step->diagnostics.push_back(
+                            c.path.GetString() +
+                            " has an invalid pole-vector source or weight; "
+                            "constraint passed through");
+                        inputsValid = false;
+                        break;
+                    }
+                    polePoint += poleFrame.Origin() * arrays.poleWeights[k];
+                    total += arrays.poleWeights[k];
+                }
+                if (inputsValid && total <= 0) {
+                    step->diagnostics.push_back(
+                        c.path.GetString() +
+                        " has zero total pole-vector weight; constraint "
+                        "passed through");
+                    inputsValid = false;
+                }
+                if (inputsValid) {
+                    params.pole = polePoint / total;
+                }
+            }
+            // "neverTS" rebuilds the chain's layout from its rests, which is
+            // the better-conditioned question for a chain with no animated
+            // translations. Which of the two it is was settled at bake.
+            const std::vector<RigExecPointFrame> *solveChain = &commit.ikChain;
+            if (inputsValid && !c.useAnimatedTs) {
+                for (size_t k = 0; k < c.targetSlots.size(); ++k) {
+                    commit.ikRest[k] =
+                        B.restFrames[size_t(c.targetSlots[k])];
+                }
+                if (!RigExecPrepareRestDerivedIkChain(
+                        commit.ikChain, commit.ikRest, &commit.ikPrepared)) {
+                    step->diagnostics.push_back(
+                        c.path.GetString() +
+                        " could not prepare rest-derived IK inputs; "
+                        "constraint passed through");
+                    inputsValid = false;
+                } else {
+                    solveChain = &commit.ikPrepared;
+                }
+            }
+            commit.ikSolved.clear();
+            if (inputsValid) {
+                commit.ikSolved =
+                    RigExecSolveSingleChainIk(*solveChain, effector, params);
+            }
+            // Atomic: the whole chain or none of it, and before any write.
+            if (inputsValid &&
+                (commit.ikSolved.size() != c.targetSlots.size() ||
+                 std::any_of(commit.ikSolved.begin(), commit.ikSolved.end(),
+                             [](const RigExecPointFrame &frame) {
+                                 return !RigExecBakedUsable(frame);
+                             }))) {
+                step->diagnostics.push_back(
+                    c.path.GetString() +
+                    " failed to solve its joint chain; constraint passed "
+                    "through atomically");
+                inputsValid = false;
+            }
+            if (inputsValid) {
+                // commit.slots is the chain, sorted; targetSlots is the
+                // chain in SOLVE order, so each solved frame lands at its
+                // own slot's position rather than at its own index.
+                for (size_t k = 0; k < c.targetSlots.size(); ++k) {
+                    const auto found = std::lower_bound(
+                        commit.slots.begin(), commit.slots.end(),
+                        c.targetSlots[k]);
+                    if (found == commit.slots.end() ||
+                        *found != c.targetSlots[k]) {
+                        continue;
+                    }
+                    const size_t pos = size_t(found - commit.slots.begin());
+                    commit.frames[pos] = commit.ikSolved[k];
+                    commit.present[pos] = 1;
+                }
+                commit.abandoned = false;
+            }
+            finish();
+            return;
+        }
+
+        // Past the IK exit, and so past the last exit the dynamic walk
+        // records every target on: its remaining two record targets[0].
+        commit.recordEveryTarget = false;
+
+        // buildSources' order, which is a diagnostic order as much as an
+        // arithmetic one: the authored tables first, then the source frames.
+        // A rig with both a bad cardinality and an unresolvable source says
+        // so in that order, and the comparator compares diagnostics in
+        // order.
+        bool sourcesReady = arrays.ok;
+        for (const std::string &line : arrays.diagnostics) {
+            step->diagnostics.push_back(line);
+        }
+        for (size_t k = 0; sourcesReady && k < c.sources.size(); ++k) {
+            RigExecPointFrame frame;
+            if (!resolveSource(c.sources[k], commit.sourceReads[k],
+                               c.sourceNatives[k], commit.sourceAncestors[k],
+                               &frame)) {
                 step->diagnostics.push_back(
                     c.path.GetString() + " could not resolve source " +
-                    B.paths[size_t(c.sources[k])].GetString());
+                    c.sourcePaths[k].GetString());
                 sourcesReady = false;
                 break;
             }
             commit.sources[k].frame = frame;
-            commit.sources[k].normalizedWeight = c.sourceWeights[k].constant;
-            commit.sources[k].translationOffset = c.translationOffsets[k];
-            commit.sources[k].rotationOffsetDegrees = c.rotationOffsets[k];
+            commit.sources[k].normalizedWeight = arrays.weights[k];
+            commit.sources[k].translationOffset =
+                arrays.translationOffsets[k];
+            commit.sources[k].rotationOffsetDegrees =
+                arrays.rotationOffsets[k];
         }
         if (!sourcesReady) {
             step->diagnostics.push_back(
@@ -2163,8 +2660,18 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             finish();
             return;
         }
+        // Past this point the dynamic walk records nothing for a
+        // geometry-domain constraint: it revises no transform, so there is
+        // no "the target as of this mover" to record.
+        commit.recordAfter = deltaBase < 0;
+        // The envelope is applied exactly ONCE. In the transform domain the
+        // kernel's per-channel blend carries it; in the geometry domain the
+        // per-point lerp does, so the solve runs UNWEIGHTED and hands back
+        // the full-strength delta. Passing the envelope to both would square
+        // it, and 0.5 would come out as 0.25 on points.
+        const double solveWeight = deltaBase < 0 ? weight : 1.0;
         const std::vector<RigExecConstraintSource> &sources = commit.sources;
-        const RigExecPointFrame input = B.fin[size_t(commit.slotReads[0])];
+        const RigExecPointFrame input = B.fin[size_t(commit.targetRead)];
         RigExecPointFrame candidate = input;
         bool candidateReady = true;
         RigExecConstraintAxisMask affect;
@@ -2175,20 +2682,20 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             RigExecPositionConstraintParams params;
             params.offset = rd(c.offset);
             params.affect = affect;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyPositionConstraint(input, sources, params);
         } else if (c.type == "RigExecRotationConstraint") {
             RigExecRotationConstraintParams params;
             params.offsetDegrees = rd(c.offset);
             params.affect = affect;
             params.rotationOrder = c.order;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyRotationConstraint(input, sources, params);
         } else if (c.type == "RigExecScaleConstraint") {
             RigExecScaleConstraintParams params;
             params.offset = rd(c.offset);
             params.affect = affect;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyScaleConstraint(input, sources, params);
         } else if (c.type == "RigExecParentConstraint") {
             RigExecParentConstraintParams params;
@@ -2202,7 +2709,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             params.scaleAxes.y = rd(c.sY);
             params.scaleAxes.z = rd(c.sZ);
             params.rotationOrder = c.order;
-            params.weight = weight;
+            params.weight = solveWeight;
             candidate = RigExecApplyParentConstraint(input, sources, params);
         } else {
             // Aim: the same weighted source set reduced to the target point
@@ -2232,7 +2739,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 params.rotationOffsetDegrees = rd(c.rotationOffset);
                 params.affectRotation = affect;
                 params.rotationOrder = c.order;
-                params.weight = weight;
+                params.weight = solveWeight;
                 params.preserveInputUp = c.preserveInputUp;
                 const GfVec3d authoredWorldUp = rd(c.worldUpVector);
                 if (c.worldUpType == "sceneUp") {
@@ -2242,25 +2749,51 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 } else if (c.worldUpType == "objectUp") {
                     // FBX ObjectUp with no reference object uses the world
                     // origin as the object point.
-                    params.worldUpDirection =
-                        c.worldUpObjectNamed
-                            ? GfVec3d(B.fin[size_t(commit.worldUpRead)]
-                                          .Origin() - input.Origin())
-                            : GfVec3d(-input.Origin());
+                    RigExecPointFrame upObject;
+                    if (!c.worldUpObjectNamed) {
+                        params.worldUpDirection = GfVec3d(-input.Origin());
+                    } else if (!resolveSource(c.worldUpObject,
+                                              commit.worldUpRead,
+                                              c.worldUpNative,
+                                              commit.worldUpAncestors,
+                                              &upObject)) {
+                        step->diagnostics.push_back(
+                            c.path.GetString() +
+                            " could not resolve its world-up object; "
+                            "constraint passed through");
+                        candidateReady = false;
+                    } else {
+                        params.worldUpDirection =
+                            upObject.Origin() - input.Origin();
+                    }
                 } else if (c.worldUpType == "objectRotationUp") {
+                    // With no object, FBX applies WorldUpVector directly in
+                    // world space rather than treating a missing binding as
+                    // a failed constraint.
                     if (!c.worldUpObjectNamed) {
                         params.worldUpDirection = authoredWorldUp;
                     } else {
+                        RigExecPointFrame upObject;
+                        if (!resolveSource(c.worldUpObject,
+                                           commit.worldUpRead,
+                                           c.worldUpNative,
+                                           commit.worldUpAncestors,
+                                           &upObject)) {
+                            step->diagnostics.push_back(
+                                c.path.GetString() +
+                                " could not resolve its world-up object; "
+                                "constraint passed through");
+                            candidateReady = false;
+                        }
                         GfMatrix4d up(1.0);
-                        if (!RigExecPointsToMatrix(
-                                RigExecIdentityLandmarks(),
-                                B.fin[size_t(commit.worldUpRead)].points,
-                                &up)) {
+                        if (candidateReady &&
+                            !RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                                   upObject.points, &up)) {
                             step->diagnostics.push_back(
                                 c.path.GetString() +
                                 " has a degenerate world-up object");
                             candidateReady = false;
-                        } else {
+                        } else if (candidateReady) {
                             params.worldUpDirection =
                                 up.ExtractRotation().TransformDir(
                                     authoredWorldUp);
@@ -2273,7 +2806,34 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 }
             }
         }
-        if (candidateReady) {
+        if (candidateReady && deltaBase >= 0) {
+            // The solve produced the same full-strength frame the transform
+            // domain would publish; the delta against the prim's own base
+            // transform is what the points ride.
+            //
+            //     D = F_solved * F_base^-1
+            //
+            // The prim's transform is NOT revised: a geometry-domain
+            // constraint writes points and nothing else.
+            const GfMatrix4d &baseMatrix =
+                B.deltaBaseMatrix[size_t(deltaBase)];
+            GfMatrix4d solvedMatrix(1.0);
+            if (RigExecBakedUsable(candidate) &&
+                B.deltaBaseOk[size_t(deltaBase)] &&
+                std::isfinite(baseMatrix.GetDeterminant()) &&
+                baseMatrix.GetDeterminant() != 0.0 &&
+                RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                      candidate.points, &solvedMatrix)) {
+                B.deltaValues[size_t(deltaBase)] =
+                    solvedMatrix * baseMatrix.GetInverse();
+                B.deltaPresent[size_t(deltaBase)] = 1;
+            } else {
+                step->diagnostics.push_back(
+                    c.path.GetString() + " could not measure its delta "
+                    "against " + c.deltaBasePath.GetString() +
+                    "; constraint passed through");
+            }
+        } else if (candidateReady) {
             // The candidate sweep a constraint commit opens with: an unusable
             // revision is diagnosed and the whole commit passes through.
             if (!RigExecBakedUsable(candidate)) {
@@ -2409,6 +2969,33 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
             "; joint fell back to its rest chain");
     }
 
+    // The plain Xformables a constraint targets, in slot (== path) order.
+    // The dynamic walk publishes these from one pass over its frame map,
+    // BETWEEN the fallback-joint lines above and the joint publication's own
+    // "degenerate final frame" lines below, and the comparator compares
+    // diagnostics in order -- so the position of this loop is as much of the
+    // answer as its contents are.
+    for (size_t k = 0; k < B.xformSlots.size(); ++k) {
+        const size_t slot = size_t(B.xformSlots[k]);
+        const RigExecPointFrame &frame = B.fin[size_t(B.finLast[slot])];
+        if (!RigExecBakedUsable(frame)) {
+            pose->diagnostics.push_back(
+                "constraint target " + B.paths[slot].GetString() +
+                " has an invalid final frame; transform omitted");
+            continue;
+        }
+        GfMatrix4d revised(1.0);
+        if (RigExecPointsToMatrix(RigExecIdentityLandmarks(), frame.points,
+                                  &revised)) {
+            // Slot order is path order and no slot is named twice, so both
+            // maps are filled strictly ascending from empty.
+            RigExecBakedEmplace(&pose->providerXforms, true, B.paths[slot],
+                                revised);
+            RigExecBakedEmplace(&pose->providerBaseXforms, true,
+                                B.paths[slot], B.xformBase[k]);
+        }
+    }
+
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedPublish", "baked");
         // A biped frame publishes about 850 keys into five ordered maps and
@@ -2491,26 +3078,24 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         }
     }
 
-    // Two published domains have no baked counterpart YET, because
-    // bakeability still rules out everything that fills them -- so leaving
-    // them empty is what agrees with the dynamic path rather than a gap in
-    // the publication: providerXforms/providerBaseXforms come only from
-    // _xformDerivedProviders ("constraint target is a plain Xformable").
-    // solverOverridesConverged stays true for the same kind of reason: it is
-    // cleared only by an incomplete exec snapshot, and there is no exec
-    // here.
-    //
-    // The weight domains used to be on that list and no longer are: a
-    // volume weight object bakes, so weightFrames is published from the
-    // placement map the walk left (bakedProgram.cpp's epilogue), and a
+    // NO published domain is left empty by a standing refusal any more, and
+    // that is new as of the Phase 3 merge -- this block used to be a list of
+    // four. A volume weight object bakes, so weightFrames is published from
+    // the placement map the walk left (bakedProgram.cpp's epilogue); a
     // mover's weight object bakes, so weightFields is drained per revision
-    // beside the geometry it deformed (RigExecBakedPublishGeometry).
+    // beside the geometry it deformed (RigExecBakedPublishGeometry); and a
+    // constraint may target a plain Xformable, so providerXforms and
+    // providerBaseXforms are published from the seeded slots just above.
     //
-    // RigExecComparePoses compares all of them regardless, so this block is
-    // a checklist rather than a licence: as each refusal above goes away,
-    // the domain it gated has to start being FILLED somewhere, and the
-    // parity mode says so on the first generation that publishes one on the
-    // dynamic side and nothing on this one.
+    // solverOverridesConverged is the one field that stays at its default,
+    // and for a different reason than a refusal: it is cleared only by an
+    // incomplete exec snapshot, and there is no exec here.
+    //
+    // RigExecComparePoses compares all of them regardless, which is what
+    // made the checklist safe to keep as a comment while it was true: the
+    // parity mode says so on the first generation that publishes a domain on
+    // the dynamic side and nothing on this one. A group that adds a refusal
+    // back, or a domain, owes this block a line.
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.

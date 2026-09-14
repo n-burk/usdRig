@@ -289,7 +289,12 @@ function(rigexec_add_baked_parity_test name)
         endforeach()
     endif()
 endfunction()
-rigexec_add_baked_parity_test(testRigExecConstraints)
+# CONE_VERIFY, not REQUIRE_BAKE: every constraint operator this suite builds
+# now comes from the program, and both schedules agree with a whole run from
+# the same state -- but the suite also builds solvers and weight objects the
+# program still refuses, so a bake requirement here would fail on another
+# group's refusal rather than on anything this entry is about.
+rigexec_add_baked_parity_test(testRigExecConstraints CONE_VERIFY)
 
 # The per-example parity entries: one named red/green signal per shipped rig.
 #

@@ -100,7 +100,8 @@ _IsBakedConstraintType(const TfToken &type)
            type == "RigExecRotationConstraint" ||
            type == "RigExecScaleConstraint" ||
            type == "RigExecParentConstraint" ||
-           type == "RigExecAimConstraint";
+           type == "RigExecAimConstraint" ||
+           type == "RigExecSingleChainIkConstraint";
     // RigExecRigEvaluator::GetConstraintOperatorTypeNames() is the authority
     // on which operators exist; this is the subset the program can express,
     // and it must stay a subset. A name here the evaluator does not register
@@ -242,9 +243,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             }
         }
     }
-    for (const SdfPath &path : E._xformDerivedProviders) {
-        say("constraint target is a plain Xformable", path);
-    }
     for (const auto &[path, movers] : E._snapshotPoints) {
         say("read-phase snapshot required on", path);
     }
@@ -276,11 +274,38 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             !_IsVolumeWeightTypeName(type)) {
             say("provider type not baked (" + type.GetString() + ")", path);
         }
-        // A space expression the compose cannot express: the program builds
-        // the default-space ladder from rest + default avars and follows the
-        // namespace parent, which is exactly what exec does only while these
-        // stay unauthored and unconnected.
-        for (const char *name : {"posed:space", "parent:space",
+        // A non-identity AUTHORED posed:space is not a ladder at all: exec
+        // uses it directly and reads neither the avars nor the parent
+        // (computations.cpp's _ComputeXformablePointFrame, step 2). That is
+        // an epoch constant unless it animates, so the compose expresses it
+        // and only the CONNECTED case -- an arbitrary exec computation --
+        // still refuses.
+        {
+            const UsdAttribute posed =
+                prim.GetAttribute(TfToken("posed:space"));
+            SdfPathVector connections;
+            if (posed && posed.HasAuthoredConnections() &&
+                posed.GetConnections(&connections) && !connections.empty()) {
+                say("connected posed:space on provider", path);
+            } else if (RigExecBakedAnimatedOrConnected(posed)) {
+                // Unconditionally, and NOT "is it identity at Default".
+                // An attribute with only time samples reads back as the
+                // schema identity at Default and as a real matrix at a
+                // numeric time, so a bake that judged it at Default would
+                // take the ladder while exec took the authored matrix --
+                // which is a divergence with no diagnostic in front of it.
+                say("animated posed:space on provider", path);
+            }
+            if (chainTargets.count(
+                    path.AppendProperty(TfToken("posed:space")))) {
+                say("property chain writes posed:space on provider", path);
+            }
+        }
+        // The other four ARE the ladder: the program builds the
+        // default-space chain from rest + default avars and follows the
+        // namespace parent, which is what exec does only while these stay
+        // unauthored and unconnected.
+        for (const char *name : {"parent:space",
                                  "parent:defaultSpace", "avars:defaultSpace",
                                  "posed:defaultSpace"}) {
             bool connected = false;
@@ -418,13 +443,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
 
     // ---- constraints -------------------------------------------------------
     for (const auto &constraint : E._frameConstraints) {
-        if (!constraint.pointsTarget.IsEmpty()) {
-            say("geometry-domain constraint", constraint.moverPath);
-        }
-        if (constraint.schemaType == "RigExecSingleChainIkConstraint") {
-            say("SingleChainIK constraint", constraint.moverPath);
-            continue;
-        }
         if (!_IsBakedConstraintType(constraint.schemaType)) {
             say("constraint type not baked (" +
                     constraint.schemaType.GetString() + ")",
@@ -441,23 +459,22 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         sayVolumeWeightOnConstraint(constraint.weightObject,
                                     constraint.moverPath);
         sayUnbakedWeights(constraint.weightObject);
-        if (constraint.targets.size() != 1) {
-            say("constraint does not write exactly one target",
-                constraint.moverPath);
+        if (constraint.targets.empty()) {
+            say("constraint names no target", constraint.moverPath);
             continue;
         }
-        if (!E._poseSeedFrames.count(constraint.targets[0])) {
-            say("constraint target is not a seeded pose provider",
-                constraint.targets[0]);
-        }
-        for (const auto &source : constraint.sources) {
-            if (!source.xformPath.IsEmpty()) {
-                say("native Xformable constraint source", source.sourcePath);
+        // Either provider family: an exec-seeded one, or a plain Xformable
+        // the program seeds from the stage in its prologue. Both take a slot
+        // in the same table, which is what the dynamic walk's one frame map
+        // holds. EVERY target, not only the first: a SingleChainIK revises
+        // its whole chain atomically, and the dynamic walk records every
+        // target of every constraint whatever it revises.
+        for (const SdfPath &target : constraint.targets) {
+            if (!E._poseSeedFrames.count(target) &&
+                !E._xformDerivedProviders.count(target)) {
+                say("constraint target is not a seeded pose provider",
+                    target);
             }
-        }
-        if (!constraint.worldUpObject.xformPath.IsEmpty()) {
-            say("native Xformable world-up object",
-                constraint.worldUpObject.sourcePath);
         }
     }
 
@@ -1105,6 +1122,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // time-code range the input classification probes at.
     B.rebuild.insert(SdfPath::AbsoluteRootPath());
 
+    // What a plain Xformable's transform is measured relative to, which is
+    // the one prim rigEvaluator.cpp's pose walk measures against too.
+    B.assetRootPath = E._rigPath.GetParentPath();
+    B.assetRoot = B.stage->GetPrimAtPath(B.assetRootPath);
+
     // ---- dense provider slots ---------------------------------------------
     //
     // The ordered union of the two families, which is the set the dynamic
@@ -1172,6 +1194,8 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // eight computations; every input to them is epoch-constant on a bakeable
     // rig, so both resolve once here. The frame round trips exec performs
     // between computations are reproduced, not simplified away.
+    B.posedAuthored.assign(size_t(N), 0);
+    B.posedAuthoredM.assign(size_t(N), GfMatrix4d(1.0));
     B.restM.assign(N, GfMatrix4d(1.0));
     B.restPts.resize(N);
     B.restFrames.resize(N);
@@ -1186,17 +1210,26 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             // ladder: the dynamic path gives it the identity rest frame
             // outright and reads its pose off the stage.
             //
-            // SI-6, invalidation-index coverage: skipping the block below
-            // also skips its B.prims.insert, so an xform-derived prim is NOT
-            // in the invalidation index and IsInvalidatedBy cannot answer a
-            // notice on it. That is right only while nothing reads such a
-            // slot's value -- today nothing writes one either, and IsBakeable
-            // refuses the rig outright. The feature that starts seeding them
-            // from the stage must insert the prim (and the ancestors whose
-            // transforms it composes) here, or an edit to the Xform will not
-            // rebuild the program.
+            // SI-6, invalidation-index coverage: the prim and every ancestor
+            // whose transform the prologue composes go into B.prims, so a
+            // RESYNC that retypes or reparents one rebuilds the program. They
+            // go nowhere else on purpose. Nothing about their VALUE is
+            // captured -- the prologue re-reads the whole ladder every frame
+            // -- so a changed-info notice on one must not rebuild, or an
+            // animated Xform above a constraint target would rebuild the
+            // program once per frame.
             B.restFrames[i] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
             B.restPts[i] = B.restFrames[i].points;
+            B.xformSlots.push_back(i);
+            B.xformPrimsBySlot.push_back(B.stage->GetPrimAtPath(B.paths[i]));
+            for (SdfPath p = B.paths[i];
+                 !p.IsEmpty() && p != SdfPath::AbsoluteRootPath();
+                 p = p.GetParentPath()) {
+                B.prims.insert(p);
+                if (p == B.assetRootPath) {
+                    break;
+                }
+            }
             continue;
         }
         const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
@@ -1219,6 +1252,18 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             B.folded.insert(walk.begin(), walk.end());
             return RigExecBakedRead(input, E._resolvedInputs, capture);
         };
+        // A non-identity authored posed:space stands in for the whole
+        // compose: exec returns its frame and reads nothing else about the
+        // provider, so the compose does the same and the rest chain below
+        // still resolves, because the REST frame is a different question.
+        if (const UsdAttribute posed =
+                prim.GetAttribute(TfToken("posed:space"))) {
+            GfMatrix4d value(1.0);
+            if (posed.Get(&value) && value != GfMatrix4d(1.0)) {
+                B.posedAuthored[size_t(i)] = 1;
+                B.posedAuthoredM[size_t(i)] = value;
+            }
+        }
         GfMatrix4d space(1.0);
         fold(prim, "rest:space");
         if (const UsdAttribute a = prim.GetAttribute(TfToken("rest:space"))) {
@@ -1270,6 +1315,13 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             }
         }
     }
+
+    // The seed's two comparison buffers, sized once and never resized in a
+    // run. Their first-run values are never read: the first run of a program
+    // dirties every pose cluster outright, because it has nothing to compare
+    // against.
+    B.xformBase.assign(B.xformSlots.size(), GfMatrix4d(1.0));
+    B.lastXformBase.assign(B.xformSlots.size(), GfMatrix4d(1.0));
 
     // ---- the input binding table -------------------------------------------
     B.avarConstants.assign(size_t(N) * 11, 0.0);
@@ -1332,14 +1384,27 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             entry.constraint.moverPath = fc.moverPath;
             entry.constraint.schemaType = fc.schemaType;
             entry.constraint.targets = fc.targets;
-            entry.constraint.snapshotAfter =
-                !fc.targets.empty() &&
-                snapshotAfter(fc.targets[0], fc.moverPath);
+            for (const SdfPath &target : fc.targets) {
+                entry.constraint.snapshotTargets.push_back(
+                    snapshotAfter(target, fc.moverPath) ? 1 : 0);
+            }
+            entry.constraint.pointsTarget = fc.pointsTarget;
+            entry.constraint.ikChain = fc.ikChain;
+            entry.constraint.ikUsesAnimatedTs =
+                !fc.ikChain.empty() && E._IkUsesAnimatedTs(fc.ikChain);
+            entry.constraint.effector = fc.effector.sourcePath;
+            entry.constraint.effectorXform = fc.effector.xformPath;
+            for (const auto &pole : fc.poleObjects) {
+                entry.constraint.poleObjects.push_back(pole.sourcePath);
+                entry.constraint.poleObjectXforms.push_back(pole.xformPath);
+            }
             for (const auto &source : fc.sources) {
                 entry.constraint.sources.push_back(source.sourcePath);
+                entry.constraint.sourceXforms.push_back(source.xformPath);
             }
             entry.constraint.worldUpObject = fc.worldUpObject.sourcePath;
             entry.constraint.weightObject = fc.weightObject;
+            entry.constraint.worldUpXform = fc.worldUpObject.xformPath;
         }
         walk.push_back(std::move(entry));
     }
@@ -1394,6 +1459,19 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
     }
     RigExecBakedBuildWalk(&ctx, walk);
+    // The native sources the walk registered, and the two buffers the
+    // prologue fills and the cone compares. Sized here, once, and never
+    // resized in a run.
+    B.deltaValues.assign(B.deltaBasePaths.size(), GfMatrix4d(1.0));
+    B.deltaPresent.assign(B.deltaBasePaths.size(), 0);
+    B.deltaBaseMatrix.assign(B.deltaBasePaths.size(), GfMatrix4d(1.0));
+    B.lastDeltaBaseMatrix = B.deltaBaseMatrix;
+    B.deltaBaseOk.assign(B.deltaBasePaths.size(), 0);
+    B.lastDeltaBaseOk = B.deltaBaseOk;
+    B.nativeFrames.assign(B.nativeSources.size(), RigExecPointFrame());
+    B.lastNativeFrames = B.nativeFrames;
+    B.nativeFrameOk.assign(B.nativeSources.size(), 0);
+    B.lastNativeFrameOk = B.nativeFrameOk;
 
     // ---- publication ---------------------------------------------------------
     for (const SdfPath &joint : E._jointPaths) {
@@ -1588,6 +1666,120 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // declines must not put a prologue and a region into a numerator whose
     // denominator stood still.
     double prologueUs = 0, regionUs = 0;
+    bool stageFramesOk = true;
+
+    // Every frame the run reads off the STAGE, read once, here.
+    //
+    // A step may not touch USD, so the stage-derived frames the pose walk
+    // uses are settled in the prologue: the plain Xformables a constraint
+    // targets, seeded into their slots' FIRST version, which is where the
+    // compose would have left one. The cache is built FRESH for this frame,
+    // exactly as _EvaluateDynamic builds its own: a retained
+    // UsdGeomXformCache keeps a UsdGeomXformQuery per prim across SetTime,
+    // so an xformOp added or reordered would leave a stale query where the
+    // dynamic path has none.
+    //
+    // False means a target's transform could not be resolved at all, which
+    // is the one thing the dynamic walk gives the generation back for here.
+    const auto stageFrames = [&B, &E, time, pose]() {
+        if (B.xformSlots.empty() && B.nativeSources.empty() &&
+            B.deltaBasePaths.empty()) {
+            return true;
+        }
+        UsdGeomXformCache cache(time);
+        for (size_t k = 0; k < B.xformSlots.size(); ++k) {
+            const size_t slot = size_t(B.xformSlots[k]);
+            RigExecPointFrame frame;
+            GfMatrix4d matrix(1.0);
+            if (!E._FrameFromXformRelativeToAsset(B.assetRoot, &cache,
+                                                  B.paths[slot], &frame,
+                                                  &matrix)) {
+                pose->diagnostics.push_back(
+                    "could not resolve constraint target " +
+                    B.paths[slot].GetString() +
+                    " relative to the asset root");
+                return false;
+            }
+            B.xformBase[k] = matrix;
+            B.base[slot] = frame;
+            B.fin[slot] = frame;
+        }
+        // And the target transform each geometry-domain constraint measures
+        // its delta against. A stage read even when the target is a
+        // RigExecJoint, because RigExecXformable inherits Xformable and the
+        // dynamic walk measures against the authored transform rather than
+        // the rig frame. Do not "improve" this: parity says mirror it.
+        for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
+            GfMatrix4d matrix(1.0);
+            B.deltaBaseOk[k] = E._FrameFromXformRelativeToAsset(
+                B.assetRoot, &cache, B.deltaBasePaths[k], nullptr, &matrix);
+            B.deltaBaseMatrix[k] = matrix;
+        }
+        // And the plain Xformables a constraint reads as a SOURCE. Only the
+        // stage half is settled here: the delta such a source rides is the
+        // deepest revision above it, which is a frame the walk has not
+        // produced yet, so the constraint step performs the ride out of the
+        // slots it declared. A source the stage cannot answer for is not a
+        // bail -- the dynamic walk diagnoses it per constraint and passes
+        // that constraint through -- so the failure is recorded and carried
+        // into the step.
+        for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+            RigExecPointFrame frame;
+            B.nativeFrameOk[k] = E._FrameFromXformRelativeToAsset(
+                B.assetRoot, &cache, B.nativeSources[k].path, &frame,
+                nullptr);
+            B.nativeFrames[k] = B.nativeFrameOk[k] ? frame
+                                                   : RigExecPointFrame();
+        }
+        return true;
+    };
+
+    // A constraint's own authored tables, read RAW at the frame's time.
+    //
+    // Not through the resolved inputs and not through a bound query: the
+    // dynamic walk reads these straight off the attribute, so a property
+    // chain or an interactive override on one is deliberately honoured by
+    // neither path. The cardinality line each read can produce is kept
+    // beside the values and replayed by the constraint step, which is where
+    // the dynamic walk emits it.
+    const auto constraintArrays = [&B, time]() {
+        for (RigExecBakedProgramImpl::ConstraintArrays &arrays :
+                 B.constraintArrays) {
+            arrays.diagnostics.clear();
+            arrays.ok = RigExecRigEvaluator::_ReadConstraintSourceWeights(
+                arrays.prim, "inputs:sourceWeights", arrays.sourceCount, time,
+                &arrays.diagnostics, &arrays.weights);
+            // The dynamic walk stops at the first table it cannot use, so
+            // the offsets are not read when the weights were malformed --
+            // and a run that read them anyway could produce a second line
+            // the reference generation never produced.
+            if (arrays.parentOffsets) {
+                arrays.ok =
+                    arrays.ok &&
+                    RigExecRigEvaluator::_ReadConstraintSourceOffsets(
+                        arrays.prim, "inputs:translationOffsets",
+                        arrays.sourceCount, time, &arrays.diagnostics,
+                        &arrays.translationOffsets) &&
+                    RigExecRigEvaluator::_ReadConstraintSourceOffsets(
+                        arrays.prim, "inputs:rotationOffsets",
+                        arrays.sourceCount, time, &arrays.diagnostics,
+                        &arrays.rotationOffsets);
+            } else {
+                arrays.translationOffsets.assign(arrays.sourceCount,
+                                                 GfVec3d(0));
+                arrays.rotationOffsets.assign(arrays.sourceCount,
+                                              GfVec3d(0));
+            }
+            if (arrays.readPole) {
+                arrays.poleDiagnostics.clear();
+                arrays.poleOk =
+                    RigExecRigEvaluator::_ReadConstraintSourceWeights(
+                        arrays.prim, "inputs:poleVectorWeights",
+                        arrays.poleCount, time, &arrays.poleDiagnostics,
+                        &arrays.poleWeights);
+            }
+        }
+    };
 
     // ---- prologue -----------------------------------------------------------
     //
@@ -1601,17 +1793,12 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // exec nothing and resolves first -- which is why this op can be the
         // same routine the dynamic path runs rather than a second copy of it.
         B.propertyResults.clear();
-        // RUN-LOCAL, and therefore a cone hazard the group that lands the
-        // writer has to answer (§7): this map is emptied here and filled by
-        // the pose walk's geometry-domain constraint, which does not exist
-        // yet. A run that SKIPS that constraint would leave the entry
-        // missing rather than leaving last run's value in it, and the
-        // assemble that find-guards it would deform as though no constraint
-        // had ever measured a delta. The two answers are to keep the map
-        // across runs the way a slot is kept, or to force a full run the way
-        // `phasedReads` does for the snapshot store. Whichever, it is a
-        // decision, not something to leave to the first frame that skips.
-        B.constraintDeltas.clear();
+        // The geometry-domain constraint deltas are NOT emptied here. They
+        // are slots: what a skipped constraint step left is what it would
+        // have measured again, and clearing them would make a cone that
+        // skips one deform as though no constraint had ever measured a
+        // delta. That was the hazard §7 named; keeping them across runs the
+        // way a slot is kept is the answer it offered.
         B.resolvedInputs->Clear();
         B.runSnapshots.Clear();
         B.chainSnapshots->Clear();
@@ -1643,7 +1830,16 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         }
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunSolverSources(&B, time);
+        stageFramesOk = stageFrames();
+        constraintArrays();
         RigExecBakedRunGeometryPrologue(&B, time, pose);
+    }
+    if (!stageFramesOk) {
+        // The dynamic walk gives the generation back at the same point and
+        // pushes the same line; the caller drops this pose and re-runs it
+        // there, so the diagnostic above is its rehearsal and not a second
+        // copy.
+        return false;
     }
     if (measuring) {
         const double mark = now();

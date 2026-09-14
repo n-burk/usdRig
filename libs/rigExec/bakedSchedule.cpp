@@ -48,6 +48,7 @@ RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain)
     case RigExecBakedSlotDomain::CommitTable: return "CommitTable";
     case RigExecBakedSlotDomain::CommitDelta: return "CommitDelta";
     case RigExecBakedSlotDomain::CommitStaging: return "CommitStaging";
+    case RigExecBakedSlotDomain::ConstraintDelta: return "ConstraintDelta";
     case RigExecBakedSlotDomain::PropertyResult: return "PropertyResult";
     case RigExecBakedSlotDomain::ChainBase: return "ChainBase";
     case RigExecBakedSlotDomain::RevisionPacket: return "RevisionPacket";
@@ -1099,6 +1100,46 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             break;
         }
     }
+    // Which constraint steps a native source's stage transform reaches, and
+    // which one each geometry-domain delta base reaches.
+    cones.nativeSourceClusters.assign(B.nativeSources.size(), {});
+    cones.deltaBaseClusters.assign(B.deltaBasePaths.size(), {});
+    cones.constraintArrayClusters.assign(B.constraintArrays.size(), {});
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind != RigExecBakedStepKind::Constraint) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::WalkStep &walk =
+            B.walkSteps[size_t(step.object)];
+        if (walk.solverBatch || walk.index < 0) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::Constraint &constraint =
+            B.constraints[size_t(walk.index)];
+        for (const int native : constraint.sourceNatives) {
+            if (native >= 0) {
+                cones.nativeSourceClusters[size_t(native)].push_back(
+                    step.cluster);
+            }
+        }
+        if (constraint.worldUpNative >= 0) {
+            cones.nativeSourceClusters[size_t(constraint.worldUpNative)]
+                .push_back(step.cluster);
+        }
+        if (constraint.deltaBase >= 0) {
+            cones.deltaBaseClusters[size_t(constraint.deltaBase)].push_back(
+                step.cluster);
+        }
+        if (constraint.arrays >= 0) {
+            cones.constraintArrayClusters[size_t(constraint.arrays)]
+                .push_back(step.cluster);
+        }
+    }
+    for (std::vector<int> &clusters : cones.nativeSourceClusters) {
+        std::sort(clusters.begin(), clusters.end());
+        clusters.erase(std::unique(clusters.begin(), clusters.end()),
+                       clusters.end());
+    }
     for (std::vector<int> &clusters : cones.chainBaseClusters) {
         std::sort(clusters.begin(), clusters.end());
         clusters.erase(std::unique(clusters.begin(), clusters.end()),
@@ -1237,6 +1278,65 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 dirty.Set(cones.avarCluster[i]);
             }
         }
+        // The transforms the prologue read off the stage for the plain
+        // Xformables a constraint targets: sixteen numbers per slot compared
+        // by VALUE, exactly as the avars above are, because "the time moved"
+        // is never the predicate for a source. The compose group covering
+        // the slot is what declares a write of its frame, so its cluster is
+        // the one every reader of that frame hangs off.
+        for (size_t k = 0; k < B.xformSlots.size(); ++k) {
+            if (B.xformBase[k] != B.lastXformBase[k]) {
+                dirty.Set(cones.avarCluster[size_t(B.xformSlots[k])]);
+            }
+        }
+        // A constraint's own authored tables, which the prologue re-reads
+        // at the frame's time. Compared by value, values and diagnostic
+        // together, because a cardinality line that changed is a published
+        // difference as much as a weight that changed.
+        for (size_t k = 0; k < B.constraintArrays.size(); ++k) {
+            const RigExecBakedProgramImpl::ConstraintArrays &arrays =
+                B.constraintArrays[k];
+            if (arrays.ok == arrays.lastOk &&
+                arrays.weights == arrays.lastWeights &&
+                arrays.translationOffsets == arrays.lastTranslationOffsets &&
+                arrays.rotationOffsets == arrays.lastRotationOffsets &&
+                arrays.diagnostics == arrays.lastDiagnostics &&
+                // The pole half is read at a different point in the walk and
+                // owns its own diagnostic, but it is the same kind of thing:
+                // a table the prologue re-read, so a table this run must be
+                // compared by value against. Leaving it out let an animated
+                // inputs:poleVectorWeights hold a stale solve.
+                arrays.poleOk == arrays.lastPoleOk &&
+                arrays.poleWeights == arrays.lastPoleWeights &&
+                arrays.poleDiagnostics == arrays.lastPoleDiagnostics) {
+                continue;
+            }
+            for (const int cluster : cones.constraintArrayClusters[k]) {
+                dirty.Set(cluster);
+            }
+        }
+        // And the transform each geometry-domain constraint measures its
+        // delta against, which is its target prim's own authored one.
+        for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
+            if (B.deltaBaseOk[k] != B.lastDeltaBaseOk[k] ||
+                B.deltaBaseMatrix[k] != B.lastDeltaBaseMatrix[k]) {
+                for (const int cluster : cones.deltaBaseClusters[k]) {
+                    dirty.Set(cluster);
+                }
+            }
+        }
+        // And the transforms of the plain Xformables a constraint names as
+        // a SOURCE, compared the same way -- frame and read-or-not together,
+        // because a source that stopped resolving has moved as surely as one
+        // that moved.
+        for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+            if (B.nativeFrameOk[k] != B.lastNativeFrameOk[k] ||
+                B.nativeFrames[k].points != B.lastNativeFrames[k].points) {
+                for (const int cluster : cones.nativeSourceClusters[k]) {
+                    dirty.Set(cluster);
+                }
+            }
+        }
         // Each chain's authored base, and whether it read at all.
         for (size_t c = 0; c < B.chains.size(); ++c) {
             const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
@@ -1315,6 +1415,22 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // this run skipped anything: the comparison is always with the values the
     // last run SAW, and a forced run saw them too.
     B.lastAvars = B.avars;
+    B.lastXformBase = B.xformBase;
+    B.lastNativeFrames = B.nativeFrames;
+    B.lastNativeFrameOk = B.nativeFrameOk;
+    B.lastDeltaBaseMatrix = B.deltaBaseMatrix;
+    B.lastDeltaBaseOk = B.deltaBaseOk;
+    for (RigExecBakedProgramImpl::ConstraintArrays &arrays :
+             B.constraintArrays) {
+        arrays.lastOk = arrays.ok;
+        arrays.lastWeights = arrays.weights;
+        arrays.lastTranslationOffsets = arrays.translationOffsets;
+        arrays.lastRotationOffsets = arrays.rotationOffsets;
+        arrays.lastDiagnostics = arrays.diagnostics;
+        arrays.lastPoleOk = arrays.poleOk;
+        arrays.lastPoleWeights = arrays.poleWeights;
+        arrays.lastPoleDiagnostics = arrays.poleDiagnostics;
+    }
     B.lastOverridden = B.overridden;
     B.lastPropertyResults = B.propertyResults;
     B.lastHaveBase.resize(B.chains.size());
