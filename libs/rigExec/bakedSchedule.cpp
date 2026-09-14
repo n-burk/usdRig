@@ -1381,7 +1381,8 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
     // Calibration measures the same boundaries on a finer clock, into each
     // step's own accumulator: no lock, no shared counter, and nothing that
     // survives the frame but a sum.
-    const bool calibrating = RigExecBakedScheduleCalibrationRequested();
+    const bool calibrating = RigExecBakedScheduleCalibrationRequested() ||
+                             RigExecBakedStepTimingRequested();
     uint64_t mark = timing ? RigExecProfiler::NowUs() : 0;
     uint64_t markNs = calibrating ? NowNs() : 0;
     for (RigExecBakedStep &step : B.steps) {
@@ -1447,6 +1448,9 @@ struct ParallelRun {
     std::atomic<bool> bailed{false};
     bool profiling = false;
     bool timing = false;
+    /// Whether each step adds its own nanoseconds to its own accumulator.
+    /// See RigExecBakedStepTimingRequested for why this is off by default.
+    bool measuring = false;
     /// Whether a step's phased-read records are folded into the run's store
     /// as the region goes. See RunStepsParallel for why that is safe only
     /// when the program has a reader for them.
@@ -1475,7 +1479,15 @@ ParallelRun::RunFrom(int start)
                 continue;  // ran before the region, with every other source
             }
             const uint64_t began = profiling ? RigExecProfiler::NowUs() : 0;
+            const uint64_t beganNs = measuring ? NowNs() : 0;
             RunStepBody(&B, &step, time);
+            if (measuring) {
+                // Two stores into this step's own accumulators, which no
+                // other task touches -- the same rule the interval pair
+                // below follows, and the reason neither needs a lock.
+                step.measuredUs += double(NowNs() - beganNs) / 1000.0;
+                ++step.measuredRuns;
+            }
             if (profiling) {
                 // Two stores into storage this step alone owns. No profile
                 // scope: RIGEXEC_PROFILE_SCOPE takes three mutexes even with
@@ -1540,6 +1552,7 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
     run.time = time;
     run.counters = B.clusterCounters.get();
     run.profiling = B.profiler && B.profiler->IsEnabled();
+    run.measuring = RigExecBakedStepTimingRequested();
     run.timing = run.profiling || RigExecBakedScheduleReportRequested();
     B.clustering.lastRunTimed = run.timing;
     // The run's phased-read store is one container, and folding a step's
@@ -1657,6 +1670,14 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
 // ---------------------------------------------------------------------------
 
 bool
+RigExecBakedStepTimingRequested()
+{
+    static const bool requested =
+        TfGetenvInt("RIGEXEC_BAKED_STEP_TIMING", 0) > 0;
+    return requested;
+}
+
+bool
 RigExecBakedScheduleCalibrationRequested()
 {
     static const bool requested =
@@ -1762,6 +1783,81 @@ RigExecBakedScheduleCalibrate(RigExecBakedProgramImpl *program)
     }
     table += "};\n";
     std::fwrite(table.data(), 1, table.size(), stderr);
+}
+
+namespace {
+
+/// How many frames the step timing watches before it prints, on the same
+/// rule the calibration uses: 1 means "the usual number", anything larger is
+/// the count.
+int
+StepTimingFrames()
+{
+    static const int frames = [] {
+        const int value = TfGetenvInt("RIGEXEC_BAKED_STEP_TIMING", 0);
+        return value > 1 ? value : 8;
+    }();
+    return frames;
+}
+
+}  // namespace
+
+void
+RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    static int framesSeen = 0;
+    if (framesSeen >= StepTimingFrames()) {
+        return;
+    }
+    if (++framesSeen < StepTimingFrames()) {
+        return;
+    }
+    const double frames = double(std::max<size_t>(B.timedFrames, 1));
+    std::array<double, kStepKindCount> byKind{};
+    std::array<size_t, kStepKindCount> runsByKind{};
+    double steps = 0;
+    for (const RigExecBakedStep &step : B.steps) {
+        if (!step.measuredRuns) {
+            continue;
+        }
+        byKind[size_t(step.kind)] += step.measuredUs;
+        runsByKind[size_t(step.kind)] += step.measuredRuns;
+        steps += step.measuredUs;
+    }
+    char line[256];
+    std::string out = "rigExec baked step timing over " +
+                      std::to_string(B.timedFrames) + " frame(s), us/frame\n";
+    std::snprintf(line, sizeof(line),
+                  "  prologue %8.1f  region %8.1f  epilogue %8.1f  "
+                  "frame %8.1f\n",
+                  B.timedPrologueUs / frames, B.timedRegionUs / frames,
+                  B.timedEpilogueUs / frames,
+                  (B.timedPrologueUs + B.timedRegionUs + B.timedEpilogueUs) /
+                      frames);
+    out += line;
+    // The steps sum to less than the region: the region also computes the
+    // dirty closure, runs the sources and, in parallel mode, waits.
+    std::snprintf(line, sizeof(line),
+                  "  step bodies %8.1f of the region\n", steps / frames);
+    out += line;
+    std::vector<std::pair<double, size_t>> order;
+    for (size_t kind = 0; kind < kStepKindCount; ++kind) {
+        if (runsByKind[kind]) {
+            order.emplace_back(byKind[kind], kind);
+        }
+    }
+    std::sort(order.begin(), order.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+    for (const auto &[total, kind] : order) {
+        std::snprintf(
+            line, sizeof(line), "  %-16s %8.2f  %6.2f per run, %zu run(s)\n",
+            RigExecBakedStepKindName(RigExecBakedStepKind(kind)),
+            total / frames, total / double(runsByKind[kind]),
+            size_t(double(runsByKind[kind]) / frames + 0.5));
+        out += line;
+    }
+    std::fwrite(out.data(), 1, out.size(), stderr);
 }
 
 // ---------------------------------------------------------------------------

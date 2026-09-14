@@ -1296,6 +1296,14 @@ struct RigExecBakedProgramImpl {
     bool jointPathsAscending = false;
     bool controlPathsAscending = false;
     bool solverArraysAscending = false;
+    /// Under RIGEXEC_BAKED_STEP_TIMING, the sum over the frames watched of
+    /// what each third of a frame cost, in microseconds, and how many frames
+    /// are in the sums. Untouched -- and unread -- when the variable is off.
+    double timedPrologueUs = 0;
+    double timedRegionUs = 0;
+    double timedEpilogueUs = 0;
+    size_t timedFrames = 0;
+
     /// Per joint, whether this run's final frame earned a published matrix.
     /// Written by the diagnostic pass, read by the fill pass; sized at
     /// Build, so the epilogue allocates nothing.

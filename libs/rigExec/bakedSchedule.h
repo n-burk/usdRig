@@ -158,6 +158,26 @@ std::string RigExecBakedScheduleRunReport(
 /// Whether RIGEXEC_BAKED_SCHEDULE_REPORT asks for that dump on stderr.
 bool RigExecBakedScheduleReportRequested();
 
+/// Whether RIGEXEC_BAKED_STEP_TIMING asks what a frame spends where.
+///
+/// Opt-in and OFF by default, in both schedule modes, because the answer
+/// costs two clock reads per step and a frame has several hundred of them --
+/// enough to move the number being asked about. With it off no executor
+/// reads a clock unless the profiler is recording or the schedule report
+/// asked for cluster times, which is what makes the default frame the frame
+/// a caller actually gets.
+bool RigExecBakedStepTimingRequested();
+
+/// Folds one frame's phase and step times into the accumulators and, once
+/// enough frames have been seen, prints the table on stderr.
+///
+/// The phases are the three a frame divides into -- the serial prologue, the
+/// region, the serial epilogue -- and the steps are grouped by kind, so the
+/// table says both which third of the frame to attack and which step kind
+/// within it. Averaged over the frames watched rather than printed per
+/// frame: a single frame of a few hundred microseconds is mostly noise.
+void RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program);
+
 }  // namespace rigExec
 
 #endif  // RIGEXEC_BAKED_SCHEDULE_H

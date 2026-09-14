@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -1389,6 +1390,20 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     RigExecRigEvaluator &E = *B.evaluator;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "Baked", "baked");
 
+    // Two clock reads per phase, and only when asked: the profiler's scopes
+    // take three mutexes apiece and cost more than the prologue they would
+    // be measuring, which is why the phase a frame spends its time in was
+    // never readable without the tracer distorting it. See
+    // RigExecBakedStepTimingRequested.
+    const bool measuring = RigExecBakedStepTimingRequested();
+    const auto now = [] {
+        return std::chrono::duration<double, std::micro>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    };
+    const double frameBegan = measuring ? now() : 0;
+    double phaseMark = frameBegan;
+
     // ---- prologue -----------------------------------------------------------
     //
     // Serial, always run, and the only part of a frame that may take a lock,
@@ -1444,6 +1459,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunGeometryPrologue(&B, time, pose);
     }
+    if (measuring) {
+        const double mark = now();
+        B.timedPrologueUs += mark - phaseMark;
+        phaseMark = mark;
+    }
 
     // ---- the region ---------------------------------------------------------
     //
@@ -1461,6 +1481,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedRegion", "baked");
         bailed = !RigExecBakedRunSteps(&B, time);
+    }
+    if (measuring) {
+        const double mark = now();
+        B.timedRegionUs += mark - phaseMark;
+        phaseMark = mark;
     }
     if (verifying) {
         after.Capture(B);
@@ -1560,6 +1585,13 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         std::to_string(pose->moverGraphSchedulesBuilt) +
         " schedule(s) built");
     pose->valid = true;
+    if (measuring) {
+        // Counted here, at the one exit that published a pose: a frame that
+        // bailed or fell back did not run the epilogue this is measuring.
+        B.timedEpilogueUs += now() - phaseMark;
+        ++B.timedFrames;
+        RigExecBakedStepTimingReport(&B);
+    }
     return true;
 }
 
