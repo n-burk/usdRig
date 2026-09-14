@@ -222,9 +222,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     for (const SdfPath &path : E._currentPhaseWeights) {
         say("current-phase volume weight", path);
     }
-    for (const auto &[path, movers] : E._snapshotPoints) {
-        say("read-phase snapshot required on", path);
-    }
     for (const auto &[path, points] : E._ribbonDriverPoints) {
         say("ribbon driver curve", path);
     }
@@ -423,8 +420,18 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         if (!r.binding.weightObject.IsEmpty()) {
             say("weight object on mover", r.moverPath);
         }
-        if (!r.binding.phases.empty()) {
-            say("read phase on a mover input", r.moverPath);
+        // A phase that names a POINT IN THE POSE WALK on rigExec:transform
+        // is the one read phase the program cannot answer. Both halves of
+        // the store are filled -- the pose walk records a provider's matrix
+        // after each constraint that names it, the chains record their own
+        // points -- but the CONSUMER is missing: the influence fold takes
+        // the provider's base or final matrix out of the dense tables and has
+        // no branch that takes it out of the store instead. Refusing is the
+        // honest answer while that is true; reading the base matrix silently
+        // would be a different deformation with nothing to say so.
+        if (r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim) {
+            say("read phase naming a pose-walk point on rigExec:transform",
+                r.moverPath);
         }
         if (!r.binding.curvenetPoints.IsEmpty() ||
             !r.binding.curvenet.IsEmpty()) {
