@@ -1873,6 +1873,15 @@ struct RigExecBakedProgramImpl {
         // re-publishes instead of re-running -- which is the accounting the
         // VdfNetwork performs for the dynamic path.
         RigExecMoverParameters lastParameters;
+        /// A DERIVED revision's `auxPoints` -- the chain's final points, up
+        /// to 315KB of them -- held here as the handle the chain published
+        /// rather than copied into `lastParameters` above, which is left
+        /// with that field empty. The comparison agrees with the elementwise
+        /// one by construction: VtArray is copy-on-write and its operator==
+        /// short-circuits on a shared buffer, so this is the same test with
+        /// the identity case taken first. Empty, and never read, for every
+        /// other revision.
+        VtVec3fArray lastAuxPoints;
         RigExecMoverStatus lastStatus;
         bool ran = false;
         /// A read phase named this revision as the point in the chain it
@@ -1953,6 +1962,18 @@ struct RigExecBakedProgramImpl {
         /// The keys are used -- more than one chunk, so an influence outside
         /// a chunk's key is an influence that chunk will not see.
         bool chunked = false;
+        /// What the cut decision saw, recorded so it can be asserted and
+        /// printed rather than re-derived. `partitionCandidates` is how many
+        /// ranges the vertex target and the cap produced, and the two levels
+        /// are the lowest and highest level at which one of those ranges has
+        /// every joint it reads. Cutting pays only when they differ -- a
+        /// range that cannot start before the whole revision could is a
+        /// serial loop where a self-parallelising kernel call used to be --
+        /// so `chunked` is `partitionCandidates > 1 && readyMin < readyMax`,
+        /// unless RIGEXEC_BAKED_CHUNK_ALWAYS asked for the cut regardless.
+        size_t partitionCandidates = 0;
+        int partitionReadyMin = 0;
+        int partitionReadyMax = 0;
 
         // ---- what RevisionStatic decides for the whole array ---------------
         /// The layout half of the skin kernel's validation (the matrix half
@@ -2839,6 +2860,7 @@ struct RigExecBakedRunShadow {
         std::vector<RigExecScaledDualQuat> palette;
         std::vector<ChunkState> chunks;
         RigExecMoverParameters parameters, lastParameters;
+        VtVec3fArray lastAuxPoints;
         RigExecMoverStatus status, lastStatus;
         TfToken resultStatus;
         GfMatrix4d transform{1.0};

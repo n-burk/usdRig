@@ -688,8 +688,38 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         destination->resultStatus = source->resultStatus;
         destination->output = std::move(source->output);
         destination->lastParameters = std::move(source->lastParameters);
+        // A DERIVED revision's remembered input lives beside the packet
+        // rather than inside it -- the chain's 315KB point buffer, held by
+        // handle with `lastParameters.auxPoints` left empty -- so it has to
+        // travel with the packet it was split from. Leaving it behind gives
+        // the adopted node a `ran` that says "compare against what I last
+        // saw" and an empty array to compare against, so every derived
+        // revision of the rig re-executes on the first generation after any
+        // edit, bumps `revisionsExecuted` and emits its diagnostic, while
+        // the dynamic path -- whose graphs stood through the same edit --
+        // reports none of it. Exactly the failure lastDefaultWeight below
+        // describes, one field further along.
+        destination->lastAuxPoints = std::move(source->lastAuxPoints);
         destination->lastStatus = source->lastStatus;
         destination->ran = source->ran;
+        // The FOLDED influence table, which is the other half of the
+        // comparison `ran` promises. A skin revision re-executes when one of
+        // its matrices moved, and `influencesChanged` is decided by the fold
+        // against the table it last wrote -- so a node that kept its `ran`
+        // and lost its table compares this run's matrices against a table
+        // that has never held one, reports every entry changed and runs.
+        // That is the same divergence the packet fields above describe,
+        // reached through the fold instead of through the packet: the
+        // dynamic path's VdfNetwork keeps the buffers of the nodes it
+        // reconnects, so it reports no such work.
+        //
+        // Carried only where the two tables are the same shape. keepRun says
+        // the revision is the same mover at the same place in the chain; it
+        // does not say its binding still names the same joints, and the fold
+        // writes one entry per influence slot of the NEW binding.
+        if (source->influences.size() == destination->influences.size()) {
+            destination->influences = std::move(source->influences);
+        }
         // The last run's envelope scalar belongs to the cached result the
         // same way the packet does: a node whose `ran` survives a rebuild
         // must not then compare this against the zero a fresh revision
@@ -1780,8 +1810,41 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // program order: its placement comes from the pose walk and its packet is
     // what a revision assembles against.
     RigExecBakedBuildWeightSteps(&B);
+    // The pose half's edges and levels, settled BEFORE the geometry half is
+    // built. A skin revision is cut into chunks only where the chunks' joints
+    // land at different levels (§6), and that question cannot be asked until
+    // the ProviderMatrix steps have levels -- so the sweep runs here, over
+    // the pose steps alone, and again inside RigExecBakedBuildSchedule once
+    // the geometry steps exist. A geometry step never precedes a pose step,
+    // so the levels this pass assigns are the levels the final graph holds.
+    RigExecBakedBuildStepEdges(&B);
+    RigExecBakedAssignStepCosts(&B);
+    // The levels the partition is about to read, kept so that the sentence
+    // above is CHECKED and not merely written down. Nothing else can catch
+    // its violation: the cut decision and the record of the cut decision
+    // (GeomRevision::partitionReady*) are derived from one another, so a
+    // partition cut from levels the final graph no longer holds still agrees
+    // with itself and tests/testRigExecBakedSchedule still passes. What
+    // would have moved is this vector -- a pose step given a geometry
+    // predecessor is a pose step pushed down a level -- so it is compared
+    // after the second sweep instead.
+    std::vector<int> poseLevels;
+    poseLevels.reserve(B.steps.size());
+    for (const RigExecBakedStep &step : B.steps) {
+        poseLevels.push_back(step.level);
+    }
     RigExecBakedBuildGeometrySteps(&B);
     RigExecBakedBuildSchedule(&B);
+    for (size_t i = 0; i < poseLevels.size(); ++i) {
+        if (!TF_VERIFY(B.steps[i].level == poseLevels[i],
+                       "rigExec: pose step %zu (%s) moved from level %d to "
+                       "%d when the geometry steps were added; the vertex "
+                       "partition was cut from the level it no longer has",
+                       i, RigExecBakedStepKindName(B.steps[i].kind),
+                       poseLevels[i], B.steps[i].level)) {
+            break;
+        }
+    }
     if (RigExecBakedScheduleReportRequested()) {
         const std::string report = RigExecBakedScheduleReport(B);
         std::fwrite(report.data(), 1, report.size(), stderr);

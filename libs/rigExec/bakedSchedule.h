@@ -53,6 +53,20 @@ RigExecBakedScheduleMode RigExecBakedScheduleModeFromEnvironment();
 /// follow).
 void RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program);
 
+/// The edge sweep alone, over the steps built so far.
+///
+/// Re-runnable, and run twice by Build: once over the pose half by itself,
+/// so that the vertex partition can ask what LEVEL a chunk's joints land at
+/// before it decides whether cutting the revision buys anything, and again
+/// from RigExecBakedBuildSchedule once the geometry steps are appended. The
+/// second sweep is not an increment on the first -- it clears every step's
+/// predecessors and successors and derives them again -- which is what makes
+/// running it twice produce exactly the graph running it once would have.
+///
+/// Sound only because a geometry step never precedes a pose step: the pose
+/// steps' edges, and therefore their levels, are the same in both sweeps.
+void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program);
+
 /// Assigns every step its size, its cost and its longest-path level.
 ///
 /// The cost model is `a[kind] + b[kind] x size`, with the constants in the

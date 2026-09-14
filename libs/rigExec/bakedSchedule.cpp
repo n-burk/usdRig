@@ -195,9 +195,9 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0324, 0.016869},   // PropagateChunk    4
     {0.0000, 0.004088},   // CommitApply       2
     {0.0000, 0.051952},   // ProviderMatrix  252
-    {1.0000, 0.200000},   // SnapshotFinals    0 -- unmeasured, see below
-    {0.5000, 0.010000},   // VolumePlacements  0 -- unmeasured, see below
-    {0.0000, 0.050000},   // WeightPacket      0 -- unmeasured, see below
+    {0.0000, 0.077140},   // SnapshotFinals    1 -- 13_ReadPhases
+    {0.0000, 0.143880},   // VolumePlacements  1 -- 11_VolumeWeights
+    {0.0000, 0.066481},   // WeightPacket      5 -- 11_VolumeWeights
     {0.0000, 0.003781},   // InfluenceFold     1
     {0.0000, 0.000487},   // RevisionStatic    1
     {11.3239, 0.000714},  // RevisionChunk     7 -- see below
@@ -208,12 +208,40 @@ constexpr StepCostConstants kStepCosts[] = {
 static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
               "rigExec: every baked step kind needs a cost row");
 
-// Two rows are worth reading twice before they are trusted:
+// Four rows are worth reading twice before they are trusted:
 //
-//  * SnapshotFinals does not exist on any rig that bakes today, so nothing
-//    measured it and the row is the guess it started as. It is a per-provider
-//    matrix pass, so it should land near ProviderMatrix's per-unit cost when a
-//    phased rig finally fits it.
+//  * SnapshotFinals, VolumePlacements and WeightPacket were guesses until
+//    Phase 3 made the rigs that exercise them bake; each is now the MEDIAN of
+//    NINE calibration runs of the one rig that has it, at
+//    RIGEXEC_BAKED_SCHEDULE_CALIBRATE=200 rather than at the default 8
+//    frames, and each carries a caveat the next fitter should know. They are
+//    fitted through the ORIGIN because the sample count could not separate
+//    the two terms (see FitKind):
+//    SnapshotFinals 0.0754..0.0814 over one step of 13_ReadPhases;
+//    VolumePlacements 0.1377..0.1652 over one step of 11_VolumeWeights;
+//    WeightPacket 0.0658..0.0674 over five steps of the same rig, which is
+//    the only one of the three with enough steps for the fit to mean
+//    anything. One run of each printed roughly double the rest and is not in
+//    the spread; the medians are what nine runs agree on.
+//
+//    The frame COUNT is the part worth copying, because the first fit of
+//    these three rows did not do it and was not reproducible. A rig with one
+//    step of a kind gives the fit one sample per run, so the cold frame --
+//    first touch of the arrays, cold caches, the arena still waking -- is an
+//    eighth of the average at the default 8 frames and reads as about 1.8x
+//    the steady-state cost, differently every run. The biped's rows do not
+//    have that problem and do not need the longer run: 93 ComposeSubtree
+//    samples or 252 ProviderMatrix samples move by 3-5% between 8 frames and
+//    200 (0.0914 -> 0.0880, 0.0530 -> 0.0515), which is what puts every row
+//    of this table on one scale. A row fitted on one step must be fitted
+//    warm to join them.
+//
+//    All three sizes are small -- a handful of providers, one volume, a few
+//    packet elements -- so the per-unit terms are honest at that scale and
+//    extrapolate on trust. The guesses they replace were {1.0, 0.2},
+//    {0.5, 0.01} and {0, 0.05}: SnapshotFinals was over-costed by nearly
+//    three, VolumePlacements under-costed by fourteen, WeightPacket by a
+//    third.
 //  * ChainStatus is sized by the chain's vertices, and its row was
 //    re-fitted after that correction: the median per-unit of four
 //    calibration runs of the biped (0.000318 .. 0.000351), which
@@ -772,7 +800,7 @@ std::string StepLabel(const RigExecBakedProgramImpl &B,
 }  // namespace
 
 void
-RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
+RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     if (B.phasedReads) {
@@ -871,6 +899,17 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
             B.steps[size_t(pred)].succs.push_back(index);
         }
     }
+}
+
+void
+RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    // Re-run rather than assumed done: Build calls the sweep once over the
+    // pose half alone, so that the partition rule (§6) can read the pose
+    // steps' levels before it decides where to cut, and the geometry steps
+    // it then appends need edges of their own.
+    RigExecBakedBuildStepEdges(&B);
 
     // The schedule the parallel executor runs, chosen once here so that a
     // frame costs it nothing: the cost model, the packing, and one padded

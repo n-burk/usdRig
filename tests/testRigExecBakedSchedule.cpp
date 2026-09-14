@@ -48,6 +48,7 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
@@ -64,6 +65,7 @@
 #include <set>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -992,6 +994,289 @@ TestTheVertexPartitionCoversEveryVertexOnce(const std::string &stagePath,
     if (report) {
         std::printf("%s", RigExecBakedGeometryReport(B).c_str());
     }
+}
+
+/// A revision is cut into chunks only where the cut buys a head start.
+///
+/// The rule (§6): a chunk body is a serial loop, while an uncut revision is
+/// one RigExecApplySkinKernel call that spreads itself over the arena -- so
+/// cutting is a LOSS unless some range becomes runnable before the whole
+/// revision could. That is a question about levels, which is why Build sweeps
+/// the pose half's edges before the geometry half is built.
+///
+/// Asserted on the decision the program recorded rather than on a rig that
+/// happens to answer one way: `chunked` must be exactly "more than one
+/// candidate range, and their ready levels differ". The environment override
+/// is checked in the same breath, because it is what keeps every other chunk
+/// assertion in this file from passing vacuously.
+void
+TestThePartitionIsCutOnlyWhereItPays(const BuiltProgram &built,
+                                     const char *name, bool always)
+{
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    size_t skins = 0, cut = 0;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.op != RigExecRevisionOp::Skin) {
+                continue;
+            }
+            ++skins;
+            const bool differ =
+                revision.partitionReadyMin < revision.partitionReadyMax;
+            const bool expected = revision.partitionCandidates > 1 &&
+                                  (always || differ);
+            if (revision.chunked != expected) {
+                ++failures;
+                std::printf("FAIL %s: %s is %scut with %zu candidate(s) and "
+                            "ready levels %d..%d\n", name,
+                            revision.moverPath.GetString().c_str(),
+                            revision.chunked ? "" : "not ",
+                            revision.partitionCandidates,
+                            revision.partitionReadyMin,
+                            revision.partitionReadyMax);
+            }
+            cut += revision.chunked ? 1 : 0;
+            // An uncut revision is the degenerate partition, not a partition
+            // with its keys quietly dropped: one range, and the fuse's
+            // whole-array path is what runs it.
+            if (!revision.chunked) {
+                CHECK(revision.chunks.size() == 1);
+                CHECK(revision.chunks[0].key.empty());
+            }
+        }
+    }
+    std::printf("  %s: %zu of %zu skin revision(s) cut%s\n", name, cut, skins,
+                always ? " (cut forced)" : "");
+}
+
+/// A derived revision keeps its 26k-point input by HANDLE, and that
+/// comparison is the elementwise one with the identity case taken first.
+///
+/// The derived maintenance step is the frame's serial tail -- one bounding
+/// box over the whole mesh -- and it used to make three passes over 315KB
+/// before it computed anything: the assemble copied the chain's points into
+/// the packet, `parameters != lastParameters` walked them, and
+/// `lastParameters = parameters` copied them again. The last two are gone
+/// because auxPoints IS the chain's final buffer and VtArray is
+/// copy-on-write, so identity decides the value.
+///
+/// That substitution is only sound if two things hold, and both are asserted
+/// here rather than assumed: the run really does remember the buffer rather
+/// than a copy of it, and VtArray's own equality falls THROUGH a
+/// non-identical pair to the values -- otherwise a chain that recomputed the
+/// same points (a forced pass, a drag returned to its value) would count as
+/// having moved, and `revisionsExecuted` is counter-parity-bearing.
+void
+TestTheDerivedCompareAgreesWithTheElementwiseOne(const std::string &stagePath)
+{
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    RigExecRigPose first, repeated;
+    CHECK(built.program->Run(UsdTimeCode::Default(), &first));
+    CHECK(built.program->Run(UsdTimeCode::Default(), &repeated));
+    // The identity arm, end to end: nothing moved, so nothing re-executed.
+    CHECK(repeated.moverGraphRevisionsExecuted == 0);
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    size_t derivedRevisions = 0;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                derived.revision;
+            if (!revision.ran) {
+                continue;
+            }
+            ++derivedRevisions;
+            // The remembered packet carries no points at all ...
+            CHECK(revision.lastParameters.auxPoints.empty());
+            // ... and what stands in for them is the chain's published
+            // points. Equal by VALUE and not necessarily by buffer: the
+            // chain publishes into a double buffer, so a generation in which
+            // the status sweep ran has swapped the array since.
+            CHECK(revision.lastAuxPoints == chain.result);
+
+            // Remembering them costs a refcount and not 315KB: assigning the
+            // handle shares the buffer, which is the whole reason the packet
+            // may keep them at all.
+            const VtVec3fArray shared = chain.result;
+            CHECK(shared.IsIdentical(chain.result));
+
+            // A DEEP copy is a different buffer that still compares equal:
+            // the fall-through the handle test relies on, and the arm that
+            // runs on every generation where the status sweep republished.
+            VtVec3fArray copy;
+            copy.assign(chain.result.begin(), chain.result.end());
+            CHECK(!copy.IsIdentical(chain.result));
+            CHECK(copy == chain.result);
+            CHECK(!(copy != chain.result));
+            // And values that moved are still not equal, however the buffer
+            // got there.
+            if (!copy.empty()) {
+                copy[0] += GfVec3f(1.0f, 0.0f, 0.0f);
+                CHECK(copy != chain.result);
+            }
+        }
+    }
+    std::printf("  derived compare: %zu derived revision(s) keep their "
+                "points by handle\n", derivedRevisions);
+}
+
+/// A rebuilt program inherits everything a revision's `ran` promises a
+/// comparison against, and not just the packet.
+///
+/// AdoptGeometryStateFrom is what stops a rebuild from re-running every
+/// per-point kernel the edit did not touch: it hands one revision's run
+/// state across to the node that replaced it. A derived revision's run state
+/// now lives in TWO fields rather than one -- the packet with its points
+/// emptied, and the chain's buffer held by handle beside it -- and a carry
+/// that takes only the packet leaves the node saying "compare against what I
+/// last saw" with an empty array to compare against. Every derived revision
+/// of the rig then re-executes on the first generation after any edit, which
+/// is a `revisionsExecuted` and a diagnostic the dynamic path does not
+/// report, because its own graphs stood through the same edit.
+///
+/// Two arms, because neither alone is the contract. The first asks the
+/// adopted node what it carries, which is the invariant and is rig
+/// independent. The second recompiles a parity-checked rig for real and
+/// evaluates it, which is the shape no other fixture has: every suite here
+/// runs generations of ONE program, so nothing else evaluates after an
+/// adopt at all.
+void
+TestARebuiltProgramKeepsItsRunState(const std::string &stagePath,
+                                    const char *name)
+{
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    RigExecRigPose first, repeated;
+    CHECK(built.program->Run(UsdTimeCode::Default(), &first));
+    CHECK(built.program->Run(UsdTimeCode::Default(), &repeated));
+
+    // What the outgoing program remembers, read BEFORE the adopt moves it
+    // out from under us.
+    std::map<SdfPath, VtVec3fArray> remembered;
+    std::map<SdfPath, std::vector<GfMatrix4d>> folded;
+    for (const RigExecBakedProgramImpl::GeomChain &chain :
+             built.program->GetStepGraph().chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.ran && !revision.influences.empty()) {
+                folded.emplace(revision.moverPath, revision.influences);
+            }
+        }
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            if (derived.revision.ran) {
+                remembered.emplace(derived.target,
+                                   derived.revision.lastAuxPoints);
+            }
+        }
+    }
+
+    std::vector<std::string> reasons;
+    std::unique_ptr<RigExecBakedProgram> rebuilt =
+        RigExecBakedProgram::Build(built.evaluator.get(), &reasons);
+    CHECK(rebuilt != nullptr);
+    if (!rebuilt) {
+        return;
+    }
+    rebuilt->AdoptGeometryStateFrom(*built.program);
+
+    size_t carried = 0, tables = 0;
+    for (const RigExecBakedProgramImpl::GeomChain &chain :
+             rebuilt->GetStepGraph().chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            const auto found = folded.find(revision.moverPath);
+            if (found == folded.end()) {
+                continue;
+            }
+            // The fold decides `influencesChanged` against this table, so an
+            // adopted node that lost it reports every matrix moved and runs.
+            // The binding did not change here, so the shapes agree and the
+            // whole table comes across.
+            CHECK(revision.influences == found->second);
+            ++tables;
+        }
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            const auto found = remembered.find(derived.target);
+            if (found == remembered.end()) {
+                continue;
+            }
+            // A node that kept its `ran` kept everything that `ran` promises
+            // a comparison against -- the packet AND the points, which are
+            // one remembered input split across two fields.
+            CHECK(derived.revision.ran);
+            CHECK(derived.revision.lastAuxPoints == found->second);
+            // And the points are really there: the failure this guards is an
+            // empty array that compares unequal to every non-empty mesh.
+            CHECK(derived.revision.lastAuxPoints.empty() ==
+                  found->second.empty());
+            ++carried;
+        }
+    }
+    std::printf("  %s: %zu derived revision(s) carried their points and %zu "
+                "influence table(s) came across a rebuild\n", name, carried,
+                tables);
+}
+
+/// The same question asked of a real recompile, through the parity check.
+///
+/// Compile() retires the program and rebuilds it, and the replacement adopts
+/// the geometry state of the one it replaced -- so the generation after a
+/// recompile is the one generation in which the two paths can disagree about
+/// how much work there was to do. `revisionsExecuted` is a compared counter,
+/// so RigExecComparePoses is the judge here as everywhere else.
+void
+TestARecompiledRigStillAgreesWithTheDynamicPath(const std::string &stagePath,
+                                                const char *name)
+{
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage != nullptr);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = FindRig(stage);
+    CHECK(!rigPath.IsEmpty());
+    if (rigPath.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    const RigExecRigPose warm = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(warm.valid);
+    CHECK(warm.bakedParityMismatches == 0);
+
+    // A recompile of the same stage: a new epoch, the same shape, and an
+    // outgoing program for the replacement to adopt.
+    CHECK(evaluator.Compile(&errors));
+    const RigExecRigPose after = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(after.valid);
+    if (after.bakedParityMismatches != 0) {
+        ++failures;
+        std::printf("FAIL %s: %zu mismatch(es) after a recompile\n", name,
+                    after.bakedParityMismatches);
+        for (const std::string &diagnostic : after.diagnostics) {
+            std::printf("    %s\n", diagnostic.c_str());
+        }
+        return;
+    }
+    std::printf("  %s: a recompiled rig agrees, %zu revision(s) executed\n",
+                name, after.moverGraphRevisionsExecuted);
 }
 
 /// A skin revision the frame rejects publishes what the dynamic path
@@ -1970,6 +2255,18 @@ main(int argc, char **argv)
     TestTheRangeFormDeformsLikeTheWholeArray("dualQuaternion");
     TestAChunkSeesOnlyItsOwnInfluences("classicLinear");
     TestAChunkSeesOnlyItsOwnInfluences("dualQuaternion");
+    // The cut decision, both ways round. The rigs that bake today pose every
+    // joint of a mesh at the same level, so with the rule alone nothing is
+    // cut -- which is the right answer and would leave every assertion below
+    // about a chunk true of no chunk at all. So the chunk fixtures run with
+    // RIGEXEC_BAKED_CHUNK_ALWAYS=1, and the rule itself is asserted in both
+    // environments.
+    TestThePartitionIsCutOnlyWhereItPays(biped, "Biped", /*always=*/false);
+    TestThePartitionIsCutOnlyWhereItPays(spider, "spider_legs",
+                                         /*always=*/false);
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    TestThePartitionIsCutOnlyWhereItPays(
+        Build(examplesDir + "/biped/Biped.usda"), "Biped", /*always=*/true);
     TestTheVertexPartitionCoversEveryVertexOnce(
         examplesDir + "/biped/Biped.usda", "Biped", /*report=*/true);
     TestTheVertexPartitionCoversEveryVertexOnce(
@@ -1985,6 +2282,17 @@ main(int argc, char **argv)
         examplesDir + "/biped/Biped.usda");
     TestAStalePartitionRunsTheRevisionWhole(
         examplesDir + "/biped/Biped.usda");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
+    TestTheDerivedCompareAgreesWithTheElementwiseOne(
+        examplesDir + "/biped/Biped.usda");
+    TestARebuiltProgramKeepsItsRunState(
+        examplesDir + "/biped/Biped.usda", "Biped");
+    TestARebuiltProgramKeepsItsRunState(
+        examplesDir + "/04_BlendShapeFace.usda", "04_BlendShapeFace");
+    TestARecompiledRigStillAgreesWithTheDynamicPath(
+        examplesDir + "/biped/Biped.usda", "Biped");
+    TestARecompiledRigStillAgreesWithTheDynamicPath(
+        examplesDir + "/04_BlendShapeFace.usda", "04_BlendShapeFace");
     TestARepeatedTimeReExecutesNothing(examplesDir + "/biped/Biped.usda",
                                        "Biped");
     TestARepeatedTimeReExecutesNothing(

@@ -364,6 +364,7 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->palette = revision.palette;
     state->parameters = revision.parameters;
     state->lastParameters = revision.lastParameters;
+    state->lastAuxPoints = revision.lastAuxPoints;
     state->status = revision.status;
     state->lastStatus = revision.lastStatus;
     state->resultStatus = revision.resultStatus;
@@ -408,6 +409,7 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->palette = state.palette;
     revision->parameters = state.parameters;
     revision->lastParameters = state.lastParameters;
+    revision->lastAuxPoints = state.lastAuxPoints;
     revision->status = state.status;
     revision->lastStatus = state.lastStatus;
     revision->resultStatus = state.resultStatus;
@@ -464,6 +466,10 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                  revision.status);
     CompareValue(differences, count, where + " lastParameters",
                  shadow.lastParameters, revision.lastParameters);
+    // The half of lastParameters a derived revision keeps by handle.
+    if (!Same(shadow.lastAuxPoints, revision.lastAuxPoints)) {
+        Differ(differences, count, where + " lastAuxPoints");
+    }
     CompareValue(differences, count, where + " lastStatus", shadow.lastStatus,
                  revision.lastStatus);
     CompareValue(differences, count, where + " resultStatus",
