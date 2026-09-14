@@ -819,6 +819,12 @@ RigExecComparePoses(const RigExecRigPose &reference,
 // Interactive overrides.
 // ---------------------------------------------------------------------------
 
+void
+RigExecBakedProgram::BumpProgramStamp()
+{
+    ++_impl->programStamp;
+}
+
 bool
 RigExecBakedProgram::SetOverrides(
     const std::vector<RigExecValueOverride> &overrides)
@@ -1389,10 +1395,49 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     }
 
     // ---- the region ---------------------------------------------------------
+    //
+    // A run executes the CLOSURE of what the sources say moved, not the whole
+    // program (§7). Under RIGEXEC_BAKED_VERIFY_CONES it does both: the cone
+    // run's whole answer is shadowed, the state the prologue left is put
+    // back, every step runs, and the two are compared. A difference is
+    // reported rather than fatal, so a test can assert on the count.
+    const bool verifying = RigExecBakedVerifyConesRequested();
+    RigExecBakedRunShadow before, after;
+    if (verifying) {
+        before.Capture(B);
+    }
     bool bailed = false;
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedRegion", "baked");
         bailed = !RigExecBakedRunSteps(&B, time);
+    }
+    if (verifying) {
+        after.Capture(B);
+        const size_t coneClusters = B.lastClosedClusters;
+        before.Restore(&B);
+        const bool bailedFull = !RigExecBakedRunSteps(&B, time, true);
+        std::vector<std::string> differences;
+        size_t mismatches = after.Compare(B, &differences);
+        if (bailedFull != bailed) {
+            ++mismatches;
+            differences.push_back(
+                "baked cone mismatch: the cone run and the whole program "
+                "disagree about giving the generation back");
+        }
+        bailed = bailedFull;
+        pose->bakedParityMismatches += mismatches;
+        for (std::string &difference : differences) {
+            pose->diagnostics.push_back(std::move(difference));
+        }
+        if (mismatches > 0) {
+            // The same wording a real parity disagreement uses, on the same
+            // stream, so one regular expression catches both.
+            TF_WARN("rigExec: baked parity mismatch: %zu difference(s) "
+                    "between the cone run (%zu of %zu cluster(s)) and the "
+                    "whole program",
+                    mismatches, coneClusters,
+                    B.clustering.clusters.size());
+        }
     }
 
     // ---- epilogue -----------------------------------------------------------
@@ -1457,6 +1502,18 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         " schedule(s) built");
     pose->valid = true;
     return true;
+}
+
+size_t
+RigExecBakedProgram::GetClusterCount() const
+{
+    return _impl->clustering.clusters.size();
+}
+
+size_t
+RigExecBakedProgram::GetClustersRunLastGeneration() const
+{
+    return _impl->lastClosedClusters;
 }
 
 const RigExecBakedProgramImpl &

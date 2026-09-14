@@ -135,6 +135,20 @@ public:
     /// than dropping the program on every notice.
     bool IsInvalidatedBy(const UsdNotice::ObjectsChanged &notice) const;
 
+    /// Tells the program that a notice it was NOT invalidated by still
+    /// reached the stage.
+    ///
+    /// IsInvalidatedBy answers "could this have moved anything the bake
+    /// captured", and its documented gap is the other half: a value edit on
+    /// an input the frame path re-reads changes what the next generation
+    /// must compute while leaving every captured constant right. Cone
+    /// re-execution (§7) decides what to re-run from the SOURCES it compares
+    /// by value, and a stage edit is the one thing no source of the program
+    /// compares -- so the evaluator says so here, and the next run runs
+    /// everything once. Interactive overrides do NOT call this: an override
+    /// is a source value like any other and is compared like one.
+    void BumpProgramStamp();
+
     /// Places the standing interactive overrides for the generations that
     /// follow, returning false when one of them names something the program
     /// cannot place.
@@ -150,6 +164,16 @@ public:
     /// return false so the caller runs the generation dynamically. A wrong
     /// baked answer is never one of the outcomes.
     bool SetOverrides(const std::vector<RigExecValueOverride> &overrides);
+
+    /// How many clusters the program's schedule holds, and how many of them
+    /// the last generation actually ran.
+    ///
+    /// Observable so a test can hold cone re-execution to account in both
+    /// directions: a frame that skipped nothing is a cone that is not
+    /// working, and a frame that skipped something has to publish what the
+    /// dynamic path publishes anyway.
+    size_t GetClusterCount() const;
+    size_t GetClustersRunLastGeneration() const;
 
     /// Dense provider slots in namespace DFS order.
     size_t GetProviderCount() const;

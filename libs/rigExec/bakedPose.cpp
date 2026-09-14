@@ -965,6 +965,111 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
 // into its own step.
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// Records \p input against \p step: what a frame can move it with.
+///
+/// Three answers, and each is a different way a value can arrive: it is a
+/// function of time (a keyframe), it resolves through the generation's
+/// resolved inputs every frame (a property chain writes it), or an
+/// interactive override can be placed on it. Anything else was folded at
+/// bake and cannot move without a rebuild.
+template <class T>
+void
+NoteInput(const RigExecBakedInput<T> &input, RigExecBakedStep *step)
+{
+    step->varyingInputs = step->varyingInputs || input.varying;
+    step->resolvedInputReads =
+        step->resolvedInputReads || bool(input.resolvedAttr);
+    if (input.overrideIndex >= 0) {
+        step->overrideInputs.push_back(input.overrideIndex);
+    }
+}
+
+/// Every per-frame input one solver's Solve step reads.
+void
+NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
+                 RigExecBakedStep *step)
+{
+    NoteInput(solver.bend, step);
+    NoteInput(solver.upperOffset, step);
+    NoteInput(solver.lowerOffset, step);
+    NoteInput(solver.stretch, step);
+    NoteInput(solver.softness, step);
+    NoteInput(solver.blendWeight, step);
+    NoteInput(solver.preserveVolume, step);
+    NoteInput(solver.midFollowWeight, step);
+    NoteInput(solver.roll, step);
+    NoteInput(solver.twist, step);
+    NoteInput(solver.minLengthRatio, step);
+    // The spline parameters the bake could not fold, which the solve re-reads
+    // as a group rather than one input at a time.
+    step->varyingInputs = step->varyingInputs || solver.splineParamsVary;
+}
+
+/// Every per-frame input one constraint's step reads.
+void
+NoteConstraintInputs(const RigExecBakedProgramImpl::Constraint &constraint,
+                     RigExecBakedStep *step)
+{
+    NoteInput(constraint.enabled, step);
+    NoteInput(constraint.defaultWeight, step);
+    NoteInput(constraint.offset, step);
+    NoteInput(constraint.affectX, step);
+    NoteInput(constraint.affectY, step);
+    NoteInput(constraint.affectZ, step);
+    NoteInput(constraint.tX, step);
+    NoteInput(constraint.tY, step);
+    NoteInput(constraint.tZ, step);
+    NoteInput(constraint.rX, step);
+    NoteInput(constraint.rY, step);
+    NoteInput(constraint.rZ, step);
+    NoteInput(constraint.sX, step);
+    NoteInput(constraint.sY, step);
+    NoteInput(constraint.sZ, step);
+    NoteInput(constraint.aimVector, step);
+    NoteInput(constraint.upVector, step);
+    NoteInput(constraint.rotationOffset, step);
+    NoteInput(constraint.worldUpVector, step);
+    // The authored source-weight and offset tables are folded -- an animated
+    // one is refused at bake -- so there is nothing per-frame about them.
+}
+
+}  // namespace
+
+void
+RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (RigExecBakedStep &step : B.steps) {
+        step.varyingInputs = false;
+        step.resolvedInputReads = false;
+        step.overrideInputs.clear();
+        switch (step.kind) {
+        case RigExecBakedStepKind::Solve:
+            NoteSolverInputs(B.solvers[size_t(step.object)], &step);
+            break;
+        case RigExecBakedStepKind::Constraint: {
+            // A commit step and its walk entry are the same index, and a
+            // constraint entry names the constraint it commits.
+            const RigExecBakedProgramImpl::WalkStep &walk =
+                B.walkSteps[size_t(step.object)];
+            if (!walk.solverBatch && walk.index >= 0) {
+                NoteConstraintInputs(B.constraints[size_t(walk.index)], &step);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        std::sort(step.overrideInputs.begin(), step.overrideInputs.end());
+        step.overrideInputs.erase(
+            std::unique(step.overrideInputs.begin(),
+                        step.overrideInputs.end()),
+            step.overrideInputs.end());
+    }
+}
+
 void
 RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {

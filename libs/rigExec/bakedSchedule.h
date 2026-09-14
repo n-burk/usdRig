@@ -82,6 +82,27 @@ RigExecBakedClustering RigExecBakedBuildClusters(
 /// otherwise `clamp(total cost / (4 x concurrency), 5us, 50us)`.
 double RigExecBakedScheduleGrainUs(double totalCost);
 
+/// Computes the cone and restore closures of \p program's clusters (§7).
+///
+/// Once, at Build, from the edges and the clustering: `cone[c]` is every
+/// cluster that has to run when c does, `restore[c]` every cluster that has
+/// to run before c can, and the three lookup tables beside them are what a
+/// frame maps a changed source onto. Nothing here measures anything and
+/// nothing depends on a run.
+void RigExecBakedBuildCones(RigExecBakedProgramImpl *program);
+
+/// Decides which clusters this run executes, and updates the source state
+/// the next run compares against.
+///
+/// Sources -- the avar table, each chain's base points, each skin
+/// revision's static packet, the property-chain results -- have already been
+/// evaluated when this is called, and are compared by VALUE. The result is
+/// left in `program->closed`; `force` asks for the whole program, which is
+/// what the first run of an epoch, a bumped program stamp and the verifier's
+/// second pass all want.
+void RigExecBakedComputeClosure(RigExecBakedProgramImpl *program,
+                               UsdTimeCode time, bool force);
+
 /// Runs every step of \p program, returning false when one of them gave the
 /// generation back.
 ///
@@ -89,7 +110,10 @@ double RigExecBakedScheduleGrainUs(double totalCost);
 /// deltas and its phased-read records into itself, and this merges the
 /// records into the run's store in step order. The epilogue replays the
 /// rest.
-bool RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time);
+/// \p force asks for every cluster, which is what a first run, a bumped
+/// program stamp and the verifier's second pass all need.
+bool RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
+                          bool force = false);
 
 /// Replays this run's per-step intervals into the profiler, in step order.
 ///

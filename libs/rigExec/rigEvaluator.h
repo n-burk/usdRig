@@ -299,6 +299,17 @@ public:
         return _bakedProgramBuildAttempts;
     }
 
+    /// How many clusters the standing baked program holds, and how many of
+    /// them its last generation ran. Both zero when there is no program.
+    ///
+    /// Cone re-execution is the one part of the program whose correctness
+    /// cannot be read off a published pose: a frame that re-ran everything
+    /// publishes the same numbers as one that skipped the right half, so a
+    /// test asserting only on the pose would pass over a cone that never
+    /// skipped anything. These make the skip itself observable.
+    size_t GetBakedClusterCount() const;
+    size_t GetBakedClustersRunLastGeneration() const;
+
     /// Values that stand in for authored attributes while they are set,
     /// with NOTHING authored: the manipulation path (spec: docs/superpowers/
     /// specs/2026-09-10-hydra-preview-manipulation-design.md).

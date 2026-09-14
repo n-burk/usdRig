@@ -596,6 +596,38 @@ struct RigExecBakedStep {
     std::vector<RigExecBakedSlotRange> reads, writes;
     /// Program indices, sorted; every entry of preds is < this step's index.
     std::vector<int> preds, succs;
+    /// The preds whose value a re-run of this step needs RESTORED: the ones
+    /// that wrote a slot this step reads which a LATER step overwrites, so
+    /// that the storage at the end of a run no longer holds the version this
+    /// step read (§3.1). Cone re-execution closes over these, which is what
+    /// makes "a skipped step keeps last run's values" sound.
+    std::vector<int> restorePreds;
+
+    // ---- what a run outside the graph can change ---------------------------
+    //
+    // A step is a pure function of its declared reads with three exceptions,
+    // and every one of them is recorded here so that the dirty set can name
+    // it rather than the executor having to guess (§7).
+    /// The step reads nothing but source slots, so it can be -- and is --
+    /// run before the dirty set is computed, every run, and compared by
+    /// VALUE. RevisionStatic on a skin revision is the only one today.
+    bool isSource = false;
+    /// The step reads outside the program at a point the graph cannot order
+    /// -- a packet assembled against the influence table, a derived target's
+    /// own inputs -- and is not a source because it has predecessors. Such a
+    /// step's cluster is dirty every run; its own value comparisons are what
+    /// keep the counters honest.
+    bool externalReads = false;
+    /// The step reads a baked input whose value is a function of TIME, so a
+    /// frame at a different time may hand it different numbers.
+    bool varyingInputs = false;
+    /// The step reads a baked input that resolves through the generation's
+    /// resolved inputs every frame -- a property chain's output.
+    bool resolvedInputReads = false;
+    /// The override indices of the baked inputs this step reads, sorted and
+    /// deduplicated. A step is dirty while an override stands on one of
+    /// them, and for the one run after it is lifted.
+    std::vector<int> overrideInputs;
 
     /// Filled by the clustering pass; the serial executor ignores all four.
     /// `level` is the longest-path level the packing groups by, `sizeUnits`
@@ -641,6 +673,21 @@ struct RigExecBakedStep {
         diagnostics.clear();
         counters.Clear();
         snapshots.Clear();
+        bail = false;
+    }
+
+    /// Records that this run skipped the step (§7).
+    ///
+    /// The diagnostics and the STRUCTURAL counters stay: a skipped step's
+    /// lines describe state nothing changed, and how many chains and
+    /// revisions the program holds is a property of the program rather than
+    /// of a run. What does not stay is the one counter that is an
+    /// observation -- a revision the frame did not execute did not execute
+    /// -- and the bail flag, which belongs to the run that raised it.
+    void MarkSkipped() {
+        counters.revisionsExecuted = 0;
+        counters.revisionsCreated = 0;
+        counters.schedulesBuilt = 0;
         bail = false;
     }
 };
@@ -707,6 +754,88 @@ struct RigExecBakedClustering {
 struct alignas(64) RigExecBakedClusterCounter {
     std::atomic<int> remaining{0};
     char padding[64 - sizeof(std::atomic<int>)] = {};
+};
+
+/// A bitset over clusters, as many 64-bit words as the program needs.
+///
+/// Cone re-execution is a handful of set unions per frame over sets whose
+/// membership was decided at Build, so the representation that matters is
+/// the one a union is a word loop over. |clusters| is a few dozen on a
+/// biped, so this is one or two words.
+struct RigExecBakedClusterSet {
+    std::vector<uint64_t> words;
+
+    void Resize(size_t clusters) {
+        words.assign((clusters + 63) / 64, 0);
+    }
+    void Clear() { std::fill(words.begin(), words.end(), uint64_t(0)); }
+    bool Test(int cluster) const {
+        return cluster >= 0 &&
+               (words[size_t(cluster) >> 6] >> (size_t(cluster) & 63)) & 1;
+    }
+    void Set(int cluster) {
+        if (cluster >= 0) {
+            words[size_t(cluster) >> 6] |= uint64_t(1) << (size_t(cluster) & 63);
+        }
+    }
+    void SetAll(size_t clusters) {
+        Resize(clusters);
+        for (size_t c = 0; c < clusters; ++c) {
+            Set(int(c));
+        }
+    }
+    /// Whether anything was added, which is the fixpoint test.
+    bool Union(const RigExecBakedClusterSet &other) {
+        bool grew = false;
+        for (size_t w = 0; w < words.size(); ++w) {
+            const uint64_t before = words[w];
+            words[w] |= other.words[w];
+            grew = grew || words[w] != before;
+        }
+        return grew;
+    }
+    bool Any() const {
+        for (const uint64_t word : words) {
+            if (word) return true;
+        }
+        return false;
+    }
+    size_t Count() const {
+        size_t count = 0;
+        for (const uint64_t word : words) {
+            count += size_t(__builtin_popcountll(word));
+        }
+        return count;
+    }
+};
+
+/// What Build knows about re-running part of a program (§7).
+///
+/// Both families are closures computed once, over clusters rather than over
+/// steps, because a cluster is what the executor can skip: `cone[c]` is
+/// everything that has to run when c does, and `restore[c]` is everything
+/// that has to run BEFORE c can, so that the slots c reads hold the version
+/// its program point saw rather than the version the end of the last run
+/// left behind.
+struct RigExecBakedCones {
+    /// Forward closure of each cluster, including itself.
+    std::vector<RigExecBakedClusterSet> cone;
+    /// The restore closure of each cluster (§3.1), transitively closed.
+    std::vector<RigExecBakedClusterSet> restore;
+    /// Clusters holding a step that reads outside the graph at a point the
+    /// graph cannot order. Dirty every run.
+    RigExecBakedClusterSet always;
+    /// Provider slot -> the cluster of the compose step that reads its
+    /// avars, or -1. What an avar that moved makes dirty.
+    std::vector<int> avarCluster;
+    /// Chain -> the clusters of every step that reads its base points.
+    std::vector<std::vector<int>> chainBaseClusters;
+    /// Dense revision id -> the clusters of every step of that revision, and
+    /// the cluster of its RevisionStatic alone.
+    std::vector<std::vector<int>> revisionClusters;
+    std::vector<int> revisionStaticCluster;
+    /// Steps whose dirtiness depends on time or on a standing override.
+    std::vector<int> varyingSteps, overrideSteps;
 };
 
 /// One contiguous group of provider slots the compose pass runs as one step.
@@ -1058,6 +1187,41 @@ struct RigExecBakedProgramImpl {
     /// that the region allocates nothing. An array rather than a vector
     /// because std::atomic is neither copyable nor movable.
     std::unique_ptr<RigExecBakedClusterCounter[]> clusterCounters;
+
+    // ---- cone re-execution -------------------------------------------------
+    //
+    // What a run may SKIP. The sets are Build's; everything below them is the
+    // last run's answer, kept so that this run's sources can be compared with
+    // it by VALUE. There is no "time changed" and no "overridden" predicate
+    // deciding whether a source ran: sources always run and their outputs are
+    // compared, which is what makes an override on a routed prim, a released
+    // drag, a cleared topology cache and a moved keyframe all reach the graph
+    // through one test (§7).
+    RigExecBakedCones cones;
+    /// The clusters this run decided to run. Every step of a cluster outside
+    /// it keeps its slots, its diagnostics and its structural counters.
+    RigExecBakedClusterSet closed;
+    /// The avar table as the last run left it, for the per-provider compare.
+    std::vector<double> lastAvars;
+    /// The property-chain results as the last run left them.
+    std::map<SdfPath, VtValue> lastPropertyResults;
+    /// The override flags as the last run left them, so that the run AFTER a
+    /// drag is released re-runs what the drag was holding.
+    std::vector<char> lastOverridden;
+    /// Whether each chain's base read at all last run.
+    std::vector<char> lastHaveBase;
+    UsdTimeCode lastTime = UsdTimeCode::Default();
+    bool everRan = false;
+    /// Bumped by the evaluator for a notice that does NOT invalidate the
+    /// program -- a value edit on an input the frame path re-reads, which is
+    /// IsInvalidatedBy's documented gap. One run of everything answers it.
+    /// Set/ClearInteractiveOverrides do NOT bump it: an override is a source
+    /// value like any other and is compared like one (§7).
+    uint64_t programStamp = 0;
+    uint64_t lastProgramStamp = 0;
+    /// How many clusters the last run ran, and how many there are, for the
+    /// schedule run report.
+    size_t lastClosedClusters = 0;
 
     /// Program constants the epilogue adds to the generation's counters.
     ///
@@ -1656,6 +1820,20 @@ void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
+/// Resets the per-run DELTAS a geometry step would have written, for a run
+/// that skipped it (§7).
+///
+/// A revision's state is two kinds of thing: values that outlive a run it
+/// sat out -- the influence table, the packet, the points, the status -- and
+/// flags that say how this run's values differ from the last run's. The
+/// values are exactly what a skipped step is keeping; the flags are
+/// statements about a comparison that was never made, and a later step
+/// reading one would be told a change happened this run when it happened
+/// during the last one. A skipped step compared nothing and therefore found
+/// nothing, which is what this writes.
+void RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
+                                  RigExecBakedStep *step);
+
 /// The pose half of the prologue: the bound inputs, once per run.
 void RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time);
 
@@ -1728,6 +1906,100 @@ RigExecWeightPacket RigExecBakedWeightPacket(
     const RigExecBakedProgramImpl &program,
     const RigExecBakedProgramImpl::WeightObject &object,
     const std::vector<RigExecWeightPacket> &packets, UsdTimeCode time);
+
+/// Records, per pose step, which of its baked inputs a run can move.
+///
+/// A Solve and a Constraint read their own parameters off the stage every
+/// frame -- weights, offsets, axis masks, world-up vectors -- so neither is
+/// a pure function of its declared slots. Build walks those inputs once here
+/// and leaves each step saying whether any of them varies with time and
+/// which override indices reach it, which is what lets the dirty set name
+/// the steps a keyframe or a standing drag can have moved instead of
+/// re-running the walk for either.
+void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
+
+/// Shadows the whole of a run's mutable state, for RIGEXEC_BAKED_VERIFY_CONES.
+///
+/// Capture/Restore are what let one frame run twice from one starting point:
+/// the cone run's answer is captured, the starting point is restored, the
+/// whole program is re-run, and Compare reports every slot, counter and
+/// diagnostic the two runs disagree about. Nothing here is on a production
+/// path -- the state is large and copying it is the point.
+struct RigExecBakedRunShadow {
+    /// Copies everything a step reads or writes out of \p program.
+    void Capture(const RigExecBakedProgramImpl &program);
+    /// Puts it back, so that a second run starts where the first one did.
+    void Restore(RigExecBakedProgramImpl *program) const;
+    /// Appends one line per disagreement between this shadow and
+    /// \p program's current state, and returns how many there were.
+    size_t Compare(const RigExecBakedProgramImpl &program,
+                   std::vector<std::string> *differences) const;
+
+    struct StepState {
+        std::vector<std::string> diagnostics;
+        RigExecBakedStepCounters counters;
+        bool bail = false;
+    };
+    struct ChunkState {
+        std::vector<GfMatrix4d> transforms;
+        bool keyChanged = false, ok = false;
+    };
+    struct RevisionState {
+        std::vector<GfVec3f> output;
+        std::vector<GfMatrix4d> influences;
+        std::vector<float> rows, envelope;
+        std::vector<RigExecScaledDualQuat> palette;
+        std::vector<ChunkState> chunks;
+        RigExecMoverParameters parameters, lastParameters;
+        RigExecMoverStatus status, lastStatus;
+        TfToken resultStatus;
+        GfMatrix4d transform{1.0};
+        size_t precedingCount = 0;
+        int currentSource = -1;
+        bool haveTransform = false, ran = false, executed = false;
+        bool influencesValid = false, influencesChanged = false;
+        bool staticDirty = false, partitionStale = false;
+        bool layoutUsable = false, envelopeOk = false, fullStrength = false;
+    };
+    struct DerivedState {
+        RevisionState revision;
+        VtVec3fArray result, spare, lastBase;
+        bool haveResult = false, haveBase = false, baseDirty = false;
+    };
+    struct ChainState {
+        std::vector<RevisionState> revisions;
+        std::vector<DerivedState> derived;
+        VtVec3fArray lastBase, result, spare;
+        bool haveResult = false, haveBase = false, baseDirty = false;
+    };
+    struct SolverState {
+        std::vector<RigExecPointFrame> outFrames;
+        std::vector<char> outPresent;
+        std::vector<SdfPath> fallbackJoints;
+    };
+    struct CommitState {
+        std::vector<char> present, deltaOk;
+        std::vector<RigExecPointFrame> frames, staged;
+        std::vector<GfMatrix4d> deltas;
+        std::vector<uint8_t> outcome;
+        std::vector<RigExecConstraintSource> sources;
+        bool abandoned = true;
+    };
+
+    std::vector<double> avars;
+    std::vector<GfMatrix4d> posedM, finalMatrix, baseMatrix;
+    std::vector<RigExecPointFrame> base, fin;
+    std::vector<RigExecPointFrameArray> aggregates;
+    std::vector<SolverState> solvers;
+    std::vector<CommitState> commits;
+    std::vector<ChainState> chains;
+    std::vector<StepState> steps;
+    std::map<SdfPath, GfMatrix4d> constraintDeltas;
+    bool avarsDisturbed = false;
+};
+
+/// Whether RIGEXEC_BAKED_VERIFY_CONES asks a run to prove its cone.
+bool RigExecBakedVerifyConesRequested();
 
 }  // namespace rigExec
 

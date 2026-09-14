@@ -1439,13 +1439,25 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // read per frame, anything on a prim the bake never looked at -- leaves
     // the program standing, which is what keeps an edit elsewhere in the
     // scene from degrading the rig to the dynamic path.
-    if (_bakedProgram && _bakedProgram->IsInvalidatedBy(notice)) {
-        _bakedProgramStale = true;
-        // The rebuild is allowed to refuse where the standing program did
-        // not, and a refusal remembered from before this notice would
-        // otherwise answer for a stage that has since changed.
-        _bakeRefused = false;
-        _bakeRefusalReasons.clear();
+    if (_bakedProgram) {
+        if (_bakedProgram->IsInvalidatedBy(notice)) {
+            _bakedProgramStale = true;
+            // The rebuild is allowed to refuse where the standing program did
+            // not, and a refusal remembered from before this notice would
+            // otherwise answer for a stage that has since changed.
+            _bakeRefused = false;
+            _bakeRefusalReasons.clear();
+        } else {
+            // The other half of the same index, and the reason the program
+            // may skip work at all. A notice that misses the index is a
+            // value edit on something the frame path re-reads -- a keyframe
+            // moved, a weight repainted -- so the program is still right
+            // about its structure and wrong about every value it cached from
+            // the last frame. Saying so here is what makes the next
+            // generation run everything once; the program compares its own
+            // sources by value from then on.
+            _bakedProgram->BumpProgramStamp();
+        }
     }
     // The seed, connected, and guide requests read authored values straight
     // off the stage; an edit that leaves the override tuple unchanged (a
@@ -10725,6 +10737,18 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
 
     pose.valid = true;
     return pose;
+}
+
+size_t
+RigExecRigEvaluator::GetBakedClusterCount() const
+{
+    return _bakedProgram ? _bakedProgram->GetClusterCount() : 0;
+}
+
+size_t
+RigExecRigEvaluator::GetBakedClustersRunLastGeneration() const
+{
+    return _bakedProgram ? _bakedProgram->GetClustersRunLastGeneration() : 0;
 }
 
 const std::vector<TfToken> &

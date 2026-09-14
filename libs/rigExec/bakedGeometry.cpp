@@ -1270,6 +1270,49 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
 }
 
 void
+RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
+                             RigExecBakedStep *step)
+{
+    RigExecBakedProgramImpl &B = *program;
+    if (step->kind == RigExecBakedStepKind::Derived) {
+        RigExecBakedProgramImpl::GeomRevision &revision =
+            B.chains[size_t(B.derivedIndex[size_t(step->object)].first)]
+                .derived[size_t(B.derivedIndex[size_t(step->object)].second)]
+                .revision;
+        revision.influencesChanged = false;
+        return;
+    }
+    if (step->kind == RigExecBakedStepKind::ChainStatus) {
+        return;  // it writes no delta: the sweep is over persisted status
+    }
+    const auto &[chainIndex, revisionIndex] =
+        B.revisionIndex[size_t(step->object)];
+    RigExecBakedProgramImpl::GeomRevision &revision =
+        B.chains[size_t(chainIndex)].revisions[size_t(revisionIndex)];
+    switch (step->kind) {
+    case RigExecBakedStepKind::InfluenceFold:
+        // The table is where the fold left it, so nothing moved into it.
+        revision.influencesChanged = false;
+        return;
+    case RigExecBakedStepKind::RevisionStatic:
+        revision.staticDirty = false;
+        return;
+    case RigExecBakedStepKind::RevisionChunk:
+        revision.chunks[size_t(step->part)].keyChanged = false;
+        return;
+    case RigExecBakedStepKind::RevisionFuse:
+        // The chain's sticky dirty bit as the NEXT revision reads it: this
+        // revision did not execute this run, whatever it did during the last
+        // one. `currentSource`, `resultStatus` and the points stay where the
+        // fuse left them -- those are the values, not the comparison.
+        revision.executed = false;
+        return;
+    default:
+        return;
+    }
+}
+
+void
 RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                             RigExecBakedStep *step, UsdTimeCode time)
 {

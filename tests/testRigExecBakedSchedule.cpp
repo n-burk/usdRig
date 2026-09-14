@@ -54,6 +54,8 @@
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
+#include "rigExecPoseCompare.h"
+
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -1180,6 +1182,327 @@ TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects()
     CHECK(!RigExecSkinTransformsAreUsable(table.data(), 0));
 }
 
+// ---------------------------------------------------------------------------
+// Cone re-execution (§7).
+//
+// The one part of the program whose correctness a published pose cannot
+// show: a frame that re-ran everything publishes exactly what a frame that
+// skipped the right half publishes, so every assertion below is in two
+// halves -- the values are the values the dynamic path produces, AND the run
+// actually skipped something. Either alone passes over the defect the other
+// one catches.
+// ---------------------------------------------------------------------------
+
+/// The two closures Build computes are closures (§7).
+///
+/// Neither can be checked against a published pose -- a cone that is too big
+/// is slow and right, and one that is too small is fast and wrong in a way
+/// only some frame of some rig will ever show. So they are checked as what
+/// they claim to be: cone[c] holds c and every successor's cone, restore[c]
+/// holds every restore of everything in it, and a step's restore
+/// predecessors are predecessors.
+void
+TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
+{
+    if (!built.program) {
+        ++failures;
+        std::printf("FAIL %s: no program to check cones of\n", name);
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    const size_t clusters = B.clustering.clusters.size();
+    CHECK(B.cones.cone.size() == clusters);
+    CHECK(B.cones.restore.size() == clusters);
+    size_t broken = 0;
+    for (const RigExecBakedStep &step : B.steps) {
+        // A restore edge is a read edge the end of a run erases, so it is
+        // always one of the step's own predecessors.
+        for (const int pred : step.restorePreds) {
+            if (!std::binary_search(step.preds.begin(), step.preds.end(),
+                                    pred)) {
+                ++broken;
+            }
+        }
+    }
+    for (size_t c = 0; c < clusters; ++c) {
+        if (!B.cones.cone[c].Test(int(c))) {
+            ++broken;
+        }
+        for (const int succ : B.clustering.clusters[c].succs) {
+            if (!B.cones.cone[c].Test(succ)) {
+                ++broken;
+            }
+        }
+        for (size_t d = 0; d < clusters; ++d) {
+            if (B.cones.cone[c].Test(int(d))) {
+                for (size_t e = 0; e < clusters; ++e) {
+                    if (B.cones.cone[d].Test(int(e)) &&
+                        !B.cones.cone[c].Test(int(e))) {
+                        ++broken;
+                    }
+                }
+            }
+            if (B.cones.restore[c].Test(int(d))) {
+                for (size_t e = 0; e < clusters; ++e) {
+                    if (B.cones.restore[d].Test(int(e)) &&
+                        !B.cones.restore[c].Test(int(e))) {
+                        ++broken;
+                    }
+                }
+            }
+        }
+    }
+    if (broken) {
+        ++failures;
+        std::printf("FAIL %s: %zu cone/restore closure violation(s)\n", name,
+                    broken);
+        return;
+    }
+    size_t restored = 0;
+    for (size_t c = 0; c < clusters; ++c) {
+        restored += B.cones.restore[c].Count();
+    }
+    std::printf("  %s: %zu cluster(s), %zu restore edge(s) in the closure\n",
+                name, clusters, restored);
+}
+
+/// One rig, compiled and evaluating through the program.
+struct LiveRig {
+    UsdStageRefPtr stage;
+    std::unique_ptr<RigExecRigEvaluator> evaluator;
+};
+
+LiveRig
+OpenRig(const std::string &stagePath, RigExecEvaluationMode mode)
+{
+    LiveRig rig;
+    rig.stage = UsdStage::Open(stagePath);
+    if (!rig.stage) {
+        return rig;
+    }
+    const SdfPath rigPath = FindRig(rig.stage);
+    if (rigPath.IsEmpty()) {
+        return rig;
+    }
+    rig.evaluator =
+        std::make_unique<RigExecRigEvaluator>(rig.stage, rigPath);
+    rig.evaluator->SetSolverGuidesEnabled(true);
+    rig.evaluator->SetEvaluationMode(mode);
+    std::vector<std::string> errors;
+    if (!rig.evaluator->Compile(&errors)) {
+        rig.evaluator.reset();
+    }
+    return rig;
+}
+
+/// The double an attribute holds at \p time, as a VtValue of its own type.
+bool
+AvarValue(const UsdAttribute &attribute, UsdTimeCode time, double bump,
+          VtValue *out)
+{
+    if (!attribute) {
+        return false;
+    }
+    if (attribute.GetTypeName() == SdfValueTypeNames->Double) {
+        double value = 0;
+        if (!attribute.Get(&value, time)) return false;
+        *out = VtValue(value + bump);
+        return true;
+    }
+    if (attribute.GetTypeName() == SdfValueTypeNames->Float) {
+        float value = 0;
+        if (!attribute.Get(&value, time)) return false;
+        *out = VtValue(float(value + bump));
+        return true;
+    }
+    return false;
+}
+
+/// A rig evaluated twice at one time re-executes nothing the second time.
+///
+/// The baked meaning of "nothing changed": the sources -- the avar table,
+/// the chain's base points, the static packet -- compare equal, so the
+/// closure is empty but for the steps that read outside the graph, and the
+/// generation publishes last frame's values without recomputing one of them.
+void
+TestARepeatedTimeReExecutesNothing(const std::string &stagePath,
+                                   const char *name)
+{
+    const LiveRig rig = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    if (!rig.evaluator) {
+        ++failures;
+        std::printf("FAIL %s: does not compile\n", name);
+        return;
+    }
+    RigExecRigEvaluator &E = *rig.evaluator;
+    const RigExecRigPose first = E.Evaluate(UsdTimeCode(1));
+    const RigExecRigPose second = E.Evaluate(UsdTimeCode(1));
+    CHECK(first.valid && second.valid);
+    if (E.GetBakedGenerationCount() != 2) {
+        ++failures;
+        std::printf("FAIL %s: %zu of 2 generation(s) came from the program\n",
+                    name, E.GetBakedGenerationCount());
+        return;
+    }
+    // Nothing moved, so nothing was deformed again.
+    CHECK(second.moverGraphRevisionsExecuted == 0);
+    CHECK(second.moverGraphRevisionsCreated == 0);
+    // ... and the run knew it: a frame that re-ran every cluster would
+    // satisfy the counter above by accident, because the fuse's executed
+    // decision is a value comparison of its own.
+    const size_t clusters = E.GetBakedClusterCount();
+    const size_t ran = E.GetBakedClustersRunLastGeneration();
+    CHECK(clusters > 0 && ran < clusters);
+    rigExecTest::CompareEveryMap(&failures, std::string(name) +
+                                     " repeated time", first, second);
+    std::printf("  %s: a repeated time ran %zu of %zu cluster(s)\n", name,
+                ran, clusters);
+}
+
+/// A control dragged and returned to its exact original value executes
+/// nothing [S25].
+///
+/// The predicate a scheduler is tempted to use is "an override stands", and
+/// it is wrong: an animator who drags a control and puts it back has changed
+/// nothing, and the VdfNetwork the program replaced would not re-execute a
+/// node for it. What decides here is the avar table compared by value, so
+/// the generation under a standing override is bit-identical to the one
+/// without it.
+void
+TestADragReturnedToItsValueExecutesNothing(const std::string &stagePath,
+                                           const SdfPath &control,
+                                           const TfToken &avar)
+{
+    const LiveRig rig = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    if (!rig.evaluator) {
+        ++failures;
+        std::printf("FAIL drag-return: does not compile\n");
+        return;
+    }
+    RigExecRigEvaluator &E = *rig.evaluator;
+    const UsdPrim prim = rig.stage->GetPrimAtPath(control);
+    VtValue original, dragged;
+    if (!prim || !AvarValue(prim.GetAttribute(avar), UsdTimeCode(1), 0.0,
+                            &original) ||
+        !AvarValue(prim.GetAttribute(avar), UsdTimeCode(1), 1.5, &dragged)) {
+        ++failures;
+        std::printf("FAIL drag-return: no double or float %s on %s\n",
+                    avar.GetText(), control.GetText());
+        return;
+    }
+    E.Evaluate(UsdTimeCode(1));
+    const RigExecRigPose settled = E.Evaluate(UsdTimeCode(1));
+
+    E.SetInteractiveOverrides(
+        {RigExecValueOverride{control, TfToken(), avar, dragged}});
+    const RigExecRigPose moved = E.Evaluate(UsdTimeCode(1));
+    CHECK(moved.moverGraphRevisionsExecuted > 0);
+
+    // Back to where it started, and HELD there. The first generation after
+    // the value moves back executes -- it moved -- and the one after it must
+    // not, although the override is still standing.
+    E.SetInteractiveOverrides(
+        {RigExecValueOverride{control, TfToken(), avar, original}});
+    const RigExecRigPose back = E.Evaluate(UsdTimeCode(1));
+    CHECK(back.moverGraphRevisionsExecuted > 0);
+    const RigExecRigPose held = E.Evaluate(UsdTimeCode(1));
+    CHECK(held.moverGraphRevisionsExecuted == 0);
+    CHECK(E.GetBakedClustersRunLastGeneration() < E.GetBakedClusterCount());
+    if (E.GetBakedGenerationCount() != 5) {
+        ++failures;
+        std::printf("FAIL drag-return: %zu of 5 generation(s) came from the "
+                    "program; the drag was not placed\n",
+                    E.GetBakedGenerationCount());
+        return;
+    }
+    // The pose under the standing override is the pose without it, to the
+    // bit: the override put the control back where the stage has it.
+    rigExecTest::CompareEveryMap(&failures, "drag returned to its value",
+                                 settled, held);
+    std::printf("  drag returned to its value: held ran %zu of %zu "
+                "cluster(s), 0 revision(s) executed\n",
+                E.GetBakedClustersRunLastGeneration(),
+                E.GetBakedClusterCount());
+}
+
+/// A constraint dirtied while its target's compose is clean still reads the
+/// frame its program point saw (§3.1, the restore closure).
+///
+/// An override on a constraint's own input moves nothing upstream of it: the
+/// controls are where they were, so the compose that produced its target's
+/// frame is clean and would be skipped. But that frame is READ-MODIFY-
+/// WRITTEN by the constraint, so the slot at the end of the last run holds
+/// the constrained value and not the composed one -- re-running the
+/// constraint over it would constrain a constrained frame. The restore
+/// closure is what puts the compose back in the run, and the only way to see
+/// that it did is to compare with a path that never skipped anything.
+void
+TestAConstraintDragRestoresWhatItReads(const std::string &stagePath,
+                                       const SdfPath &mover,
+                                       const TfToken &input)
+{
+    const UsdStageRefPtr probe = UsdStage::Open(stagePath);
+    CHECK(probe);
+    if (!probe) {
+        return;
+    }
+    const UsdPrim prim = probe->GetPrimAtPath(mover);
+    VtValue dragged;
+    if (!prim || !AvarValue(prim.GetAttribute(input), UsdTimeCode(1), -0.25,
+                            &dragged)) {
+        ++failures;
+        std::printf("FAIL constraint-drag: no double or float %s on %s\n",
+                    input.GetText(), mover.GetText());
+        return;
+    }
+    const std::vector<RigExecValueOverride> overrides = {
+        RigExecValueOverride{mover, TfToken(), input, dragged}};
+
+    // The path that skips: warmed up first, so its next generation has last
+    // frame's values to keep.
+    const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    // The path that never skips, and never baked: one evaluator, one
+    // generation, the whole dynamic walk.
+    const LiveRig reference =
+        OpenRig(stagePath, RigExecEvaluationMode::Dynamic);
+    if (!baked.evaluator || !reference.evaluator) {
+        ++failures;
+        std::printf("FAIL constraint-drag: does not compile\n");
+        return;
+    }
+    baked.evaluator->Evaluate(UsdTimeCode(1));
+    baked.evaluator->Evaluate(UsdTimeCode(1));
+    baked.evaluator->SetInteractiveOverrides(overrides);
+    const RigExecRigPose constrained =
+        baked.evaluator->Evaluate(UsdTimeCode(1));
+    if (baked.evaluator->GetBakedGenerationCount() != 3) {
+        ++failures;
+        std::printf("FAIL constraint-drag: %zu of 3 generation(s) came from "
+                    "the program\n",
+                    baked.evaluator->GetBakedGenerationCount());
+        return;
+    }
+    const size_t ran = baked.evaluator->GetBakedClustersRunLastGeneration();
+    const size_t clusters = baked.evaluator->GetBakedClusterCount();
+    CHECK(ran > 0);
+
+    reference.evaluator->SetInteractiveOverrides(overrides);
+    const RigExecRigPose expected =
+        reference.evaluator->Evaluate(UsdTimeCode(1));
+    CHECK(expected.valid && constrained.valid);
+    rigExecTest::CompareEveryMap(&failures, "constraint input drag", expected,
+                                 constrained);
+    // The ratio is reported rather than asserted on, and the number it
+    // usually shows is the whole program: a constraint READ-MODIFY-WRITES
+    // its target's frame, so restoring the version it read pulls in the
+    // compose that wrote it, and everything downstream of that compose comes
+    // with it. That is the closure being right, not being lazy -- the
+    // assertion above it is that the pose matches a path that skipped
+    // nothing, which is exactly what a missing restore would break.
+    std::printf("  constraint input drag: ran %zu of %zu cluster(s) and "
+                "published the dynamic path's pose\n", ran, clusters);
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -1223,6 +1546,9 @@ main(int argc, char **argv)
     TestTheClusteringIsSound(biped, "Biped");
     TestTheClusteringIsSound(spider, "spider_legs");
     TestTheClusteringIsSound(stacked, "stacked_revisions");
+    TestTheConeClosuresAreSound(biped, "Biped");
+    TestTheConeClosuresAreSound(spider, "spider_legs");
+    TestTheConeClosuresAreSound(stacked, "stacked_revisions");
     TestTheReportIsDeterministic(examplesDir + "/biped/Biped.usda");
     TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects();
     TestTheRangeFormDeformsLikeTheWholeArray("classicLinear");
@@ -1244,6 +1570,17 @@ main(int argc, char **argv)
         examplesDir + "/biped/Biped.usda");
     TestAStalePartitionRunsTheRevisionWhole(
         examplesDir + "/biped/Biped.usda");
+    TestARepeatedTimeReExecutesNothing(examplesDir + "/biped/Biped.usda",
+                                       "Biped");
+    TestARepeatedTimeReExecutesNothing(
+        examplesDir + "/spider_legs_assembly_ref.usda", "spider_legs");
+    TestADragReturnedToItsValueExecutesNothing(
+        examplesDir + "/biped/Biped.usda",
+        SdfPath("/Biped/Rig/Controls/hips_ctl"), TfToken("avars:ty"));
+    TestAConstraintDragRestoresWhatItReads(
+        examplesDir + "/biped/Biped.usda",
+        SdfPath("/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim"),
+        TfToken("inputs:defaultWeight"));
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

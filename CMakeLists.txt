@@ -100,6 +100,7 @@ add_library(rigExec SHARED
     libs/rigExec/bakedSchedule.cpp
     libs/rigExec/bakedGeometry.cpp
     libs/rigExec/bakedWeights.cpp
+    libs/rigExec/bakedVerify.cpp
 )
 target_include_directories(rigExec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -235,6 +236,17 @@ add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 # here having compared nothing. It is opt-in per suite because turning it on
 # for a suite whose operators do not bake yet is red by construction: add it
 # in the same commit that removes that suite's refusal.
+#
+# CONE_VERIFY, likewise anywhere in the argument list, registers TWO further
+# entries beside the parity one -- <name>Cones_serial and <name>Cones_parallel
+# -- which run the same binary with RIGEXEC_BAKED_VERIFY_CONES=1 and each
+# schedule in turn. That mode makes every generation run twice: once as the
+# cone decided, once whole, from the state the prologue left, comparing every
+# slot, counter and diagnostic. It is what holds "a skipped step's values are
+# still this frame's values" to account on a suite that drags, which is the
+# only place the claim can be wrong. Opt-in, because the mode roughly doubles
+# a suite's runtime and only a suite whose generations come from the program
+# proves anything under it.
 function(rigexec_add_baked_parity_test name)
     set(_args "${ARGN}")
     set(_require_bake OFF)
@@ -242,6 +254,12 @@ function(rigexec_add_baked_parity_test name)
     if (NOT _require_bake_at EQUAL -1)
         list(REMOVE_AT _args ${_require_bake_at})
         set(_require_bake ON)
+    endif()
+    set(_cone_verify OFF)
+    list(FIND _args "CONE_VERIFY" _cone_verify_at)
+    if (NOT _cone_verify_at EQUAL -1)
+        list(REMOVE_AT _args ${_cone_verify_at})
+        set(_cone_verify ON)
     endif()
     add_test(NAME ${name}BakedParity COMMAND ${name} ${_args})
     set_tests_properties(${name}BakedParity PROPERTIES
@@ -252,6 +270,23 @@ function(rigexec_add_baked_parity_test name)
         # setting it again would drop the mode above.
         set_property(TEST ${name}BakedParity APPEND PROPERTY ENVIRONMENT
             "RIGEXEC_BAKE_REQUIRED=1")
+    endif()
+    if (_cone_verify)
+        foreach(_schedule serial parallel)
+            add_test(NAME ${name}Cones_${_schedule}
+                COMMAND ${name} ${_args})
+            set_tests_properties(${name}Cones_${_schedule} PROPERTIES
+                ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
+                FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+            set_property(TEST ${name}Cones_${_schedule} APPEND
+                PROPERTY ENVIRONMENT
+                "RIGEXEC_BAKED_VERIFY_CONES=1"
+                "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+            if (_require_bake)
+                set_property(TEST ${name}Cones_${_schedule} APPEND
+                    PROPERTY ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1")
+            endif()
+        endforeach()
     endif()
 endfunction()
 rigexec_add_baked_parity_test(testRigExecConstraints)
@@ -361,6 +396,22 @@ add_test(NAME testRigExecExampleParity COMMAND testRigExecExampleParity
 set_tests_properties(testRigExecExampleParity PROPERTIES
     ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
     FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+# The same sweep with the cone verifier on, in both schedules. Every fixture
+# that bakes is evaluated across its frames and then dragged twice, so this
+# is where "the run skipped the right half" is measured against "the run
+# skipped nothing" on several hundred generations rather than on one.
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecExampleParityCones_${_schedule}
+        COMMAND testRigExecExampleParity
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    set_tests_properties(testRigExecExampleParityCones_${_schedule} PROPERTIES
+        ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    set_property(TEST testRigExecExampleParityCones_${_schedule} APPEND
+        PROPERTY ENVIRONMENT
+        "RIGEXEC_BAKED_VERIFY_CONES=1"
+        "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+endforeach()
 
 add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
 target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
@@ -510,7 +561,10 @@ add_test(NAME testRigExecInteractive COMMAND testRigExecInteractive)
 # suites still fall back (plain-Xformable constraint targets, SingleChainIK,
 # weight objects on movers, authored posed:space and rest overrides), so
 # they get REQUIRE_BAKE in the commit that bakes their operators.
-rigexec_add_baked_parity_test(testRigExecInteractive REQUIRE_BAKE)
+# The drag suite, and the one whose every generation comes from the program:
+# the natural home for the cone verifier, because an interactive override is
+# what makes two consecutive frames differ in one value and nothing else.
+rigexec_add_baked_parity_test(testRigExecInteractive REQUIRE_BAKE CONE_VERIFY)
 
 add_executable(testRigExecDefaultSpaces tests/testRigExecDefaultSpaces.cpp)
 target_link_libraries(testRigExecDefaultSpaces PRIVATE rigExec)
