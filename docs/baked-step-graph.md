@@ -223,7 +223,9 @@ everything and call it a fast drag.
 
 Median of 60 steps, min of three runs, `Biped.usda`, µs per drag step. The `b705950` columns are
 this same tool's source compiled against the straight-line library, so the two sides differ only in
-the library. "wide clear" is the old unconditional `_skinTopologies.Clear()` on every override set:
+the library. The reference worktree's own tool stays exactly as `b705950` wrote it -- backporting
+`--repeat`/`--drag` into it would leave a reference build that is no longer the reference, with
+nothing in its history to say so -- so the comparison binary is built beside it instead. "wide clear" is the old unconditional `_skinTopologies.Clear()` on every override set:
 
 | control | b705950 dynamic | b705950 baked | serial | parallel | serial, wide clear | parallel, wide clear |
 |---|---|---|---|---|---|---|
@@ -552,6 +554,14 @@ records and the publication read nothing else; the versions in between are an ar
 write site that does NOT write -- a candidate its batch published nothing for, a propagation pair
 stepped over, a constraint that passed through -- CARRIES the version it found into its own entry,
 so every version a reader can name is well formed however the run went.
+
+A carry is a READ, and is declared as one. The step that performs it -- the head of an unsplit
+commit, the `CommitApply` of a split one -- declares `PoseFin` of every candidate and, for a solver
+commit, `PoseBase` of every candidate and every descendant, beside the delta reads it already
+declared. Those are edges the write-after-write pass raises against the same writers anyway, so
+declaring them adds no edge and moves no cone; what it keeps true is the graph's account of what a
+step touches, which is what the next writer of a commit step will reason from.
+`testRigExecBakedSchedule`'s check (6) asserts it.
 
 Cost: Σ|writes| frames of 96 bytes, sized at Build and never resized in a run -- on the biped 1 777
 write sites over 326 slots, 2 015 `fin` + 652 `base` entries, 270 KB. A read is one indirection

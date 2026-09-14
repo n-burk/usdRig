@@ -419,7 +419,8 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
     }
 
     // (6) An unsplit commit declares a READ of every candidate slot it
-    // measures its delta against. ComputeCommitDeltas takes B.fin[slot] as
+    // measures its delta against, and every commit declares the versions its
+    // write-back carries. ComputeCommitDeltas takes B.fin[slot] as
     // it stood BEFORE the commit and the write-back then overwrites that
     // slot, so the read is not implied by the write: a cone that sees only
     // the write is free to skip the commit in a generation that moved the
@@ -429,34 +430,63 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
     // here because the symptom is invisible in a serial run, and invisible
     // in every published value of a commit that has no descendants: what
     // caught it was the cone verifier at one cluster per step.
+    //
+    // The same rule covers what the write-back CARRIES, on whichever step
+    // performs it: FinishCommit copies the version it found into its own
+    // storage wherever it declines to write, so a solver commit reads the
+    // PoseBase version of every candidate and every descendant, and the
+    // split arrangement's APPLY step reads the PoseFin version of every
+    // candidate -- none of which the write implies either. Neither can race
+    // (the same step writes those slots, so check (3) has already ordered it
+    // against every other writer), which is exactly why nothing caught the
+    // omission: what is at stake is a graph that says what its steps touch.
+    const auto declaresRead = [](const RigExecBakedStep &step,
+                                 RigExecBakedSlotDomain domain, int slot) {
+        for (const RigExecBakedSlotRange &read : step.reads) {
+            if (read.domain == domain && read.begin <= uint32_t(slot) &&
+                uint32_t(slot) < read.end) {
+                return true;
+            }
+        }
+        return false;
+    };
     for (size_t index = 0; index < B.steps.size(); ++index) {
         const RigExecBakedStep &step = B.steps[index];
-        if (step.kind != RigExecBakedStepKind::SolverCommit &&
-            step.kind != RigExecBakedStepKind::Constraint) {
+        const bool head = step.kind == RigExecBakedStepKind::SolverCommit ||
+                          step.kind == RigExecBakedStepKind::Constraint;
+        if (!head && step.kind != RigExecBakedStepKind::CommitApply) {
             continue;
         }
         if (step.object < 0 || size_t(step.object) >= B.commits.size()) {
             continue;
         }
         const RigExecBakedCommit &commit = B.commits[size_t(step.object)];
-        if (commit.split) {
-            continue;  // its CommitDelta step owns the reads
+        if (head == commit.split) {
+            continue;  // the other arrangement's step of this commit
         }
-        for (const int slot : commit.slots) {
-            bool declared = false;
-            for (const RigExecBakedSlotRange &read : step.reads) {
-                declared = declared ||
-                           (read.domain == RigExecBakedSlotDomain::PoseFin &&
-                            read.begin <= uint32_t(slot) &&
-                            uint32_t(slot) < read.end);
-            }
-            if (declared) {
-                continue;
+        const auto require = [&](RigExecBakedSlotDomain domain, int slot,
+                                 const char *what) {
+            if (declaresRead(step, domain, slot)) {
+                return;
             }
             ++failures;
-            std::printf("FAIL %s: step %zu (%s) measures a delta against "
-                        "PoseFin[%d] without declaring the read\n", name,
-                        index, step.label.c_str(), slot);
+            std::printf("FAIL %s: step %zu (%s) %s %s[%d] without "
+                        "declaring the read\n", name, index,
+                        step.label.c_str(), what,
+                        RigExecBakedSlotDomainName(domain), slot);
+        };
+        for (const int slot : commit.slots) {
+            require(RigExecBakedSlotDomain::PoseFin, slot,
+                    head ? "measures a delta against" : "carries");
+            if (commit.solverOutput) {
+                require(RigExecBakedSlotDomain::PoseBase, slot, "carries");
+            }
+        }
+        if (!commit.solverOutput) {
+            continue;
+        }
+        for (const auto &pair : commit.propagate) {
+            require(RigExecBakedSlotDomain::PoseBase, pair.first, "carries");
         }
     }
 

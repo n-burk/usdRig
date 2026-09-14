@@ -964,6 +964,35 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 }
             }
         };
+        // What the write-back CARRIES is a read too, and of a different
+        // version than the delta's: FinishCommit copies the version it found
+        // into the storage it owns wherever it declines to write, so a step
+        // that carries TOUCHES the version it carries. PoseFin's half is the
+        // candidate read the unsplit arrangement declares just below for the
+        // delta -- but the split arrangement performs the carry on its APPLY
+        // step, whose reads say nothing about it, and the PoseBase half of a
+        // solver commit is declared nowhere at all. Both are edges the
+        // write-after-write pass already raises against the same writers, so
+        // stating them adds no edge and changes no cone; what it buys is a
+        // graph that still describes what the step reads, which is what the
+        // next writer of one of these steps will reason from.
+        const auto declareCarryReads = [&commit](RigExecBakedStep *step) {
+            for (const int slot : commit.slots) {
+                step->reads.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, slot));
+                if (commit.solverOutput) {
+                    step->reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseBase, slot));
+                }
+            }
+            if (!commit.solverOutput) {
+                return;
+            }
+            for (const auto &pair : commit.propagate) {
+                step->reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseBase, pair.first));
+            }
+        };
         if (!commit.split) {
             // The delta this arrangement measures itself is against each
             // candidate slot's value BEFORE the commit revises it:
@@ -978,6 +1007,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                     RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, slot));
             }
             declarePropagation(&commitStep, /* writes = */ true);
+            declareCarryReads(&commitStep);
             if (!walk.solverBatch) {
                 commitStep.writes.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::Snapshots,
@@ -1031,6 +1061,7 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 RigExecBakedSlotDomain::CommitStaging, commit.stagingBase,
                 commit.stagingBase + int(commit.propagate.size())));
             declarePropagation(&apply, /* writes = */ true);
+            declareCarryReads(&apply);
             if (!walk.solverBatch) {
                 apply.writes.push_back(
                     RigExecBakedOne(RigExecBakedSlotDomain::Snapshots,
