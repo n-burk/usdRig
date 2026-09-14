@@ -1634,10 +1634,14 @@ RecordFrame(const RigExecBakedProgramImpl &B,
     if (!constraint.snapshotAfter) {
         return;
     }
-    // EVERY target, because the dynamic walk records every target of the
-    // constraint and not only the one it revises -- which is the whole joint
-    // chain of a SingleChainIK.
-    for (size_t k = 0; k < constraint.targetSlots.size(); ++k) {
+    // Every target, or just the first: which one this exit is was decided
+    // by the step, because the dynamic walk decides it per exit (see
+    // RigExecBakedCommit::recordEveryTarget).
+    const size_t count =
+        commit.recordEveryTarget
+            ? constraint.targetSlots.size()
+            : std::min<size_t>(1, constraint.targetSlots.size());
+    for (size_t k = 0; k < count; ++k) {
         if (!constraint.snapshotTargets[k]) {
             continue;
         }
@@ -2020,6 +2024,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // only on the exits the dynamic walk records it on.
         const int deltaBase = c.deltaBase;
         commit.recordAfter = true;
+        commit.recordEveryTarget = true;
         if (deltaBase >= 0) {
             B.deltaPresent[size_t(deltaBase)] = 0;
         }
@@ -2231,6 +2236,10 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             finish();
             return;
         }
+
+        // Past the IK exit, and so past the last exit the dynamic walk
+        // records every target on: its remaining two record targets[0].
+        commit.recordEveryTarget = false;
 
         // buildSources' order, which is a diagnostic order as much as an
         // arithmetic one: the authored tables first, then the source frames.

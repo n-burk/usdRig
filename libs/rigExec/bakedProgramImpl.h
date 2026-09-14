@@ -1008,6 +1008,15 @@ struct RigExecBakedCommit {
     /// geometry-domain constraint has its sources, which is where the
     /// dynamic walk stops recording for one.
     bool recordAfter = true;
+    /// And HOW MANY targets that exit records. The dynamic walk is not
+    /// uniform about it: its early exits -- disabled, an unusable weight
+    /// object, a bad envelope, a dormant one -- loop every target, and so
+    /// does the SingleChainIK exit, whose targets ARE the solved chain; but
+    /// its two late exits, unusable sources and the ordinary one, record
+    /// targets[0] alone. Only a multi-target NON-IK constraint can tell the
+    /// two apart, and no rig in the tree is one -- but the program must not
+    /// invent a snapshot the reference path never published.
+    bool recordEveryTarget = true;
     /// Parallel to `sources`, and empty for a source the walk holds a frame
     /// for: the ancestor slots of a native source, in increasing depth.
     std::vector<std::vector<AncestorRead>> sourceAncestors;
