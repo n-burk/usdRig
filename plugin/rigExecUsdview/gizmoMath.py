@@ -209,23 +209,124 @@ def ReadsScaleAvars(prim):
     return not prim.IsA(volume)
 
 
-def FindRigRoot(prim):
+class _EvalContext(object):
+    """
+    Everything ONE top-level ComputeRigFrames call reads, read once.
+
+    The frames of a prim are a pure function of (stage, time, preview
+    values), and none of the three moves while a single computation is
+    running: a drag step installs its preview values (SetPreviewValues)
+    and only then asks for frames, and stage edits arrive between steps.
+    So a context lives for exactly one invocation and NOTHING survives
+    across calls -- a memo that outlived its call would draw the gizmo
+    at the previous mouse position.
+
+    Why it exists: RestSpace recurses to the rig root, and was called
+    once per ancestor from _ComputeRigFrames and twice more from
+    _ComputedSpace, so a joint at depth d paid O(d^2) rest walks -- 312
+    ms per mouse move on the biped's depth-20 brow joints, against 5.7
+    ms now. The XformCache is shared for the same reason:
+    InterveningXform built a fresh one per call, and a fresh cache
+    re-walks the namespace for every question asked of it.
+
+    Memoising cannot change the arithmetic: every entry is the result of
+    the same operations in the same order, handed back as a copy so each
+    caller still owns its matrix, and a computation that RAISED is never
+    recorded -- a cyclic connection or a _PoseAuthorityError has to
+    raise again the next time it is asked for.
+
+    Keying reads by (path, name) is safe even though a previewed
+    attribute stands in for itself and suppresses its connection (see
+    ScalarAvar): _previewValues is fixed for the invocation, so a
+    previewed and an unpreviewed read of one attribute cannot both
+    happen inside one context.
+    """
+
+    def __init__(self, time, frames=None):
+        self.time = time
+        # The frame memo. Shared with a caller that passed the plain
+        # dict _frameCache used to be, so that contract still holds.
+        self.frames = {} if frames is None else frames
+        self.rigRoots = {}
+        self.parents = {}
+        self.scalars = {}
+        self.matrices = {}
+        self.restLocals = {}
+        self.defaultLocals = {}
+        self.intervening = {}
+        self.restSpaces = {}
+        self.spaces = {}
+        self._xformCache = None
+
+    def XformCache(self):
+        """The one UsdGeomXformCache every query in this call shares."""
+        if self._xformCache is None:
+            self._xformCache = UsdGeom.XformCache(self.time)
+        return self._xformCache
+
+
+def _Context(cache, time):
+    """
+    The evaluation context for a call: `cache` if it already is one, a
+    throwaway around it otherwise.
+
+    This is what keeps every entry point callable exactly as before --
+    with no context, with None, or with the plain dict that _frameCache
+    used to be, which then goes on holding the frames.
+    """
+    if isinstance(cache, _EvalContext):
+        return cache
+    return _EvalContext(time, cache)
+
+
+def _MemoMatrix(memo, key, compute):
+    """
+    `compute()` once per key, handed back as a matrix the caller owns.
+
+    The copy preserves today's contract that every call returns a fresh
+    matrix; `memo` is None when there is no context, and then this is
+    just the call.
+    """
+    if memo is None:
+        return compute()
+    if key not in memo:
+        memo[key] = compute()
+    return Gf.Matrix4d(memo[key])
+
+
+def FindRigRoot(prim, _ctx=None):
     """The enclosing RigExecRoot, or None."""
+    memo = None if _ctx is None else _ctx.rigRoots
+    key = prim.GetPath()
+    if memo is not None and key in memo:
+        return memo[key]
+    root = None
     parent = prim.GetParent()
     while parent and not parent.IsPseudoRoot():
         if parent.GetTypeName() == "RigExecRoot":
-            return parent
+            root = parent
+            break
         parent = parent.GetParent()
-    return None
+    if memo is not None:
+        memo[key] = root
+    return root
 
 
-def _FindParentXformable(prim, rigRoot):
+def _FindParentXformable(prim, rigRoot, _ctx=None):
+    memo = None if _ctx is None else _ctx.parents
+    key = (prim.GetPath(), rigRoot.GetPath() if rigRoot else None)
+    if memo is not None and key in memo:
+        return memo[key]
+    found = None
     parent = prim.GetParent()
     while parent and parent != rigRoot and not parent.IsPseudoRoot():
         if IsRigXformable(parent):
-            return parent
+            found = parent
+            break
         parent = parent.GetParent()
-    return None
+    if memo is not None:
+        memo[key] = found
+    return found
 
 
 # The relationship SolverPosedPaths reads and SolverPosedCache watches
@@ -389,7 +490,17 @@ def _Previewed(attr):
     return _previewValues.get(attr.GetPath())
 
 
-def ScalarAvar(prim, name, time, fallback):
+def _ScalarAvarValue(prim, name, time):
+    """
+    ScalarAvar's stage read, WITHOUT the fallback: the float the
+    attribute (or the end of its connection chain) resolves to, or None
+    when nothing resolves.
+
+    Split out so the memo can key on (path, name) alone. The fallback is
+    the caller's, not the attribute's -- avars:sx falls back to 1.0 and
+    rest:tx to 0.0 -- so folding it in would either key on it too or
+    hand one caller another's default.
+    """
     attr = prim.GetAttribute(name)
     visiting = set()
     while attr and attr.GetPath() not in visiting:
@@ -414,34 +525,53 @@ def ScalarAvar(prim, name, time, fallback):
         value = attr.Get(time)
         if value is not None:
             return float(value)
-    return fallback
+    return None
 
 
-def _MatrixAttr(prim, name, time):
-    attr = prim.GetAttribute(name)
-    if attr:
-        value = _Previewed(attr)
-        if value is None:
-            value = attr.Get(time)
-        if value is not None:
-            return Gf.Matrix4d(value)
-    return Gf.Matrix4d(1.0)
+def ScalarAvar(prim, name, time, fallback, _ctx=None):
+    memo = None if _ctx is None else _ctx.scalars
+    key = (prim.GetPath(), name)
+    if memo is None:
+        value = _ScalarAvarValue(prim, name, time)
+    elif key in memo:
+        value = memo[key]
+    else:
+        value = _ScalarAvarValue(prim, name, time)
+        memo[key] = value
+    return fallback if value is None else value
 
 
-def RestLocal(prim, time):
+def _MatrixAttr(prim, name, time, _ctx=None):
+    def Read():
+        attr = prim.GetAttribute(name)
+        if attr:
+            value = _Previewed(attr)
+            if value is None:
+                value = attr.Get(time)
+            if value is not None:
+                return Gf.Matrix4d(value)
+        return Gf.Matrix4d(1.0)
+    memo = None if _ctx is None else _ctx.matrices
+    return _MemoMatrix(memo, (prim.GetPath(), name), Read)
+
+
+def RestLocal(prim, time, _ctx=None):
     """compose(rest:t, rest:r) -- XYZ order, no scale, no spin."""
-    return ComposeAvarMatrix(
-        ScalarAvar(prim, REST_T[0], time, 0.0),
-        ScalarAvar(prim, REST_T[1], time, 0.0),
-        ScalarAvar(prim, REST_T[2], time, 0.0),
-        1.0, 1.0, 1.0,
-        ScalarAvar(prim, REST_R[0], time, 0.0),
-        ScalarAvar(prim, REST_R[1], time, 0.0),
-        ScalarAvar(prim, REST_R[2], time, 0.0),
-        0.0, "XYZ")
+    def Compose():
+        return ComposeAvarMatrix(
+            ScalarAvar(prim, REST_T[0], time, 0.0, _ctx),
+            ScalarAvar(prim, REST_T[1], time, 0.0, _ctx),
+            ScalarAvar(prim, REST_T[2], time, 0.0, _ctx),
+            1.0, 1.0, 1.0,
+            ScalarAvar(prim, REST_R[0], time, 0.0, _ctx),
+            ScalarAvar(prim, REST_R[1], time, 0.0, _ctx),
+            ScalarAvar(prim, REST_R[2], time, 0.0, _ctx),
+            0.0, "XYZ")
+    memo = None if _ctx is None else _ctx.restLocals
+    return _MemoMatrix(memo, prim.GetPath(), Compose)
 
 
-def InterveningXform(prim, time, rigRoot=None):
+def InterveningXform(prim, time, rigRoot=None, _ctx=None):
     """
     The transform of any plain Xformable lying between `prim` and the
     frame provider above it -- the quantity the evaluator folds into its
@@ -463,23 +593,32 @@ def InterveningXform(prim, time, rigRoot=None):
     from the anchor entirely -- again matching the evaluator, which
     reports that case rather than guessing at it.
     """
-    rigRoot = FindRigRoot(prim) if rigRoot is None else rigRoot
+    _ctx = _Context(_ctx, time)
+    rigRoot = FindRigRoot(prim, _ctx) if rigRoot is None else rigRoot
     if rigRoot is None:
         return Gf.Matrix4d(1.0)
-    anchor = _FindParentXformable(prim, rigRoot)
-    if anchor is None:
-        # No RigExec ancestor: the chain is anchored at the asset root,
-        # which is the rig root's parent.
-        anchor = rigRoot.GetParent()
-    parent = prim.GetParent()
-    if not anchor or not parent or parent == anchor:
-        return Gf.Matrix4d(1.0)
-    matrix, resets = UsdGeom.XformCache(time).ComputeRelativeTransform(
-        parent, anchor)
-    return Gf.Matrix4d(1.0) if resets else matrix
+
+    def Compute():
+        anchor = _FindParentXformable(prim, rigRoot, _ctx)
+        if anchor is None:
+            # No RigExec ancestor: the chain is anchored at the asset root,
+            # which is the rig root's parent.
+            anchor = rigRoot.GetParent()
+        parent = prim.GetParent()
+        if not anchor or not parent or parent == anchor:
+            return Gf.Matrix4d(1.0)
+        matrix, resets = _ctx.XformCache().ComputeRelativeTransform(
+            parent, anchor)
+        return Gf.Matrix4d(1.0) if resets else matrix
+
+    # The rig root is part of the key: it is an argument, and a caller
+    # that passes one other than FindRigRoot's answer is asking about a
+    # different anchor.
+    return _MemoMatrix(_ctx.intervening,
+                       (prim.GetPath(), rigRoot.GetPath()), Compute)
 
 
-def RestSpace(prim, time):
+def RestSpace(prim, time, _ctx=None):
     """
     Mirror of _JointRestSpace: the local rest carried into the parent's
     rest frame, orthonormalize(restLocal * rest:space) * X * parentRest.
@@ -490,20 +629,32 @@ def RestSpace(prim, time):
     keep. Orthonormalizing the local factor first is what keeps an
     invalid ancestor's NaN from being scrubbed by the multiply.
     """
-    rigRoot = FindRigRoot(prim)
-    rest = RestLocal(prim, time) * _MatrixAttr(prim, REST_SPACE, time)
-    rest = rest.GetOrthonormalized(False) * InterveningXform(
-        prim, time, rigRoot)
-    parent = _FindParentXformable(prim, rigRoot)
-    return rest * RestSpace(parent, time) if parent else rest
+    _ctx = _Context(_ctx, time)
+
+    def Compute():
+        rigRoot = FindRigRoot(prim, _ctx)
+        rest = RestLocal(prim, time, _ctx) * _MatrixAttr(
+            prim, REST_SPACE, time, _ctx)
+        rest = rest.GetOrthonormalized(False) * InterveningXform(
+            prim, time, rigRoot, _ctx)
+        parent = _FindParentXformable(prim, rigRoot, _ctx)
+        return rest * RestSpace(parent, time, _ctx) if parent else rest
+
+    # The memo that turns the module from quadratic to linear: the
+    # recursion above walks to the rig root, and every ancestor's frames
+    # ask for the same walk again.
+    return _MemoMatrix(_ctx.restSpaces, prim.GetPath(), Compute)
 
 
-def DefaultLocal(prim, time):
-    return ComposeAvarMatrix(
-        *(tuple(ScalarAvar(prim, n, time, 0.0) for n in DEFAULT_T)
-          + (1.0, 1.0, 1.0)
-          + tuple(ScalarAvar(prim, n, time, 0.0) for n in DEFAULT_R)
-          + (0.0, "XYZ")))
+def DefaultLocal(prim, time, _ctx=None):
+    def Compose():
+        return ComposeAvarMatrix(
+            *(tuple(ScalarAvar(prim, n, time, 0.0, _ctx) for n in DEFAULT_T)
+              + (1.0, 1.0, 1.0)
+              + tuple(ScalarAvar(prim, n, time, 0.0, _ctx) for n in DEFAULT_R)
+              + (0.0, "XYZ")))
+    memo = None if _ctx is None else _ctx.defaultLocals
+    return _MemoMatrix(memo, prim.GetPath(), Compose)
 
 
 class _PoseAuthorityError(ValueError):
@@ -520,68 +671,94 @@ class _PoseAuthorityError(ValueError):
     """
 
 
-def _ComputedSpace(prim, name, time, solverPosed, visiting=None, frameCache=None):
-    """Evaluate the schema space expressions, including connected identity."""
+def _ComputedSpace(prim, name, time, solverPosed, visiting=None,
+                   frameCache=None):
+    """
+    Evaluate the schema space expressions, including connected identity.
+
+    Memoised per (prim, name) for the invocation. The memo is consulted
+    BEFORE the cycle guard, and that cannot hide a cycle: a key only
+    enters `visiting` after the memo has missed, and only enters the
+    memo once its computation has RETURNED, so no key is ever in both.
+    """
+    ctx = _Context(frameCache, time)
+    key = (prim.GetPath(), name)
+    if key in ctx.spaces:
+        return Gf.Matrix4d(ctx.spaces[key])
     visiting = set() if visiting is None else visiting
     path = prim.GetPath().AppendProperty(name)
     if path in visiting:
         raise ValueError("cyclic space connection at %s" % path)
     visiting.add(path)
     try:
-        attr = prim.GetAttribute(name)
-        connections = attr.GetConnections() if attr else []
-        if len(connections) == 1:
-            source = prim.GetStage().GetAttributeAtPath(connections[0])
-            if source:
-                return _ComputedSpace(source.GetPrim(), source.GetName(),
-                                      time, solverPosed, visiting, frameCache)
-        raw = _MatrixAttr(prim, name, time)
-        if name not in _COMPUTED_SPACES or not IsRigXformable(prim):
-            return raw
-        if raw != _IDENTITY:
-            return raw
-        if name == AVAR_DEFAULT_SPACE:
-            return _ComputedSpace(prim, DEFAULT_SPACE, time, solverPosed, visiting, frameCache)
-        if name == POSED_DEFAULT_SPACE:
-            return _ComputedSpace(prim, AVAR_DEFAULT_SPACE, time, solverPosed, visiting, frameCache)
-        parent = _FindParentXformable(prim, FindRigRoot(prim))
-        if name == PARENT_DEFAULT_SPACE:
-            return (_ComputedSpace(parent, DEFAULT_SPACE, time, solverPosed, visiting, frameCache)
-                    if parent else Gf.Matrix4d(1.0))
-        if name == PARENT_SPACE:
-            if not parent:
-                return Gf.Matrix4d(1.0)
-            parentFrames = ComputeRigFrames(prim.GetStage(), parent, time, solverPosed, frameCache)
-            if parentFrames.reason:
-                raise _PoseAuthorityError("space source %s: %s" % (
-                    parent.GetPath(), parentFrames.reason))
-            return parentFrames.posed
-        parentRest = RestSpace(parent, time) if parent else Gf.Matrix4d(1.0)
-        return (DefaultLocal(prim, time) * RestSpace(prim, time)
-                * parentRest.GetInverse()
-                * _ComputedSpace(prim, PARENT_DEFAULT_SPACE, time, solverPosed, visiting, frameCache))
+        space = _ComputeSpace(prim, name, time, solverPosed, visiting, ctx)
     finally:
         visiting.remove(path)
+    # Recorded only on the way out, so a cyclic connection and a
+    # _PoseAuthorityError raise again for every caller that asks.
+    ctx.spaces[key] = space
+    return Gf.Matrix4d(space)
 
 
-def AvarsMatrix(prim, time):
+def _ComputeSpace(prim, name, time, solverPosed, visiting, ctx):
+    """_ComputedSpace's body, inside its cycle guard."""
+    attr = prim.GetAttribute(name)
+    connections = attr.GetConnections() if attr else []
+    if len(connections) == 1:
+        source = prim.GetStage().GetAttributeAtPath(connections[0])
+        if source:
+            return _ComputedSpace(source.GetPrim(), source.GetName(),
+                                  time, solverPosed, visiting, ctx)
+    raw = _MatrixAttr(prim, name, time, ctx)
+    if name not in _COMPUTED_SPACES or not IsRigXformable(prim):
+        return raw
+    if raw != _IDENTITY:
+        return raw
+    if name == AVAR_DEFAULT_SPACE:
+        return _ComputedSpace(prim, DEFAULT_SPACE, time, solverPosed,
+                              visiting, ctx)
+    if name == POSED_DEFAULT_SPACE:
+        return _ComputedSpace(prim, AVAR_DEFAULT_SPACE, time, solverPosed,
+                              visiting, ctx)
+    parent = _FindParentXformable(prim, FindRigRoot(prim, ctx), ctx)
+    if name == PARENT_DEFAULT_SPACE:
+        return (_ComputedSpace(parent, DEFAULT_SPACE, time, solverPosed,
+                               visiting, ctx)
+                if parent else Gf.Matrix4d(1.0))
+    if name == PARENT_SPACE:
+        if not parent:
+            return Gf.Matrix4d(1.0)
+        parentFrames = ComputeRigFrames(prim.GetStage(), parent, time,
+                                        solverPosed, ctx)
+        if parentFrames.reason:
+            raise _PoseAuthorityError("space source %s: %s" % (
+                parent.GetPath(), parentFrames.reason))
+        return parentFrames.posed
+    parentRest = RestSpace(parent, time, ctx) if parent else Gf.Matrix4d(1.0)
+    return (DefaultLocal(prim, time, ctx) * RestSpace(prim, time, ctx)
+            * parentRest.GetInverse()
+            * _ComputedSpace(prim, PARENT_DEFAULT_SPACE, time, solverPosed,
+                             visiting, ctx))
+
+
+def AvarsMatrix(prim, time, _ctx=None):
     order = prim.GetAttribute(AVAR_ORDER)
     orderValue = order.Get(time) if order else None
     # Mirrors _ComputeXformablePointFrame's readScaleAvars argument: a
     # volume weight substitutes identity scale rather than reading avars.
     scaled = ReadsScaleAvars(prim)
-    units = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
+    units = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0, _ctx)
     return ComposeAvarMatrix(
-        ScalarAvar(prim, AVAR_T[0], time, 0.0) * units,
-        ScalarAvar(prim, AVAR_T[1], time, 0.0) * units,
-        ScalarAvar(prim, AVAR_T[2], time, 0.0) * units,
-        ScalarAvar(prim, AVAR_S[0], time, 1.0) if scaled else 1.0,
-        ScalarAvar(prim, AVAR_S[1], time, 1.0) if scaled else 1.0,
-        ScalarAvar(prim, AVAR_S[2], time, 1.0) if scaled else 1.0,
-        ScalarAvar(prim, AVAR_R[0], time, 0.0),
-        ScalarAvar(prim, AVAR_R[1], time, 0.0),
-        ScalarAvar(prim, AVAR_R[2], time, 0.0),
-        ScalarAvar(prim, AVAR_RSPIN, time, 0.0),
+        ScalarAvar(prim, AVAR_T[0], time, 0.0, _ctx) * units,
+        ScalarAvar(prim, AVAR_T[1], time, 0.0, _ctx) * units,
+        ScalarAvar(prim, AVAR_T[2], time, 0.0, _ctx) * units,
+        ScalarAvar(prim, AVAR_S[0], time, 1.0, _ctx) if scaled else 1.0,
+        ScalarAvar(prim, AVAR_S[1], time, 1.0, _ctx) if scaled else 1.0,
+        ScalarAvar(prim, AVAR_S[2], time, 1.0, _ctx) if scaled else 1.0,
+        ScalarAvar(prim, AVAR_R[0], time, 0.0, _ctx),
+        ScalarAvar(prim, AVAR_R[1], time, 0.0, _ctx),
+        ScalarAvar(prim, AVAR_R[2], time, 0.0, _ctx),
+        ScalarAvar(prim, AVAR_RSPIN, time, 0.0, _ctx),
         orderValue or "XYZ")
 
 
@@ -676,25 +853,36 @@ def SetPublishedControlFrameReader(reader):
 
 
 def ComputeRigFrames(stage, prim, time, solverPosed=None, _frameCache=None):
-    _frameCache = {} if _frameCache is None else _frameCache
-    if prim.GetPath() in _frameCache:
-        cached = _frameCache[prim.GetPath()]
+    """
+    The frames of one RigExecXformable, in asset space.
+
+    `_frameCache` carries the recursion's shared state. A top-level call
+    passes nothing and gets a private _EvalContext for the duration --
+    one invocation, one context, nothing kept afterwards, because the
+    preview values and the stage both move between drag steps. A plain
+    dict is still accepted and is still used as the frame memo, so the
+    older contract holds for anything that passes one.
+    """
+    ctx = _Context(_frameCache, time)
+    memo = ctx.frames
+    if prim.GetPath() in memo:
+        cached = memo[prim.GetPath()]
         if cached is None:
             raise ValueError("cyclic posed-space dependency at %s" % prim.GetPath())
         return cached
-    _frameCache[prim.GetPath()] = None
+    memo[prim.GetPath()] = None
     try:
-        frames = _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache)
-        _frameCache[prim.GetPath()] = frames
+        frames = _ComputeRigFrames(stage, prim, time, solverPosed, ctx)
+        memo[prim.GetPath()] = frames
         return frames
     except ValueError:
-        del _frameCache[prim.GetPath()]
+        del memo[prim.GetPath()]
         raise
 
 
-def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
+def _ComputeRigFrames(stage, prim, time, solverPosed, ctx):
     frames = RigFrames(prim)
-    frames.rigRoot = FindRigRoot(prim)
+    frames.rigRoot = FindRigRoot(prim, ctx)
     if frames.rigRoot is None:
         # Returns before any frame is computed, so rest/Qrest/assetToWorld
         # stay identity and a pivot built from them would draw at the
@@ -711,14 +899,15 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
             return _RefuseBothModes(
                 frames,
                 "Activate RigExec at this frame to edit the curvenet adjustment")
-        avars = AvarsMatrix(prim, time)
+        avars = AvarsMatrix(prim, time, ctx)
         if not all(math.isfinite(avars[r][c]) for r in range(4) for c in range(4)) \
                 or abs(avars.GetDeterminant()) < 1e-12:
             return _RefuseBothModes(
                 frames, "The adjustment's avar matrix is not invertible")
         posedAttr = prim.GetAttribute(POSED_SPACE)
         if posedAttr and (posedAttr.HasAuthoredConnections()
-                          or _MatrixAttr(prim, POSED_SPACE, time) != _IDENTITY):
+                          or _MatrixAttr(prim, POSED_SPACE, time, ctx)
+                          != _IDENTITY):
             return _RefuseBothModes(
                 frames, "posed:space drives this adjustment; edit its source")
         frames.posed = Gf.Matrix4d(matrix)
@@ -726,7 +915,7 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         frames.default = frames.P
         frames.Q = frames.P
         frames.rest = frames.P
-        frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
+        frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0, ctx)
         if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
             _RefuseBothModes(
                 frames,
@@ -734,17 +923,20 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         frames.pivotReason = "Curvenet adjustment pivots follow the preceding deformation"
         assetRoot = frames.rigRoot.GetParent()
         if assetRoot and not assetRoot.IsPseudoRoot():
-            frames.assetToWorld = UsdGeom.XformCache(time).GetLocalToWorldTransform(assetRoot)
+            frames.assetToWorld = ctx.XformCache().GetLocalToWorldTransform(
+                assetRoot)
         return frames
     if solverPosed is None:
         solverPosed = SolverPosedPaths(frames.rigRoot)
 
-    parent = _FindParentXformable(prim, frames.rigRoot)
+    parent = _FindParentXformable(prim, frames.rigRoot, ctx)
     if parent is not None:
-        parentFrames = ComputeRigFrames(stage, parent, time, solverPosed, _frameCache)
+        parentFrames = ComputeRigFrames(stage, parent, time, solverPosed, ctx)
         parentSpace = prim.GetAttribute(PARENT_SPACE)
         explicitParent = parentSpace and (parentSpace.HasAuthoredConnections()
-                                         or _MatrixAttr(prim, PARENT_SPACE, time) != _IDENTITY)
+                                         or _MatrixAttr(prim, PARENT_SPACE,
+                                                        time, ctx)
+                                         != _IDENTITY)
         if parentFrames.reason and not explicitParent:
             frames.reason = "parent %s: %s" % (
                 parent.GetName(), parentFrames.reason)
@@ -759,28 +951,32 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         if posed.HasAuthoredConnections():
             frames.reason = ("%s has a connected posed:space; its avars "
                              "are ignored" % prim.GetName())
-        elif _MatrixAttr(prim, POSED_SPACE, time) != _IDENTITY:
+        elif _MatrixAttr(prim, POSED_SPACE, time, ctx) != _IDENTITY:
             frames.reason = ("%s has an authored posed:space; its avars "
                              "are ignored" % prim.GetName())
 
-    frames.restLocal = RestLocal(prim, time)
-    frames.rest = RestSpace(prim, time)
+    frames.restLocal = RestLocal(prim, time, ctx)
+    frames.rest = RestSpace(prim, time, ctx)
     # Built here, before anything on the pose side can fail: Pivot needs
     # Qrest and restLocal and nothing else (RigPivotTarget._Qw), so a
     # pose-side give-up must not be allowed to return past this.
-    frames.Qrest = _MatrixAttr(prim, REST_SPACE, time)\
+    frames.Qrest = _MatrixAttr(prim, REST_SPACE, time, ctx)\
         .GetOrthonormalized(False)
     try:
-        frames.default = _ComputedSpace(prim, DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
-        frames.parentDefault = _ComputedSpace(prim, PARENT_DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
-        effectiveDefault = _ComputedSpace(prim, POSED_DEFAULT_SPACE, time, solverPosed, frameCache=_frameCache)
+        frames.default = _ComputedSpace(prim, DEFAULT_SPACE, time,
+                                        solverPosed, frameCache=ctx)
+        frames.parentDefault = _ComputedSpace(prim, PARENT_DEFAULT_SPACE, time,
+                                              solverPosed, frameCache=ctx)
+        effectiveDefault = _ComputedSpace(prim, POSED_DEFAULT_SPACE, time,
+                                          solverPosed, frameCache=ctx)
     except ValueError as error:
         # The default-space family. Pivot answers to these too -- the
         # loop below refuses a pivot on an authored default space -- so a
         # broken one refuses both modes.
         return _RefuseBothModes(frames, str(error))
     try:
-        frames.parentPosed = _ComputedSpace(prim, PARENT_SPACE, time, solverPosed, frameCache=_frameCache)
+        frames.parentPosed = _ComputedSpace(prim, PARENT_SPACE, time,
+                                            solverPosed, frameCache=ctx)
     except _PoseAuthorityError as error:
         # An ancestor whose pose comes from somewhere other than its
         # avars: a solver, or an authored posed:space. That is a POSE
@@ -794,7 +990,7 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         frames.reason = frames.reason or str(error)
     except ValueError as error:
         return _RefuseBothModes(frames, str(error))
-    frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0)
+    frames.unitScale = ScalarAvar(prim, AVAR_UNIT_SCALE, time, 1.0, ctx)
     if not math.isfinite(frames.unitScale) or abs(frames.unitScale) < 1e-12:
         # Only RigPoseTarget divides by it, but a prim carrying a broken
         # unit scale is not one to author against in either mode.
@@ -810,22 +1006,23 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
     # Qrest reads no namespace ancestor, so the intervening Xform has to
     # be inserted here rather than arriving through it -- the pivot draws
     # in the bind basis, and the bind basis moved with the Xform.
-    frames.Q = (frames.Qrest * InterveningXform(prim, time, frames.rigRoot)
+    frames.Q = (frames.Qrest
+                * InterveningXform(prim, time, frames.rigRoot, ctx)
                 * frames.parentDefault * toParent)
     for name in (DEFAULT_SPACE, AVAR_DEFAULT_SPACE, POSED_DEFAULT_SPACE):
         attr = prim.GetAttribute(name)
         if attr and (attr.HasAuthoredConnections()
-                     or _MatrixAttr(prim, name, time) != _IDENTITY):
+                     or _MatrixAttr(prim, name, time, ctx) != _IDENTITY):
             frames.pivotReason = ("%s.%s selects a default space independently "
                                   "of rest; edit that source for pivot changes"
                                   % (prim.GetName(), name))
-    frames.posed = AvarsMatrix(prim, time) * frames.P
+    frames.posed = AvarsMatrix(prim, time, ctx) * frames.P
 
     assetRoot = frames.rigRoot.GetParent()
     if assetRoot and not assetRoot.IsPseudoRoot():
-        frames.assetToWorld = UsdGeom.XformCache(time)\
+        frames.assetToWorld = ctx.XformCache()\
             .GetLocalToWorldTransform(assetRoot)
-    _frameCache[prim.GetPath()] = frames
+    ctx.frames[prim.GetPath()] = frames
     return frames
 
 
