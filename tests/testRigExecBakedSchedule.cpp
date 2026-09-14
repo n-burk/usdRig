@@ -1503,6 +1503,98 @@ TestAConstraintDragRestoresWhatItReads(const std::string &stagePath,
                 "published the dynamic path's pose\n", ran, clusters);
 }
 
+/// A program that legitimately holds a NaN is still a program whose cone the
+/// verifier can prove (§8.3).
+///
+/// A mover whose inputs the kernel rejects publishes the packet it rejected,
+/// NaN and all -- that is how the pass-through diagnostic can name the value
+/// it refused -- so a non-finite number is ordinary state for a CORRECT
+/// program here, not a symptom of anything. The verifier compares two runs
+/// of that program field by field, and `==` says a NaN differs from itself:
+/// comparing with it reported three "baked cone mismatch" lines on a
+/// generation whose cone had skipped nothing, turned a correct parity run
+/// red, and would have sent whoever debugged the next real cone defect after
+/// the wrong thing entirely. So this asks for both halves at once -- no cone
+/// mismatch, and the same pose an evaluator that never baked publishes --
+/// with the NaN placed the way a manipulator would place it.
+///
+/// Only the cone entries prove the first half: with the verifier off there
+/// is no second run to disagree with the first. That is what
+/// testRigExecBakedScheduleCones_serial and _parallel are registered for,
+/// and the line this prints says which of the two it ran.
+void
+TestANonFiniteValueIsNotAConeMismatch(const std::string &stagePath,
+                                      const TfToken &input,
+                                      const VtValue &value)
+{
+    const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    const LiveRig reference =
+        OpenRig(stagePath, RigExecEvaluationMode::Dynamic);
+    if (!baked.evaluator || !reference.evaluator) {
+        ++failures;
+        std::printf("FAIL non-finite cone: does not compile\n");
+        return;
+    }
+    const SdfPath mover = FindSkinMover(baked.stage);
+    if (mover.IsEmpty()) {
+        ++failures;
+        std::printf("FAIL non-finite cone: no skin mover\n");
+        return;
+    }
+    const std::vector<RigExecValueOverride> overrides = {
+        RigExecValueOverride{mover, TfToken(), input, value}};
+
+    // Warmed up, then dragged, then HELD: the generation that matters is the
+    // third, where the NaN has already settled and the packet therefore
+    // compares equal to the one the last run assembled. That comparison --
+    // a NaN against the identical NaN -- is the whole subject.
+    baked.evaluator->Evaluate(UsdTimeCode::Default());
+    baked.evaluator->SetInteractiveOverrides(overrides);
+    baked.evaluator->Evaluate(UsdTimeCode::Default());
+    const RigExecRigPose held =
+        baked.evaluator->Evaluate(UsdTimeCode::Default());
+    reference.evaluator->SetInteractiveOverrides(overrides);
+    const RigExecRigPose expected =
+        reference.evaluator->Evaluate(UsdTimeCode::Default());
+    CHECK(held.valid && expected.valid);
+    if (baked.evaluator->GetBakedGenerationCount() != 3) {
+        ++failures;
+        std::printf("FAIL non-finite cone: %zu of 3 generation(s) came from "
+                    "the program\n",
+                    baked.evaluator->GetBakedGenerationCount());
+        return;
+    }
+    // The value really did reach the program, rather than the fixture
+    // agreeing about a generation in which nothing happened.
+    bool rejected = false;
+    for (const std::string &diagnostic : held.diagnostics) {
+        rejected = rejected ||
+                   diagnostic.find("MoverFailed " + mover.GetString()) !=
+                       std::string::npos;
+    }
+    if (!rejected) {
+        ++failures;
+        std::printf("FAIL non-finite cone: the revision was not rejected\n");
+        return;
+    }
+    size_t coneMismatches = 0;
+    for (const std::string &diagnostic : held.diagnostics) {
+        if (diagnostic.find("baked cone mismatch") != std::string::npos) {
+            ++coneMismatches;
+            if (coneMismatches <= 8) {
+                std::printf("    %s\n", diagnostic.c_str());
+            }
+        }
+    }
+    CHECK(coneMismatches == 0);
+    CHECK(held.bakedParityMismatches == 0);
+    rigExecTest::CompareEveryMap(&failures, "a non-finite value held", expected,
+                                 held);
+    std::printf("  a non-finite %s: %zu cone mismatch(es), verifier %s\n",
+                input.GetText(), coneMismatches,
+                RigExecBakedVerifyConesRequested() ? "on" : "off");
+}
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
@@ -1581,6 +1673,9 @@ main(int argc, char **argv)
         examplesDir + "/biped/Biped.usda",
         SdfPath("/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim"),
         TfToken("inputs:defaultWeight"));
+    TestANonFiniteValueIsNotAConeMismatch(
+        examplesDir + "/biped/Biped.usda", TfToken("inputs:defaultWeight"),
+        VtValue(std::nanf("")));
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
         return 1;

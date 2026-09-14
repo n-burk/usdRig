@@ -984,6 +984,7 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     cones.cone.resize(count);
     cones.restore.resize(count);
     cones.always.Resize(count);
+    cones.poseClusters.Resize(count);
     for (size_t c = 0; c < count; ++c) {
         cones.cone[c].Resize(count);
         cones.restore[c].Resize(count);
@@ -1019,6 +1020,9 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         }
         if (step.externalReads) {
             cones.always.Set(step.cluster);
+        }
+        if (!RigExecBakedIsGeometryStep(step.kind)) {
+            cones.poseClusters.Set(step.cluster);
         }
         if (step.varyingInputs || step.resolvedInputReads) {
             cones.varyingSteps.push_back(int(&step - B.steps.data()));
@@ -1131,15 +1135,16 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     RigExecBakedClusterSet dirty;
     dirty.Resize(count);
 
-    // A program the epoch has not run yet has nothing to compare with; a
-    // program stamp that moved is the evaluator saying a notice changed
-    // something the index does not name; and a rig that can LOOK UP a phased
-    // read needs every recorder to have run, because the store the records
-    // land in is emptied at the head of every run and a skipped recorder
-    // leaves a hole in it rather than last run's answer.
-    bool full = force || !B.everRan || B.phasedReads ||
+    // What makes a run trust NOTHING it holds: the caller forcing one (the
+    // cone verifier's second pass); a program stamp that moved, which is the
+    // evaluator saying a notice changed something the index does not name;
+    // and a rig that can LOOK UP a phased read, because the store the
+    // records land in is emptied at the head of every run and a skipped
+    // recorder leaves a hole in it rather than last run's answer. The first
+    // run of a program is NOT one of them -- it has its own dirty set below.
+    bool full = force || B.phasedReads ||
                 B.programStamp != B.lastProgramStamp;
-    if (!full && B.hasPropertyChains &&
+    if (!full && B.everRan && B.hasPropertyChains &&
         B.propertyResults != B.lastPropertyResults) {
         // A chain's result reaches a step through the generation's resolved
         // inputs, which no slot names: every step that reads one has to run.
@@ -1147,6 +1152,58 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     }
     if (full) {
         dirty.SetAll(count);
+    } else if (!B.everRan) {
+        // The FIRST run of this program -- §7's other dirty set [S28].
+        //
+        // There is nothing to compare against, so every step that could have
+        // moved for any reason is dirty: the whole pose half, the steps that
+        // read outside the graph, and the steps a time or a standing
+        // override reaches. The one thing this run DOES know is which
+        // revisions came across a rebuild with their answer intact:
+        // AdoptGeometryStateFrom carries the cached result of every revision
+        // whose position in its chain did not move, and re-deforming those
+        // would spend a whole skin on an edit the dynamic path's VdfNetwork
+        // reconnects without re-executing a node.
+        //
+        // Nothing downstream of them is at risk of running on half a state:
+        // a revision's steps are dirtied together or not at all, because
+        // every source whose cone reaches one of them -- its own
+        // RevisionStatic, its chain's base, the matrices of its influences
+        // -- reaches the rest of the revision as well.
+        dirty.Union(cones.poseClusters);
+        dirty.Union(cones.always);
+        for (const int index : cones.varyingSteps) {
+            dirty.Set(B.steps[size_t(index)].cluster);
+        }
+        for (const int index : cones.overrideSteps) {
+            dirty.Set(B.steps[size_t(index)].cluster);
+        }
+        for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
+            const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
+            if (B.chains[size_t(chainIndex)]
+                    .revisions[size_t(revisionIndex)]
+                    .ran) {
+                continue;
+            }
+            for (const int cluster : cones.revisionClusters[r]) {
+                dirty.Set(cluster);
+            }
+        }
+        // And the chains whose AUTHORED points moved with the same edit, or
+        // which do not read at this time at all. `ran` says a revision holds
+        // an answer; it does not say the points that answer was computed
+        // from are still the ones the stage has. Without this a rebuild that
+        // also repainted a mesh would publish the old deformation on any
+        // chain no joint drives.
+        for (size_t c = 0; c < B.chains.size(); ++c) {
+            const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
+            if (chain.haveBase && !chain.baseDirty) {
+                continue;
+            }
+            for (const int cluster : cones.chainBaseClusters[c]) {
+                dirty.Set(cluster);
+            }
+        }
     } else {
         dirty.Union(cones.always);
         // Avars, per provider: eleven doubles compared, not a flag consulted.

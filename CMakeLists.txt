@@ -453,6 +453,23 @@ target_link_libraries(testRigExecBakedSchedule PRIVATE rigExec)
 target_compile_definitions(testRigExecBakedSchedule PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecBakedSchedule COMMAND testRigExecBakedSchedule
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# The same suite with the cone verifier on, in both schedules. This is the
+# only place the verifier's own comparison is exercised: the suite drives a
+# NaN into a published packet on purpose, and a comparison that called a NaN
+# different from itself reported mismatches on a generation whose cone had
+# skipped nothing. Registered by hand rather than through
+# rigexec_add_baked_parity_test because this suite is not a parity suite --
+# it asserts on the graph, not on two paths agreeing.
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecBakedScheduleCones_${_schedule}
+        COMMAND testRigExecBakedSchedule
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    set_tests_properties(testRigExecBakedScheduleCones_${_schedule} PROPERTIES
+        ENVIRONMENT "RIGEXEC_BAKED_VERIFY_CONES=1"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    set_property(TEST testRigExecBakedScheduleCones_${_schedule} APPEND
+        PROPERTY ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+endforeach()
 
 add_executable(testRigExecArm tests/testRigExecArm.cpp)
 target_link_libraries(testRigExecArm PRIVATE rigExec)

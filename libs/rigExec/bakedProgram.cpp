@@ -1429,9 +1429,17 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     }
     if (verifying) {
         after.Capture(B);
-        const size_t coneClusters = B.lastClosedClusters;
+        // What the generation DID, taken before the second pass overwrites
+        // it. A verification pass runs everything by construction, so
+        // leaving its numbers in place would make every observer -- the run
+        // report, GetClustersRunLastGeneration, and so the tests that prove
+        // a cone skips anything -- describe the instrument instead of the
+        // frame.
+        const RigExecBakedRunStatistics coneRun(B);
+        const size_t coneClusters = coneRun.closedClusters;
         before.Restore(&B);
         const bool bailedFull = !RigExecBakedRunSteps(&B, time, true);
+        coneRun.Restore(&B);
         std::vector<std::string> differences;
         size_t mismatches = after.Compare(B, &differences);
         if (bailedFull != bailed) {

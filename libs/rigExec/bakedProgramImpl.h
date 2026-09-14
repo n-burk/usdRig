@@ -678,12 +678,18 @@ struct RigExecBakedStep {
 
     /// Records that this run skipped the step (§7).
     ///
-    /// The diagnostics and the STRUCTURAL counters stay: a skipped step's
-    /// lines describe state nothing changed, and how many chains and
-    /// revisions the program holds is a property of the program rather than
-    /// of a run. What does not stay is the one counter that is an
-    /// observation -- a revision the frame did not execute did not execute
-    /// -- and the bail flag, which belongs to the run that raised it.
+    /// The diagnostics stay, and so do the two counters that are PROGRAM
+    /// CONSTANTS: a skipped step's lines describe state nothing changed, and
+    /// how many chains and revisions the program holds is a property of the
+    /// program rather than of a run (§4.2). What does not stay is the three
+    /// counters that are OBSERVATIONS of this run -- a revision the frame
+    /// did not execute did not execute, a node it did not report did not
+    /// report its creation, a schedule it did not build did not build one --
+    /// nor the bail flag, which belongs to the run that raised it. The three
+    /// are reported again by the run that does the work, because what they
+    /// count is held in state that outlives a skip (`executed` off a value
+    /// comparison, `created` and `scheduleDirty` off one-shot flags the
+    /// geometry prologue clears only when it counts them).
     void MarkSkipped() {
         counters.revisionsExecuted = 0;
         counters.revisionsCreated = 0;
@@ -826,6 +832,10 @@ struct RigExecBakedCones {
     /// Clusters holding a step that reads outside the graph at a point the
     /// graph cannot order. Dirty every run.
     RigExecBakedClusterSet always;
+    /// Clusters holding any step that is not a geometry step. The FIRST run
+    /// of a program is dirty here and in the geometry clusters of the
+    /// revisions a rebuild did not carry, rather than everywhere (§7 [S28]).
+    RigExecBakedClusterSet poseClusters;
     /// Provider slot -> the cluster of the compose step that reads its
     /// avars, or -1. What an avar that moved makes dirty.
     std::vector<int> avarCluster;
@@ -1935,6 +1945,49 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 /// whole program is re-run, and Compare reports every slot, counter and
 /// diagnostic the two runs disagree about. Nothing here is on a production
 /// path -- the state is large and copying it is the point.
+///
+/// WHAT IT DELIBERATELY DOES NOT COMPARE, and why each one is scratch rather
+/// than an answer. An instrument that agrees about state it never looked at
+/// is worse than no instrument, so this list is meant to be exhaustive
+/// against the mutable fields of RigExecBakedProgramImpl, RigExecBakedStep,
+/// GeomChain, GeomRevision and GeomChunk; a field added to any of those
+/// belongs either in Compare or in this list.
+///
+///  * everything Build wrote and no run touches -- the slot tables, the
+///    rests, the input bindings, the step graph, the clustering, the cones.
+///    A run that changed one of those would be a run editing the program.
+///  * what the PROLOGUE writes: `propertyResults`, `avarsDisturbed`,
+///    `overridden`/`anyOverridden`/`folded`, `curvenetBindings`, and the
+///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
+///    `scheduleDirty`/`topology`/the partition. The prologue runs ONCE per
+///    generation, before either pass, so both passes see one value of each
+///    by construction. Several are captured and restored anyway, because
+///    they are cheap and putting the second pass back on exactly the first
+///    pass's footing is what the mode is for.
+///  * the cone bookkeeping itself -- `closed`, `lastAvars`, `lastOverridden`,
+///    `lastPropertyResults`, `lastHaveBase`, `lastTime`, `everRan`,
+///    `lastProgramStamp`. The second pass is FORCED, so its closure differs
+///    from the first's on purpose; comparing them would report the mode
+///    rather than the program. The run statistics that observers read are
+///    put back by RigExecBakedRunStatistics instead.
+///  * each chain's `spare`, the other half of the published double buffer.
+///    A pass that publishes swaps it with `result`; a pass that skips the
+///    publication does not. The two therefore hold DIFFERENT generations'
+///    arrays after runs that agree exactly about the published one, which is
+///    `result` -- the buffer is storage, and only what `result` names in it
+///    is an answer.
+///  * a commit's `deltas` where nothing reads them: see the reason, and the
+///    measurement behind it, at the comparison in bakedVerify.cpp.
+///  * the snapshot stores: `RigExecBakedProgramImpl::runSnapshots` and each
+///    step's `snapshots`. A program in which any step records one sets
+///    `phasedReads`, and `phasedReads` forces every run whole (§7), so a
+///    program that fills them has no cone for this mode to check. Each
+///    revision's `revisionInputs` overlay is captured and restored for the
+///    same reason turned around -- it costs nothing and it keeps the second
+///    pass starting from exactly the first's state -- but not compared.
+///  * per-step `startUs`/`endUs` and `measuredUs`/`measuredRuns`: the
+///    profiler's and the calibrator's own scratch, which the second pass
+///    overwrites by design.
 struct RigExecBakedRunShadow {
     /// Copies everything a step reads or writes out of \p program.
     void Capture(const RigExecBakedProgramImpl &program);
@@ -1952,11 +2005,14 @@ struct RigExecBakedRunShadow {
     };
     struct ChunkState {
         std::vector<GfMatrix4d> transforms;
+        std::vector<float> rows;
+        std::vector<RigExecScaledDualQuat> palette;
         bool keyChanged = false, ok = false;
     };
     struct RevisionState {
         std::vector<GfVec3f> output;
-        std::vector<GfMatrix4d> influences;
+        std::vector<GfMatrix4d> packetInfluences, influences;
+        RigExecResolvedInputs revisionInputs;
         std::vector<float> rows, envelope;
         std::vector<RigExecScaledDualQuat> palette;
         std::vector<ChunkState> chunks;
@@ -2007,6 +2063,32 @@ struct RigExecBakedRunShadow {
     std::vector<StepState> steps;
     std::map<SdfPath, GfMatrix4d> constraintDeltas;
     bool avarsDisturbed = false;
+};
+
+/// The run statistics of the generation that produced the pose (§8.3).
+///
+/// RIGEXEC_BAKED_VERIFY_CONES runs the frame a second time, forced, and that
+/// pass writes the same bookkeeping the first one did: how many clusters the
+/// closure held, and the per-cluster intervals the run report prints. But a
+/// verification pass is not a generation -- it publishes nothing -- so what
+/// an observer asks the program afterwards has to be the cone run's answer.
+/// Without this, GetClustersRunLastGeneration() reports every cluster
+/// whenever the verifier is on, and the assertions that prove a cone skipped
+/// anything hold or fail on whether the verifier is on rather than on the
+/// cone.
+struct RigExecBakedRunStatistics {
+    /// Takes the statistics \p program currently holds.
+    explicit RigExecBakedRunStatistics(
+        const RigExecBakedProgramImpl &program);
+    /// Puts them back.
+    void Restore(RigExecBakedProgramImpl *program) const;
+
+    struct ClusterTimes {
+        uint64_t readyUs = 0, startUs = 0, endUs = 0;
+    };
+    std::vector<ClusterTimes> clusters;
+    size_t closedClusters = 0;
+    bool timed = false;
 };
 
 /// Whether RIGEXEC_BAKED_VERIFY_CONES asks a run to prove its cone.
