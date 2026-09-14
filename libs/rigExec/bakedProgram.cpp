@@ -1694,8 +1694,32 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // so the levels this pass assigns are the levels the final graph holds.
     RigExecBakedBuildStepEdges(&B);
     RigExecBakedAssignStepCosts(&B);
+    // The levels the partition is about to read, kept so that the sentence
+    // above is CHECKED and not merely written down. Nothing else can catch
+    // its violation: the cut decision and the record of the cut decision
+    // (GeomRevision::partitionReady*) are derived from one another, so a
+    // partition cut from levels the final graph no longer holds still agrees
+    // with itself and tests/testRigExecBakedSchedule still passes. What
+    // would have moved is this vector -- a pose step given a geometry
+    // predecessor is a pose step pushed down a level -- so it is compared
+    // after the second sweep instead.
+    std::vector<int> poseLevels;
+    poseLevels.reserve(B.steps.size());
+    for (const RigExecBakedStep &step : B.steps) {
+        poseLevels.push_back(step.level);
+    }
     RigExecBakedBuildGeometrySteps(&B);
     RigExecBakedBuildSchedule(&B);
+    for (size_t i = 0; i < poseLevels.size(); ++i) {
+        if (!TF_VERIFY(B.steps[i].level == poseLevels[i],
+                       "rigExec: pose step %zu (%s) moved from level %d to "
+                       "%d when the geometry steps were added; the vertex "
+                       "partition was cut from the level it no longer has",
+                       i, RigExecBakedStepKindName(B.steps[i].kind),
+                       poseLevels[i], B.steps[i].level)) {
+            break;
+        }
+    }
     if (RigExecBakedScheduleReportRequested()) {
         const std::string report = RigExecBakedScheduleReport(B);
         std::fwrite(report.data(), 1, report.size(), stderr);
