@@ -8932,13 +8932,14 @@ RigExecRigEvaluator::_RebuildBakedProgram(
     }
     RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.Bake", "compile");
     ++_bakedProgramBuildAttempts;
-    // A refusal is only reportable if somebody collected it: Build is the
-    // one thing that knows why, and it fills a reasons vector only when it
-    // is given one. Production passes nullptr and pays nothing to build
-    // strings no caller reads -- the dispatch needs the yes/no alone. The
-    // two callers that do read them are RIGEXEC_BAKE_REQUIRED and a rig that
-    // asked for the program through its own attribute, which is owed the
-    // reason it did not get one; see _WantsBakeRefusalReasons.
+    // A refusal is only reportable if somebody kept it: Build is the one
+    // thing that knows why, and it hands the reasons back only when it is
+    // given a vector. Production passes nullptr, which saves no walk -- the
+    // bakeability check assembles its refusals to answer at all -- it drops
+    // them, because the dispatch needs the yes/no alone. The two callers
+    // that do read them are RIGEXEC_BAKE_REQUIRED and a rig that asked for
+    // the program through its own attribute, which is owed the reason it
+    // did not get one; see _WantsBakeRefusalReasons.
     std::vector<std::string> reasons;
     _bakedProgram = RigExecBakedProgram::Build(
         this, _WantsBakeRefusalReasons() ? &reasons : nullptr);

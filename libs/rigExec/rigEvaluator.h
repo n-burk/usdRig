@@ -1137,11 +1137,12 @@ private:
 
     /// Whether a refused bake has to say WHICH feature refused it.
     ///
-    /// Collecting the reasons walks every refusal on the rig instead of
-    /// stopping at the first, so it is done only for the two callers that
-    /// report them: RIGEXEC_BAKE_REQUIRED, and a rig that asked for the
-    /// program through its own attribute and is owed the reason it did not
-    /// get one.
+    /// Not a gate on the work: the bakeability walk collects its refusals
+    /// either way, because the list IS the answer. What it gates is whether
+    /// they are KEPT -- carried on the epoch and reported once per
+    /// generation -- and only two callers report them:
+    /// RIGEXEC_BAKE_REQUIRED, and a rig that asked for the program through
+    /// its own attribute and is owed the reason it did not get one.
     bool _WantsBakeRefusalReasons() const;
 
     /// Re-reads the rig's rigExec:baked and moves the mode to what it asks

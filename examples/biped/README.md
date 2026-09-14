@@ -93,4 +93,10 @@ The `params` and `split_layers` steps come after the build, in that order —
 to see them. The mesh manifest comes from `tools/biped/extract_maya_mesh.py`
 run under Blender against the exported FBX.
 
+`rigExec:baked` survives a rebuild: the build step stamps it on the rig root
+beside `rigExec:restFrameVersion`, and `split_layers` copies it into
+`Biped_layered_center.usda` with the rest of that prim's own opinions. The
+prose comment above it in the checked-in files is a hand annotation, and is
+the one thing regeneration drops.
+
 Full guide, including what is not finished: [`docs/biped-rig.md`](../../docs/biped-rig.md).

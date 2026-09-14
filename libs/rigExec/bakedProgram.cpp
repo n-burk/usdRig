@@ -227,6 +227,10 @@ bool
 RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                                std::vector<std::string> *reasons)
 {
+    // The refusal list IS the answer here -- the walk below is the same
+    // whether or not anybody wants to read the sentences -- so a caller
+    // that passes nothing is given a scratch vector and its refusals are
+    // dropped on return; see _WantsBakeRefusalReasons for who keeps them.
     std::vector<std::string> local;
     std::vector<std::string> &out = reasons ? *reasons : local;
     const size_t before = out.size();

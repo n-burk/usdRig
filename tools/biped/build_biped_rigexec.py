@@ -1583,6 +1583,19 @@ def build(out_path, skin_path=None, rig_root="/Biped/Rig",
         Sdf.VariabilityUniform)
     attr.Set(2)
 
+    # The biped asks to be evaluated through the BAKED PROGRAM. It is a
+    # request and not an assertion -- parity is proven frame by frame, and a
+    # generation the program cannot answer falls back and says so -- so what
+    # it changes is how fast the character poses, not how it poses. Stamped
+    # HERE, and not by hand on the checked-in file, because these examples
+    # are generated: a rebuild that dropped the line would quietly hand
+    # every biped example back to the dynamic path. Schema attribute, so
+    # custom=False; see examples/biped/README.md, "Why it is fast".
+    baked = root_prim.CreateAttribute(
+        "rigExec:baked", Sdf.ValueTypeNames.Bool, False,
+        Sdf.VariabilityUniform)
+    baked.Set(True)
+
     # Maya's shapes, colours and sizes on the controls, read from
     # control_positions.data and the studio colour module.
     print("\ncontrol shapes from Maya:")
