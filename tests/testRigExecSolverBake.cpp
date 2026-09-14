@@ -291,6 +291,122 @@ MakeTwistRigWithNoEnd()
     return stage;
 }
 
+// ---------------------------------------------------------------------------
+// RigExecRibbon.
+// ---------------------------------------------------------------------------
+
+/// A native driver curve under /Asset/Geom, with a bind-time default and,
+/// when \p animated, a bend keyed over the sweep.
+///
+/// The default matters on its own: the sampler pairs each posed sample with
+/// a REST sample read at UsdTimeCode::Default, and a curve that answers
+/// nothing there publishes no frames at all.
+UsdPrim
+DefineDriverCurve(const UsdStageRefPtr &stage, bool animated,
+                  bool withDefault = true)
+{
+    const UsdPrim curve =
+        Define(stage, "/Asset/Geom/SpineCurve", "BasisCurves");
+    curve.CreateAttribute(TfToken("type"), SdfValueTypeNames->Token)
+        .Set(TfToken("cubic"));
+    curve.CreateAttribute(TfToken("basis"), SdfValueTypeNames->Token)
+        .Set(TfToken("bspline"));
+    curve.CreateAttribute(TfToken("wrap"), SdfValueTypeNames->Token)
+        .Set(TfToken("nonperiodic"));
+    curve.CreateAttribute(TfToken("curveVertexCounts"),
+                          SdfValueTypeNames->IntArray).Set(VtIntArray{4});
+    const VtVec3fArray rest{GfVec3f(0, 0, 0), GfVec3f(0, 2.7f, 0),
+                            GfVec3f(0, 5.3f, 0), GfVec3f(0, 8, 0)};
+    UsdAttribute points = curve.CreateAttribute(
+        TfToken("points"), SdfValueTypeNames->Point3fArray);
+    if (withDefault) {
+        points.Set(rest);
+    }
+    if (animated) {
+        points.Set(rest, UsdTimeCode(1.0));
+        points.Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0.4f, 2.7f, 0),
+                                GfVec3f(1.4f, 5.3f, 0), GfVec3f(2.8f, 7.6f, 0)},
+                   UsdTimeCode(3.0));
+        points.Set(rest, UsdTimeCode(5.0));
+    }
+    return curve;
+}
+
+/// The ribbon, with a joint riding its middle sample. Example 05's solver
+/// with the curve mover and the guide emitter left off -- and with a joint
+/// bound, because a ribbon nothing consumes is the guide-only case instead.
+UsdStageRefPtr
+MakeRibbonRig(bool animated = true, bool withDefault = true)
+{
+    const UsdStageRefPtr stage = MakeFkSpine();
+    const UsdPrim curve = DefineDriverCurve(stage, animated, withDefault);
+    const UsdPrim rider =
+        Define(stage, "/Asset/Rig/Joints/RibbonMid", "RigExecJoint");
+    rider.GetAttribute(TfToken("rest:space")).Set(RestAt(4.0));
+
+    const UsdPrim ribbon =
+        Define(stage, "/Asset/Rig/Solvers/SpineRibbon", "RigExecRibbon");
+    ribbon.GetAttribute(TfToken("rigExec:sampleCount")).Set(5);
+    SetTargets(ribbon, "rigExec:driverCurve", {curve.GetPath()});
+    SetTargets(ribbon, "rigExec:startFrame",
+               {SdfPath("/Asset/Rig/Joints/Root")});
+    SetTargets(ribbon, "rigExec:endFrame",
+               {SdfPath("/Asset/Rig/Joints/Root/Chest")});
+    SetTargets(ribbon, "rigExec:joints", {rider.GetPath()});
+    ribbon.GetAttribute(TfToken("rigExec:jointElements")).Set(VtIntArray{2});
+    return stage;
+}
+
+/// The driver curve keyed. This is the only per-frame input of the ribbon
+/// that is scene data, and the only reason the prologue reads the stage.
+UsdStageRefPtr
+MakeAnimatedRibbonRig()
+{
+    return MakeRibbonRig(/* animated = */ true);
+}
+
+/// The same curve with no time samples at all: one value at every time code,
+/// folded at Build, and a cone that never has to look at it.
+UsdStageRefPtr
+MakeStaticRibbonRig()
+{
+    return MakeRibbonRig(/* animated = */ false);
+}
+
+/// Time samples and NO default. The rest read answers nothing, so the
+/// sampler publishes an empty aggregate however good the live curve is, and
+/// the joint falls back -- which is the dynamic path's behaviour and not an
+/// obvious one to re-derive.
+UsdStageRefPtr
+MakeRibbonRigWithNoBindPose()
+{
+    return MakeRibbonRig(/* animated = */ true, /* withDefault = */ false);
+}
+
+/// rigExec:driverCurve wired to nothing, so the compiler resolves no points
+/// attribute and both curves are empty.
+UsdStageRefPtr
+MakeRibbonRigWithNoDriver()
+{
+    const UsdStageRefPtr stage = MakeRibbonRig();
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineRibbon")),
+               "rigExec:driverCurve", {});
+    return stage;
+}
+
+/// A ribbon that names no joint and drives no geometry: it is in no solver
+/// batch, and the only thing that reads it is the guide request.
+UsdStageRefPtr
+MakeGuideOnlyRibbonRig()
+{
+    const UsdStageRefPtr stage = MakeRibbonRig();
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineRibbon")),
+               "rigExec:joints", {});
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineRibbon"))
+        .GetAttribute(TfToken("rigExec:jointElements")).Set(VtIntArray{});
+    return stage;
+}
+
 }  // namespace
 
 static std::string
@@ -328,6 +444,15 @@ main(int argc, char **argv)
     CheckParity("twist distribution with one sample",
                 MakeTwistRigWithOneSample, frames, true);
     CheckParity("twist distribution with no end", MakeTwistRigWithNoEnd,
+                frames, true);
+
+    CheckParity("ribbon on a keyed driver curve", MakeAnimatedRibbonRig,
+                frames, true);
+    CheckParity("ribbon on a static driver curve", MakeStaticRibbonRig,
+                frames, true);
+    CheckParity("ribbon whose driver curve has no bind pose",
+                MakeRibbonRigWithNoBindPose, frames, true);
+    CheckParity("ribbon with no driver curve", MakeRibbonRigWithNoDriver,
                 frames, true);
 
     if (failures) {

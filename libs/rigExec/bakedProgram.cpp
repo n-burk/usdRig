@@ -116,7 +116,7 @@ _IsBakedSolverType(const TfToken &type)
 {
     return type == "RigExecFkChain" || type == "RigExecTwoBoneIk" ||
            type == "RigExecBlendPointFrames" || type == "RigExecSplineIk" ||
-           type == "RigExecTwistDistribution";
+           type == "RigExecTwistDistribution" || type == "RigExecRibbon";
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on
@@ -225,9 +225,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     }
     for (const auto &[path, movers] : E._snapshotPoints) {
         say("read-phase snapshot required on", path);
-    }
-    for (const auto &[path, points] : E._ribbonDriverPoints) {
-        say("ribbon driver curve", path);
     }
 
     const UsdTimeCode probe = _ProbeTime(E._stage);
@@ -976,6 +973,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     for (const auto &[target, revisions] : E._propertyChains) {
         ctx.chainTargets.insert(target);
     }
+    // Each ribbon's driver-points attribute, resolved once by the compiler.
+    // Restated here because bakedPose.cpp cannot name the evaluator's
+    // private map, and re-deriving the resolution (a prim target becomes its
+    // .points, a property target is taken verbatim) would be a second
+    // expression of a rule the compiler already applied.
+    ctx.ribbonDriverPoints = E._ribbonDriverPoints;
     const UsdTimeCode capture = ctx.capture;
     const std::set<SdfPath> &chainTargets = ctx.chainTargets;
     // The bodies below were written against these as lambdas of this
@@ -1469,6 +1472,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                                                    &B.propertyResults);
         }
         RigExecBakedRunInputs(&B, time);
+        RigExecBakedRunSolverSources(&B, time);
         RigExecBakedRunGeometryPrologue(&B, time, pose);
     }
     if (measuring) {

@@ -523,6 +523,7 @@ and makes Build's edge computation an interval sweep.
 | PosedM | i | `posedM[i]` | ComposeSubtree |
 | FinalMatrix / BaseMatrix | i | `finalMatrix[i]` / `baseMatrix[i]` (`_Impl` members, not per-frame allocations [S34 #7]) | ProviderMatrix |
 | Aggregate | solver s | `aggregates[s]` | Solve(s) |
+| SolverPoints | solver s | `solvers[s].ribbonPoints` | SolverSources (prologue) |
 | Candidates | Solve step / Constraint step | per-step dense `{slots[], frames[]}` scratch [S34 #2] | that step |
 | Propagated / Delta | commit step | per-step staging | CommitDelta / PropagateChunk |
 | PropertyResult | property-chain target t | `E._resolvedInputs` entry + `propertyResults[t]` | PropertyChains (prologue) |
@@ -591,6 +592,12 @@ declared slot RANGES, and the version table is derived from the same lastWriter 
 `reserve()` at Build), per-step counter deltas, `bail` flag.
 
 Program order is today's `Run` order. The prologue and epilogue are serial code, not steps.
+
+A ribbon's driver curve is the one solver input that is scene data: the dynamic path reads the
+attribute with `UsdAttribute::Get` and hands exec the value as a packet override, honouring neither
+connections nor the resolved inputs. It is therefore read the same way and in the PROLOGUE
+(`RigExecBakedRunSolverSources`), into `SolverPoints`, and compared by value there -- a step body
+may not touch USD, and "the time moved" is never the predicate (§7).
 
 **Prologue (serial, always runs)** [S4][P22][P36]: `E._resolvedInputs.Clear()`; `E._chainSnapshots`
 handling per SI-4 (Run-local store); apply interactive overrides to resolved (pre); property
@@ -914,8 +921,8 @@ than 42% of the rig's joints, against 100% before.
 
 ## 7. Cone re-execution (drags and static frames) [S24-S28][P20-P22]
 
-Source steps are the only steps that read outside the program: Inputs, ChainBase, PropertyChains
-(all prologue), RevisionStatic, and Phase 3 weight-object readers. Every other step is a pure
+Source steps are the only steps that read outside the program: Inputs, ChainBase, PropertyChains,
+SolverSources (all prologue), RevisionStatic, and Phase 3 weight-object readers. Every other step is a pure
 function of its declared reads. Sources ALWAYS run and compare their outputs by VALUE against last
 run (11 doubles per provider, the base arrays, per-target property results, the static packet);
 "time changed" or "overridden" is never the predicate. This is what makes an override on a

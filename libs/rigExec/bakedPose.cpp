@@ -338,6 +338,60 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             }
             RigExecResolveTwistWeights(count, &s.twistWeights);
             s.twistTurns = bind(prim, "inputs:twistTurns", 0.0);
+        } else if (s.type == "RigExecRibbon") {
+            // The driver curve's points, resolved by the compiler to the
+            // exact native attribute (a prim target becomes its .points).
+            // The dynamic path reads that attribute with UsdAttribute::Get
+            // and hands exec the two values as packet overrides, so it
+            // honours neither a connection on it nor the generation's
+            // resolved inputs -- which is why this is NOT bind(): the
+            // connection walk bind() performs would answer differently on a
+            // connected points attribute.
+            const auto found = ctx->ribbonDriverPoints.find(solverPath);
+            if (found != ctx->ribbonDriverPoints.end()) {
+                s.ribbonPointsPath = found->second;
+            }
+            if (const UsdAttribute a =
+                    B.stage->GetAttributeAtPath(s.ribbonPointsPath)) {
+                // Read at Default, and left empty when nothing answers
+                // there: a curve carrying only time samples has no bind-time
+                // value, and an empty rest is what makes the sampler publish
+                // nothing at all.
+                VtVec3fArray rest;
+                a.Get(&rest, UsdTimeCode::Default());
+                s.ribbonRestPoints.assign(rest.begin(), rest.end());
+                s.ribbonPointsVarying = a.ValueMightBeTimeVarying() ||
+                                        a.GetNumTimeSamples() > 0;
+                if (s.ribbonPointsVarying) {
+                    s.ribbonPointsQuery = UsdAttributeQuery(a);
+                } else {
+                    // One value at every time code, so the prologue has
+                    // nothing to read and the cone nothing to compare.
+                    VtVec3fArray live;
+                    a.Get(&live, ctx->capture);
+                    s.ribbonConstantPoints.assign(live.begin(), live.end());
+                }
+                // Registered BY PATH rather than through fold(prim, name):
+                // the driver curve is another prim entirely, and the target
+                // may be an arbitrary property path. The rest capture makes
+                // it folded -- a value edit on the curve rebuilds, and an
+                // override on it cannot be placed, which is right because
+                // the dynamic path would ignore that override.
+                B.rebuild.insert(s.ribbonPointsPath);
+                B.folded.insert(s.ribbonPointsPath);
+                B.named.insert(s.ribbonPointsPath);
+                B.prims.insert(s.ribbonPointsPath.GetPrimPath());
+            }
+            // bind(), not fold(): a sampleCount edit is a value edit exec
+            // answers per frame, and the epoch digest already forces a
+            // recompile when the count changes the frame cardinality.
+            s.ribbonSampleCount = bind(prim, "rigExec:sampleCount", 5);
+            // rigExec:parameterization, frameTransport, startFrame,
+            // endFrame, twistFrames and driverCurveReadPhase are
+            // deliberately NOT read: the computation does not read them
+            // either -- they shape batching and the epoch digest -- and
+            // folding one would rebuild the program for an edit that cannot
+            // change what it publishes.
         }
         const int slot = int(B.solvers.size());
         B.solverIndex[solverPath] = slot;
@@ -932,6 +986,15 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                             RigExecBakedSlotDomain::PoseFin, control));
                     }
                 }
+                // The ribbon's driver points, filled by the prologue.
+                // Nothing in the program writes the domain, so the read
+                // raises no edge; it is declared because it is what the cone
+                // follows when the curve moves, and because a step's
+                // declaration is meant to say what the step touches.
+                if (!solver.ribbonPointsPath.IsEmpty()) {
+                    step.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::SolverPoints, si));
+                }
                 // A BlendPointFrames input solver normally runs in an
                 // earlier batch; when it does not, the read is of last run's
                 // aggregate, which is why Aggregate is a source domain.
@@ -1245,6 +1308,7 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.twist, step);
     NoteInput(solver.minLengthRatio, step);
     NoteInput(solver.twistTurns, step);
+    NoteInput(solver.ribbonSampleCount, step);
     // The spline parameters the bake could not fold, which the solve re-reads
     // as a group rather than one input at a time.
     step->varyingInputs = step->varyingInputs || solver.splineParamsVary;
@@ -1338,6 +1402,31 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
                     : binding.input.constant;
         }
         B.avarsDisturbed = B.anyOverridden;
+    }
+}
+
+void
+RigExecBakedRunSolverSources(RigExecBakedProgramImpl *program,
+                             UsdTimeCode time)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (RigExecBakedProgramImpl::Solver &s : B.solvers) {
+        if (!s.ribbonPointsVarying || !s.ribbonPointsQuery.IsValid()) {
+            continue;
+        }
+        // The dynamic path's read, verbatim: the driver attribute's value at
+        // this generation's time, with a failed read leaving the array as it
+        // found it -- which is empty, the way the dynamic path's freshly
+        // constructed VtVec3fArray is. The pinned query answers the same
+        // value the attribute does; only the resolve is cached.
+        VtVec3fArray live;
+        s.ribbonPointsQuery.Get(&live, time);
+        s.lastRibbonPoints.swap(s.ribbonPoints);
+        s.ribbonPoints.assign(live.begin(), live.end());
+        // By VALUE, never "the time moved": a curve keyed on two frames
+        // holds the same points across most of a sweep, and comparing is
+        // what lets the ribbon's whole cone sit out those frames.
+        s.ribbonPointsDirty = s.ribbonPoints != s.lastRibbonPoints;
     }
 }
 
@@ -1705,6 +1794,16 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
                 s.twistStartRest, s.twistEndRest, s.twistWeights,
                 rd(s.twistTurns));
+        } else if (s.type == "RigExecRibbon") {
+            // Both curves go in as the dynamic path supplies them: the live
+            // points the prologue read (or the folded constant, for a curve
+            // that cannot vary with time), and the bind-time points captured
+            // at Build. Either one empty is the sampler's own guard, and an
+            // empty aggregate is what it answers with.
+            aggregate = RigExecSampleRibbonFrames(
+                s.ribbonPointsVarying ? s.ribbonPoints
+                                      : s.ribbonConstantPoints,
+                s.ribbonRestPoints, rd(s.ribbonSampleCount));
         } else if (s.type == "RigExecSplineIk") {
             RigExecSplineIkParams params = s.splineParams;
             if (s.splineParamsVary || live(s.preserveVolume) ||
