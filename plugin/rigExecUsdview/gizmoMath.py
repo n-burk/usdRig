@@ -275,6 +275,13 @@ def _Context(cache, time):
     used to be, which then goes on holding the frames.
     """
     if isinstance(cache, _EvalContext):
+        # None of the memos key on time -- a context IS one time code --
+        # so a context handed on to a second time would answer from the
+        # first one's reads and nothing would say so. Refuse it instead.
+        if Usd.TimeCode(cache.time) != Usd.TimeCode(time):
+            raise ValueError(
+                "gizmo evaluation context built for time %s reused at %s"
+                % (cache.time, time))
         return cache
     return _EvalContext(time, cache)
 
