@@ -687,6 +687,18 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                     RigExecBakedSlotDomain::RevisionTransforms, id));
                 fuse.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
+                if (revision.weightObject >= 0) {
+                    // The packet the MoverFailed arm consults. The assemble
+                    // declares it too and the fuse waits on the assemble
+                    // either way, so this changes no order -- but a step
+                    // that touches a slot it did not declare is a bug even
+                    // when a neighbour's declaration happens to cover it,
+                    // and the next reader of either builder would have to
+                    // rediscover why it was safe.
+                    fuse.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::WeightPacket,
+                        revision.weightObject));
+                }
                 fuse.reads.push_back(RigExecBakedRange(
                     RigExecBakedSlotDomain::RevisionOut, chunkFirst,
                     revision.chunkBase + int(revision.chunks.size())));
@@ -2120,10 +2132,18 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
         if (step.kind == RigExecBakedStepKind::RevisionStatic) {
             const auto &[chainIndex, revisionIndex] =
                 B.revisionIndex[size_t(step.object)];
+            const RigExecBakedProgramImpl::GeomChain &chain =
+                B.chains[size_t(chainIndex)];
             const RigExecBakedProgramImpl::GeomRevision &revision =
-                B.chains[size_t(chainIndex)]
-                    .revisions[size_t(revisionIndex)];
-            if (revision.weightFieldPublished) {
+                chain.revisions[size_t(revisionIndex)];
+            // `haveBase` for the same reason the two arms below test it: a
+            // chain whose points stopped reading at this time drives
+            // nothing, and the assemble that would have refreshed the field
+            // returned before it ever looked at the packet. Its last answer
+            // is then last FRAME's, and publishing that is the one shape of
+            // staleness a value comparison cannot catch -- the dynamic path
+            // publishes no field at all for such a chain.
+            if (chain.haveBase && revision.weightFieldPublished) {
                 RigExecResolvedWeightField &field =
                     pose->weightFields[
                         B.weightObjects[size_t(revision.weightObject)].path];
