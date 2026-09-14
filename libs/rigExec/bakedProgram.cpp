@@ -115,7 +115,8 @@ bool
 _IsBakedSolverType(const TfToken &type)
 {
     return type == "RigExecFkChain" || type == "RigExecTwoBoneIk" ||
-           type == "RigExecBlendPointFrames" || type == "RigExecSplineIk";
+           type == "RigExecBlendPointFrames" || type == "RigExecSplineIk" ||
+           type == "RigExecTwistDistribution";
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on

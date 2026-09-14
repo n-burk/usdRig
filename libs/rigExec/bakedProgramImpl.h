@@ -1175,6 +1175,18 @@ struct RigExecBakedProgramImpl {
         RigExecBakedInput<double> preserveVolume, midFollowWeight, roll, twist,
             minLengthRatio;
         bool splineParamsVary = false;
+        // TwistDistribution. rigExec:start and rigExec:end ride on the shared
+        // `root` and `end` members rather than a pair of their own: they are
+        // provider slots read out of `fin` exactly as an IK control is, and
+        // the version binding and the Solve step's read declaration are each
+        // written once over those members. The two landmark sets are the
+        // START and END rests, which exec substitutes with identity landmarks
+        // for an unwired end -- a case the bake answers with `degenerate`
+        // instead, because an unwired end also leaves the REQUIRED frame
+        // input unbound and the computation publishes nothing at all.
+        std::array<GfVec3d, 4> twistStartRest{}, twistEndRest{};
+        std::vector<double> twistWeights;
+        RigExecBakedInput<double> twistTurns;
         // (providerSlot, element) pairs this solver writes
         std::vector<std::pair<int, int>> outputs;
 

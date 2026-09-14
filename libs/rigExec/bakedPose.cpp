@@ -15,6 +15,7 @@
 #include "frameExtraction.h"
 #include "moverGraph.h"
 #include "rigEvaluator.h"
+#include "solverKernels.h"
 #include "types.h"
 
 #include "rigExecMath/pointFrame.h"
@@ -287,6 +288,56 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             } else if (!tangent.IsEmpty() && tangent != "rigid") {
                 refuse("SplineIk rootTangent is unsupported", solverPath);
             }
+        } else if (s.type == "RigExecTwistDistribution") {
+            // The two endpoint frames arrive on the batch request as FINAL
+            // frames, the same way an FkChain's controls do, so they are
+            // provider slots read out of `fin`.
+            //
+            // A target that is no provider slot, or one the exec network
+            // seeds from the stage rather than computing (an xform-derived
+            // slot declares neither computePointFrame nor computeRestFrame),
+            // leaves the computation's REQUIRED start or end input unbound:
+            // it publishes an empty aggregate and every joint it names falls
+            // back. That is `degenerate`, not a refusal.
+            const auto frameSlot = [&](const SdfPathVector &v) {
+                const int slot = v.empty() ? -1 : slotOf(v[0]);
+                return slot >= 0 && B.slotKind[size_t(slot)] ==
+                                        RigExecBakedSlotKind::PoseSeed
+                           ? slot
+                           : -1;
+            };
+            s.root = frameSlot(targets(prim, "rigExec:start"));
+            s.end = frameSlot(targets(prim, "rigExec:end"));
+            if (s.root < 0 || s.end < 0) {
+                s.degenerate = true;
+            } else {
+                // The rests are OPTIONAL inputs of the computation, but
+                // every seeded provider publishes computeRestFrame, so a
+                // resolved endpoint always has one and the identity
+                // substitution exec makes for a missing one is unreachable
+                // from here.
+                s.twistStartRest = B.restPts[size_t(s.root)];
+                s.twistEndRest = B.restPts[size_t(s.end)];
+            }
+            // rigExec:weights and rigExec:count define the frame cardinality,
+            // which compile refuses to let vary with time, so both are read
+            // once and folded. The float -> double widening is element-wise
+            // and in array order, as the computation's read iterator does it.
+            VtFloatArray authoredWeights;
+            fold(prim, "rigExec:weights");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:weights"))) {
+                a.Get(&authoredWeights);
+            }
+            for (float w : authoredWeights) s.twistWeights.push_back(w);
+            int count = 1;
+            fold(prim, "rigExec:count");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:count"))) {
+                a.Get(&count);
+            }
+            RigExecResolveTwistWeights(count, &s.twistWeights);
+            s.twistTurns = bind(prim, "inputs:twistTurns", 0.0);
         }
         const int slot = int(B.solvers.size());
         B.solverIndex[solverPath] = slot;
@@ -1193,6 +1244,7 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.roll, step);
     NoteInput(solver.twist, step);
     NoteInput(solver.minLengthRatio, step);
+    NoteInput(solver.twistTurns, step);
     // The spline parameters the bake could not fold, which the solve re-reads
     // as a group rather than one input at a time.
     step->varyingInputs = step->varyingInputs || solver.splineParamsVary;
@@ -1648,6 +1700,11 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     aggregate.rests.push_back(a.rests[k]);
                 }
             }
+        } else if (s.type == "RigExecTwistDistribution") {
+            aggregate = RigExecSolveTwistDistribution(
+                B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
+                s.twistStartRest, s.twistEndRest, s.twistWeights,
+                rd(s.twistTurns));
         } else if (s.type == "RigExecSplineIk") {
             RigExecSplineIkParams params = s.splineParams;
             if (s.splineParamsVary || live(s.preserveVolume) ||
@@ -1705,11 +1762,22 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         commit.abandoned = std::find(commit.present.begin(),
                                      commit.present.end(), 1) ==
                            commit.present.end();
-        if (commit.split || commit.abandoned) {
-            return;
+        if (commit.split) {
+            return;  // CommitApply finishes, and carries
         }
-        ComputeCommitDeltas(B, &commit);
-        StageCommitPairs(B, &commit, 0, commit.propagate.size());
+        // A batch that published NOTHING still reaches FinishCommit, the
+        // same way a constraint that passes through does. It writes no
+        // frame, but it owns a version of every slot it could have written
+        // (§3.1) and a write site that leaves its own storage untouched
+        // leaves every reader bound to it -- the matrices and the
+        // publication among them -- reading whatever the last run left
+        // there. Reachable only from a batch whose every solver published an
+        // empty aggregate, which until RigExecTwistDistribution baked no rig
+        // in the tree could produce.
+        if (!commit.abandoned) {
+            ComputeCommitDeltas(B, &commit);
+            StageCommitPairs(B, &commit, 0, commit.propagate.size());
+        }
         FinishCommit(&B, step, &commit);
         return;
     }
