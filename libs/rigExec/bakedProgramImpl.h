@@ -1306,11 +1306,12 @@ struct RigExecBakedProgramImpl {
     double timedRegionUs = 0;
     double timedEpilogueUs = 0;
     size_t timedFrames = 0;
-    /// Set while the cone verifier's second, whole-program pass runs, and
-    /// read by both executors. That pass is the instrument, not the frame:
-    /// letting it into the per-step accumulators would make every step of a
-    /// verified frame report two runs, and the table would describe a frame
-    /// nobody asked for.
+    /// Set while the cone verifier's second, whole-program pass runs --
+    /// always, not only when a step timing asked, so that the flag means
+    /// one thing -- and read by both executors. That pass is the
+    /// instrument, not the frame: letting it into the per-step accumulators
+    /// would make every step of a verified frame report two runs, and the
+    /// table would describe a frame nobody asked for.
     bool measurementSuspended = false;
 
     /// Per joint, whether this run's final frame earned a published matrix.

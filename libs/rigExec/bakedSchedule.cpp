@@ -1378,9 +1378,10 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
     // Nothing here looks at a cluster, so the run report must not pretend
     // this frame measured any.
     B.clustering.lastRunTimed = false;
-    // Calibration measures the same boundaries on a finer clock, into each
-    // step's own accumulator: no lock, no shared counter, and nothing that
-    // survives the frame but a sum.
+    // The calibration and the step timing measure a step BODY on a finer
+    // clock, into that step's own accumulator: no lock, no shared counter,
+    // and nothing that survives the frame but a sum. Both stop for the cone
+    // verifier's second pass, which is not this frame.
     const bool calibrating = (RigExecBakedScheduleCalibrationRequested() ||
                               RigExecBakedStepTimingRequested()) &&
                              !B.measurementSuspended;

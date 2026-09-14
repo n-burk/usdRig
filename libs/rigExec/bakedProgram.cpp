@@ -1513,7 +1513,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // the per-step accumulators for the same reason the phase marks
         // below skip over it, so that a verified frame's table still says
         // what one frame costs.
-        B.measurementSuspended = measuring;
+        B.measurementSuspended = true;
         const bool bailedFull = !RigExecBakedRunSteps(&B, time, true);
         B.measurementSuspended = false;
         coneRun.Restore(&B);
