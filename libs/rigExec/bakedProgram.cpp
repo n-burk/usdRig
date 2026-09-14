@@ -416,16 +416,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         };
         walk(root);
     };
-    const auto sayVolumeWeightOnConstraint = [&](const SdfPath &root,
-                                                 const SdfPath &where) {
-        walkWeights(root, [&](const UsdPrim &prim) {
-            if (_IsVolumeWeightTypeName(prim.GetTypeName())) {
-                say("volume weight object on constraint", where);
-                return false;
-            }
-            return true;
-        });
-    };
     const auto sayUnbakedWeights = [&](const SdfPath &root) {
         walkWeights(root, [&](const UsdPrim &prim) {
             const TfToken type = prim.GetTypeName();
@@ -446,15 +436,20 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 constraint.moverPath);
             continue;
         }
-        // A constraint's envelope is resolved by the CPU oracle, which
-        // reads a volume's placement out of _volumeWeightMatrices as that
-        // map stands AT THE CONSTRAINT'S POINT IN THE WALK. The program
-        // republishes that map once, after the walk, because nothing else it
-        // does reads the map at all -- so a volume anywhere in a
-        // constraint's weight closure is still refused, and lifting this is
-        // the same change as moving that call into the commits.
-        sayVolumeWeightOnConstraint(constraint.weightObject,
-                                    constraint.moverPath);
+        // A volume anywhere in the closure used to be refused here, on the
+        // grounds that a constraint's envelope is resolved by the CPU oracle
+        // out of _volumeWeightMatrices AS THAT MAP STANDS AT THE
+        // CONSTRAINT'S POINT IN THE WALK, while the program republishes the
+        // map once, after the walk. That reasoning describes a constraint
+        // the epoch cannot hold: a volumetric field requires a POINT domain
+        // (_ValidateWeightObjectDomain, composed inputs included), so the
+        // only constraint that can bind one is a geometry-domain constraint
+        // -- and a geometry-domain constraint resolves NO envelope in the
+        // walk at all. Its weight is per point and resolves after the solve,
+        // on the revision its delta feeds, where the placement is the same
+        // one every other mover's packet uses. So the map is never read
+        // mid-walk by anything, and one republication after it is what every
+        // reader of it sees.
         sayUnbakedWeights(constraint.weightObject);
         if (constraint.targets.empty()) {
             say("constraint names no target", constraint.moverPath);
@@ -470,6 +465,32 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             if (!E._poseSeedFrames.count(target) &&
                 !E._xformDerivedProviders.count(target)) {
                 say("constraint target is not a seeded pose provider",
+                    target);
+            } else if (E._poseSeedFrames.count(target) &&
+                       E._xformDerivedProviders.count(target)) {
+                // The two families are documented as disjoint, and they are
+                // for every provider but one: a VOLUME WEIGHT is exec-seeded
+                // like a joint AND, because its type is neither
+                // RigExecControl nor RigExecJoint, is catalogued as a plain
+                // Xformable the moment a constraint targets it. The dynamic
+                // walk then resolves the collision by LAST WRITER: the
+                // xform-derived pass runs after the compose and overwrites
+                // the volume's rest, base and final with an identity rest
+                // and a transform read off the stage, discarding the avar
+                // composition entirely -- while exec's computeWeightPacket
+                // goes on placing that same volume from its avars. Two
+                // placements, and the program has one slot to hold them in.
+                //
+                // Refused rather than guessed, and refused narrowly: a
+                // volume a constraint does NOT target bakes, which is what
+                // lifting "volume weight object on constraint" above was
+                // about. The dynamic path's own parity mode declines to
+                // publish a reference-phase field on such a volume
+                // ("mover graph parity failed"), so which of the two
+                // placements is intended is not a question the program can
+                // answer by reading either side.
+                say("constraint target is both exec-seeded and "
+                    "xform-derived",
                     target);
             }
         }

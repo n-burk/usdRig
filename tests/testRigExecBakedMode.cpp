@@ -28,6 +28,7 @@
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -1791,6 +1792,149 @@ _SweepFrames(const UsdStageRefPtr &stage)
 
 
 // ---------------------------------------------------------------------------
+// A volume weight that is ITSELF A CONSTRAINT TARGET: the second deliberate
+// negative, and like the first it is a property of the rig rather than a gap
+// in the bake.
+//
+// A RigExecSphereWeight is exec-seeded like a joint, so it has a pose seed
+// frame and an avar composition. It is also not a RigExecControl and not a
+// RigExecJoint, so the moment a constraint targets it the compiler
+// catalogues it as a plain UsdGeomXformable as well -- and the two families
+// the program's slot table merges, which its comment calls disjoint, are not
+// disjoint for this one provider.
+//
+// The dynamic walk resolves the collision by last writer: the xform-derived
+// pass runs after the compose and replaces the volume's rest, base and final
+// with an identity rest and a transform read off the stage. Exec's
+// computeWeightPacket goes on placing the same volume from its avars. So the
+// volume has two placements at once, the program has one slot to hold them
+// in, and there is no reading of either side that says which is meant -- the
+// dynamic path's own CPU parity mode refuses to publish a reference-phase
+// field on such a volume rather than choose.
+//
+// Refused, therefore, and narrowly: a volume weight on a constraint bakes
+// (testRigExecVolumeWeights covers both sample phases); a volume weight a
+// constraint MOVES does not.
+// ---------------------------------------------------------------------------
+
+static UsdStageRefPtr
+MakeAConstrainedVolumeRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh = stage->DefinePrim(SdfPath("/Asset/Geom/Slab"),
+                                           TfToken("Points"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 4, 0),
+                          GfVec3f(0, 8, 0)});
+
+    const UsdPrim lift = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Lift"), TfToken("RigExecControl"));
+    lift.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+        .Set(8.0);
+
+    const UsdPrim sphere = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Sphere"), TfToken("RigExecSphereWeight"));
+    sphere.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({SdfPath("/Asset/Geom/Slab.points")});
+    sphere.CreateAttribute(TfToken("inputs:falloffMin"),
+                           SdfValueTypeNames->Float).Set(0.0f);
+    sphere.CreateAttribute(TfToken("inputs:falloffMax"),
+                           SdfValueTypeNames->Float).Set(8.0f);
+    sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
+                           SdfValueTypeNames->Token).Set(TfToken("linear"));
+    // `current`, so the field is resolved by the oracle on both paths: a
+    // `reference` field on a constrained volume is the arm the dynamic
+    // path's own parity mode refuses, and this test is about the SLOT
+    // collision rather than about that.
+    sphere.CreateAttribute(TfToken("rigExec:samplePhase"),
+                           SdfValueTypeNames->Token).Set(TfToken("current"));
+
+    // The constraint that moves the volume. This is the whole fixture.
+    const UsdPrim move = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Pose/MoveVolume"),
+        TfToken("RigExecPositionConstraint"));
+    move.ApplyAPI(TfToken("RigExecMoverAPI"));
+    move.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({sphere.GetPath()});
+    move.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({lift.GetPath()});
+
+    const UsdGeomXform pull =
+        UsdGeomXform::Define(stage, SdfPath("/Asset/PullTo"));
+    pull.MakeMatrixXform().Set(
+        GfMatrix4d(1.0).SetTranslate(GfVec3d(6, 0, 0)));
+    const UsdPrim constraint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Sweep/Pull"),
+        TfToken("RigExecPositionConstraint"));
+    constraint.ApplyAPI(TfToken("RigExecMoverAPI"));
+    constraint.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/Slab.points")});
+    constraint.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({pull.GetPath()});
+    constraint.CreateRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({sphere.GetPath()});
+    return stage;
+}
+
+static void
+TestAConstrainedVolumeWeightFallsBack()
+{
+    const char *const what = "a volume weight a constraint moves";
+    UsdStageRefPtr stage = MakeAConstrainedVolumeRig();
+    const SdfPath rigPath = FindRig(stage);
+    if (rigPath.IsEmpty()) { ++failures; return; }
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    if (!rig.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        return;
+    }
+    std::vector<std::string> reasons;
+    CHECK(!rig.IsBakeable(&reasons));
+    bool named = false;
+    for (const std::string &reason : reasons) {
+        named = named ||
+                reason.find("both exec-seeded and xform-derived") !=
+                    std::string::npos;
+    }
+    if (!named) {
+        ++failures;
+        std::printf("FAIL %s: no reason names the slot collision\n", what);
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+    }
+
+    // And the fallback is a real generation, identical to a plain dynamic
+    // evaluator's: a refusal that also changed the answer would be worse
+    // than the divergence it exists to avoid.
+    UsdStageRefPtr referenceStage = MakeAConstrainedVolumeRig();
+    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    errors.clear();
+    CHECK(referenceRig.Compile(&errors));
+    for (double frame = 1; frame <= 2; ++frame) {
+        const RigExecRigPose reference =
+            referenceRig.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose fallen = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(fallen.valid);
+        CHECK(!fallen.movedProperties.empty());
+        CompareEveryMap(std::string(what) + " frame " +
+                            std::to_string(int(frame)),
+                        reference, fallen);
+    }
+    CHECK(rig.GetBakedGenerationCount() == 0);
+}
+
+// ---------------------------------------------------------------------------
 // A read phase on rigExec:transform that names a POINT IN THE POSE WALK.
 //
 // The general form of the three shorthands (base, preceding, final): the
@@ -2194,6 +2338,9 @@ main(int argc, char **argv)
     // A read phase naming a point in the pose walk, which no shipped rig
     // authors and no other suite builds.
     TestAReadPhaseOnTheTransformIsExact();
+    // The second deliberate negative: a volume weight a constraint moves,
+    // which the DYNAMIC path gives two placements at once.
+    TestAConstrainedVolumeWeightFallsBack();
 
     // And everything in examples/, whether it bakes or not.
     TestEveryExampleStage(examplesDir);
