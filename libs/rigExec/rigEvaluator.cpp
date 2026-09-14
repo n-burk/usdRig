@@ -24,6 +24,7 @@
 #include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/usd/usd/attribute.h"
+#include "pxr/usd/usd/attributeQuery.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
@@ -1423,6 +1424,13 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // cache holds authored values: the whole of it is dropped, on every
     // notice, for the same reason the structure is re-checked on every one.
     _staticInputs.Clear();
+    // The property chains' pinned queries are the same kind of thing one
+    // step further in: a query holds where a value comes FROM, which only a
+    // stage edit can move, and the prims and relationship targets beside
+    // them are structure. Dropped whole, on every notice, and rebound by the
+    // next frame -- the conservative answer, and the only one that cannot be
+    // wrong.
+    _propertyChainBindings.reset();
     // Epoch-scoped geometry caches. A weight-paint edit and a points edit are
     // both VALUE edits: the digest does not change, so no new epoch begins,
     // and nothing else here would ever let go of the arrays they replaced.
@@ -5536,6 +5544,9 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     }
     _propertyChains = std::move(newPropertyChains);
     _propertyChainOrder = std::move(newPropertyChainOrder);
+    // The bindings describe the chains entry for entry, so a recompile that
+    // replaced them has replaced what the bindings are about.
+    _propertyChainBindings.reset();
 
     stampCompileRegion("Compile.Commit");
     // Chain evaluation order.
@@ -7462,35 +7473,6 @@ RigExecRigEvaluator::_EvaluateChain(
 
 namespace {
 
-// Reads the authored inputs of one float/vec3f math mover at \p time.
-//
-// Every field is read even though the operation uses only some of them: the
-// packet is the mover's whole authored state, and branching on the operation
-// while reading would put the same switch in two places.
-template <class T>
-bool
-_ReadPropertyMathParams(
-    const RigExecResolvedInputs &resolved, const UsdPrim &moverPrim,
-    UsdTimeCode time,
-    RigExecPropertyMathParams<T> *params)
-{
-    TfToken operation;
-    if (const UsdAttribute a =
-            moverPrim.GetAttribute(TfToken("rigExec:operation"))) {
-        a.Get(&operation);
-    }
-    if (!RigExecParsePropertyOp(operation, &params->op)) {
-        return false;
-    }
-    params->value = _ResolvedRead(
-        resolved, moverPrim, "inputs:value", params->value, time);
-    params->min = _ResolvedRead(
-        resolved, moverPrim, "inputs:min", params->min, time);
-    params->max = _ResolvedRead(
-        resolved, moverPrim, "inputs:max", params->max, time);
-    return true;
-}
-
 bool
 _IsFinite(float v)
 {
@@ -7518,6 +7500,202 @@ _IsFinite(const GfMatrix4d &m)
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// What a property chain re-reads every frame, bound once.
+//
+// The chains are the prologue, on BOTH paths: [P22] makes the baked program
+// call this very routine so the two agree line for line, so what is spent
+// here is spent twice over. Measured at 119-128us of a 662us biped frame,
+// and it is USD value resolution rather than arithmetic -- about 180 reads
+// at ~0.43us each, of which 0.38us is the resolution itself.
+//
+// A UsdAttributeQuery is the answer USD already has for that: it holds the
+// resolved value source, so a read at a new time skips the composition
+// lookup and goes straight to the layer. Nothing else about the routine
+// moves -- every diag() line, in the same order, off the same values -- so
+// the dynamic dumps are the proof that this changed no answer.
+//
+// The structural lookups come with it, because they are the same kind of
+// thing: the target attribute, its value type, the mover prim and the
+// weight-object relationship's targets are all things only a stage edit can
+// move, and a stage edit drops this whole cache.
+// ---------------------------------------------------------------------------
+
+struct RigExecPropertyChainBindings
+{
+    /// One input the revision loop reads by value.
+    struct Input {
+        UsdAttribute attribute;
+        UsdAttributeQuery query;
+        SdfPath path;
+        /// Authored connections make the read a WALK over the connection
+        /// chain, which only RigExecResolvedInputs::GetAttribute knows how
+        /// to perform; such an input is handed back to it unchanged.
+        bool connected = false;
+        /// Whether the attribute cannot change until the stage does -- no
+        /// authored connections, no time samples, no time-varying opinion --
+        /// which is the admission test RigExecStaticInputCache applies, and
+        /// then `constantValue` is what it read once. Exactly as safe as
+        /// that cache and for the same reasons: a standing property override
+        /// is consulted FIRST and outranks it, and any stage edit drops the
+        /// whole binding.
+        bool constant = false;
+        VtValue constantValue;
+        explicit operator bool() const { return bool(attribute); }
+    };
+
+    /// One revision of one chain, in the chain's own order.
+    struct Revision {
+        UsdPrim moverPrim;
+        SdfPathVector weightObjects;
+        Input enabled;
+        Input defaultWeight;
+        Input operation;
+        Input value;
+        Input minimum;
+        Input maximum;
+    };
+
+    /// One target, in _propertyChainOrder's order. An entry whose target
+    /// attribute did not resolve carries an invalid `target`, which is the
+    /// same thing the per-frame lookup used to report.
+    struct Chain {
+        SdfPath targetPath;
+        UsdAttribute target;
+        UsdAttributeQuery targetQuery;
+        SdfValueTypeName valueType;
+        std::vector<Revision> revisions;
+    };
+
+    std::vector<Chain> chains;
+};
+
+namespace {
+
+/// Binds one input of \p prim, or leaves the binding empty when there is
+/// none -- which is what `prim.GetAttribute(...)` returning invalid used to
+/// mean at the call site.
+RigExecPropertyChainBindings::Input
+_BindInput(const UsdPrim &prim, const char *name, UsdTimeCode time)
+{
+    RigExecPropertyChainBindings::Input input;
+    if (!prim) {
+        return input;
+    }
+    if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+        input.attribute = a;
+        input.path = a.GetPath();
+        input.connected = a.HasAuthoredConnections();
+        input.query = UsdAttributeQuery(a);
+        input.constant = !input.connected && !a.ValueMightBeTimeVarying() &&
+                         a.GetNumTimeSamples() == 0;
+        if (input.constant) {
+            // At THIS time, which is what the static cache fills an entry
+            // with on its first read. The attribute does not vary, so the
+            // time chooses nothing; saying which one was used is what makes
+            // that claim checkable.
+            a.Get(&input.constantValue, time);
+        }
+    }
+    return input;
+}
+
+/// _ResolvedRead through a pinned query.
+///
+/// Equivalent to it by construction, arm for arm:
+///
+///  * no attribute -> the fallback, as `prim.GetAttribute()` returning
+///    invalid gives;
+///  * a connected attribute -> handed to RigExecResolvedInputs::GetAttribute,
+///    which is the only code that follows a connection chain;
+///  * an in-memory value of the right type for this exact property -> that
+///    value, which is the `Get(a.GetPath(), out)` at the head of the walk
+///    (and a value of the WRONG type falls through to the stage there too);
+///  * otherwise the attribute's own value, which is what the tail of the
+///    walk reads and what the query resolves.
+///
+/// The static-input cache is not consulted on this path. It only ever
+/// answers for an attribute with no connections, no time samples and no
+/// time-varying opinion, so the value it would hand back is the value the
+/// query resolves; and its hit/refusal counters reach no pose.
+template <class T>
+T
+_PinnedRead(const RigExecResolvedInputs &resolved,
+            const RigExecPropertyChainBindings::Input &input, T fallback,
+            UsdTimeCode time)
+{
+    T value = fallback;
+    if (!input.attribute) {
+        return value;
+    }
+    if (input.connected) {
+        resolved.GetAttribute(input.attribute, time, &value);
+        return value;
+    }
+    if (const VtValue *const standing = resolved.Find(input.path)) {
+        if (standing->IsHolding<T>()) {
+            return standing->UncheckedGet<T>();
+        }
+    }
+    if (input.constant && input.constantValue.IsHolding<T>()) {
+        return input.constantValue.UncheckedGet<T>();
+    }
+    T resolvedValue;
+    if (input.query.Get(&resolvedValue, time)) {
+        value = resolvedValue;
+    }
+    return value;
+}
+
+/// rigExec:operation as `a.Get(&operation)` read it: at Default, off the
+/// stage, with no resolved input consulted -- the operation names the
+/// arithmetic and not a value.
+void
+_ReadOperation(const RigExecPropertyChainBindings::Input &input,
+               TfToken *operation)
+{
+    if (input.constant) {
+        if (input.constantValue.IsHolding<TfToken>()) {
+            *operation = input.constantValue.UncheckedGet<TfToken>();
+        }
+        return;
+    }
+    input.query.Get(operation);
+}
+
+// Reads the authored inputs of one float/vec3f math mover at \p time.
+//
+// Every field is read even though the operation uses only some of them: the
+// packet is the mover's whole authored state, and branching on the operation
+// while reading would put the same switch in two places.
+//
+// rigExec:operation is read at Default with no resolved inputs consulted,
+// which is what the unpinned form did: the operation names the arithmetic,
+// not a value, and a chain whose arithmetic an override could change is not
+// a chain this routine is allowed to be wrong about quietly.
+template <class T>
+bool
+_ReadPinnedPropertyMathParams(
+    const RigExecResolvedInputs &resolved,
+    const RigExecPropertyChainBindings::Revision &bound, UsdTimeCode time,
+    RigExecPropertyMathParams<T> *params)
+{
+    TfToken operation;
+    if (bound.operation) {
+        _ReadOperation(bound.operation, &operation);
+    }
+    if (!RigExecParsePropertyOp(operation, &params->op)) {
+        return false;
+    }
+    params->value =
+        _PinnedRead(resolved, bound.value, params->value, time);
+    params->min = _PinnedRead(resolved, bound.minimum, params->min, time);
+    params->max = _PinnedRead(resolved, bound.maximum, params->max, time);
+    return true;
+}
+
+}  // namespace
+
 void
 RigExecRigEvaluator::_EvaluatePropertyChains(
     UsdTimeCode time,
@@ -7531,25 +7709,64 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         }
     };
 
-    for (const SdfPath &orderedTarget : _propertyChainOrder) {
-        const auto chainIt = _propertyChains.find(orderedTarget);
-        if (chainIt == _propertyChains.end()) {
-            continue;
+    // The first frame of an epoch pays for the bindings; every frame after it
+    // reads through them. Built here rather than in Compile because the
+    // chains are also rebuilt by a notice that recompiles nothing, and
+    // "whatever the stage now says" is the only state this has to describe.
+    if (!_propertyChainBindings) {
+        _propertyChainBindings =
+            std::make_unique<RigExecPropertyChainBindings>();
+        for (const SdfPath &orderedTarget : _propertyChainOrder) {
+            const auto chainIt = _propertyChains.find(orderedTarget);
+            if (chainIt == _propertyChains.end()) {
+                continue;
+            }
+            RigExecPropertyChainBindings::Chain bound;
+            bound.targetPath = chainIt->first;
+            bound.target = _stage->GetAttributeAtPath(bound.targetPath);
+            if (bound.target) {
+                bound.targetQuery = UsdAttributeQuery(bound.target);
+                bound.valueType = bound.target.GetTypeName();
+            }
+            for (const _PropertyRevision &revision : chainIt->second) {
+                RigExecPropertyChainBindings::Revision boundRevision;
+                boundRevision.moverPrim =
+                    _stage->GetPrimAtPath(revision.moverPath);
+                const UsdPrim &mover = boundRevision.moverPrim;
+                if (mover) {
+                    if (const UsdRelationship rel = mover.GetRelationship(
+                            TfToken("rigExec:weightObject"))) {
+                        rel.GetTargets(&boundRevision.weightObjects);
+                    }
+                }
+                boundRevision.enabled =
+                    _BindInput(mover, "inputs:enabled", time);
+                boundRevision.defaultWeight =
+                    _BindInput(mover, "inputs:defaultWeight", time);
+                boundRevision.operation =
+                    _BindInput(mover, "rigExec:operation", time);
+                boundRevision.value = _BindInput(mover, "inputs:value", time);
+                boundRevision.minimum = _BindInput(mover, "inputs:min", time);
+                boundRevision.maximum = _BindInput(mover, "inputs:max", time);
+                bound.revisions.push_back(std::move(boundRevision));
+            }
+            _propertyChainBindings->chains.push_back(std::move(bound));
         }
-        const auto &chain = *chainIt;
-        // Named locals rather than a structured binding: the lambdas below
-        // capture both, and capturing a structured binding is C++20.
-        const SdfPath &target = chain.first;
-        const std::vector<_PropertyRevision> &revisions = chain.second;
-        const UsdAttribute attr = _stage->GetAttributeAtPath(target);
-        if (!attr) {
+    }
+
+    for (RigExecPropertyChainBindings::Chain &chain :
+             _propertyChainBindings->chains) {
+        const SdfPath &target = chain.targetPath;
+        const std::vector<RigExecPropertyChainBindings::Revision> &revisions =
+            chain.revisions;
+        if (!chain.target) {
             diag("property chain " + target.GetString() +
                  ": target attribute disappeared; chain skipped");
             continue;
         }
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "PropertyChain " + target.GetString(), "property");
-        const SdfValueTypeName valueType = attr.GetTypeName();
+        const SdfValueTypeName &valueType = chain.valueType;
 
         // One shared revision loop over the three value domains. Each
         // iteration reads the mover's own authored state and applies it to
@@ -7558,7 +7775,7 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         // points.
         auto runChain = [&](auto value, auto apply) {
             using ValueT = decltype(value);
-            if (!attr.Get(&value, time)) {
+            if (!chain.targetQuery.Get(&value, time)) {
                 diag("property chain " + target.GetString() +
                      ": target has no authored value; chain skipped");
                 return false;
@@ -7568,52 +7785,47 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                      ": authored base is not finite; chain skipped");
                 return false;
             }
-            for (const _PropertyRevision &revision : revisions) {
-                const UsdPrim moverPrim =
-                    _stage->GetPrimAtPath(revision.moverPath);
+            for (const RigExecPropertyChainBindings::Revision &revision :
+                     revisions) {
+                const UsdPrim &moverPrim = revision.moverPrim;
                 if (!moverPrim) {
                     continue;
                 }
-                const bool enabled = _ResolvedRead(
-                    _resolvedInputs, moverPrim, "inputs:enabled", true, time);
+                const SdfPath moverPath = moverPrim.GetPath();
+                const bool enabled = _PinnedRead(
+                    _resolvedInputs, revision.enabled, true, time);
                 if (!enabled) {
-                    diag("diag " + revision.moverPath.GetString() +
+                    diag("diag " + moverPath.GetString() +
                          ": disabled; revision passed through");
                     continue;  // ordinary pass-through (spec §6.6)
                 }
                 float envelope = 1.0f;
-                SdfPathVector weightObjects;
-                if (const UsdRelationship rel =
-                        moverPrim.GetRelationship(
-                            TfToken("rigExec:weightObject"))) {
-                    rel.GetTargets(&weightObjects);
-                }
+                const SdfPathVector &weightObjects = revision.weightObjects;
                 if (!weightObjects.empty()) {
                     std::vector<float> weights;
                     std::string error;
                     if (!_ResolveWeights(weightObjects[0], 1, time,
                                          &weights, &error) ||
                         weights.size() != 1) {
-                        diag("diag " + revision.moverPath.GetString() +
+                        diag("diag " + moverPath.GetString() +
                              ": " + error + "; revision passed through");
                         continue;
                     }
                     envelope = weights[0];
                 } else {
-                    envelope = _ResolvedRead(
-                        _resolvedInputs, moverPrim, "inputs:defaultWeight",
-                        1.0f, time);
+                    envelope = _PinnedRead(
+                        _resolvedInputs, revision.defaultWeight, 1.0f, time);
                     if (!std::isfinite(envelope) || envelope < 0.0f ||
                         envelope > 1.0f) {
-                        diag("diag " + revision.moverPath.GetString() +
+                        diag("diag " + moverPath.GetString() +
                              ": inputs:defaultWeight must be finite and in "
                              "[0, 1]; revision passed through");
                         continue;
                     }
                 }
                 ValueT next = value;
-                if (!apply(moverPrim, value, envelope, &next)) {
-                    diag("diag " + revision.moverPath.GetString() +
+                if (!apply(revision, value, envelope, &next)) {
+                    diag("diag " + moverPath.GetString() +
                          ": inputs unusable; revision passed through");
                     continue;
                 }
@@ -7622,7 +7834,7 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                     // consumer of the attribute with no way to report it
                     // back, so the mover fails and passes through instead
                     // (spec §6.6).
-                    diag("diag " + revision.moverPath.GetString() +
+                    diag("diag " + moverPath.GetString() +
                          ": produced a non-finite value; revision passed "
                          "through");
                     continue;
@@ -7644,11 +7856,12 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
             return true;
         };
 
+        using BoundRevision = RigExecPropertyChainBindings::Revision;
         if (valueType == SdfValueTypeNames->Float) {
-            runChain(float(0), [&](const UsdPrim &mover, float in,
+            runChain(float(0), [&](const BoundRevision &mover, float in,
                                    float envelope, float *out) {
                 RigExecPropertyMathParams<float> params;
-                if (!_ReadPropertyMathParams(
+                if (!_ReadPinnedPropertyMathParams(
                         _resolvedInputs, mover, time, &params) ||
                     !_IsFinite(params.value) || !_IsFinite(params.min) ||
                     !_IsFinite(params.max)) {
@@ -7659,22 +7872,20 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 return true;
             });
         } else if (valueType == SdfValueTypeNames->Matrix4d) {
-            runChain(GfMatrix4d(1.0), [&](const UsdPrim &mover,
+            runChain(GfMatrix4d(1.0), [&](const BoundRevision &mover,
                                           const GfMatrix4d &in,
                                           float envelope,
                                           GfMatrix4d *out) {
                 TfToken operation;
-                if (const UsdAttribute a =
-                        mover.GetAttribute(TfToken("rigExec:operation"))) {
-                    a.Get(&operation);
+                if (mover.operation) {
+                    _ReadOperation(mover.operation, &operation);
                 }
                 RigExecPropertyOp op;
                 if (!RigExecParsePropertyOp(operation, &op)) {
                     return false;
                 }
-                const GfMatrix4d opValue = _ResolvedRead(
-                    _resolvedInputs, mover, "inputs:value",
-                    GfMatrix4d(1.0), time);
+                const GfMatrix4d opValue = _PinnedRead(
+                    _resolvedInputs, mover.value, GfMatrix4d(1.0), time);
                 if (!_IsFinite(opValue)) {
                     return false;
                 }
@@ -7683,11 +7894,11 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
             });
         } else {
             // Every remaining type the compiler admits is GfVec3f-backed.
-            runChain(GfVec3f(0), [&](const UsdPrim &mover, const GfVec3f &in,
-                                     float envelope,
+            runChain(GfVec3f(0), [&](const BoundRevision &mover,
+                                     const GfVec3f &in, float envelope,
                                      GfVec3f *out) {
                 RigExecPropertyMathParams<GfVec3f> params;
-                if (!_ReadPropertyMathParams(
+                if (!_ReadPinnedPropertyMathParams(
                         _resolvedInputs, mover, time, &params) ||
                     !_IsFinite(params.value) || !_IsFinite(params.min) ||
                     !_IsFinite(params.max)) {

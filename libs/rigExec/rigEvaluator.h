@@ -249,6 +249,13 @@ bool RigExecPrepareRestDerivedIkChain(
     std::vector<RigExecPointFrame> *prepared);
 
 /// Compiles and evaluates one RigExecRoot prim.
+/// The pinned reads a property chain re-uses every frame (rigEvaluator.cpp).
+///
+/// Opaque here on purpose: it holds one UsdAttributeQuery per input the
+/// chains read, which is a value-resolution cache and therefore something
+/// only the routine that fills it should be able to reach.
+struct RigExecPropertyChainBindings;
+
 class RigExecRigEvaluator : public TfWeakBase {
 public:
     RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath);
@@ -965,6 +972,17 @@ private:
     /// the consumer sees the same override Exec will receive rather than the
     /// target's authored fallback.
     std::vector<SdfPath> _propertyChainOrder;
+
+    /// Everything the chains look up on the stage rather than compute, bound
+    /// once and re-used until the stage moves: the target attribute and its
+    /// value type, each mover's prim and weight-object targets, and a pinned
+    /// UsdAttributeQuery for every input the revision loop reads by value.
+    ///
+    /// Dropped on every notice, beside _staticInputs and for the same reason
+    /// -- a query caches where a value comes from, and only a notice can move
+    /// that -- and again at the end of Compile, because a recompile may have
+    /// replaced the chains the entries describe.
+    std::unique_ptr<RigExecPropertyChainBindings> _propertyChainBindings;
 
     /// Evaluates every property chain at \p time.
     ///
