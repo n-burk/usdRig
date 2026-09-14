@@ -47,6 +47,7 @@ cone verifier on in each.
 | `RIGEXEC_BAKED_VERIFY_CONES` | off | run every frame twice and compare, slot by slot |
 | `RIGEXEC_BAKED_SCHEDULE_REPORT` | off | the structural report at Build and the run report per frame |
 | `RIGEXEC_BAKED_SCHEDULE_CALIBRATE` | off | fit and print a replacement cost table |
+| `RIGEXEC_BAKED_STEP_TIMING` | off | sum the three phases and every step kind over N frames (8 when set to 1) and print the table |
 
 ### The schedule, on the biped
 
@@ -76,34 +77,118 @@ anyway.
 
 ### What a frame costs
 
-`rigExecPose --profile`, `Biped_anim` frames 1-8, median of frames 2-8, best of five runs, on a
-20-core box. `b705950` is the Phase 1 head, before any of this:
+Measured with the profiler OFF, because on a frame this size the profiler is not an observer:
+`RIGEXEC_PROFILE_SCOPE` takes three mutexes even with recording off, the parallel executor takes a
+clock pair per step across twenty threads, and the traced frame used to read 1096us against an
+untraced 820us. Two untraced instruments replace it. `rigExecPose --repeat N` cycles the frame list
+inside one process and reports microseconds per frame, which takes the stage open, the compile and
+the bake out of the number; `RIGEXEC_BAKED_STEP_TIMING=N` sums the three phases and every step kind
+with two clock reads apiece. Numbers below are `Biped_anim` frames 2-8 on a 20-core box, and
+`b705950` is the Phase 1 head -- the straight line, before any of this.
 
-| | Baked | prologue | region | epilogue |
-|---|---|---|---|---|
-| b705950 (straight line) | 738us | -- | -- | -- |
-| serial | 802us | 122us | 513us | 150us |
-| parallel | 1273us | 123us | 992us | 150us |
+**The frame.** In-process, frames 2-8 cycled 150x, minimum of nine runs, and (for `b705950`, whose
+tool has no `--repeat`) the same frames as a 2800-frame and a 700-frame process, differenced:
 
-The profiler is not free here: it takes two clock reads per step in parallel mode against one per
-step boundary in serial, so the same frames were also timed by the wall clock with the profiler
-off, as (800 frames - 400 frames)/400 to subtract stage opening, best of five:
+| | us/frame | user CPU | system CPU |
+|---|---|---|---|
+| b705950 (straight line) | 757 | 1019us | 329us |
+| serial | **662** | 671us | ~5us |
+| parallel | 705 | 1210us | 824us |
 
-| | us/frame |
+Serial is 12.5% FASTER than the straight line and runs on half the CPU. §8.4's first half (within
+5% of `b705950`) therefore passes with room; its second half -- parallel faster than serial -- does
+not, and **`RIGEXEC_BAKED_SCHEDULE` still defaults to `serial`**. What follows is why, measured
+rather than argued, so that nobody repeats the experiment.
+
+**Where the frame goes** (`RIGEXEC_BAKED_STEP_TIMING=40`, us/frame; the instrument costs about 5%
+of what it reports, so read the shares, not the total):
+
+| | serial | parallel |
+|---|---|---|
+| prologue | 160 | 157 |
+| region | 554 | 787 |
+| epilogue | 52 | 46 |
+| RevisionChunk (7 runs) | 262 | 339 |
+| Derived (1 run) | 103 | **336** |
+| Constraint (65 runs) | 97 | 118 |
+| ComposeSubtree (93 runs) | 32 | 36 |
+| ProviderMatrix (252 runs) | 13 | 16 |
+
+**The parallel region is slower because every step in it is slower, not because the schedule is
+wrong.** The same bodies, doing the same arithmetic, cost 888us of step time in parallel against
+535us in serial. The three control experiments say where that comes from:
+
+| control | us/frame |
 |---|---|
-| b705950 | 766 |
-| serial | 753 |
-| parallel (default grain) | 820 |
-| parallel (grain 20 / 50 / 200) | 813 / 846 / 852 |
+| the whole frame, no step bodies, but the same 57 clusters spawned | 248 |
+| the same, with no clusters spawned at all | 243 |
+| every step on the calling thread, inside the same `WorkWithScopedParallelism` + `WorkDispatcher` | 714 |
 
-So §8.4's first half holds -- serial is within 5% of the straight line, and in fact slightly
-faster -- and its second half does not: parallel is 9% SLOWER than serial on this machine at every
-grain tried. **`RIGEXEC_BAKED_SCHEDULE` therefore still defaults to `serial`**, which §5.2 makes
-conditional on §8 passing. The schedule's own estimate says why the margin is thin: 558us of
-modelled serial work against a 294us critical path is at most 1.9x before any overhead, the
-epilogue's 150us of map publication is irreducibly serial, and 57 clusters averaging 10us each are
-close to the cost of spawning them. A frame that is actually quicker is the evidence that flips
-the default; the mode is correct at every grain today and one environment variable away.
+Spawning 57 tasks costs 5us of WALL time, and the envelope costs nothing: `WorkDispatcher` is a
+`tbb::task_group` plus a context, and `WorkWithScopedParallelism` is `tbb::this_task_arena::isolate`
+with no arena construction in it. Cluster count is not the problem either -- `GRAIN_US=0` (458
+clusters), the default (57) and `GRAIN_US=400` (41) all land within noise of 790us. What the
+spawning DOES cost is 424us/frame of system time in the workers, and `strace -f -c` over 700 frames
+names it exactly:
+
+| | sched_yield | futex |
+|---|---|---|
+| b705950 | 142098 (203/frame) | 1601 |
+| serial | 33542 (48/frame) | 906 |
+| parallel | 134527 (192/frame) | 1518 |
+
+Those are TBB workers spinning in their steal loop. A frame of 660us that wakes the arena never
+lets them get to sleep, so nineteen threads yield their way through the frame -- including through
+the region's memory-bound serial tail, where one thread makes seven passes over a 26k-point mesh.
+That is the `Derived` row above: the same bounding box, 103us alone and 336us with the arena awake
+beside it. `b705950` pays the same spin for the same reason (its skin kernel calls
+`WorkParallelForN` every frame); the serial executor is the only one of the three that leaves the
+arena alone, and it is the fastest of the three.
+
+So the honest statement of the ceiling is: **this frame is too small and too memory-bound for the
+arena to pay.** 558us of modelled serial work against a 294us critical path is at most 1.9x before
+overhead; of the real 660us, 160us is the serial prologue (almost all of it the property chains,
+119us, which are USD value resolution and not arithmetic) and about 190us is a strictly serial tail
+(the fuse, the chain status sweep and the extent, each a pass over the whole mesh). A frame that is
+actually quicker is the evidence that flips the default; the mode is correct at every grain and
+every chunk count today, and one environment variable away.
+
+**What a default frame is instrumented with.** Nothing inside a step. No step body opens a profile
+scope (`RIGEXEC_PROFILE_SCOPE_CAT` calls `IsEnabled()` three times and each call takes a mutex,
+which is why §2.2 keeps them out), and with the profiler off, `RIGEXEC_BAKED_SCHEDULE_REPORT` off
+and `RIGEXEC_BAKED_STEP_TIMING` off, neither executor reads a clock at all. What is left is about
+twenty scopes in the serial prologue, the serial epilogue and around the region -- sixty
+uncontended mutex acquisitions, which is below the run-to-run spread of the frame measurement
+itself and is not separately visible in it.
+
+**What was removed, and what was measured and left.** The epilogue's map publication went from
+152us to about 50us by filling the published maps from their end (`emplace_hint`) in path order --
+about 850 keys that were each a search from the root. Rejected by measurement rather than by
+preference: a coarser grain or a cluster cap (cluster count does not move the frame); a persistent
+`WorkDispatcher` owned by the program (construction is not the cost); moving `Solve` and
+`Constraint` parameter reads into the prologue source pass (worth the 21us those 65 steps lose to
+the static input cache's worker-thread bypass, and nothing at all in serial mode); and removing the
+allocations from `RigExecResolvedInputs::GetAttribute` (no measurable change -- the cost of a
+parameter read is USD's value resolution, about 0.38us of the 0.43us).
+
+**The one number a next stage should act on first.** The skin partition costs more than it buys on
+this rig, because a chunk body is a serial loop where an unpartitioned revision calls a kernel that
+spreads itself over the arena:
+
+| | serial | parallel |
+|---|---|---|
+| default (7 chunks) | 662 | 705 |
+| `RIGEXEC_BAKED_MAX_CHUNKS=1` | **615** | 628 |
+
+50-90us per frame, and it agrees with the report's own finding above: all seven chunks are ready at
+level 40 of 44, so there is no head start to pay for the loss of the data-parallel kernel. The rule
+that would settle it is "cut a revision only when its chunks' ready levels differ", and the reason
+it is not implemented here is ordering: `PartitionAtBuild` runs before the edge sweep, so the levels
+it needs do not exist yet. Running the sweep and `RigExecBakedAssignStepCosts` over the pose steps
+first -- geometry steps never precede a pose step, so their absence cannot change a
+`ProviderMatrix` level -- would make the levels available where the cut is decided. The defaults
+are left where Phase 2 set them until that is done, so that the feature is not switched off on the
+strength of one asset.
 
 ### What a drag costs
 
@@ -485,10 +570,18 @@ compose), a few thousand edges.
    lines, world-up lines.
 3. Fallback joints: merge every Solve step's list into one `std::set<SdfPath>`, emit in path order,
    de-duplicated (today :2577-2590).
-4. Joint publication in `_jointPaths` order: `jointFramesBase`, `jointFramesFinal`, the degenerate
-   final-frame diagnostic, `jointMatricesFinal` from `FinalMatrix`, and the ONLY bail in this block:
-   `!_Usable(restFrames[slot])` for a valid, non-degenerate final frame → return false [P33].
-   Control frames. Solver guides: read `B.aggregates` directly under the runtime toggle
+4. Joint publication: two passes, not one. The first walks `_jointPaths` order and settles what
+   the order is observable through -- the degenerate final-frame diagnostic, and the ONLY bail in
+   this block, `!_Usable(restFrames[slot])` for a valid, non-degenerate final frame → return false
+   [P33], which now happens before a single key is published rather than with the maps half
+   filled. The second fills `jointFramesBase`, `jointFramesFinal` and `jointMatricesFinal` (from
+   `FinalMatrix`) in PATH order, with a hint at each map's end, so a key costs one comparison
+   instead of a search from the root. The publication lists are not themselves in path order -- the
+   biped's joints and controls both arrive in binding order -- so Build sorts a permutation of each
+   (`jointPublishOrder`, `controlPublishOrder`, `solverPublishOrder`) and records whether it is
+   STRICTLY ascending; a list that names one path twice is published the old assigning way, because
+   an emplace would keep the first value where the assignment kept the last. Control frames the
+   same. Solver guides: read `B.aggregates` directly under the runtime toggle
    `E._guideTaps && E._solverGuidesEnabled`, never cached in a step [P22].
 5. Property-domain results into `movedProperties`.
 6. Per chain in chain order: each revision's `RevisionStatic` diagnostics (the `inputs:defaultWeight`
@@ -778,6 +871,11 @@ Measure and record (§8.4): drag frame cost with and without the per-override-se
    epilogue's map publication (~50-150 µs) is irreducible serial work, so the biped frame should
    land around 2-2.5× faster than serial, not 8× [S30]. A serial regression means per-frame work
    that belongs at Build.
+   STATUS: the first half passes -- serial is 662us against `b705950`'s 757us, 12.5% faster, not
+   within 5% of it -- and the second half does not: parallel is 705us. `--profile` turned out to be
+   the wrong instrument for a frame this size and was replaced by `--repeat` and
+   `RIGEXEC_BAKED_STEP_TIMING`; see "What a frame costs" for the numbers and for the three control
+   experiments that say where the parallel time goes.
 5. `RIGEXEC_BAKED_SCHEDULE_REPORT=1` prints steps, edges, clusters, critical-path estimate, and per
    skin revision: chunk count, vertices per chunk, |key| min/mean/max, fraction of chunks covering
    ≥ 50% of influences, each chunk's ready level vs the global max level, and skin critical path vs
