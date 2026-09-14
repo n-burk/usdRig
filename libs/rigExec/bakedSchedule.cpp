@@ -1381,8 +1381,9 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
     // Calibration measures the same boundaries on a finer clock, into each
     // step's own accumulator: no lock, no shared counter, and nothing that
     // survives the frame but a sum.
-    const bool calibrating = RigExecBakedScheduleCalibrationRequested() ||
-                             RigExecBakedStepTimingRequested();
+    const bool calibrating = (RigExecBakedScheduleCalibrationRequested() ||
+                              RigExecBakedStepTimingRequested()) &&
+                             !B.measurementSuspended;
     uint64_t mark = timing ? RigExecProfiler::NowUs() : 0;
     uint64_t markNs = calibrating ? NowNs() : 0;
     for (RigExecBakedStep &step : B.steps) {
@@ -1552,7 +1553,8 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
     run.time = time;
     run.counters = B.clusterCounters.get();
     run.profiling = B.profiler && B.profiler->IsEnabled();
-    run.measuring = RigExecBakedStepTimingRequested();
+    run.measuring = RigExecBakedStepTimingRequested() &&
+                    !B.measurementSuspended;
     run.timing = run.profiling || RigExecBakedScheduleReportRequested();
     B.clustering.lastRunTimed = run.timing;
     // The run's phased-read store is one container, and folding a step's

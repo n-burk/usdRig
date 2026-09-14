@@ -1408,6 +1408,12 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     };
     const double frameBegan = measuring ? now() : 0;
     double phaseMark = frameBegan;
+    // This frame's three phases, held here and folded into the program's
+    // sums at the one exit that counts a frame: the divisor is incremented
+    // there too, and a generation a step hands back or the publication
+    // declines must not put a prologue and a region into a numerator whose
+    // denominator stood still.
+    double prologueUs = 0, regionUs = 0;
 
     // ---- prologue -----------------------------------------------------------
     //
@@ -1466,7 +1472,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     }
     if (measuring) {
         const double mark = now();
-        B.timedPrologueUs += mark - phaseMark;
+        prologueUs = mark - phaseMark;
         phaseMark = mark;
     }
 
@@ -1489,7 +1495,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     }
     if (measuring) {
         const double mark = now();
-        B.timedRegionUs += mark - phaseMark;
+        regionUs = mark - phaseMark;
         phaseMark = mark;
     }
     if (verifying) {
@@ -1503,7 +1509,13 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         const RigExecBakedRunStatistics coneRun(B);
         const size_t coneClusters = coneRun.closedClusters;
         before.Restore(&B);
+        // The second pass is the verifier, not the frame: it is kept out of
+        // the per-step accumulators for the same reason the phase marks
+        // below skip over it, so that a verified frame's table still says
+        // what one frame costs.
+        B.measurementSuspended = measuring;
         const bool bailedFull = !RigExecBakedRunSteps(&B, time, true);
+        B.measurementSuspended = false;
         coneRun.Restore(&B);
         std::vector<std::string> differences;
         size_t mismatches = after.Compare(B, &differences);
@@ -1526,6 +1538,13 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                     "whole program",
                     mismatches, coneClusters,
                     B.clustering.clusters.size());
+        }
+        if (measuring) {
+            // Charged to no phase at all. The block above ran the whole
+            // program a second time and compared two copies of the state;
+            // adding that to the epilogue would make the epilogue of a
+            // verified frame read several times the epilogue a caller gets.
+            phaseMark = now();
         }
     }
 
@@ -1592,7 +1611,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     pose->valid = true;
     if (measuring) {
         // Counted here, at the one exit that published a pose: a frame that
-        // bailed or fell back did not run the epilogue this is measuring.
+        // bailed or fell back did not run the epilogue this is measuring,
+        // and its prologue and region are dropped with it so that every
+        // term of the table is divided by the frames that produced it.
+        B.timedPrologueUs += prologueUs;
+        B.timedRegionUs += regionUs;
         B.timedEpilogueUs += now() - phaseMark;
         ++B.timedFrames;
         RigExecBakedStepTimingReport(&B);

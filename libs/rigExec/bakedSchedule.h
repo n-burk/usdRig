@@ -176,6 +176,10 @@ bool RigExecBakedStepTimingRequested();
 /// table says both which third of the frame to attack and which step kind
 /// within it. Averaged over the frames watched rather than printed per
 /// frame: a single frame of a few hundred microseconds is mostly noise.
+///
+/// Only a frame that published a pose is watched, numerator and divisor
+/// together, and the cone verifier's second pass is excluded from both --
+/// so a table is always the cost of one frame of the kind a caller gets.
 void RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program);
 
 }  // namespace rigExec

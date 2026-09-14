@@ -83,7 +83,10 @@ clock pair per step across twenty threads, and the traced frame used to read 109
 untraced 820us. Two untraced instruments replace it. `rigExecPose --repeat N` cycles the frame list
 inside one process and reports microseconds per frame, which takes the stage open, the compile and
 the bake out of the number; `RIGEXEC_BAKED_STEP_TIMING=N` sums the three phases and every step kind
-with two clock reads apiece. Numbers below are `Biped_anim` frames 2-8 on a 20-core box, and
+with two clock reads apiece. It counts only frames that published a pose -- a frame a step hands
+back, or one the publication declines, contributes to neither the numerator nor the divisor -- and
+under `RIGEXEC_BAKED_VERIFY_CONES=1` the verifier's second whole-program pass is charged to no
+phase and kept out of the per-step accumulators, so the table still says what ONE frame costs. Numbers below are `Biped_anim` frames 2-8 on a 20-core box, and
 `b705950` is the Phase 1 head -- the straight line, before any of this.
 
 **The frame.** In-process, frames 2-8 cycled 150x, minimum of nine runs, and (for `b705950`, whose
