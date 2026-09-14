@@ -2099,15 +2099,14 @@ struct RigExecBakedBuildContext {
     /// The provider slot of \p path, or -1.
     ///
     /// EITHER kind: the table is the ordered union of the exec-seeded
-    /// providers and the plain Xformables a constraint targets, so a
+    /// providers and the plain Xformables a constraint targets, and both
+    /// kinds are LIVE -- the prologue seeds an xform-derived slot from the
+    /// stage and a constraint revises it like any other target. So a
     /// `SlotOf(x) < 0` refusal reads "is no provider slot at all", NOT "is
-    /// not a pose provider". The two coincide only because IsBakeable still
-    /// refuses a rig with any xform-derived provider ("constraint target is
-    /// a plain Xformable"); that refusal is the sole guard. A caller that
-    /// means "publishes computeRestFrame" or "is composed from avars" must
-    /// test slotKind[slot] == PoseSeed itself, as the solver rest binding
-    /// does, and the Phase 3 group that lifts the refusal has to visit every
-    /// site that does not.
+    /// not a pose provider", and there is no longer a refusal standing
+    /// between the two meanings. A caller that means "publishes
+    /// computeRestFrame" or "is composed from avars" must test
+    /// slotKind[slot] == PoseSeed itself, as the solver rest binding does.
     int SlotOf(const SdfPath &path) const;
     /// Binds \p name as a per-frame input, registering it for overrides and
     /// for invalidation.

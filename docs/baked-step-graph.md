@@ -396,6 +396,43 @@ The baked drag is still 9-13x the dynamic path's, which is the point of the exer
   counters are right either way, and what would stop it re-running the clusters is a
   shorter dependency from a control to a chunk -- the same ladder §6.1's chunk report measures.
 
+### Phase 3: constraints and providers
+
+What that group added to the model, which is not a new step KIND but a new slot domain and
+four new prologue SOURCES. A later group reading §§3, 4 and 7 should read this beside them.
+
+* **`ConstraintDelta(c)`** is a slot domain. A geometry-domain constraint writes no transform: it
+  measures the delta between its solved frame and its target prim's own authored transform, and
+  the `InfluenceFold` of the Matrix revision that same mover contributes reads it as that
+  revision's transform. §10 left the hand-off as a run-local `std::map` cleared at the head of a
+  run, with the cone hazard written on it; it is dense arrays indexed at Build instead, for both
+  halves of the reason -- a map written from a step body is an allocation and a race whatever the
+  slots say, and a map emptied per run leaves a HOLE where a cone skipped the constraint, rather
+  than the answer that constraint would have measured again. It is a slot, so it is kept across
+  runs and the verifier compares it.
+* **The prologue makes every stage read the pose walk needs**, because no step may touch USD. Four
+  families, each of them a §7 SOURCE -- always run, compared by VALUE, never by "the time moved":
+  the transform of each plain Xformable a constraint TARGETS (seeded into the slot's first
+  version, where the compose would have left one, and published as `providerBaseXforms`); the
+  transform of each plain Xformable a constraint reads as a SOURCE; the transform each
+  geometry-domain constraint measures its delta against; and each constraint's own authored
+  tables (`inputs:sourceWeights`, the parent offsets, `inputs:poleVectorWeights`), read raw at the
+  frame's time through the evaluator's own readers. Each one carries a list of the clusters it
+  reaches (`RigExecBakedCones::nativeSourceClusters` and its two neighbours), which is how a
+  changed stage transform dirties the constraint that reads it.
+* **A cardinality diagnostic the prologue produces is replayed by the STEP**, not pushed into the
+  pose where it was read. That is what keeps it at the constraint's own place in the walk, ahead
+  of the mover's "has unusable constraint inputs", which is the order `RigExecComparePoses`
+  compares.
+* **A native Xformable source's stage frame is only half its answer.** The other half -- riding it
+  on the revision of the deepest provider above it that the walk has already moved -- is the
+  step's, out of the `PoseFin` and `PoseBase` versions of that source's ancestor slots as they
+  stand where the constraint runs. The selection and the delta are one body,
+  `RigExecApplyRevisedAncestorDelta`, which the dynamic walk calls too.
+* **A constraint may write more than one target**, and `RecordFrame` records every one of them.
+  SingleChainIK is the multi-target built-in: its targets ARE its joint chain, its commit declares
+  every chain slot, and its propagation is built over the whole chain at once.
+
 Two rules of §2 and §4.3 that a serial run cannot enforce, and where they are enforced instead:
 the per-frame assemblers take no token-registry lock -- every `TfToken(const char *)` on the step
 path is hoisted to a `TF_DEFINE_PRIVATE_TOKENS` block in `moverGraph.cpp` and `bakedGeometry.cpp`,
