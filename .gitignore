@@ -107,7 +107,6 @@ desktop.ini
 
 # Profiling captures and working notes from development.
 /reports/
-/docs/superpowers/
 
 # TouchPose's importer and development probes. The importer converts source
 # region data this repository does not ship; the probes are one-off
@@ -119,9 +118,6 @@ desktop.ini
 # Development utilities. `tools/rigExecPose.cpp` is NOT here: CMake builds it
 # as part of the project (CMakeLists.txt:166), so it is a source file, not a
 # script. These three are neither built nor needed to run anything.
-/tools/bakeGizmoIcons.py
-/tools/diagnoseSolverBinding.py
-/tools/migrateRestToLocal.py
 
 # Per-developer environment scripts. These name a specific build directory
 # and a specific machine's USD install, so they are never shareable and must
@@ -132,6 +128,3 @@ desktop.ini
 # asset paths, and a saved graph is a record of one scene -- there is little
 # left once the paths are removed. `test_single_node.json` is synthetic and
 # stays.
-/plugin/usdNoodles/assets/body_graph.json
-/plugin/usdNoodles/assets/body_graph2.json
-/plugin/usdNoodles/assets/my_nodes.json
