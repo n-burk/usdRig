@@ -74,13 +74,13 @@ Thumbs.db
 desktop.ini
 .DS_Store
 
-# Built biped rigs. `tools/biped/build_biped_rigexec.py` regenerates these
-# from the the conventional tool data in ~40 seconds; 39 of them were sitting in the repo
-# root at 72 MB total.
+# Built biped rigs. The generator regenerates these from its source data
+# in about 40 seconds; 39 of them were sitting in the repo root at 72 MB
+# total.
 /biped*.usda
 
-# The mesh the skin deforms, extracted from the the conventional tool FBX. 2.4 MB of
-# derived data. To rebuild the rig that is already in examples/, read
+# The mesh the skin deforms. 2.4 MB of derived data. To rebuild the rig
+# that is already in examples/, read
 # body_geo's points, faceVertexCounts and faceVertexIndices straight off
 # examples/biped/Biped.usda. NOTE THE UNITS: the manifest is in METRES, because
 # `add_rigexec_skinning` multiplies by 100 on the way in. Handing it
@@ -115,16 +115,8 @@ desktop.ini
 /plugin/touchPose/import_touch.py
 /plugin/touchPose/spikes/
 
-# Development utilities. `tools/rigExecPose.cpp` is NOT here: CMake builds it
-# as part of the project (CMakeLists.txt:166), so it is a source file, not a
-# script. These three are neither built nor needed to run anything.
-
 # Per-developer environment scripts. These name a specific build directory
 # and a specific machine's USD install, so they are never shareable and must
 # never be committed. `bin/_env.sh` is the shared one.
 /env-*.sh
 
-# Saved graphs captured from a production scene. They carry that scene's
-# asset paths, and a saved graph is a record of one scene -- there is little
-# left once the paths are removed. `test_single_node.json` is synthetic and
-# stays.
