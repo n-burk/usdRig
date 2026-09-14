@@ -407,6 +407,269 @@ MakeGuideOnlyRibbonRig()
     return stage;
 }
 
+// ---------------------------------------------------------------------------
+// The latent guards: RigExecTwoBoneIk, RigExecSplineIk, RigExecBlendPointFrames.
+//
+// Every one of these malformed bindings makes the computation warn and
+// publish an EMPTY aggregate; the warning never reaches the pose, so the
+// only observable consequence is that the joints fall back to their rest
+// chains and say so. No shipped rig is malformed, so the bake's agreement
+// with that is checked here and nowhere else.
+// ---------------------------------------------------------------------------
+
+/// A two-bone IK leg with its three controls and its three bound joints:
+/// example 02's solver with the geometry left off.
+UsdStageRefPtr
+MakeTwoBoneIkRig()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    Define(stage, "/Asset", "Xform");
+    Define(stage, "/Asset/Rig", "RigExecRoot");
+
+    const UsdPrim hipRoot =
+        Define(stage, "/Asset/Rig/Controls/HipRoot", "RigExecControl");
+    hipRoot.GetAttribute(TfToken("rest:space")).Set(RestAt(8.0));
+    const UsdPrim footIk =
+        Define(stage, "/Asset/Rig/Controls/FootIK", "RigExecControl");
+    UsdAttribute ty = footIk.GetAttribute(TfToken("avars:ty"));
+    ty.Set(0.0, UsdTimeCode(1.0));
+    ty.Set(1.5, UsdTimeCode(3.0));
+    ty.Set(0.5, UsdTimeCode(5.0));
+    const UsdPrim kneePole =
+        Define(stage, "/Asset/Rig/Controls/KneePole", "RigExecControl");
+    GfMatrix4d poleRest(1.0);
+    poleRest.SetTranslateOnly(GfVec3d(0, 4, 3));
+    kneePole.GetAttribute(TfToken("rest:space")).Set(poleRest);
+
+    const UsdPrim hip = Define(stage, "/Asset/Rig/Joints/Hip", "RigExecJoint");
+    hip.GetAttribute(TfToken("rest:space")).Set(RestAt(8.0));
+    GfMatrix4d down(1.0);
+    down.SetTranslateOnly(GfVec3d(4, 0, 0));
+    const UsdPrim knee =
+        Define(stage, "/Asset/Rig/Joints/Hip/Knee", "RigExecJoint");
+    knee.GetAttribute(TfToken("rest:space")).Set(down);
+    const UsdPrim ankle =
+        Define(stage, "/Asset/Rig/Joints/Hip/Knee/Ankle", "RigExecJoint");
+    ankle.GetAttribute(TfToken("rest:space")).Set(down);
+
+    const UsdPrim ik =
+        Define(stage, "/Asset/Rig/Solvers/LegIK", "RigExecTwoBoneIk");
+    SetTargets(ik, "rigExec:rootControl", {hipRoot.GetPath()});
+    SetTargets(ik, "rigExec:effectorControl", {footIk.GetPath()});
+    SetTargets(ik, "rigExec:poleControl", {kneePole.GetPath()});
+    SetTargets(ik, "rigExec:joints",
+               {hip.GetPath(), knee.GetPath(), ankle.GetPath()});
+    ik.GetAttribute(TfToken("rigExec:preferredBendRadians")).Set(0.3);
+    return stage;
+}
+
+/// rigExec:joints reduced to two, so the solver binds two of the three chain
+/// slots and cannot measure its lower bone.
+UsdStageRefPtr
+MakeTwoBoneIkRigWithTwoJoints()
+{
+    const UsdStageRefPtr stage = MakeTwoBoneIkRig();
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/LegIK")),
+               "rigExec:joints",
+               {SdfPath("/Asset/Rig/Joints/Hip"),
+                SdfPath("/Asset/Rig/Joints/Hip/Knee")});
+    return stage;
+}
+
+/// rigExec:poleControl aimed at a plain Xform. It publishes no
+/// computePointFrame, so the pole input is unbound and the computation
+/// publishes nothing.
+UsdStageRefPtr
+MakeTwoBoneIkRigWithANonProviderPole()
+{
+    const UsdStageRefPtr stage = MakeTwoBoneIkRig();
+    const UsdPrim marker = Define(stage, "/Asset/Geom/Marker", "Xform");
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/LegIK")),
+               "rigExec:poleControl", {marker.GetPath()});
+    return stage;
+}
+
+/// A spline IK spine of five joints over three controls.
+UsdStageRefPtr
+MakeSplineIkRig()
+{
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    Define(stage, "/Asset", "Xform");
+    Define(stage, "/Asset/Rig", "RigExecRoot");
+
+    const UsdPrim rootCtl =
+        Define(stage, "/Asset/Rig/Controls/RootCtl", "RigExecControl");
+    const UsdPrim midCtl =
+        Define(stage, "/Asset/Rig/Controls/MidCtl", "RigExecControl");
+    midCtl.GetAttribute(TfToken("rest:space")).Set(RestAt(4.0));
+    UsdAttribute midTx = midCtl.GetAttribute(TfToken("avars:tx"));
+    midTx.Set(0.0, UsdTimeCode(1.0));
+    midTx.Set(1.2, UsdTimeCode(3.0));
+    midTx.Set(-0.4, UsdTimeCode(5.0));
+    const UsdPrim endCtl =
+        Define(stage, "/Asset/Rig/Controls/EndCtl", "RigExecControl");
+    endCtl.GetAttribute(TfToken("rest:space")).Set(RestAt(8.0));
+    UsdAttribute endRz = endCtl.GetAttribute(TfToken("avars:rz"));
+    endRz.Set(0.0, UsdTimeCode(1.0));
+    endRz.Set(20.0, UsdTimeCode(5.0));
+
+    SdfPathVector joints;
+    std::string path = "/Asset/Rig/Joints";
+    for (int k = 0; k < 5; ++k) {
+        path += "/S" + std::to_string(k);
+        const UsdPrim joint = Define(stage, path.c_str(), "RigExecJoint");
+        joint.GetAttribute(TfToken("rest:space")).Set(RestAt(k == 0 ? 0 : 2));
+        joints.push_back(joint.GetPath());
+    }
+
+    const UsdPrim spline =
+        Define(stage, "/Asset/Rig/Solvers/SpineIk", "RigExecSplineIk");
+    SetTargets(spline, "rigExec:rootControl", {rootCtl.GetPath()});
+    SetTargets(spline, "rigExec:midControl", {midCtl.GetPath()});
+    SetTargets(spline, "rigExec:endControl", {endCtl.GetPath()});
+    SetTargets(spline, "rigExec:joints", joints);
+    spline.GetAttribute(TfToken("rigExec:restLength")).Set(TfToken("curve"));
+    spline.GetAttribute(TfToken("rigExec:volumeWeights"))
+        .Set(VtFloatArray{0.2f, 0.4f, 0.5f, 0.35f, 0.1f});
+    return stage;
+}
+
+/// A token no kernel implements, on each of the two the computation parses.
+UsdStageRefPtr
+MakeSplineIkRigWithUnsupportedRestLength()
+{
+    const UsdStageRefPtr stage = MakeSplineIkRig();
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineIk"))
+        .GetAttribute(TfToken("rigExec:restLength")).Set(TfToken("spring"));
+    return stage;
+}
+
+UsdStageRefPtr
+MakeSplineIkRigWithUnsupportedRootTangent()
+{
+    const UsdStageRefPtr stage = MakeSplineIkRig();
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineIk"))
+        .GetAttribute(TfToken("rigExec:rootTangent")).Set(TfToken("wobble"));
+    return stage;
+}
+
+// Four more of the computations' guards have no fixture, and cannot have
+// one: COMPILE rejects every one of them before a program is built, with the
+// error each was probed for --
+//   rigExec:volumeWeights of the wrong length: "rigExec:volumeWeights length
+//     3 must equal rigExec:joints length 5 (or be empty)"
+//   a remap filling one chain slot twice: "rigExec:jointElements fills chain
+//     slot 0 twice"
+//   a remap entry outside the chain: "element 9 for <joint> is out of range
+//     (solver produces 5 frames)"
+//   a remap of the wrong LENGTH, on either solver that reads one:
+//     "rigExec:jointElements length 2 must equal rigExec:joints length 3"
+// (the last one authored as a CUSTOM array, since RigExecTwoBoneIk does not
+// declare jointElements -- its positions are its elements).
+//
+// The bake's `degenerate` for all four is therefore defensive rather than
+// reachable. It stays, because the computations check them at runtime and
+// the two paths should answer the same hypothetical the same way; this
+// comment is so the next reader does not spend an afternoon trying to
+// author one.
+
+/// An IK/FK blend over the two-bone leg: example 03's shape, with an FK
+/// chain over the same three joints and a blend in front of both.
+UsdStageRefPtr
+MakeBlendRig()
+{
+    const UsdStageRefPtr stage = MakeTwoBoneIkRig();
+    const UsdPrim fkRoot =
+        Define(stage, "/Asset/Rig/Controls/FkHip", "RigExecControl");
+    fkRoot.GetAttribute(TfToken("rest:space")).Set(RestAt(8.0));
+    UsdAttribute rz = fkRoot.GetAttribute(TfToken("avars:rz"));
+    rz.Set(0.0, UsdTimeCode(1.0));
+    rz.Set(30.0, UsdTimeCode(5.0));
+    GfMatrix4d down(1.0);
+    down.SetTranslateOnly(GfVec3d(4, 0, 0));
+    const UsdPrim fkKnee =
+        Define(stage, "/Asset/Rig/Controls/FkHip/FkKnee", "RigExecControl");
+    fkKnee.GetAttribute(TfToken("rest:space")).Set(down);
+    const UsdPrim fkAnkle = Define(
+        stage, "/Asset/Rig/Controls/FkHip/FkKnee/FkAnkle", "RigExecControl");
+    fkAnkle.GetAttribute(TfToken("rest:space")).Set(down);
+
+    const UsdPrim fk =
+        Define(stage, "/Asset/Rig/Solvers/LegFK", "RigExecFkChain");
+    SetTargets(fk, "rigExec:controls",
+               {fkRoot.GetPath(), fkKnee.GetPath(), fkAnkle.GetPath()});
+    SetTargets(fk, "rigExec:joints",
+               {SdfPath("/Asset/Rig/Joints/Hip"),
+                SdfPath("/Asset/Rig/Joints/Hip/Knee"),
+                SdfPath("/Asset/Rig/Joints/Hip/Knee/Ankle")});
+
+    const UsdPrim blend =
+        Define(stage, "/Asset/Rig/Solvers/Blend", "RigExecBlendPointFrames");
+    SetTargets(blend, "rigExec:inputA", {fk.GetPath()});
+    SetTargets(blend, "rigExec:inputB",
+               {SdfPath("/Asset/Rig/Solvers/LegIK")});
+    UsdAttribute weight = blend.GetAttribute(TfToken("inputs:weight"));
+    weight.Set(0.0f, UsdTimeCode(1.0));
+    weight.Set(1.0f, UsdTimeCode(5.0));
+    // The blend is what poses the joints now; its two inputs name them only
+    // for their rests.
+    SetTargets(blend, "rigExec:joints",
+               {SdfPath("/Asset/Rig/Joints/Hip"),
+                SdfPath("/Asset/Rig/Joints/Hip/Knee"),
+                SdfPath("/Asset/Rig/Joints/Hip/Knee/Ankle")});
+    return stage;
+}
+
+/// An FK chain one of whose controls is a plain Xform. The computation reads
+/// its controls through a read iterator, so the target contributes no input
+/// at all: the chain SHORTENS, every later element renumbers, and the joint
+/// bound to the element past the new end falls back.
+UsdStageRefPtr
+MakeFkChainWithANonProviderControl()
+{
+    const UsdStageRefPtr stage = MakeBlendRig();
+    stage->RemovePrim(SdfPath("/Asset/Rig/Solvers/LegIK"));
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/Blend")),
+               "rigExec:inputB", {SdfPath("/Asset/Rig/Solvers/LegFK")});
+    const UsdPrim marker = Define(stage, "/Asset/Geom/Marker", "Xform");
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/LegFK")),
+               "rigExec:controls",
+               {SdfPath("/Asset/Rig/Controls/FkHip"), marker.GetPath(),
+                SdfPath("/Asset/Rig/Controls/FkHip/FkKnee/FkAnkle")});
+    return stage;
+}
+
+/// rigExec:rotationBlend authored to the one thing the schema does not
+/// allow: the computation rejects the token rather than substituting for it.
+UsdStageRefPtr
+MakeBlendRigWithLinearRotation()
+{
+    const UsdStageRefPtr stage = MakeBlendRig();
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/Blend"))
+        .GetAttribute(TfToken("rigExec:rotationBlend"))
+        .Set(TfToken("linear"));
+    return stage;
+}
+
+/// rigExec:inputB aimed at a prim that publishes no aggregate -- a control.
+/// That is the computation's null pointer, and a null pointer passes the
+/// OTHER input through unchanged, rests and all.
+///
+/// The IK goes with it: a solver nothing consumes claims the joints its
+/// rigExec:joints names, and two solvers claiming one joint does not
+/// compile. Leaving inputB empty has the same effect, so this shape is the
+/// only way to author the null.
+UsdStageRefPtr
+MakeBlendRigWithANonSolverInput()
+{
+    const UsdStageRefPtr stage = MakeBlendRig();
+    stage->RemovePrim(SdfPath("/Asset/Rig/Solvers/LegIK"));
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/Blend")),
+               "rigExec:inputB",
+               {SdfPath("/Asset/Rig/Controls/KneePole")});
+    return stage;
+}
+
 }  // namespace
 
 static std::string
@@ -454,6 +717,27 @@ main(int argc, char **argv)
                 MakeRibbonRigWithNoBindPose, frames, true);
     CheckParity("ribbon with no driver curve", MakeRibbonRigWithNoDriver,
                 frames, true);
+
+    CheckParity("two-bone ik", MakeTwoBoneIkRig, frames, true);
+    CheckParity("two-bone ik binding two joints",
+                MakeTwoBoneIkRigWithTwoJoints, frames, true);
+
+    CheckParity("two-bone ik with a non-provider pole",
+                MakeTwoBoneIkRigWithANonProviderPole, frames, true);
+    CheckParity("fk chain with a non-provider control",
+                MakeFkChainWithANonProviderControl, frames, true);
+
+    CheckParity("spline ik", MakeSplineIkRig, frames, true);
+    CheckParity("spline ik with an unsupported restLength",
+                MakeSplineIkRigWithUnsupportedRestLength, frames, true);
+    CheckParity("spline ik with an unsupported rootTangent",
+                MakeSplineIkRigWithUnsupportedRootTangent, frames, true);
+
+    CheckParity("ik/fk blend", MakeBlendRig, frames, true);
+    CheckParity("ik/fk blend with a linear rotation blend",
+                MakeBlendRigWithLinearRotation, frames, true);
+    CheckParity("ik/fk blend with a non-solver input",
+                MakeBlendRigWithANonSolverInput, frames, true);
 
     if (failures) {
         std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);

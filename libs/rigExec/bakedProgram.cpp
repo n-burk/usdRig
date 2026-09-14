@@ -311,39 +311,12 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                     solverPath);
                 continue;
             }
-            if (type == "RigExecTwoBoneIk") {
-                // Bone lengths are MEASURED from the rests of the joints the
-                // solver names; without all three there is nothing to bake.
-                //
-                // Resolved the way bakeSolver resolves it, so the two do not
-                // drift: one rest per rigExec:joints target that publishes
-                // computeRestFrame, and the remap indexed by position within
-                // THAT list. A cardinality mismatch is deliberately not a
-                // refusal here -- exec's computation warns and publishes an
-                // empty aggregate, and the bake reproduces that through
-                // Solver::degenerate rather than declining the rig.
-                std::array<bool, 3> seen{false, false, false};
-                std::vector<SdfPath> rests;
-                for (const SdfPath &joint : _Targets(prim, "rigExec:joints")) {
-                    if (E._poseSeedFrames.count(joint)) {
-                        rests.push_back(joint);
-                    }
-                }
-                VtIntArray elements;
-                if (const UsdAttribute a = prim.GetAttribute(
-                        TfToken("rigExec:jointElements"))) {
-                    a.Get(&elements);
-                }
-                for (size_t k = 0; k < rests.size(); ++k) {
-                    const int element =
-                        elements.size() == rests.size() ? elements[k] : int(k);
-                    if (element >= 0 && element < 3) seen[element] = true;
-                }
-                if (!(seen[0] && seen[1] && seen[2])) {
-                    say("TwoBoneIk does not bind three joint rests",
-                        solverPath);
-                }
-            }
+            // A TwoBoneIk that does not bind three joint rests used to be
+            // refused here, resolved a second time by a copy of bakeSolver's
+            // rule. It is not a rig the program cannot express: the
+            // computation warns and publishes an empty aggregate, and
+            // bakeSolver reproduces that through Solver::degenerate. One
+            // expression of the rule, in the place that needs its answer.
         }
     }
     for (const auto &[solverPath, tap] : E._solverArrayTaps) {
