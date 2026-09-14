@@ -29,6 +29,7 @@
 
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace rigExec;
@@ -335,6 +336,49 @@ TestSphereAxisScales()
     const float expected[4] = {1.0f, 0.5f, 0.0f, 0.0f};
     for (size_t i = 0; i < 4; ++i) {
         CHECK(Near(points[i], Moved(f.base[i], expected[i])));
+    }
+}
+
+// The TRANSFORM's scale avars are not part of a volume's placement.
+//
+// A volume weight is a pose provider, so it composes like a joint -- but
+// exec never binds avars:sx/sy/sz for one, and its shape is
+// inputs:scaleX/Y/Z's business alone. The two say opposite things about the
+// same points: a transform scale of 2 in X would HALVE the local distance
+// of a point at X=2 and hand it a weight the rigid placement gives to X=1.
+// So this case authors all three, expects the answers of the case that
+// authors none, and is the only place either path's discard is checked --
+// no shipped rig scales a volume's transform.
+static void
+TestVolumeIgnoresTransformScaleAvars()
+{
+    const VtVec3fArray points{GfVec3f(1, 0, 0), GfVec3f(2, 0, 0),
+                              GfVec3f(3, 0, 0), GfVec3f(0, 1, 0)};
+    // distances 1, 2, 3, 1 over a [0, 2] band -> 0.5, 0, 0, 0.5. Under a
+    // composed sx=2/sy=0.5 they would be 0.75, 0.5, 0.25, 0 instead, so
+    // three of the four points say which placement was used.
+    const float expected[4] = {0.5f, 0.0f, 0.0f, 0.5f};
+    for (const bool scaled : {false, true}) {
+        Fixture f(points, GfVec3d(0, 2, 0));
+        UsdPrim v = f.MakeVolume("Sphere", TfToken("RigExecSphereWeight"),
+                                 GfVec3d(0, 0, 0), 0.0f, 2.0f);
+        if (scaled) {
+            const std::pair<const char *, double> avars[3] = {
+                {"avars:sx", 2.0}, {"avars:sy", 0.5}, {"avars:sz", 3.0}};
+            for (const auto &[name, value] : avars) {
+                v.CreateAttribute(TfToken(name),
+                                  SdfValueTypeNames->Double).Set(value);
+            }
+        }
+        f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
+
+        const VtVec3fArray moved =
+            f.Resolve(scaled ? "volume-scale-avars" : "volume-no-scale-avars");
+        CHECK(moved.size() == 4);
+        if (moved.size() != 4) return;
+        for (size_t i = 0; i < 4; ++i) {
+            CHECK(Near(moved[i], Moved(f.base[i], expected[i])));
+        }
     }
 }
 
@@ -1173,6 +1217,7 @@ main(int argc, char **argv)
     TestSphereWeight();
     TestVolumePlacedByRestSpace();
     TestSphereAxisScales();
+    TestVolumeIgnoresTransformScaleAvars();
     TestPlaneWeight();
     TestPlaneBounded();
     TestPlaneBoundsEpochSplit();
