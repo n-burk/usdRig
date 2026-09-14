@@ -41,6 +41,51 @@ bake is byte-identical to the straight line it replaced, in serial and in parall
 the default grain and 200us, at 1, 8 and 32 chunks, at 512 and 4096 chunk vertices, and with the
 cone verifier on in each.
 
+### Phase 3: weight objects
+
+Two step kinds and two slot domains, between the pose half and the geometry
+half. `WeightPacket(w)` builds one weight object's packet for the frame --
+one per OBJECT and not per consumer, which is what exec's targeted-objects
+accessor gives the dynamic path for free -- and the table is in dependency
+order, so a composed object's step reads the `WeightPacket` slots of what it
+composes and the edges fall out of the declaration. `VolumePlacements` reads
+the final frame of every volume weight provider and writes the one
+`WeightFrames` slot, which is where `pose.weightFrames` comes from and what
+the CPU oracle places a volume from.
+
+Which side each call site copies is written down at the head of
+`bakedWeights.cpp` and is the thing to check first when this domain
+disagrees with the dynamic path: a MOVER copies EXEC (the packet builders in
+`weightPackets.h`, the volume's BASE frame, exec's validity ladder, an
+invalid packet as a MoverFailed pass-through), a CONSTRAINT and a
+CURRENT-PHASE field copy the ORACLE (`_ResolveWeights`, the final-frame
+placement, an error string), and `weightFrames` copies the walk's FINAL
+frames. The two placements differ only for a volume some constraint revises,
+and reproducing both is the contract.
+
+Three consequences worth knowing before touching it:
+
+* A weight object built from the stage alone reads no slot, so its step is a
+  SOURCE and the `RevisionStatic` that reads its packet stays a source too;
+  the classification propagates in program order, which is dependency order
+  for these steps. A volume reads `PoseBase`, so neither it nor its readers
+  can be.
+* A current-phase revision's `RevisionStatic` is not a source at all: the
+  field is measured against the points ENTERING the revision, so the step
+  declares every buffer its chain has filled before it, the `RevisionDone`
+  range that says which of them holds the running value, and the chain's
+  dirty bit -- the same declaration a chunk makes. It patches the shared
+  packet rather than building one, and touches exactly the fields the
+  dynamic path patches (not `rangePolicy`).
+* `pose.weightFields` is published from `RevisionStatic`, whether or not the
+  revision then executes, and drained by the epilogue in chain and revision
+  order -- that ordering is what makes two revisions sharing one weight
+  object last-writer-wins the way the dynamic walk's per-chain merge does.
+  The drain tests `chain.haveBase` as well as the revision's own flag, for
+  the reason the points and the derived targets beside it do: a chain whose
+  points stop reading at a time returns from the assemble before it looks at
+  a packet, and the dynamic path publishes no field at all for one.
+
 ### The environment
 
 | variable | default | what it does |

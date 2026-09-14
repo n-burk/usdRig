@@ -483,6 +483,19 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         }
         c.enabled = bind(prim, "inputs:enabled", true);
         c.defaultWeight = bind(prim, "inputs:defaultWeight", 1.0f);
+        // The envelope object, resolved per frame by the oracle and not
+        // captured here: what the bake records is only that the constraint
+        // HAS one, and enough of the invalidation index to notice the object
+        // changing. Every read the oracle makes goes through the
+        // generation's resolved inputs, so the prim is routed rather than
+        // bound -- an interactive override on any property of it reaches the
+        // next generation with nothing to place.
+        c.weightObject = fc.weightObject;
+        c.weightScratch.reserve(1);
+        if (!c.weightObject.IsEmpty()) {
+            B.prims.insert(c.weightObject);
+            B.resolvedRoutedPrims.insert(c.weightObject);
+        }
 
         // inputs:sourceWeights / the parent offsets are authored tables, read
         // as arrays rather than as a per-source scalar.
@@ -1424,21 +1437,14 @@ namespace {
 
 /// Records \p input against \p step: what a frame can move it with.
 ///
-/// Three answers, and each is a different way a value can arrive: it is a
-/// function of time (a keyframe), it resolves through the generation's
-/// resolved inputs every frame (a property chain writes it), or an
-/// interactive override can be placed on it. Anything else was folded at
-/// bake and cannot move without a rebuild.
+/// The rule itself is RigExecBakedNoteInput in bakedProgramImpl.h, because
+/// the weight half declares its inputs the same way and two spellings of
+/// "what can move this" is a step the cone cannot dirty.
 template <class T>
 void
 NoteInput(const RigExecBakedInput<T> &input, RigExecBakedStep *step)
 {
-    step->varyingInputs = step->varyingInputs || input.varying;
-    step->resolvedInputReads =
-        step->resolvedInputReads || bool(input.resolvedAttr);
-    if (input.overrideIndex >= 0) {
-        step->overrideInputs.push_back(input.overrideIndex);
-    }
+    RigExecBakedNoteInput(input, step);
 }
 
 /// Every per-frame input one solver's Solve step reads.
@@ -1516,6 +1522,10 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
             }
             break;
         }
+        case RigExecBakedStepKind::WeightPacket:
+            RigExecBakedNoteWeightInputs(
+                B.weightObjects[size_t(step.object)], &step);
+            break;
         default:
             break;
         }
@@ -1853,8 +1863,16 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             const double *a = &B.avars[size_t(i) * 11];
             const double units = a[10];
+            // A volume weight's placement is RIGID: its shape is
+            // inputs:scaleX/Y/Z's alone, so the transform-scale avars are
+            // read and discarded here rather than zeroed at bake -- exec
+            // never binds them at all, and a captured zero would be walked
+            // straight past by an override or an animated channel.
+            const bool noScale = B.noScaleAvars[size_t(i)] != 0;
             const GfMatrix4d avars = RigExecBakedComposeAvars(
-                a[0] * units, a[1] * units, a[2] * units, a[3], a[4], a[5],
+                a[0] * units, a[1] * units, a[2] * units,
+                noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
+                noScale ? 1.0 : a[5],
                 a[6], a[7], a[8], a[9], B.rotOrder[size_t(i)]);
             const GfMatrix4d parentPosed =
                 B.parent[size_t(i)] >= 0
@@ -2050,7 +2068,10 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         RigExecBakedCommit &commit = B.commits[size_t(step->object)];
         commit.abandoned = true;
         std::fill(commit.present.begin(), commit.present.end(), 0);
-        const RigExecBakedProgramImpl::Constraint &c =
+        // Non-const because the envelope arm below resolves into this
+        // constraint's own scratch, which is storage one step owns and no
+        // other step names.
+        RigExecBakedProgramImpl::Constraint &c =
             B.constraints[size_t(B.walkSteps[size_t(step->object)].index)];
         // Every exit below records the target's frame, because the dynamic
         // walk does: a phase names a POINT in the walk, and a constraint that
@@ -2078,14 +2099,39 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             finish();
             return;
         }
-        const double weight = rd(c.defaultWeight);
-        if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
-            step->diagnostics.push_back(
-                c.path.GetString() +
-                " has inputs:defaultWeight outside finite [0, 1]; "
-                "constraint passed through");
-            finish();
-            return;
+        // The envelope, in the dynamic path's two exclusive arms. A
+        // constraint copies the ORACLE -- the dynamic constraint path does
+        // not go through exec at all, it calls _ResolveWeights and takes its
+        // error string -- so this calls the same function with the same
+        // arguments and the answer is identical by construction.
+        //
+        // The finite-[0, 1] check belongs to the OTHER arm and must not be
+        // applied to a resolved envelope: the dynamic path does not check
+        // there, so checking would emit a diagnostic it never emits.
+        double weight = 1.0;
+        if (!c.weightObject.IsEmpty()) {
+            c.weightScratch.clear();
+            c.weightError.clear();
+            if (!B.resolveWeights(c.weightObject, 1, time, &c.weightScratch,
+                                  &c.weightError, nullptr) ||
+                c.weightScratch.size() != 1) {
+                step->diagnostics.push_back(
+                    c.path.GetString() + ": " + c.weightError +
+                    "; constraint passed through");
+                finish();
+                return;
+            }
+            weight = c.weightScratch[0];
+        } else {
+            weight = rd(c.defaultWeight);
+            if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
+                step->diagnostics.push_back(
+                    c.path.GetString() +
+                    " has inputs:defaultWeight outside finite [0, 1]; "
+                    "constraint passed through");
+                finish();
+                return;
+            }
         }
         if (weight <= 0.0) {
             // A zero envelope is an exact dormant pass-through, decided
@@ -2445,21 +2491,26 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         }
     }
 
-    // Four published domains have no baked counterpart YET, because
+    // Two published domains have no baked counterpart YET, because
     // bakeability still rules out everything that fills them -- so leaving
     // them empty is what agrees with the dynamic path rather than a gap in
     // the publication: providerXforms/providerBaseXforms come only from
-    // _xformDerivedProviders ("constraint target is a plain Xformable"),
-    // weightFrames only from volume weight objects, weightFields only from a
-    // mover's weight object. solverOverridesConverged stays true for the
-    // same kind of reason: it is cleared only by an incomplete exec
-    // snapshot, and there is no exec here.
+    // _xformDerivedProviders ("constraint target is a plain Xformable").
+    // solverOverridesConverged stays true for the same kind of reason: it is
+    // cleared only by an incomplete exec snapshot, and there is no exec
+    // here.
     //
-    // RigExecComparePoses compares all four regardless, so this block is a
-    // checklist rather than a licence: as each refusal above goes away, the
-    // domain it gated has to start being FILLED here, and the parity mode
-    // says so on the first generation that publishes one on the dynamic side
-    // and nothing on this one.
+    // The weight domains used to be on that list and no longer are: a
+    // volume weight object bakes, so weightFrames is published from the
+    // placement map the walk left (bakedProgram.cpp's epilogue), and a
+    // mover's weight object bakes, so weightFields is drained per revision
+    // beside the geometry it deformed (RigExecBakedPublishGeometry).
+    //
+    // RigExecComparePoses compares all of them regardless, so this block is
+    // a checklist rather than a licence: as each refusal above goes away,
+    // the domain it gated has to start being FILLED somewhere, and the
+    // parity mode says so on the first generation that publishes one on the
+    // dynamic side and nothing on this one.
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.

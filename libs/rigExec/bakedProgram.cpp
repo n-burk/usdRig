@@ -47,6 +47,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -117,6 +118,33 @@ _IsBakedSolverType(const TfToken &type)
     return type == "RigExecFkChain" || type == "RigExecTwoBoneIk" ||
            type == "RigExecBlendPointFrames" || type == "RigExecSplineIk" ||
            type == "RigExecTwistDistribution" || type == "RigExecRibbon";
+}
+
+// The three placeable weight shapes, which the evaluator spells the same way
+// in its own file-static _IsVolumeWeightType. Three tokens, and duplicating
+// them here is cheaper than widening a header for a predicate neither side
+// would ever change without the other.
+bool
+_IsVolumeWeightTypeName(const TfToken &type)
+{
+    return type == "RigExecSphereWeight" || type == "RigExecPlaneWeight" ||
+           type == "RigExecCurveWeight";
+}
+
+// The weight-object schemas the program can build a packet for.
+//
+// It is about the BUILDER and nothing else. The volumetric three are here
+// because RigExecBuildVolumeWeightPacket is one of the builders, and they are
+// still refused above by the _volumeWeightMatrixTaps loop, which is about the
+// PLACEMENT a volume's field needs -- which the pose walk now composes, so
+// the two questions have one answer again.
+// RigExecCurvenetWeight is the one weight object left out: its field comes off
+// a curvenet bind, which the program does not hold.
+bool
+_IsBakedWeightType(const TfToken &type)
+{
+    return type == "RigExecStaticWeight" || type == "RigExecDynamicWeight" ||
+           type == "RigExecCombineWeight" || _IsVolumeWeightTypeName(type);
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on
@@ -217,12 +245,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     for (const SdfPath &path : E._xformDerivedProviders) {
         say("constraint target is a plain Xformable", path);
     }
-    for (const auto &[path, tap] : E._volumeWeightMatrixTaps) {
-        say("volume weight object", path);
-    }
-    for (const SdfPath &path : E._currentPhaseWeights) {
-        say("current-phase volume weight", path);
-    }
     for (const auto &[path, movers] : E._snapshotPoints) {
         say("read-phase snapshot required on", path);
     }
@@ -245,7 +267,13 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             continue;
         }
         const TfToken type = prim.GetTypeName();
-        if (type != "RigExecJoint" && type != "RigExecControl") {
+        // The volumetric three are RigExecXformables, so the pose walk
+        // composes them into a slot exactly as it composes a joint -- with
+        // one difference the compose has to know about, which is that their
+        // scale avars are read and discarded (RigExecBakedProgramImpl::
+        // noScaleAvars).
+        if (type != "RigExecJoint" && type != "RigExecControl" &&
+            !_IsVolumeWeightTypeName(type)) {
             say("provider type not baked (" + type.GetString() + ")", path);
         }
         // A space expression the compose cannot express: the program builds
@@ -336,6 +364,58 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
+    // ---- weight objects -----------------------------------------------------
+    //
+    // A weight object is a COMPOSITION -- a dynamic weight remaps a base, a
+    // combine folds a list -- so every question about one is a question about
+    // its closure and not about the object a mover or a constraint happens to
+    // name. Both walks below carry a visited set of their own rather than
+    // trusting the compile pass to have rejected a cycle first: a
+    // bakeability check that only terminates because somebody else checked is
+    // not one to leave in place.
+    const auto walkWeights = [&E](const SdfPath &root,
+                                  const std::function<bool(const UsdPrim &)>
+                                      &visit) {
+        std::set<SdfPath> seen;
+        std::function<void(const SdfPath &)> walk = [&](const SdfPath &path) {
+            if (path.IsEmpty() || !seen.insert(path).second) {
+                return;
+            }
+            const UsdPrim prim = E._stage->GetPrimAtPath(path);
+            if (!prim || !visit(prim)) {
+                return;
+            }
+            for (const char *name : {"rigExec:baseWeight",
+                                     "rigExec:inputWeights"}) {
+                for (const SdfPath &input : _Targets(prim, name)) {
+                    walk(input);
+                }
+            }
+        };
+        walk(root);
+    };
+    const auto sayVolumeWeightOnConstraint = [&](const SdfPath &root,
+                                                 const SdfPath &where) {
+        walkWeights(root, [&](const UsdPrim &prim) {
+            if (_IsVolumeWeightTypeName(prim.GetTypeName())) {
+                say("volume weight object on constraint", where);
+                return false;
+            }
+            return true;
+        });
+    };
+    const auto sayUnbakedWeights = [&](const SdfPath &root) {
+        walkWeights(root, [&](const UsdPrim &prim) {
+            const TfToken type = prim.GetTypeName();
+            if (!_IsBakedWeightType(type)) {
+                say("weight object type not baked (" + type.GetString() + ")",
+                    prim.GetPath());
+                return false;
+            }
+            return true;
+        });
+    };
+
     // ---- constraints -------------------------------------------------------
     for (const auto &constraint : E._frameConstraints) {
         if (!constraint.pointsTarget.IsEmpty()) {
@@ -351,9 +431,16 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 constraint.moverPath);
             continue;
         }
-        if (!constraint.weightObject.IsEmpty()) {
-            say("weight object on constraint", constraint.moverPath);
-        }
+        // A constraint's envelope is resolved by the CPU oracle, which
+        // reads a volume's placement out of _volumeWeightMatrices as that
+        // map stands AT THE CONSTRAINT'S POINT IN THE WALK. The program
+        // republishes that map once, after the walk, because nothing else it
+        // does reads the map at all -- so a volume anywhere in a
+        // constraint's weight closure is still refused, and lifting this is
+        // the same change as moving that call into the commits.
+        sayVolumeWeightOnConstraint(constraint.weightObject,
+                                    constraint.moverPath);
+        sayUnbakedWeights(constraint.weightObject);
         if (constraint.targets.size() != 1) {
             say("constraint does not write exactly one target",
                 constraint.moverPath);
@@ -389,9 +476,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 r.moverPath);
             return;
         }
-        if (!r.binding.weightObject.IsEmpty()) {
-            say("weight object on mover", r.moverPath);
-        }
+        sayUnbakedWeights(r.binding.weightObject);
         if (!r.binding.blendInputs.empty()) {
             say("blend shape inputs on mover", r.moverPath);
         }
@@ -716,16 +801,15 @@ RigExecComparePoses(const RigExecRigPose &reference,
                 return a.size() == b.size() &&
                        std::equal(a.begin(), a.end(), b.begin(), sameFrame);
             });
-    // The weight domains, which nothing bakeable fills TODAY -- every
-    // feature that publishes one still refuses the bake, so both maps are
-    // empty on both paths and these two calls cost a pair of empty walks.
-    // They are here anyway, and ahead of the operators that will fill them:
-    // the day a weight object bakes, its very first generation is measured
-    // against the dynamic path instead of against a comparator that was
-    // never taught to look. A field is equal iff it weights the same
-    // property with the same floats, bit for bit -- a resolved field is what
-    // a mover actually consumed, and an element one path clamped and the
-    // other did not is exactly the difference a size check cannot see.
+    // The weight domains. They were compared here before anything could
+    // fill them, which is why a weight object's very first baked generation
+    // was measured against the dynamic path instead of against a comparator
+    // that had never been taught to look -- and they are both filled now: a
+    // mover's resolved field, and where every volume weight ended the walk.
+    // A field is equal iff it weights the same property with the same
+    // floats, bit for bit -- a resolved field is what a mover actually
+    // consumed, and an element one path clamped and the other did not is
+    // exactly the difference a size check cannot see.
     compare(reference.weightFields, baked.weightFields, "weight field",
             [](const RigExecResolvedWeightField &a,
                const RigExecResolvedWeightField &b) {
@@ -945,6 +1029,43 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.guideTaps = &E._guideTaps;
     B.solverGuidesEnabled = &E._solverGuidesEnabled;
     B.hasPropertyChains = !E._propertyChains.empty();
+    // Every volumetric weight's baked falloff remap, copied rather than
+    // recomputed: these are the same bytes the authoritative snapshot hands
+    // exec, and resampling the curve again here would risk a different
+    // answer for a spline edited between Compile and Build.
+    B.volumeWeightMatrices = &E._volumeWeightMatrices;
+    B.currentPhaseWeights = E._currentPhaseWeights;
+    B.updateVolumePlacements =
+        [evaluator](const std::function<
+                        bool(const SdfPath &, RigExecPointFrame *)> &lookup) {
+            // The pose is the routine's second output and this call wants
+            // only its first: what the program publishes is the MAP, which
+            // the epilogue copies where the dynamic walk assigns it from.
+            // One empty pose per frame, and nothing in it but the same
+            // handful of matrices.
+            RigExecRigPose unused;
+            evaluator->_UpdateVolumePlacements(
+                RigExecPoseFrameLookup(lookup), &unused);
+        };
+    // The oracle a constraint's envelope resolves through, bound here
+    // because this is the only translation unit the evaluator's friendship
+    // reaches. `evaluator` outlives the program -- the evaluator owns it and
+    // drops it on any epoch change -- so capturing the pointer is safe in
+    // exactly the way every other capture in this block is.
+    B.resolveWeights = [evaluator](const SdfPath &weightPath, size_t count,
+                                   UsdTimeCode time,
+                                   std::vector<float> *weights,
+                                   std::string *error,
+                                   const std::vector<GfVec3f> *current) {
+        return evaluator->_ResolveWeights(weightPath, count, time, weights,
+                                          error, current);
+    };
+    for (const RigExecValueOverride &override : E._falloffLutOverrides) {
+        if (override.value.IsHolding<RigExecFalloffLut>()) {
+            B.falloffLuts[override.prim] =
+                override.value.UncheckedGet<RigExecFalloffLut>().samples;
+        }
+    }
 
     RigExecBakedBuildContext ctx;
     ctx.program = &B;
@@ -1006,6 +1127,13 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             B.index[path] = int(B.paths.size());
             B.paths.push_back(path);
             B.slotKind.push_back(kind);
+            // Read here, with the type already in hand, rather than in the
+            // compose: a volume weight's placement is rigid, and the
+            // transform-scale avars it would otherwise compose with are
+            // exactly the ones exec never binds.
+            const UsdPrim prim = B.stage->GetPrimAtPath(path);
+            B.noScaleAvars.push_back(
+                prim && _IsVolumeWeightTypeName(prim.GetTypeName()) ? 1 : 0);
         }
     }
     const int N = int(B.paths.size());
@@ -1211,6 +1339,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                 entry.constraint.sources.push_back(source.sourcePath);
             }
             entry.constraint.worldUpObject = fc.worldUpObject.sourcePath;
+            entry.constraint.weightObject = fc.weightObject;
         }
         walk.push_back(std::move(entry));
     }
@@ -1411,6 +1540,10 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // between them follow from the slot ranges each piece declares. Built
     // once here, so that a frame costs the graph nothing.
     RigExecBakedBuildPoseSteps(&B);
+    // Between the two halves, which is where a weight object belongs in
+    // program order: its placement comes from the pose walk and its packet is
+    // what a revision assembles against.
+    RigExecBakedBuildWeightSteps(&B);
     RigExecBakedBuildGeometrySteps(&B);
     RigExecBakedBuildSchedule(&B);
     if (RigExecBakedScheduleReportRequested()) {
@@ -1614,6 +1747,14 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     }
     if (!RigExecBakedPublishPose(&B, pose)) {
         return false;  // the dynamic fallback needs exec
+    }
+    // Where every volume weight ended up, as the VolumePlacements step left
+    // it. The dynamic walk assigns the pose from the same map at the same
+    // point -- the last refresh before anything reads it -- and a run whose
+    // cone skipped the step is a run in which no volume's final frame moved,
+    // so the map it kept is still this generation's.
+    if (B.volumeWeightMatrices) {
+        pose->weightFrames = *B.volumeWeightMatrices;
     }
     RigExecBakedPublishGeometry(&B, pose);
 

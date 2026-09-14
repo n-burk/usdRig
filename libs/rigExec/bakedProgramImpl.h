@@ -50,6 +50,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -444,6 +445,8 @@ enum class RigExecBakedSlotDomain : uint8_t {
     ChainDirty,          ///< the chain's sticky dirty bit as of one revision
     ChainPoints,         ///< the chain's published points
     DerivedOut,          ///< one derived target's output
+    WeightPacket,        ///< one weight object's packet for this frame
+    WeightFrames,        ///< where every volume weight is placed, as one slot
     Snapshots,           ///< the phased-read records one step made
 };
 /// Derived from the last enumerator rather than written out: an array
@@ -553,6 +556,8 @@ enum class RigExecBakedStepKind {
     CommitApply,      ///< a split commit's decision and write-back
     ProviderMatrix,   ///< one provider's rest -> final or rest -> base matrix
     SnapshotFinals,   ///< every provider's final matrix, for a phased read
+    VolumePlacements, ///< every volume weight's placement, from the walk
+    WeightPacket,     ///< one weight object's packet, built once per frame
     InfluenceFold,    ///< one revision's influence table
     RevisionStatic,   ///< one revision's packet, status and executed decision
     RevisionChunk,    ///< one vertex range of one revision
@@ -620,6 +625,8 @@ struct RigExecBakedStep {
     ///     PropagateChunk/CommitApply                index into commits
     ///   ProviderMatrix                              provider slot
     ///   SnapshotFinals                              unused
+    ///   VolumePlacements                            unused
+    ///   WeightPacket                                index into weightObjects
     ///   InfluenceFold/RevisionStatic/
     ///     RevisionChunk/RevisionFuse                index into revisionIndex
     ///   ChainStatus                                 index into chains
@@ -1048,6 +1055,17 @@ struct RigExecBakedProgramImpl {
     std::vector<GfMatrix4d> selfD;                     // default:space
     std::vector<GfMatrix4d> parentDinv;                // parent default^-1
     std::vector<TfToken> rotOrder;
+    /// Per provider slot: the scale avars are read and DISCARDED.
+    ///
+    /// A volume weight is a RigExecXformable whose point frame is composed
+    /// with readScaleAvars = false, because a volume's shape is
+    /// inputs:scaleX/Y/Z's alone and a transform scale left in the placement
+    /// would deform the field without deforming the rigid guide a viewer
+    /// draws. Exec expresses that by never binding avars:sx/sy/sz at all --
+    /// so the discard has to happen at COMPOSE time and not by zeroing the
+    /// captured constants, which an override or an animated channel would
+    /// walk straight past.
+    std::vector<char> noScaleAvars;
 
     // ---- the input binding table ------------------------------------------
     std::vector<double> avarConstants;                 // providers * 11
@@ -1256,6 +1274,16 @@ struct RigExecBakedProgramImpl {
     struct Constraint {
         SdfPath path;
         TfToken type;
+        /// rigExec:weightObject, empty when the constraint binds none.
+        ///
+        /// Deliberately NOT an index into `weightObjects`: a constraint
+        /// copies the ORACLE, and the oracle resolves the whole composition
+        /// itself from the stage (see the head of bakedWeights.cpp).
+        SdfPath weightObject;
+        /// The one float the oracle resolves into, and the string it would
+        /// report. Sized at Build so the step body allocates neither.
+        std::vector<float> weightScratch;
+        std::string weightError;
         int target = -1;
         std::vector<int> sources;
         RigExecBakedInput<bool> enabled;
@@ -1619,6 +1647,32 @@ struct RigExecBakedProgramImpl {
         /// whole rather than a chunk deforming a vertex against an identity.
         bool partitionStale = false;
 
+        // ---- the weight object this revision binds -------------------------
+        /// rigExec:weightObject as an index into `weightObjects`, or -1.
+        /// The packet itself is shared -- one per object per frame, however
+        /// many movers bind it -- so what a revision holds is the index.
+        int weightObject = -1;
+        /// Whether the weight object weights the MOVER (one declared target,
+        /// and it is this mover) rather than the points. Decided at Build
+        /// because it is a relationship read, and the relationship is epoch
+        /// state; the condition is the dynamic path's, verbatim.
+        bool weightOperationDomain = false;
+        /// The property the published field says it weights: the mover for
+        /// an operation-domain object, the chain's target otherwise.
+        SdfPath weightFieldTarget;
+        /// The field is measured against the points ENTERING this revision,
+        /// so the shared packet is not this revision's answer: it patches a
+        /// copy of its own, exactly the fields the dynamic path patches, and
+        /// assembles against that.
+        bool weightCurrentPhase = false;
+        RigExecWeightPacket currentPhasePacket;
+        /// The field this revision published this run, and whether it
+        /// published one at all. Written by RevisionStatic -- which is where
+        /// the dynamic path publishes it, from the packet the mover is about
+        /// to consume -- and drained by the epilogue in chain order.
+        std::vector<float> weightField;
+        bool weightFieldPublished = false;
+
         // ---- what InfluenceFold decides for the whole array ----------------
         /// Every influence matrix finite and affine. For a skin revision the
         /// packet cannot answer this -- it is assembled before the matrices
@@ -1722,7 +1776,7 @@ struct RigExecBakedProgramImpl {
     struct WeightObject {
         SdfPath path;
         TfToken type;
-        TfToken representation, rangePolicy, operation;
+        TfToken representation, rangePolicy;
         // RigExecStaticWeight: every field is uniform, so all three fold --
         // but they are still REGISTERED, so a drag on a painted weight can
         // be placed.
@@ -1739,19 +1793,97 @@ struct RigExecBakedProgramImpl {
         // Combine.
         TfToken combineMode;
         RigExecBakedInput<float> strength, invert;
-        size_t weightTargetCount = 0;
-        /// True when anything this object reads can move between frames --
-        /// its own bound inputs, or any object it composes. A false one is
-        /// built once and replayed.
-        bool varying = false;
-        RigExecWeightPacket cached;
-        bool haveCached = false;
+        /// The combine's own rigExec:weightTarget, read for its SIZE alone.
+        std::vector<UsdAttribute> combineTargetPoints;
+        /// Roughly how many elements this object's packet carries, for the
+        /// cost model alone. Measured once at Build off the same arrays the
+        /// chain point counts are measured from; a packet whose field turns
+        /// out to be a different size costs the schedule a bin, never an
+        /// answer.
+        size_t costElements = 1;
+
+        // ---- the volumetric three ------------------------------------------
+        /// The provider slot the volume is posed into, and therefore the
+        /// BASE frame its field is placed against -- base and not final,
+        /// because the evaluator overrides every seeded provider's
+        /// computePointFrame with its base frame before the authoritative
+        /// snapshot, and a mover's packet is what that snapshot carries.
+        int providerSlot = -1;
+        RigExecBakedInput<float> falloffMin, falloffMax;
+        RigExecBakedInput<float> scaleX, scaleY, scaleZ;
+        RigExecBakedInput<float> extentU, extentV;
+        TfToken planeAxis, planeBounds;
+        /// The points-bearing relationships, as the attributes their
+        /// AUTHORED targets name, in authored order.
+        ///
+        /// Authored and not canonicalized: exec reaches these through
+        /// Relationship().TargetedObjects<GfVec3f>(computeValue), which
+        /// computes a value on each targeted OBJECT, so a target naming a
+        /// prim rather than its .points contributes nothing there however
+        /// readily the CPU oracle infers one. A mover copies exec, so this
+        /// list holds exactly the properties exec would have reached. No
+        /// shipped rig authors the prim form -- every weightTarget in the
+        /// tree and in the fixtures names `.points` -- so the two readings
+        /// agree everywhere today, and where they would not, this is the
+        /// one that is a mover's answer.
+        std::vector<UsdAttribute> targetPoints, samplePoints, curvePoints;
+        /// The epoch's resampled falloff remap, copied from falloffLuts.
+        std::vector<float> falloffCurve;
     };
     std::vector<WeightObject> weightObjects;
     /// Path to index in weightObjects. A NEGATIVE entry is an object whose
     /// composition walk is under way (the bake is depth first and enters the
     /// table on the way out), so meeting one is a cycle.
     std::map<SdfPath, int> weightIndex;
+    /// The weight oracle, as the evaluator's own RigExecRigEvaluator::
+    /// _ResolveWeights.
+    ///
+    /// A pointer to a member function rather than a call, because only
+    /// bakedProgram.cpp is the evaluator's friend and the constraint that
+    /// needs it lives in bakedPose.cpp. It is the SAME function the dynamic
+    /// constraint path calls with the same arguments, which is what makes
+    /// the answer and the error string identical by construction rather
+    /// than by review -- a constraint's envelope is one of the two places
+    /// the dynamic path does not go through exec at all.
+    std::function<bool(const SdfPath &, size_t, UsdTimeCode,
+                       std::vector<float> *, std::string *,
+                       const std::vector<GfVec3f> *)> resolveWeights;
+
+    /// Where each volume weight object is placed, as the walk left it.
+    ///
+    /// A POINTER to the evaluator's own _volumeWeightMatrices, because the
+    /// oracle reads that member and nothing else: a program-owned copy would
+    /// be a second map the oracle never looks at. Written by the one
+    /// VolumePlacements step, which declares it, so no two steps can be
+    /// inside it at once.
+    std::map<SdfPath, GfMatrix4d> *volumeWeightMatrices = nullptr;
+    /// RigExecRigEvaluator::_UpdateVolumePlacements, bound at Build.
+    ///
+    /// The body has a subtlety worth not restating: a frame no matrix can be
+    /// built from leaves whatever the failed decomposition wrote, over an
+    /// identity seed, rather than the identity. Calling the evaluator's own
+    /// is how the program cannot drift from that.
+    std::function<void(const std::function<
+        bool(const SdfPath &, RigExecPointFrame *)> &)> updateVolumePlacements;
+    /// Weight objects whose field is measured against the points AS THEY
+    /// STAND at the revision that binds them, rather than the authored base
+    /// (the evaluator's _currentPhaseWeights). A combine is in here when
+    /// anything inside it is.
+    std::set<SdfPath> currentPhaseWeights;
+
+    /// Every volumetric weight object's baked falloff remap, by prim path.
+    ///
+    /// Copied out of the evaluator's own _falloffLutOverrides at Build, not
+    /// recomputed: a falloff curve is epoch-structural (exec has no accessor
+    /// for an attribute's spline, so the curve is resampled once at Compile
+    /// and replayed unchanged), and these are literally the bytes exec
+    /// receives.
+    std::map<SdfPath, std::vector<float>> falloffLuts;
+    /// This frame's packet per weight object -- the WeightPacket slot
+    /// domain's storage. Sized at Build and never resized in a run, like
+    /// every other slot: a consumer holds a pointer into it for the whole
+    /// region.
+    std::vector<RigExecWeightPacket> weightPackets;
 
     // ---- the invalidation index --------------------------------------------
     //
@@ -1868,6 +2000,8 @@ struct RigExecBakedConstraintSpec {
     SdfPathVector sources;
     /// Empty when the aim constraint named no world-up object.
     SdfPath worldUpObject;
+    /// rigExec:weightObject, empty when the constraint binds none.
+    SdfPath weightObject;
 };
 
 /// One geometry revision of a compiled chain.
@@ -2037,6 +2171,20 @@ void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
+/// Appends the placement step, if the epoch has any volume weight at all,
+/// then one WeightPacket step per weight object in the table's dependency
+/// order -- all of it between the pose half and the geometry half.
+void RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program);
+
+/// Runs one WeightPacket step, under the same rule as the other two.
+void RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
+                               RigExecBakedStep *step, UsdTimeCode time);
+
+/// Every per-frame input one weight object's step reads.
+void RigExecBakedNoteWeightInputs(
+    const RigExecBakedProgramImpl::WeightObject &weight,
+    RigExecBakedStep *step);
+
 /// Resets the per-run DELTAS a geometry step would have written, for a run
 /// that skipped it (§7).
 ///
@@ -2111,6 +2259,30 @@ void RigExecBakedPartitionRevision(
 /// longer wait for the leg constraints" a measured claim per asset rather
 /// than a design intention.
 std::string RigExecBakedGeometryReport(const RigExecBakedProgramImpl &program);
+
+/// Records \p input against \p step: what a frame can move it with.
+///
+/// Three answers, and each is a different way a value can arrive: it is a
+/// function of time (a keyframe), it resolves through the generation's
+/// resolved inputs every frame (a property chain writes it), or an
+/// interactive override can be placed on it. Anything else was folded at
+/// bake and cannot move without a rebuild.
+///
+/// It is here rather than beside one domain's step builders because all
+/// three domains declare inputs and a domain that declared them its own way
+/// would be a step the cone cannot dirty.
+template <class T>
+inline void
+RigExecBakedNoteInput(const RigExecBakedInput<T> &input,
+                      RigExecBakedStep *step)
+{
+    step->varyingInputs = step->varyingInputs || input.varying;
+    step->resolvedInputReads =
+        step->resolvedInputReads || bool(input.resolvedAttr);
+    if (input.overrideIndex >= 0) {
+        step->overrideInputs.push_back(input.overrideIndex);
+    }
+}
 
 /// Bakes the weight object at \p path, and everything it composes, into
 /// \p ctx's table; returns its index, or -1 when there is nothing there.
@@ -2243,6 +2415,9 @@ struct RigExecBakedRunShadow {
         bool influencesValid = false, influencesChanged = false;
         bool staticDirty = false, partitionStale = false;
         bool layoutUsable = false, envelopeOk = false, fullStrength = false;
+        std::vector<float> weightField;
+        RigExecWeightPacket currentPhasePacket;
+        bool weightFieldPublished = false;
     };
     struct DerivedState {
         RevisionState revision;
@@ -2270,6 +2445,7 @@ struct RigExecBakedRunShadow {
     };
 
     std::vector<double> avars;
+    std::vector<RigExecWeightPacket> weightPackets;
     std::vector<GfMatrix4d> posedM, finalMatrix, baseMatrix;
     std::vector<RigExecPointFrame> base, fin;
     std::vector<RigExecPointFrameArray> aggregates;
