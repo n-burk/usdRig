@@ -2159,21 +2159,26 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         }
     }
 
-    // Four published domains have no baked counterpart YET, because
+    // Two published domains have no baked counterpart YET, because
     // bakeability still rules out everything that fills them -- so leaving
     // them empty is what agrees with the dynamic path rather than a gap in
     // the publication: providerXforms/providerBaseXforms come only from
-    // _xformDerivedProviders ("constraint target is a plain Xformable"),
-    // weightFrames only from volume weight objects, weightFields only from a
-    // mover's weight object. solverOverridesConverged stays true for the
-    // same kind of reason: it is cleared only by an incomplete exec
-    // snapshot, and there is no exec here.
+    // _xformDerivedProviders ("constraint target is a plain Xformable").
+    // solverOverridesConverged stays true for the same kind of reason: it is
+    // cleared only by an incomplete exec snapshot, and there is no exec
+    // here.
     //
-    // RigExecComparePoses compares all four regardless, so this block is a
-    // checklist rather than a licence: as each refusal above goes away, the
-    // domain it gated has to start being FILLED here, and the parity mode
-    // says so on the first generation that publishes one on the dynamic side
-    // and nothing on this one.
+    // The weight domains used to be on that list and no longer are: a
+    // volume weight object bakes, so weightFrames is published from the
+    // placement map the walk left (bakedProgram.cpp's epilogue), and a
+    // mover's weight object bakes, so weightFields is drained per revision
+    // beside the geometry it deformed (RigExecBakedPublishGeometry).
+    //
+    // RigExecComparePoses compares all of them regardless, so this block is
+    // a checklist rather than a licence: as each refusal above goes away,
+    // the domain it gated has to start being FILLED somewhere, and the
+    // parity mode says so on the first generation that publishes one on the
+    // dynamic side and nothing on this one.
 
     // Property-domain results, in the same map as the point chains: a
     // consumer tells them apart by the type the VtValue holds.

@@ -819,16 +819,15 @@ RigExecComparePoses(const RigExecRigPose &reference,
                 return a.size() == b.size() &&
                        std::equal(a.begin(), a.end(), b.begin(), sameFrame);
             });
-    // The weight domains, which nothing bakeable fills TODAY -- every
-    // feature that publishes one still refuses the bake, so both maps are
-    // empty on both paths and these two calls cost a pair of empty walks.
-    // They are here anyway, and ahead of the operators that will fill them:
-    // the day a weight object bakes, its very first generation is measured
-    // against the dynamic path instead of against a comparator that was
-    // never taught to look. A field is equal iff it weights the same
-    // property with the same floats, bit for bit -- a resolved field is what
-    // a mover actually consumed, and an element one path clamped and the
-    // other did not is exactly the difference a size check cannot see.
+    // The weight domains. They were compared here before anything could
+    // fill them, which is why a weight object's very first baked generation
+    // was measured against the dynamic path instead of against a comparator
+    // that had never been taught to look -- and they are both filled now: a
+    // mover's resolved field, and where every volume weight ended the walk.
+    // A field is equal iff it weights the same property with the same
+    // floats, bit for bit -- a resolved field is what a mover actually
+    // consumed, and an element one path clamped and the other did not is
+    // exactly the difference a size check cannot see.
     compare(reference.weightFields, baked.weightFields, "weight field",
             [](const RigExecResolvedWeightField &a,
                const RigExecResolvedWeightField &b) {

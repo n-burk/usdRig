@@ -1619,7 +1619,15 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
         step.startUs = step.endUs = 0;
     }
     // The sources, before anything that could be skipped: they are what the
-    // dirty set is computed FROM, and they read nothing a step writes.
+    // dirty set is computed FROM. They read nothing a step OUTSIDE this pass
+    // writes -- which is not the same as reading nothing at all, and stopped
+    // being the same when weight objects started baking: a source weight
+    // packet is composed from other source packets, and a source assemble
+    // reads them. So this loop stays SERIAL and stays in program order,
+    // which for the weight steps is dependency order; running it in
+    // parallel, or reordering it, would read a packet before its own step
+    // built it. Anything added here that needs a different order needs its
+    // own edges instead.
     for (RigExecBakedStep &step : program->steps) {
         if (step.isSource) {
             RunStepBody(program, &step, time);
