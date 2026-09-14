@@ -1196,12 +1196,55 @@ struct RigExecBakedProgramImpl {
     std::vector<RigExecPointFrame> nativeFrames, lastNativeFrames;
     std::vector<char> nativeFrameOk, lastNativeFrameOk;
 
-    // ---- epoch constants resolved at bake ---------------------------------
+    // ---- the provider ladder ----------------------------------------------
+    //
+    // The rest chain and the default-space ladder, resolved once at Build
+    // and again on any frame that can move them. Every channel below is a
+    // BOUND input rather than a folded constant, which is what lets an
+    // animated, connected or chain-written rest bake and what lets a drag
+    // on one be placed; when nothing varies and nothing is dragged the
+    // Build-time answer stands and the frame path never looks at any of
+    // them, which is the fast path the whole rig shape used to be.
+    struct Ladder {
+        RigExecBakedInput<GfMatrix4d> restSpace, defaultSpace, posedSpace;
+        /// rest:tx/ty/tz/rx/ry/rz and default:tx/ty/tz/rx/ry/rz, in that
+        /// order, which is the order RigExecBakedComposeAvars takes them in.
+        RigExecBakedInput<double> restAvars[6];
+        RigExecBakedInput<double> defaultAvars[6];
+        RigExecBakedInput<TfToken> rotationOrder;
+    };
+    /// One per slot; an xform-derived slot's is unused and stays default.
+    std::vector<Ladder> ladders;
+    /// True when any channel of any ladder is read per frame. False is the
+    /// ordinary rig, and it is what keeps the recompute off the frame path.
+    bool ladderVarying = false;
+    /// Every override index a ladder channel registered, sorted and unique.
+    /// Consulted only while a drag stands, to decide whether that drag is
+    /// one of THESE inputs.
+    std::vector<int> ladderOverrides;
+    /// True while the ladder still holds values recomputed for a drag; the
+    /// same one-more-pass rule the avar table's `avarsDisturbed` states.
+    bool ladderDisturbed = false;
+    /// The slots whose ladder values moved this run, which is the skip hook
+    /// a recomputed ladder owes the schedule: a provider whose rest or
+    /// default space moved has to recompose, and so does everything reading
+    /// the rest -> pose matrices below it.
+    std::vector<int> ladderMovedSlots;
+    /// True on a run whose prologue recomposed the ladder. A solver rest
+    /// description is rebuilt from the rests, so it is rebuilt exactly on
+    /// these runs -- including the one after a drag is released, which is
+    /// why the flag is "did it run" and not "does it vary".
+    bool ladderRecomputed = false;
+    /// Per slot, whether the REST CHAIN reaching it can move within the
+    /// epoch: its own rest channels, or any ancestor's. A solver measures
+    /// its description from these, so it is the question a solver asks.
+    std::vector<char> restChainVaries;
+
     /// A non-identity AUTHORED posed:space, per slot. Exec returns its frame
     /// directly and reads neither the avars nor the parent, so the compose
     /// takes the same branch: the flag is the "authored" test
-    /// computations.cpp makes, decided once because the value is an epoch
-    /// constant (an animated or connected one still refuses the bake).
+    /// computations.cpp makes, re-taken on any frame the ladder is
+    /// recomputed on, because an animated posed:space can cross identity.
     std::vector<char> posedAuthored;
     std::vector<GfMatrix4d> posedAuthoredM;
     std::vector<GfMatrix4d> restM;                     // asset-space rest
@@ -1210,6 +1253,16 @@ struct RigExecBakedProgramImpl {
     std::vector<GfMatrix4d> selfD;                     // default:space
     std::vector<GfMatrix4d> parentDinv;                // parent default^-1
     std::vector<TfToken> rotOrder;
+    /// The frame round trips exec performs between its ladder computations,
+    /// which a deep chain drifts without. Per slot, in slot order, because
+    /// a child reads its parent's.
+    std::vector<GfMatrix4d> restRoundTrip, defaultRoundTrip;
+    /// What the run before composed, for the move comparison above. Sized
+    /// only when a ladder can actually move.
+    std::vector<GfMatrix4d> lastRestM, lastSelfD, lastParentDinv,
+        lastPosedAuthoredM;
+    std::vector<char> lastPosedAuthored;
+    std::vector<TfToken> lastRotOrder;
     /// Per provider slot: the scale avars are read and DISCARDED.
     ///
     /// A volume weight is a RigExecXformable whose point frame is composed
@@ -1321,6 +1374,28 @@ struct RigExecBakedProgramImpl {
     struct Solver {
         SdfPath path;
         TfToken type;
+        // ---- the rest description ------------------------------------
+        //
+        // Exec rebuilds every one of the rest members below from the
+        // epoch's rests on EVERY evaluation, because it is a pure function
+        // of them. The bake resolves it once, and RigExecBakedRefreshSolver
+        // Rests resolves it again on any run whose prologue recomposed the
+        // ladder -- which is what lets a solver measure against an animated,
+        // chain-written or dragged rest instead of refusing the rig.
+        /// Every provider slot whose rest this description folded in.
+        std::vector<int> restSlots;
+        /// (slot, element) for the two computations that remap by element:
+        /// TwoBoneIk and SplineIk.
+        std::vector<std::pair<int, int>> restRefs;
+        /// True when any slot's whole rest CHAIN can move with time.
+        bool restsVary = false;
+        /// Every override index a rest channel of that chain registered, so
+        /// a drag on one dirties this solver's step.
+        std::vector<int> restOverrides;
+        /// SplineIk rebuilds its rest curve from these two beside the rests.
+        std::vector<double> splineRestWeights;
+        RigExecSplineIkRestLength splineRestMode =
+            RigExecSplineIkRestLength::Curve;
         /// The bake found this solver's rigExec:joints / jointElements
         /// binding malformed in one of the ways its exec computation checks
         /// at runtime. Such a computation warns and returns an EMPTY
@@ -2353,6 +2428,7 @@ struct RigExecBakedBuildContext {
     /// RigExecBlendPointFrames may read another one's aggregate, and the
     /// order is what makes the reader run second.
     std::vector<SdfPath> guideOnlySolvers;
+
     std::vector<std::string> *reasons = nullptr;
     bool ok = true;
 
@@ -2490,6 +2566,22 @@ void RigExecBakedNoteWeightInputs(
 /// nothing, which is what this writes.
 void RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
                                   RigExecBakedStep *step);
+
+/// Resolves every provider's rest chain and default-space ladder from the
+/// bound channels of RigExecBakedProgramImpl::ladders, in slot order.
+///
+/// ONE definition, called from Build (once, at the capture time) and from
+/// the prologue (on any frame a channel can have moved). computations.cpp
+/// resolves the same eight computations per provider per evaluation; the
+/// frame round trips exec performs between them are reproduced, not
+/// simplified away, because a deep chain drifts without them.
+///
+/// \p trackMoves fills RigExecBakedProgramImpl::ladderMovedSlots by
+/// comparing what it composes against what the run before composed, which
+/// is what dirties the compose of a provider whose rest moved. Build passes
+/// false: there is no run before, and the first run dirties everything.
+void RigExecBakedComposeLadder(RigExecBakedProgramImpl *program,
+                               UsdTimeCode time, bool trackMoves);
 
 /// The pose half of the prologue: the bound inputs, once per run.
 void RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time);

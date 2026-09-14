@@ -524,6 +524,49 @@ fixture. That is the §5.2 "check the static input cache before merging" item, a
 back clean: `_bypasses` is already a `std::atomic<size_t>`, which is the one member of the cache
 written off the owning thread.
 
+### Phase 4: the provider ladder
+
+The rest chain and the default-space ladder used to be EPOCH CONSTANTS: Build resolved
+`restM`/`restPts`/`restFrames`, `selfD`, `parentDinv`, `rotOrder` and the authored-`posed:space`
+flag once and folded every channel feeding them, so an animated, connected or chain-written rest
+refused the bake and a drag on one was "interactive overrides are not placeable". They are per-frame
+inputs now. What that adds to the model, for a later group:
+
+* **No new step kind and no new slot domain.** The ladder is recomposed in the POSE PROLOGUE, beside
+  the avar table, by `RigExecBakedComposeLadder` -- the same function Build calls once at the
+  capture time, so the two answers cannot drift. It is a prologue pass and not a step for the reason
+  the bound inputs are one: it reads USD (through the bindings), and a step body may not.
+* **Fifteen bound channels per provider** (`RigExecBakedProgramImpl::Ladder`): `rest:space`,
+  `default:space`, `posed:space`, six rest avars, six default avars and `avars:rotationOrder`. The
+  SPACE EXPRESSIONS (`parent:space`, `parent:defaultSpace`, `avars:defaultSpace`,
+  `posed:defaultSpace`) stay FOLDED, because authoring one replaces the compose rather than moving a
+  value in it.
+* **The fast path is the ordinary rig, and it is the same fast path.** `ladderVarying` is false when
+  no channel varies; the prologue then does nothing at all and every consumer reads the Build-time
+  arrays. Measured on `Biped_anim.usda`, eight frames, baked mode: 0.45-0.50 s and 135 MB peak RSS
+  against 0.43-0.44 s and 134 MB at a1c2ea9 -- the ~1.7 MB is the retained bindings, and the time is
+  Build's, once.
+* **A new §7 per-run delta, with its skip hook.** `ladderMovedSlots` is filled by the recompose, by
+  VALUE and not by "it was recomputed", and `bakedSchedule.cpp` dirties `cones.avarCluster[slot]` for
+  each -- which is the compose group that declares the write every reader of that provider's frame
+  and of its rest -> pose matrices hangs off. The hook is load-bearing: removed, a three-joint rig
+  with static avars and one animated `rest:tx` reports four parity mismatches at frames 2 and 3,
+  from both the comparator and the cone verifier.
+* **A solver's REST DESCRIPTION is rebuilt with it.** An FkChain's control rests, a TwoBoneIk's
+  measured bone lengths, a SplineIk's rest curve and a twist's two endpoints are pure functions of
+  the rests, so `RefreshSolverRests` redoes them in the Solve step on any run whose prologue
+  recomposed the ladder -- pure arithmetic over `B.restPts`, no lock and no USD read. The Solve step
+  declares what can move it the two ways §7 asks about separately: `varyingInputs` for a rest that
+  varies with time, and `overrideInputs` carrying every rest-channel override index of the whole
+  rest CHAIN above each slot it measured from, for a drag that moves one where no time did.
+* **What still refuses, and why it is not this.** A CONNECTED `rest:space`, `default:space` or
+  `posed:space` stays refused. Exec reads all three through `computeValue`, and on a provider's space
+  attributes `computeValue` is a COMPUTATION -- the space expression that follows the namespace
+  parent, or a posed frame -- so the connection resolves to something no per-frame read off the
+  stage can answer. The scalar and token channels are not the same question: exec resolves each of
+  them through `computeResolvedValue`, which is the single-connection walk
+  `RigExecBakedClassifyInput` performs, so a connected `rest:tx` bakes.
+
 ### What holds it to account
 
 * `tests/testRigExecBakedSchedule` -- every edge forward, every read written or sourced, no two
@@ -544,6 +587,10 @@ written off the owning thread.
   of the whole program from the same starting state.
 * `example_parity_*` and the `*BakedParity` suites -- both paths in one generation, compared
   exactly, on every shipped rig that bakes.
+* `testRigExecEpochRests{BakedParity,Cones_serial,Cones_parallel}` -- the suite that moves rests on
+  purpose, under `RIGEXEC_BAKE_REQUIRED=1` as of Phase 4. It is the only place a rest is animated,
+  connected, written by a property chain and dragged, and the only place a program that went back to
+  folding one would show up.
 
 ---
 

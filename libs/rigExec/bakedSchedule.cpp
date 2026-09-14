@@ -1289,6 +1289,14 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 dirty.Set(cones.avarCluster[size_t(B.xformSlots[k])]);
             }
         }
+        // The provider ladder, where the prologue recomposed it and found a
+        // value moved: a rest, a default space or an authored posed:space
+        // that moved recomposes its provider, and the compose group is what
+        // declares the write every reader of that frame -- and of the
+        // rest -> pose matrices beside it -- hangs off.
+        for (const int slot : B.ladderMovedSlots) {
+            dirty.Set(cones.avarCluster[size_t(slot)]);
+        }
         // A constraint's own authored tables, which the prologue re-reads
         // at the frame's time. Compared by value, values and diagnostic
         // together, because a cardinality line that changed is a published

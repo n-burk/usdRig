@@ -95,6 +95,16 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                           const std::vector<std::pair<SdfPath, int>>
                               &jointOutputs) {
         RigExecBakedProgramImpl::Solver s;
+        // Every slot whose REST this description measures from. Recorded at
+        // the point the rest is actually read, so the list is exactly what
+        // RigExecBakedRefreshSolverRests has to rebuild from and cannot
+        // drift from it by one solver type.
+        auto foldRest = [&s](int slot) {
+            if (slot >= 0) {
+                s.restSlots.push_back(slot);
+            }
+            return slot;
+        };
         s.path = solverPath;
         const UsdPrim prim = B.stage->GetPrimAtPath(solverPath);
         s.type = prim.GetTypeName();
@@ -151,6 +161,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 restRefs.emplace_back(restSlots[k],
                                       useRemap ? elements[k] : int(k));
             }
+            s.restRefs = restRefs;
         }
         for (const auto &[joint, element] : jointOutputs) {
             const int slot = slotOf(joint);
@@ -183,7 +194,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                     continue;
                 }
                 s.controls.push_back(slot);
-                s.controlRests.push_back(B.restPts[slot]);
+                s.controlRests.push_back(B.restPts[foldRest(slot)]);
             }
         } else if (s.type == "RigExecTwoBoneIk") {
             const auto r = targets(prim, "rigExec:rootControl");
@@ -209,7 +220,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                     s.degenerate = true;
                     continue;
                 }
-                s.ikRests[size_t(element)] = B.restPts[slot];
+                s.ikRests[size_t(element)] = B.restPts[foldRest(slot)];
                 seen[size_t(element)] = true;
             }
             if (!(seen[0] && seen[1] && seen[2])) {
@@ -300,7 +311,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                     continue;
                 }
                 filled[size_t(element)] = true;
-                restJoints[size_t(element)] = B.restFrames[slot];
+                restJoints[size_t(element)] = B.restFrames[foldRest(slot)];
                 s.splineJointRests[size_t(element)] = B.restPts[slot];
             }
             std::vector<double> weights;
@@ -319,13 +330,21 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 restTok != "chain") {
                 s.degenerate = true;
             }
-            // Exec rebuilds this description every evaluation; it is a pure
-            // function of epoch-constant rests, so it bakes out.
+            // Exec rebuilds this description every evaluation. It is a pure
+            // function of the rests plus these two, so the two are kept and
+            // the rebuild happens again only on a run that recomposed them.
+            s.splineRestWeights = weights;
+            s.splineRestMode = restTok == "chain"
+                                   ? RigExecSplineIkRestLength::Chain
+                                   : RigExecSplineIkRestLength::Curve;
             s.splineRest = RigExecSplineIkMakeRest(
                 restJoints,
-                s.root >= 0 ? B.restFrames[s.root] : RigExecPointFrame(),
-                s.mid >= 0 ? B.restFrames[s.mid] : RigExecPointFrame(),
-                s.end >= 0 ? B.restFrames[s.end] : RigExecPointFrame(),
+                s.root >= 0 ? B.restFrames[foldRest(s.root)]
+                            : RigExecPointFrame(),
+                s.mid >= 0 ? B.restFrames[foldRest(s.mid)]
+                           : RigExecPointFrame(),
+                s.end >= 0 ? B.restFrames[foldRest(s.end)]
+                           : RigExecPointFrame(),
                 weights,
                 restTok == "chain" ? RigExecSplineIkRestLength::Chain
                                    : RigExecSplineIkRestLength::Curve);
@@ -372,8 +391,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 // resolved endpoint always has one and the identity
                 // substitution exec makes for a missing one is unreachable
                 // from here.
-                s.twistStartRest = B.restPts[size_t(s.root)];
-                s.twistEndRest = B.restPts[size_t(s.end)];
+                s.twistStartRest = B.restPts[size_t(foldRest(s.root))];
+                s.twistEndRest = B.restPts[size_t(foldRest(s.end))];
             }
             // rigExec:weights and rigExec:count define the frame cardinality,
             // which compile refuses to let vary with time, so both are read
@@ -459,6 +478,42 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // either -- they shape batching and the epoch digest -- and
             // folding one would rebuild the program for an edit that cannot
             // change what it publishes.
+        }
+        // What can move this description, asked once. `restsVary` is the
+        // whole rest CHAIN of every slot it measured from -- a provider's
+        // rest is its ancestors' rests as well -- and `restOverrides` is
+        // every rest channel of that same chain, so that a drag on one
+        // dirties this solver rather than leaving it solving against the
+        // authored rest the drag is standing in for.
+        {
+            std::set<int> chain;
+            for (const int named : s.restSlots) {
+                for (int slot = named; slot >= 0;
+                     slot = B.parent[size_t(slot)]) {
+                    if (!chain.insert(slot).second) {
+                        break;
+                    }
+                }
+                s.restsVary =
+                    s.restsVary || B.restChainVaries[size_t(named)] != 0;
+            }
+            for (const int slot : chain) {
+                const RigExecBakedProgramImpl::Ladder &ladder =
+                    B.ladders[size_t(slot)];
+                const RigExecBakedInput<double> *avars = ladder.restAvars;
+                if (ladder.restSpace.overrideIndex >= 0) {
+                    s.restOverrides.push_back(ladder.restSpace.overrideIndex);
+                }
+                for (int c = 0; c < 6; ++c) {
+                    if (avars[c].overrideIndex >= 0) {
+                        s.restOverrides.push_back(avars[c].overrideIndex);
+                    }
+                }
+            }
+            std::sort(s.restOverrides.begin(), s.restOverrides.end());
+            s.restOverrides.erase(
+                std::unique(s.restOverrides.begin(), s.restOverrides.end()),
+                s.restOverrides.end());
         }
         const int slot = int(B.solvers.size());
         B.solverIndex[solverPath] = slot;
@@ -1698,6 +1753,14 @@ void
 NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
                  RigExecBakedStep *step)
 {
+    // The rest description is one of them. A rest that varies with time
+    // moves it whenever the time moves, and a drag on a rest channel of the
+    // same chain moves it where no time did -- the two halves the schedule
+    // asks about separately.
+    step->varyingInputs = step->varyingInputs || solver.restsVary;
+    step->overrideInputs.insert(step->overrideInputs.end(),
+                                solver.restOverrides.begin(),
+                                solver.restOverrides.end());
     NoteInput(solver.bend, step);
     NoteInput(solver.upperOffset, step);
     NoteInput(solver.lowerOffset, step);
@@ -1794,11 +1857,131 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
 }
 
 void
+RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
+                          bool trackMoves)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const RigExecResolvedInputs &R = *B.resolvedInputs;
+    const int N = int(B.paths.size());
+    const GfMatrix4d identity(1.0);
+    if (trackMoves) {
+        B.ladderMovedSlots.clear();
+    }
+    const auto rd = [&](const auto &input) {
+        return RigExecBakedRead(input, R, time, &B.overridden);
+    };
+    for (int i = 0; i < N; ++i) {
+        const size_t slot = size_t(i);
+        if (B.slotKind[slot] != RigExecBakedSlotKind::PoseSeed) {
+            // An xform-derived slot has no rest chain and no default-space
+            // ladder: the dynamic path gives it the identity rest frame
+            // outright and reads its pose off the stage. Build set both and
+            // nothing here may move them -- including the round trips, which
+            // stay the identity a descendant of one would inherit.
+            continue;
+        }
+        const RigExecBakedProgramImpl::Ladder &L = B.ladders[slot];
+        // A non-identity authored posed:space stands in for the whole
+        // compose: exec returns its frame and reads nothing else about the
+        // provider, so the compose does the same and the rest chain below
+        // still resolves, because the REST frame is a different question.
+        const GfMatrix4d posed = rd(L.posedSpace);
+        B.posedAuthored[slot] = posed != identity ? 1 : 0;
+        B.posedAuthoredM[slot] = posed;
+
+        GfMatrix4d rest =
+            RigExecBakedComposeAvars(rd(L.restAvars[0]), rd(L.restAvars[1]),
+                                     rd(L.restAvars[2]), 1, 1, 1,
+                                     rd(L.restAvars[3]), rd(L.restAvars[4]),
+                                     rd(L.restAvars[5]), 0, TfToken("XYZ")) *
+            rd(L.restSpace);
+        rest.Orthonormalize(/* issueWarning = */ false);
+        const int parent = B.parent[slot];
+        const GfMatrix4d parentRest =
+            parent >= 0 ? B.restRoundTrip[size_t(parent)] : identity;
+        B.restM[slot] = rest * parentRest;
+        B.restFrames[slot] = RigExecFrameFromMatrix(B.restM[slot]);
+        B.restPts[slot] = B.restFrames[slot].points;
+        B.restRoundTrip[slot] = RigExecBakedRoundTrip(B.restM[slot]);
+
+        // default:space is a space EXPRESSION: a non-identity authored value
+        // wins, otherwise the computed ladder.
+        const GfMatrix4d authoredDefault = rd(L.defaultSpace);
+        const GfMatrix4d parentDefault =
+            parent >= 0 ? B.defaultRoundTrip[size_t(parent)] : identity;
+        if (authoredDefault != identity) {
+            B.selfD[slot] = authoredDefault;
+        } else {
+            const GfMatrix4d offset = RigExecBakedComposeAvars(
+                rd(L.defaultAvars[0]), rd(L.defaultAvars[1]),
+                rd(L.defaultAvars[2]), 1, 1, 1, rd(L.defaultAvars[3]),
+                rd(L.defaultAvars[4]), rd(L.defaultAvars[5]), 0,
+                TfToken("XYZ"));
+            B.selfD[slot] = offset * B.restRoundTrip[slot] *
+                            parentRest.GetInverse() * parentDefault;
+        }
+        B.defaultRoundTrip[slot] = RigExecBakedRoundTrip(B.selfD[slot]);
+        B.parentDinv[slot] = parentDefault.GetInverse();
+        const TfToken order = rd(L.rotationOrder);
+        B.rotOrder[slot] = order.IsEmpty() ? TfToken("XYZ") : order;
+
+        if (!trackMoves) {
+            continue;
+        }
+        // Compared by VALUE, the way every other source of this program is:
+        // "the ladder was recomputed" is not the predicate, because a
+        // recompute that landed on the same numbers moved nothing and the
+        // compose below it is entitled to be skipped.
+        if (B.restM[slot] != B.lastRestM[slot] ||
+            B.selfD[slot] != B.lastSelfD[slot] ||
+            B.parentDinv[slot] != B.lastParentDinv[slot] ||
+            B.posedAuthored[slot] != B.lastPosedAuthored[slot] ||
+            B.posedAuthoredM[slot] != B.lastPosedAuthoredM[slot] ||
+            B.rotOrder[slot] != B.lastRotOrder[slot]) {
+            B.ladderMovedSlots.push_back(i);
+            B.lastRestM[slot] = B.restM[slot];
+            B.lastSelfD[slot] = B.selfD[slot];
+            B.lastParentDinv[slot] = B.parentDinv[slot];
+            B.lastPosedAuthored[slot] = B.posedAuthored[slot];
+            B.lastPosedAuthoredM[slot] = B.posedAuthoredM[slot];
+            B.lastRotOrder[slot] = B.rotOrder[slot];
+        }
+    }
+}
+
+void
 RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
 {
     RigExecBakedProgramImpl &B = *program;
     const RigExecResolvedInputs &R = *B.resolvedInputs;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedInputs", "baked");
+    // The provider ladder, before the avars that compose against it.
+    //
+    // Three ways a frame can move it and nothing else can: a channel that
+    // varies with time or resolves through a property chain (settled at
+    // Build), a drag standing on one of its channels, and the frame after
+    // such a drag is released -- the ladder holds the dragged value until
+    // something writes the authored one back over it, which is the same
+    // one-more-pass the avar table below owes its own constants.
+    bool ladderDragged = false;
+    if (B.anyOverridden) {
+        for (const int index : B.ladderOverrides) {
+            if (B.overridden[size_t(index)]) {
+                ladderDragged = true;
+                break;
+            }
+        }
+    }
+    B.ladderRecomputed = B.ladderVarying || ladderDragged ||
+                         B.ladderDisturbed;
+    if (B.ladderRecomputed) {
+        RigExecBakedComposeLadder(&B, time, /* trackMoves = */ true);
+        B.ladderDisturbed = ladderDragged;
+    } else if (!B.ladderMovedSlots.empty()) {
+        // Nothing recomputed, so nothing moved -- and last run's list would
+        // otherwise dirty a compose this run has no reason to run.
+        B.ladderMovedSlots.clear();
+    }
     for (const auto &binding : B.avarBindings) {
         B.avars[binding.slot] =
             RigExecBakedRead(binding.input, R, time, &B.overridden);
@@ -2105,6 +2288,59 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
     record();
 }
 
+/// Rebuilds one solver's rest description from the ladder this run composed.
+///
+/// Exec rebuilds every one of these from computeRestFrame on EVERY
+/// evaluation; the bake resolves them once and this resolves them again,
+/// from the same B.restPts/B.restFrames the bake read, so the two cannot
+/// disagree about anything but which rests were in the arrays.
+void
+RefreshSolverRests(RigExecBakedProgramImpl &B,
+                   RigExecBakedProgramImpl::Solver *solver)
+{
+    RigExecBakedProgramImpl::Solver &s = *solver;
+    if (s.type == "RigExecFkChain") {
+        for (size_t k = 0; k < s.controls.size(); ++k) {
+            s.controlRests[k] = B.restPts[size_t(s.controls[k])];
+        }
+    } else if (s.type == "RigExecTwoBoneIk") {
+        for (const auto &[slot, element] : s.restRefs) {
+            if (element >= 0 && element < 3) {
+                s.ikRests[size_t(element)] = B.restPts[size_t(slot)];
+            }
+        }
+        s.upperLengthBase =
+            (s.ikRests[1][0] - s.ikRests[0][0]).GetLength();
+        s.lowerLengthBase =
+            (s.ikRests[2][0] - s.ikRests[1][0]).GetLength();
+        // The constant arm of the params below reads these two, so they are
+        // written back into it here; the live arm recomputes them from the
+        // same bases and agrees by construction.
+        s.ikParams.upperLength = s.upperLengthBase + s.upperOffset.constant;
+        s.ikParams.lowerLength = s.lowerLengthBase + s.lowerOffset.constant;
+    } else if (s.type == "RigExecSplineIk") {
+        std::vector<RigExecPointFrame> restJoints(s.splineCount);
+        for (const auto &[slot, element] : s.restRefs) {
+            if (element >= 0 && size_t(element) < s.splineCount) {
+                restJoints[size_t(element)] = B.restFrames[size_t(slot)];
+                s.splineJointRests[size_t(element)] =
+                    B.restPts[size_t(slot)];
+            }
+        }
+        s.splineRest = RigExecSplineIkMakeRest(
+            restJoints,
+            s.root >= 0 ? B.restFrames[size_t(s.root)] : RigExecPointFrame(),
+            s.mid >= 0 ? B.restFrames[size_t(s.mid)] : RigExecPointFrame(),
+            s.end >= 0 ? B.restFrames[size_t(s.end)] : RigExecPointFrame(),
+            s.splineRestWeights, s.splineRestMode);
+    } else if (s.type == "RigExecTwistDistribution") {
+        if (s.root >= 0 && s.end >= 0) {
+            s.twistStartRest = B.restPts[size_t(s.root)];
+            s.twistEndRest = B.restPts[size_t(s.end)];
+        }
+    }
+}
+
 }  // namespace
 
 void
@@ -2188,6 +2424,13 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 
     case RigExecBakedStepKind::Solve: {
         RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(step->object)];
+        // The rest description, where this run recomposed the rests it is
+        // measured from. Pure arithmetic over the ladder the prologue left:
+        // no lock, no USD read and no pose write, which is what lets it sit
+        // in a step body at all.
+        if (B.ladderRecomputed && !s.restSlots.empty()) {
+            RefreshSolverRests(B, &s);
+        }
         RigExecPointFrameArray &aggregate = B.aggregates[size_t(step->object)];
         aggregate.frames.clear();
         aggregate.rests.clear();

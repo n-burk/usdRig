@@ -4163,12 +4163,14 @@ TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag()
 
 // An AUTHORED posed:space is the pose: exec returns its frame and reads
 // neither the avars nor the parent, so the baked program says the same and
-// the epoch bakes. An ANIMATED one does not -- and the test that matters is
-// the one whose Default value is the schema identity, because that is the
-// shape a bake could judge at Default, call static, and then compose through
-// the ladder while exec used the authored matrix at every numeric frame.
+// the epoch bakes. An ANIMATED one bakes too, now that the provider ladder
+// is a per-frame input -- and it is the case that matters, because its
+// Default value is the schema identity: a bake that judged "is it authored"
+// once, at Default, would call it static and compose through the ladder
+// while exec used the authored matrix at every numeric frame. So the
+// assertion is not that it refuses but that it FOLLOWS, frame by frame.
 static void
-TestAuthoredPosedSpaceBakesAndAnimatedOneDoesNot()
+TestAuthoredPosedSpaceBakesAndAnimatedOneFollows()
 {
     const auto build = [](bool animate) {
         const UsdStageRefPtr stage = UsdStage::CreateInMemory();
@@ -4212,11 +4214,45 @@ TestAuthoredPosedSpaceBakesAndAnimatedOneDoesNot()
     RigExecRigEvaluator animated(moving, SdfPath("/Asset/Rig"));
     CHECK(animated.Compile(&errors));
     reasons.clear();
-    CHECK(!animated.IsBakeable(&reasons));
+    CHECK(animated.IsBakeable(&reasons));
+    for (const std::string &reason : reasons) {
+        std::printf("    unexpected refusal: %s\n", reason.c_str());
+    }
+    // Both samples, in both directions, because the failure this guards
+    // against is a value judged ONCE: a program that read posed:space at
+    // Default would see the schema identity, take the ladder branch, and
+    // park the child on its parent at every frame.
+    for (const auto &[frame, x] : {std::make_pair(1.0, 1.0),
+                                   std::make_pair(2.0, 3.0),
+                                   std::make_pair(1.0, 1.0)}) {
+        const RigExecRigPose moved = animated.Evaluate(UsdTimeCode(frame));
+        CHECK(moved.valid);
+        const auto child = moved.jointFramesFinal.find(
+            SdfPath("/Asset/Rig/Joints/Root/Child"));
+        CHECK(child != moved.jointFramesFinal.end());
+        if (child != moved.jointFramesFinal.end()) {
+            CHECK(Near(child->second.Origin(), GfVec3d(x, 0, 0)));
+        }
+    }
+    // And the connected case, which is the one the program still hands
+    // back: exec reads the connection's computeValue, which can be any
+    // computation at all, and no per-frame read off the stage is that.
+    const UsdStageRefPtr connected = build(/* animate = */ false);
+    const UsdPrim child =
+        connected->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root/Child"));
+    const UsdAttribute driver = child.CreateAttribute(
+        TfToken("inputs:posedDriver"), SdfValueTypeNames->Matrix4d);
+    driver.Set(Matrix(GfVec3d(4, 0, 0)));
+    child.GetAttribute(TfToken("posed:space"))
+        .SetConnections({driver.GetPath()});
+    RigExecRigEvaluator wired(connected, SdfPath("/Asset/Rig"));
+    CHECK(wired.Compile(&errors));
+    reasons.clear();
+    CHECK(!wired.IsBakeable(&reasons));
     bool named = false;
     for (const std::string &reason : reasons) {
         named = named ||
-                reason.find("animated posed:space") != std::string::npos;
+                reason.find("connected posed:space") != std::string::npos;
     }
     CHECK(named);
 }
@@ -4273,7 +4309,7 @@ main()
     TestConnectedParentSpaceSolverInputs();
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();
-    TestAuthoredPosedSpaceBakesAndAnimatedOneDoesNot();
+    TestAuthoredPosedSpaceBakesAndAnimatedOneFollows();
     TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag();
 
     if (failures) {

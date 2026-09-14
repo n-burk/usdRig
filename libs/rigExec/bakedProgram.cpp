@@ -273,10 +273,12 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
         // A non-identity AUTHORED posed:space is not a ladder at all: exec
         // uses it directly and reads neither the avars nor the parent
-        // (computations.cpp's _ComputeXformablePointFrame, step 2). That is
-        // an epoch constant unless it animates, so the compose expresses it
-        // and only the CONNECTED case -- an arbitrary exec computation --
-        // still refuses.
+        // (computations.cpp's _ComputeXformablePointFrame, step 2). The
+        // compose expresses that branch and re-takes the "is it identity"
+        // test on every frame the ladder is recomposed on, so an animated
+        // or chain-written one bakes. Only the CONNECTED case -- an
+        // arbitrary exec computation, which is what step 1 of the same
+        // function reads -- still refuses.
         {
             const UsdAttribute posed =
                 prim.GetAttribute(TfToken("posed:space"));
@@ -284,18 +286,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             if (posed && posed.HasAuthoredConnections() &&
                 posed.GetConnections(&connections) && !connections.empty()) {
                 say("connected posed:space on provider", path);
-            } else if (RigExecBakedAnimatedOrConnected(posed)) {
-                // Unconditionally, and NOT "is it identity at Default".
-                // An attribute with only time samples reads back as the
-                // schema identity at Default and as a real matrix at a
-                // numeric time, so a bake that judged it at Default would
-                // take the ladder while exec took the authored matrix --
-                // which is a divergence with no diagnostic in front of it.
-                say("animated posed:space on provider", path);
-            }
-            if (chainTargets.count(
-                    path.AppendProperty(TfToken("posed:space")))) {
-                say("property chain writes posed:space on provider", path);
             }
         }
         // The other four ARE the ladder: the program builds the
@@ -317,23 +307,26 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                     path);
             }
         }
-        // The ladder is resolved once, so anything feeding it must be still.
-        for (const char *name : {"rest:space", "rest:tx", "rest:ty", "rest:tz",
-                                 "rest:rx", "rest:ry", "rest:rz",
-                                 "default:space", "default:tx", "default:ty",
-                                 "default:tz", "default:rx", "default:ry",
-                                 "default:rz", "avars:rotationOrder"}) {
-            if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-                if (RigExecBakedAnimatedOrConnected(a)) {
-                    say(std::string("animated or connected ") + name +
-                            " on provider",
-                        path);
-                }
-            }
-            if (chainTargets.count(path.AppendProperty(TfToken(name)))) {
-                say(std::string("property chain writes ") + name +
-                        " on provider",
-                    path);
+        // The ladder is a per-frame input now, so an animated, connected or
+        // chain-written SCALAR channel bakes: exec resolves each of them
+        // through computeResolvedValue, which is the same single-connection
+        // walk RigExecBakedClassifyInput performs, and no double or token
+        // channel of a provider carries a computation that could answer
+        // differently.
+        //
+        // The three MATRIX channels are not the same question. Each of them
+        // is read by exec through computeValue, and on a provider's space
+        // attributes computeValue is a COMPUTATION -- the space expression
+        // that follows the namespace parent, or a posed frame -- so a
+        // connection reaching one resolves to something the program cannot
+        // read off the stage at all. Those still refuse, by the same
+        // boundary the connected-space providers above sit behind.
+        for (const char *name : {"rest:space", "default:space"}) {
+            const UsdAttribute a = prim.GetAttribute(TfToken(name));
+            SdfPathVector connections;
+            if (a && a.HasAuthoredConnections() &&
+                a.GetConnections(&connections) && !connections.empty()) {
+                say(std::string("connected ") + name + " on provider", path);
             }
         }
         (void)probe;
@@ -1224,9 +1217,13 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // ---- the rest chain and the default-space ladder -----------------------
     //
     // computations.cpp resolves both per provider per evaluation through
-    // eight computations; every input to them is epoch-constant on a bakeable
-    // rig, so both resolve once here. The frame round trips exec performs
-    // between computations are reproduced, not simplified away.
+    // eight computations. Every channel feeding them is BOUND here, not
+    // folded: an ordinary rig binds fifteen constants per provider and the
+    // frame path never reads one again, while a rig that animates, connects
+    // or chain-writes a rest keeps the same fifteen bindings and recomposes
+    // the ladder in the prologue. One resolution either way --
+    // RigExecBakedComposeLadder, called once below and again per frame --
+    // so the two cannot drift.
     B.posedAuthored.assign(size_t(N), 0);
     B.posedAuthoredM.assign(size_t(N), GfMatrix4d(1.0));
     B.restM.assign(N, GfMatrix4d(1.0));
@@ -1235,8 +1232,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.selfD.assign(N, GfMatrix4d(1.0));
     B.parentDinv.assign(N, GfMatrix4d(1.0));
     B.rotOrder.assign(N, TfToken("XYZ"));
-    std::vector<GfMatrix4d> restRoundTrip(N, GfMatrix4d(1.0));
-    std::vector<GfMatrix4d> defaultRoundTrip(N, GfMatrix4d(1.0));
+    B.restRoundTrip.assign(N, GfMatrix4d(1.0));
+    B.defaultRoundTrip.assign(N, GfMatrix4d(1.0));
+    B.ladders.resize(size_t(N));
     for (int i = 0; i < N; ++i) {
         if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
             // An xform-derived slot has no rest chain and no default-space
@@ -1267,86 +1265,100 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
         const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
         B.prims.insert(B.paths[i]);
-        // The ladder is resolved once and folded into restM/selfD, so every
-        // attribute feeding it is a captured constant -- including the space
-        // EXPRESSIONS, which bakeability accepted because they are unauthored
-        // and would change the compose if they stopped being so.
-        for (const char *name : {"posed:space", "parent:space",
-                                 "parent:defaultSpace", "avars:defaultSpace",
-                                 "posed:defaultSpace", "avars:rotationOrder"}) {
+        // The space EXPRESSIONS stay FOLDED. Bakeability accepted them
+        // because they are unauthored and unconnected, which is a statement
+        // about the SHAPE of the compose -- authoring one replaces the
+        // ladder rather than moving a value in it -- so an edit to one must
+        // rebuild the program and a drag on one must fall back.
+        for (const char *name : {"parent:space", "parent:defaultSpace",
+                                 "avars:defaultSpace",
+                                 "posed:defaultSpace"}) {
             fold(prim, name);
         }
-        auto number = [&](const char *name, double fallback) {
-            SdfPathVector walk;
-            const RigExecBakedInput<double> input = RigExecBakedBindInput(
-                prim, name, fallback, capture, chainTargets, &walk);
-            fold(prim, name);
-            B.rebuild.insert(walk.begin(), walk.end());
-            B.folded.insert(walk.begin(), walk.end());
-            return RigExecBakedRead(input, E._resolvedInputs, capture);
-        };
-        // A non-identity authored posed:space stands in for the whole
-        // compose: exec returns its frame and reads nothing else about the
-        // provider, so the compose does the same and the rest chain below
-        // still resolves, because the REST frame is a different question.
-        if (const UsdAttribute posed =
-                prim.GetAttribute(TfToken("posed:space"))) {
-            GfMatrix4d value(1.0);
-            if (posed.Get(&value) && value != GfMatrix4d(1.0)) {
-                B.posedAuthored[size_t(i)] = 1;
-                B.posedAuthoredM[size_t(i)] = value;
-            }
+        RigExecBakedProgramImpl::Ladder &ladder = B.ladders[size_t(i)];
+        ladder.posedSpace = bind(prim, "posed:space", GfMatrix4d(1.0));
+        ladder.restSpace = bind(prim, "rest:space", GfMatrix4d(1.0));
+        ladder.defaultSpace = bind(prim, "default:space", GfMatrix4d(1.0));
+        ladder.rotationOrder =
+            bind(prim, "avars:rotationOrder", TfToken("XYZ"));
+        static const char *const kRestAvars[6] = {
+            "rest:tx", "rest:ty", "rest:tz",
+            "rest:rx", "rest:ry", "rest:rz"};
+        static const char *const kDefaultAvars[6] = {
+            "default:tx", "default:ty", "default:tz",
+            "default:rx", "default:ry", "default:rz"};
+        for (int c = 0; c < 6; ++c) {
+            ladder.restAvars[c] = bind(prim, kRestAvars[c], 0.0);
+            ladder.defaultAvars[c] = bind(prim, kDefaultAvars[c], 0.0);
         }
-        GfMatrix4d space(1.0);
-        fold(prim, "rest:space");
-        if (const UsdAttribute a = prim.GetAttribute(TfToken("rest:space"))) {
-            a.Get(&space);
+    }
+    // What a frame may have to re-resolve, and where a drag on one lands.
+    // Both are asked of the WHOLE ladder rather than per provider: exec
+    // re-pulls every rest the moment any one of them can move (rigEvaluator
+    // .cpp's newRestsMightVary), and a chain's answer depends on its
+    // ancestors in any case.
+    const auto noteLadderInput = [&B](const auto &input) {
+        if (input.varying) {
+            B.ladderVarying = true;
         }
-        GfMatrix4d rest = RigExecBakedComposeAvars(
-            number("rest:tx", 0), number("rest:ty", 0), number("rest:tz", 0),
-            1, 1, 1, number("rest:rx", 0), number("rest:ry", 0),
-            number("rest:rz", 0), 0, TfToken("XYZ")) * space;
-        rest.Orthonormalize(/* issueWarning = */ false);
-        const GfMatrix4d parentRest =
-            B.parent[i] >= 0 ? restRoundTrip[B.parent[i]] : GfMatrix4d(1.0);
-        B.restM[i] = rest * parentRest;
-        B.restFrames[i] = RigExecFrameFromMatrix(B.restM[i]);
-        B.restPts[i] = B.restFrames[i].points;
-        restRoundTrip[i] = RigExecBakedRoundTrip(B.restM[i]);
-
-        // default:space is a space EXPRESSION: a non-identity authored value
-        // wins, otherwise the computed ladder.
-        GfMatrix4d authoredDefault(1.0);
-        bool haveAuthored = false;
-        fold(prim, "default:space");
-        if (const UsdAttribute a =
-                prim.GetAttribute(TfToken("default:space"))) {
-            a.Get(&authoredDefault);
-            haveAuthored = authoredDefault != GfMatrix4d(1.0);
+        if (input.overrideIndex >= 0) {
+            B.ladderOverrides.push_back(input.overrideIndex);
         }
-        const GfMatrix4d parentDefault =
-            B.parent[i] >= 0 ? defaultRoundTrip[B.parent[i]]
-                             : GfMatrix4d(1.0);
-        if (haveAuthored) {
-            B.selfD[i] = authoredDefault;
-        } else {
-            const GfMatrix4d offset = RigExecBakedComposeAvars(
-                number("default:tx", 0), number("default:ty", 0),
-                number("default:tz", 0), 1, 1, 1, number("default:rx", 0),
-                number("default:ry", 0), number("default:rz", 0), 0,
-                TfToken("XYZ"));
-            B.selfD[i] = offset * restRoundTrip[i] * parentRest.GetInverse() *
-                         parentDefault;
+    };
+    for (int i = 0; i < N; ++i) {
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+            continue;
         }
-        defaultRoundTrip[i] = RigExecBakedRoundTrip(B.selfD[i]);
-        B.parentDinv[i] = parentDefault.GetInverse();
-        if (const UsdAttribute a =
-                prim.GetAttribute(TfToken("avars:rotationOrder"))) {
-            TfToken order;
-            if (a.Get(&order) && !order.IsEmpty()) {
-                B.rotOrder[i] = order;
-            }
+        const RigExecBakedProgramImpl::Ladder &ladder = B.ladders[size_t(i)];
+        noteLadderInput(ladder.posedSpace);
+        noteLadderInput(ladder.restSpace);
+        noteLadderInput(ladder.defaultSpace);
+        noteLadderInput(ladder.rotationOrder);
+        for (int c = 0; c < 6; ++c) {
+            noteLadderInput(ladder.restAvars[c]);
+            noteLadderInput(ladder.defaultAvars[c]);
         }
+    }
+    // Per slot, whether the rest chain reaching it can move. A rest is its
+    // ancestors' rests as well, so this propagates down the chain -- slots
+    // are in namespace DFS pre-order and a parent's slot is always lower,
+    // so one forward pass settles it.
+    B.restChainVaries.assign(size_t(N), 0);
+    for (int i = 0; i < N; ++i) {
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::Ladder &ladder = B.ladders[size_t(i)];
+        bool varies = ladder.restSpace.varying;
+        for (int c = 0; c < 6; ++c) {
+            varies = varies || ladder.restAvars[c].varying;
+        }
+        if (B.parent[size_t(i)] >= 0 &&
+            B.restChainVaries[size_t(B.parent[size_t(i)])]) {
+            varies = true;
+        }
+        B.restChainVaries[size_t(i)] = varies ? 1 : 0;
+    }
+    std::sort(B.ladderOverrides.begin(), B.ladderOverrides.end());
+    B.ladderOverrides.erase(
+        std::unique(B.ladderOverrides.begin(), B.ladderOverrides.end()),
+        B.ladderOverrides.end());
+    // And the ladder itself, at the capture time, through the same function
+    // the prologue calls. Nothing is captured that the frame path cannot
+    // re-resolve, which is what makes the two agree by construction.
+    RigExecBakedComposeLadder(&B, capture, /* trackMoves = */ false);
+    // The comparison buffers the per-frame recompose dirties against, sized
+    // only for a ladder that can actually move. Seeded with what Build just
+    // composed: the first run dirties every pose cluster outright, so what
+    // they hold on it is never read, and a later run that recomposes to the
+    // same numbers correctly finds nothing moved.
+    if (B.ladderVarying || !B.ladderOverrides.empty()) {
+        B.lastRestM = B.restM;
+        B.lastSelfD = B.selfD;
+        B.lastParentDinv = B.parentDinv;
+        B.lastPosedAuthored = B.posedAuthored;
+        B.lastPosedAuthoredM = B.posedAuthoredM;
+        B.lastRotOrder = B.rotOrder;
     }
 
     // The seed's two comparison buffers, sized once and never resized in a
