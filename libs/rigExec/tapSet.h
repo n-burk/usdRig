@@ -152,6 +152,16 @@ public:
     /// false when the request could not be built valid.
     bool Prepare();
 
+    /// Populates the shared executor at \p time without copying values out.
+    ///
+    /// Every pull in this evaluator carries overrides, and an override-bearing
+    /// compute runs in a throwaway sub-executor seeded from the main one: with
+    /// nothing ever computed into the main executor it starts empty every
+    /// time, so the whole network is recomputed on every call. One plain
+    /// Compute() first leaves the shared cache warm and the overridden pull
+    /// only has to recompute what the overrides actually reach.
+    void Warm(UsdTimeCode time);
+
     /// Serialized ChangeTime + Compute + immutable value copy.
     RigExecSnapshot Evaluate(UsdTimeCode time);
 
@@ -183,6 +193,9 @@ private:
     std::vector<SdfPath> _resolutions;
     std::atomic<bool> _dirty{false};
     bool _prepared = false;
+    /// Diagnostic only (TF_DEBUG=RIGEXEC_TAP_TIMING): how many times this
+    /// tap set has rebuilt its request.
+    size_t _prepareCount = 0;
 };
 
 }  // namespace rigExec

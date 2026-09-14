@@ -23,6 +23,16 @@ rem Hosted providers need MUSE_API_KEY (or ANTHROPIC_API_KEY). Local Apple FM
 rem and Ollama do not.
 set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\museAssistant"
 
+rem TouchPose, for the same reason and with the same caveat. This launcher
+rem is the one an animator opens, and the toolset is not something they
+rem should have to pick a launcher for: without this the RigExec menu
+rem simply has no TouchPose item and nothing says why. plugin\touchPose
+rem is NOT on _env.bat's PYTHONPATH the way rigExecUsdview is, so both
+rem the plugin path and the import path are added here.
+set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\touchPose"
+set "PYTHONPATH=%RIG%\plugin\touchPose;%PYTHONPATH%"
+set "TOUCHPOSE_PLUGIN_DIR=%RIG%\plugin\touchPose"
+
 rem Fail early and legibly rather than deep inside python.
 set "USDVIEW=%USD%\bin\usdview"
 if not exist "%USDVIEW%" (

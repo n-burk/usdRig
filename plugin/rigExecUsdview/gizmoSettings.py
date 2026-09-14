@@ -6,7 +6,7 @@
 # controller and the drag code all read the same fields, and a typo in a
 # dict key would be a silent wrong default rather than an AttributeError.
 # Keeping it out of gizmoUI.py is what lets "what does the Move tool
-# start as" be tested headlessly, which is the part of Maya parity a
+# start as" be tested headlessly, which is the part of manipulator parity a
 # reviewer can actually check.
 #
 # The tool tokens come from gizmoScreen rather than being restated here
@@ -15,26 +15,39 @@
 # a headless test cannot pay.
 #
 from gizmoScreen import TOOL_TRANSLATE, TOOL_ROTATE, TOOL_SCALE
+# The pivot tokens live with the maths that honours them, for the same
+# reason the tool tokens live in gizmoScreen: one spelling, and the
+# module that acts on a value owns it.
+from gizmoMath import (GROUP_PIVOT_CENTER, GROUP_PIVOT_LEAD,
+                       GROUP_PIVOT_INDIVIDUAL, GROUP_PIVOT_MODES)
 
-# gizmoUI re-exports this; it lives here because MayaDefaults and
+# gizmoUI re-exports this; it lives here because ToolDefaults and
 # OrientationChoices both have to answer for it.
 TOOL_SELECT = "select"
 
 TOOLS = (TOOL_SELECT, TOOL_TRANSLATE, TOOL_ROTATE, TOOL_SCALE)
 
-# Maya's Axis Orientation menu. World / Object / Parent for Move and
-# Scale; Object / World / Gimbal for Rotate (Maya's Rotate Tool has no
+# the conventional Axis Orientation menu. World / Object / Parent for Move and
+# Scale; Object / World / Gimbal for Rotate (the conventional Rotate Tool has no
 # Parent entry -- its "Gimbal" is the parent-space Euler decomposition).
 ORIENT_WORLD = "world"
 ORIENT_OBJECT = "object"
 ORIENT_PARENT = "parent"
 ORIENT_GIMBAL = "gimbal"
 
-# Maya-style snap modes for the viewport gizmo (snapping design
+# The two the toolbar's Global/Local toggle cycles between, in the order
+# it cycles them. The toggle and the panel's Axis Orientation combo box
+# write the SAME per-tool field, so there is one answer to "which axes
+# am I on" however it was chosen; the toggle just covers the two an
+# animator switches all day and leaves Parent and Gimbal to the panel.
+# Named here rather than in gizmoUI so the pairing is testable headlessly.
+ORIENT_TOGGLE = (ORIENT_WORLD, ORIENT_OBJECT)
+
+# conventional snap modes for the viewport gizmo (snapping design
 # section 1). The tokens alone let gizmoSnap re-export one spelling;
 # the labels, per-tool choices, sticky field and grid size below are
 # the Task 2 half, added together so no _FIELDS entry lacks its
-# MayaDefaults default (a KeyError in every ToolSettings).
+# ToolDefaults default (a KeyError in every ToolSettings).
 SNAP_OFF = "off"
 SNAP_GRID = "grid"
 SNAP_POINT = "point"
@@ -46,6 +59,32 @@ _ORIENT_LABELS = {
     ORIENT_OBJECT: "Object",
     ORIENT_PARENT: "Parent",
     ORIENT_GIMBAL: "Gimbal",
+}
+
+# What the TOOLBAR calls them. the conventional tool says World/Object; every other DCC
+# an animator is likely to have used says Global/Local, and the toolbar
+# has room for one word. The panel keeps the conventional spelling because the
+# rest of that panel is the authored data's.
+_TOGGLE_LABELS = {
+    ORIENT_WORLD: "Global",
+    ORIENT_OBJECT: "Local",
+}
+
+_GROUP_PIVOT_LABELS = {
+    GROUP_PIVOT_CENTER: "Selection Centre",
+    GROUP_PIVOT_LEAD: "Last Selected",
+    GROUP_PIVOT_INDIVIDUAL: "Individual Origins",
+}
+
+# What the TOOLBAR button says. The bar has room for one short phrase,
+# and "Group:" rather than "Pivot:" on purpose: the row already has a
+# Pose/Pivot pair two groups along that means something else entirely
+# (which CHANNELS are edited), and two controls both saying "Pivot"
+# would be read as one setting shown twice.
+_GROUP_PIVOT_SHORT = {
+    GROUP_PIVOT_CENTER: "Centre",
+    GROUP_PIVOT_LEAD: "Lead",
+    GROUP_PIVOT_INDIVIDUAL: "Each",
 }
 
 _ORIENT_CHOICES = {
@@ -88,11 +127,12 @@ GRID_SIZE_MIN = 1e-4
 GRID_SIZE_MAX = 1e5
 
 # The fields every ToolSettings carries. Every tool carries all of them
-# even where Maya shows only some (Free Rotate is a Rotate-only row),
+# even where the conventional tool shows only some (Free Rotate is a Rotate-only row),
 # so the drag code can read settings.freeRotate without first asking
 # which tool it belongs to.
 _FIELDS = ("orientation", "stepSnap", "stepSize", "freeRotate",
-           "preventNegativeScale", "preserveChildren", "snapMode")
+           "preventNegativeScale", "preserveChildren", "snapMode",
+           "groupPivot")
 
 
 def OrientationLabel(orientation):
@@ -102,11 +142,68 @@ def OrientationLabel(orientation):
 
 def OrientationChoices(tool):
     """
-    The Axis Orientation entries Maya offers for `tool`, in Maya's own
+    The Axis Orientation entries the conventional tool offers for `tool`, in the conventional own
     order (the default first). Empty for a tool with no manipulator, so
     the panel can simply omit the row.
     """
     return _ORIENT_CHOICES.get(tool, ())
+
+
+def ToggleLabel(orientation):
+    """The toolbar's word for an orientation token."""
+    return _TOGGLE_LABELS.get(orientation, OrientationLabel(orientation))
+
+
+def NextToggleOrientation(orientation):
+    """
+    What the toolbar's Global/Local toggle moves to from `orientation`.
+
+    Anything outside the pair -- Parent, Gimbal, a value the panel set
+    -- goes to World, so the toggle always has somewhere to go and
+    always lands somewhere an artist can name.
+    """
+    if orientation == ORIENT_WORLD:
+        return ORIENT_OBJECT
+    return ORIENT_WORLD
+
+
+def GroupPivotLabel(mode):
+    """The menu text for a group pivot token."""
+    return _GROUP_PIVOT_LABELS.get(mode, str(mode).title())
+
+
+def GroupPivotShortLabel(mode):
+    """The toolbar button's word for a group pivot token."""
+    return _GROUP_PIVOT_SHORT.get(mode, GroupPivotLabel(mode))
+
+
+def NextGroupPivot(mode, tool):
+    """
+    The next group pivot in `tool`'s cycle, wrapping.
+
+    An unknown or out-of-cycle value lands on the first choice, so the
+    hotkey always has somewhere to go; a tool with no choices answers
+    with what it was given rather than inventing one.
+    """
+    choices = GroupPivotChoices(tool)
+    if not choices:
+        return mode
+    try:
+        return choices[(choices.index(mode) + 1) % len(choices)]
+    except ValueError:
+        return choices[0]
+
+
+def GroupPivotChoices(tool):
+    """
+    The pivot points offered for `tool`, default first. Empty for
+    Select, and for Move -- moving a selection by a world delta is the
+    same motion whatever it is measured about, so offering the row there
+    would be a control that does nothing.
+    """
+    if tool in (TOOL_ROTATE, TOOL_SCALE):
+        return GROUP_PIVOT_MODES
+    return ()
 
 
 def SnapLabel(snapMode):
@@ -180,9 +277,9 @@ class ToolSettings(object):
                                 for n in _FIELDS))
 
 
-def MayaDefaults(tool, owner=None):
+def ToolDefaults(tool, owner=None):
     """
-    A fresh ToolSettings carrying Maya's defaults for `tool` (design
+    A fresh ToolSettings carrying the conventional defaults for `tool` (design
     spec 8.2 Move, 8.3 Rotate, 8.4 Scale).
     """
     values = {
@@ -193,6 +290,9 @@ def MayaDefaults(tool, owner=None):
         "preventNegativeScale": False,
         "preserveChildren": False,
         "snapMode": SNAP_OFF,
+        # The centre, always. A multi-selection turns about its middle
+        # until the artist says otherwise; see gizmoMath.GROUP_PIVOT_*.
+        "groupPivot": GROUP_PIVOT_CENTER,
     }
     return ToolSettings(tool, owner, **values)
 
@@ -209,7 +309,7 @@ class GizmoSettings(object):
     def __init__(self):
         object.__setattr__(self, "_listeners", [])
         object.__setattr__(
-            self, "_tools", dict((t, MayaDefaults(t, self)) for t in TOOLS))
+            self, "_tools", dict((t, ToolDefaults(t, self)) for t in TOOLS))
         object.__setattr__(self, "manipulatorSize", MANIPULATOR_SIZE_DEFAULT)
         object.__setattr__(self, "gridSize", GRID_SIZE_DEFAULT)
 
@@ -242,13 +342,13 @@ class GizmoSettings(object):
         """
         settings = self._tools.get(tool)
         if settings is None:
-            settings = MayaDefaults(tool, self)
+            settings = ToolDefaults(tool, self)
             self._tools[tool] = settings
         return settings
 
     def Reset(self, tool):
-        """Restore Maya's defaults for one tool, in place."""
-        self.For(tool).CopyFrom(MayaDefaults(tool))
+        """Restore the conventional defaults for one tool, in place."""
+        self.For(tool).CopyFrom(ToolDefaults(tool))
 
     def ScaleManipulator(self, factor):
         """

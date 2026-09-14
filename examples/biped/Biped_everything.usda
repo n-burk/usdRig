@@ -1,0 +1,24 @@
+#usda 1.0
+(
+    doc = """Everything at once: the rig, its pose-space correctives, and the
+    TouchPose regions. Open this to use the Control Picker, TouchPose and the
+    Shape Editor on the same character.
+
+    FOUR LAYERS, strongest first. `Biped_touch_regions.usda` is `over`s only
+    -- it adds the touch regions and nothing else, so it must sit above the
+    rig it annotates. `Biped_psd.usda` carries the RigExecPoseInterpolator
+    prims that compute each corrective's weight, `Biped_shapes.usdc` the 161
+    UsdSkelBlendShape targets and the mover that applies them, and
+    `Biped.usda` the rig itself. The middle two are useless apart: the
+    interpolators publish weights nothing reads, and the shapes wait for
+    weights nobody writes."""
+    defaultPrim = "Biped"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    subLayers = [
+        @./Biped_touch_regions.usda@,
+        @./Biped_psd.usda@,
+        @./Biped_shapes.usdc@,
+        @./Biped.usda@
+    ]
+)

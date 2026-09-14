@@ -9,10 +9,17 @@
 //
 //   rigExecPose <stage> [--rig <primPath>] [--frames 1001,1024,1048]
 //               [--joints] [--targets] [--joints-out <file.usda>]
+//               [--profile <file.trace>] [--mode dynamic|baked|parity]
 //
 // With no --frames it evaluates the stage's start time code (or Default when
 // the stage has no time range). Exit status is non-zero when the rig fails to
 // compile or an evaluation comes back invalid, so it can gate a build.
+//
+// --profile records scoped phase timings (compile, property chains, pose
+// seed, each solver batch and constraint, the exec snapshot, each geometry
+// chain, derived maintenance) across every evaluated frame, writes them as
+// Chrome Trace Event JSON to <file.trace> -- openable in Perfetto
+// (ui.perfetto.dev) or chrome://tracing -- and prints a per-phase summary.
 //
 // --joints-out writes the evaluated joint frames, as asset-space matrices
 // sampled at every requested frame, to a plain USD layer. It is deliberately
@@ -251,12 +258,16 @@ main(int argc, char **argv)
         std::printf(
             "usage: rigExecPose <stage> [--rig <primPath>] "
             "[--frames a,b,c] [--joints] [--targets] "
-            "[--joints-out <file.usda>]\n");
+            "[--joints-out <file.usda>] [--profile <file.trace>] "
+            "[--mode dynamic|baked|parity]\n");
         return 2;
     }
     std::string stagePath = argv[1];
     std::string rigArg;
     std::string jointsOut;
+    std::string profileOut;
+    rigExec::RigExecEvaluationMode mode =
+        rigExec::RigExecEvaluationMode::Dynamic;
     std::vector<double> frames;
     bool showJoints = false;
     bool showTargets = false;
@@ -272,6 +283,21 @@ main(int argc, char **argv)
             showTargets = true;
         } else if (arg == "--joints-out" && i + 1 < argc) {
             jointsOut = argv[++i];
+        } else if (arg == "--profile" && i + 1 < argc) {
+            profileOut = argv[++i];
+        } else if (arg == "--mode" && i + 1 < argc) {
+            const std::string value = argv[++i];
+            if (value == "dynamic") {
+                mode = rigExec::RigExecEvaluationMode::Dynamic;
+            } else if (value == "baked") {
+                mode = rigExec::RigExecEvaluationMode::Baked;
+            } else if (value == "parity") {
+                mode = rigExec::RigExecEvaluationMode::BakedWithParityCheck;
+            } else {
+                std::printf("unknown mode: %s "
+                            "(dynamic | baked | parity)\n", value.c_str());
+                return 2;
+            }
         } else {
             std::printf("unknown argument: %s\n", arg.c_str());
             return 2;
@@ -300,6 +326,17 @@ main(int argc, char **argv)
                 rigPath.GetText());
 
     rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
+    // This tool reports joints, targets, and diagnostics; it never reads
+    // pose.solverFrames, so the observational guide request is skipped.
+    evaluator.SetSolverGuidesEnabled(false);
+    // Enabled before Compile so the trace holds the compile itself plus
+    // every evaluated frame.
+    if (!profileOut.empty()) {
+        evaluator.SetProfilingEnabled(true);
+    }
+    // Before Compile, so the bake happens inside it rather than on the first
+    // frame; the mode is a request either way.
+    evaluator.SetEvaluationMode(mode);
     std::vector<std::string> errors;
     const bool compiled = evaluator.Compile(&errors);
     for (const std::string &error : errors) {
@@ -311,6 +348,17 @@ main(int argc, char **argv)
                 evaluator.GetBindingEpochDigest());
     if (!compiled) {
         return 1;
+    }
+    // Only in a non-default mode: the reasons are the actionable half of a
+    // fallback, and printing them unasked would change every existing run.
+    if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
+        std::vector<std::string> reasons;
+        if (!evaluator.IsBakeable(&reasons)) {
+            std::printf("  not bakeable; evaluating dynamically\n");
+            for (const std::string &reason : reasons) {
+                std::printf("    %s\n", reason.c_str());
+            }
+        }
     }
     if (showTargets) {
         for (const rigExec::RigExecMoverRecord &record :
@@ -350,7 +398,8 @@ main(int argc, char **argv)
                     pose.moverGraphParityMismatches,
                     pose.solverOverrideRounds,
                     pose.solverOverridesConverged ? "" : ", NOT CONVERGED");
-        if (!pose.valid || pose.moverGraphParityMismatches) {
+        if (!pose.valid || pose.moverGraphParityMismatches ||
+            pose.bakedParityMismatches) {
             status = 1;
         }
         for (const std::string &diagnostic : pose.diagnostics) {
@@ -403,6 +452,26 @@ main(int argc, char **argv)
                                              "as identity",
                                              jointExport.Degenerate()).c_str()
                             : "");
+        }
+    }
+
+    if (!profileOut.empty()) {
+        std::string error;
+        if (!evaluator.WriteProfileTrace(profileOut, &error)) {
+            std::printf("\n  profile FAILED: %s\n", error.c_str());
+            status = 1;
+        } else {
+            std::printf("\n  wrote %s (%zu events)\n", profileOut.c_str(),
+                        evaluator.GetProfiler().GetEventCount());
+            std::printf("  %10s %10s %7s  %s\n", "total_ms", "max_ms",
+                        "count", "phase");
+            for (const rigExec::RigExecProfileSummaryRow &row :
+                 evaluator.GetProfiler().Summarize()) {
+                std::printf("  %10.2f %10.2f %7zu  [%s] %s\n",
+                            row.totalUs / 1000.0, row.maxUs / 1000.0,
+                            row.count, row.category.c_str(),
+                            row.name.c_str());
+            }
         }
     }
     return status;

@@ -3,7 +3,7 @@
 Headless test for plugin/rigExecUsdview/gizmoSettings.py: the Qt-free
 per-tool settings model behind the gizmo's Tool Settings panel.
 
-The Maya defaults are asserted literally rather than read back from the
+The the conventional tool defaults are asserted literally rather than read back from the
 module, because "what the tool starts as" is the behaviour a user
 notices and the whole point of design spec section 8.2-8.4.
 
@@ -37,21 +37,21 @@ def TestOrientationConstants():
                "%s has a display label" % token)
 
 
-def TestMayaDefaults():
+def TestToolDefaults():
     """Design spec 8.2-8.4: what each tool starts as."""
-    move = gset.MayaDefaults(gset.TOOL_TRANSLATE)
+    move = gset.ToolDefaults(gset.TOOL_TRANSLATE)
     _Check(move.orientation == gset.ORIENT_WORLD, "move starts in World")
     _Check(move.stepSnap is False, "move step snap starts off")
     _Check(move.stepSize == 1.0, "move step size is 1 unit")
     _Check(move.preserveChildren is False, "move preserve children is off")
 
-    rotate = gset.MayaDefaults(gset.TOOL_ROTATE)
+    rotate = gset.ToolDefaults(gset.TOOL_ROTATE)
     _Check(rotate.orientation == gset.ORIENT_OBJECT, "rotate starts in Object")
     _Check(rotate.stepSnap is False, "rotate step snap starts off")
     _Check(rotate.stepSize == 15.0, "rotate step size is 15 degrees")
     _Check(rotate.freeRotate is True, "free rotate starts on")
 
-    scale = gset.MayaDefaults(gset.TOOL_SCALE)
+    scale = gset.ToolDefaults(gset.TOOL_SCALE)
     _Check(scale.orientation == gset.ORIENT_WORLD, "scale starts in World")
     _Check(scale.stepSnap is False, "scale step snap starts off")
     _Check(scale.stepSize == 1.0, "scale step size is 1")
@@ -62,7 +62,7 @@ def TestMayaDefaults():
     # read one without asking which tool it belongs to.
     for tool in (gset.TOOL_SELECT, gset.TOOL_TRANSLATE, gset.TOOL_ROTATE,
                  gset.TOOL_SCALE):
-        settings = gset.MayaDefaults(tool)
+        settings = gset.ToolDefaults(tool)
         for field in ("orientation", "stepSnap", "stepSize", "freeRotate",
                       "preventNegativeScale", "preserveChildren",
                       "snapMode"):
@@ -71,7 +71,7 @@ def TestMayaDefaults():
 
 
 def TestOrientationChoices():
-    """Maya offers Gimbal only for rotate, and Parent only for the rest."""
+    """Gimbal is offered only for rotate, and Parent only for the rest."""
     for tool in (gset.TOOL_TRANSLATE, gset.TOOL_SCALE):
         choices = gset.OrientationChoices(tool)
         _Check(choices == (gset.ORIENT_WORLD, gset.ORIENT_OBJECT,
@@ -84,7 +84,7 @@ def TestOrientationChoices():
     # Every default is one of its own tool's choices; a combo box built
     # from the choices must be able to show the value it starts on.
     for tool in (gset.TOOL_TRANSLATE, gset.TOOL_ROTATE, gset.TOOL_SCALE):
-        _Check(gset.MayaDefaults(tool).orientation
+        _Check(gset.ToolDefaults(tool).orientation
                in gset.OrientationChoices(tool),
                "%s default orientation is offered" % tool)
 
@@ -111,10 +111,10 @@ def TestSnapChoices():
     # the orientation loop excludes TOOL_SELECT.
     for tool in (gset.TOOL_SELECT, gset.TOOL_TRANSLATE, gset.TOOL_ROTATE,
                  gset.TOOL_SCALE):
-        _Check(gset.MayaDefaults(tool).snapMode == gset.SNAP_OFF,
+        _Check(gset.ToolDefaults(tool).snapMode == gset.SNAP_OFF,
                "%s snap starts off" % tool)
     for tool in (gset.TOOL_TRANSLATE, gset.TOOL_ROTATE):
-        _Check(gset.MayaDefaults(tool).snapMode
+        _Check(gset.ToolDefaults(tool).snapMode
                in gset.SnapChoices(tool),
                "%s default snap is offered" % tool)
 
@@ -227,10 +227,70 @@ def TestUnknownToolIsSafe():
            "the select tool offers no orientations")
 
 
+def TestToolbarOrientationToggle():
+    """
+    The toolbar's Global/Local toggle and the panel's Axis Orientation
+    combo write the SAME per-tool field, so the pair the toggle cycles
+    has to be a subset of every tool's choices -- otherwise pressing L
+    under some tool would set a mode that tool cannot draw.
+    """
+    _Check(gset.ORIENT_TOGGLE == (gset.ORIENT_WORLD, gset.ORIENT_OBJECT),
+           "the toggle covers Global and Local: %s"
+           % (gset.ORIENT_TOGGLE,))
+    for tool in (gset.TOOL_TRANSLATE, gset.TOOL_ROTATE, gset.TOOL_SCALE):
+        choices = gset.OrientationChoices(tool)
+        for token in gset.ORIENT_TOGGLE:
+            _Check(token in choices,
+                   "%s offers %s" % (tool, token))
+    _Check(gset.ToggleLabel(gset.ORIENT_WORLD) == "Global"
+           and gset.ToggleLabel(gset.ORIENT_OBJECT) == "Local",
+           "the toolbar says Global/Local where the panel says "
+           "World/Object")
+    # Cycling is a closed loop over the pair...
+    _Check(gset.NextToggleOrientation(gset.ORIENT_WORLD)
+           == gset.ORIENT_OBJECT, "Global -> Local")
+    _Check(gset.NextToggleOrientation(gset.ORIENT_OBJECT)
+           == gset.ORIENT_WORLD, "Local -> Global")
+    # ... and anything outside it lands on Global rather than nowhere,
+    # so L always has somewhere to go from a panel-set Parent or Gimbal.
+    for token in (gset.ORIENT_PARENT, gset.ORIENT_GIMBAL, "nonsense"):
+        _Check(gset.NextToggleOrientation(token) == gset.ORIENT_WORLD,
+               "%s -> Global" % token)
+
+
+def TestGroupPivotDefaultsToTheCentre():
+    """
+    Several selected controls turn about their CENTRE until the artist
+    says otherwise. Not about the last-selected one: that is the
+    behaviour this option exists to avoid being stuck with.
+    """
+    settings = gset.GizmoSettings()
+    for tool in gset.TOOLS:
+        _Check(settings.For(tool).groupPivot == gset.GROUP_PIVOT_CENTER,
+               "%s defaults to the selection centre" % tool)
+    # Rotate and Scale offer the row; Move does not, because a world
+    # delta is the same motion whatever it is measured about.
+    for tool in (gset.TOOL_ROTATE, gset.TOOL_SCALE):
+        choices = gset.GroupPivotChoices(tool)
+        _Check(choices and choices[0] == gset.GROUP_PIVOT_CENTER,
+               "%s offers the centre first: %s" % (tool, (choices,)))
+        _Check(set(choices) == set(gset.GROUP_PIVOT_MODES),
+               "%s offers all three: %s" % (tool, (choices,)))
+    for tool in (gset.TOOL_SELECT, gset.TOOL_TRANSLATE):
+        _Check(gset.GroupPivotChoices(tool) == (),
+               "%s has no pivot row" % tool)
+    _Check(gset.GroupPivotLabel(gset.GROUP_PIVOT_LEAD) == "Last Selected",
+           "the lead mode is named for what it is")
+    # It resets with the tool, like every other per-tool field.
+    settings.For(gset.TOOL_ROTATE).groupPivot = gset.GROUP_PIVOT_INDIVIDUAL
+    settings.Reset(gset.TOOL_ROTATE)
+    _Check(settings.For(gset.TOOL_ROTATE).groupPivot
+           == gset.GROUP_PIVOT_CENTER, "Reset Tool restores the centre")
+
 def main():
     groups = [
         ("orientation constants", TestOrientationConstants),
-        ("maya defaults", TestMayaDefaults),
+        ("conventional defaults", TestToolDefaults),
         ("orientation choices", TestOrientationChoices),
         ("snap choices", TestSnapChoices),
         ("grid size", TestGridSize),
@@ -239,6 +299,10 @@ def main():
         ("reset", TestReset),
         ("listeners", TestListeners),
         ("unknown tool", TestUnknownToolIsSafe),
+        ("toolbar orientation toggle",
+         TestToolbarOrientationToggle),
+        ("group pivot defaults to the centre",
+         TestGroupPivotDefaultsToTheCentre),
     ]
     for name, fn in groups:
         fn()

@@ -47,6 +47,10 @@ _DEFAULT_PRIORITY: int = 100
 # plugInfo.json library (default priority 100) still claims its own types first.
 _BUILTIN_LIBRARIES: list[tuple[str, str, int]] = [
     (".usdPrimLibrary", "UsdPrimLibrary", 1000),
+    # TouchPose ships in this package, so it is a built-in and not an
+    # external plugin -- but it must still claim its prims BEFORE the
+    # catch-all, hence the default priority rather than 1000.
+    (".touchPoseLibrary", "TouchPoseLibrary", _DEFAULT_PRIORITY),
 ]
 
 

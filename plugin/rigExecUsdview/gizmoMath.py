@@ -209,8 +209,110 @@ def ReadsScaleAvars(prim):
     return not prim.IsA(volume)
 
 
+# Memo for the pure reads below, alive for exactly ONE top-level
+# ComputeRigFrames call.
+#
+# MEASURED 2026-09-13, biped, ONE request for `arm_l_fk_wrist_l_bind`
+# (namespace depth 12): 3,792 ScalarAvar calls, 690 FindRigRoot, 556
+# RestLocal, 547 RestSpace -- 120.0 ms, against 49.7 ms for the FK
+# shoulder and 7.2 ms for a spine control. A control has ~10 avars and 12
+# ancestors, so ~120 reads would do it; the other 3,672 are the same
+# ancestors re-walked, because every level composes its parent's frame
+# from scratch and nothing remembers the answer.
+#
+# All of these are pure functions of (prim, time) against a stage that
+# cannot change inside one composition, so memoizing them here is
+# byte-identical by construction -- the same argument the epoch digest's
+# memo rests on. The cache is torn down when the OUTERMOST call returns
+# (ComputeRigFrames recurses ~17 deep per request), so a preview value
+# written between two requests is always seen.
+_MEMO = None
+_MEMO_DEPTH = 0
+
+
+def _MemoEnter():
+    global _MEMO, _MEMO_DEPTH
+    if _MEMO_DEPTH == 0:
+        _MEMO = {}
+    _MEMO_DEPTH += 1
+
+
+def _MemoExit():
+    global _MEMO, _MEMO_DEPTH
+    _MEMO_DEPTH -= 1
+    if _MEMO_DEPTH <= 0:
+        _MEMO_DEPTH = 0
+        _MEMO = None
+
+
+def _Memo(key, compute):
+    """`compute()` once per key for the life of the current request."""
+    memo = _MEMO
+    if memo is None:
+        return compute()
+    if key in memo:
+        return memo[key]
+    value = compute()
+    memo[key] = value
+    return value
+
+
+def _MemoMatrix(key, compute):
+    """As `_Memo`, but hands back a COPY.
+
+    Gf.Matrix4d is mutable and these are multiplied into by callers, so
+    handing out the cached object itself would let one caller corrupt
+    every later reader. Copying 16 doubles is nothing against recomputing
+    an ancestor walk.
+    """
+    return Gf.Matrix4d(_Memo(key, compute))
+
+
+class MemoScope(object):
+    """Hold the per-request memo open across SEVERAL ComputeRigFrames calls.
+
+    ComputeRigFrames tears the memo down when its outermost call returns,
+    which is right for one control and wasteful for a hundred. The
+    marquee (gizmoMarquee.ScreenPositions) projects every control on the
+    stage in one pass, and they share ancestors all the way to the rig
+    root: measured on examples/biped/Biped.usda, its 111 selectable
+    controls cost 0.844 s with a memo per call and 0.262 s inside one
+    scope, sharing the same frame cache in both runs.
+
+    Safe only where nothing is authored between the calls -- the memo is
+    a pure function of (prim, time) against an unchanging stage, which is
+    exactly what a projection pass is. A drag, which writes between
+    requests, must NOT wrap itself in one.
+    """
+
+    def __enter__(self):
+        _MemoEnter()
+        return self
+
+    def __exit__(self, *args):
+        _MemoExit()
+        return False
+
+
 def FindRigRoot(prim):
-    """The enclosing RigExecRoot, or None."""
+    """The enclosing RigExecRoot, or None.
+
+    An INVALID prim is refused here with a clear message rather than being
+    allowed through to `GetParent()`, which raises "Accessed invalid null
+    prim" from inside a memo lambda several frames down and says nothing
+    about where the bad prim came from. It got here once already: a test
+    held a hardcoded control path, the rig moved that control, and
+    `GetPrimAtPath` handed back an invalid prim that travelled a long way
+    before failing. The lookup that produced it is the bug; this says so.
+    """
+    if not prim or not prim.IsValid():
+        raise ValueError(
+            "FindRigRoot got an invalid prim -- the lookup that produced it "
+            "failed, most likely a path that no longer exists on this stage")
+    return _Memo(("rigRoot", prim.GetPath()), lambda: _FindRigRoot(prim))
+
+
+def _FindRigRoot(prim):
     parent = prim.GetParent()
     while parent and not parent.IsPseudoRoot():
         if parent.GetTypeName() == "RigExecRoot":
@@ -228,21 +330,58 @@ def _FindParentXformable(prim, rigRoot):
     return None
 
 
-# The relationship SolverPosedPaths reads and SolverPosedCache watches
+# The relationships SolverPosedPaths reads and SolverPosedCache watches
 # for invalidation. Named once so the two cannot drift apart.
 SOLVER_JOINTS_REL = "rigExec:joints"
+MOVER_MOVES_REL = "rigExec:moves"
+RIG_WRITTEN_RELS = (SOLVER_JOINTS_REL, MOVER_MOVES_REL)
+
+# Mover types that OVERWRITE their target's frame rather than composing
+# onto it. Only these belong in SolverPosedPaths; see its docstring for
+# the measurement that separates them from the rest.
+OVERWRITING_MOVER_TYPES = ("RigExecParentConstraint",)
 
 
 def SolverPosedPaths(rigRoot):
     """
-    Every prim a solver poses: the union of all rigExec:joints targets
-    under the rig. The evaluator injects those joints' frames as value
-    overrides (computations.cpp:223-227), so their avars are inert.
+    Every prim the rig poses OUTRIGHT: all rigExec:joints targets, plus
+    the rigExec:moves targets of the movers that overwrite a frame. The
+    evaluator injects those frames as value overrides
+    (computations.cpp:223-227), so their avars are inert.
+
+    WHY rigExec:moves is here at all, and why only for some movers.
+    Reading rigExec:joints alone missed the biped's finger FK roots,
+    which are parent-constrained to the wrist
+    (/Biped/Rig/Movers/hand_?_follow), and the gizmo drew them from a
+    composition that knows nothing about that constraint -- 39.5-42.2 cm
+    and 45 degrees away from the hand with the arm posed. But
+    rigExec:moves by ITSELF is too blunt in both directions, so the
+    filter is on the mover's type:
+
+      * measured, of the 41 controls that plain rigExec:moves would
+        have claimed on Biped.usda, only 15 are avar-inert. All 15 are
+        RigExecParentConstraint targets;
+      * the other 26 are the foot roll rig (heel_?, toe_?, ballRoll_?,
+        toeBend_?, the ?_ikTargets and the roll twins), reached through
+        RigExecAimConstraint / RotationConstraint / PositionConstraint /
+        FloatMathMover. Every one of those honours its own avars --
+        avars:tx=5 moves it 5.0000 cm and carries real joints with it --
+        and none of them is mis-placed by the composition (measured 0.000
+        cm before any fix). Claiming them would have cost the animator
+        the whole foot and corrected nothing.
+
+    The separation is total, not a judgement call: 15 of 15 inert
+    controls are parent-constraint targets and 0 of 26 live ones are.
+    A mover type that turns out to overwrite as well belongs in
+    OVERWRITING_MOVER_TYPES, with the measurement that says so.
     """
     paths = set()
     for prim in Usd.PrimRange(rigRoot):
         rel = prim.GetRelationship(SOLVER_JOINTS_REL)
         if rel:
+            paths.update(rel.GetTargets())
+        rel = prim.GetRelationship(MOVER_MOVES_REL)
+        if rel and prim.GetTypeName() in OVERWRITING_MOVER_TYPES:
             paths.update(rel.GetTargets())
     return paths
 
@@ -252,10 +391,10 @@ class SolverPosedCache(object):
     SolverPosedPaths memoised per rig root.
 
     Every Refresh() of a rig target re-derives its frames, and that walks
-    the WHOLE rig looking for rigExec:joints. Outside a drag the
-    controller refreshes on every relevant stage notice, so without this
-    an avar change costs a full traversal for an answer that cannot have
-    moved.
+    the WHOLE rig looking for rigExec:joints and rigExec:moves. Outside
+    a drag the controller refreshes on every relevant stage notice, so
+    without this an avar change costs a full traversal for an answer that
+    cannot have moved.
 
     The set changes in two notice shapes, not one, and missing either
     leaves the memo handing out an editable target for a control a
@@ -307,18 +446,19 @@ class SolverPosedCache(object):
 
     def InvalidateChanged(self, changedPaths):
         """
-        Drop every rig root whose solver joints were RE-TARGETED.
+        Drop every rig root whose solver joints or mover targets were
+        RE-TARGETED.
 
         SetTargets on a relationship that already has targets is an
         info-only change (see the class docstring's probe table), so a
         memo invalidated on resync alone would keep answering with the
-        joints from before the edit. The name matched here is the one
+        joints from before the edit. The names matched here are the ones
         SolverPosedPaths reads, so the two cannot drift apart.
         """
         for root in list(self._byRoot):
             for path in changedPaths:
                 if (path.IsPropertyPath()
-                        and path.name == SOLVER_JOINTS_REL
+                        and path.name in RIG_WRITTEN_RELS
                         and path.GetPrimPath().HasPrefix(root)):
                     del self._byRoot[root]
                     break
@@ -390,6 +530,11 @@ def _Previewed(attr):
 
 
 def ScalarAvar(prim, name, time, fallback):
+    return _Memo(("avar", prim.GetPath(), name, time, fallback),
+                 lambda: _ScalarAvar(prim, name, time, fallback))
+
+
+def _ScalarAvar(prim, name, time, fallback):
     attr = prim.GetAttribute(name)
     visiting = set()
     while attr and attr.GetPath() not in visiting:
@@ -430,6 +575,11 @@ def _MatrixAttr(prim, name, time):
 
 def RestLocal(prim, time):
     """compose(rest:t, rest:r) -- XYZ order, no scale, no spin."""
+    return _MemoMatrix(("restLocal", prim.GetPath(), time),
+                       lambda: _RestLocal(prim, time))
+
+
+def _RestLocal(prim, time):
     return ComposeAvarMatrix(
         ScalarAvar(prim, REST_T[0], time, 0.0),
         ScalarAvar(prim, REST_T[1], time, 0.0),
@@ -490,6 +640,11 @@ def RestSpace(prim, time):
     keep. Orthonormalizing the local factor first is what keeps an
     invalid ancestor's NaN from being scrubbed by the multiply.
     """
+    return _MemoMatrix(("restSpace", prim.GetPath(), time),
+                       lambda: _RestSpace(prim, time))
+
+
+def _RestSpace(prim, time):
     rigRoot = FindRigRoot(prim)
     rest = RestLocal(prim, time) * _MatrixAttr(prim, REST_SPACE, time)
     rest = rest.GetOrthonormalized(False) * InterveningXform(
@@ -499,6 +654,11 @@ def RestSpace(prim, time):
 
 
 def DefaultLocal(prim, time):
+    return _MemoMatrix(("defaultLocal", prim.GetPath(), time),
+                       lambda: _DefaultLocal(prim, time))
+
+
+def _DefaultLocal(prim, time):
     return ComposeAvarMatrix(
         *(tuple(ScalarAvar(prim, n, time, 0.0) for n in DEFAULT_T)
           + (1.0, 1.0, 1.0)
@@ -552,7 +712,10 @@ def _ComputedSpace(prim, name, time, solverPosed, visiting=None, frameCache=None
             if not parent:
                 return Gf.Matrix4d(1.0)
             parentFrames = ComputeRigFrames(prim.GetStage(), parent, time, solverPosed, frameCache)
-            if parentFrames.reason:
+            if parentFrames.reason and not parentFrames.published:
+                # Published means the frame IS resolved -- the evaluator
+                # handed it over -- so there is no authority to refuse.
+                # See the matching guard in _ComputeRigFrames.
                 raise _PoseAuthorityError("space source %s: %s" % (
                     parent.GetPath(), parentFrames.reason))
             return parentFrames.posed
@@ -618,6 +781,10 @@ class RigFrames(object):
       restLocal  compose(rest:t, rest:r)
       default    computed default:space, including connected overrides
       unitScale  distance per translation avar unit; inverted on drag writes
+      published  True when `posed` came from the rig's evaluated snapshot
+                 rather than from composing avars onto P. The frame is
+                 then authoritative, so a CHILD of this prim must not
+                 inherit its pose reason -- see _PreferPublishedFrame.
       reason     "" when the prim is editable through its avars, else why
                  not (solver-posed, posed:space authority, no rig root)
       pivotReason
@@ -637,6 +804,7 @@ class RigFrames(object):
         self.rigRoot = None
         self.reason = ""
         self.pivotReason = ""
+        self.published = False
         self.rest = Gf.Matrix4d(1.0)
         self.posed = Gf.Matrix4d(1.0)
         self.P = Gf.Matrix4d(1.0)
@@ -676,6 +844,15 @@ def SetPublishedControlFrameReader(reader):
 
 
 def ComputeRigFrames(stage, prim, time, solverPosed=None, _frameCache=None):
+    _MemoEnter()
+    try:
+        return _ComputeRigFramesCached(stage, prim, time, solverPosed,
+                                       _frameCache)
+    finally:
+        _MemoExit()
+
+
+def _ComputeRigFramesCached(stage, prim, time, solverPosed, _frameCache):
     _frameCache = {} if _frameCache is None else _frameCache
     if prim.GetPath() in _frameCache:
         cached = _frameCache[prim.GetPath()]
@@ -690,6 +867,80 @@ def ComputeRigFrames(stage, prim, time, solverPosed=None, _frameCache=None):
     except ValueError:
         del _frameCache[prim.GetPath()]
         raise
+
+
+def _PreferPublishedFrame(stage, prim, time, solverPosed, frames):
+    """
+    Replace a rig-written prim's COMPOSED pose with the evaluated one.
+
+    Everything above this composes `posed` from authored USD alone --
+    rest:space, the default:space family, and the namespace parent's
+    posed frame. That reproduces the evaluator exactly for a prim whose
+    pose IS its avars, which is nearly every control, and not at all for
+    one the rig writes: a solver or a mover hands that prim a frame this
+    module has no way to recompute, and the composition silently answers
+    with the REST frame instead.
+
+    Measured on examples/biped/Biped.usda with the left arm's FK
+    shoulder at avars:rz=45, the finger FK roots (parent-constrained to
+    wrist_?_bind) drew 39.5-42.2 cm and 45 degrees away from where the
+    rig had actually put them, and their namespace descendants, which
+    compose off that wrong parent, 44.5-51.6 cm away; on
+    examples/biped/Biped_anim.usda at frame 12, 33.0-39.2 cm, the gizmo
+    sitting ~35 cm BELOW the hand it belonged to while the control
+    circles -- drawn by Hydra from the evaluated frame -- were correct.
+    Every control the rig does not write measured 0.0000 cm both before
+    and after, which is why this went unnoticed for so long: for them the
+    two answers agree exactly. With this in place the worst residual
+    against pose.control_frame() over all 116 controls is 1.1e-12 cm.
+
+    The published frame is the host's snapshot of the evaluated control
+    (RigExecImaging_GetControlFrameAssetSpace, installed by
+    rigExecUsdview._ReadPublishedControlFrame), in asset space -- the
+    same space `posed` is in, so it substitutes directly. P follows from
+    it the way the curvenet adjustment above derives its own, so
+    posed == avars * P still holds and every consumer of P (the channel
+    and gimbal frames, the drag maths) stays consistent.
+
+    Gated on `solverPosed` -- the prims the rig writes outright -- rather
+    than asked for every prim. Three reasons, in order of weight. It is
+    exactly the set whose composed answer is known to be wrong: measured
+    on Biped.usda with the arm posed, 22 of 116 controls were mis-placed
+    and every one of them was a RigExecParentConstraint target or a
+    namespace descendant of one, so the other 94 have nothing to gain.
+    The set is already memoised and invalidated (SolverPosedCache). And a
+    composed frame reads the uncommitted drag values (_previewValues)
+    synchronously, whereas the published frame arrives through the host's
+    preview channel, so keeping composition wherever it is already right
+    keeps a drag off that round trip.
+
+    The reader returns None for anything it has no published frame for --
+    a joint, a mover-written prim that is not a control, a frame where
+    RigExec is not active -- and a headless or un-activated session has
+    no reader at all; every one of those falls back to the composition,
+    which is the behaviour that was correct for them all along.
+    """
+    if _publishedControlFrameReader is None or not solverPosed:
+        return frames
+    if prim.GetPath() not in solverPosed:
+        return frames
+    published = _publishedControlFrameReader(stage, prim.GetPath(), time)
+    if published is None:
+        return frames
+    published = Gf.Matrix4d(published)
+    if not all(math.isfinite(published[r][c])
+               for r in range(4) for c in range(4)):
+        return frames
+    avars = AvarsMatrix(prim, time)
+    if abs(avars.GetDeterminant()) < 1e-12:
+        # P = avars^-1 * posed is the only route back to a consistent
+        # pair, so a singular avar matrix keeps the composed frames
+        # rather than handing out a P that does not reproduce posed.
+        return frames
+    frames.posed = published
+    frames.P = avars.GetInverse() * published
+    frames.published = True
+    return frames
 
 
 def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
@@ -723,6 +974,7 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
                 frames, "posed:space drives this adjustment; edit its source")
         frames.posed = Gf.Matrix4d(matrix)
         frames.P = avars.GetInverse() * frames.posed
+        frames.published = True
         frames.default = frames.P
         frames.Q = frames.P
         frames.rest = frames.P
@@ -745,15 +997,34 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
         parentSpace = prim.GetAttribute(PARENT_SPACE)
         explicitParent = parentSpace and (parentSpace.HasAuthoredConnections()
                                          or _MatrixAttr(prim, PARENT_SPACE, time) != _IDENTITY)
-        if parentFrames.reason and not explicitParent:
+        # `published` breaks the inheritance, and has to. A pose reason
+        # propagates because an ancestor whose pose is not its avars
+        # leaves THIS prim composed off a stale parent frame -- but a
+        # published parent frame is not stale, it is the evaluator's own
+        # answer, so nothing downstream of it is in doubt. Without this
+        # guard the refusal above reached every finger control on the
+        # biped rather than the 10 roots the constraints actually write:
+        # the 32 nested FK controls the animator grabs (index_002..,
+        # thumb_001..) do honour their own avars -- measured, avars:tx=5
+        # on index_002_l_bind_fk moves it and its joints 5.0000 cm, while
+        # the same on the constrained root moves nothing at all -- and
+        # refusing them would have traded a misplaced gizmo for no gizmo.
+        if (parentFrames.reason and not explicitParent
+                and not parentFrames.published):
             frames.reason = "parent %s: %s" % (
                 parent.GetName(), parentFrames.reason)
         frames.parentRest = parentFrames.rest
         frames.parentPosed = parentFrames.posed
 
     if prim.GetPath() in solverPosed:
-        frames.reason = ("%s is posed by a solver (rigExec:joints); its "
-                         "avars are ignored" % prim.GetName())
+        # One message for both authorities: SolverPosedPaths returns one
+        # set (its callers compare it to a set, so it cannot become a
+        # path -> relationship map without churning them), and the
+        # artist-facing fact is the same either way -- something in the
+        # rig writes this frame, so the avars here are not what moves it.
+        frames.reason = ("%s is posed by a solver or an overwriting mover "
+                         "(rigExec:joints / rigExec:moves); its avars "
+                         "are ignored" % prim.GetName())
     posed = prim.GetAttribute(POSED_SPACE)
     if posed:
         if posed.HasAuthoredConnections():
@@ -820,6 +1091,7 @@ def _ComputeRigFrames(stage, prim, time, solverPosed, _frameCache):
                                   "of rest; edit that source for pivot changes"
                                   % (prim.GetName(), name))
     frames.posed = AvarsMatrix(prim, time) * frames.P
+    frames = _PreferPublishedFrame(stage, prim, time, solverPosed, frames)
 
     assetRoot = frames.rigRoot.GetParent()
     if assetRoot and not assetRoot.IsPseudoRoot():
@@ -838,6 +1110,31 @@ WRITE_DEFAULT = "default"
 CHANNELS_POSE = "pose"
 CHANNELS_PIVOT = "pivot"
 
+# Where a MULTI-selection turns and scales about. Blender's Transform
+# Pivot Point, and the conventional Move Tool "Pivot" row, restated for a rig:
+#
+#   GROUP_PIVOT_CENTER      the centroid of the selected controls'
+#                           evaluated origins. THE DEFAULT, because the
+#                           thing an animator means by "rotate these
+#                           together" is about their middle -- not about
+#                           whichever one they happened to click last.
+#   GROUP_PIVOT_LEAD        the last-selected control's origin (the conventional tool's
+#                           "Object" / Blender's "Active Element"), for
+#                           swinging a group about one of its members.
+#   GROUP_PIVOT_INDIVIDUAL  each control about its OWN origin: they all
+#                           turn by the same angle and none of them
+#                           moves. Blender's "Individual Origins", and
+#                           the only one of the three that is not a
+#                           rigid motion of the selection.
+#
+# This is independent of the AXIS ORIENTATION (gizmoSettings.ORIENT_*),
+# which says which way the rings point, not what they turn about.
+GROUP_PIVOT_CENTER = "center"
+GROUP_PIVOT_LEAD = "lead"
+GROUP_PIVOT_INDIVIDUAL = "individual"
+GROUP_PIVOT_MODES = (GROUP_PIVOT_CENTER, GROUP_PIVOT_LEAD,
+                     GROUP_PIVOT_INDIVIDUAL)
+
 
 def SetAnimated(attr, value, time):
     """
@@ -848,7 +1145,7 @@ def SetAnimated(attr, value, time):
     curve-interpolated knot on the attribute's spline.
 
     The knot itself comes from graphModel.AuthorKnot, so a gizmo drag
-    and a graph-editor insert produce the SAME key -- Maya's default new
+    and a graph-editor insert produce the SAME key -- the conventional default new
     key, AutoEase on both tangents (graph editor design spec 1.2) -- and
     a key the artist has already shaped keeps its tangents.
     """
@@ -1006,7 +1303,7 @@ def _FrameAt(matrix, origin):
 
 def _SnapValue(value, step):
     """
-    `value` rounded to the nearest multiple of `step` (Maya's Step Snap),
+    `value` rounded to the nearest multiple of `step` (the conventional Step Snap),
     or `value` unchanged when `step` is None or 0.
 
     Halves go AWAY from zero. Python's round() sends them to even, which
@@ -1023,7 +1320,7 @@ def _SnapTranslation(base, delta, step, absolute):
     """
     base + delta with Step Snap applied where the channel values live.
 
-    Relative (Maya's `J` hold) quantises the DELTA, so a drag advances in
+    Relative (`J` hold) quantises the DELTA, so a drag advances in
     whole steps from wherever it started; absolute quantises the RESULT,
     so the channel value lands on the grid however the drag started.
     Snapping the WORLD delta instead would put the channels off the grid
@@ -1044,7 +1341,7 @@ def _ScaleAxes(axisIndex):
     """
     Which scale channels a drag touches: None for all three (the centre
     cube), an int for one (an axis handle), or ANY iterable of ints for a
-    planar handle -- (0, 1) is Maya's XY square.
+    planar handle -- (0, 1) is the conventional XY square.
 
     The iterable case is duck-typed rather than a list of accepted
     classes: the controller hands over whatever its handle description
@@ -1206,8 +1503,8 @@ class Target(object):
     Three frames, all orthonormal and all translated to the gizmo origin,
     feed the Axis Orientation option (design spec 8.2):
 
-      ObjectFrame()   Maya "Object": the target's own posed orientation
-      ChannelFrame()  Maya "Parent": the space the channels are written
+      ObjectFrame()   the conventional tool "Object": the target's own posed orientation
+      ChannelFrame()  the conventional tool "Parent": the space the channels are written
                       in (P or Q for a rig prim, the parent xform
                       otherwise)
       GimbalFrame()   the space the ROTATE channels compose in; equal to
@@ -1249,8 +1546,18 @@ class Target(object):
         """
         return ""
 
-    def Refresh(self):
-        """Re-read the stage; call after a frame change or an undo."""
+    def Refresh(self, frameCache=None):
+        """
+        Re-read the stage; call after a frame change or an undo.
+
+        `frameCache` is the optional {path: RigFrames} dict
+        ComputeRigFrames threads through its own recursion, offered here
+        so a GROUP can refresh several targets against ONE walk. It has
+        to be fresh for each round of refreshes -- a cache kept across
+        mouse samples would hand out the previous sample's frames -- so
+        the group builds a new one every time and nothing here keeps it.
+        Ignored by targets with no rig frames to compute.
+        """
 
     def RigRootPath(self):
         """
@@ -1287,7 +1594,7 @@ class Target(object):
 
     def SetPreserveChildren(self, enabled):
         """
-        Maya "Preserve Children". A target that cannot honour it stays
+        the conventional tool "Preserve Children". A target that cannot honour it stays
         off however often it is asked, so a stale toolbar checkbox can
         never make a drag silently skip the compensation.
         """
@@ -1305,8 +1612,8 @@ class Target(object):
         """
         raise NotImplementedError
 
-    def BeginDrag(self):
-        self.Refresh()
+    def BeginDrag(self, frameCache=None):
+        self.Refresh(frameCache)
         self._base = {name: ScalarAvar(self.prim, name, self.time, fallback)
                       for name, fallback in self._ScalarChannels()}
 
@@ -1319,7 +1626,7 @@ class Target(object):
     def ApplyTranslate(self, worldDelta, *, snapStep=None,
                        snapAbsolute=False):
         """
-        Move by a WORLD delta, optionally with Maya's Step Snap.
+        Move by a WORLD delta, optionally with the conventional Step Snap.
 
         `snapStep` quantises in CHANNEL space, where the values that get
         written live; see _SnapTranslation for why that is not the same
@@ -1333,7 +1640,7 @@ class Target(object):
         Turn the drawn world frame by `degrees` about a WORLD axis.
 
         `snapStep` quantises the ANGLE, relative to the drag base, so a
-        snapped drag advances in whole steps (Maya's `J` hold, default
+        snapped drag advances in whole steps (`J` hold, default
         step 15 degrees).
         """
         raise NotImplementedError
@@ -1344,7 +1651,7 @@ class Target(object):
         others held at their drag base. `snapStep` quantises the angle
         exactly as it does for ApplyRotate.
 
-        This is Maya's Gimbal mode (design spec 8.3, "each ring changes
+        This is the conventional Gimbal mode (design spec 8.3, "each ring changes
         exactly one Euler channel"), and it needs its own entry point
         because ApplyRotate cannot deliver it: ApplyRotate takes a world
         axis and promises the drawn frame turns by the dragged angle,
@@ -1361,7 +1668,7 @@ class Target(object):
 
         `axisIndex` picks them: None for all three (the centre cube), an
         int for one (an axis handle), or a tuple or list for a planar
-        handle -- (0, 1) is Maya's XY square. `snapStep` quantises the
+        handle -- (0, 1) is the conventional XY square. `snapStep` quantises the
         RESULTING value of each channel the drag touches, before the
         evaluator's 1e-4 floor. Channels the drag does not touch keep
         their authored value rather than being nudged onto the grid.
@@ -1378,19 +1685,24 @@ class _RigTarget(Target):
     preserveChildrenReason = ("children of a rig control are evaluated by "
                               "the rig")
 
-    def __init__(self, stage, prim, writer, solverPosed=None):
+    def __init__(self, stage, prim, writer, solverPosed=None,
+                 frameCache=None):
         Target.__init__(self, stage, prim, writer)
         # A SolverPosedCache, or None to walk the rig on every Refresh.
         self._solverPosed = solverPosed
         self.frames = None
-        self.Refresh()
+        # `frameCache` is used for THIS walk and then dropped: it belongs
+        # to whoever is building targets right now (MakeGroupTarget
+        # builds several off one walk), and keeping it would hand out
+        # frames composed from a stage that has since moved.
+        self.Refresh(frameCache)
 
-    def Refresh(self):
+    def Refresh(self, frameCache=None):
         posed = None
         if self._solverPosed is not None:
             posed = self._solverPosed.For(FindRigRoot(self.prim))
         self.frames = ComputeRigFrames(self.stage, self.prim, self.time,
-                                       posed)
+                                       posed, frameCache)
 
     def RigRootPath(self):
         root = self.frames.rigRoot if self.frames is not None else None
@@ -1513,8 +1825,8 @@ class RigPivotTarget(_RigTarget):
                              for n in REST_T + REST_R)
         return paths
 
-    def BeginDrag(self):
-        _RigTarget.BeginDrag(self)
+    def BeginDrag(self, frameCache=None):
+        _RigTarget.BeginDrag(self, frameCache)
         # The world rest each child must be put back onto. Captured before
         # the first write, so a multi-event drag compensates against the
         # start of the drag rather than accumulating per event.
@@ -1688,7 +2000,7 @@ class _XformTarget(Target):
         self._preserved = []
         self.Refresh()
 
-    def Refresh(self):
+    def Refresh(self, frameCache=None):
         cache = UsdGeom.XformCache(self.time)
         # An op stack beginning with !resetXformStack! ignores its
         # ancestors, and XformCommonAPI accepts one. GetParentToWorld-
@@ -1740,8 +2052,8 @@ class _XformTarget(Target):
                 r = Gf.Vec3f(value)
         return (t, r, sc, p, order)
 
-    def BeginDrag(self):
-        self.Refresh()
+    def BeginDrag(self, frameCache=None):
+        self.Refresh(frameCache)
         t, r, s, p, order = self.vectors
         self._base = {"t": Gf.Vec3d(t), "r": Gf.Vec3f(r), "s": Gf.Vec3f(s),
                       "p": Gf.Vec3f(p), "order": order}
@@ -1933,7 +2245,7 @@ class XformPoseTarget(_XformTarget):
         """
         The object's orientation, drawn at the PIVOT (design spec 8.2).
 
-        Maya centres all three manipulators on the point the rotate and
+        All three manipulators are centred on the point the rotate and
         scale ops turn about, which for this op stack is `pivot +
         translate` in parent space. Drawing at the prim's local origin
         instead would put the rotate rings off the point the object
@@ -1994,7 +2306,7 @@ class XformPivotTarget(_XformTarget):
     # rotate or a scale, since the pivot is part of the local matrix.
     # The brief still puts Preserve Children out of scope for pivot
     # mode (design spec 1.2: a pivot edit is uncompensated by design,
-    # like moving a Maya pivot without compensation), so say that
+    # like moving a the conventional tool pivot without compensation), so say that
     # rather than claiming the children hold still on their own.
     preserveChildrenReason = ("pivot edits are not compensated, on this "
                               "prim or its children (spec 1.2)")
@@ -2055,15 +2367,26 @@ def _IsRigTargetType(prim):
     return False
 
 
-def MakeTarget(stage, prim, channels, writer, solverPosed=None):
+def MakeTarget(stage, prim, channels, writer, solverPosed=None,
+               frameCache=None):
     """
     (target, "") or (None, reason) for usdview's focus prim.
 
     `solverPosed` is an optional SolverPosedCache, shared with the
     target so a Refresh() reuses the rig walk instead of repeating it.
+
+    `frameCache` is the {path: RigFrames} dict ComputeRigFrames threads
+    through its own recursion. One is made here when none is given, so
+    the refusal check below and the target's own first Refresh() cost
+    ONE walk rather than two; MakeGroupTarget passes one in so the whole
+    selection costs one. Measured on examples/biped/Biped.usda, building
+    targets for {fk shoulder, fk elbow, fk wrist, spine_root_ctl} is
+    262.5 ms of walking with a cache each and 120.1 ms sharing one --
+    and a selection change runs this.
     """
     if not prim or not prim.IsValid():
         return None, "nothing selected"
+    frameCache = {} if frameCache is None else frameCache
     if IsRigXformable(prim):
         if not _IsRigTargetType(prim):
             if not ReadsScaleAvars(prim):
@@ -2073,7 +2396,8 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None):
                 prim.GetName(), prim.GetTypeName() or "untyped")
         posed = (solverPosed.For(FindRigRoot(prim))
                  if solverPosed is not None else None)
-        frames = ComputeRigFrames(stage, prim, writer.time, posed)
+        frames = ComputeRigFrames(stage, prim, writer.time, posed,
+                                  frameCache)
         # Pose answers to `reason`. Pivot edits rest:t/r, which no solver
         # and no posed:space takes away -- a TwoBoneIk measures its bone
         # lengths FROM the bound joints' rest frames -- so it answers to
@@ -2091,8 +2415,10 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None):
             return None, "%s.%s is connected; edit its source instead" % (
                 prim.GetName(), connected)
         if channels == CHANNELS_PIVOT:
-            return RigPivotTarget(stage, prim, writer, solverPosed), ""
-        return RigPoseTarget(stage, prim, writer, solverPosed), ""
+            return RigPivotTarget(stage, prim, writer, solverPosed,
+                                  frameCache), ""
+        return RigPoseTarget(stage, prim, writer, solverPosed,
+                             frameCache), ""
     if prim.IsA(UsdGeom.Xformable):
         if not UsdGeom.XformCommonAPI(prim):
             return None, ("%s: xformOp stack is not XformCommonAPI-"
@@ -2102,3 +2428,657 @@ def MakeTarget(stage, prim, channels, writer, solverPosed=None):
         return XformPoseTarget(stage, prim, writer), ""
     return None, "%s (%s) has no transform to edit" % (
         prim.GetName(), prim.GetTypeName() or "untyped")
+
+
+# ---------------------------------------------------------------------------
+# Group edits: one gizmo over several selected controls
+# ---------------------------------------------------------------------------
+
+def _PoseProvider(prim, time):
+    """
+    The one prim whose POSE carries `prim`, or None.
+
+    Mirrors what _ComputeRigFrames actually resolves, rather than
+    assuming the namespace parent: frames.parentPosed comes from
+    _ComputedSpace(prim, PARENT_SPACE), which follows a single authored
+    CONNECTION to its source prim, treats an authored non-identity
+    matrix as an absolute space with nothing upstream, and only then
+    falls back to _FindParentXformable. Getting this wrong would not be
+    cosmetic -- see PoseProviderPaths for what it decides.
+    """
+    attr = prim.GetAttribute(PARENT_SPACE)
+    if attr:
+        connections = attr.GetConnections()
+        if len(connections) == 1:
+            source = prim.GetStage().GetPrimAtPath(
+                connections[0].GetPrimPath())
+            return source if source and source.IsValid() else None
+        if _MatrixAttr(prim, PARENT_SPACE, time) != _IDENTITY:
+            # An absolute parent space: nothing above it carries this prim.
+            return None
+    return _FindParentXformable(prim, FindRigRoot(prim))
+
+
+def PoseProviderChain(prim, time):
+    """
+    The prims whose pose carries `prim`, NEAREST FIRST: its pose parent,
+    that prim's pose parent, and so on out of the rig and up the asset's
+    xforms.
+
+    Used for two things by a group drag, and for NEITHER of them as an
+    exclusion rule. It orders the members so an ancestor's contribution
+    is in place before a descendant's is computed, and it names each
+    member's nearest selected ancestor so the descendant can be given
+    the REMAINDER rather than a second copy of the same motion (see
+    GroupTarget._Solve).
+
+    That distinction is the whole design. This rig nests its FK controls
+    in a namespace chain -- rigExec:controlSpace = "parentRelative"
+    (tools/biped/build_biped_rigexec.py:211, build_fingers.py:225) --
+    where another rig would use constraints, so arm_l_fk_shoulder_l_bind
+    > elbow > wrist is one line of descent and so is every finger, leg
+    and spine chain. An earlier version SKIPPED a member whose ancestor
+    was also selected, on the grounds that the ancestor's rigid motion
+    already carries it. That is true for a rigid pivot and false for
+    Individual Origins, and either way it let an implementation detail
+    -- how THIS rig happens to be wired -- decide what the animator's
+    selection does. Measured on Biped.usda, a three-control selection of
+    any FK chain had a delta reach 1 member of 3 in every pivot mode.
+    The remainder solve replaces the rule with arithmetic: a member that
+    is already exactly where it should be gets an identity remainder and
+    authors nothing, and that is a RESULT rather than a policy.
+
+    Ordered rather than a set because the order is what makes the walk
+    topological; PoseProviderPaths is the set form, for membership tests.
+    """
+    chain = []
+    seen = set()
+    rigRoot = FindRigRoot(prim)
+    if rigRoot is None:
+        # A plain xformable: its namespace ancestors carry it, up to a
+        # !resetXformStack! -- which is exactly what _XformTarget.Refresh
+        # honours when it reads the parent-to-world transform.
+        xformable = UsdGeom.Xformable(prim)
+        if xformable and xformable.GetResetXformStack():
+            return chain
+        parent = prim.GetParent()
+        while parent and not parent.IsPseudoRoot():
+            chain.append(parent.GetPath())
+            xformable = UsdGeom.Xformable(parent)
+            if xformable and xformable.GetResetXformStack():
+                return chain
+            parent = parent.GetParent()
+        return chain
+    current = prim
+    while current is not None:
+        provider = _PoseProvider(current, time)
+        if provider is None or provider.GetPath() in seen:
+            break
+        seen.add(provider.GetPath())
+        chain.append(provider.GetPath())
+        current = provider
+    # Out of the rig: assetToWorld is the rig root's PARENT's
+    # local-to-world (see the module banner), so those xforms carry the
+    # whole rig and a selected one of them drives every control under it.
+    parent = rigRoot.GetParent()
+    while parent and not parent.IsPseudoRoot():
+        chain.append(parent.GetPath())
+        parent = parent.GetParent()
+    return chain
+
+
+def PoseProviderPaths(prim, time):
+    """PoseProviderChain as a set, for membership tests."""
+    return set(PoseProviderChain(prim, time))
+
+# How small a remainder counts as nothing. Degrees for a turn, world
+# units for a move: a member already carried into place by a selected
+# ancestor lands within floating-point noise of where it belongs, and
+# authoring that noise would put a key on every control in the chain.
+# Measured on Biped.usda, the residual for a carried member under a
+# rigid pivot is under 1e-13 of either.
+_GROUP_EPSILON_DEGREES = 1e-9
+_GROUP_EPSILON_LENGTH = 1e-9
+
+
+def _IsIdentity(matrix, tolerance=1e-12):
+    return all(abs(matrix[r][c] - _IDENTITY[r][c]) <= tolerance
+               for r in range(4) for c in range(4))
+
+
+def _Centroid(points):
+    total = Gf.Vec3d(0.0, 0.0, 0.0)
+    for point in points:
+        total += Gf.Vec3d(point)
+    return total / float(len(points)) if points else total
+
+
+class GroupTarget(Target):
+    """
+    One gizmo for several selected controls, moved and turned together.
+
+    THE PIVOT IS THE CENTROID of the members' evaluated origins, and a
+    rotate or a scale turns the whole selection about it. That is the
+    default and the point of the feature: "rotate these together" means
+    about their middle, not about whichever control was clicked last.
+    SetPivotMode() offers the other two a DCC has -- GROUP_PIVOT_LEAD
+    (the last-selected control's origin) and GROUP_PIVOT_INDIVIDUAL
+    (each about its own) -- but neither is what a fresh selection does.
+
+    THE AXES ARE A SEPARATE QUESTION, and the controller answers it, not
+    this class: gizmoUI._Orientation reads the per-tool Axis Orientation
+    (Global/World, Local/Object, Parent, Gimbal) and feeds the frame to
+    gizmoScreen. ObjectFrame / ChannelFrame / GimbalFrame below answer
+    with the LEAD control's frames moved onto the group pivot, which is
+    the conventional meaning of "Local" for a multi-selection -- an
+    orientation averaged over the members points nowhere in particular,
+    and the first-selected control's frame would move the gizmo whenever
+    the artist added to the selection from the other end.
+
+    THE DELTA IS EXPRESSED PER MEMBER, and it has to be. The members sit
+    at different depths and in different spaces -- a finger control's
+    avars are relative to a wrist-constrained root, a hips control's to
+    the asset -- so one world delta is one set of channel values only
+    after it has been inverted through that member's OWN channel frame.
+    There is no second copy of that maths here: every member's
+    ApplyTranslate already does exactly that inversion, and the group
+    calls it. What the group adds is the ORBIT -- a member away from the
+    pivot must translate as well as turn -- and the REMAINDER.
+
+    THE REMAINDER IS THE WHOLE DESIGN (_Solve). Each member is given
+    its intended world motion MINUS whatever a selected ancestor has
+    already carried it through. A member already exactly where it
+    belongs gets an identity remainder and authors nothing; a member
+    half-way there authors the difference; a member with no selected
+    ancestor authors all of it. One code path, no modes, and no rule
+    about hierarchies -- which matters because the hierarchy is OUR
+    business and not the animator's. This rig nests its FK controls
+    (rigExec:controlSpace = "parentRelative") where another rig would
+    constrain them, and an earlier version SKIPPED a member whose
+    ancestor was also selected. That skip was right for a rigid pivot,
+    wrong for Individual Origins, and in both cases it let our wiring
+    decide what a selection does: measured on Biped.usda, a three-
+    control selection of any FK chain -- fingers, arm, leg -- reached
+    exactly one member in every pivot mode.
+
+    WHY THE TURN AND THE ORBIT DO NOT INTERFERE. Every composition in
+    this module puts the translation LAST (avars = S * R * Rspin * T,
+    restLocal = compose(rest:t, rest:r), and XformCommonAPI's translate
+    op, whose gizmo origin is parentWorld.Transform(pivot + translate)),
+    so in row-vector form a target's own origin is its translation
+    channel carried by its channel frame and NOTHING else. Rotating or
+    scaling a member therefore cannot move its own origin, and the orbit
+    delta can be computed once from the drag base instead of being
+    re-measured after the turn -- which would have cost a rig walk per
+    member per mouse sample. Each Apply* recomputes from BeginDrag()'s
+    base, so the two writes compose rather than accumulate.
+
+    WHAT IS DELIBERATELY NOT HERE. Preserve Children is a single-target
+    option: with several members the compensation would have to agree
+    about children that two of them both claim, and nothing asks for it.
+    Gimbal rings are declined the same way (see RotationState): a gimbal
+    ring IS one Euler channel of one prim, and a group has no shared
+    channel to put an angle on.
+    """
+
+    kind = "group"
+    supportsPreserveChildren = False
+    preserveChildrenReason = "Preserve Children edits one target at a time"
+
+    def __init__(self, members, lead, writer, skipped=None):
+        Target.__init__(self, lead.stage, lead.prim, writer)
+        self.members = list(members)
+        self.lead = lead
+        # [(prim name, reason)] for everything in the selection the
+        # gizmo will not touch, so the status line can say so rather
+        # than letting a control sit still and look broken.
+        self.skipped = list(skipped or [])
+        self.label = ("%d controls" % len(self.members)
+                      if len(self.members) != 1 else self.members[0].label)
+        # ANY, not all: a member that cannot scale is skipped by
+        # ApplyScale, and greying out the whole tool because one member
+        # in eight is a pivot target would be worse than dropping it.
+        self.supportsTranslate = any(m.supportsTranslate for m in members)
+        self.supportsRotate = any(m.supportsRotate for m in members)
+        self.supportsScale = any(m.supportsScale for m in members)
+        self.pivotMode = GROUP_PIVOT_CENTER
+        self._origins = []
+        self._order = []
+        self._ancestor = []
+        self._pivot = Gf.Vec3d(0.0, 0.0, 0.0)
+        self._frame = Gf.Matrix4d(1.0)
+        self._notes = []
+
+    def SetPivotMode(self, mode):
+        """
+        Choose what a rotate or a scale turns about (GROUP_PIVOT_*).
+
+        Unknown values fall back to the centre rather than raising: this
+        is fed from a settings field a stale panel can write, and the
+        centre is the answer that is never surprising.
+        """
+        self.pivotMode = (mode if mode in GROUP_PIVOT_MODES
+                          else GROUP_PIVOT_CENTER)
+
+    # -- frames ---------------------------------------------------------
+
+    def Origins(self):
+        return [m.GizmoMatrix().ExtractTranslation() for m in self.members]
+
+    def Pivot(self):
+        """
+        Where the gizmo is drawn, and -- except in Individual mode --
+        what a rotate or a scale turns about.
+
+        Individual origins draw at the centroid too. There is one
+        manipulator and it has to be somewhere; Blender puts it on the
+        median for this mode as well, and putting it on one member would
+        say that member was special when the whole point is that none of
+        them is.
+        """
+        if self.pivotMode == GROUP_PIVOT_LEAD:
+            return Gf.Vec3d(self.lead.GizmoMatrix().ExtractTranslation())
+        return _Centroid(self.Origins())
+
+    def GizmoMatrix(self):
+        return _FrameAt(self.lead.GizmoMatrix(), self.Pivot())
+
+    def ObjectFrame(self):
+        return self.GizmoMatrix()
+
+    def ChannelFrame(self):
+        return _FrameAt(self.lead.ChannelFrame(), self.Pivot())
+
+    def GimbalFrame(self):
+        return _FrameAt(self.lead.GimbalFrame(), self.Pivot())
+
+    def RotationState(self):
+        # None disables the Gimbal orientation for a real group, which
+        # is what makes gizmoDrag take the world-axis route: _Orientation
+        # falls back to Object when this is None, and DragState then has
+        # no gimbal base to quantise against. A group of ONE is not a
+        # group -- it keeps its member's rings, so a selection where
+        # everything but the lead was refused behaves as it does today.
+        if len(self.members) == 1:
+            return self.members[0].RotationState()
+        return None
+
+    def RigRootPath(self):
+        return self.lead.RigRootPath()
+
+    def Refresh(self, frameCache=None):
+        """
+        Re-read every member against ONE rig walk.
+
+        The members of a real group share most of their ancestry -- the
+        biped's three FK arm controls share five frame providers out of
+        six -- and ComputeRigFrames recomposes the whole chain for each
+        prim asked about unless it is handed the cache it uses
+        internally. Measured on Biped.usda, one refresh of
+        {fk shoulder, fk elbow, fk wrist, spine_root_ctl}: 262.5 ms with
+        a walk each, 120.1 ms sharing one cache -- and this runs on
+        every mouse sample of a drag, so it is 2.2x of the whole
+        interactive budget, not of a setup step.
+
+        The cache is built FRESH here every time and kept by nobody: the
+        frames it holds are composed from the preview values of one
+        sample (gizmoMath._previewValues), and reusing it across samples
+        would redraw the manipulator on the previous sample's pose.
+        """
+        cache = {} if frameCache is None else frameCache
+        for member in self.members:
+            member.Refresh(cache)
+
+    def Advisory(self):
+        notes = ["%s: %s" % (name, reason) for name, reason in self.skipped]
+        notes.extend(self._notes)
+        return "; ".join(notes)
+
+    def AttributePaths(self):
+        """
+        Every member's channels, in selection order, de-duplicated.
+
+        ONE list for ONE undo entry: the controller hands this to a
+        single rigExecUndo.EditRecorder at the press, so the whole group
+        drag takes back in one step however many controls it moved.
+        """
+        paths = []
+        seen = set()
+        for member in self.members:
+            for path in member.AttributePaths():
+                if path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+        return paths
+
+    def SetPreserveChildren(self, enabled):
+        Target.SetPreserveChildren(self, False)
+
+    # -- drag -----------------------------------------------------------
+
+    def BeginDrag(self, frameCache=None):
+        cache = {} if frameCache is None else frameCache
+        for member in self.members:
+            member.BeginDrag(cache)
+        self._origins = self.Origins()
+        self._pivot = Gf.Vec3d(self.Pivot())
+        self._frame = _RotationOnly(self.lead.GizmoMatrix())
+        self._order, self._ancestor = self._Hierarchy()
+        self._notes = []
+
+    def _Note(self, text):
+        """
+        A one-sentence explanation of something a drag could NOT do,
+        for Advisory() and the status line. De-duplicated: these are
+        raised per mouse sample, and the artist wants the fact once.
+        """
+        if text not in self._notes:
+            self._notes.append(text)
+
+    def _Hierarchy(self):
+        """
+        (order, ancestor): the member indices SHALLOWEST FIRST, and each
+        member's nearest selected ancestor (an index, or None).
+
+        Ordered by how many selected ancestors a member has, which is a
+        topological order for a forest and needs no graph. Computed once
+        at the press -- it walks PoseProviderChain per member, the same
+        walk the old driver filter did -- and then the whole drag is
+        arithmetic.
+        """
+        byPath = dict((m.prim.GetPath(), i)
+                      for i, m in enumerate(self.members))
+        ancestor = []
+        depth = []
+        for member in self.members:
+            nearest = None
+            count = 0
+            for path in PoseProviderChain(member.prim, self.time):
+                if path in byPath:
+                    count += 1
+                    if nearest is None:
+                        nearest = byPath[path]
+            ancestor.append(nearest)
+            depth.append(count)
+        order = sorted(range(len(self.members)), key=lambda i: depth[i])
+        return order, ancestor
+
+    def _Solve(self, intended):
+        """
+        Walk the members shallowest first and hand each one the
+        REMAINDER of its intended motion: what is left after everything
+        it has already inherited from a selected ancestor.
+
+        `intended(index, origin, inherited, inheritedOrigin)` answers
+        with the member's intended TOTAL world motion. Yields
+        (member, remainder, inheritedLinear, inheritedOrigin,
+        intendedOrigin).
+
+        THE WHOLE POINT. A rig control's world frame is
+        avars * C * parentWorld, with the parent's frame the RIGHTMOST
+        factor, so moving an ancestor right-multiplies every descendant
+        by the same world transform -- exactly, and for free. If a
+        member's intended motion IS what it inherited, the remainder is
+        the identity and it authors nothing; if it is not, the member
+        authors the difference. No rule about hierarchies, no mode to
+        get wrong: the two cases the old skip hard-coded both fall out
+        of one subtraction.
+
+        NO FRAME WALK PER MEMBER PER SAMPLE. `inherited` is composed
+        from the ancestors' own intended motions, which this loop
+        already holds, rather than re-derived from the stage --
+        ComputeRigFrames costs 7.2 ms on a spine control, 49.7 on the FK
+        shoulder and 120.0 on the FK wrist (measured on Biped.usda), and
+        a drag samples at mouse rate. The price is that each member's
+        own frames are STALE by exactly its inherited motion when its
+        Apply* is called, which _Author corrects for in closed form.
+        """
+        applied = {}
+        for index in self._order:
+            member = self.members[index]
+            origin = Gf.Vec3d(self._origins[index])
+            parent = self._ancestor[index]
+            inherited = (applied[parent] if parent is not None
+                         else Gf.Matrix4d(1.0))
+            inheritedOrigin = inherited.Transform(origin)
+            total = intended(index, origin, inherited, inheritedOrigin)
+            applied[index] = total
+            yield (member, inherited.GetInverse() * total,
+                   _Linear(inherited), inheritedOrigin,
+                   total.Transform(origin))
+
+    def _Author(self, member, remainder, inheritedLinear, inheritedOrigin,
+                intendedOrigin):
+        """
+        Write one member's remainder through its OWN entry points.
+
+        The remainder is a world motion of this member's frame, so it is
+        two calls: turn the frame by the remainder's rotation (which
+        leaves the origin alone -- every composition here puts the
+        translation last), then move the origin the rest of the way.
+        Each member's ApplyRotate / ApplyTranslate does the conversion
+        into that member's own channel space, which is the one copy of
+        that maths there is.
+
+        THE COMPENSATION. Those entry points read the member's channel
+        frame from self.frames, and _Solve does not refresh it, so when
+        an ancestor has already moved they are working in a frame that
+        is stale by exactly the ancestor's linear part, L. The member's
+        live frame is Pw*L, so a world vector v handed over unchanged
+        would land as v*L. Handing over v*L^-1 lands it as v -- exact,
+        and free, against a refresh that would cost a rig walk per
+        member per mouse sample. The rotation AXIS takes the same
+        correction, from the same algebra: conjugating a row-vector
+        rotation, R(n, a) becomes R(n*L^-1, a).
+        """
+        inverse = inheritedLinear.GetInverse()
+        turn = _RotationOnly(remainder).ExtractRotation()
+        angle = turn.GetAngle()
+        if abs(angle) > _GROUP_EPSILON_DEGREES:
+            if member.supportsRotate:
+                member.ApplyRotate(
+                    inverse.TransformDir(Gf.Vec3d(turn.GetAxis())), angle)
+            else:
+                self._Note("%s cannot rotate: it stays as it was rather "
+                           "than turning with the group" % member.label)
+        delta = Gf.Vec3d(intendedOrigin) - Gf.Vec3d(inheritedOrigin)
+        if delta.GetLength() > _GROUP_EPSILON_LENGTH:
+            if member.supportsTranslate:
+                member.ApplyTranslate(inverse.TransformDir(delta))
+            else:
+                self._Note("%s cannot translate: it turns in place rather "
+                           "than following the group pivot" % member.label)
+
+    def _About(self, motion, pivot):
+        """`motion` applied about `pivot` instead of about the origin."""
+        to = Gf.Matrix4d(1.0).SetTranslate(-Gf.Vec3d(pivot))
+        back = Gf.Matrix4d(1.0).SetTranslate(Gf.Vec3d(pivot))
+        return to * motion * back
+
+    def ApplyTranslate(self, worldDelta, *, snapStep=None,
+                       snapAbsolute=False):
+        """
+        Every member ends up moved by the SAME world delta.
+
+        Which ones AUTHOR it is not decided here: a member that a
+        selected ancestor has already carried the whole way has an
+        identity remainder and writes nothing, and that falls out of
+        _Solve rather than out of a rule about hierarchies.
+
+        Step Snap is quantised HERE, once, on the world delta, and the
+        members are then handed an exact vector (snapStep=None). Letting
+        each member quantise in its own channel space -- which is what
+        the single-target path does, and rightly, since that is where
+        the value lands -- would move the members by different amounts
+        and tear the group apart the moment two of them sit in spaces
+        rotated relative to each other, which on the biped is every
+        pair.
+        """
+        delta = Gf.Vec3d(worldDelta)
+        if snapStep and len(self.members) > 1:
+            base = [self._pivot[i] for i in range(3)]
+            landed = _SnapTranslation(base, [delta[i] for i in range(3)],
+                                      snapStep, snapAbsolute)
+            delta = Gf.Vec3d(*landed) - self._pivot
+            snapStep = None
+        elif snapStep:
+            member = self.members[0]
+            if member.supportsTranslate:
+                member.ApplyTranslate(delta, snapStep=snapStep,
+                                      snapAbsolute=snapAbsolute)
+            return
+        move = Gf.Matrix4d(1.0).SetTranslate(delta)
+        for entry in self._Solve(lambda *args: move):
+            self._Author(*entry)
+
+    def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
+        """
+        Turn the selection by the same world rotation, about whatever
+        the group pivot mode says (gizmoMath.GROUP_PIVOT_*).
+
+        Centre and Last Selected are RIGID motions of the whole
+        selection about one point, so every member's intended motion is
+        the same transform. Individual Origins is not rigid and is not
+        meant to be: each member turns about where IT now is, on top of
+        anything it inherited, so selecting a finger chain and dragging
+        the ring curls the finger instead of swinging it.
+
+        The angle is snapped once here so the members cannot land on
+        different angles; each member's own ApplyRotate then takes it
+        exactly (snapStep=None).
+        """
+        angle = _SnapValue(degrees, snapStep)
+        rotation = _WorldRotation(worldAxis, angle)
+        rigid = self._About(rotation, self._pivot)
+
+        def intended(index, origin, inherited, inheritedOrigin):
+            if self.pivotMode == GROUP_PIVOT_INDIVIDUAL:
+                return inherited * self._About(rotation, inheritedOrigin)
+            return rigid
+
+        for entry in self._Solve(intended):
+            self._Author(*entry)
+
+    def ApplyRotateChannel(self, axisIndex, degrees, *, snapStep=None):
+        """
+        A gimbal ring on a group. Unreachable while RotationState()
+        answers None for a real group -- the rings are then laid out on
+        world or object axes and gizmoDrag takes ApplyRotate -- but a
+        group of one still carries its member's rings, and a caller with
+        its own handles can still arrive here. Both are served by
+        turning the group about the named axis of the GROUP frame, which
+        is the frame the ring the artist grabbed was drawn on.
+        """
+        if len(self.members) == 1:
+            self.members[0].ApplyRotateChannel(axisIndex, degrees,
+                                               snapStep=snapStep)
+            return
+        axis = _RotationOnly(self._frame).TransformDir(_AXES[axisIndex])
+        self.ApplyRotate(axis, degrees, snapStep=snapStep)
+
+    def ApplyScale(self, axisIndex, factor, *, snapStep=None):
+        """
+        Scale the selection about the group pivot, along the axes of the
+        GROUP frame -- the frame the handles the artist grabbed were
+        drawn on.
+
+        Same remainder walk as the other two, with one difference worth
+        naming: a scale is not a rigid motion, so a member whose
+        ancestor was scaled has inherited that scale in its own channels
+        already (the evaluator composes scale down the chain) and its
+        remainder is the identity, exactly as it is for a rigid move.
+        Where the remainder is NOT the identity the member takes the
+        whole factor, because the factor is the same for every member of
+        the group; only the orbit differs.
+        """
+        axes = _ScaleAxes(axisIndex)
+        frame = _RotationOnly(self._frame)
+        inverseFrame = frame.GetInverse()
+        scale = Gf.Matrix4d(1.0)
+        scale.SetScale(Gf.Vec3d(*[factor if i in axes else 1.0
+                                  for i in range(3)]))
+        aligned = inverseFrame * scale * frame
+
+        def intended(index, origin, inherited, inheritedOrigin):
+            if self.pivotMode == GROUP_PIVOT_INDIVIDUAL:
+                return inherited * self._About(aligned, inheritedOrigin)
+            return self._About(aligned, self._pivot)
+
+        for (member, remainder, inheritedLinear, inheritedOrigin,
+             intendedOrigin) in self._Solve(intended):
+            if _IsIdentity(remainder):
+                continue
+            if member.supportsScale:
+                member.ApplyScale(axisIndex, factor, snapStep=snapStep)
+            delta = Gf.Vec3d(intendedOrigin) - Gf.Vec3d(inheritedOrigin)
+            if delta.GetLength() > _GROUP_EPSILON_LENGTH:
+                if member.supportsTranslate:
+                    member.ApplyTranslate(
+                        inheritedLinear.GetInverse().TransformDir(delta))
+                else:
+                    self._Note("%s cannot translate: it scales in place "
+                               "rather than following the group pivot"
+                               % member.label)
+
+
+def MakeGroupTarget(stage, prims, channels, writer, solverPosed=None):
+    """
+    (target, "") or (None, reason) for a MULTI-prim selection, `prims`
+    in selection order with the LEAD last.
+
+    Every prim goes through MakeTarget, so a group inherits every
+    refusal the single-target path already makes -- and that is the
+    whole of the "do not manipulate what the rig overwrites" rule. No
+    second policy, and no second place for the two to disagree.
+
+    Measured on examples/biped/Biped.usda, of its 116 controls:
+
+      15  refused because a RigExecParentConstraint overwrites their
+          frame (SolverPosedPaths / OVERWRITING_MOVER_TYPES -- the ten
+          constrained finger roots, arm_?_params, leg_?_params and
+          spine_mid_follow). Their avars are inert: a drag would author
+          values the next evaluation throws away.
+       2  refused for a connected avar (toeBend_?_fk.avars:rx).
+      33  more, but ONLY in a session with no published-frame reader:
+          headless, the descendants of those 15 inherit the refusal
+          (_PreferPublishedFrame explains why a published frame breaks
+          that inheritance), so the count is 50 under the tests and 17
+          in a live usdview with RigExec active.
+
+    A refused prim is left out of the group and NAMED in the target's
+    Advisory(), rather than dropped in silence -- a control that sits
+    still while its neighbours move reads as a bug from the viewport.
+
+    A selection with one survivor still returns a GroupTarget, so those
+    refusals stay visible; a group of one behaves exactly like the bare
+    target it wraps -- its pivot is that member's own origin, its orbit
+    deltas are zero, and RotationState() passes the member's rings
+    through.
+    """
+    members = []
+    skipped = []
+    lead = None
+    # ONE rig walk for the whole selection: the members share most of
+    # their ancestry, and ComputeRigFrames recomposes the entire chain
+    # per prim asked about unless it is handed this.
+    frameCache = {}
+    for prim in prims:
+        target, reason = MakeTarget(stage, prim, channels, writer,
+                                    solverPosed, frameCache)
+        if target is None:
+            name = prim.GetName() if prim and prim.IsValid() else "?"
+            skipped.append((name, reason))
+            continue
+        members.append(target)
+        # The lead is the last ACCEPTED prim, not simply the last one: a
+        # selection whose focus prim is one of the refused controls still
+        # has to orient its gizmo on something real.
+        lead = target
+    if not members:
+        if skipped:
+            # The LEAD's refusal, not the first one: it is the prim the
+            # artist picked last, and the one the status line named
+            # before the rest of the selection arrived.
+            return None, skipped[-1][1]
+        return None, "nothing selected"
+    return GroupTarget(members, lead, writer, skipped), ""

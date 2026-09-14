@@ -272,6 +272,67 @@ def TestXformOpsPreviewThroughTheVectors():
            < 1e-9, "with the handles where they already were")
 
 
+def TestGroupPushesOneSamplePerMove():
+    """
+    A GROUP drag is still ONE declaration and ONE Update per mouse
+    sample, however many prims it moves.
+
+    This is the whole reason the controller builds every member's target
+    on a single Writer: Push() sends writer.Pending(), so N targets that
+    shared one writer arrive as one packed sample, while N writers would
+    have been N round trips to the C++ side per mouse-move -- and then N
+    authored commits on release, where one authored edit already costs
+    ~150 ms on the next evaluate.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    time = Usd.TimeCode.Default()
+    UsdGeom.Xform.Define(stage, "/Group")
+    prims = []
+    for index, name in enumerate(("A", "B")):
+        xform = UsdGeom.Xform.Define(stage, "/Group/%s" % name)
+        api = UsdGeom.XformCommonAPI(xform)
+        api.SetTranslate(Gf.Vec3d(index * 4, 0, 0))
+        api.SetRotate(Gf.Vec3f(0, 0, 30.0 * index))
+        api.SetScale(Gf.Vec3f(1, 1, 1))
+        prims.append(xform.GetPrim())
+    # Two prims x one Vec3d translate op = six doubles in one sample.
+    sink = _FakeSink(expected=6)
+    gizmoPreview.SetSink(sink)
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    group, reason = gizmoMath.MakeGroupTarget(
+        stage, prims, gizmoMath.CHANNELS_POSE, writer)
+    _Check(group is not None, reason)
+    group.BeginDrag()
+    group.ApplyTranslate(Gf.Vec3d(0, 2, 0))
+    _Check(gizmoPreview.Push(writer.Pending()),
+           "the sink took the group sample")
+    _Check(len(sink.declarations) == 1,
+           "one declaration for the whole group: %s" % sink.declarations)
+    _Check(sink.declarations[0].split("\n")
+           == ["/Group/A.xformOp:translate", "/Group/B.xformOp:translate"],
+           "both members in it: %r" % sink.declarations[0])
+    _Check(len(sink.samples) == 1 and len(sink.samples[0]) == 6,
+           "one packed sample: %s" % sink.samples)
+    # A second mouse-move re-declares nothing: the key set is unchanged.
+    group.ApplyTranslate(Gf.Vec3d(0, 5, 0))
+    _Check(gizmoPreview.Push(writer.Pending()), "second sample")
+    _Check(len(sink.declarations) == 1 and len(sink.samples) == 2,
+           "still one declaration, two samples: %s / %s"
+           % (sink.declarations, sink.samples))
+    # Nothing reached the stage: the release is what authors.
+    for prim in prims:
+        _Check(not stage.GetAttributeAtPath(
+            prim.GetPath().AppendProperty("xformOp:translate"))
+            .Get(time)[1],
+            "%s is still where it was authored" % prim.GetName())
+    writer.CommitToStage()
+    gizmoPreview.End()
+    for prim in prims:
+        value = stage.GetAttributeAtPath(
+            prim.GetPath().AppendProperty("xformOp:translate")).Get(time)
+        _Check(abs(value[1] - 5.0) < 1e-9,
+               "%s authored once, on release: %s" % (prim.GetName(), value))
+
 def main():
     for name, fn in (("flatten", TestFlatten),
                      ("declare once", TestPushDeclaresOnceAndSendsNumbers),
@@ -280,7 +341,9 @@ def main():
                      ("no sink", TestNoSinkStillWorks),
                      ("writer feeds the maths",
                       TestWriterFeedsTheFrameMaths),
-                     ("xform ops", TestXformOpsPreviewThroughTheVectors)):
+                     ("xform ops", TestXformOpsPreviewThroughTheVectors),
+                     ("group: one sample per move",
+                      TestGroupPushesOneSamplePerMove)):
         try:
             fn()
         finally:
@@ -289,7 +352,7 @@ def main():
             gizmoPreview.SetSink(None)
             gizmoMath.SetPreviewValues({})
         print("  ok: %s" % name)
-    print("GIZMO_PREVIEW_OK (%d groups)" % 7)
+    print("GIZMO_PREVIEW_OK (%d groups)" % 8)
     return 0
 
 

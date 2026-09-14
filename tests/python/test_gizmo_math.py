@@ -491,7 +491,7 @@ def TestWriter():
     _Check(attr.HasSpline() and len(attr.GetSpline().GetKnots()) == 1,
            "animation mode writes ONE spline knot for the whole drag")
     _Check(_Close(attr.Get(Usd.TimeCode(1001.0)), 3.0), "knot value")
-    # Maya's default new key (graphModel.AuthorKnot), so a gizmo drag and
+    # the conventional default new key (graphModel.AuthorKnot), so a gizmo drag and
     # a graph-editor insert produce the same knot.
     knot = attr.GetSpline().GetKnot(1001.0)
     _Check(knot.GetPreTanAlgorithm() == Ts.TangentAlgorithmAutoEase
@@ -978,7 +978,7 @@ def TestXformTargets():
     cache = UsdGeom.XformCache(time)
     expected = cache.GetLocalToWorldTransform(box.GetPrim())\
         .ExtractTranslation()
-    # Maya centres all three manipulators on the point the rotate and
+    # All three manipulators are centred on the point the rotate and
     # scale ops turn about, which for this op stack is pivot + translate
     # in parent space (design spec section 8.2), not the local origin.
     startVectors = api.GetXformVectors(time)
@@ -1053,7 +1053,7 @@ def TestXformTargets():
 
 def TestGimbalAndFrames():
     """
-    Maya's Gimbal rotate axes and the frames the handles are drawn in
+    the conventional Gimbal rotate axes and the frames the handles are drawn in
     (design spec section 8.2 Axis Orientation, 8.3 Rotate Axis).
 
     The gimbal contract is exact, not approximate: dragging the ring for
@@ -1266,7 +1266,7 @@ def TestRigPivotCarriesChildrenWhenOff():
 
 def TestPreserveChildren():
     """
-    Maya's Preserve Children (design spec section 8.2), default off: the
+    the conventional Preserve Children (design spec section 8.2), default off: the
     children keep their world transforms while the parent is dragged.
     """
     stage = Usd.Stage.CreateInMemory()
@@ -1399,7 +1399,7 @@ def _AxisAlignedRigStage():
 
 def TestSnapAndPlanarScale():
     """
-    Maya's planar (two-axis) scale handles and Step Snap (design spec
+    the conventional planar (two-axis) scale handles and Step Snap (design spec
     8.2, 8.4). Snapping is done here, not in the controller, because it
     has to happen in CHANNEL space: quantising the world delta would put
     the written values off the grid whenever the channel frame is turned.
@@ -1419,7 +1419,7 @@ def TestSnapAndPlanarScale():
     _Check(_Close(ctl.GetAttribute("avars:tx").Get(), 0.7)
            and _Close(ctl.GetAttribute("avars:ty").Get(), 0.2),
            "no snapStep leaves the delta alone")
-    # Relative snap (Maya's J hold) quantises the DELTA.
+    # Relative snap (the conventional J hold) quantises the DELTA.
     for name in gizmoMath.AVAR_T:
         ctl.GetAttribute(name).Set(0.0)
     _Drag(target, lambda: target.ApplyTranslate(
@@ -1428,7 +1428,7 @@ def TestSnapAndPlanarScale():
            and _Close(ctl.GetAttribute("avars:ty").Get(), 0.0),
            "relative step snap quantises the channel delta: %s"
            % [ctl.GetAttribute(n).Get() for n in gizmoMath.AVAR_T])
-    # Absolute snap (Maya's X grid hold) quantises the RESULT, which is
+    # Absolute snap (the conventional X grid hold) quantises the RESULT, which is
     # what makes it different: the same delta is swallowed by relative.
     ctl.GetAttribute("avars:tx").Set(1.3)
     _Drag(target, lambda: target.ApplyTranslate(
@@ -2146,6 +2146,844 @@ def TestSolverCacheRetarget():
         listener.Revoke()
 
 
+def _GroupStage():
+    """
+    A rig shaped like the biped's arm: a namespace CHAIN of three
+    controls plus a control off to one side, and a solver-posed joint
+    the gizmo has to refuse.
+
+    The chain is the part that matters. The biped's FK controls are
+    nested (rigExec:controlSpace = "parentRelative"), so a group drag
+    that hands each selected control its own copy of the delta moves a
+    child once per selected ancestor; this stage reproduces that in
+    three prims instead of 116.
+    """
+    stage = Usd.Stage.CreateInMemory()
+    asset = UsdGeom.Xform.Define(stage, "/Asset")
+    asset.AddTranslateOp().Set(Gf.Vec3d(100, 0, 0))
+    stage.DefinePrim("/Asset/Rig", "RigExecRoot")
+    stage.DefinePrim("/Asset/Rig/Controls", "Scope")
+
+    space = _Rot(Gf.Vec3d(0, 0, 1), 90.0)
+    space.SetTranslateOnly(Gf.Vec3d(0, 5, 0))
+    root = stage.DefinePrim("/Asset/Rig/Controls/Root", "RigExecControl")
+    root.GetAttribute("rest:space").Set(space)
+    root.GetAttribute("avars:rz").Set(30.0)
+    mid = stage.DefinePrim("/Asset/Rig/Controls/Root/Mid", "RigExecControl")
+    mid.GetAttribute("rest:tx").Set(6.0)
+    mid.GetAttribute("avars:ry").Set(15.0)
+    tip = stage.DefinePrim("/Asset/Rig/Controls/Root/Mid/Tip",
+                           "RigExecControl")
+    tip.GetAttribute("rest:tx").Set(4.0)
+    tip.GetAttribute("avars:rx").Set(-20.0)
+
+    sideSpace = _Rot(Gf.Vec3d(0, 1, 0), 40.0)
+    sideSpace.SetTranslateOnly(Gf.Vec3d(0, -8, 12))
+    side = stage.DefinePrim("/Asset/Rig/Controls/Side", "RigExecControl")
+    side.GetAttribute("rest:space").Set(sideSpace)
+    side.GetAttribute("avars:ty").Set(2.0)
+
+    # The stand-in for the biped's 15 parent-constrained controls: a prim
+    # the rig writes outright, whose avars are inert.
+    posedCtl = stage.DefinePrim("/Asset/Rig/Controls/Driven",
+                                "RigExecControl")
+    posedCtl.GetAttribute("rest:space").Set(sideSpace)
+    mover = stage.DefinePrim("/Asset/Rig/Movers/Follow",
+                             "RigExecParentConstraint")
+    mover.GetRelationship("rigExec:moves").SetTargets([posedCtl.GetPath()])
+    return stage, root, mid, tip, side, posedCtl
+
+
+def _GroupOrigin(stage, prim, time):
+    frames = gizmoMath.ComputeRigFrames(stage, prim, time)
+    return (frames.posed * frames.assetToWorld).ExtractTranslation()
+
+
+def _GroupWorld(stage, prim, time):
+    frames = gizmoMath.ComputeRigFrames(stage, prim, time)
+    return (frames.posed * frames.assetToWorld).GetOrthonormalized(False)
+
+
+def _Group(stage, prims, time, channels=None):
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    target, reason = gizmoMath.MakeGroupTarget(
+        stage, prims, channels or gizmoMath.CHANNELS_POSE, writer)
+    _Check(target is not None, "group refused: %s" % reason)
+    return target, writer
+
+
+def TestGroupPivotAndFrame():
+    """
+    The pivot is the centroid of the members' evaluated origins,
+    oriented like the LEAD (last-selected) control -- the the conventional tool/Blender
+    convention.
+    """
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    group, _writer = _Group(stage, [mid, tip, side], time)
+    _Check(group.kind == "group" and group.label == "3 controls",
+           "label: %r" % group.label)
+    origins = [_GroupOrigin(stage, p, time) for p in (mid, tip, side)]
+    centroid = (Gf.Vec3d(origins[0]) + Gf.Vec3d(origins[1])
+                + Gf.Vec3d(origins[2])) / 3.0
+    pivot = group.Pivot()
+    _Check(all(_Close(pivot[i], centroid[i], 1e-9) for i in range(3)),
+           "pivot is the centroid: %s vs %s" % (pivot, centroid))
+    gizmo = group.GizmoMatrix()
+    _Check(all(_Close(gizmo.ExtractTranslation()[i], centroid[i], 1e-9)
+               for i in range(3)), "the gizmo sits on the pivot")
+    lead, _ = gizmoMath.MakeTarget(stage, side, gizmoMath.CHANNELS_POSE,
+                                   gizmoMath.Writer(stage, time,
+                                                    gizmoMath.WRITE_DEFAULT))
+    leadRotation = lead.GizmoMatrix().GetOrthonormalized(False)
+    _Check(all(_Close(gizmo[r][c], leadRotation[r][c], 1e-9)
+               for r in range(3) for c in range(3)),
+           "the group frame is the LEAD's orientation:\n%s\n%s"
+           % (gizmo, leadRotation))
+    # ... and the other two orientation modes are the lead's too, moved
+    # onto the pivot, so the Axis Orientation option keeps working.
+    for name in ("ChannelFrame", "GimbalFrame"):
+        groupFrame = getattr(group, name)()
+        leadFrame = getattr(lead, name)()
+        _Check(all(_Close(groupFrame[r][c], leadFrame[r][c], 1e-9)
+                   for r in range(3) for c in range(3)),
+               "%s follows the lead" % name)
+        _Check(all(_Close(groupFrame.ExtractTranslation()[i], centroid[i],
+                          1e-9) for i in range(3)),
+               "%s sits on the pivot" % name)
+    # A gimbal ring is one Euler channel of one prim; a group has none.
+    _Check(group.RotationState() is None,
+           "a real group declines gimbal rings")
+    # ... but a group of ONE is not a group: it keeps its member's rings,
+    # which is what a selection where everything but the lead was refused
+    # falls back to.
+    single, _writer = _Group(stage, [side], time)
+    _Check(single.RotationState() is not None
+           and single.label == side.GetName(),
+           "a group of one passes the member through: %r" % single.label)
+
+
+def TestGroupTranslate():
+    """
+    One world delta, expressed in every member's OWN space, and the
+    members carried by another member are left to ride.
+    """
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    selected = [mid, tip, side]
+    before = {p.GetName(): _GroupOrigin(stage, p, time) for p in selected}
+    untouched = _GroupOrigin(stage, root, time)
+    group, writer = _Group(stage, selected, time)
+    group.BeginDrag()
+    # Tip is a namespace descendant of Mid, so Mid is its nearest
+    # selected ancestor and Tip is walked after it.
+    _Check(group._ancestor == [None, 0, None],
+           "nearest selected ancestors: %s" % group._ancestor)
+    _Check(group._order.index(0) < group._order.index(1),
+           "shallowest first: %s" % group._order)
+    delta = Gf.Vec3d(2.5, -3.25, 7.0)
+    group.ApplyTranslate(delta)
+    # ONE writer for the whole group: this dict is what gizmoPreview.Push
+    # sends in a single UpdatePreview per mouse sample.
+    pending = writer.Pending()
+    # Two members author; Tip's remainder is the identity because Mid
+    # already carried it the whole way, so it writes nothing -- an
+    # outcome of the arithmetic, not of a rule (GroupTarget._Solve).
+    _Check(len(pending) == 6,
+           "six translate avars in one push: %d" % len(pending))
+    writer.CommitToStage()
+    group.Refresh()
+    for prim in selected:
+        after = _GroupOrigin(stage, prim, time)
+        start = before[prim.GetName()]
+        _Check(all(_Close(after[i], start[i] + delta[i], 1e-9)
+                   for i in range(3)),
+               "%s moved by the group delta: %s vs %s"
+               % (prim.GetName(), Gf.Vec3d(after) - Gf.Vec3d(start), delta))
+    _Check(all(_Close(_GroupOrigin(stage, root, time)[i], untouched[i], 1e-9)
+               for i in range(3)), "an unselected control did not move")
+    # The carried member's own channels were never written.
+    for name in gizmoMath.AVAR_T:
+        _Check(not tip.GetAttribute(name).HasAuthoredValue(),
+               "the carried control authored nothing: %s" % name)
+    # Every member's channels are in ONE undo list, de-duplicated.
+    paths = group.AttributePaths()
+    _Check(len(paths) == len(set(paths)) == 27,
+           "nine avars per member, once each: %d" % len(paths))
+    for prim in selected:
+        _Check(prim.GetPath().AppendProperty("avars:tx") in paths,
+               "%s is in the undo record" % prim.GetName())
+
+
+def TestGroupTranslateIsNotAvailableInWorldUnits():
+    """
+    The per-member conversion is real, not a world-space memo: the
+    members' channel frames are rotated 90 and 40 degrees apart here, so
+    the SAME world delta lands on completely different avar values.
+    """
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    group, writer = _Group(stage, [mid, side], time)
+    group.BeginDrag()
+    group.ApplyTranslate(Gf.Vec3d(0, 0, 5))
+    writer.CommitToStage()
+    midValues = [mid.GetAttribute(n).Get(time) for n in gizmoMath.AVAR_T]
+    sideValues = [side.GetAttribute(n).Get(time) for n in gizmoMath.AVAR_T]
+    _Check(max(abs(midValues[i] - sideValues[i]) for i in range(3)) > 1.0,
+           "different spaces, different channel values: %s vs %s"
+           % (midValues, sideValues))
+
+
+def TestGroupRotate():
+    """
+    A rotation about the SHARED pivot: every member turns by the angle
+    AND orbits to where the rigid rotation puts its origin.
+    """
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    selected = [mid, tip, side]
+    before = {p.GetName(): _GroupOrigin(stage, p, time) for p in selected}
+    beforeWorld = {p.GetName(): _GroupWorld(stage, p, time)
+                   for p in selected}
+    untouched = _GroupOrigin(stage, root, time)
+    group, writer = _Group(stage, selected, time)
+    group.BeginDrag()
+    pivot = Gf.Vec3d(group.Pivot())
+    axis = Gf.Vec3d(0, 0, 1)
+    group.ApplyRotate(axis, 30.0)
+    writer.CommitToStage()
+    rotation = _Rot(axis, 30.0)
+    for prim in selected:
+        name = prim.GetName()
+        after = _GroupOrigin(stage, prim, time)
+        predicted = pivot + rotation.TransformDir(
+            Gf.Vec3d(before[name]) - pivot)
+        _Check(all(_Close(after[i], predicted[i], 1e-9) for i in range(3)),
+               "%s landed on the rigid rotation: %s vs %s"
+               % (name, after, predicted))
+        world = _GroupWorld(stage, prim, time)
+        expected = beforeWorld[name] * rotation
+        _Check(all(_Close(world[r][c], expected[r][c], 1e-9)
+                   for r in range(3) for c in range(3)),
+               "%s turned by 30 degrees about the world axis" % name)
+        turn = (beforeWorld[name].GetInverse() * world).ExtractRotation()
+        _Check(_Close(turn.GetAngle(), 30.0, 1e-6),
+               "%s turned %.6f degrees" % (name, turn.GetAngle()))
+    _Check(all(_Close(_GroupOrigin(stage, root, time)[i], untouched[i], 1e-9)
+               for i in range(3)), "an unselected control did not move")
+    # The orbit is a TRANSLATE as well as a turn: a member off the pivot
+    # writes both, or it would rotate in place and tear the group apart.
+    _Check(mid.GetAttribute("avars:tx").HasAuthoredValue()
+           and mid.GetAttribute("avars:rz").HasAuthoredValue(),
+           "an off-pivot member both turned and orbited")
+
+
+def TestGroupRotateOnlyMemberIsReported():
+    """
+    A member whose channels cannot express the orbit keeps its turn and
+    SAYS SO. Half-applying it in silence is the one outcome the group
+    path must not have.
+    """
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    group, writer = _Group(stage, [mid, side], time)
+    # There is no rotate-only Target in the module today; the flag is the
+    # contract every Apply* honours, so setting it is the whole case.
+    group.members[1].supportsTranslate = False
+    group.BeginDrag()
+    before = _GroupOrigin(stage, side, time)
+    channels = [side.GetAttribute(n).Get(time) for n in gizmoMath.AVAR_T]
+    group.ApplyRotate(Gf.Vec3d(0, 0, 1), 30.0)
+    writer.CommitToStage()
+    after = _GroupOrigin(stage, side, time)
+    _Check(all(_Close(after[i], before[i], 1e-9) for i in range(3)),
+           "the rotate-only member turned in place")
+    _Check("cannot translate" in group.Advisory(),
+           "and the status line says so: %r" % group.Advisory())
+    for name, value in zip(gizmoMath.AVAR_T, channels):
+        now = side.GetAttribute(name).Get(time)
+        _Check((value is None and now is None)
+               or _Close(now or 0.0, value or 0.0, 1e-12),
+               "nothing half-applied onto %s: %s -> %s"
+               % (name, value, now))
+
+
+def TestGroupScale():
+    """Scale about the shared pivot: own channels, plus the orbit."""
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    selected = [mid, side]
+    before = {p.GetName(): _GroupOrigin(stage, p, time) for p in selected}
+    group, writer = _Group(stage, selected, time)
+    group.BeginDrag()
+    pivot = Gf.Vec3d(group.Pivot())
+    group.ApplyScale(None, 2.0)
+    writer.CommitToStage()
+    for prim in selected:
+        name = prim.GetName()
+        after = _GroupOrigin(stage, prim, time)
+        predicted = pivot + (Gf.Vec3d(before[name]) - pivot) * 2.0
+        _Check(all(_Close(after[i], predicted[i], 1e-9) for i in range(3)),
+               "%s scaled about the pivot: %s vs %s"
+               % (name, after, predicted))
+        for channel in gizmoMath.AVAR_S:
+            _Check(_Close(prim.GetAttribute(channel).Get(time), 2.0, 1e-9),
+                   "%s.%s doubled" % (name, channel))
+
+
+def TestGroupStepSnapIsQuantisedOnce():
+    """
+    Step Snap quantises the WORLD delta once, not each member's channels
+    in its own space -- which would move the members by different
+    amounts and tear the group apart.
+    """
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    selected = [mid, side]
+    before = {p.GetName(): _GroupOrigin(stage, p, time) for p in selected}
+    group, writer = _Group(stage, selected, time)
+    group.BeginDrag()
+    group.ApplyTranslate(Gf.Vec3d(2.4, 0, 0), snapStep=1.0)
+    writer.CommitToStage()
+    moved = []
+    for prim in selected:
+        after = _GroupOrigin(stage, prim, time)
+        moved.append(Gf.Vec3d(after) - Gf.Vec3d(before[prim.GetName()]))
+    _Check(all(_Close(moved[0][i], 2.0 if i == 0 else 0.0, 1e-9)
+               for i in range(3)),
+           "the world delta snapped to the step: %s" % (moved[0],))
+    _Check(all(_Close(moved[0][i], moved[1][i], 1e-9) for i in range(3)),
+           "and every member moved by the same one: %s vs %s"
+           % (moved[0], moved[1]))
+
+
+def TestGroupSkipsWhatTheRigOverwrites():
+    """
+    A control a RigExecParentConstraint writes is left out of the group
+    and NAMED, never dragged into values the rig throws away.
+    """
+    stage, root, mid, tip, side, driven = _GroupStage()
+    time = Usd.TimeCode.Default()
+    solverPosed = gizmoMath.SolverPosedPaths(
+        stage.GetPrimAtPath("/Asset/Rig"))
+    _Check(driven.GetPath() in solverPosed,
+           "the stage really does overwrite it: %s" % solverPosed)
+    before = _GroupOrigin(stage, driven, time)
+    group, writer = _Group(stage, [driven, mid, side], time)
+    _Check([m.label for m in group.members] == ["Mid", "Side"],
+           "the overwritten control is not a member: %s"
+           % [m.label for m in group.members])
+    _Check(len(group.skipped) == 1 and group.skipped[0][0] == "Driven",
+           "and it is named: %s" % (group.skipped,))
+    _Check("Driven" in group.Advisory()
+           and "overwriting mover" in group.Advisory(),
+           "the status line carries the reason: %r" % group.Advisory())
+    group.BeginDrag()
+    group.ApplyTranslate(Gf.Vec3d(0, 0, 9))
+    group.ApplyRotate(Gf.Vec3d(0, 0, 1), 25.0)
+    writer.CommitToStage()
+    after = _GroupOrigin(stage, driven, time)
+    _Check(all(_Close(after[i], before[i], 1e-9) for i in range(3)),
+           "the refused control did not move")
+    for name in gizmoMath.AVAR_T + gizmoMath.AVAR_R:
+        _Check(not driven.GetAttribute(name).HasAuthoredValue(),
+               "nothing was authored onto %s.%s" % (driven.GetName(), name))
+    # A selection of nothing BUT refusals still answers with the reason.
+    refused, reason = gizmoMath.MakeGroupTarget(
+        stage, [driven], gizmoMath.CHANNELS_POSE,
+        gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT))
+    _Check(refused is None and "overwriting mover" in reason,
+           "an all-refused selection reports the lead's reason: %r" % reason)
+
+
+def TestGroupSolverPosedJointIsSkipped():
+    """The existing rigExec:joints refusal reaches a group too."""
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    joint = stage.DefinePrim("/Asset/Rig/Joints/J", "RigExecJoint")
+    solver = stage.DefinePrim("/Asset/Rig/Solvers/Fk", "RigExecFkChain")
+    solver.GetRelationship("rigExec:joints").SetTargets([joint.GetPath()])
+    group, writer = _Group(stage, [joint, mid, side], time)
+    _Check([m.label for m in group.members] == ["Mid", "Side"],
+           "the solver-posed joint is not a member")
+    _Check("solver" in group.Advisory(),
+           "and the reason is the solver's: %r" % group.Advisory())
+
+
+def TestGroupCarriesOnPoseProviders():
+    """
+    PoseProviderPaths follows what _ComputeRigFrames actually resolves,
+    which is not always the namespace parent.
+    """
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    providers = gizmoMath.PoseProviderPaths(tip, time)
+    _Check(mid.GetPath() in providers and root.GetPath() in providers,
+           "the namespace chain carries the tip: %s" % providers)
+    _Check(Sdf.Path("/Asset") in providers,
+           "and so does the asset xform that places the rig: %s" % providers)
+    _Check(side.GetPath() not in providers, "a sibling does not")
+    # A parent:space CONNECTION redirects the pose parent, and the group
+    # has to follow it or it would hand a carried control its own delta.
+    side.GetAttribute("parent:space").AddConnection(
+        mid.GetAttribute("parent:space").GetPath())
+    providers = gizmoMath.PoseProviderPaths(side, time)
+    _Check(mid.GetPath() in providers,
+           "a connected parent:space is followed: %s" % providers)
+
+
+def _GroupRotateRun(mode, degrees=30.0):
+    """
+    One 30-degree group rotate on a fresh stage in `mode`.
+
+    Fresh every time, because each run authors: reusing the stage would
+    measure the second rotation on top of the first.
+    """
+    stage, _root, mid, tip, side, _driven = _GroupStage()
+    time = Usd.TimeCode.Default()
+    prims = [mid, tip, side]
+    before = [Gf.Vec3d(_GroupOrigin(stage, p, time)) for p in prims]
+    beforeWorld = [_GroupWorld(stage, p, time) for p in prims]
+    group, writer = _Group(stage, prims, time)
+    group.SetPivotMode(mode)
+    group.BeginDrag()
+    pivot = Gf.Vec3d(group.Pivot())
+    group.ApplyRotate(Gf.Vec3d(0, 0, 1), degrees)
+    writer.CommitToStage()
+    after = [Gf.Vec3d(_GroupOrigin(stage, p, time)) for p in prims]
+    return stage, prims, before, beforeWorld, after, pivot
+
+
+def _Centroid3(points):
+    return (points[0] + points[1] + points[2]) / 3.0
+
+
+def TestGroupPivotModes():
+    """
+    WHERE a group turns: the CENTRE by default, and the two other
+    answers a DCC offers.
+
+    The default is the point of the option. "Rotate these together"
+    means about their middle -- the centroid has to come out of the
+    rotation exactly where it went in -- not about whichever control
+    happened to be clicked last.
+    """
+    rotation = _Rot(Gf.Vec3d(0, 0, 1), 30.0)
+
+    # -- the default: about the centre, and the centre does not move.
+    _stage, prims, before, _bw, after, pivot = _GroupRotateRun(
+        gizmoMath.GROUP_PIVOT_CENTER)
+    _Check(all(_Close(pivot[i], _Centroid3(before)[i], 1e-9)
+               for i in range(3)),
+           "the default pivot IS the centroid: %s vs %s"
+           % (pivot, _Centroid3(before)))
+    drift = _Centroid3(after) - _Centroid3(before)
+    _Check(drift.GetLength() < 1e-9,
+           "and a rotation about it leaves the centroid where it was: %s"
+           % (drift,))
+    for prim, start, end in zip(prims, before, after):
+        predicted = pivot + rotation.TransformDir(start - pivot)
+        _Check((end - predicted).GetLength() < 1e-9,
+               "%s is where the rigid rotation about the centre puts it: "
+               "%s vs %s" % (prim.GetName(), end, predicted))
+
+    # -- lead: the last-selected control is the one that stays put.
+    _stage, prims, before, _bw, after, pivot = _GroupRotateRun(
+        gizmoMath.GROUP_PIVOT_LEAD)
+    _Check(all(_Close(pivot[i], before[2][i], 1e-9) for i in range(3)),
+           "the lead pivot is the LAST selected control's origin")
+    _Check((after[2] - before[2]).GetLength() < 1e-9,
+           "so the lead does not move: %s" % (after[2] - before[2],))
+    _Check((_Centroid3(after) - _Centroid3(before)).GetLength() > 0.5,
+           "and the centroid does -- which is the whole difference from "
+           "the default")
+
+    # -- individual origins: everyone turns, no DRIVER moves.
+    _stage, prims, before, _bw, after, _pivot = _GroupRotateRun(
+        gizmoMath.GROUP_PIVOT_INDIVIDUAL)
+    _Check((after[0] - before[0]).GetLength() < 1e-9
+           and (after[2] - before[2]).GetLength() < 1e-9,
+           "each driver turned about its own origin and stayed there")
+    # The carried member moves, and correctly so: it rides on an
+    # ancestor, and the ancestor turned. This is the one pivot mode that
+    # is not a rigid motion of the selection, by design.
+    _Check((after[1] - before[1]).GetLength() > 0.5,
+           "a carried control still rides on the driver it hangs from")
+
+
+def TestGroupPivotModeFallsBackToTheCentre():
+    """A stale or unknown setting must not be able to break a drag."""
+    stage, _root, mid, _tip, side, _driven = _GroupStage()
+    time = Usd.TimeCode.Default()
+    group, _writer = _Group(stage, [mid, side], time)
+    group.SetPivotMode("a mode from a future version")
+    _Check(group.pivotMode == gizmoMath.GROUP_PIVOT_CENTER,
+           "an unknown pivot mode is the centre: %r" % group.pivotMode)
+
+
+def TestGroupRotateTurnsEveryoneWhateverThePivot():
+    """
+    Under a RIGID pivot the angle is the angle: every member turns by
+    exactly what was dragged, wherever the pivot is. Asserted on its own
+    because "what moves" and "how far it turns" are easy to conflate,
+    and a mistake in the orbit maths shows up here first.
+
+    INDIVIDUAL ORIGINS is the exception, and deliberately so. Each
+    selected control turns about itself, so a control that hangs off
+    another selected control gets its own turn AND its ancestor's: Mid
+    and Side turn 30 degrees, and Tip -- a child of Mid -- turns 60.
+    That is Blender's behaviour for this mode, and it is the reason an
+    animator reaches for it: selecting a finger chain and dragging the
+    ring CURLS the finger instead of swinging it rigidly.
+    """
+    time = Usd.TimeCode.Default()
+    for mode in (gizmoMath.GROUP_PIVOT_CENTER, gizmoMath.GROUP_PIVOT_LEAD):
+        stage, prims, _b, beforeWorld, _a, _p = _GroupRotateRun(mode)
+        for prim, start in zip(prims, beforeWorld):
+            turn = (start.GetInverse()
+                    * _GroupWorld(stage, prim, time)).ExtractRotation()
+            _Check(_Close(turn.GetAngle(), 30.0, 1e-6),
+                   "%s turned %.6f degrees in %s mode"
+                   % (prim.GetName(), turn.GetAngle(), mode))
+    stage, prims, _b, beforeWorld, _a, _p = _GroupRotateRun(
+        gizmoMath.GROUP_PIVOT_INDIVIDUAL)
+    expected = {"Mid": 30.0, "Tip": 60.0, "Side": 30.0}
+    for prim, start in zip(prims, beforeWorld):
+        turn = (start.GetInverse()
+                * _GroupWorld(stage, prim, time)).ExtractRotation()
+        _Check(_Close(turn.GetAngle(), expected[prim.GetName()], 1e-6),
+               "%s turned %.6f degrees, expected %.1f"
+               % (prim.GetName(), turn.GetAngle(),
+                  expected[prim.GetName()]))
+
+
+def TestGroupLocalAxesAreTheLeads():
+    """
+    What "Local" means for a multi-selection: the LAST-SELECTED
+    control's frame, moved onto the group pivot.
+
+    The axes and the pivot are independent -- this asserts the pairing
+    the controller relies on (gizmoUI._Orientation feeds ObjectFrame()
+    to gizmoScreen, and the pivot comes from GizmoMatrix()).
+    """
+    stage, _root, mid, tip, side, _driven = _GroupStage()
+    time = Usd.TimeCode.Default()
+    group, _writer = _Group(stage, [mid, tip, side], time)
+    leadWorld = _GroupWorld(stage, side, time)
+    frame = group.ObjectFrame()
+    _Check(all(_Close(frame[r][c], leadWorld[r][c], 1e-9)
+               for r in range(3) for c in range(3)),
+           "Local is the lead's own axes")
+    pivot = group.Pivot()
+    _Check(all(_Close(frame.ExtractTranslation()[i], pivot[i], 1e-9)
+               for i in range(3)),
+           "drawn at the group pivot, not at the lead")
+    # And they really are a different set of axes from Global here, or
+    # the assertion above would be vacuous.
+    angle = Gf.Rotation(Gf.Vec3d(0, 0, 1),
+                        frame.TransformDir(Gf.Vec3d(0, 0, 1))).GetAngle()
+    _Check(angle > 1.0,
+           "the lead's Z is not the world Z: %.4f degrees apart" % angle)
+
+def TestGroupRemainderSolve():
+    """
+    Every selected member ends up where the pivot mode says, and WHO
+    authored is a result rather than a rule.
+
+    This is the test that would have caught the skip. A rigid pivot
+    leaves a member whose ancestor is also selected exactly where it
+    belongs, so its remainder is the identity and it writes nothing --
+    but it still has to LAND there, to the same tolerance as the member
+    that did the writing. Individual Origins is not rigid, so every
+    member's remainder is its own turn and every member writes.
+    """
+    rotation = _Rot(Gf.Vec3d(0, 0, 1), 30.0)
+
+    def Run(mode):
+        stage, _root, mid, tip, side, _driven = _GroupStage()
+        time = Usd.TimeCode.Default()
+        prims = [mid, tip, side]
+        before = [Gf.Matrix4d(_GroupWorld(stage, p, time)) for p in prims]
+        origins = [Gf.Vec3d(_GroupOrigin(stage, p, time)) for p in prims]
+        group, writer = _Group(stage, prims, time)
+        group.SetPivotMode(mode)
+        group.BeginDrag()
+        pivot = Gf.Vec3d(group.Pivot())
+        group.ApplyRotate(Gf.Vec3d(0, 0, 1), 30.0)
+        wrote = set(path.GetPrimPath() for path in writer.Pending())
+        writer.CommitToStage()
+        return stage, prims, before, origins, pivot, wrote
+
+    # -- rigid: one member writes, all three land -------------------
+    for mode in (gizmoMath.GROUP_PIVOT_CENTER, gizmoMath.GROUP_PIVOT_LEAD):
+        stage, prims, before, origins, pivot, wrote = Run(mode)
+        time = Usd.TimeCode.Default()
+        _Check(tuple(sorted(str(p) for p in wrote))
+               == ("/Asset/Rig/Controls/Root/Mid", "/Asset/Rig/Controls/Side"),
+               "%s: only the members with a non-identity remainder wrote: "
+               "%s" % (mode, sorted(str(p) for p in wrote)))
+        for prim, start, origin in zip(prims, before, origins):
+            predicted = pivot + rotation.TransformDir(origin - pivot)
+            landed = Gf.Vec3d(_GroupOrigin(stage, prim, time))
+            _Check((landed - predicted).GetLength() < 1e-9,
+                   "%s in %s landed on the rigid prediction whether it "
+                   "wrote or not: %s vs %s"
+                   % (prim.GetName(), mode, landed, predicted))
+            world = _GroupWorld(stage, prim, time)
+            expected = start * rotation
+            expected.SetTranslateOnly(world.ExtractTranslation())
+            _Check(_MatClose(world, expected, 1e-9),
+                   "%s in %s turned by the world rotation, not merely by "
+                   "the same angle" % (prim.GetName(), mode))
+
+    # -- individual: every member writes ----------------------------
+    stage, prims, before, origins, pivot, wrote = Run(
+        gizmoMath.GROUP_PIVOT_INDIVIDUAL)
+    time = Usd.TimeCode.Default()
+    _Check(len(wrote) == 3,
+           "Individual Origins reaches every selected control, nested or "
+           "not: %s" % sorted(str(p) for p in wrote))
+    # And the AXIS is right for the nested one, not just the angle. A
+    # descendant's channel frame has already been turned by its
+    # ancestor when its own Apply* runs, and without the compensation in
+    # _Author the rotation it writes lands about a conjugated axis --
+    # same angle, wrong direction, which an angle-only assertion misses.
+    for prim, start in zip(prims, before):
+        turn = (start.GetInverse()
+                * _GroupWorld(stage, prim, time)).ExtractRotation()
+        axis = Gf.Vec3d(turn.GetAxis())
+        _Check(abs(abs(axis[2]) - 1.0) < 1e-9,
+               "%s turned about the WORLD Z it was dragged about: %s"
+               % (prim.GetName(), axis))
+
+
+def TestGroupTranslateCarriesWithoutDoubling():
+    """
+    The remainder is also what stops a translate double-applying.
+
+    Measured with the solve removed on Biped.usda, {fk shoulder, fk
+    elbow, fk wrist} asked to move 10 cm along +X moved 10.0000,
+    20.0000 and 30.0000 -- one copy of the delta per selected ancestor.
+    Here the chain is Root > Mid > Tip with Mid and Tip selected.
+    """
+    stage, root, mid, tip, side, _driven = _GroupStage()
+    time = Usd.TimeCode.Default()
+    prims = [mid, tip]
+    before = [Gf.Vec3d(_GroupOrigin(stage, p, time)) for p in prims]
+    group, writer = _Group(stage, prims, time)
+    group.BeginDrag()
+    delta = Gf.Vec3d(4.0, -2.0, 1.5)
+    group.ApplyTranslate(delta)
+    wrote = set(path.GetPrimPath() for path in writer.Pending())
+    writer.CommitToStage()
+    _Check(wrote == set([mid.GetPath()]),
+           "the ancestor writes and the descendant's remainder is nothing: "
+           "%s" % sorted(str(p) for p in wrote))
+    for prim, start in zip(prims, before):
+        moved = Gf.Vec3d(_GroupOrigin(stage, prim, time)) - start
+        _Check((moved - delta).GetLength() < 1e-9,
+               "%s moved by ONE copy of the delta: %s vs %s"
+               % (prim.GetName(), moved, delta))
+
+def TestGroupIsOneUndoEntry():
+    """
+    A group drag takes back in ONE step, not one per control.
+
+    This is the controller's _BeginDrag / _EndDrag bracket run without
+    Qt: one rigExecUndo.EditRecorder over GroupTarget.AttributePaths(),
+    the whole drag authored by one Writer.CommitToStage(), one Edit
+    pushed. The assertion that matters is the LAST one -- a single
+    Undo() has to put every member back, or the artist gets half a pose
+    per Ctrl+Z.
+    """
+    import rigExecUndo
+
+    stage, root, mid, tip, side, _ = _GroupStage()
+    time = Usd.TimeCode.Default()
+    selected = [mid, tip, side]
+    before = {p.GetName(): _GroupOrigin(stage, p, time) for p in selected}
+    group, writer = _Group(stage, selected, time)
+
+    recorder = rigExecUndo.EditRecorder(stage, group.AttributePaths())
+    recorder.Begin()
+    group.BeginDrag()
+    for sample in (Gf.Vec3d(1, 0, 0), Gf.Vec3d(2, -1, 0),
+                   Gf.Vec3d(3, -2, 4)):
+        # Every sample recomputes from the drag base, so the stage sees
+        # nothing until the release: three mouse-moves, one edit.
+        group.ApplyTranslate(sample)
+        group.ApplyRotate(Gf.Vec3d(0, 1, 0), 12.0)
+    _Check(not mid.GetAttribute("avars:tx").HasAuthoredValue(),
+           "a drag in progress has authored nothing")
+    writer.CommitToStage()
+    edit = recorder.Commit("Move 3 controls")
+    _Check(edit is not None and edit.label == "Move 3 controls",
+           "one Edit for the whole drag")
+    touched = set(entry.specPath.GetPrimPath() for entry in edit.entries)
+    _Check(touched == set([mid.GetPath(), side.GetPath()]),
+           "it covers every DRIVEN member and nothing else: %s" % touched)
+
+    stack = rigExecUndo.UndoStack()
+    stack.Push(edit)
+    _Check(stack.CanUndo() and not stack.CanRedo(), "one entry on the stack")
+    _Check(stack.Undo() and not stack.CanUndo(),
+           "one Undo empties the stack: a group drag is ONE step")
+    for prim in selected:
+        after = _GroupOrigin(stage, prim, time)
+        start = before[prim.GetName()]
+        _Check(all(_Close(after[i], start[i], 1e-9) for i in range(3)),
+               "%s is back where it started: %s"
+               % (prim.GetName(), Gf.Vec3d(after) - Gf.Vec3d(start)))
+    _Check(stack.Redo(), "and it redoes as one too")
+    for prim in selected:
+        after = _GroupOrigin(stage, prim, time)
+        start = before[prim.GetName()]
+        _Check(any(not _Close(after[i], start[i], 1e-9) for i in range(3)),
+               "%s moved again" % prim.GetName())
+
+def TestGroupOnBiped():
+    """
+    The real rig, with numbers: three nested FK arm controls plus a
+    spine control, moved and turned as a group.
+
+    Kept here rather than in a probe script because this is the case the
+    synthetic stages above are a model OF -- nested FK controls
+    (rigExec:controlSpace = "parentRelative"), a control in a completely
+    different space, and 15 controls a RigExecParentConstraint
+    overwrites. Skipped when the example is not checked out.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "examples", "biped", "Biped.usda")
+    if not os.path.isfile(path):
+        return
+    time = Usd.TimeCode.Default()
+    control = "/Biped/Rig/Controls"
+    arm = (control + "/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl"
+           + "/clavicle_l_ctl/arm_l_root")
+    shoulder = arm + "/arm_l_fk_shoulder_l_bind"
+    elbow = shoulder + "/arm_l_fk_elbow_l_bind"
+    wrist = elbow + "/arm_l_fk_wrist_l_bind"
+    spine = control + "/hips_ctl/spine_root_pivot/spine_root_ctl"
+    # The finger ROOT is now posable, and the prim the rig overwrites is
+    # the FOLLOW HELPER above it. `build_fingers.py` used to parent-
+    # constrain the root control itself to the wrist so the hand rode the
+    # arm -- but a constraint overwrites the frame it writes, so the
+    # control's own avars were discarded and ten finger roots moved 0 of
+    # 26,276 skinned points on any avar. The constraint now targets a
+    # helper and the control hangs off it by namespace, so it carries the
+    # hand AND stays posable (measured: 612 points, 8.18 cm on rz=30).
+    #
+    # This case wants a prim the rig really does overwrite, so it uses the
+    # helper. `arm_l_params` would do as well.
+    fingerHelper = control + "/index_001_l_bind_fk_follow"
+    finger = fingerHelper + "/index_001_l_bind_fk"
+    witnesses = [control + "/hips_ctl", control + "/arm_l_ik"]
+
+    def Open():
+        # A fresh session layer over the CACHED file layer: Usd.Stage.Open
+        # on a path reuses the globally cached SdfLayer, so avars authored
+        # by one case would leak into the next.
+        stage = Usd.Stage.Open(Sdf.Layer.FindOrOpen(path),
+                               Sdf.Layer.CreateAnonymous())
+        stage.SetEditTarget(stage.GetSessionLayer())
+        return stage
+
+    def Origin(stage, prim):
+        frames = gizmoMath.ComputeRigFrames(stage, prim, time)
+        return (frames.posed * frames.assetToWorld).ExtractTranslation()
+
+    def World(stage, prim):
+        frames = gizmoMath.ComputeRigFrames(stage, prim, time)
+        return (frames.posed
+                * frames.assetToWorld).GetOrthonormalized(False)
+
+    # -- translate --------------------------------------------------
+    stage = Open()
+    selected = [stage.GetPrimAtPath(p)
+                for p in (shoulder, elbow, wrist, spine)]
+    before = [Origin(stage, p) for p in selected]
+    beforeWitness = [Origin(stage, stage.GetPrimAtPath(p))
+                     for p in witnesses]
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    group, reason = gizmoMath.MakeGroupTarget(
+        stage, selected, gizmoMath.CHANNELS_POSE, writer)
+    _Check(group is not None and group.label == "4 controls", reason)
+    group.BeginDrag()
+    # Only the topmost of the FK chain drives; the other two ride on it.
+    _Check(group._ancestor == [None, 0, 1, None],
+           "each FK control's nearest selected ancestor: %s"
+           % group._ancestor)
+    delta = Gf.Vec3d(3.5, -7.25, 11.0)
+    group.ApplyTranslate(delta)
+    _Check(len(writer.Pending()) == 6,
+           "one preview push, two drivers: %d" % len(writer.Pending()))
+    writer.CommitToStage()
+    for prim, start in zip(selected, before):
+        after = Origin(stage, prim)
+        _Check(all(_Close(after[i], start[i] + delta[i], 1e-9)
+                   for i in range(3)),
+               "%s moved by the group delta: %s"
+               % (prim.GetName(), Gf.Vec3d(after) - Gf.Vec3d(start)))
+    for name, start in zip(witnesses, beforeWitness):
+        after = Origin(stage, stage.GetPrimAtPath(name))
+        _Check(all(_Close(after[i], start[i], 1e-9) for i in range(3)),
+               "%s did not move" % name)
+
+    # -- rotate -----------------------------------------------------
+    stage = Open()
+    selected = [stage.GetPrimAtPath(p)
+                for p in (shoulder, elbow, wrist, spine)]
+    before = [Origin(stage, p) for p in selected]
+    beforeWorld = [World(stage, p) for p in selected]
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    group, _reason = gizmoMath.MakeGroupTarget(
+        stage, selected, gizmoMath.CHANNELS_POSE, writer)
+    group.BeginDrag()
+    pivot = Gf.Vec3d(group.Pivot())
+    centroid = (Gf.Vec3d(before[0]) + Gf.Vec3d(before[1])
+                + Gf.Vec3d(before[2]) + Gf.Vec3d(before[3])) / 4.0
+    _Check(all(_Close(pivot[i], centroid[i], 1e-9) for i in range(3)),
+           "the biped pivot is the centroid: %s vs %s" % (pivot, centroid))
+    axis = Gf.Vec3d(0, 0, 1)
+    group.ApplyRotate(axis, 30.0)
+    writer.CommitToStage()
+    rotation = _Rot(axis, 30.0)
+    for prim, start, startWorld in zip(selected, before, beforeWorld):
+        after = Origin(stage, prim)
+        predicted = pivot + rotation.TransformDir(Gf.Vec3d(start) - pivot)
+        _Check(all(_Close(after[i], predicted[i], 1e-7) for i in range(3)),
+               "%s landed on the rigid rotation: %s vs %s"
+               % (prim.GetName(), after, predicted))
+        turn = (startWorld.GetInverse() * World(stage, prim))\
+            .ExtractRotation()
+        _Check(_Close(turn.GetAngle(), 30.0, 1e-6),
+               "%s turned %.6f degrees" % (prim.GetName(), turn.GetAngle()))
+
+    # -- a mixed set with one the rig overwrites ---------------------
+    stage = Open()
+    selected = [stage.GetPrimAtPath(p)
+                for p in (shoulder, fingerHelper, spine)]
+    before = [Origin(stage, p) for p in selected]
+    writer = gizmoMath.Writer(stage, time, gizmoMath.WRITE_DEFAULT)
+    group, _reason = gizmoMath.MakeGroupTarget(
+        stage, selected, gizmoMath.CHANNELS_POSE, writer)
+    _Check([m.prim.GetName() for m in group.members]
+           == ["arm_l_fk_shoulder_l_bind", "spine_root_ctl"],
+           "the parent-constrained follow helper is not a member: %s"
+           % [m.prim.GetName() for m in group.members])
+    group.BeginDrag()
+    group.ApplyTranslate(Gf.Vec3d(0, 0, 9))
+    writer.CommitToStage()
+    after = Origin(stage, selected[1])
+    _Check(all(_Close(after[i], before[1][i], 1e-9) for i in range(3)),
+           "index_001_l_bind_fk_follow did not move: %s"
+           % (Gf.Vec3d(after) - Gf.Vec3d(before[1])))
+    session = stage.GetSessionLayer()
+    _Check(not any(session.GetAttributeAtPath(
+        selected[1].GetPath().AppendProperty(n))
+        for n in gizmoMath.AVAR_T + gizmoMath.AVAR_R),
+        "and nothing was authored onto it")
+
 def main():
     _RegisterSchema()
     groups = [
@@ -2179,6 +3017,32 @@ def main():
         ("reset xform stack", TestResetXformStack),
         ("notice filter", TestNoticeFilter),
         ("solver cache retarget", TestSolverCacheRetarget),
+        ("group pivot and frame", TestGroupPivotAndFrame),
+        ("group translate", TestGroupTranslate),
+        ("group delta per member space",
+         TestGroupTranslateIsNotAvailableInWorldUnits),
+        ("group rotate about the shared pivot", TestGroupRotate),
+        ("group rotate-only member is reported",
+         TestGroupRotateOnlyMemberIsReported),
+        ("group scale", TestGroupScale),
+        ("group step snap", TestGroupStepSnapIsQuantisedOnce),
+        ("group skips what the rig overwrites",
+         TestGroupSkipsWhatTheRigOverwrites),
+        ("group skips a solver-posed joint",
+         TestGroupSolverPosedJointIsSkipped),
+        ("group pose providers", TestGroupCarriesOnPoseProviders),
+        ("group remainder solve", TestGroupRemainderSolve),
+        ("group translate does not double",
+         TestGroupTranslateCarriesWithoutDoubling),
+        ("group pivot modes", TestGroupPivotModes),
+        ("group pivot mode fallback",
+         TestGroupPivotModeFallsBackToTheCentre),
+        ("group rotate turns everyone",
+         TestGroupRotateTurnsEveryoneWhateverThePivot),
+        ("group local axes are the lead's",
+         TestGroupLocalAxesAreTheLeads),
+        ("group is one undo entry", TestGroupIsOneUndoEntry),
+        ("group on the biped", TestGroupOnBiped),
     ]
     for name, fn in groups:
         fn()

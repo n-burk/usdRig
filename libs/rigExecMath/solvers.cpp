@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace rigExec {
 
@@ -380,6 +381,191 @@ RigExecApplyWeightedMatrix(
         return moved;
     }
     return point + (moved - point) * weight;
+}
+
+bool
+RigExecSkinLayout::Validate(std::string *error) const
+{
+    auto fail = [error](const std::string &why) {
+        if (error) {
+            *error = why;
+        }
+        return false;
+    };
+    if (elementSize < 1) {
+        return fail("elementSize must be at least 1");
+    }
+    if (!transforms || transformCount == 0) {
+        return fail("no influences");
+    }
+    if (indexCount != pointCount * elementSize) {
+        return fail("jointIndices/jointWeights length " +
+                    std::to_string(indexCount) + " must equal " +
+                    std::to_string(pointCount) + " points * elementSize " +
+                    std::to_string(elementSize));
+    }
+    if (indexCount && (!indices || !weights)) {
+        return fail("jointIndices and jointWeights are both required");
+    }
+    for (size_t t = 0; t < transformCount; ++t) {
+        const GfMatrix4d &m = transforms[t];
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (!std::isfinite(m[r][c])) {
+                    return fail("influence " + std::to_string(t) +
+                                " has a non-finite matrix");
+                }
+            }
+        }
+        if (m[0][3] != 0 || m[1][3] != 0 || m[2][3] != 0 || m[3][3] != 1) {
+            return fail("influence " + std::to_string(t) +
+                        " has a non-affine matrix");
+        }
+    }
+    for (size_t i = 0; i < indexCount; ++i) {
+        if (indices[i] < 0 || size_t(indices[i]) >= transformCount) {
+            return fail("jointIndices[" + std::to_string(i) + "] = " +
+                        std::to_string(indices[i]) + " is outside the " +
+                        std::to_string(transformCount) + " influences");
+        }
+        if (!std::isfinite(weights[i]) || weights[i] < 0.0f) {
+            return fail("jointWeights[" + std::to_string(i) +
+                        "] must be finite and non-negative");
+        }
+    }
+    return true;
+}
+
+GfVec3d
+RigExecApplyLinearBlendSkin(
+    const GfVec3d &point, const RigExecSkinLayout &layout, size_t i)
+{
+    GfVec3d sum(0.0);
+    double total = 0.0;
+    for (size_t k = 0; k < layout.elementSize; ++k) {
+        const double w = layout.Weight(i, k);
+        if (w == 0.0) {
+            continue;
+        }
+        sum += layout.Transform(i, k).TransformAffine(point) * w;
+        total += w;
+    }
+    // The complement stays with the rest point; exact when total == 1.
+    return point * (1.0 - total) + sum;
+}
+
+void
+RigExecApplyLinearBlendSkin(
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout)
+{
+    for (size_t i = 0; i < layout.pointCount; ++i) {
+        out[i] = GfVec3f(RigExecApplyLinearBlendSkin(
+            GfVec3d(in[i]), layout, i));
+    }
+}
+
+namespace {
+
+// The per-point gather of the dual-quaternion kernel (see the header):
+// the largest-weight slot first so it becomes the blend's sign-correction
+// reference, the other non-zero slots in authored order, then the identity
+// entry palette[transformCount] with the weight complement when that is
+// not exactly zero. The weight total is accumulated in double in slot
+// order, exactly as RigExecApplyLinearBlendSkin accumulates it, so the two
+// kernels see the same complement bit for bit.
+void
+_GatherDualQuatInfluences(
+    const RigExecSkinLayout &layout, size_t i,
+    std::vector<int> *indices, std::vector<double> *weights)
+{
+    indices->clear();
+    weights->clear();
+    size_t pivot = 0;
+    float pivotWeight = -1.0f;
+    double total = 0.0;
+    for (size_t k = 0; k < layout.elementSize; ++k) {
+        const float w = layout.Weight(i, k);
+        if (pivotWeight < w) {
+            pivotWeight = w;
+            pivot = k;
+        }
+        total += w;
+    }
+    auto push = [&](size_t k) {
+        const double w = layout.Weight(i, k);
+        if (w != 0.0) {
+            indices->push_back(layout.indices[i * layout.elementSize + k]);
+            weights->push_back(w);
+        }
+    };
+    push(pivot);
+    for (size_t k = 0; k < layout.elementSize; ++k) {
+        if (k != pivot) {
+            push(k);
+        }
+    }
+    const double complement = 1.0 - total;
+    if (complement != 0.0) {
+        indices->push_back(static_cast<int>(layout.transformCount));
+        weights->push_back(complement);
+    }
+}
+
+}  // namespace
+
+std::vector<RigExecScaledDualQuat>
+RigExecSkinDualQuatPalette(const RigExecSkinLayout &layout)
+{
+    std::vector<RigExecScaledDualQuat> palette;
+    palette.reserve(layout.transformCount + 1);
+    for (size_t t = 0; t < layout.transformCount; ++t) {
+        palette.push_back(RigExecScaledDualQuatFromMatrix(layout.transforms[t]));
+    }
+    palette.emplace_back();  // identity: the weight complement's influence
+    return palette;
+}
+
+bool
+RigExecApplyDualQuatSkin(
+    const GfVec3d &point, const RigExecScaledDualQuat *palette,
+    size_t paletteSize, const RigExecSkinLayout &layout, size_t i,
+    GfVec3d *out)
+{
+    std::vector<int> indices;
+    std::vector<double> weights;
+    _GatherDualQuatInfluences(layout, i, &indices, &weights);
+    RigExecScaledDualQuat blend;
+    if (!RigExecBlendScaledDualQuats(
+            palette, paletteSize, indices.data(), weights.data(),
+            indices.size(), &blend)) {
+        return false;
+    }
+    *out = RigExecScaledDualQuatTransformPoint(blend, point);
+    return true;
+}
+
+bool
+RigExecApplyDualQuatSkin(
+    const GfVec3f *in, GfVec3f *out, const RigExecSkinLayout &layout)
+{
+    const std::vector<RigExecScaledDualQuat> palette =
+        RigExecSkinDualQuatPalette(layout);
+    std::vector<int> indices;
+    std::vector<double> weights;
+    indices.reserve(layout.elementSize + 1);
+    weights.reserve(layout.elementSize + 1);
+    for (size_t i = 0; i < layout.pointCount; ++i) {
+        _GatherDualQuatInfluences(layout, i, &indices, &weights);
+        RigExecScaledDualQuat blend;
+        if (!RigExecBlendScaledDualQuats(
+                palette.data(), palette.size(), indices.data(),
+                weights.data(), indices.size(), &blend)) {
+            return false;
+        }
+        out[i] = GfVec3f(
+            RigExecScaledDualQuatTransformPoint(blend, GfVec3d(in[i])));
+    }
+    return true;
 }
 
 namespace {

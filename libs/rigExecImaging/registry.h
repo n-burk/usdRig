@@ -242,6 +242,21 @@ RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGeneration();
 /// Reads one complete evaluated control matrix from the exact published
 /// stage/time. Returns 1 on success, 0 without changing output otherwise.
 /// isDefault selects UsdTimeCode::Default; ordinary frames must be finite.
+/// Reads scalar properties this generation published, by property path.
+///
+/// \p packedPaths is newline-separated absolute property paths, the same
+/// convention BeginPreview uses; \p out receives one float each and must
+/// hold \p count of them. Returns how many were FOUND; a path the rig did
+/// not publish leaves its slot at 0 and is not counted, so a caller can
+/// tell "everything is zero" from "nothing was published".
+///
+/// This exists so a tool does not have to evaluate the rig a second time to
+/// see numbers the viewport already computed. The Shape Editor was doing
+/// exactly that -- 9-15 ms per refresh to recover pose-interpolator weights
+/// sitting in the current snapshot.
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetMovedFloats(
+    const char *packedPaths, float *out, int count);
+
 RIGEXEC_IMAGING_C_API int RigExecImaging_GetControlFrameAssetSpace(
     long long stageCacheId, const char *primPath, double frame,
     int isDefault, double outMatrix[16]);

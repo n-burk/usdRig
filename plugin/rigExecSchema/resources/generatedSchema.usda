@@ -5,7 +5,7 @@
 
 class "RigExecControlAPI" (
     customData = {
-        string userDocBrief = """Channel semantics and computational limits for animator-authored\r
+        string userDocBrief = """Channel semantics and computational limits for animator-authored
     controls."""
     }
 )
@@ -38,17 +38,14 @@ class "RigExecMoverAPI" (
     )
     rel rigExec:weightObject (
         customData = {
-            string userDocBrief = """Optional compatible total weight field, at most one target.\r
-        When bound, the weight object's values (including its own sparse or\r
-        constant fallback) supply the common envelope instead of\r
-        inputs:defaultWeight."""
+            string userDocBrief = "Optional compatible total weight field, at most one target."
         }
     )
 }
 
 class RigExecRoot "RigExecRoot" (
     customData = {
-        string userDocBrief = """Character root: partition and namespace root for control,\r
+        string userDocBrief = """Character root: partition and namespace root for control,
     joint, and mover discovery (spec section 4.1)."""
     }
 )
@@ -80,8 +77,8 @@ class RigExecRoot "RigExecRoot" (
 
 class RigExecControl "RigExecControl" (
     customData = {
-        string userDocBrief = """An animator-facing RigExecXformable: animation is authored\r
-    on the avars (or an authored/connected posed:space), exactly like an\r
+        string userDocBrief = """An animator-facing RigExecXformable: animation is authored
+    on the avars (or an authored/connected posed:space), exactly like an
     Ir xformable."""
     }
 )
@@ -139,19 +136,39 @@ class RigExecControl "RigExecControl" (
         extent of the authored gprim in its own local space (i.e."""
         }
     )
-    color3f guide:displayColor = (1, 0.85, 0.2)
-    float guide:displayOpacity = 1
+    color3f guide:displayColor = (1, 0.85, 0.2) (
+        customData = {
+            string userDocBrief = "Constant colour of the synthesized guide."
+        }
+    )
+    float guide:displayOpacity = 1 (
+        customData = {
+            string userDocBrief = "Constant opacity of the synthesized guide."
+        }
+    )
+    uniform bool guide:displayOpacityInvert = 0 (
+        customData = {
+            string userDocBrief = """When guide:displayOpacity is connected, draw 1 - source
+        instead of source."""
+        }
+    )
+    uniform float guide:displayOpacityMin = 0.15 (
+        customData = {
+            string userDocBrief = """Floor applied to a CONNECTED guide:displayOpacity after the
+        optional inversion."""
+        }
+    )
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry"]
         customData = {
-            string userDocBrief = """wire draws the guide as curves, widthed by\r
+            string userDocBrief = """wire draws the guide as curves, widthed by
         guide:wireWidth."""
         }
     )
     double guide:scaleX = 1 (
         customData = {
-            string userDocBrief = """Positive per-axis draw multiplier of the guide shape whose\r
-        final size is abs(evaluated frame axis) * guide:scaleAxis, authored as\r
+            string userDocBrief = """Positive per-axis draw multiplier of the guide shape whose
+        final size is abs(evaluated frame axis) * guide:scaleAxis, authored as
         three separate double properties rather than a vec3."""
         }
     )
@@ -168,16 +185,16 @@ class RigExecControl "RigExecControl" (
     uniform token guide:shape = "circle" (
         allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
         customData = {
-            string userDocBrief = """Guide primitive synthesized at the control's posed frame\r
-        origin (spec section 10.3 extension), exactly parallel to the\r
+            string userDocBrief = """Guide primitive synthesized at the control's posed frame
+        origin (spec section 10.3 extension), exactly parallel to the
         RigExecJoint sphere/cone guides."""
         }
     )
     double guide:wireWidth = 0.05 (
         customData = {
-            string userDocBrief = """Width authored onto the wire curves, in the LOCAL\r
-        pre-scale units of the unit shape -- so the drawn width tracks the\r
-        evaluated control-frame scale multiplied by guide:scaleX/Y/Z along\r
+            string userDocBrief = """Width authored onto the wire curves, in the LOCAL
+        pre-scale units of the unit shape -- so the drawn width tracks the
+        evaluated control-frame scale multiplied by guide:scaleX/Y/Z along
         with the rest of the shape."""
         }
     )
@@ -221,7 +238,7 @@ class RigExecControl "RigExecControl" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -246,10 +263,10 @@ class RigExecControl "RigExecControl" (
 
 class "RigExecXformable" (
     customData = {
-        string userDocBrief = """An abstract animation interface for an animatable coordinate\r
-    space, mirroring OpenExec's IrXformable contract exactly\r
-    (user-directed alignment, 2026-07-25): matrix4d local-to-world\r
-    rest/default/posed/parent spaces and scalar translation/rotation avars\r
+        string userDocBrief = """An abstract animation interface for an animatable coordinate
+    space, mirroring OpenExec's IrXformable contract exactly
+    (user-directed alignment, 2026-07-25): matrix4d local-to-world
+    rest/default/posed/parent spaces and scalar translation/rotation avars
     (rotations in degrees)."""
     }
 )
@@ -332,7 +349,7 @@ class "RigExecXformable" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -357,9 +374,9 @@ class "RigExecXformable" (
 
 class RigExecJoint "RigExecJoint" (
     customData = {
-        string userDocBrief = """The joint of an armature-based rig, mirroring OpenExec's\r
-    IrJointScope exactly: a RigExecXformable specialized so guides can be\r
-    drawn (a sphere at the posed origin and one cone to each nested child\r
+        string userDocBrief = """The joint of an armature-based rig, mirroring OpenExec's
+    IrJointScope exactly: a RigExecXformable specialized so guides can be
+    drawn (a sphere at the posed origin and one cone to each nested child
     joint, purpose guide)."""
     }
 )
@@ -421,7 +438,7 @@ class RigExecJoint "RigExecJoint" (
     float guide:displayOpacity = 0.5
     double guide:radius = 1 (
         customData = {
-            string userDocBrief = """Radius of BOTH guide primitives: the sphere at the posed\r
+            string userDocBrief = """Radius of BOTH guide primitives: the sphere at the posed
         origin and every cone drawn to a nested child joint."""
         }
     )
@@ -455,15 +472,9 @@ class RigExecJoint "RigExecJoint" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback: joint and solver guides are DIAGNOSTICS, drawn when a\r
-        viewer asks for guides.\r
-\r
-        This is the stock attribute rather than a RigExec-specific token so\r
-        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache\r
-        classifies a prim's extent by this exact attribute, and the results\r
-        scene index stamps the same resolved value onto the guide it\r
-        synthesizes."""
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides."""
         }
     )
     double rest:rx = 0
@@ -471,7 +482,7 @@ class RigExecJoint "RigExecJoint" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -510,13 +521,10 @@ class RigExecFkChain "RigExecFkChain" (
     float guide:displayOpacity = 0.5
     double guide:radius = 1 (
         customData = {
-            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate\r
-        element: the exact counterpart of RigExecJoint's guide:radius,\r
-        including the rule that zero or negative draws no guides at all,\r
-        which is how a solver's diagnostics are turned off.\r
-\r
-        Without it the elements are stuck at Hydra's fallback radius of\r
-        1.0."""
+            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate
+        element: the exact counterpart of RigExecJoint's guide:radius,
+        including the rule that zero or negative draws no guides at all,
+        which is how a solver's diagnostics are turned off."""
         }
     )
     rel proxyPrim (
@@ -529,15 +537,9 @@ class RigExecFkChain "RigExecFkChain" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback: joint and solver guides are DIAGNOSTICS, drawn when a\r
-        viewer asks for guides.\r
-\r
-        This is the stock attribute rather than a RigExec-specific token so\r
-        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache\r
-        classifies a prim's extent by this exact attribute, and the results\r
-        scene index stamps the same resolved value onto the guide it\r
-        synthesizes."""
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides."""
         }
     )
     rel rigExec:controls (
@@ -545,10 +547,24 @@ class RigExecFkChain "RigExecFkChain" (
             string userDocBrief = "Ordered chain controls (parents resolved via rigExec:parent)."
         }
     )
+    uniform token rigExec:controlSpace = "world" (
+        allowedTokens = ["world", "parentRelative"]
+        customData = {
+            string userDocBrief = "What each control's posed frame already contains, i.e."
+        }
+    )
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints this solver poses (view-free\r
+            string userDocBrief = """Ordered output joints this solver poses (view-free
         extraction, user-directed 2026-07-25)."""
+        }
+    )
+    rel rigExec:startFrame (
+        customData = {
+            string userDocBrief = """Optional single provider (joint or control) whose POSED
+        frame is the base the whole chain hangs from: the solver composes
+        every element on top of that provider's rest-to-pose delta S, so
+        W_0 = S."""
         }
     )
     token visibility = "inherited" (
@@ -570,7 +586,7 @@ class RigExecFkChain "RigExecFkChain" (
 
 class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     customData = {
-        string userDocBrief = """Analytic two-bone IK with pole, stretch, softness, and preferred\r
+        string userDocBrief = """Analytic two-bone IK with pole, stretch, softness, and preferred
     bend."""
     }
 )
@@ -585,13 +601,10 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     float guide:displayOpacity = 0.5
     double guide:radius = 1 (
         customData = {
-            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate\r
-        element: the exact counterpart of RigExecJoint's guide:radius,\r
-        including the rule that zero or negative draws no guides at all,\r
-        which is how a solver's diagnostics are turned off.\r
-\r
-        Without it the elements are stuck at Hydra's fallback radius of\r
-        1.0."""
+            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate
+        element: the exact counterpart of RigExecJoint's guide:radius,
+        including the rule that zero or negative draws no guides at all,
+        which is how a solver's diagnostics are turned off."""
         }
     )
     float inputs:softness = 0 (
@@ -614,21 +627,15 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback: joint and solver guides are DIAGNOSTICS, drawn when a\r
-        viewer asks for guides.\r
-\r
-        This is the stock attribute rather than a RigExec-specific token so\r
-        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache\r
-        classifies a prim's extent by this exact attribute, and the results\r
-        scene index stamps the same resolved value onto the guide it\r
-        synthesizes."""
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides."""
         }
     )
     rel rigExec:effectorControl
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints [root, mid, end] posed by this solve\r
+            string userDocBrief = """Ordered output joints [root, mid, end] posed by this solve
         (view-free extraction)."""
         }
     )
@@ -670,8 +677,7 @@ class RigExecTwoBoneIk "RigExecTwoBoneIk" (
 
 class RigExecBlendPointFrames "RigExecBlendPointFrames" (
     customData = {
-        string userDocBrief = """IK/FK or general frame blend of two aggregate providers.\r
-    Publishes computePointFrameArray."""
+        string userDocBrief = "IK/FK or general frame blend of two aggregate providers."
     }
 )
 {
@@ -685,13 +691,10 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
     float guide:displayOpacity = 0.5
     double guide:radius = 1 (
         customData = {
-            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate\r
-        element: the exact counterpart of RigExecJoint's guide:radius,\r
-        including the rule that zero or negative draws no guides at all,\r
-        which is how a solver's diagnostics are turned off.\r
-\r
-        Without it the elements are stuck at Hydra's fallback radius of\r
-        1.0."""
+            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate
+        element: the exact counterpart of RigExecJoint's guide:radius,
+        including the rule that zero or negative draws no guides at all,
+        which is how a solver's diagnostics are turned off."""
         }
     )
     float inputs:weight = 0
@@ -705,22 +708,16 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback: joint and solver guides are DIAGNOSTICS, drawn when a\r
-        viewer asks for guides.\r
-\r
-        This is the stock attribute rather than a RigExec-specific token so\r
-        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache\r
-        classifies a prim's extent by this exact attribute, and the results\r
-        scene index stamps the same resolved value onto the guide it\r
-        synthesizes."""
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides."""
         }
     )
     rel rigExec:inputA
     rel rigExec:inputB
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints posed by the blended result (view-free\r
+            string userDocBrief = """Ordered output joints posed by the blended result (view-free
         extraction)."""
         }
     )
@@ -749,7 +746,7 @@ class RigExecBlendPointFrames "RigExecBlendPointFrames" (
 
 class RigExecTwistDistribution "RigExecTwistDistribution" (
     customData = {
-        string userDocBrief = """Distributes unwrapped twist over N frames between start and end\r
+        string userDocBrief = """Distributes unwrapped twist over N frames between start and end
     providers."""
     }
 )
@@ -764,13 +761,10 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
     float guide:displayOpacity = 0.5
     double guide:radius = 1 (
         customData = {
-            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate\r
-        element: the exact counterpart of RigExecJoint's guide:radius,\r
-        including the rule that zero or negative draws no guides at all,\r
-        which is how a solver's diagnostics are turned off.\r
-\r
-        Without it the elements are stuck at Hydra's fallback radius of\r
-        1.0."""
+            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate
+        element: the exact counterpart of RigExecJoint's guide:radius,
+        including the rule that zero or negative draws no guides at all,
+        which is how a solver's diagnostics are turned off."""
         }
     )
     double inputs:twistTurns = 0 (
@@ -789,15 +783,9 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback: joint and solver guides are DIAGNOSTICS, drawn when a\r
-        viewer asks for guides.\r
-\r
-        This is the stock attribute rather than a RigExec-specific token so\r
-        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache\r
-        classifies a prim's extent by this exact attribute, and the results\r
-        scene index stamps the same resolved value onto the guide it\r
-        synthesizes."""
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides."""
         }
     )
     uniform int rigExec:count = 1
@@ -807,13 +795,13 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
     rel rigExec:end
     uniform int[] rigExec:jointElements = [] (
         customData = {
-            string userDocBrief = """Optional aggregate element index for each rigExec:joints\r
+            string userDocBrief = """Optional aggregate element index for each rigExec:joints
         entry (parallel array)."""
         }
     )
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints posed by the distributed twist frames\r
+            string userDocBrief = """Ordered output joints posed by the distributed twist frames
         (view-free extraction)."""
         }
     )
@@ -838,9 +826,8 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
 
 class RigExecRibbon "RigExecRibbon" (
     customData = {
-        string userDocBrief = """Samples a native UsdGeomBasisCurves.points driver, constructs\r
-    transported frames, and optionally conforms to a native mesh surface.\r
-    Publishes computePointFrameArray (spec section 4.1)."""
+        string userDocBrief = """Samples a native UsdGeomBasisCurves.points driver, constructs
+    transported frames, and optionally conforms to a native mesh surface."""
     }
 )
 {
@@ -854,13 +841,10 @@ class RigExecRibbon "RigExecRibbon" (
     float guide:displayOpacity = 0.5
     double guide:radius = 1 (
         customData = {
-            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate\r
-        element: the exact counterpart of RigExecJoint's guide:radius,\r
-        including the rule that zero or negative draws no guides at all,\r
-        which is how a solver's diagnostics are turned off.\r
-\r
-        Without it the elements are stuck at Hydra's fallback radius of\r
-        1.0."""
+            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate
+        element: the exact counterpart of RigExecJoint's guide:radius,
+        including the rule that zero or negative draws no guides at all,
+        which is how a solver's diagnostics are turned off."""
         }
     )
     rel proxyPrim (
@@ -873,15 +857,9 @@ class RigExecRibbon "RigExecRibbon" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback: joint and solver guides are DIAGNOSTICS, drawn when a\r
-        viewer asks for guides.\r
-\r
-        This is the stock attribute rather than a RigExec-specific token so\r
-        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache\r
-        classifies a prim's extent by this exact attribute, and the results\r
-        scene index stamps the same resolved value onto the guide it\r
-        synthesizes."""
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides."""
         }
     )
     rel rigExec:driverCurve
@@ -894,13 +872,13 @@ class RigExecRibbon "RigExecRibbon" (
     )
     uniform int[] rigExec:jointElements = [] (
         customData = {
-            string userDocBrief = """Optional aggregate element index per rigExec:joints entry\r
+            string userDocBrief = """Optional aggregate element index per rigExec:joints entry
         (parallel array)."""
         }
     )
     rel rigExec:joints (
         customData = {
-            string userDocBrief = """Ordered output joints posed along the ribbon (view-free\r
+            string userDocBrief = """Ordered output joints posed along the ribbon (view-free
         extraction)."""
         }
     )
@@ -930,11 +908,143 @@ class RigExecRibbon "RigExecRibbon" (
     )
 }
 
+class RigExecSplineIk "RigExecSplineIk" (
+    customData = {
+        string userDocBrief = """Control-driven spline IK for a spine or neck: the counterpart of
+    The spline IK solver as the biped uses it."""
+    }
+)
+{
+    float3[] extent (
+        customData = {
+            string userDocBrief = """Extent is a three dimensional range measuring the geometric
+        extent of the authored gprim in its own local space (i.e."""
+        }
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1)
+    float guide:displayOpacity = 0.5
+    double guide:radius = 1 (
+        customData = {
+            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate
+        element: the exact counterpart of RigExecJoint's guide:radius,
+        including the rule that zero or negative draws no guides at all,
+        which is how a solver's diagnostics are turned off."""
+        }
+    )
+    double inputs:midFollowWeight = 0.5 (
+        customData = {
+            string userDocBrief = """Blend of the mid control's follow point between its rest
+        origin carried by the root control (0) and by the end control (1):
+        a parentConstraint with maintainOffset on both parents."""
+        }
+    )
+    double inputs:minLengthRatio = 0 (
+        customData = {
+            string userDocBrief = """Length floor as a fraction of the rest root->end chord; 0
+        switches it off."""
+        }
+    )
+    double inputs:preserveVolume = 1 (
+        customData = {
+            string userDocBrief = """Strength of the linear volume preservation in [0, 1]:
+        s_y = s_z = 1 - w_i * preserveVolume * (ratio - 1), s_x = 1."""
+        }
+    )
+    double inputs:roll = 0 (
+        customData = {
+            string userDocBrief = """Additional roll in DEGREES about every joint's +X aim,
+        added to the root control's own twist about the rest chain axis
+        (the handle's roll)."""
+        }
+    )
+    double inputs:twist = 0 (
+        customData = {
+            string userDocBrief = """Additional twist in DEGREES, linear in arc position from 0
+        at the root to the full value at the curve end, added to the end
+        control's twist minus the root's (the handle's twist)."""
+        }
+    )
+    rel proxyPrim (
+        customData = {
+            string userDocBrief = '''The proxyPrim relationship allows us to link a
+        prim whose purpose is "render" to its (single target)
+        purpose="proxy" prim.'''
+        }
+    )
+    uniform token purpose = "guide" (
+        allowedTokens = ["default", "render", "proxy", "guide"]
+        customData = {
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a
+        viewer asks for guides."""
+        }
+    )
+    rel rigExec:endControl (
+        customData = {
+            string userDocBrief = "Control carrying the curve end (cv2, cv3) and the end twist."
+        }
+    )
+    uniform int[] rigExec:jointElements = [] (
+        customData = {
+            string userDocBrief = """Optional chain slot per rigExec:joints entry (parallel
+        array)."""
+        }
+    )
+    rel rigExec:joints (
+        customData = {
+            string userDocBrief = """Ordered chain, root to tip, posed by this solve (view-free
+        extraction)."""
+        }
+    )
+    rel rigExec:midControl (
+        customData = {
+            string userDocBrief = """Control whose translation offset from its follow point bends
+        the interior (cv1, cv2)."""
+        }
+    )
+    uniform token rigExec:restLength = "curve" (
+        allowedTokens = ["curve", "chain"]
+        customData = {
+            string userDocBrief = "What the stretch ratio is measured against."
+        }
+    )
+    rel rigExec:rootControl (
+        customData = {
+            string userDocBrief = "Control carrying the curve start (cv0, cv1) and the root roll."
+        }
+    )
+    uniform token rigExec:rootTangent = "rigid" (
+        allowedTokens = ["rigid", "aim"]
+        customData = {
+            string userDocBrief = "How cv1, the root's tangent CV, is posed."
+        }
+    )
+    uniform float[] rigExec:volumeWeights = [] (
+        customData = {
+            string userDocBrief = """Per-joint squash/stretch weight w_i, parallel to
+        rigExec:joints (in chain-slot order)."""
+        }
+    )
+    token visibility = "inherited" (
+        allowedTokens = ["inherited", "invisible"]
+        customData = {
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+        visibility that is supported by most DCC apps.'''
+        }
+    )
+    uniform token[] xformOpOrder (
+        customData = {
+            string userDocBrief = """Encodes the sequence of transformation operations in the
+        order in which they should be pushed onto a transform stack while
+        visiting a UsdStage's prims in a graph traversal that will effect
+        the desired positioning for this prim and its descendant prims."""
+        }
+    )
+}
+
 class "RigExecConstraint" (
     customData = {
-        string userDocBrief = """Abstract common contract for FBX-style pose constraints.\r
-\r
-    A constraint that modifies an existing result applies RigExecMoverAPI."""
+        string userDocBrief = "Abstract common contract for FBX-style pose constraints."
     }
 )
 {
@@ -966,8 +1076,8 @@ class "RigExecConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -984,15 +1094,14 @@ class "RigExecConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
 }
 
 class "RigExecSourceConstraint" (
     customData = {
-        string userDocBrief = """Abstract base for constraints that blend an ordered set of\r
+        string userDocBrief = """Abstract base for constraints that blend an ordered set of
     transform sources."""
     }
 )
@@ -1025,8 +1134,8 @@ class "RigExecSourceConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -1048,8 +1157,7 @@ class "RigExecSourceConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -1098,8 +1206,8 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -1147,8 +1255,7 @@ class RigExecAimConstraint "RigExecAimConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -1206,8 +1313,8 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -1229,8 +1336,7 @@ class RigExecPositionConstraint "RigExecPositionConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -1274,8 +1380,8 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -1297,8 +1403,7 @@ class RigExecRotationConstraint "RigExecRotationConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -1342,8 +1447,8 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -1365,8 +1470,7 @@ class RigExecScaleConstraint "RigExecScaleConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -1415,8 +1519,8 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -1443,8 +1547,7 @@ class RigExecParentConstraint "RigExecParentConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     rel rigExec:sources (
@@ -1498,8 +1601,8 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     )
     double3 inputs:scaleOffset = (0, 0, 0) (
         customData = {
-            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why\r
-        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes\r
+            string userDocBrief = """ADDITIVE scale offset applied after the blend, which is why
+        its identity is (0, 0, 0) and not (1, 1, 1): the kernel computes
         blendedScale + offset."""
         }
     )
@@ -1522,10 +1625,10 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     uniform token rigExec:evaluationMode = "neverTS" (
         allowedTokens = ["neverTS", "autoDetect", "alwaysTS"]
         customData = {
-            string userDocBrief = """Controls whether animated per-chain translation and scale\r
-        contribute to IK solve lengths, following Autodesk EvaluateTSAnim:\r
-        neverTS ignores animated T/S and uses rest-derived lengths, autoDetect\r
-        uses current T/S when animation is detected, and alwaysTS always uses\r
+            string userDocBrief = """Controls whether animated per-chain translation and scale
+        contribute to IK solve lengths, following Autodesk EvaluateTSAnim:
+        neverTS ignores animated T/S and uses rest-derived lengths, autoDetect
+        uses current T/S when animation is detected, and alwaysTS always uses
         the current T/S."""
         }
     )
@@ -1550,8 +1653,7 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
     uniform token rigExec:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
         customData = {
-            string userDocBrief = """Euler order for the operators that compose a rotation.\r
-        Authoring it on one that does not is a compile error."""
+            string userDocBrief = "Euler order for the operators that compose a rotation."
         }
     )
     uniform token rigExec:solverMode = "rotatePlane" (
@@ -1561,11 +1663,8 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
 
 class RigExecFloatMathMover "RigExecFloatMathMover" (
     customData = {
-        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an\r
-    exact float property target (spec section 4.1).\r
-\r
-    The revision is r = op(incoming), then the common MoverAPI envelope mixes\r
-    it back over the incoming value."""
+        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an
+    exact float property target (spec section 4.1)."""
     }
 )
 {
@@ -1579,7 +1678,7 @@ class RigExecFloatMathMover "RigExecFloatMathMover" (
 
 class "RigExecWeightObject" (
     customData = {
-        string userDocBrief = """Abstract common contract for a total scalar weight field over\r
+        string userDocBrief = """Abstract common contract for a total scalar weight field over
     the logical elements of one exact prim or property target."""
     }
 )
@@ -1592,7 +1691,7 @@ class "RigExecWeightObject" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
         domain."""
         }
     )
@@ -1627,7 +1726,7 @@ class RigExecCurvenetWeight "RigExecCurvenetWeight" (
     float rigExec:unreachedValue = 0
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
         domain."""
         }
     )
@@ -1635,8 +1734,8 @@ class RigExecCurvenetWeight "RigExecCurvenetWeight" (
 
 class RigExecStaticWeight "RigExecStaticWeight" (
     customData = {
-        string userDocBrief = """Time-invariant constant, dense, or sparse authored weight field;\r
-    every target element resolves to an explicit value or the authored\r
+        string userDocBrief = """Time-invariant constant, dense, or sparse authored weight field;
+    every target element resolves to an explicit value or the authored
     sparse default (spec section 4.1)."""
     }
 )
@@ -1652,7 +1751,7 @@ class RigExecStaticWeight "RigExecStaticWeight" (
     uniform float[] rigExec:values = []
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
         domain."""
         }
     )
@@ -1660,8 +1759,8 @@ class RigExecStaticWeight "RigExecStaticWeight" (
 
 class RigExecDynamicWeight "RigExecDynamicWeight" (
     customData = {
-        string userDocBrief = """Epoch-shape-stable weight field recomputed from statically\r
-    declared inputs, optionally modulating a base weight object:\r
+        string userDocBrief = """Epoch-shape-stable weight field recomputed from statically
+    declared inputs, optionally modulating a base weight object:
     r_i = (b_i * d) * s + a; w_i = RangePolicy(r_i) (spec section 4.1)."""
     }
 )
@@ -1681,7 +1780,7 @@ class RigExecDynamicWeight "RigExecDynamicWeight" (
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
         domain."""
         }
     )
@@ -1689,8 +1788,8 @@ class RigExecDynamicWeight "RigExecDynamicWeight" (
 
 class "RigExecVolumeWeight" (
     customData = {
-        string userDocBrief = """Abstract placed volume that GENERATES a total scalar weight\r
-    field over the logical elements of one exact prim or property target,\r
+        string userDocBrief = """Abstract placed volume that GENERATES a total scalar weight
+    field over the logical elements of one exact prim or property target,
     instead of storing one."""
     }
 )
@@ -1735,8 +1834,8 @@ class "RigExecVolumeWeight" (
     )
     color3f guide:displayColor = (1, 0.2, 0.2) (
         customData = {
-            string userDocBrief = """Red by convention, matching the influence overlay the\r
-        results scene index paints onto the weighted geometry so the\r
+            string userDocBrief = """Red by convention, matching the influence overlay the
+        results scene index paints onto the weighted geometry so the
         volume and the region it grabs read as one object."""
         }
     )
@@ -1744,8 +1843,8 @@ class "RigExecVolumeWeight" (
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
-            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
+            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as
+        curves, widthed by guide:wireWidth; geometry draws them solid;
         none suppresses the guide without disturbing the field."""
         }
     )
@@ -1756,11 +1855,8 @@ class "RigExecVolumeWeight" (
     )
     float inputs:falloffMax = 1 (
         customData = {
-            string userDocBrief = """Distance at which the field is fully OFF; the outer\r
-        radius for a sphere.\r
-\r
-        falloffMax < falloffMin is legal and flips the ramp -- the signed\r
-        denominator does it with no special case."""
+            string userDocBrief = """Distance at which the field is fully OFF; the outer
+        radius for a sphere."""
         }
     )
     float inputs:falloffMin = 0 (
@@ -1808,10 +1904,10 @@ class "RigExecVolumeWeight" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback for the same reason RigExecJoint does: an influence\r
-        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and\r
-        the stock attribute keeps the drawing and the bounds from\r
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback for the same reason RigExecJoint does: an influence
+        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and
+        the stock attribute keeps the drawing and the bounds from
         disagreeing."""
         }
     )
@@ -1820,7 +1916,7 @@ class "RigExecVolumeWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -1828,51 +1924,42 @@ class "RigExecVolumeWeight" (
     double rest:tz = 0
     float rigExec:falloffCurve = 0 (
         customData = {
-            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],\r
+            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],
         read when rigExec:falloffProfile is `curve`."""
         }
     )
     uniform token rigExec:falloffProfile = "smooth" (
         allowedTokens = ["linear", "smooth", "easeIn", "easeOut", "constant", "curve"]
         customData = {
-            string userDocBrief = """Named analytic remap of the normalized band parameter, or\r
+            string userDocBrief = """Named analytic remap of the normalized band parameter, or
         `curve` to use the spline authored on rigExec:falloffCurve."""
         }
     )
     uniform token rigExec:rangePolicy = "clamp" (
         allowedTokens = ["strict", "clamp"]
         customData = {
-            string userDocBrief = """Defaults to clamp rather than the strict used by the\r
-        authored weight objects: inputs:strength and inputs:invert are\r
-        animatable, and an artist scrubbing strength past one should see\r
+            string userDocBrief = """Defaults to clamp rather than the strict used by the
+        authored weight objects: inputs:strength and inputs:invert are
+        animatable, and an artist scrubbing strength past one should see
         the field saturate, not invalidate the rig mid-drag."""
         }
     )
     uniform token rigExec:representation = "dense" (
         allowedTokens = ["dense"]
         customData = {
-            string userDocBrief = """A generated field has a value at every element, so dense\r
+            string userDocBrief = """A generated field has a value at every element, so dense
         is the only representation it can honestly publish."""
         }
     )
     uniform token rigExec:samplePhase = "reference" (
         allowedTokens = ["reference", "current"]
         customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
+            string userDocBrief = "Which points the distance function measures against."
         }
     )
     rel rigExec:sampleSource (
         customData = {
-            string userDocBrief = """Optional explicit static points source to measure\r
+            string userDocBrief = """Optional explicit static points source to measure
         against, overriding rigExec:weightTarget for SAMPLING only."""
         }
     )
@@ -1900,10 +1987,10 @@ class "RigExecVolumeWeight" (
 
 class RigExecSphereWeight "RigExecSphereWeight" (
     customData = {
-        string userDocBrief = """Radial falloff about the volume's placed origin:\r
-    d = |(px/sx, py/sy, pz/sz)| in rigid volume-local space, so\r
-    inputs:falloffMin/falloffMax are the inner and outer radii and\r
-    inputs:scaleX/Y/Z make the iso-surfaces ellipsoidal (spec section\r
+        string userDocBrief = """Radial falloff about the volume's placed origin:
+    d = |(px/sx, py/sy, pz/sz)| in rigid volume-local space, so
+    inputs:falloffMin/falloffMax are the inner and outer radii and
+    inputs:scaleX/Y/Z make the iso-surfaces ellipsoidal (spec section
     4.1, volumetric extension)."""
     }
 )
@@ -1948,8 +2035,8 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     color3f guide:displayColor = (1, 0.2, 0.2) (
         customData = {
-            string userDocBrief = """Red by convention, matching the influence overlay the\r
-        results scene index paints onto the weighted geometry so the\r
+            string userDocBrief = """Red by convention, matching the influence overlay the
+        results scene index paints onto the weighted geometry so the
         volume and the region it grabs read as one object."""
         }
     )
@@ -1957,8 +2044,8 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
-            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
+            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as
+        curves, widthed by guide:wireWidth; geometry draws them solid;
         none suppresses the guide without disturbing the field."""
         }
     )
@@ -1969,11 +2056,8 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     float inputs:falloffMax = 1 (
         customData = {
-            string userDocBrief = """Distance at which the field is fully OFF; the outer\r
-        radius for a sphere.\r
-\r
-        falloffMax < falloffMin is legal and flips the ramp -- the signed\r
-        denominator does it with no special case."""
+            string userDocBrief = """Distance at which the field is fully OFF; the outer
+        radius for a sphere."""
         }
     )
     float inputs:falloffMin = 0 (
@@ -1988,7 +2072,7 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     float inputs:scaleX = 1 (
         customData = {
-            string userDocBrief = """Per-axis divisor applied to the local coordinate before\r
+            string userDocBrief = """Per-axis divisor applied to the local coordinate before
         the radial distance, so the iso-surfaces are ellipsoids."""
         }
     )
@@ -2029,10 +2113,10 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback for the same reason RigExecJoint does: an influence\r
-        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and\r
-        the stock attribute keeps the drawing and the bounds from\r
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback for the same reason RigExecJoint does: an influence
+        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and
+        the stock attribute keeps the drawing and the bounds from
         disagreeing."""
         }
     )
@@ -2041,7 +2125,7 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -2049,51 +2133,42 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     double rest:tz = 0
     float rigExec:falloffCurve = 0 (
         customData = {
-            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],\r
+            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],
         read when rigExec:falloffProfile is `curve`."""
         }
     )
     uniform token rigExec:falloffProfile = "smooth" (
         allowedTokens = ["linear", "smooth", "easeIn", "easeOut", "constant", "curve"]
         customData = {
-            string userDocBrief = """Named analytic remap of the normalized band parameter, or\r
+            string userDocBrief = """Named analytic remap of the normalized band parameter, or
         `curve` to use the spline authored on rigExec:falloffCurve."""
         }
     )
     uniform token rigExec:rangePolicy = "clamp" (
         allowedTokens = ["strict", "clamp"]
         customData = {
-            string userDocBrief = """Defaults to clamp rather than the strict used by the\r
-        authored weight objects: inputs:strength and inputs:invert are\r
-        animatable, and an artist scrubbing strength past one should see\r
+            string userDocBrief = """Defaults to clamp rather than the strict used by the
+        authored weight objects: inputs:strength and inputs:invert are
+        animatable, and an artist scrubbing strength past one should see
         the field saturate, not invalidate the rig mid-drag."""
         }
     )
     uniform token rigExec:representation = "dense" (
         allowedTokens = ["dense"]
         customData = {
-            string userDocBrief = """A generated field has a value at every element, so dense\r
+            string userDocBrief = """A generated field has a value at every element, so dense
         is the only representation it can honestly publish."""
         }
     )
     uniform token rigExec:samplePhase = "reference" (
         allowedTokens = ["reference", "current"]
         customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
+            string userDocBrief = "Which points the distance function measures against."
         }
     )
     rel rigExec:sampleSource (
         customData = {
-            string userDocBrief = """Optional explicit static points source to measure\r
+            string userDocBrief = """Optional explicit static points source to measure
         against, overriding rigExec:weightTarget for SAMPLING only."""
         }
     )
@@ -2121,13 +2196,8 @@ class RigExecSphereWeight "RigExecSphereWeight" (
 
 class RigExecPlaneWeight "RigExecPlaneWeight" (
     customData = {
-        string userDocBrief = """Gradient across a plane: d is the SIGNED local coordinate\r
-    along rigExec:planeAxis (spec section 4.1, volumetric extension).\r
-\r
-    Signed rather than absolute so a falloffMin/falloffMax pair\r
-    straddling zero authors a gradient ACROSS the plane -- the useful\r
-    planar-falloff behaviour -- rather than a band mirrored on both sides\r
-    of it."""
+        string userDocBrief = """Gradient across a plane: d is the SIGNED local coordinate
+    along rigExec:planeAxis (spec section 4.1, volumetric extension)."""
     }
 )
 {
@@ -2171,8 +2241,8 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     )
     color3f guide:displayColor = (1, 0.2, 0.2) (
         customData = {
-            string userDocBrief = """Red by convention, matching the influence overlay the\r
-        results scene index paints onto the weighted geometry so the\r
+            string userDocBrief = """Red by convention, matching the influence overlay the
+        results scene index paints onto the weighted geometry so the
         volume and the region it grabs read as one object."""
         }
     )
@@ -2180,8 +2250,8 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
-            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
+            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as
+        curves, widthed by guide:wireWidth; geometry draws them solid;
         none suppresses the guide without disturbing the field."""
         }
     )
@@ -2192,29 +2262,20 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     )
     float inputs:extentU = 1 (
         customData = {
-            string userDocBrief = """Half-extent of the bounded rectangle along the first\r
-        IN-PLANE axis, U = (planeAxis + 1) % 3.\r
-\r
-        Separate from the falloff band on purpose, and the separation is\r
-        the whole point: falloffMin/falloffMax are distances ALONG the\r
-        axis and say where the gradient starts and stops, while the\r
-        extents are the size ACROSS it and say how far the sheet reaches.\r
-        They are different directions and different quantities."""
+            string userDocBrief = """Half-extent of the bounded rectangle along the first
+        IN-PLANE axis, U = (planeAxis + 1) % 3."""
         }
     )
     float inputs:extentV = 1 (
         customData = {
-            string userDocBrief = """Half-extent along the second in-plane axis,\r
+            string userDocBrief = """Half-extent along the second in-plane axis,
         V = (planeAxis + 2) % 3."""
         }
     )
     float inputs:falloffMax = 1 (
         customData = {
-            string userDocBrief = """Distance at which the field is fully OFF; the outer\r
-        radius for a sphere.\r
-\r
-        falloffMax < falloffMin is legal and flips the ramp -- the signed\r
-        denominator does it with no special case."""
+            string userDocBrief = """Distance at which the field is fully OFF; the outer
+        radius for a sphere."""
         }
     )
     float inputs:falloffMin = 0 (
@@ -2262,10 +2323,10 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback for the same reason RigExecJoint does: an influence\r
-        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and\r
-        the stock attribute keeps the drawing and the bounds from\r
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback for the same reason RigExecJoint does: an influence
+        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and
+        the stock attribute keeps the drawing and the bounds from
         disagreeing."""
         }
     )
@@ -2274,7 +2335,7 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -2282,14 +2343,14 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     double rest:tz = 0
     float rigExec:falloffCurve = 0 (
         customData = {
-            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],\r
+            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],
         read when rigExec:falloffProfile is `curve`."""
         }
     )
     uniform token rigExec:falloffProfile = "smooth" (
         allowedTokens = ["linear", "smooth", "easeIn", "easeOut", "constant", "curve"]
         customData = {
-            string userDocBrief = """Named analytic remap of the normalized band parameter, or\r
+            string userDocBrief = """Named analytic remap of the normalized band parameter, or
         `curve` to use the spline authored on rigExec:falloffCurve."""
         }
     )
@@ -2302,48 +2363,35 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     uniform token rigExec:planeBounds = "unbounded" (
         allowedTokens = ["unbounded", "bounded"]
         customData = {
-            string userDocBrief = """Whether the field extends forever across the plane, or\r
-        stops at the inputs:extentU x inputs:extentV rectangle.\r
-\r
-        `unbounded` is the default because it is the behaviour a\r
-        half-space falloff wants and the one every plane weight authored\r
-        before this property existed had."""
+            string userDocBrief = """Whether the field extends forever across the plane, or
+        stops at the inputs:extentU x inputs:extentV rectangle."""
         }
     )
     uniform token rigExec:rangePolicy = "clamp" (
         allowedTokens = ["strict", "clamp"]
         customData = {
-            string userDocBrief = """Defaults to clamp rather than the strict used by the\r
-        authored weight objects: inputs:strength and inputs:invert are\r
-        animatable, and an artist scrubbing strength past one should see\r
+            string userDocBrief = """Defaults to clamp rather than the strict used by the
+        authored weight objects: inputs:strength and inputs:invert are
+        animatable, and an artist scrubbing strength past one should see
         the field saturate, not invalidate the rig mid-drag."""
         }
     )
     uniform token rigExec:representation = "dense" (
         allowedTokens = ["dense"]
         customData = {
-            string userDocBrief = """A generated field has a value at every element, so dense\r
+            string userDocBrief = """A generated field has a value at every element, so dense
         is the only representation it can honestly publish."""
         }
     )
     uniform token rigExec:samplePhase = "reference" (
         allowedTokens = ["reference", "current"]
         customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
+            string userDocBrief = "Which points the distance function measures against."
         }
     )
     rel rigExec:sampleSource (
         customData = {
-            string userDocBrief = """Optional explicit static points source to measure\r
+            string userDocBrief = """Optional explicit static points source to measure
         against, overriding rigExec:weightTarget for SAMPLING only."""
         }
     )
@@ -2371,15 +2419,10 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
 
 class RigExecCurveWeight "RigExecCurveWeight" (
     customData = {
-        string userDocBrief = """Tubular falloff about a curve: d is the distance to the\r
-    nearest point on the polyline through the target curve's points,\r
-    measured in rigid volume-local space after inputs:scaleX/Y/Z (spec\r
-    section 4.1, volumetric extension).\r
-\r
-    The polyline through the control points is deliberate rather than a\r
-    basis evaluation: a weight field wants a stable, cheap, monotone\r
-    distance, and the control polygon bounds the curve it hulls, so the\r
-    field never reaches somewhere the draw..."""
+        string userDocBrief = """Tubular falloff about a curve: d is the distance to the
+    nearest point on the polyline through the target curve's points,
+    measured in rigid volume-local space after inputs:scaleX/Y/Z (spec
+    section 4.1, volumetric extension)."""
     }
 )
 {
@@ -2423,8 +2466,8 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     )
     color3f guide:displayColor = (1, 0.2, 0.2) (
         customData = {
-            string userDocBrief = """Red by convention, matching the influence overlay the\r
-        results scene index paints onto the weighted geometry so the\r
+            string userDocBrief = """Red by convention, matching the influence overlay the
+        results scene index paints onto the weighted geometry so the
         volume and the region it grabs read as one object."""
         }
     )
@@ -2432,8 +2475,8 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry", "none"]
         customData = {
-            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as\r
-        curves, widthed by guide:wireWidth; geometry draws them solid;\r
+            string userDocBrief = """wire draws the falloffMin and falloffMax iso-surfaces as
+        curves, widthed by guide:wireWidth; geometry draws them solid;
         none suppresses the guide without disturbing the field."""
         }
     )
@@ -2444,11 +2487,8 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     )
     float inputs:falloffMax = 1 (
         customData = {
-            string userDocBrief = """Distance at which the field is fully OFF; the outer\r
-        radius for a sphere.\r
-\r
-        falloffMax < falloffMin is legal and flips the ramp -- the signed\r
-        denominator does it with no special case."""
+            string userDocBrief = """Distance at which the field is fully OFF; the outer
+        radius for a sphere."""
         }
     )
     float inputs:falloffMin = 0 (
@@ -2503,10 +2543,10 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     uniform token purpose = "guide" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
-        fallback for the same reason RigExecJoint does: an influence\r
-        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and\r
-        the stock attribute keeps the drawing and the bounds from\r
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`
+        fallback for the same reason RigExecJoint does: an influence
+        volume is a DIAGNOSTIC, drawn when a viewer asks for guides, and
+        the stock attribute keeps the drawing and the bounds from
         disagreeing."""
         }
     )
@@ -2515,7 +2555,7 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -2523,57 +2563,48 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     double rest:tz = 0
     rel rigExec:curve (
         customData = {
-            string userDocBrief = """Exactly one native points source for the curve -- a\r
+            string userDocBrief = """Exactly one native points source for the curve -- a
         UsdGeomBasisCurves prim or an exact point3f[] property."""
         }
     )
     float rigExec:falloffCurve = 0 (
         customData = {
-            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],\r
+            string userDocBrief = """Falloff shape as an authored Ts spline over x in [0, 1],
         read when rigExec:falloffProfile is `curve`."""
         }
     )
     uniform token rigExec:falloffProfile = "smooth" (
         allowedTokens = ["linear", "smooth", "easeIn", "easeOut", "constant", "curve"]
         customData = {
-            string userDocBrief = """Named analytic remap of the normalized band parameter, or\r
+            string userDocBrief = """Named analytic remap of the normalized band parameter, or
         `curve` to use the spline authored on rigExec:falloffCurve."""
         }
     )
     uniform token rigExec:rangePolicy = "clamp" (
         allowedTokens = ["strict", "clamp"]
         customData = {
-            string userDocBrief = """Defaults to clamp rather than the strict used by the\r
-        authored weight objects: inputs:strength and inputs:invert are\r
-        animatable, and an artist scrubbing strength past one should see\r
+            string userDocBrief = """Defaults to clamp rather than the strict used by the
+        authored weight objects: inputs:strength and inputs:invert are
+        animatable, and an artist scrubbing strength past one should see
         the field saturate, not invalidate the rig mid-drag."""
         }
     )
     uniform token rigExec:representation = "dense" (
         allowedTokens = ["dense"]
         customData = {
-            string userDocBrief = """A generated field has a value at every element, so dense\r
+            string userDocBrief = """A generated field has a value at every element, so dense
         is the only representation it can honestly publish."""
         }
     )
     uniform token rigExec:samplePhase = "reference" (
         allowedTokens = ["reference", "current"]
         customData = {
-            string userDocBrief = """Which points the distance function measures against.\r
-\r
-        `reference` samples the STATIC authored base points, so the field\r
-        is computed once per epoch and a point keeps the weight its bind\r
-        pose earned -- the behaviour of a painted map, and what a matrix\r
-        mover wants so that its own output cannot feed back into its own\r
-        weights.\r
-\r
-        `current` samples the points AS THEY STAND at this operation's\r
-        position in the mover stack, so the volume grab..."""
+            string userDocBrief = "Which points the distance function measures against."
         }
     )
     rel rigExec:sampleSource (
         customData = {
-            string userDocBrief = """Optional explicit static points source to measure\r
+            string userDocBrief = """Optional explicit static points source to measure
         against, overriding rigExec:weightTarget for SAMPLING only."""
         }
     )
@@ -2601,7 +2632,7 @@ class RigExecCurveWeight "RigExecCurveWeight" (
 
 class RigExecCombineWeight "RigExecCombineWeight" (
     customData = {
-        string userDocBrief = """Folds an ordered list of weight objects into one field\r
+        string userDocBrief = """Folds an ordered list of weight objects into one field
     (spec section 4.1, volumetric extension)."""
     }
 )
@@ -2615,7 +2646,7 @@ class RigExecCombineWeight "RigExecCombineWeight" (
     uniform token rigExec:combineMode = "multiply" (
         allowedTokens = ["multiply", "add", "subtract", "max", "min", "average", "overlay"]
         customData = {
-            string userDocBrief = """multiply, add, max, min, and average are order\r
+            string userDocBrief = """multiply, add, max, min, and average are order
         independent."""
         }
     )
@@ -2630,20 +2661,15 @@ class RigExecCombineWeight "RigExecCombineWeight" (
     uniform token rigExec:representation = "dense" (
         allowedTokens = ["dense"]
         customData = {
-            string userDocBrief = """Redeclared to override the RigExecWeightObject fallback\r
-        of `constant`, which a combine cannot honour: it resolves every\r
-        input to a dense field before folding, so dense is the only\r
-        representation it can publish.\r
-\r
-        Inheriting the base fallback made a DEFAULT combine -- author the\r
-        prim, wire two inputs, change nothing else -- publish an invalid\r
-        packet on the exec path while the CPU oracle resolved it happily.\r
-        That is a parity mismatch r..."""
+            string userDocBrief = """Redeclared to override the RigExecWeightObject fallback
+        of `constant`, which a combine cannot honour: it resolves every
+        input to a dense field before folding, so dense is the only
+        representation it can publish."""
         }
     )
     rel rigExec:weightTarget (
         customData = {
-            string userDocBrief = """Canonical prim or exact property carrying the weighted\r
+            string userDocBrief = """Canonical prim or exact property carrying the weighted
         domain."""
         }
     )
@@ -2651,8 +2677,8 @@ class RigExecCombineWeight "RigExecCombineWeight" (
 
 class RigExecMatrixMover "RigExecMatrixMover" (
     customData = {
-        string userDocBrief = """Moves the preceding native point3f[] points value through one\r
-    declared target-local affine transform and blends each point with the\r
+        string userDocBrief = """Moves the preceding native point3f[] points value through one
+    declared target-local affine transform and blends each point with the
     common MoverAPI envelope: p' = q + w (T q - q) (spec section 7.4)."""
     }
 )
@@ -2667,11 +2693,54 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     )
 }
 
+class RigExecSkinMover "RigExecSkinMover" (
+    customData = {
+        string userDocBrief = """Multi-influence skinning of an exact native point3f[] points
+    property in ONE pass: every influence's matrix is gathered per point and
+    blended by that point's authored weights, then the result is mixed with
+    the common MoverAPI envelope."""
+    }
+)
+{
+    uniform int rigExec:elementSize = 1 (
+        customData = {
+            string userDocBrief = "Influences per point."
+        }
+    )
+    rel rigExec:influences (
+        customData = {
+            string userDocBrief = """Ordered GfMatrix4d providers (computeMatrix), one per
+        influence."""
+        }
+    )
+    int[] rigExec:jointIndices = [] (
+        customData = {
+            string userDocBrief = """Per-point influence indices into rigExec:influences,
+        rigExec:elementSize entries per point in point order (UsdSkel's
+        primvars:skel:jointIndices layout)."""
+        }
+    )
+    float[] rigExec:jointWeights = [] (
+        customData = {
+            string userDocBrief = "Per-point influence weights parallel to rigExec:jointIndices."
+        }
+    )
+    uniform token rigExec:skinningMethod = "classicLinear" (
+        allowedTokens = ["classicLinear", "dualQuaternion"]
+    )
+    uniform token rigExec:transformReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+        customData = {
+            string userDocBrief = "Which revision of every influence's matrix is read."
+        }
+    )
+}
+
 class RigExecBlendShapeMover "RigExecBlendShapeMover" (
     customData = {
-        string userDocBrief = """Applies independently composed blend inputs and native\r
-    target-shape points samples to an exact standard UsdGeomPointBased.points\r
-    property, then applies the common MoverAPI envelope to the accumulated\r
+        string userDocBrief = """Applies independently composed blend inputs and native
+    target-shape points samples to an exact standard UsdGeomPointBased.points
+    property, then applies the common MoverAPI envelope to the accumulated
     delta (spec section 7.3)."""
     }
 )
@@ -2687,7 +2756,7 @@ class RigExecBlendShapeMover "RigExecBlendShapeMover" (
 
 class RigExecBlendInput "RigExecBlendInput" (
     customData = {
-        string userDocBrief = """One independently composable blend channel with an authored or\r
+        string userDocBrief = """One independently composable blend channel with an authored or
     connected weight and relationships to samples."""
     }
 )
@@ -2698,13 +2767,21 @@ class RigExecBlendInput "RigExecBlendInput" (
 
 class RigExecBlendSample "RigExecBlendSample" (
     customData = {
-        string userDocBrief = """One target or in-between activation related to an exact native\r
-    target-shape points property; dense deltas are derived against the base\r
-    points."""
+        string userDocBrief = """One target or in-between activation, related EITHER to an exact
+    native target-shape points property or to a UsdSkelBlendShape carrying the
+    same shape as sparse offsets."""
     }
 )
 {
     float rigExec:activation = 1
+    rel rigExec:blendShape (
+        customData = {
+            string userDocBrief = """A UsdSkelBlendShape whose offsets (and pointIndices, when
+        non-empty) ARE the sample's deltas -- the same shape rigExec:targetPoints
+        expresses as a full moved-points array, stored as only the points that
+        move."""
+        }
+    )
     uniform token rigExec:pointsReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
@@ -2715,10 +2792,142 @@ class RigExecBlendSample "RigExecBlendSample" (
     )
 }
 
+class RigExecPoseInterpolator "RigExecPoseInterpolator" (
+    customData = {
+        string userDocBrief = """A pose interpolator: one driver joint in, one weight per
+    authored RigExecPose child out."""
+    }
+)
+{
+    bool inputs:enabled = 1 (
+        customData = {
+            string userDocBrief = "Shape-preserving enable."
+        }
+    )
+    bool rigExec:allowNegativeWeights = 1 (
+        customData = {
+            string userDocBrief = "allowNegativeWeights."
+        }
+    )
+    rel rigExec:driver (
+        customData = {
+            string userDocBrief = """The driver, at most one target: a RigExecJoint (or any
+        RigExecXformable) whose LOCAL rotation -- its pose relative to its own
+        rest, in its parent's frame -- is what every pose is measured against."""
+        }
+    )
+    bool rigExec:enableRotation = 1 (
+        customData = {
+            string userDocBrief = "enableRotation: measure the driver's rotation."
+        }
+    )
+    bool rigExec:enableTranslation = 0 (
+        customData = {
+            string userDocBrief = """enableTranslation: measure the driver's translation as
+        well, in the driver's own frame."""
+        }
+    )
+    uniform token rigExec:kernel = "gaussian" (
+        allowedTokens = ["gaussian", "linear"]
+        customData = {
+            string userDocBrief = "How a pose's weight falls away with distance."
+        }
+    )
+    bool rigExec:normalize = 1 (
+        customData = {
+            string userDocBrief = """Divide the weights by their SUM, so they stay a partition of
+        unity."""
+        }
+    )
+    float rigExec:regularization = 0 (
+        customData = {
+            string userDocBrief = """regularization, added to the matrix diagonal before
+        inverting."""
+        }
+    )
+    uniform token rigExec:twistAxis = "X" (
+        allowedTokens = ["X", "Y", "Z"]
+        customData = {
+            string userDocBrief = "The axis a twist pose spins about, in the DRIVER's own frame."
+        }
+    )
+}
+
+class RigExecPose "RigExecPose" (
+    customData = {
+        string userDocBrief = """One authored pose of a RigExecPoseInterpolator, and the float it
+    publishes."""
+    }
+)
+{
+    bool inputs:enabled = 1 (
+        customData = {
+            string userDocBrief = "Shape-preserving enable."
+        }
+    )
+    float outputs:weight = 0 (
+        customData = {
+            string userDocBrief = "How much this pose counts, for wherever the driver is now."
+        }
+    )
+    float rigExec:falloff = 0.3 (
+        customData = {
+            string userDocBrief = """poseFalloff, kept as provenance and as the editable
+        dial: the share the artist painted on top of the fitted width, where
+        0.3 is the default and means just reach the closest other pose."""
+        }
+    )
+    rel rigExec:poseControls (
+        customData = {
+            string userDocBrief = """The exact control PROPERTIES that put the rig into this pose
+        -- </Rig/Controls/arm_l_fk_shoulder_l_bind.avars:ry> and the like --
+        parallel to rigExec:poseControlValues."""
+        }
+    )
+    double[] rigExec:poseControlValues = [] (
+        customData = {
+            string userDocBrief = """The value for each target of rigExec:poseControls, in OUR
+        units and from OUR zero: degrees for a rotation avar, centimetres for
+        a translation one, measured from the rig's rest rather than from
+        the authored data's."""
+        }
+    )
+    uniform token rigExec:poseType = "swing" (
+        allowedTokens = ["swing", "twist", "whole"]
+        customData = {
+            string userDocBrief = """poseType (1 swing, 2 twist, 0 whole): WHICH PART of
+        the driver's rotation this pose is measured against."""
+        }
+    )
+    quatf rigExec:rotation = (1, 0, 0, 0) (
+        customData = {
+            string userDocBrief = """Where the driver stands in this pose: its LOCAL rotation
+        relative to its own rest, in the driver's parent frame."""
+        }
+    )
+    float rigExec:rotationRadius = 0 (
+        customData = {
+            string userDocBrief = """How far in RADIANS the driver may stray before this pose's
+        kernel has fallen away -- one falloff width, this pose's own."""
+        }
+    )
+    float3 rigExec:translation = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """The driver's translation in this pose, in CENTIMETRES, in the
+        driver's own frame."""
+        }
+    )
+    float rigExec:translationRadius = 0 (
+        customData = {
+            string userDocBrief = "The same width for the translation channel, in CENTIMETRES."
+        }
+    )
+}
+
 class RigExecCurveMover "RigExecCurveMover" (
     customData = {
-        string userDocBrief = """Reads standard basis-curve properties for wire, spline-IK,\r
-    ribbon, and curve-coordinate movement and writes an exact native\r
+        string userDocBrief = """Reads standard basis-curve properties for wire, spline-IK,
+    ribbon, and curve-coordinate movement and writes an exact native
     UsdGeomPointBased points property (spec section 7.5)."""
     }
 )
@@ -2736,11 +2945,8 @@ class RigExecCurveMover "RigExecCurveMover" (
 
 class RigExecVec3fMathMover "RigExecVec3fMathMover" (
     customData = {
-        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an\r
-    exact float3/vector-valued property target (spec section 4.1).\r
-\r
-    Every operation is component-wise, which is why the bounds are float3\r
-    rather than float."""
+        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an
+    exact float3/vector-valued property target (spec section 4.1)."""
     }
 )
 {
@@ -2754,7 +2960,7 @@ class RigExecVec3fMathMover "RigExecVec3fMathMover" (
 
 class RigExecMatrixMathMover "RigExecMatrixMathMover" (
     customData = {
-        string userDocBrief = """Statically typed multiply or blend over an exact matrix4d\r
+        string userDocBrief = """Statically typed multiply or blend over an exact matrix4d
     property target (spec section 4.1)."""
     }
 )
@@ -2767,8 +2973,8 @@ class RigExecMatrixMathMover "RigExecMatrixMathMover" (
 
 class RigExecLatticeMover "RigExecLatticeMover" (
     customData = {
-        string userDocBrief = """Reads cage points from a native mesh/points prim and writes\r
-    exactly one exact native UsdGeomPointBased points property through\r
+        string userDocBrief = """Reads cage points from a native mesh/points prim and writes
+    exactly one exact native UsdGeomPointBased points property through
     tensor-product basis evaluation (spec sections 4.1, 7.5)."""
     }
 )
@@ -2789,8 +2995,8 @@ class RigExecLatticeMover "RigExecLatticeMover" (
 
 class RigExecSurfaceMover "RigExecSurfaceMover" (
     customData = {
-        string userDocBrief = """Reads standard mesh properties for attachment/projection/\r
-    sliding and surface-driven correction and writes an exact native\r
+        string userDocBrief = """Reads standard mesh properties for attachment/projection/
+    sliding and surface-driven correction and writes an exact native
     UsdGeomPointBased points property (spec sections 4.1, 7.5)."""
     }
 )
@@ -2810,10 +3016,10 @@ class RigExecSurfaceMover "RigExecSurfaceMover" (
 
 class RigExecSmoothMover "RigExecSmoothMover" (
     customData = {
-        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points\r
-    property through uniform-weight Laplacian smoothing with fixed edge\r
-    adjacency taken from the destination's standard topology (spec\r
-    section 7.6 revised: the former post-mover smooth operation as a\r
+        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points
+    property through uniform-weight Laplacian smoothing with fixed edge
+    adjacency taken from the destination's standard topology (spec
+    section 7.6 revised: the former post-mover smooth operation as a
     first-class mover)."""
     }
 )
@@ -2822,13 +3028,9 @@ class RigExecSmoothMover "RigExecSmoothMover" (
 
 class RigExecCurvenet "RigExecCurvenet" (
     customData = {
-        string userDocBrief = '''A net of cubic splines profiling a surface, the rigging\r
-    representation of de Goes, Sheffler and Fleischer, "Character\r
-    Articulation through Profile Curves" (SIGGRAPH 2022), section 3.\r
-\r
-    Inherited `points` is the shared pool of control points -- knots AND\r
-    tangent handles -- in the PROJECTION pose, the pose the net was drawn\r
-    in.'''
+        string userDocBrief = '''A net of cubic splines profiling a surface, the rigging
+    representation of de Goes, Sheffler and Fleischer, "Character
+    Articulation through Profile Curves" (SIGGRAPH 2022), section 3.'''
     }
 )
 {
@@ -2921,8 +3123,8 @@ class RigExecCurvenet "RigExecCurvenet" (
     )
     uniform int rigExec:samplesPerSpline = 5 (
         customData = {
-            string userDocBrief = """Sampling density before the mesh-resolution scaling of\r
-        section 3: the count per spline is this value times the ratio of the\r
+            string userDocBrief = """Sampling density before the mesh-resolution scaling of
+        section 3: the count per spline is this value times the ratio of the
         spline's control polygon length to the surface's mean edge length."""
         }
     )
@@ -3021,19 +3223,39 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
         extent of the authored gprim in its own local space (i.e."""
         }
     )
-    color3f guide:displayColor = (1, 0.85, 0.2)
-    float guide:displayOpacity = 1
+    color3f guide:displayColor = (1, 0.85, 0.2) (
+        customData = {
+            string userDocBrief = "Constant colour of the synthesized guide."
+        }
+    )
+    float guide:displayOpacity = 1 (
+        customData = {
+            string userDocBrief = "Constant opacity of the synthesized guide."
+        }
+    )
+    uniform bool guide:displayOpacityInvert = 0 (
+        customData = {
+            string userDocBrief = """When guide:displayOpacity is connected, draw 1 - source
+        instead of source."""
+        }
+    )
+    uniform float guide:displayOpacityMin = 0.15 (
+        customData = {
+            string userDocBrief = """Floor applied to a CONNECTED guide:displayOpacity after the
+        optional inversion."""
+        }
+    )
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry"]
         customData = {
-            string userDocBrief = """wire draws the guide as curves, widthed by\r
+            string userDocBrief = """wire draws the guide as curves, widthed by
         guide:wireWidth."""
         }
     )
     double guide:scaleX = 1 (
         customData = {
-            string userDocBrief = """Positive per-axis draw multiplier of the guide shape whose\r
-        final size is abs(evaluated frame axis) * guide:scaleAxis, authored as\r
+            string userDocBrief = """Positive per-axis draw multiplier of the guide shape whose
+        final size is abs(evaluated frame axis) * guide:scaleAxis, authored as
         three separate double properties rather than a vec3."""
         }
     )
@@ -3050,16 +3272,16 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     uniform token guide:shape = "circle" (
         allowedTokens = ["sphere", "circle", "box", "cube", "diamond", "pyramid"]
         customData = {
-            string userDocBrief = """Guide primitive synthesized at the control's posed frame\r
-        origin (spec section 10.3 extension), exactly parallel to the\r
+            string userDocBrief = """Guide primitive synthesized at the control's posed frame
+        origin (spec section 10.3 extension), exactly parallel to the
         RigExecJoint sphere/cone guides."""
         }
     )
     double guide:wireWidth = 0.05 (
         customData = {
-            string userDocBrief = """Width authored onto the wire curves, in the LOCAL\r
-        pre-scale units of the unit shape -- so the drawn width tracks the\r
-        evaluated control-frame scale multiplied by guide:scaleX/Y/Z along\r
+            string userDocBrief = """Width authored onto the wire curves, in the LOCAL
+        pre-scale units of the unit shape -- so the drawn width tracks the
+        evaluated control-frame scale multiplied by guide:scaleX/Y/Z along
         with the rest of the shape."""
         }
     )
@@ -3093,8 +3315,8 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that
-        can each be independently included or excluded from traversals of prims
+            string userDocBrief = """Purpose is a classification of geometry into categories that 
+        can each be independently included or excluded from traversals of prims 
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
@@ -3103,7 +3325,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -3118,7 +3340,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning"
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
         visibility that is supported by most DCC apps.'''
         }
     )
@@ -3144,13 +3366,9 @@ class RigExecCurvenetAdjusterMover "RigExecCurvenetAdjusterMover" (
 
 class RigExecCurvenetMover "RigExecCurvenetMover" (
     customData = {
-        string userDocBrief = """The Profile Mover: propagates a rigged curvenet's articulation\r
-    over one exact native UsdGeomPointBased points property (2022 paper\r
-    section 4).\r
-\r
-    Binding is precomputed once per epoch against the target's authored\r
-    base points -- the projection pose -- by cutting the mesh along the\r
-    curvenet and factorizing the resulting cut-aware Laplacian."""
+        string userDocBrief = """The Profile Mover: propagates a rigged curvenet's articulation
+    over one exact native UsdGeomPointBased points property (2022 paper
+    section 4)."""
     }
 )
 {
@@ -3163,12 +3381,474 @@ class RigExecCurvenetMover "RigExecCurvenetMover" (
 
 class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
     customData = {
-        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points\r
-    property by uniform centroid scaling toward the authored rest bound\r
-    volume (spec section 7.6 revised: the former post-mover volumeCorrect\r
+        string userDocBrief = """Moves exactly one exact native UsdGeomPointBased points
+    property by uniform centroid scaling toward the authored rest bound
+    volume (spec section 7.6 revised: the former post-mover volumeCorrect
     operation as a first-class mover)."""
     }
 )
 {
+}
+
+class RigExecPicker "RigExecPicker" (
+    customData = {
+        string userDocBrief = """A character's control picker: one tab in the picker panel,
+    holding one RigExecPickerPanel per sub-tab."""
+    }
+)
+{
+    rel rigExec:picker:rig (
+        customData = {
+            string userDocBrief = "The RigExecRoot this picker drives."
+        }
+    )
+    uniform string ui:label = "" (
+        customData = {
+            string userDocBrief = "Tab label."
+        }
+    )
+    uniform int ui:order = 0 (
+        customData = {
+            string userDocBrief = "Sort key among sibling pickers."
+        }
+    )
+}
+
+class RigExecPickerPanel "RigExecPickerPanel" (
+    customData = {
+        string userDocBrief = "One sub-tab of a RigExecPicker: Body, Face, and so on."
+    }
+)
+{
+    uniform color4f ui:background = (0.16, 0.16, 0.16, 1) (
+        customData = {
+            string userDocBrief = "Panel fill behind every button."
+        }
+    )
+    uniform string ui:label = "" (
+        customData = {
+            string userDocBrief = "Sub-tab label; empty means use the prim name."
+        }
+    )
+    uniform int ui:order = 0 (
+        customData = {
+            string userDocBrief = "Sort key among sibling panels."
+        }
+    )
+    uniform float2 ui:size = (400, 600) (
+        customData = {
+            string userDocBrief = "Panel extent in picker units, before the view's fit scale."
+        }
+    )
+}
+
+class RigExecPickerButton "RigExecPickerButton" (
+    customData = {
+        string userDocBrief = "One button."
+    }
+)
+{
+    rel rigExec:picker:attribute (
+        customData = {
+            string userDocBrief = """The single attribute this button edits, for a switch or a
+        dial."""
+        }
+    )
+    uniform token[] rigExec:picker:attributeLabels = [] (
+        customData = {
+            string userDocBrief = """Labels for the values rigExec:picker:attribute cycles
+        through, low to high, e.g."""
+        }
+    )
+    uniform token rigExec:picker:command = "" (
+        customData = {
+            string userDocBrief = """A named action this button runs, instead of selecting or
+        editing."""
+        }
+    )
+    rel rigExec:picker:controls (
+        customData = {
+            string userDocBrief = "The prims this button selects, in order."
+        }
+    )
+    uniform token rigExec:picker:mode = "" (
+        allowedTokens = ["", "ik", "fk"]
+        customData = {
+            string userDocBrief = "Show this button only while its limb is in this mode."
+        }
+    )
+    rel rigExec:picker:modeDial (
+        customData = {
+            string userDocBrief = "The attribute rigExec:picker:mode is tested against."
+        }
+    )
+    uniform bool ui:alternate = 0 (
+        customData = {
+            string userDocBrief = """This button shares a slot with another and is the one
+        hidden at rest."""
+        }
+    )
+    uniform float2[] ui:bezier = [] (
+        customData = {
+            string userDocBrief = """Cubic control points for ui:shape = bezier, THREE per
+        knot -- on-curve point, out-tangent, in-tangent -- flattened,
+        with each span completed by the following knot's in-tangent."""
+        }
+    )
+    uniform bool ui:bold = 0 (
+        customData = {
+            string userDocBrief = "Label weight."
+        }
+    )
+    uniform float ui:depth = 0 (
+        customData = {
+            string userDocBrief = "Painter's-algorithm order; higher draws later, on top."
+        }
+    )
+    uniform token ui:direction = "top" (
+        allowedTokens = ["top", "bottom", "left", "right"]
+        customData = {
+            string userDocBrief = "Which edge a trapezoid or triangle points at."
+        }
+    )
+    uniform color4f ui:fill = (0.5, 0.5, 0.5, 1) (
+        customData = {
+            string userDocBrief = "Interior colour, linear, alpha premultiplied by the view."
+        }
+    )
+    uniform float ui:fontSize = 8 (
+        customData = {
+            string userDocBrief = "Label size in panel units."
+        }
+    )
+    uniform float2[] ui:polygon = [] (
+        customData = {
+            string userDocBrief = "Outline vertices for ui:shape = polygon, panel units."
+        }
+    )
+    uniform float2 ui:position = (0, 0) (
+        customData = {
+            string userDocBrief = "Top-left corner in panel units."
+        }
+    )
+    uniform float ui:rotation = 0 (
+        customData = {
+            string userDocBrief = "Degrees clockwise about the button's own centre."
+        }
+    )
+    uniform float ui:roundness = 0 (
+        customData = {
+            string userDocBrief = "Corner radius fraction for roundedRectangle, 0 to 1."
+        }
+    )
+    uniform token ui:shape = "rectangle" (
+        allowedTokens = ["rectangle", "roundedRectangle", "circle", "ellipse", "hexagon", "triangle", "trapezoid", "polygon", "bezier", "widgetControl", "slider"]
+        customData = {
+            string userDocBrief = "Outline."
+        }
+    )
+    uniform float2 ui:size = (10, 10) (
+        customData = {
+            string userDocBrief = "Width and height in panel units."
+        }
+    )
+    uniform float ui:slopeLeft = 0 (
+        customData = {
+            string userDocBrief = "Trapezoid left-edge inset, as a fraction of ui:size width."
+        }
+    )
+    uniform float ui:slopeRight = 0 (
+        customData = {
+            string userDocBrief = "Trapezoid right-edge inset, as a fraction of ui:size width."
+        }
+    )
+    uniform color4f ui:stroke = (0, 0, 0, 0.8) (
+        customData = {
+            string userDocBrief = "Outline colour."
+        }
+    )
+    uniform float ui:strokeWidth = 1 (
+        customData = {
+            string userDocBrief = "Outline width in panel units."
+        }
+    )
+    uniform string ui:text = "" (
+        customData = {
+            string userDocBrief = "Label drawn inside the button."
+        }
+    )
+    uniform token ui:textAlign = "center" (
+        allowedTokens = ["left", "center", "right"]
+        customData = {
+            string userDocBrief = "Horizontal label alignment inside the button."
+        }
+    )
+    uniform color4f ui:textColor = (0, 0, 0, 1) (
+        customData = {
+            string userDocBrief = "Label colour."
+        }
+    )
+    uniform color4f ui:valueColor = (0, 0, 0, 1) (
+        customData = {
+            string userDocBrief = """Colour of the VALUE a switch or dial displays, as
+        distinct from its label: `Foot` is drawn in ui:textColor and the
+        `IK` beside it in this."""
+        }
+    )
+}
+
+class RigExecTouchRegions "RigExecTouchRegions" (
+    customData = {
+        string userDocBrief = """A mesh's touch regions: the shared palette, and one
+    RigExecTouchRegion child per named set."""
+    }
+)
+{
+    rel proxyPrim (
+        customData = {
+            string userDocBrief = '''The proxyPrim relationship allows us to link a
+        prim whose purpose is "render" to its (single target)
+        purpose="proxy" prim.'''
+        }
+    )
+    uniform token purpose = "default" (
+        allowedTokens = ["default", "render", "proxy", "guide"]
+        customData = {
+            string userDocBrief = """Purpose is a classification of geometry into categories that 
+        can each be independently included or excluded from traversals of prims 
+        on a stage, such as rendering or bounding-box computation traversals."""
+        }
+    )
+    uniform float rigExec:touch:alpha = 1 (
+        customData = {
+            string userDocBrief = "Opacity the overlay draws the regions at."
+        }
+    )
+    rel rigExec:touch:mesh (
+        customData = {
+            string userDocBrief = "The UsdGeomMesh whose faces these regions index."
+        }
+    )
+    uniform color3f[] rigExec:touch:palette = [] (
+        customData = {
+            string userDocBrief = """One ramp shared by every region, indexed by the
+        region's own order."""
+        }
+    )
+    token visibility = "inherited" (
+        allowedTokens = ["inherited", "invisible"]
+        customData = {
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+        visibility that is supported by most DCC apps.'''
+        }
+    )
+}
+
+class RigExecTouchOverlay "RigExecTouchOverlay" (
+    customData = {
+        string userDocBrief = "The surface TouchPose lights the hovered region on."
+    }
+)
+{
+    vector3f[] accelerations (
+        customData = {
+            string userDocBrief = """If provided, 'accelerations' should be used with
+        velocities to compute positions between samples for the 'points'
+        attribute rather than interpolating between neighboring 'points'
+        samples."""
+        }
+    )
+    int[] cornerIndices = [] (
+        customData = {
+            string userDocBrief = """The indices of points for which a corresponding sharpness
+        value is specified in _cornerSharpnesses_ (so the size of this array
+        must match that of _cornerSharpnesses_)."""
+        }
+    )
+    float[] cornerSharpnesses = [] (
+        customData = {
+            string userDocBrief = """The sharpness values associated with a corresponding set of
+        points specified in _cornerIndices_ (so the size of this array must
+        match that of _cornerIndices_)."""
+        }
+    )
+    int[] creaseIndices = [] (
+        customData = {
+            string userDocBrief = """The indices of points grouped into sets of successive pairs
+        that identify edges to be creased."""
+        }
+    )
+    int[] creaseLengths = [] (
+        customData = {
+            string userDocBrief = """The length of this array specifies the number of creases
+        (sets of adjacent sharpened edges) on the mesh."""
+        }
+    )
+    float[] creaseSharpnesses = [] (
+        customData = {
+            string userDocBrief = "The per-crease or per-edge sharpness values for all creases."
+        }
+    )
+    uniform bool doubleSided = 0 (
+        customData = {
+            string userDocBrief = """Although some renderers treat all parametric or polygonal
+        surfaces as if they were effectively laminae with outward-facing
+        normals on both sides, some renderers derive significant optimizations
+        by considering these surfaces to have only a single outward side,
+        typically determined by control-point winding order and/or 
+        orientation."""
+        }
+    )
+    float3[] extent (
+        customData = {
+            string userDocBrief = """Extent is a three dimensional range measuring the geometric
+        extent of the authored gprim in its own local space (i.e."""
+        }
+    )
+    token faceVaryingLinearInterpolation = "cornersPlus1" (
+        allowedTokens = ["none", "cornersOnly", "cornersPlus1", "cornersPlus2", "boundaries", "all"]
+        customData = {
+            string userDocBrief = '''Specifies how elements of a primvar of interpolation type
+        "faceVarying" are interpolated for subdivision surfaces.'''
+        }
+    )
+    int[] faceVertexCounts (
+        customData = {
+            string userDocBrief = """Provides the number of vertices in each face of the mesh, 
+        which is also the number of consecutive indices in _faceVertexIndices_
+        that define the face."""
+        }
+    )
+    int[] faceVertexIndices (
+        customData = {
+            string userDocBrief = """Flat list of the index (into the _points_ attribute) of each
+        vertex of each face in the mesh."""
+        }
+    )
+    int[] holeIndices = [] (
+        customData = {
+            string userDocBrief = """The indices of all faces that should be treated as holes,
+        i.e."""
+        }
+    )
+    token interpolateBoundary = "edgeAndCorner" (
+        allowedTokens = ["none", "edgeOnly", "edgeAndCorner"]
+        customData = {
+            string userDocBrief = """Specifies how subdivision is applied for faces adjacent to
+        boundary edges and boundary points."""
+        }
+    )
+    normal3f[] normals (
+        customData = {
+            string userDocBrief = """Provide an object-space orientation for individual points, 
+        which, depending on subclass, may define a surface, curve, or free 
+        points."""
+        }
+    )
+    uniform token orientation = "rightHanded" (
+        allowedTokens = ["rightHanded", "leftHanded"]
+        customData = {
+            string userDocBrief = """Orientation specifies whether the gprim's surface normal 
+        should be computed using the right hand rule, or the left hand rule."""
+        }
+    )
+    point3f[] points (
+        customData = {
+            string userDocBrief = """The primary geometry attribute for all PointBased
+        primitives, describes points in (local) space."""
+        }
+    )
+    color3f[] primvars:displayColor (
+        customData = {
+            string userDocBrief = '''It is useful to have an "official" colorSet that can be used
+        as a display or modeling color, even in the absence of any specified
+        shader for a gprim.'''
+        }
+    )
+    float[] primvars:displayOpacity (
+        customData = {
+            string userDocBrief = """Companion to displayColor that specifies opacity, broken
+        out as an independent attribute rather than an rgba color, both so that
+        each can be independently overridden, and because shaders rarely consume
+        rgba parameters."""
+        }
+    )
+    rel proxyPrim (
+        customData = {
+            string userDocBrief = '''The proxyPrim relationship allows us to link a
+        prim whose purpose is "render" to its (single target)
+        purpose="proxy" prim.'''
+        }
+    )
+    uniform token purpose = "default" (
+        allowedTokens = ["default", "render", "proxy", "guide"]
+        customData = {
+            string userDocBrief = """Purpose is a classification of geometry into categories that 
+        can each be independently included or excluded from traversals of prims 
+        on a stage, such as rendering or bounding-box computation traversals."""
+        }
+    )
+    uniform token subdivisionScheme = "catmullClark" (
+        allowedTokens = ["catmullClark", "loop", "bilinear", "none"]
+        customData = {
+            string userDocBrief = "The subdivision scheme to be applied to the surface."
+        }
+    )
+    token triangleSubdivisionRule = "catmullClark" (
+        allowedTokens = ["catmullClark", "smooth"]
+        customData = {
+            string userDocBrief = """Specifies an option to the subdivision rules for the
+        Catmull-Clark scheme to try and improve undesirable artifacts when
+        subdividing triangles."""
+        }
+    )
+    vector3f[] velocities (
+        customData = {
+            string userDocBrief = """If provided, 'velocities' should be used by renderers to 
+
+        compute positions between samples for the 'points' attribute, rather
+        than interpolating between neighboring 'points' samples."""
+        }
+    )
+    token visibility = "invisible" (
+        allowedTokens = ["inherited", "invisible"]
+        customData = {
+            string userDocBrief = "Hidden until TouchPose lights it."
+        }
+    )
+    uniform token[] xformOpOrder (
+        customData = {
+            string userDocBrief = """Encodes the sequence of transformation operations in the
+        order in which they should be pushed onto a transform stack while
+        visiting a UsdStage's prims in a graph traversal that will effect
+        the desired positioning for this prim and its descendant prims."""
+        }
+    )
+}
+
+class RigExecTouchRegion "RigExecTouchRegion" (
+    customData = {
+        string userDocBrief = """One named touch set: the faces it owns and the control a
+    click inside it selects."""
+    }
+)
+{
+    rel rigExec:touch:control (
+        customData = {
+            string userDocBrief = "The control a click in this region selects."
+        }
+    )
+    uniform token rigExec:touch:elementType = "face" (
+        allowedTokens = ["face"]
+        customData = {
+            string userDocBrief = "What rigExec:touch:faces indexes."
+        }
+    )
+    uniform int[] rigExec:touch:faces = [] (
+        customData = {
+            string userDocBrief = """Face indices on the mesh named by the parent's
+        rigExec:touch:mesh."""
+        }
+    )
 }
 

@@ -34,12 +34,17 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
+#include <typeinfo>
+#include <unordered_map>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -51,6 +56,7 @@ namespace rigExec {
 /// operation dispatch inside a node.
 enum class RigExecRevisionOp {
     Matrix,
+    Skin,
     BlendShape,
     VolumeCorrect,
     Smooth,
@@ -131,6 +137,143 @@ bool RigExecResolveReadPhase(
     RigExecReadPhase *phase,
     std::string *error);
 
+/// Authored input values that cannot change between two reads in a generation.
+///
+/// The evaluator and the packet assemblers re-read the same handful of
+/// authored inputs on every frame -- a constraint's inputs:enabled, its
+/// offsets, a weight's defaultWeight -- and each read resolves the attribute
+/// through USD again to be handed the same number back. An attribute that is
+/// neither connected nor time-varying cannot answer differently until the
+/// stage changes, so its first answer is kept and served until it does.
+///
+/// Correctness rests on three rules, all enforced here or by the owner:
+///   * admission: only attributes with no authored connections, no possible
+///     time variation AND no authored time samples at all are held. The
+///     third test is not implied by the second: USD reports
+///     ValueMightBeTimeVarying() == false for an attribute whose strongest
+///     opinion is exactly ONE time sample of a non-composable type, while
+///     Get(Default) does not see time samples at all -- so for such an
+///     attribute a Default read and a numeric read legitimately disagree,
+///     and an entry keyed by path alone would serve whichever came first to
+///     both. A single-keyed inputs:enabled made the pose at a frame depend
+///     on which time codes the same evaluator had evaluated before it;
+///   * invalidation: the owner clears the whole cache on every stage notice,
+///     so an edit reaches the very next read. It also clears it when
+///     interactive overrides are set AND when they are cleared, which is
+///     defence in depth and not a correctness requirement: an attribute
+///     override is written into the generation's resolved inputs before
+///     anything reads one, and GetAttribute consults this cache only where
+///     the resolved map has no entry, so an overridden attribute is never
+///     answered from here in the first place. Kept because a drag is cheap
+///     to re-fill from and the alternative is an argument;
+///   * precedence: a value this generation already resolved in memory (a
+///     property chain result, an interactive override) is consulted before
+///     the cache is, by RigExecResolvedInputs::GetAttribute.
+class RigExecStaticInputCache
+{
+public:
+    RigExecStaticInputCache() { Clear(); }
+
+    /// Forgets everything. Called on every notice: the cache holds authored
+    /// values, and a notice is the only way an authored value moves.
+    ///
+    /// The counters below are cumulative and deliberately survive this: they
+    /// describe what the cache DID, which a test reads across the notices it
+    /// provokes.
+    void Clear() {
+        _entries.clear();
+        // The cache is single-threaded state. It is stamped with the thread
+        // that owns it here so a read from a worker (a parallel chain walk)
+        // bypasses it instead of racing on it.
+        _owner = std::this_thread::get_id();
+    }
+
+    /// Reads \p attribute at \p time through the cache.
+    ///
+    /// Sets \p handled when the answer is authoritative: false means the
+    /// attribute is not cacheable and the caller must read it the long way.
+    template <class T>
+    bool Read(const UsdAttribute &attribute, const SdfPath &path,
+              UsdTimeCode time, T *out, bool *handled) {
+        *handled = false;
+        if (_owner != std::this_thread::get_id()) {
+            // Not this cache's thread: neither the map nor the counters may
+            // be touched from here. Counted so the bypass is observable --
+            // it is the whole of the cache's thread safety.
+            ++_bypasses;
+            return false;
+        }
+        auto entry = _entries.find(path);
+        if (entry == _entries.end()) {
+            _Entry fresh;
+            fresh.cacheable = !attribute.HasAuthoredConnections() &&
+                              !attribute.ValueMightBeTimeVarying() &&
+                              attribute.GetNumTimeSamples() == 0;
+            entry = _entries.emplace(path, fresh).first;
+        }
+        if (!entry->second.cacheable) {
+            ++_refusals;
+            return false;
+        }
+        *handled = true;
+        if (!entry->second.filled) {
+            T value;
+            entry->second.hasValue = attribute.Get(&value, time);
+            if (entry->second.hasValue) {
+                entry->second.value = VtValue(value);
+            }
+            entry->second.valueType = &typeid(T);
+            entry->second.filled = true;
+            if (entry->second.hasValue) {
+                *out = value;
+            }
+            return entry->second.hasValue;
+        }
+        // The same attribute read as another type: the entry answers only
+        // the type its first read typed it as -- including the "no value"
+        // answer, which a different type may well not share -- so this read
+        // goes to the stage.
+        if (!entry->second.valueType || *entry->second.valueType != typeid(T)) {
+            return attribute.Get(out, time);
+        }
+        ++_hits;
+        if (!entry->second.hasValue) {
+            return false;
+        }
+        *out = entry->second.value.UncheckedGet<T>();
+        return true;
+    }
+
+    /// How many entries are held, cacheable or refused.
+    size_t GetSize() const { return _entries.size(); }
+    /// Reads answered from a held value.
+    size_t GetHitCount() const { return _hits; }
+    /// Reads that arrived from a thread that does not own the cache.
+    size_t GetBypassCount() const { return _bypasses; }
+    /// Reads on an attribute that admission refused, which the caller then
+    /// resolved the long way.
+    size_t GetRefusalCount() const { return _refusals; }
+
+private:
+    struct _Entry {
+        /// The value as the first read of this attribute typed it.
+        VtValue value;
+        /// That type, so a later read of another one is not answered with
+        /// this one's result.
+        const std::type_info *valueType = nullptr;
+        bool cacheable = false;
+        bool filled = false;
+        bool hasValue = false;
+    };
+    std::unordered_map<SdfPath, _Entry, SdfPath::Hash> _entries;
+    std::thread::id _owner;
+    /// Written from the owning thread except for _bypasses, which is
+    /// written from whatever thread bounced off the guard.
+    size_t _hits = 0;
+    size_t _refusals = 0;
+    std::atomic<size_t> _bypasses{0};
+};
+
 /// Values evaluation has already computed that a static read must prefer over
 /// the authored stage value.
 ///
@@ -177,6 +320,30 @@ public:
         if (!out) {
             return false;
         }
+        // An input that cannot change until the stage does answers from the
+        // cache -- but only after the in-memory value for this exact property
+        // has been ruled out, because a property chain result outranks the
+        // authored value the cache holds.
+        if (attribute && !_values.count(attribute.GetPath())) {
+            if (_cache) {
+                bool handled = false;
+                const bool got = _cache->Read(
+                    attribute, attribute.GetPath(), time, out, &handled);
+                if (handled) {
+                    return got;
+                }
+            }
+            // The cache refused it: a connection to follow, or a value that
+            // varies with time -- which is every avar, so the refused reads
+            // are exactly the ones that recur every frame. MEASURED
+            // 2026-09-13, biped: ~11 600 scalar reads per frame, and an
+            // unconnected one still reaches the walk below, which allocates
+            // a std::set and a std::vector to discover there is no single
+            // connection to follow. Same answer, no allocation.
+            if (!attribute.HasAuthoredConnections()) {
+                return attribute.Get(out, time);
+            }
+        }
         std::set<SdfPath> visiting;
         std::vector<UsdAttribute> fallback;
         UsdAttribute a = attribute;
@@ -186,7 +353,12 @@ public:
             }
             fallback.push_back(a);
             SdfPathVector connections;
-            a.GetConnections(&connections);
+            // Connections are derived from authored opinions only, so an
+            // attribute with none can skip building the target index that
+            // GetConnections would build to come back empty.
+            if (a.HasAuthoredConnections()) {
+                a.GetConnections(&connections);
+            }
             if (connections.size() != 1) {
                 break;
             }
@@ -207,8 +379,14 @@ public:
     size_t GetSize() const { return _values.size(); }
     void Clear() { _values.clear(); }
 
+    /// Attaches the owner's static-input cache. Not owned, and not cleared
+    /// by Clear(): this object is emptied every generation, while the cache
+    /// spans generations and is invalidated by stage notices.
+    void SetStaticCache(RigExecStaticInputCache *cache) { _cache = cache; }
+
 private:
     std::map<SdfPath, VtValue> _values;
+    RigExecStaticInputCache *_cache = nullptr;
 };
 
 /// What each chain held at each point in the walk.
@@ -244,6 +422,16 @@ public:
         const SdfPath &target, const RigExecReadPhase &phase,
         const SdfPath &readerMover) const;
 
+    /// Takes over everything recorded in \p other, appending its revisions
+    /// after any this already holds for the same target.
+    ///
+    /// One chain's records are written by whoever walked that chain and are
+    /// folded in here afterwards, in chain order. That is what lets the walk
+    /// hand a task its own store instead of this one: a task records into a
+    /// store nobody else can see, and the walk order -- not the order the
+    /// tasks happened to finish in -- decides what this ends up holding.
+    void Merge(RigExecChainSnapshots &&other);
+
     void Clear() { _chains.clear(); }
     bool IsEmpty() const { return _chains.empty(); }
 
@@ -270,8 +458,15 @@ struct RigExecBlendSampleBinding {
     SdfPath sample;
     SdfPath points;
     RigExecReadPhase phase;
+    /// The UsdSkelBlendShape prim named by rigExec:blendShape, when the
+    /// sample carries its shape sparsely instead of as a full points array.
+    /// Empty and `points` set is the dense form; set and `points` empty is
+    /// the sparse one. Never both: the compiler rejects a sample that
+    /// authors both relationships rather than picking a winner.
+    SdfPath blendShape;
     bool operator==(const RigExecBlendSampleBinding &o) const {
-        return sample == o.sample && points == o.points && phase == o.phase;
+        return sample == o.sample && points == o.points &&
+               phase == o.phase && blendShape == o.blendShape;
     }
 };
 
@@ -279,6 +474,9 @@ struct RigExecRevisionBinding {
     SdfPath moverPath;        ///< the authored mover
     SdfPath target;           ///< canonical exact write target
     SdfPath transform;        ///< computeMatrix provider (matrix)
+    /// Ordered computeMatrix providers (skin): rigExec:influences, which
+    /// rigExec:jointIndices index. Every entry shares transformPhase.
+    std::vector<SdfPath> influences;
     SdfPath weightObject;     ///< computeWeightPacket provider
     SdfPath base;             ///< authored-base points (blend/volume/lattice)
     SdfPath topologyCounts;   ///< faceVertexCounts (smooth/surface)
@@ -359,6 +557,130 @@ private:
     std::vector<std::string> _pending;
 };
 
+/// Per-epoch skin layouts, keyed by the mover that owns them.
+///
+/// Peer of RigExecCurvenetBindCache, and there for the same reason: the
+/// expensive half of the operation depends only on the layout, and the
+/// layout is what an epoch IS. Here that half is reading two megabyte-scale
+/// arrays off the stage and range-checking every element of them.
+///
+/// Owned by the evaluator, never a static: a cache that outlives the
+/// evaluator outlives the stage it read, and a weight-paint edit has to be
+/// able to throw it away. Clear() is what a change notice calls.
+///
+/// Resolve() is safe to call from several chain tasks at once, because the
+/// chain walk runs independent chains concurrently and every skinned chain
+/// asks here. The lock decides nothing: a layout is a pure function of the
+/// mover's authored arrays, so whichever task happens to build it builds the
+/// same one, and after the first frame of an epoch every call is a hit.
+class RigExecSkinTopologyCache
+{
+public:
+    /// The layout for \p mover, calling \p build on a miss. \p build fills
+    /// a fresh topology; whatever it produces -- validated or not -- is what
+    /// this epoch uses, so a rejected layout is not re-read every frame
+    /// either.
+    ///
+    /// \p build returns false to REFUSE the cache for this mover: the layout
+    /// can move within the epoch after all, and the caller must read it per
+    /// frame instead. The refusal is remembered exactly as a layout is, so
+    /// the question costs one answer per notice and not one per frame; a
+    /// refused mover answers null until the next Clear().
+    std::shared_ptr<const RigExecSkinTopology> Resolve(
+        const SdfPath &mover,
+        const std::function<bool(RigExecSkinTopology *)> &build);
+
+    void Clear() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        // Dropped as ANSWERS, kept as candidates. Every notice clears this
+        // cache, including the overwhelming majority that touched no
+        // layout; handing back a fresh pointer for arrays that compare equal
+        // would make the mover's packet compare unequal and re-run the
+        // whole per-point kernel for a binding that did not move. Resolve
+        // pays one array compare per notice to avoid that, instead of the
+        // kernel once per notice.
+        for (auto &[mover, topology] : _entries) {
+            if (topology) {
+                _candidates[mover] = std::move(topology);
+            }
+        }
+        _entries.clear();
+    }
+    size_t GetSize() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _entries.size();
+    }
+
+private:
+    mutable std::mutex _mutex;
+    /// A present entry holding null is a remembered refusal.
+    std::map<SdfPath, std::shared_ptr<const RigExecSkinTopology>> _entries;
+    /// The last layout each mover had, from before the most recent Clear(),
+    /// so an unchanged binding can keep its pointer. Never an answer: only
+    /// something a freshly read layout is compared against.
+    std::map<SdfPath, std::shared_ptr<const RigExecSkinTopology>> _candidates;
+};
+
+/// Per-epoch blend sample shapes, keyed by the sample prim that owns them.
+///
+/// Peer of RigExecSkinTopologyCache, and there for the same reason, but the
+/// arithmetic is starker here. A dense blend sample's full points array is
+/// read and copied off the stage once per sample per frame whether its
+/// channel sits at 0 or at 1 -- measured at 0.37-0.38 ms per sample per frame
+/// on a 26,276-point body, so 169 correctives cost ~65 ms/frame with the rig
+/// standing at REST (tools/biped/spikes/blend_cost.py). Resolving the shape
+/// once per epoch and sharing it by pointer is what removes that, and the
+/// sparse layout is what makes the resolved shape small: the real correctives
+/// move 1,279 points on average, 4.87% of the mesh.
+///
+/// Owned by the evaluator, never a static: a cache that outlives the
+/// evaluator outlives the stage it read, and a sculpt edit has to be able to
+/// throw it away. Clear() is what a change notice calls.
+///
+/// Resolve() is safe to call from several chain tasks at once. The lock
+/// decides nothing -- a layout is a pure function of the sample's authored
+/// arrays, so whichever task builds it builds the same one.
+class RigExecBlendSampleCache
+{
+public:
+    /// The shape for \p sample, calling \p build on a miss.
+    ///
+    /// \p build returns false to REFUSE the cache for this sample: the shape
+    /// can move within the epoch after all, and the caller must read it per
+    /// frame instead. The refusal is remembered exactly as a shape is, so the
+    /// question costs one answer per notice and not one per frame; a refused
+    /// sample answers null until the next Clear().
+    std::shared_ptr<const RigExecBlendSampleLayout> Resolve(
+        const SdfPath &sample,
+        const std::function<bool(RigExecBlendSampleLayout *)> &build);
+
+    void Clear() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        // Dropped as ANSWERS, kept as candidates -- see
+        // RigExecSkinTopologyCache::Clear for why handing back a fresh
+        // pointer for arrays that compare equal is worse than one array
+        // compare per notice.
+        for (auto &[sample, layout] : _entries) {
+            if (layout) {
+                _candidates[sample] = std::move(layout);
+            }
+        }
+        _entries.clear();
+    }
+    size_t GetSize() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _entries.size();
+    }
+
+private:
+    mutable std::mutex _mutex;
+    /// A present entry holding null is a remembered refusal.
+    std::map<SdfPath, std::shared_ptr<const RigExecBlendSampleLayout>> _entries;
+    /// The last shape each sample had, from before the most recent Clear().
+    std::map<SdfPath, std::shared_ptr<const RigExecBlendSampleLayout>>
+        _candidates;
+};
+
 /// Resolves a mover's side-input bindings from the authored stage.
 ///
 /// \p frameChainHeads maps a transform provider to its final frame-chain head,
@@ -390,11 +712,81 @@ RigExecMoverParameters RigExecAssembleMatrixParameters(
     UsdTimeCode time = UsdTimeCode::Default(),
     const RigExecResolvedInputs *resolved = nullptr);
 
+/// Assembles a skin mover's parameter packet.
+///
+/// \p influenceTransforms are the already-evaluated computeMatrix results of
+/// the providers named by rigExec:influences, in that order; null fails the
+/// application. The per-point layout (rigExec:jointIndices, jointWeights,
+/// elementSize) and the method token are static reads off the mover prim at
+/// \p time -- unless \p topologyCache is given, in which case the layout is
+/// resolved through it once per epoch and carried in the packet by handle.
+/// The caller passes a cache only when Compile established that the layout
+/// cannot change within the epoch. The packet is valid only when the layout
+/// indexes the influence table in range with finite non-negative weights, so
+/// the kernel never has to guard an element; the point-count half of the
+/// check happens in the kernel, which is the first place the count is known.
+RigExecMoverParameters RigExecAssembleSkinParameters(
+    const UsdPrim &moverPrim,
+    const std::vector<GfMatrix4d> *influenceTransforms,
+    const RigExecWeightPacket *weights,
+    UsdTimeCode time = UsdTimeCode::Default(),
+    const RigExecResolvedInputs *resolved = nullptr,
+    RigExecSkinTopologyCache *topologyCache = nullptr);
+
 /// Derives a mover's status from its packet (spec §6.6): disabled and failed
 /// movers both pass their preceding revision through, and a failure records the
 /// first bad canonical address.
 RigExecMoverStatus RigExecStatusForParameters(
     const RigExecMoverParameters &parameters, const SdfPath &moverPath);
+
+/// Applies the matrix operation of \p p to \p pts in place, returning false
+/// when the packet fails atomically (the envelope does not resolve to the
+/// point count).
+///
+/// The envelope is resolved and applied INSIDE the kernel, unlike the
+/// point3f[] ops: the weighted-matrix rule folds the weight into the movement
+/// (p' = q + w (T q - q)) rather than blending a finished result.
+///
+/// Shared by the mover-graph revision node and by the baked program, which
+/// runs the same operation with no VdfNetwork around it.
+bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
+                              std::vector<GfVec3f> *pts);
+
+/// Applies the skin operation of \p p to \p pts in place, returning false
+/// when the packet fails atomically (cardinality mismatch, unknown method).
+///
+/// The envelope is NOT applied here: the caller blends the result against the
+/// preceding revision, because that is where the "apply once" rule lives.
+///
+/// Shared by the mover-graph revision node and by the baked program, which
+/// runs the same operation with no VdfNetwork around it.
+bool RigExecApplySkinKernel(const RigExecMoverParameters &p,
+                            std::vector<GfVec3f> *pts);
+
+/// Whether \p envelope makes the "apply once" blend the identity, so the
+/// copy of the preceding revision, the resolved envelope array and the blend
+/// loop are all dead work.
+///
+/// RigExecBlendEnvelope's `weight >= 1` branch returns the candidate itself,
+/// with no arithmetic, and RigExecWeightPacket::ResolveAll can only answer 1
+/// for every element of a constant packet carrying no values, no indices and
+/// a range policy it accepts. This is the packet EVERY unweighted mover gets,
+/// because it is what inputs:defaultWeight synthesizes.
+///
+/// ONE definition, called by the mover-graph revision node and by the baked
+/// geometry loop: two hand-copied predicates could disagree about when the
+/// skip is safe, and the only rigs that would show it are the ones no
+/// fixture happened to have (a partial constant envelope on a skin mover).
+inline bool
+RigExecEnvelopeIsFullStrength(const RigExecWeightPacket &envelope)
+{
+    return envelope.valid && envelope.representation == "constant" &&
+           envelope.values.empty() && envelope.indices.empty() &&
+           envelope.defaultWeight == 1.0f &&
+           (envelope.rangePolicy.IsEmpty() ||
+            envelope.rangePolicy == "strict" ||
+            envelope.rangePolicy == "clamp");
+}
 
 /// Provider results a revision needs that only evaluation can supply.
 ///
@@ -407,6 +799,8 @@ RigExecMoverStatus RigExecStatusForParameters(
 /// so inputs:defaultWeight supplies the common envelope.
 struct RigExecProviderValues {
     const GfMatrix4d *transform = nullptr;          ///< computeMatrix
+    /// computeMatrix per binding.influences entry, in that order (skin).
+    const std::vector<GfMatrix4d> *influenceTransforms = nullptr;
     /// Bound computeWeightPacket, or null to use inputs:defaultWeight.
     const RigExecWeightPacket *weights = nullptr;
     const RigExecPointFrameArray *driverFrames = nullptr;
@@ -420,6 +814,10 @@ struct RigExecProviderValues {
     /// Cache for the expensive half of the Profile Mover. Null binds fresh
     /// every call, which is correct but only sane in a test.
     RigExecCurvenetBindCache *curvenetCache = nullptr;
+    /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
+    /// and re-validates the arrays every call, which is what a layout that
+    /// is animated, connected, or written by a property chain requires.
+    RigExecSkinTopologyCache *skinTopologyCache = nullptr;
     /// Values already resolved this generation, preferred by every static
     /// read the assembler makes. Null reads the stage throughout, which is
     /// what a rig with no property chains wants and what a test may pass.

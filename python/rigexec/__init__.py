@@ -123,6 +123,7 @@ TwoBoneIk = _native.TwoBoneIk
 BlendPointFrames = _native.BlendPointFrames
 TwistDistribution = _native.TwistDistribution
 Ribbon = _native.Ribbon
+SplineIk = _native.SplineIk
 
 Constraint = _native.Constraint
 SourceConstraint = _native.SourceConstraint
@@ -147,6 +148,7 @@ BlendSample = _native.BlendSample
 Curvenet = _native.Curvenet
 
 MatrixMover = _native.MatrixMover
+SkinMover = _native.SkinMover
 LatticeMover = _native.LatticeMover
 BlendShapeMover = _native.BlendShapeMover
 CurveMover = _native.CurveMover
@@ -166,14 +168,14 @@ __all__ = [
     "Builder", "SchemaPrim", "schema", "ControlAPI", "MoverAPI",
     "Rig", "Pose", "PointFrame",
     "Handle", "Mover", "Control", "Joint", "Solver", "FkChain", "TwoBoneIk",
-    "BlendPointFrames", "TwistDistribution", "Ribbon",
+    "BlendPointFrames", "TwistDistribution", "Ribbon", "SplineIk",
     "Constraint", "SourceConstraint", "AimConstraint", "PositionConstraint",
     "RotationConstraint", "ScaleConstraint", "ParentConstraint",
     "SingleChainIkConstraint",
     "Weight", "StaticWeight", "DynamicWeight", "VolumeWeight", "SphereWeight",
     "PlaneWeight", "CurveWeight", "CombineWeight",
     "BlendInput", "BlendSample", "Curvenet", "CurvenetAdjustment", "CurvenetAdjusterMover",
-    "MatrixMover", "LatticeMover", "BlendShapeMover", "CurveMover",
+    "MatrixMover", "SkinMover", "LatticeMover", "BlendShapeMover", "CurveMover",
     "SurfaceMover", "SmoothMover", "VolumeCorrectMover", "CurvenetMover",
     "FloatMathMover", "Vec3fMathMover", "MatrixMathMover",
     "MoverChain",
@@ -303,6 +305,7 @@ _CONCRETE_SCHEMA_NAMES = (
     "LatticeMover",
     "MatrixMathMover",
     "MatrixMover",
+    "SkinMover",
     "ParentConstraint",
     "PlaneWeight",
     "PositionConstraint",
@@ -313,6 +316,7 @@ _CONCRETE_SCHEMA_NAMES = (
     "SingleChainIkConstraint",
     "SmoothMover",
     "SphereWeight",
+    "SplineIk",
     "StaticWeight",
     "SurfaceMover",
     "TwistDistribution",

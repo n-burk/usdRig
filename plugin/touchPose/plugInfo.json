@@ -1,0 +1,21 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "touchPoseUsdview.TouchPoseContainer": {
+                        "bases": [
+                            "pxr.Usdviewq.plugin.PluginContainer"
+                        ],
+                        "displayName": "TouchPose region picking"
+                    }
+                }
+            },
+            "LibraryPath": "",
+            "Name": "touchPoseUsdview",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "python"
+        }
+    ]
+}

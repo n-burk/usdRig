@@ -69,6 +69,7 @@ from .pinUtils import (
     split_direction_hint,
 )
 from .textRenderer import TextRenderer
+from .touchPose import collect_graph_prims, is_touch_group
 from .usdNoticeHandler import UsdNoticeHandler
 from .utils import M, MenuBuilder
 from .widgets.textInputWidget import TextInputWidget
@@ -9236,8 +9237,16 @@ class GraphView(QGLWidget):
 
                 # Check if this is a container-type prim (Container or Blueprint)
                 # If so, add all its child nodes instead of the container itself
-                if primType in ["Container", "Blueprint"]:
-                    childNodes = self._getContainerChildNodes(prim)
+                # A TouchPose scope is the third kind of group: selecting it
+                # means "show me the regions", exactly as selecting a Container
+                # means "show me its nodes" (see touchPose.collect_graph_prims
+                # for why the controls come too).
+                isTouchGroup = is_touch_group(prim)
+                if primType in ["Container", "Blueprint"] or isTouchGroup:
+                    if isTouchGroup:
+                        childNodes = collect_graph_prims(prim, stage)
+                    else:
+                        childNodes = self._getContainerChildNodes(prim)
                     if childNodes:
                         for childPrim in childNodes:
                             childPathStr = str(childPrim.GetPath())

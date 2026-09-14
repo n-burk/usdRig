@@ -27,6 +27,7 @@
 
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/quatf.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/usd/sdf/path.h"
 #include "pxr/base/tf/token.h"
@@ -186,6 +187,23 @@ public:
     /// Ordered driving controls (rigExec:controls).
     void SetControls(const std::vector<RigExecControlHandle> &controls);
     void SetControls(const std::vector<SdfPath> &paths);
+    /// world | parentRelative (rigExec:controlSpace): whether each control's
+    /// posed frame already carries the motion of the control before it.
+    /// Use parentRelative for controls nested one under the next (AddControl
+    /// with a parent) so they travel with their parent, the conventional tool FK style,
+    /// without the solver applying that motion twice. The joints pose the
+    /// same either way. Any other token is rejected.
+    void SetControlSpace(const TfToken &space);
+    /// Optional base frame (rigExec:startFrame): the joint or control the
+    /// chain hangs from. The solver composes every element onto that
+    /// provider's rest-to-pose delta, so the chain rides it. Unauthored
+    /// (or an empty path, which clears it) leaves the historical absolute
+    /// behaviour untouched. Use it when the chain's joints are namespace
+    /// children of something ANOTHER solver poses -- the fingers under a
+    /// wrist driven by the arm's IK/FK blend -- where nesting the first
+    /// control cannot work: a solver-posed joint is an absolute override
+    /// and namespace pose does not propagate through it.
+    void SetStartFrame(const SdfPath &path);
 };
 
 /// RigExecTwoBoneIk.
@@ -251,6 +269,36 @@ public:
     void SetParameterization(const TfToken &mode);  // arcLength | parametric
     void SetDriverCurveReadPhase(const TfToken &phase);
     void SetSurfaceReadPhase(const TfToken &phase);
+    void SetJointElements(const std::vector<int> &elements);
+};
+
+/// RigExecSplineIk: control-driven spline IK (root/mid/end controls shape a
+/// degree-2 B-spline; the ordered rigExec:joints chain is laid along it).
+class RigExecSplineIkHandle : public RigExecSolverHandle {
+public:
+    using RigExecSolverHandle::RigExecSolverHandle;
+
+    void SetRootControl(const SdfPath &path);
+    void SetMidControl(const SdfPath &path);
+    void SetEndControl(const SdfPath &path);
+    /// Per-joint squash/stretch weights, parallel to rigExec:joints (in
+    /// chain-slot order). Empty means no thinning.
+    void SetVolumeWeights(const std::vector<float> &weights);
+    /// curve | chain: what the stretch ratio is measured against.
+    void SetRestLength(const TfToken &mode);
+    /// Strength of the linear volume preservation, 0..1.
+    void SetPreserveVolume(double amount);
+    /// Mid control follow point: 0 follows the root, 1 the end.
+    void SetMidFollowWeight(double weight);
+    /// Additional roll / twist in degrees (the conventional tool ikHandle roll / twist).
+    void SetRoll(double degrees);
+    void SetTwist(double degrees);
+    /// Length floor as a fraction of the rest root->end chord, 0 = off
+    /// (inputs:minLengthRatio).
+    void SetMinLengthRatio(double ratio);
+    /// rigid | aim: how the root tangent CV is posed (rigExec:rootTangent).
+    void SetRootTangent(const TfToken &mode);
+    /// Optional chain slot per rigExec:joints entry (a permutation).
     void SetJointElements(const std::vector<int> &elements);
 };
 
@@ -501,6 +549,11 @@ public:
 
     /// Channel weight (inputs:weight).
     void SetWeight(float weight);
+    /// Drive inputs:weight from a RigExecPose's outputs:weight instead of an
+    /// authored number. The connection is authored on the CONSUMER, which is
+    /// what lets a layer retarget one corrective's channel without touching
+    /// the interpolator that drives it. An empty path removes it.
+    void ConnectWeight(const SdfPath &output);
     /// Add a sample to this input's ordered rigExec:samples.
     RigExecBlendSampleHandle AddSample(const std::string &name, float activation = 1.f);
 };
@@ -514,8 +567,75 @@ public:
     void SetActivation(float activation);
     /// Exact native points property of the target shape.
     void SetTargetPoints(const SdfPath &path);
+    /// A UsdSkelBlendShape carrying the same shape as sparse offsets, as the
+    /// alternative to SetTargetPoints. Mutually exclusive with it: a dense
+    /// sample's full points array is read per sample per frame regardless of
+    /// its channel weight, which is ~65 ms/frame for 169 correctives on a
+    /// 26,276-point body standing at rest.
+    void SetBlendShape(const SdfPath &path);
     /// base | preceding | final.
     void SetReadPhase(const TfToken &phase);
+};
+
+/// A RigExecPose: one authored pose of an interpolator, and the weight it
+/// publishes.
+class RigExecPoseHandle : public RigExecHandleBase {
+public:
+    using RigExecHandleBase::RigExecHandleBase;
+
+    /// swing | twist | whole -- which PART of the driver's rotation this
+    /// pose is measured against. poseType, and a property of the POSE
+    /// rather than of the interpolator: one driver carries both at once and a
+    /// neck that has twisted has not bent.
+    void SetPoseType(const TfToken &poseType);
+    /// Where the driver stands, as its local rotation relative to its own
+    /// rest -- REBASED, with the neutral pose taken out
+    ///.
+    void SetRotation(const GfQuatf &rotation);
+    /// The driver's translation in this pose, in CENTIMETRES, in the driver's
+    /// own frame. Read only when the interpolator enables translation.
+    void SetTranslation(const GfVec3f &translation);
+    /// The pose's own falloff widths: radians and centimetres. Zero means
+    /// "measure one from the poses" -- see RigExecRbfFitWidth for why these
+    /// are fitted rather than read out of the conventional tool.
+    void SetRadii(float rotationRadius, float translationRadius = 0.f);
+    /// poseFalloff, as provenance: the share painted on top of the
+    /// fitted width, 0.3 being the conventional default. The radii already carry it.
+    void SetFalloff(float falloff);
+    /// The exact control PROPERTIES that put the rig into this pose and their
+    /// values, in OUR units and from OUR zero (degrees, centimetres). The two
+    /// vectors must be the same length; authoring data only.
+    void SetPoseControls(const std::vector<SdfPath> &properties,
+                         const std::vector<double> &values);
+    void SetEnabled(bool enabled);
+    /// The `outputs:weight` property path, which is what a blend input's
+    /// inputs:weight connects to. Valid whether or not anything reads it yet.
+    SdfPath GetWeightOutput() const;
+};
+
+/// A RigExecPoseInterpolator: the conventional poseInterpolator, one driver in and one
+/// weight per pose out.
+class RigExecPoseInterpolatorHandle : public RigExecHandleBase {
+public:
+    using RigExecHandleBase::RigExecHandleBase;
+
+    /// The joint whose LOCAL rotation every pose is measured against.
+    void SetDriver(const SdfPath &path);
+    /// gaussian | linear. `interpolation`: 0 linear, 1 gaussian.
+    void SetKernel(const TfToken &kernel);
+    /// enableRotation / enableTranslation. Honoured rather than
+    /// assumed: read as a rotation, a translation interpolator's poses are
+    /// all identity and it solves degenerate.
+    void SetChannels(bool enableRotation, bool enableTranslation);
+    void SetAllowNegativeWeights(bool allow);
+    void SetNormalize(bool normalize);
+    void SetRegularization(float regularization);
+    /// X | Y | Z, in the driver's own frame. driverTwistAxis.
+    void SetTwistAxis(const TfToken &axis);
+    void SetEnabled(bool enabled);
+    /// Add a pose as a child of this interpolator. Poses are prims rather
+    /// than array entries so each composes independently.
+    RigExecPoseHandle AddPose(const std::string &name);
 };
 
 /// A RigExecCurvenet: a net of cubic splines profiling a surface (2022 paper).
@@ -547,6 +667,32 @@ public:
     /// The GfMatrix4d provider (computeMatrix) -- joint, control, or xform.
     void SetTransformProvider(const SdfPath &path);
     /// base | preceding | final.
+    void SetReadPhase(const TfToken &phase);
+};
+
+/// RigExecSkinMover: multi-influence skinning in one pass, UsdSkel's
+/// jointIndices / jointWeights layout over an ordered influence list.
+/// classicLinear: p' = (1 - sum w) p + sum_i w_i (T_i p).
+class RigExecSkinMoverHandle : public RigExecMoverHandle {
+public:
+    using RigExecMoverHandle::RigExecMoverHandle;
+    using RigExecMoverHandle::SetReadPhase;
+
+    /// Ordered GfMatrix4d providers (joints or controls). The order is
+    /// semantic: jointIndices index this list.
+    void SetInfluences(const std::vector<SdfPath> &providers);
+    /// Per-point layout: elementSize slots per point in point order, each an
+    /// index into the influence list with a parallel weight. Lengths must
+    /// agree and be a multiple of elementSize; indices non-negative; weights
+    /// finite and non-negative. The point count is checked at compile.
+    void SetJointInfluences(
+        const std::vector<int> &indices, const std::vector<float> &weights,
+        int elementSize);
+    /// classicLinear | dualQuaternion (scale-aware dual-quaternion
+    /// skinning: rotation blended on the shortest arc, joint scale and
+    /// shear blended linearly in the pre-rotation frame).
+    void SetSkinningMethod(const TfToken &method);
+    /// base | preceding | final, for every influence.
     void SetReadPhase(const TfToken &phase);
 };
 
@@ -708,6 +854,17 @@ public:
     RigExecMatrixMoverHandle AddMatrixMover(
         const std::string &name,
         const SdfPath &transformProvider,
+        const SdfPath &weightObject = {},
+        const SdfPath &target = {},
+        const TfToken &readPhase = TfToken("base"));
+
+    /// Multi-influence skinning over an ordered influence list. The
+    /// per-point layout is authored on the handle (SetJointInfluences).
+    /// weightObject is optional; without one, the MoverAPI defaultWeight
+    /// envelope is used.
+    RigExecSkinMoverHandle AddSkinMover(
+        const std::string &name,
+        const std::vector<SdfPath> &influences,
         const SdfPath &weightObject = {},
         const SdfPath &target = {},
         const TfToken &readPhase = TfToken("base"));
@@ -885,9 +1042,15 @@ public:
 
     // ---- Transform providers -------------------------------------------
 
-    /// Create <rig>/Controls/<name> as a RigExecControl.
+    /// Create <rig>/Controls/<name> (or nested under \p parentControl) as a
+    /// RigExecControl. restSpace is asset space for a top-level control and
+    /// relative to the parent control's rest when nested: a nested
+    /// control's rest and posed frames compose through its namespace
+    /// ancestor, so it travels with the parent (an FK chain in
+    /// parentRelative controlSpace is built this way).
     RigExecControlHandle AddControl(
-        const std::string &name, const GfMatrix4d &restSpace = GfMatrix4d());
+        const std::string &name, const GfMatrix4d &restSpace = GfMatrix4d(),
+        const RigExecControlHandle *parentControl = nullptr);
 
     /// Create <rig>/Joints/<name> (or nested under \p parentJoint) as a
     /// RigExecJoint. restSpace is the asset-space bind transform for
@@ -919,6 +1082,11 @@ public:
         const std::string &name,
         const SdfPath &driverCurve,
         int sampleCount = 5);
+    RigExecSplineIkHandle AddSplineIk(
+        const std::string &name,
+        const SdfPath &rootControl,
+        const SdfPath &midControl,
+        const SdfPath &endControl);
 
     // ---- Weight objects (created under <rig>/Weights) -------------------
 
@@ -972,6 +1140,17 @@ public:
     /// RigExecBlendShapeMoverHandle::SetBlendInputs.
     RigExecBlendInputHandle AddBlendInput(
         const std::string &name, float weight = 0.f);
+
+    // ---- Pose interpolators (created under <rig>/PoseInterpolators) ------
+
+    /// Create <rig>/PoseInterpolators/<name> reading \p driver.
+    ///
+    /// Its own scope and not /Movers: an interpolator writes no transform and
+    /// no points, so it has no place in an order that exists to say which
+    /// write lands on top of which. It publishes a float per pose and the
+    /// blend inputs connect to those.
+    RigExecPoseInterpolatorHandle AddPoseInterpolator(
+        const std::string &name, const SdfPath &driver);
 
     // ---- Curvenets (created under <rig>/Curvenets) ----------------------
 

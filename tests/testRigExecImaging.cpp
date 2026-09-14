@@ -1421,6 +1421,91 @@ TestControlGuides(const std::string &examplesDir)
         }
     }
 
+    // ---- Opacity through a CONNECTION: an IK/FK switch fading the
+    // inactive control set. UsdAttribute::Get never follows a connection,
+    // so a bridge reading the attribute plainly drew the local value and a
+    // wired rig looked wired while nothing faded.
+    {
+        auto readOpacity = [&](const SdfPath &control) {
+            HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(
+                results->GetPrim(guidePath(control)).dataSource);
+            HdSampledDataSourceHandle v =
+                primvars.GetPrimvar(HdTokens->displayOpacity)
+                    .GetPrimvarValue();
+            const VtValue held = v ? v->GetValue(0.0f) : VtValue();
+            if (!held.IsHolding<VtFloatArray>() ||
+                held.UncheckedGet<VtFloatArray>().size() != 1) {
+                return -1.0f;
+            }
+            return held.UncheckedGet<VtFloatArray>()[0];
+        };
+        UsdPrim pole = stage->GetPrimAtPath(elbowPole);
+        const UsdPrim shoulder = stage->GetPrimAtPath(shoulderFk);
+        const UsdPrim elbow = stage->GetPrimAtPath(elbowFk);
+        // A float dial, as the biped's avars:ikfk is, and a double twin,
+        // as every schema avar is: both have to drive.
+        const UsdAttribute dial = pole.CreateAttribute(
+            TfToken("dial"), SdfValueTypeNames->Float, /* custom = */ true);
+        const UsdAttribute dialD = pole.CreateAttribute(
+            TfToken("dialD"), SdfValueTypeNames->Double, /* custom = */ true);
+        CHECK(dial.Set(0.3f) && dialD.Set(0.6));
+        const UsdAttribute shoulderOpacity =
+            shoulder.GetAttribute(TfToken("guide:displayOpacity"));
+        const UsdAttribute elbowOpacity =
+            elbow.GetAttribute(TfToken("guide:displayOpacity"));
+        CHECK(shoulderOpacity &&
+              shoulderOpacity.SetConnections({dial.GetPath()}));
+        CHECK(elbowOpacity && elbowOpacity.SetConnections({dialD.GetPath()}));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.3f) < 1e-6f);
+        CHECK(std::abs(readOpacity(elbowFk) - 0.6f) < 1e-6f);
+
+        // Invert: the FK side of one switch draws the complement.
+        const UsdAttribute invert =
+            shoulder.GetAttribute(TfToken("guide:displayOpacityInvert"));
+        CHECK(invert && invert.Set(true));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.7f) < 1e-6f);
+
+        // The floor: a dial at its end stop must not make the control
+        // vanish. The schema default first, then an authored one, then
+        // zero, which is how a true fade-out is asked for.
+        CHECK(dial.Set(1.0f));
+        observer.dirtied.clear();
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.15f) < 1e-6f);
+        // ...and an edit on the SOURCE prim dirtied the dependent guide,
+        // which hangs off a different prim entirely.
+        CHECK(std::find(observer.dirtied.begin(), observer.dirtied.end(),
+                        guidePath(shoulderFk)) != observer.dirtied.end());
+        const UsdAttribute floorAttr =
+            shoulder.GetAttribute(TfToken("guide:displayOpacityMin"));
+        CHECK(floorAttr && floorAttr.Set(0.4f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.4f) < 1e-6f);
+        CHECK(floorAttr.Set(0.0f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk)) < 1e-6f);
+        // An out-of-range source clamps (inverted: 1 - (-2) = 3 -> 1).
+        CHECK(dial.Set(-2.0f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 1.0f) < 1e-6f);
+
+        // Disconnected, the local value draws again, invert and floor
+        // ignored: an unconnected attribute means exactly what it says.
+        CHECK(shoulderOpacity.ClearConnections() &&
+              elbowOpacity.ClearConnections());
+        CHECK(shoulderOpacity.Set(0.9f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.9f) < 1e-6f);
+        CHECK(std::abs(readOpacity(elbowFk) - 1.0f) < 1e-6f);
+        // Put the fixture back for the checks that follow.
+        CHECK(invert.Clear() && floorAttr.Clear() && shoulderOpacity.Clear());
+        CHECK(pole.RemoveProperty(TfToken("dial")) &&
+              pole.RemoveProperty(TfToken("dialD")));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+    }
+
     // The guide sits at the control's posed frame, in ASSET space: nothing
     // upstream places /Shot/HeroArm here, so the asset root resolves to
     // identity and ShoulderFK's rest translate is the whole transform.

@@ -180,20 +180,117 @@ _ReadGuidePurpose(const UsdPrim &prim)
     return UsdGeomTokens->default_;
 }
 
+// The value the FIRST connection source of \p attr holds at the pose's
+// time, or nothing when the attribute has no connection or the source
+// cannot supply one (dangling path, a relationship, no value).
+//
+// UsdAttribute::Get() does NOT follow connections: they are a
+// shading-graph concept, not value resolution. So a rig that authored
+// `guide:displayOpacity.connect = </limb_params.avars:ikfk>` compiled,
+// drew nothing different, and gave no hint why. This is the read-through.
+//
+// A property-mover result for the source wins over its authored value,
+// exactly as the volume guides read their driven dimensions: a dial that
+// is itself computed must fade the guide by what it computed.
+bool
+_ReadConnectedValue(
+    const UsdAttribute &attr, const RigExecRigPose &pose, VtValue *held)
+{
+    SdfPathVector connections;
+    if (!attr.GetConnections(&connections) || connections.empty()) {
+        return false;
+    }
+    const SdfPath &sourcePath = connections.front();
+    if (!sourcePath.IsPropertyPath()) {
+        return false;
+    }
+    const UsdAttribute source =
+        attr.GetStage()->GetAttributeAtPath(sourcePath);
+    if (!source) {
+        return false;
+    }
+    const auto moved = pose.movedProperties.find(sourcePath);
+    if (moved != pose.movedProperties.end() && !moved->second.IsEmpty()) {
+        *held = moved->second;
+        return true;
+    }
+    return source.Get(held, pose.time);
+}
+
+// The scalar a float OR double VtValue holds -- avars are double, the
+// biped's ikfk dial is float, and a guide must accept either -- or
+// nothing when it holds neither or the value is not finite.
+bool
+_HeldScalar(const VtValue &held, double *value)
+{
+    if (held.IsHolding<float>()) {
+        *value = held.UncheckedGet<float>();
+    } else if (held.IsHolding<double>()) {
+        *value = held.UncheckedGet<double>();
+    } else {
+        return false;
+    }
+    return std::isfinite(*value);
+}
+
+// The schema fallback for guide:displayOpacityMin, restated for the same
+// reason _FillControlGuides restates its own: a stage composed without the
+// codeless schema plugin has no fallback to resolve.
+constexpr double _kDefaultGuideOpacityMin = 0.15;
+
 void
 _ReadGuideStyle(
-    const UsdPrim &prim, UsdTimeCode time, RigExecPublishedPrim *published)
+    const UsdPrim &prim, const RigExecRigPose &pose,
+    RigExecPublishedPrim *published)
 {
     if (!prim) {
         return;
     }
+    const UsdTimeCode time = pose.time;
     published->guidePurpose = _ReadGuidePurpose(prim);
     if (UsdAttribute a = prim.GetAttribute(TfToken("guide:displayColor"))) {
-        a.Get(&published->guideColor, time);
+        VtValue held;
+        if (_ReadConnectedValue(a, pose, &held) &&
+            held.IsHolding<GfVec3f>()) {
+            published->guideColor = held.UncheckedGet<GfVec3f>();
+        } else {
+            a.Get(&published->guideColor, time);
+        }
     }
     if (UsdAttribute a =
             prim.GetAttribute(TfToken("guide:displayOpacity"))) {
-        a.Get(&published->guideOpacity, time);
+        VtValue held;
+        double driven = 0.0;
+        if (_ReadConnectedValue(a, pose, &held) &&
+            _HeldScalar(held, &driven)) {
+            // A driven opacity is a dial's value, and a dial parks at its
+            // end stops: without the complement one switch could not fade
+            // two control sets in opposite directions, and without the
+            // floor the inactive set would vanish -- unfindable, so
+            // unswitchable-back. Both apply ONLY to a connected value; an
+            // unconnected attribute draws exactly what it says.
+            bool invert = false;
+            if (UsdAttribute i = prim.GetAttribute(
+                    TfToken("guide:displayOpacityInvert"))) {
+                i.Get(&invert, time);
+            }
+            double floor = _kDefaultGuideOpacityMin;
+            if (UsdAttribute m = prim.GetAttribute(
+                    TfToken("guide:displayOpacityMin"))) {
+                VtValue heldMin;
+                double authoredMin = 0.0;
+                if (m.Get(&heldMin, time) &&
+                    _HeldScalar(heldMin, &authoredMin)) {
+                    floor = authoredMin;
+                }
+            }
+            floor = std::min(1.0, std::max(0.0, floor));
+            double opacity = invert ? 1.0 - driven : driven;
+            opacity = std::min(1.0, std::max(floor, opacity));
+            published->guideOpacity = static_cast<float>(opacity);
+        } else {
+            a.Get(&published->guideOpacity, time);
+        }
     }
 }
 
@@ -651,6 +748,9 @@ RigExecImagingBridge::RigExecImagingBridge(
     , _evaluator(std::make_unique<RigExecRigEvaluator>(stage, rigPath))
     , _store(std::move(store))
 {
+    // No overlay is selected yet, so nothing consumes the per-point influence
+    // field. SetWeightOverlay turns it back on the moment one is.
+    _evaluator->SetPublishWeightFields(false);
 }
 
 bool
@@ -778,7 +878,7 @@ RigExecImagingBridge::_FillGuides(
         if (any) {
             published.assetRoot = _rigPath.GetParentPath();
             published.hasGuides = true;
-            _ReadGuideStyle(prim, pose.time, &published);
+            _ReadGuideStyle(prim, pose, &published);
         }
     }
     for (const auto &[solverPath, frames] : pose.solverFrames) {
@@ -807,7 +907,7 @@ RigExecImagingBridge::_FillGuides(
         if (any) {
             published.assetRoot = _rigPath.GetParentPath();
             published.hasGuides = true;
-            _ReadGuideStyle(solverPrim, pose.time, &published);
+            _ReadGuideStyle(solverPrim, pose, &published);
         } else if (!published.hasPoints && !published.hasNormals &&
                    !published.hasExtent && !published.hasXform) {
             snapshot->prims.erase(solverPath);
@@ -915,7 +1015,7 @@ RigExecImagingBridge::_FillControlGuides(
         published.controlGuideDrawMode = drawMode;
         published.controlGuideScale = effectiveScale;
         published.controlGuideWireWidth = wireWidth;
-        _ReadGuideStyle(prim, pose.time, &published);
+        _ReadGuideStyle(prim, pose, &published);
     }
 }
 
@@ -1092,7 +1192,7 @@ RigExecImagingBridge::_FillVolumeGuides(
         published.assetRoot = _rigPath.GetParentPath();
         published.hasVolumeGuides = true;
         published.volumeGuides = std::move(elements);
-        _ReadGuideStyle(prim, pose.time, &published);
+        _ReadGuideStyle(prim, pose, &published);
     }
 }
 
@@ -1172,7 +1272,7 @@ RigExecImagingBridge::_FillCurvenetGuides(
         published.volumeGuideAnchorToAsset = toAsset;
         published.guideColor = GfVec3f(0.15f, 0.8f, 0.45f);
         published.guideOpacity = 1.0f;
-        _ReadGuideStyle(prim, pose.time, &published);
+        _ReadGuideStyle(prim, pose, &published);
     }
 }
 
@@ -1298,6 +1398,19 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
             (property == "points" || property == "normals" ||
              property == "extent");
         if (!isGeometry) {
+            // Not Hydra data -- but a scalar here is a rig output a
+            // tool may want (a blend weight, a pose-interpolator
+            // result), and recovering it otherwise costs a whole
+            // second evaluation of the rig. Recorded beside the
+            // generation that produced it; see
+            // RigExecImagingSnapshot::movedFloats.
+            if (value.IsHolding<float>()) {
+                snapshot->movedFloats[propertyPath] =
+                    value.UncheckedGet<float>();
+            } else if (value.IsHolding<double>()) {
+                snapshot->movedFloats[propertyPath] =
+                    static_cast<float>(value.UncheckedGet<double>());
+            }
             continue;
         }
         RigExecPublishedPrim &published = snapshot->prims[primPath];
@@ -1439,6 +1552,19 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
                 (property == "points" || property == "normals" ||
                  property == "extent");
             if (!isGeometry) {
+                // Not Hydra data -- but a scalar here is a rig output a
+                // tool may want (a blend weight, a pose-interpolator
+                // result), and recovering it otherwise costs a whole
+                // second evaluation of the rig. Recorded beside the
+                // generation that produced it; see
+                // RigExecImagingSnapshot::movedFloats.
+                if (value.IsHolding<float>()) {
+                    snapshot->movedFloats[propertyPath] =
+                        value.UncheckedGet<float>();
+                } else if (value.IsHolding<double>()) {
+                    snapshot->movedFloats[propertyPath] =
+                        static_cast<float>(value.UncheckedGet<double>());
+                }
                 continue;
             }
             RigExecPublishedPrim &published = snapshot->prims[primPath];

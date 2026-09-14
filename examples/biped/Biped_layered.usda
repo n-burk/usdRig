@@ -1,0 +1,500 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    metersPerUnit = 0.01
+    subLayers = [
+        @./Biped_layered_center.usda@,
+        @./Biped_layered_left.usda@,
+        @./Biped_layered_right.usda@,
+        @./Biped_layered_model.usda@
+    ]
+    upAxis = "Y"
+)
+
+over "Biped"
+{
+    reorder nameChildren = ["Rig", "Geom", "Materials"]
+    over "Rig"
+    {
+        reorder nameChildren = ["Joints", "Movers", "Controls", "Solvers"]
+        over "Joints"
+        {
+            reorder nameChildren = ["hips_bind", "ankle_l_pivot", "ankle_r_pivot", "pupilCenter_l_pivot", "pupilCenter_r_pivot", "spine_ik_spine_0_bind", "neck_ik_neck_0_bind"]
+            over "hips_bind"
+            {
+                reorder nameChildren = ["pelvis_l_bind", "pelvis_r_bind", "spine_0_bind"]
+                over "pelvis_l_bind"
+                {
+                    reorder nameChildren = ["thigh_l_bind", "pelvis_trans_combo_l_driver", "pelvis_trans_l_bind", "thighNoTwist_l_bind", "thigh_combo_l_driver"]
+                    over "thigh_l_bind"
+                    {
+                        over "knee_l_bind"
+                        {
+                            reorder nameChildren = ["ankleTwist_l_bind", "ankleTwist_l_driver", "ankle_l_bind", "kneeTwist_l_bind"]
+                            over "ankle_l_bind"
+                            {
+                                reorder nameChildren = ["ball_l_bind", "toe_l_driver"]
+                                over "ball_l_bind"
+                                {
+                                    reorder nameChildren = ["toe1_001_l_bind", "toe2_001_l_bind", "toe3_001_l_bind", "toe4_001_l_bind", "toe5_001_l_bind", "toe_l_bind"]
+                                }
+                            }
+                        }
+                    }
+                }
+
+                over "pelvis_r_bind"
+                {
+                    reorder nameChildren = ["thigh_r_bind", "pelvis_trans_combo_r_driver", "pelvis_trans_r_bind", "thighNoTwist_r_bind", "thigh_combo_r_driver"]
+                    over "thigh_r_bind"
+                    {
+                        over "knee_r_bind"
+                        {
+                            reorder nameChildren = ["ankleTwist_r_bind", "ankleTwist_r_driver", "ankle_r_bind", "kneeTwist_r_bind"]
+                            over "ankle_r_bind"
+                            {
+                                reorder nameChildren = ["ball_r_bind", "toe_r_driver"]
+                                over "ball_r_bind"
+                                {
+                                    reorder nameChildren = ["toe1_001_r_bind", "toe2_001_r_bind", "toe3_001_r_bind", "toe4_001_r_bind", "toe5_001_r_bind", "toe_r_bind"]
+                                }
+                            }
+                        }
+                    }
+                }
+
+                over "spine_0_bind"
+                {
+                    over "spine_1_bind"
+                    {
+                        over "spine_2_bind"
+                        {
+                            over "spine_3_bind"
+                            {
+                                over "spine_4_bind"
+                                {
+                                    over "spine_5_bind"
+                                    {
+                                        over "chest_bind"
+                                        {
+                                            reorder nameChildren = ["neck_base_bind", "clavicle_l_bind", "clavicle_r_bind"]
+                                            over "neck_base_bind"
+                                            {
+                                                over "neck_0_bind"
+                                                {
+                                                    over "neck_1_bind"
+                                                    {
+                                                        over "neck_2_bind"
+                                                        {
+                                                            over "neck_3_bind"
+                                                            {
+                                                                over "skull_bind"
+                                                                {
+                                                                    reorder nameChildren = ["face_upper_bind", "face_lower_bind"]
+                                                                    over "face_upper_bind"
+                                                                    {
+                                                                        reorder nameChildren = ["head_tip_bind", "eyeSocket_l_bind", "eyeSocket_r_bind"]
+                                                                        over "head_tip_bind"
+                                                                        {
+                                                                            reorder nameChildren = ["brow_inner_l_bind", "brow_inner_r_bind", "brow_main_l_bind", "brow_main_r_bind", "brow_peak_l_bind", "brow_peak_r_bind"]
+                                                                        }
+                                                                    }
+
+                                                                    over "face_lower_bind"
+                                                                    {
+                                                                        reorder nameChildren = ["face_mid_bind", "jaw_bind"]
+                                                                        over "face_mid_bind"
+                                                                        {
+                                                                            reorder nameChildren = ["jaw_compression_driver", "nose_bridge_bind", "teeth_upper_bind"]
+                                                                        }
+
+                                                                        over "jaw_bind"
+                                                                        {
+                                                                            reorder nameChildren = ["jaw_end", "teeth_lower_bind", "tongue_0_bind"]
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            over "clavicle_l_bind"
+                                            {
+                                                reorder nameChildren = ["clavicle_trans_combo_l_driver", "clavicle_trans_l_bind", "shoulder_l_bind", "shoulderNoTwist_l_bind", "shoulder_combo_l_driver"]
+                                                over "shoulder_l_bind"
+                                                {
+                                                    over "elbow_l_bind"
+                                                    {
+                                                        reorder nameChildren = ["elbowTwist_l_bind", "wrist_l_bind", "wristTwist_l_bind", "wristTwist_l_driver"]
+                                                        over "wrist_l_bind"
+                                                        {
+                                                            reorder nameChildren = ["index_001_l_bind", "middle_001_l_bind", "pinkyCup_l_bind", "ring_001_l_bind", "thumbCup_l_bind"]
+                                                            over "index_001_l_bind"
+                                                            {
+                                                                reorder nameChildren = ["index_002_combo_l_driver", "index_002_l_bind"]
+                                                            }
+
+                                                            over "middle_001_l_bind"
+                                                            {
+                                                                reorder nameChildren = ["middle_002_combo_l_driver", "middle_002_l_bind"]
+                                                            }
+
+                                                            over "pinkyCup_l_bind"
+                                                            {
+                                                                over "pinky_001_l_bind"
+                                                                {
+                                                                    reorder nameChildren = ["pinky_002_combo_l_driver", "pinky_002_l_bind"]
+                                                                }
+                                                            }
+
+                                                            over "ring_001_l_bind"
+                                                            {
+                                                                reorder nameChildren = ["ring_002_combo_l_driver", "ring_002_l_bind"]
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            over "clavicle_r_bind"
+                                            {
+                                                reorder nameChildren = ["clavicle_trans_combo_r_driver", "clavicle_trans_r_bind", "shoulder_r_bind", "shoulderNoTwist_r_bind", "shoulder_combo_r_driver"]
+                                                over "shoulder_r_bind"
+                                                {
+                                                    over "elbow_r_bind"
+                                                    {
+                                                        reorder nameChildren = ["elbowTwist_r_bind", "wrist_r_bind", "wristTwist_r_bind", "wristTwist_r_driver"]
+                                                        over "wrist_r_bind"
+                                                        {
+                                                            reorder nameChildren = ["index_001_r_bind", "middle_001_r_bind", "pinkyCup_r_bind", "ring_001_r_bind", "thumbCup_r_bind"]
+                                                            over "index_001_r_bind"
+                                                            {
+                                                                reorder nameChildren = ["index_002_combo_r_driver", "index_002_r_bind"]
+                                                            }
+
+                                                            over "middle_001_r_bind"
+                                                            {
+                                                                reorder nameChildren = ["middle_002_combo_r_driver", "middle_002_r_bind"]
+                                                            }
+
+                                                            over "pinkyCup_r_bind"
+                                                            {
+                                                                over "pinky_001_r_bind"
+                                                                {
+                                                                    reorder nameChildren = ["pinky_002_combo_r_driver", "pinky_002_r_bind"]
+                                                                }
+                                                            }
+
+                                                            over "ring_001_r_bind"
+                                                            {
+                                                                reorder nameChildren = ["ring_002_combo_r_driver", "ring_002_r_bind"]
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            over "ankle_l_pivot"
+            {
+                over "bankIn_l_pivot"
+                {
+                    over "bankOut_l_pivot"
+                    {
+                        over "heel_l_pivot"
+                        {
+                            over "ball_l_pivot"
+                            {
+                                over "toe_l_pivot"
+                                {
+                                    reorder nameChildren = ["ballRoll_l_pivot", "toeBend_l_pivot"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            over "ankle_r_pivot"
+            {
+                over "bankIn_r_pivot"
+                {
+                    over "bankOut_r_pivot"
+                    {
+                        over "heel_r_pivot"
+                        {
+                            over "ball_r_pivot"
+                            {
+                                over "toe_r_pivot"
+                                {
+                                    reorder nameChildren = ["ballRoll_r_pivot", "toeBend_r_pivot"]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        over "Movers"
+        {
+            reorder nameChildren = ["param_follow", "skin_body_geo", "pose_drivers", "twist_aims", "neck_to_bind", "girdles", "spine_to_bind", "hips_follow", "ball_l_bind_scAim", "ankle_l_bind_scAim", "ballRoll_l_down_rc", "ballRoll_l_down_w", "ballRoll_l_up_rc", "ballRoll_l_up_w", "toe_l_roll_rc", "toe_l_roll_w", "heel_l_roll_rc", "heel_l_roll_w", "bankOut_l_pivot_rc", "bankOut_l_pivot_w", "bankIn_l_pivot_rc", "bankIn_l_pivot_w", "ball_r_bind_scAim", "ankle_r_bind_scAim", "ballRoll_r_down_rc", "ballRoll_r_down_w", "ballRoll_r_up_rc", "ballRoll_r_up_w", "toe_r_roll_rc", "toe_r_roll_w", "heel_r_roll_rc", "heel_r_roll_w", "bankOut_r_pivot_rc", "bankOut_r_pivot_w", "bankIn_r_pivot_rc", "bankIn_r_pivot_w", "hand_l_follow", "hand_r_follow", "spine_mid_follow"]
+            over "pose_drivers"
+            {
+                reorder nameChildren = ["elbow_l_driver_copies_elbow_l_bind", "elbow_r_driver_copies_elbow_r_bind", "wristSwing_l_driver_copies_wrist_l_bind", "wristSwing_r_driver_copies_wrist_r_bind", "shoulder_l_twist_driver_copies_shoulderNoTwist_l_bind", "shoulder_r_twist_driver_copies_shoulderNoTwist_r_bind", "wristTwist_l_driver_copies_wristTwist_l_bind", "wristTwist_r_driver_copies_wristTwist_r_bind", "shoulder_l_driver_copies_shoulder_l_bind", "shoulder_r_driver_copies_shoulder_r_bind", "ankleSwing_l_driver_copies_ankle_l_bind", "ankleSwing_r_driver_copies_ankle_r_bind", "knee_l_driver_copies_knee_l_bind", "knee_r_driver_copies_knee_r_bind", "toe_l_driver_copies_ball_l_bind", "toe_r_driver_copies_ball_r_bind", "ankleTwist_l_driver_copies_ankleTwist_l_bind", "ankleTwist_r_driver_copies_ankleTwist_r_bind", "thigh_l_twist_driver_copies_thighNoTwist_l_bind", "thigh_r_twist_driver_copies_thighNoTwist_r_bind", "thigh_l_driver_copies_thigh_l_bind", "thigh_r_driver_copies_thigh_r_bind"]
+            }
+
+            over "twist_aims"
+            {
+                reorder nameChildren = ["shoulderNoTwist_l_bind_aim", "shoulderNoTwist_r_bind_aim", "elbowTwist_l_bind_aim", "elbowTwist_r_bind_aim", "clavicle_trans_l_bind_aim", "clavicle_trans_r_bind_aim", "thighNoTwist_l_bind_aim", "thighNoTwist_r_bind_aim", "kneeTwist_l_bind_aim", "kneeTwist_r_bind_aim", "pelvis_trans_l_bind_aim", "pelvis_trans_r_bind_aim", "clavicle_trans_l_bind_follows_shoulder_l_bind", "clavicle_trans_r_bind_follows_shoulder_r_bind", "pelvis_trans_l_bind_follows_thigh_l_bind", "pelvis_trans_r_bind_follows_thigh_r_bind", "shoulderNoTwist_l_bind_follows_shoulder_l_bind", "shoulderNoTwist_r_bind_follows_shoulder_r_bind", "thighNoTwist_l_bind_follows_thigh_l_bind", "thighNoTwist_r_bind_follows_thigh_r_bind", "wristTwist_l_bind_follows_wrist_l_bind", "wristTwist_r_bind_follows_wrist_r_bind", "ankleTwist_l_bind_follows_ankle_l_bind", "ankleTwist_r_bind_follows_ankle_r_bind", "ankleTwist_l_bind_aim", "ankleTwist_l_bind_copy", "ankleTwist_r_bind_aim", "ankleTwist_r_bind_copy", "wristTwist_l_bind_aim", "wristTwist_l_bind_copy", "wristTwist_r_bind_aim", "wristTwist_r_bind_copy"]
+            }
+
+            over "neck_to_bind"
+            {
+                reorder nameChildren = ["neck_ik_skull_bind_to_skull_bind", "neck_ik_skull_bind_scale_to_skull_bind", "neck_ik_neck_3_bind_to_neck_3_bind", "neck_ik_neck_3_bind_scale_to_neck_3_bind", "neck_ik_neck_2_bind_to_neck_2_bind", "neck_ik_neck_2_bind_scale_to_neck_2_bind", "neck_ik_neck_1_bind_to_neck_1_bind", "neck_ik_neck_1_bind_scale_to_neck_1_bind", "neck_ik_neck_0_bind_to_neck_0_bind", "neck_ik_neck_0_bind_scale_to_neck_0_bind"]
+            }
+
+            over "girdles"
+            {
+                reorder nameChildren = ["clavicle_l_ctl_unsquashes_clavicle_l_bind", "clavicle_r_ctl_unsquashes_clavicle_r_bind", "spine_end_ctl_unsquashes_neck_base_bind", "clavicle_l_ctl_drives_clavicle_l_bind", "clavicle_r_ctl_drives_clavicle_r_bind", "pelvis_l_ctl_drives_pelvis_l_bind", "pelvis_r_ctl_drives_pelvis_r_bind", "spine_end_ctl_drives_chest_bind"]
+            }
+
+            over "spine_to_bind"
+            {
+                reorder nameChildren = ["spine_ik_chest_bind_to_chest_bind", "spine_ik_chest_bind_scale_to_chest_bind", "spine_ik_spine_5_bind_to_spine_5_bind", "spine_ik_spine_5_bind_scale_to_spine_5_bind", "spine_ik_spine_4_bind_to_spine_4_bind", "spine_ik_spine_4_bind_scale_to_spine_4_bind", "spine_ik_spine_3_bind_to_spine_3_bind", "spine_ik_spine_3_bind_scale_to_spine_3_bind", "spine_ik_spine_2_bind_to_spine_2_bind", "spine_ik_spine_2_bind_scale_to_spine_2_bind", "spine_ik_spine_1_bind_to_spine_1_bind", "spine_ik_spine_1_bind_scale_to_spine_1_bind", "spine_ik_spine_0_bind_to_spine_0_bind", "spine_ik_spine_0_bind_scale_to_spine_0_bind"]
+            }
+
+            over "hips_follow"
+            {
+                reorder nameChildren = ["spine_root_ctl_scales_hips_bind", "spine_root_ctl_drives_hips_bind"]
+            }
+
+            over "ballRoll_l_down_w"
+            {
+                reorder nameChildren = ["ballRoll_l_down_w_4_multiply", "ballRoll_l_down_w_3_clamp", "ballRoll_l_down_w_2_add", "ballRoll_l_down_w_1_multiply", "ballRoll_l_down_w_0_add"]
+            }
+
+            over "ballRoll_l_up_w"
+            {
+                reorder nameChildren = ["ballRoll_l_up_w_2_multiply", "ballRoll_l_up_w_1_clamp", "ballRoll_l_up_w_0_add"]
+            }
+
+            over "toe_l_roll_w"
+            {
+                reorder nameChildren = ["toe_l_roll_w_4_clamp", "toe_l_roll_w_3_multiply", "toe_l_roll_w_2_add", "toe_l_roll_w_1_multiply", "toe_l_roll_w_0_add"]
+            }
+
+            over "heel_l_roll_w"
+            {
+                reorder nameChildren = ["heel_l_roll_w_2_clamp", "heel_l_roll_w_1_multiply", "heel_l_roll_w_0_add"]
+            }
+
+            over "bankOut_l_pivot_w"
+            {
+                reorder nameChildren = ["bankOut_l_pivot_w_2_clamp", "bankOut_l_pivot_w_1_multiply", "bankOut_l_pivot_w_0_add"]
+            }
+
+            over "bankIn_l_pivot_w"
+            {
+                reorder nameChildren = ["bankIn_l_pivot_w_2_clamp", "bankIn_l_pivot_w_1_multiply", "bankIn_l_pivot_w_0_add"]
+            }
+
+            over "ballRoll_r_down_w"
+            {
+                reorder nameChildren = ["ballRoll_r_down_w_4_multiply", "ballRoll_r_down_w_3_clamp", "ballRoll_r_down_w_2_add", "ballRoll_r_down_w_1_multiply", "ballRoll_r_down_w_0_add"]
+            }
+
+            over "ballRoll_r_up_w"
+            {
+                reorder nameChildren = ["ballRoll_r_up_w_2_multiply", "ballRoll_r_up_w_1_clamp", "ballRoll_r_up_w_0_add"]
+            }
+
+            over "toe_r_roll_w"
+            {
+                reorder nameChildren = ["toe_r_roll_w_4_clamp", "toe_r_roll_w_3_multiply", "toe_r_roll_w_2_add", "toe_r_roll_w_1_multiply", "toe_r_roll_w_0_add"]
+            }
+
+            over "heel_r_roll_w"
+            {
+                reorder nameChildren = ["heel_r_roll_w_2_clamp", "heel_r_roll_w_1_multiply", "heel_r_roll_w_0_add"]
+            }
+
+            over "bankOut_r_pivot_w"
+            {
+                reorder nameChildren = ["bankOut_r_pivot_w_2_clamp", "bankOut_r_pivot_w_1_multiply", "bankOut_r_pivot_w_0_add"]
+            }
+
+            over "bankIn_r_pivot_w"
+            {
+                reorder nameChildren = ["bankIn_r_pivot_w_2_clamp", "bankIn_r_pivot_w_1_multiply", "bankIn_r_pivot_w_0_add"]
+            }
+
+            over "hand_l_follow"
+            {
+                reorder nameChildren = ["index_001_l_bind_fk_follow_to_wrist_l_bind", "middle_001_l_bind_fk_follow_to_wrist_l_bind", "pinkyCup_l_bind_fk_follow_to_wrist_l_bind", "ring_001_l_bind_fk_follow_to_wrist_l_bind", "thumbCup_l_bind_fk_follow_to_wrist_l_bind"]
+            }
+
+            over "hand_r_follow"
+            {
+                reorder nameChildren = ["index_001_r_bind_fk_follow_to_wrist_r_bind", "middle_001_r_bind_fk_follow_to_wrist_r_bind", "pinkyCup_r_bind_fk_follow_to_wrist_r_bind", "ring_001_r_bind_fk_follow_to_wrist_r_bind", "thumbCup_r_bind_fk_follow_to_wrist_r_bind"]
+            }
+
+            over "spine_mid_follow"
+            {
+                reorder nameChildren = ["spine_mid_follow_aim", "spine_mid_follow_pos"]
+            }
+
+            over "param_follow"
+            {
+                reorder nameChildren = ["arm_l_params_to_wrist_l_bind", "arm_r_params_to_wrist_r_bind", "leg_l_params_to_ankle_l_bind", "leg_r_params_to_ankle_r_bind"]
+            }
+        }
+
+        over "Controls"
+        {
+            reorder nameChildren = ["hips_ctl", "spine_mid_follow", "arm_l_ik", "arm_l_pv", "arm_r_ik", "arm_r_pv", "leg_l_ik", "leg_l_pv", "leg_r_ik", "leg_r_pv", "index_001_l_bind_fk_follow", "middle_001_l_bind_fk_follow", "pinkyCup_l_bind_fk_follow", "ring_001_l_bind_fk_follow", "thumbCup_l_bind_fk_follow", "index_001_r_bind_fk_follow", "middle_001_r_bind_fk_follow", "pinkyCup_r_bind_fk_follow", "ring_001_r_bind_fk_follow", "thumbCup_r_bind_fk_follow", "arm_l_params", "arm_r_params", "leg_l_params", "leg_r_params"]
+            over "hips_ctl"
+            {
+                reorder nameChildren = ["torso_ctl", "spine_root_pivot"]
+                over "torso_ctl"
+                {
+                    over "spine_end_pivot"
+                    {
+                        over "spine_end_ctl"
+                        {
+                            reorder nameChildren = ["neck_root_ctl", "clavicle_l_ctl", "clavicle_r_ctl"]
+                            over "neck_root_ctl"
+                            {
+                                reorder nameChildren = ["neck_end_pivot", "neck_cv1"]
+                            }
+                        }
+                    }
+                }
+
+                over "spine_root_pivot"
+                {
+                    over "spine_root_ctl"
+                    {
+                        reorder nameChildren = ["pelvis_l_ctl", "pelvis_r_ctl"]
+                    }
+                }
+            }
+
+            over "leg_l_ik"
+            {
+                over "ankle_l_pivot"
+                {
+                    reorder nameChildren = ["bank_l", "bankIn_l_pivot", "bankIn_l_pivot_twin"]
+                    over "bankIn_l_pivot"
+                    {
+                        reorder nameChildren = ["bankOut_l_pivot", "bankOut_l_pivot_twin"]
+                        over "bankOut_l_pivot"
+                        {
+                            reorder nameChildren = ["heel_l_roll", "heel_l_roll_twin"]
+                            over "heel_l_roll"
+                            {
+                                over "heel_l"
+                                {
+                                    over "ball_l_pivot"
+                                    {
+                                        reorder nameChildren = ["toe_l_roll", "toe_l_roll_twin"]
+                                        over "toe_l_roll"
+                                        {
+                                            over "toe_l"
+                                            {
+                                                reorder nameChildren = ["ballRoll_l_up", "ballRoll_l_up_twin", "toeBend_l"]
+                                                over "ballRoll_l_up"
+                                                {
+                                                    reorder nameChildren = ["ballRoll_l_down", "ballRoll_l_down_twin"]
+                                                    over "ballRoll_l_down"
+                                                    {
+                                                        over "ballRoll_l"
+                                                        {
+                                                            reorder nameChildren = ["ankle_l_ikTarget", "ball_l_ikTarget"]
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            over "leg_r_ik"
+            {
+                over "ankle_r_pivot"
+                {
+                    reorder nameChildren = ["bank_r", "bankIn_r_pivot", "bankIn_r_pivot_twin"]
+                    over "bankIn_r_pivot"
+                    {
+                        reorder nameChildren = ["bankOut_r_pivot", "bankOut_r_pivot_twin"]
+                        over "bankOut_r_pivot"
+                        {
+                            reorder nameChildren = ["heel_r_roll", "heel_r_roll_twin"]
+                            over "heel_r_roll"
+                            {
+                                over "heel_r"
+                                {
+                                    over "ball_r_pivot"
+                                    {
+                                        reorder nameChildren = ["toe_r_roll", "toe_r_roll_twin"]
+                                        over "toe_r_roll"
+                                        {
+                                            over "toe_r"
+                                            {
+                                                reorder nameChildren = ["ballRoll_r_up", "ballRoll_r_up_twin", "toeBend_r"]
+                                                over "ballRoll_r_up"
+                                                {
+                                                    reorder nameChildren = ["ballRoll_r_down", "ballRoll_r_down_twin"]
+                                                    over "ballRoll_r_down"
+                                                    {
+                                                        over "ballRoll_r"
+                                                        {
+                                                            reorder nameChildren = ["ankle_r_ikTarget", "ball_r_ikTarget"]
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        over "Solvers"
+        {
+            reorder nameChildren = ["spine_splineIk", "neck_splineIk", "arm_l_twoBoneIk", "arm_l_fkChain", "arm_l_ikfk", "arm_r_twoBoneIk", "arm_r_fkChain", "arm_r_ikfk", "leg_l_twoBoneIk", "leg_l_fkChain", "leg_l_ikfk", "leg_r_twoBoneIk", "leg_r_fkChain", "leg_r_ikfk", "fk_index_l", "fk_middle_l", "fk_pinky_l", "fk_ring_l", "fk_thumb_l", "fk_index_r", "fk_middle_r", "fk_pinky_r", "fk_ring_r", "fk_thumb_r"]
+        }
+    }
+
+    over "Geom"
+    {
+        over "body_geo"
+        {
+            reorder nameChildren = ["body_geo_pants_shdr", "body_geo_skin_shdr", "body_geo_hair_shdr", "body_geo_lip_shdr", "body_geo_lambert2"]
+        }
+    }
+
+    over "Materials"
+    {
+        reorder nameChildren = ["cornea_mat", "eye_mat", "hair_shdr", "iris_edge_mat", "iris_mat", "lambert2", "lip_shdr", "pants_shdr", "pupil_mat", "skin_shdr", "teeth_shdr", "tongue_shdr"]
+    }
+}
+

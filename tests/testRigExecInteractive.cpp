@@ -687,6 +687,37 @@ static void TestInteractiveOverrides()
     CHECK(pointX(pose, &x) && std::abs(x - 1.0f) < 1e-6f);
     CHECK(dialValue(pose, &value) && std::abs(value - 21.0f) < 1e-6f);
     CHECK(exported() == authored);
+
+    // 7. A drag on an input the STATIC INPUT CACHE is allowed to hold.
+    //
+    //    inputs:defaultWeight is authored, unconnected and carries no time
+    //    sample, so it is exactly what that cache admits -- and the
+    //    generations before the drag have filled it with the authored 1.
+    //    Both halves of the drag have to reach the mover: the override on the
+    //    way in (0 envelope, so the matrix mover contributes nothing and the
+    //    point stays where the source left it), and the release on the way
+    //    out. Setting the overrides invalidates the cache and clearing them
+    //    does too, which is belt and braces -- an overridden attribute is
+    //    answered from the generation's resolved inputs and never reaches the
+    //    cache at all -- but an invalidation that runs on the way in and not
+    //    on the way out is a bug shape worth spending a test on.
+    const SdfPath moveShape("/Asset/Rig/Movers/MoveShape");
+    evaluator.SetInteractiveOverrides({RigExecValueOverride{
+        moveShape, TfToken(), TfToken("inputs:defaultWeight"),
+        VtValue(0.0f)}});
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pointX(pose, &x) && std::abs(x) < 1e-6f);
+    // Twice, so a cache that filled during the drag would have had its
+    // chance to hold the overridden value.
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pointX(pose, &x) && std::abs(x) < 1e-6f);
+
+    evaluator.ClearInteractiveOverrides();
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pointX(pose, &x) && std::abs(x - 1.0f) < 1e-6f);
+    pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pointX(pose, &x) && std::abs(x - 1.0f) < 1e-6f);
+    CHECK(exported() == authored);
 }
 
 int main()

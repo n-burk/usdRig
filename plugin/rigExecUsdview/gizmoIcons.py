@@ -165,7 +165,7 @@ def _Pivot():
 
 
 def _Animation():
-    """A solid key: Maya's filled keyframe diamond."""
+    """A solid key: a filled keyframe diamond."""
     path = QtGui.QPainterPath()
     path.moveTo(50, 20)
     path.lineTo(80, 50)
@@ -224,6 +224,85 @@ def _Graph():
     return [(path, False), (curve, False)]
 
 
+def _Global():
+    """
+    A globe: the world axes the manipulator is drawn on in Global mode.
+
+    A circle with one meridian and one parallel, and nothing else. The
+    obvious alternative -- three labelled axes -- is four strokes and
+    two glyph-sized letters at 16 px, which is mud; a globe reads at a
+    glance and is what every DCC uses for "world".
+    """
+    path = QtGui.QPainterPath()
+    radius = (_BOX - 2 * _MARGIN) / 2.0
+    path.addEllipse(QtCore.QPointF(50, 50), radius, radius)
+    # The meridian: a narrow ellipse on the same centre.
+    path.addEllipse(QtCore.QPointF(50, 50), radius * 0.42, radius)
+    path.moveTo(50 - radius, 50)
+    path.lineTo(50 + radius, 50)
+    return [(path, False)]
+
+
+def _Local():
+    """
+    A box with one corner's axes drawn on it: an object's OWN frame.
+
+    Deliberately the same two-stroke corner the world glyph does not
+    have, so the pair reads as "everything" against "this one thing"
+    rather than as two abstract diagrams.
+    """
+    box = QtGui.QPainterPath()
+    box.addRect(QtCore.QRectF(_MARGIN, _MARGIN, _BOX - 2 * _MARGIN,
+                              _BOX - 2 * _MARGIN))
+    axes = QtGui.QPainterPath()
+    axes.moveTo(32, 68)
+    axes.lineTo(72, 68)
+    axes.moveTo(32, 68)
+    axes.lineTo(32, 30)
+    return [(box, False), (axes, False)]
+
+
+# Three controls in a triangle: the selection, for the group-pivot
+# glyphs below. Kept as one list so the three read as the same picture
+# with one thing changed, which is the only way a set of three says
+# "same question, different answer" at 16 px.
+_GROUP_DOTS = ((28.0, 72.0), (50.0, 30.0), (72.0, 72.0))
+_GROUP_DOT_R = 10.0
+_GROUP_MARK_R = 7.0
+
+
+def _GroupRing(dots):
+    path = QtGui.QPainterPath()
+    for x, y in dots:
+        path.addEllipse(QtCore.QPointF(x, y), _GROUP_DOT_R, _GROUP_DOT_R)
+    return path
+
+
+def _GroupCentre():
+    """Three controls with the pivot on their centroid -- the default."""
+    mark = QtGui.QPainterPath()
+    cx = sum(d[0] for d in _GROUP_DOTS) / 3.0
+    cy = sum(d[1] for d in _GROUP_DOTS) / 3.0
+    mark.addEllipse(QtCore.QPointF(cx, cy), _GROUP_MARK_R, _GROUP_MARK_R)
+    return [(_GroupRing(_GROUP_DOTS), False), (mark, True)]
+
+
+def _GroupLead():
+    """The same three, with the pivot on the LAST-selected one."""
+    mark = QtGui.QPainterPath()
+    x, y = _GROUP_DOTS[2]
+    mark.addEllipse(QtCore.QPointF(x, y), _GROUP_MARK_R, _GROUP_MARK_R)
+    return [(_GroupRing(_GROUP_DOTS), False), (mark, True)]
+
+
+def _GroupEach():
+    """Every control its own pivot: all three marked, none between."""
+    mark = QtGui.QPainterPath()
+    for x, y in _GROUP_DOTS:
+        mark.addEllipse(QtCore.QPointF(x, y), _GROUP_MARK_R, _GROUP_MARK_R)
+    return [(_GroupRing(_GROUP_DOTS), False), (mark, True)]
+
+
 # name -> the strokes it is made of, as (path, filled) pairs.
 _GLYPHS = {
     "select": _Select,
@@ -238,6 +317,11 @@ _GLYPHS = {
     "redo": lambda: _UndoPath(True),
     "settings": _Settings,
     "graph": _Graph,
+    "global": _Global,
+    "local": _Local,
+    "groupCentre": _GroupCentre,
+    "groupLead": _GroupLead,
+    "groupEach": _GroupEach,
 }
 
 _cache = {}

@@ -164,7 +164,7 @@ class RigExecUsdviewContainer(PluginContainer):
             "Curvenet Authoring",
             lambda api: self._OpenCurvenetPanel(api))
 
-        # The Maya-style animation graph editor. Same lazy-import
+        # The conventional animation graph editor. Same lazy-import
         # reasoning as the panels above: graphEditorUI pulls in Qt.
         self._graphEditor = plugRegistry.registerCommandPlugin(
             "RigExecUsdviewContainer.graphEditor",
@@ -178,6 +178,29 @@ class RigExecUsdviewContainer(PluginContainer):
             "Layer Opinions",
             lambda api: self._OpenLayerOpinionsPanel(api))
 
+        # The execution stack: what runs, in what order, and what it
+        # writes. Same lazy-import reasoning as the panels above.
+        self._execStack = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.execStack",
+            "Execution Stack",
+            lambda api: self._OpenExecStackPanel(api))
+
+        # The avar editor: the selected control's avar channels as
+        # sliders and number fields, writing through the shared undo
+        # stack. Same lazy-import reasoning as the panels above.
+        self._avarEditor = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.avarEditor",
+            "Avar Editor",
+            lambda api: self._OpenAvarEditorPanel(api))
+
+        # The control picker: a picker layout baked to JSON beside
+        # the rig, driving usdview's selection. Same lazy sibling
+        # import as the panels above.
+        self._picker = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.picker",
+            "Control Picker",
+            lambda api: self._OpenPickerPanel(api))
+
         # The viewport manipulator toolbar. Same lazy-import reasoning
         # again; the menu item toggles it rather than opening a window,
         # because the toolbar lives inside the viewport frame.
@@ -186,7 +209,7 @@ class RigExecUsdviewContainer(PluginContainer):
             "Viewport Tools",
             lambda api: self._ToggleViewportTools())
 
-        # The Maya-style view cube. Same lazy-import reasoning again;
+        # The conventional view cube. Same lazy-import reasoning again;
         # the menu item toggles it rather than opening a window,
         # because the cube lives inside the viewport.
         self._viewCubeCommand = plugRegistry.registerCommandPlugin(
@@ -211,6 +234,9 @@ class RigExecUsdviewContainer(PluginContainer):
         menu.addItem(self._curvenets)
         menu.addItem(self._graphEditor)
         menu.addItem(self._layerOpinions)
+        menu.addItem(self._execStack)
+        menu.addItem(self._avarEditor)
+        menu.addItem(self._picker)
         menu.addItem(self._viewportToolsCommand)
         menu.addItem(self._viewCubeCommand)
 
@@ -297,6 +323,45 @@ class RigExecUsdviewContainer(PluginContainer):
 
         return layerOpinionsUI.OpenLayerOpinionsPanel(
             usdviewApi or self._api, self._UndoStack())
+
+    def _OpenExecStackPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenVolumeWeightPanel: execStackUI
+        # pulls in Qt, and this container must stay importable headless.
+        try:
+            import execStackUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import execStackUI
+
+        return execStackUI.OpenExecStackPanel(usdviewApi or self._api)
+
+    def _OpenAvarEditorPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenVolumeWeightPanel: avarEditorUI
+        # pulls in Qt, and this container must stay importable headless.
+        # Shares the undo stack, so Ctrl+Z spans a slider drag and a
+        # gizmo drag alike.
+        try:
+            import avarEditorUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import avarEditorUI
+
+        return avarEditorUI.OpenAvarEditorPanel(
+            usdviewApi or self._api, self._UndoStack())
+
+    def _OpenPickerPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenAvarEditorPanel: pickerUI pulls
+        # in Qt and this container must stay importable headless.
+        try:
+            import pickerUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import pickerUI
+
+        return pickerUI.OpenPickerPanel(usdviewApi or self._api)
 
     def _OpenGraphEditor(self, usdviewApi=None):
         """

@@ -23,6 +23,16 @@ set -euo pipefail
 # launching; this lower-level helper stays quiet.
 export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/museAssistant"
 
+# TouchPose, for the same reason and with the same caveat. This launcher
+# is the one an animator opens, and the toolset is not something they
+# should have to pick a launcher for: without this the RigExec menu
+# simply has no TouchPose item and nothing says why. `plugin/touchPose`
+# is NOT on _env.sh's PYTHONPATH the way rigExecUsdview is, so both the
+# plugin path and the import path are added here.
+export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/touchPose"
+export PYTHONPATH="$RIG/plugin/touchPose:${PYTHONPATH:-}"
+export TOUCHPOSE_PLUGIN_DIR="$RIG/plugin/touchPose"
+
 rigexec_require_python
 rigexec_require_usd "$USDVIEW"
 rigexec_build
