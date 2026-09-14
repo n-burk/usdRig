@@ -1730,11 +1730,12 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
 
 // The examples that are ALLOWED to decline the bake, by basename.
 //
-// Every one of them names a feature the program cannot express yet, and the
-// next phase shrinks this list to empty: an example that declines while it
-// is not on this list is a regression, and an example on this list that
-// starts baking is a line to delete here. Nothing else in the sweep can tell
-// the two apart, which is why the sweep used to print a decline and pass.
+// IT IS EMPTY, and that is the point the four Phase 3 groups were aiming at:
+// every example rig in the tree now bakes. It stays here, empty, rather than
+// being deleted with its machinery, because the machinery is what makes the
+// emptiness mean something -- an example that declines is now unconditionally
+// a failure, with no line anyone can add quietly to make the sweep green
+// again. Adding a name back is a deliberate, reviewable act.
 //
 // Both directions are FAILURES, and so is an entry nothing matched. A list
 // that is only read when a rig declines goes stale silently -- a group that
@@ -1742,22 +1743,18 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
 // that no longer says what still has to be done, and re-declining that same
 // rig later would then be green.
 //
-// Populated from what actually declines today, read off
-// `rigExecPose <rig> --mode baked`; the reason each gives is beside it.
-static const char *const kExpectedToDecline[] = {
-    "04_BlendShapeFace.usda",        // provisional -- verified after the build
-    "05_TwistRibbonSpine.usda",      // provisional -- verified after the build
-    "12_CurvenetProfile.usda",       // provisional -- verified after the build
-    "13_ReadPhases.usda",            // provisional -- verified after the build
-    "ArmRig.usda",                   // provisional -- verified after the build
-    "ArmShotAnim.usda",              // provisional -- verified after the build
-};
+// The deliberate negative is NOT here and must not be moved here: it is
+// TestANonBakeableRigFallsBack, which builds its rig in memory (a connected
+// posed:space on a provider) precisely so that the shipped examples can all
+// be required to bake.
+static const char *const *const kExpectedToDecline = nullptr;
+static constexpr size_t kExpectedToDeclineCount = 0;
 
 // The index of \p name in kExpectedToDecline, or -1 if it is not listed.
 static int
 _ExpectedToDeclineIndex(const std::string &name)
 {
-    for (size_t i = 0; i < std::size(kExpectedToDecline); ++i) {
+    for (size_t i = 0; i < kExpectedToDeclineCount; ++i) {
         if (name == kExpectedToDecline[i]) return int(i);
     }
     return -1;
@@ -1800,7 +1797,7 @@ TestEveryExampleStage(const std::string &examplesDir)
     // Which allowlist entries the sweep actually reached, so that a line
     // nobody matched -- a rig that now bakes, or one that was renamed or
     // deleted -- is reported instead of sitting there.
-    std::vector<bool> declineListHit(std::size(kExpectedToDecline), false);
+    std::vector<bool> declineListHit(kExpectedToDeclineCount, false);
     for (const std::string &stagePath : stagePaths) {
         // A payload file, a clip manifest, a sublayer: an example directory
         // holds plenty of .usd files that are not a rig, and none of them is
@@ -1908,7 +1905,7 @@ TestEveryExampleStage(const std::string &examplesDir)
     // The allowlist is a debt, not a configuration: every line has to be
     // earned by a rig that declined in THIS run, and when the last group
     // lands there are no lines left and `declined` is zero.
-    for (size_t i = 0; i < std::size(kExpectedToDecline); ++i) {
+    for (size_t i = 0; i < kExpectedToDeclineCount; ++i) {
         if (!declineListHit[i]) {
             ++failures;
             std::printf("FAIL %s: on the expected-to-decline list, but the "
@@ -1916,7 +1913,7 @@ TestEveryExampleStage(const std::string &examplesDir)
                         kExpectedToDecline[i]);
         }
     }
-    CHECK(declined == std::size(kExpectedToDecline));
+    CHECK(declined == kExpectedToDeclineCount);
 }
 
 static std::string

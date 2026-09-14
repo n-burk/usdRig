@@ -59,16 +59,16 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "01_FkChainTail.usda|1001,1012,1024,1036,1048|/TailAsset/Rig/Controls/Tail2|avars:rz|/TailAsset/Rig/Weights/Seg2W|rigExec:defaultWeight|YES|-"
     "02_TwoBoneIkLeg.usda|1001,1016,1024,1032,1048|/LegAsset/Rig/Controls/FootIK|avars:ty|/LegAsset/Rig/Weights/KneeDriven|inputs:driver|YES|-"
     "03_IkFkBlendClamp.usda|1001,1020,1024,1028,1048|/BlendArmAsset/Rig/Controls/HandIK|avars:tx|/BlendArmAsset/Rig/Solvers/IKFKBlend|inputs:weight|YES|-"
-    "04_BlendShapeFace.usda|1001,1016,1024,1040,1048|-|-|/FaceAsset/Rig/BlendInputs/Smile|inputs:weight|NO|provisional"
-    "05_TwistRibbonSpine.usda|1001,1012,1024,1036,1048|/SpineAsset/Rig/Controls/ChestCtl|avars:rz|/SpineAsset/Rig/Weights/FinW|rigExec:defaultWeight|NO|provisional"
+    "04_BlendShapeFace.usda|1001,1016,1024,1040,1048|-|-|/FaceAsset/Rig/BlendInputs/Smile|inputs:weight|YES|-"
+    "05_TwistRibbonSpine.usda|1001,1012,1024,1036,1048|/SpineAsset/Rig/Controls/ChestCtl|avars:rz|/SpineAsset/Rig/Weights/FinW|rigExec:defaultWeight|YES|-"
     "06_LatticeBulge.usda|1001,1012,1024,1036,1048|-|-|/LatticeAsset/Rig/Movers/Geometry/VolumeCorrect/Smooth|inputs:defaultWeight|YES|-"
     "07_SurfaceDrape.usda|1001,1012,1024,1036,1048|-|-|/DrapeAsset/Rig/Movers/Geometry/AttachToGround|inputs:defaultWeight|YES|-"
     "08_AimEyes.usda|1001,1012,1016,1032,1048|/EyesAsset/Rig/Controls/LookAt|avars:tx|/EyesAsset/Rig/Movers/Pose/AimL|inputs:defaultWeight|YES|-"
     "09_PropertyMathMovers.usda|1001,1012,1024,1036,1048|/PropMathAsset/Rig/Controls/RootCtl|avars:ry|/PropMathAsset/Rig/Movers/ClampGain|inputs:max|YES|-"
     "10_AimXformTurret.usda|1001,1012,1024,1036,1048|/TurretAsset/Rig/Controls/TrackTarget|avars:tx|/TurretAsset/Rig/Movers/AimBarrel|inputs:defaultWeight|YES|-"
     "11_VolumeWeights.usda|1001,1012,1024,1036,1048|/VolumeAsset/Rig/Controls/Root|avars:rz|/VolumeAsset/Rig/Joints/Shoulder/ShoulderVolume|inputs:falloffMax|YES|-"
-    "12_CurvenetProfile.usda|1001,1012,1024,1036,1048|/CurvenetAsset/Rig/Controls/BendCtl|avars:rz|/CurvenetAsset/Rig/Movers/Geometry/ProfileMover|inputs:defaultWeight|NO|provisional"
-    "13_ReadPhases.usda|1001,1012,1024,1036,1048|/ReadPhaseAsset/Rig/Controls/LiftCtl|avars:ty|/ReadPhaseAsset/Rig/Weights/CageW|rigExec:defaultWeight|NO|provisional"
+    "12_CurvenetProfile.usda|1001,1012,1024,1036,1048|/CurvenetAsset/Rig/Controls/BendCtl|avars:rz|/CurvenetAsset/Rig/Movers/Geometry/ProfileMover|inputs:defaultWeight|YES|-"
+    "13_ReadPhases.usda|1001,1012,1024,1036,1048|/ReadPhaseAsset/Rig/Controls/LiftCtl|avars:ty|/ReadPhaseAsset/Rig/Weights/CageW|rigExec:defaultWeight|YES|-"
     # -- the constraint stages: every one aims at a plain UsdGeomXformable --
     "aimtest.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"
     "aimtest_points.usda|1,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"
@@ -79,8 +79,8 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "rot_par_combo.usd|0,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecRotationConstraint1|inputs:defaultWeight|YES|-"
     "aim_par_combo_flattened.usd|0,25,50,75,100|-|-|/World/RigRoot/Movers/RigExecAimConstraint1|inputs:defaultWeight|YES|-"
     # -- the arm, asset and shot ------------------------------------------
-    "ArmRig.usda|1001,1024,1048|/ArmAsset/Rig/Controls/HandIK|avars:tx|/ArmAsset/Rig/Solvers/IK|inputs:softness|NO|solvers"
-    "ArmShotAnim.usda|1001,1012,1013,1024,1048|/Shot/HeroArm/Rig/Controls/HandIK|avars:ty|/Shot/HeroArm/Rig/Solvers/IK|inputs:softness|NO|solvers"
+    "ArmRig.usda|1001,1024,1048|/ArmAsset/Rig/Controls/HandIK|avars:tx|/ArmAsset/Rig/Solvers/IK|inputs:softness|YES|-"
+    "ArmShotAnim.usda|1001,1012,1013,1024,1048|/Shot/HeroArm/Rig/Controls/HandIK|avars:ty|/Shot/HeroArm/Rig/Solvers/IK|inputs:softness|YES|-"
     # -- the stages that bake today ----------------------------------------
     # The two component layers the spider assembly is built from are rigs in
     # their own right and open on their own; spider_leg.usd is the one stage

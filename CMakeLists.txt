@@ -291,9 +291,12 @@ function(rigexec_add_baked_parity_test name)
 endfunction()
 # CONE_VERIFY, not REQUIRE_BAKE: every constraint operator this suite builds
 # now comes from the program, and both schedules agree with a whole run from
-# the same state -- but the suite also builds solvers and weight objects the
-# program still refuses, so a bake requirement here would fail on another
-# group's refusal rather than on anything this entry is about.
+# the same state. The solver and weight-object refusals this comment used to
+# blame are gone as of the Phase 3 merge; what is left is three PROVIDER
+# refusals the suite authors deliberately -- an animated or connected rest:tx,
+# an animated or connected default:space, and an animated posed:space -- so a
+# bake requirement here would still fail on a missing feature rather than on
+# anything this entry is about.
 rigexec_add_baked_parity_test(testRigExecConstraints CONE_VERIFY)
 
 # The per-example parity entries: one named red/green signal per shipped rig.
@@ -549,7 +552,13 @@ target_link_libraries(testRigExecArm PRIVATE rigExec)
 target_compile_definitions(testRigExecArm PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecArm COMMAND testRigExecArm
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
-rigexec_add_baked_parity_test(testRigExecArm
+# REQUIRE_BAKE and CONE_VERIFY as of the Phase 3 merge: this is the suite
+# that exercises blendShape, volumeCorrect, ribbon and twist TOGETHER, and
+# every one of those now comes from the program. It was registered bare while
+# the arm's geometry and its two solver types belonged to different groups;
+# with both landed it runs clean under the bake requirement and under the
+# cone verifier in each schedule.
+rigexec_add_baked_parity_test(testRigExecArm REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecImaging tests/testRigExecImaging.cpp)
@@ -619,7 +628,16 @@ add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
 # And again under the parity check. A rest that moves on one path and not the
 # other is exactly what the comparator is for, and this is the suite that
 # moves rests on purpose.
-rigexec_add_baked_parity_test(testRigExecEpochRests
+#
+# CONE_VERIFY but NOT REQUIRE_BAKE, and the asymmetry is the honest state of
+# the tree rather than an oversight. Under the verifier it is clean in both
+# schedules. Under a bake requirement it is not, because the suite authors on
+# purpose the three things the program still refuses: an animated or
+# connected rest:tx on a provider, a property chain that writes rest:space,
+# and a generation whose interactive overrides are not placeable. Those are
+# missing features, not disagreements -- every generation that DOES bake
+# agrees exactly -- and the flag goes on the day the rest-channel work lands.
+rigexec_add_baked_parity_test(testRigExecEpochRests CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Bit-identical results from the parallel per-point kernels, both ways round:
