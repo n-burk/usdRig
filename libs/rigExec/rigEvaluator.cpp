@@ -1429,6 +1429,11 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // Dropping them on every notice is the conservative answer, and the only
     // one that cannot be wrong -- rebuilding costs one read per skinned mesh.
     _skinTopologies.Clear();
+    // Which properties can REACH a layout is read off the same stage as the
+    // layouts themselves -- a connection authored on rigExec:jointWeights
+    // moves no epoch digest and recompiles nothing -- so the answer is
+    // dropped exactly where the layouts are.
+    _skinLayoutInputsValid = false;
     for (auto &[target, live] : _liveGraphs) {
         if (live) live->basePointsPushed = false;
     }
@@ -5516,6 +5521,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // influence table a layout was range-checked against and the base points
     // a source holds are both things a recompile can have changed.
     _skinTopologies.Clear();
+    _skinLayoutInputsValid = false;
     for (auto &[target, live] : _liveGraphs) {
         if (live) live->basePointsPushed = false;
     }
@@ -7870,9 +7876,99 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
 }
 
 void
+RigExecRigEvaluator::_ResolveSkinLayoutInputs() const
+{
+    _skinLayoutInputs.clear();
+    _skinLayoutInputsValid = true;
+    // The four the layout is assembled from: the two arrays and the element
+    // size RigExecResolveSkinTopology reads, and the method
+    // RigExecAssembleSkinParameters reads beside them. inputs:enabled and
+    // inputs:defaultWeight are deliberately NOT here -- they are read per
+    // frame, never cached, so an override on one reaches the next generation
+    // without anything being dropped.
+    static const TfToken layoutAttributes[] = {
+        TfToken("rigExec:jointIndices"), TfToken("rigExec:jointWeights"),
+        TfToken("rigExec:elementSize"), TfToken("rigExec:skinningMethod")};
+    for (const RigExecMoverRecord &record : _movers) {
+        if (record.schemaType != "RigExecSkinMover") {
+            continue;
+        }
+        const UsdPrim prim = _stage->GetPrimAtPath(record.moverPath);
+        if (!prim) {
+            continue;
+        }
+        for (const TfToken &name : layoutAttributes) {
+            // The SAME walk the value is read through
+            // (RigExecResolvedInputs::GetAttribute): a single authored
+            // connection per hop, the resolved map consulted at every hop,
+            // cycles refused. Every path along it is a path an override can
+            // stand on and be seen by the read, so every path along it
+            // belongs in this set -- an override one hop upstream of a
+            // connected rigExec:jointIndices is the case that makes the
+            // difference between a re-read and a silently stale deformation.
+            UsdAttribute attribute = prim.GetAttribute(name);
+            if (!attribute) {
+                // Not authored and not in the schema: an override could
+                // still create the opinion the read would find, so the
+                // property itself is named even where the attribute is not.
+                _skinLayoutInputs.insert(
+                    record.moverPath.AppendProperty(name));
+                continue;
+            }
+            while (attribute &&
+                   _skinLayoutInputs.insert(attribute.GetPath()).second) {
+                SdfPathVector connections;
+                if (attribute.HasAuthoredConnections()) {
+                    attribute.GetConnections(&connections);
+                }
+                if (connections.size() != 1) {
+                    break;
+                }
+                attribute = _stage->GetAttributeAtPath(connections[0]);
+            }
+        }
+    }
+}
+
+bool
+RigExecRigEvaluator::_OverridesReachSkinLayout(
+    const std::vector<RigExecValueOverride> &overrides) const
+{
+    if (overrides.empty()) {
+        return false;
+    }
+    if (!_skinLayoutInputsValid) {
+        _ResolveSkinLayoutInputs();
+    }
+    for (const RigExecValueOverride &o : overrides) {
+        // A computation override names no property, so there is nothing to
+        // compare it against: it is taken to reach everything.
+        if (o.attribute.IsEmpty()) {
+            return true;
+        }
+        if (_skinLayoutInputs.count(o.prim.AppendProperty(o.attribute))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+size_t
+RigExecRigEvaluator::GetSkinTopologyCacheSize() const
+{
+    return _skinTopologies.GetSize();
+}
+
+void
 RigExecRigEvaluator::SetInteractiveOverrides(
     std::vector<RigExecValueOverride> overrides)
 {
+    // Asked of BOTH sets before either is dropped: an override being lifted
+    // off a layout attribute moves the value the layout was read with just
+    // as much as one being placed on it.
+    const bool touchesLayout =
+        _OverridesReachSkinLayout(_interactiveOverrides) ||
+        _OverridesReachSkinLayout(overrides);
     _interactiveOverrides = std::move(overrides);
     // Defence in depth, not a correctness requirement: every attribute
     // override is written into the resolved inputs before anything reads
@@ -7885,8 +7981,19 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     // An override is a value the static reads must prefer over the stage,
     // and the skin layout is read through exactly that route -- so a layout
     // resolved before the override set changed was resolved against a
-    // different answer.
-    _skinTopologies.Clear();
+    // different answer. But only for an override that can actually reach
+    // one: dropping every layout costs ~400us of a biped drag frame (a
+    // third of it) re-reading and re-comparing 105k elements that no
+    // manipulator touched, and an animator's drag names a control avar.
+    // The predicate follows the same connection walk the layout is read
+    // through and answers yes wherever it is unsure -- see
+    // _OverridesReachSkinLayout. The dynamic path shares this cache, so
+    // both paths get the same answer either way: the cache hands back the
+    // pointer it held for arrays that compare equal, so what is at stake is
+    // the re-read and not the deformation.
+    if (touchesLayout) {
+        _skinTopologies.Clear();
+    }
     // Nothing to invalidate: the program is asked to PLACE these at the top
     // of every generation (Evaluate), and it runs only for a set it can place
     // exactly. An override it cannot place -- one standing on a value folded
@@ -7897,6 +8004,8 @@ RigExecRigEvaluator::SetInteractiveOverrides(
 void
 RigExecRigEvaluator::ClearInteractiveOverrides()
 {
+    const bool touchesLayout =
+        _OverridesReachSkinLayout(_interactiveOverrides);
     _interactiveOverrides.clear();
     // Both halves of a drag invalidate the same two caches. See
     // SetInteractiveOverrides: the static-input clear is defence in depth
@@ -7904,7 +8013,9 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
     // on the way in and not on the way out is the shape of bug that is only
     // ever found the hard way.
     _staticInputs.Clear();
-    _skinTopologies.Clear();
+    if (touchesLayout) {
+        _skinTopologies.Clear();
+    }
 }
 
 // Appends the interactive overrides to \p overrides, replacing any entry

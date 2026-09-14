@@ -12,6 +12,7 @@
 //               [--pose-out <file.txt>] [--repeat N]
 //               [--profile <file.trace>] [--mode dynamic|baked|parity]
 //               [--guides] [--require-baked]
+//               [--drag <prim> <attr> <steps>]
 //
 // With no --frames it evaluates the stage's start time code (or Default when
 // the stage has no time range). Exit status is non-zero when the rig fails to
@@ -42,6 +43,14 @@
 // process divides by N frames instead of one. It exists because the frames
 // of this rig cost a few hundred microseconds each and a process start
 // costs half a second; timing one frame means timing the process.
+//
+// --drag <prim> <attr> <steps> ramps one attribute through <steps> values
+// with SetInteractiveOverrides, evaluating after each one, and prints the
+// wall clock of every step plus the median and the minimum. It is the
+// manipulator's frame: an override placed, a generation asked for, a pose
+// drawn, over and over on one control. Nothing else about the run changes --
+// the drag happens after the reported frames, so every line above it is the
+// line a command line without the option prints.
 //
 // --pose-out writes every published domain of every evaluated generation in
 // a canonical text form (%.17g doubles, %.9g floats), so two runs -- two
@@ -432,6 +441,56 @@ private:
     bool _inconsistent = false;
 };
 
+/// \p attribute's value at \p time as a double, whatever scalar type it is
+/// declared with.
+bool
+AttributeDouble(const UsdAttribute &attribute, UsdTimeCode time, double *out)
+{
+    if (!attribute) {
+        return false;
+    }
+    if (attribute.GetTypeName() == SdfValueTypeNames->Double) {
+        return attribute.Get(out, time);
+    }
+    if (attribute.GetTypeName() == SdfValueTypeNames->Float) {
+        float value = 0;
+        if (!attribute.Get(&value, time)) return false;
+        *out = value;
+        return true;
+    }
+    return false;
+}
+
+/// \p attribute's value at \p time, displaced by \p bump, as a VtValue of
+/// the attribute's own type.
+///
+/// A drag is a value an animator holds a manipulator at, so it has to reach
+/// the rig as the type the attribute is declared with: a float avar handed a
+/// double override is an override the program cannot place, and the whole
+/// generation falls back to the dynamic path -- which is exactly the number
+/// the benchmark is trying not to measure.
+bool
+DisplacedValue(const UsdAttribute &attribute, UsdTimeCode time, double bump,
+               VtValue *out)
+{
+    if (!attribute) {
+        return false;
+    }
+    if (attribute.GetTypeName() == SdfValueTypeNames->Double) {
+        double value = 0;
+        if (!attribute.Get(&value, time)) return false;
+        *out = VtValue(value + bump);
+        return true;
+    }
+    if (attribute.GetTypeName() == SdfValueTypeNames->Float) {
+        float value = 0;
+        if (!attribute.Get(&value, time)) return false;
+        *out = VtValue(float(value + bump));
+        return true;
+    }
+    return false;
+}
+
 std::vector<UsdTimeCode>
 ParseFrames(const std::string &text)
 {
@@ -455,7 +514,8 @@ main(int argc, char **argv)
             "[--frames a,b,c] [--joints] [--targets] "
             "[--joints-out <file.usda>] [--pose-out <file.txt>] "
             "[--profile <file.trace>] [--mode dynamic|baked|parity] "
-            "[--guides] [--require-baked]\n");
+            "[--guides] [--require-baked] "
+            "[--drag <prim> <attr> <steps>]\n");
         return 2;
     }
     std::string stagePath = argv[1];
@@ -466,6 +526,8 @@ main(int argc, char **argv)
     rigExec::RigExecEvaluationMode mode =
         rigExec::RigExecEvaluationMode::Dynamic;
     std::vector<UsdTimeCode> frames;
+    std::string dragPrim, dragAttr;
+    int dragSteps = 0;
     int repeat = 1;
     bool showJoints = false;
     bool showTargets = false;
@@ -493,6 +555,14 @@ main(int argc, char **argv)
             repeat = std::atoi(argv[++i]);
             if (repeat < 1) {
                 std::printf("--repeat wants a count of 1 or more\n");
+                return 2;
+            }
+        } else if (arg == "--drag" && i + 3 < argc) {
+            dragPrim = argv[++i];
+            dragAttr = argv[++i];
+            dragSteps = std::atoi(argv[++i]);
+            if (dragSteps < 1) {
+                std::printf("--drag wants a step count of 1 or more\n");
                 return 2;
             }
         } else if (arg == "--profile" && i + 1 < argc) {
@@ -735,6 +805,95 @@ main(int argc, char **argv)
                         "program\n",
                         evaluator.GetBakedGenerationCount(), evaluated);
             status = 1;
+        }
+    }
+
+    // ---- the manipulator's frame ------------------------------------------
+    //
+    // A drag is not a frame change: the time stands still and one attribute
+    // moves, over and over, with a pose drawn between each pair of values.
+    // That is the generation the interactive path has to be quick at, and it
+    // is a different shape from an animation frame -- no time moved, so
+    // every input that is a function of time is unchanged and only the cone
+    // below the dragged control has anything to do.
+    //
+    // Measured AFTER the accounting above, so the generation counts a reader
+    // (and --require-baked) sees still describe the requested frames alone;
+    // what the drag itself did with the program is reported here instead.
+    if (dragSteps > 0) {
+        const SdfPath dragPath(dragPrim);
+        const UsdPrim prim = stage->GetPrimAtPath(dragPath);
+        const UsdAttribute attribute =
+            prim ? prim.GetAttribute(TfToken(dragAttr)) : UsdAttribute();
+        const UsdTimeCode dragFrame = frames.back();
+        double original = 0;
+        if (!AttributeDouble(attribute, dragFrame, &original)) {
+            std::printf("\n  drag FAILED: %s has no double or float %s\n",
+                        dragPrim.c_str(), dragAttr.c_str());
+            status = 1;
+        } else {
+            // A triangle wave rather than a ramp: an animator's drag stays
+            // in the neighbourhood of the value it started at, and a ramp
+            // long enough to time would walk an envelope out of [0, 1] and
+            // measure a constraint passing through instead of applying.
+            // Away from zero for a value near it, back towards it for one
+            // that is not, for the same reason.
+            const double direction = original > 0.5 ? -1.0 : 1.0;
+            const size_t generationsBefore =
+                evaluator.GetBakedGenerationCount();
+            // One generation at this time before the first measured step, so
+            // that what every step measures is a drag and not the first
+            // frame's cold caches.
+            evaluator.Evaluate(dragFrame);
+            std::vector<double> stepUs;
+            stepUs.reserve(size_t(dragSteps));
+            for (int k = 0; k < dragSteps; ++k) {
+                const double phase = double(k % 20);
+                // 1..10 up, 11..2 down: twenty DISTINCT displacements, so
+                // no step ever hands the rig the value the step before it
+                // did -- which a cone re-execution would skip, and a
+                // benchmark would then report as a cheap drag frame.
+                const double bump =
+                    direction * 0.005 *
+                    (phase < 10 ? phase + 1 : 21 - phase);
+                VtValue value;
+                if (!DisplacedValue(attribute, dragFrame, bump, &value)) {
+                    break;
+                }
+                const auto began = std::chrono::steady_clock::now();
+                evaluator.SetInteractiveOverrides(
+                    {rigExec::RigExecValueOverride{
+                        dragPath, TfToken(), TfToken(dragAttr), value}});
+                const rigExec::RigExecRigPose pose =
+                    evaluator.Evaluate(dragFrame);
+                stepUs.push_back(
+                    std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - began).count() *
+                    1e6);
+                if (!pose.valid || pose.moverGraphParityMismatches ||
+                    pose.bakedParityMismatches) {
+                    status = 1;
+                }
+            }
+            evaluator.ClearInteractiveOverrides();
+            std::vector<double> sorted = stepUs;
+            std::sort(sorted.begin(), sorted.end());
+            const double median =
+                sorted.empty() ? 0.0 : sorted[sorted.size() / 2];
+            std::printf("\n  drag %s.%s: %zu step(s), median %.1fus, "
+                        "min %.1fus, max %.1fus\n",
+                        dragPrim.c_str(), dragAttr.c_str(), stepUs.size(),
+                        median, sorted.empty() ? 0.0 : sorted.front(),
+                        sorted.empty() ? 0.0 : sorted.back());
+            if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
+                std::printf("    baked: %zu of %zu drag generation(s)\n",
+                            evaluator.GetBakedGenerationCount() -
+                                generationsBefore,
+                            stepUs.size() + 1);
+            }
+            for (size_t k = 0; k < stepUs.size(); ++k) {
+                std::printf("    step %3zu %8.1fus\n", k, stepUs[k]);
+            }
         }
     }
 

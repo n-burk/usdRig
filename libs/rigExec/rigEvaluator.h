@@ -310,6 +310,16 @@ public:
     size_t GetBakedClusterCount() const;
     size_t GetBakedClustersRunLastGeneration() const;
 
+    /// How many skin layouts the epoch's topology cache is holding answers
+    /// for.
+    ///
+    /// The other thing about an interactive generation that a published pose
+    /// cannot show: dropping the layouts and re-reading them publishes
+    /// exactly the same deformation as keeping them, so only the cache's own
+    /// occupancy says whether a drag paid for the re-read. A test that
+    /// overrides an unrelated control reads this to see that it did not.
+    size_t GetSkinTopologyCacheSize() const;
+
     /// Values that stand in for authored attributes while they are set,
     /// with NOTHING authored: the manipulation path (spec: docs/superpowers/
     /// specs/2026-09-10-hydra-preview-manipulation-design.md).
@@ -827,6 +837,26 @@ private:
     /// the stage it came from. Cleared by every change notice, by every
     /// interactive-override change, and by the commit of a new epoch.
     RigExecSkinTopologyCache _skinTopologies;
+    /// Every property whose value can reach a cached skin layout: each skin
+    /// mover's layout attributes, plus every attribute upstream of one of
+    /// them along the authored connection chain the layout is read through.
+    ///
+    /// An interactive override drops the layouts only when it names one of
+    /// these (SetInteractiveOverrides). Rebuilt lazily and invalidated
+    /// exactly where the cache itself is, so the two can never disagree
+    /// about which epoch's connections they describe.
+    mutable std::set<SdfPath> _skinLayoutInputs;
+    mutable bool _skinLayoutInputsValid = false;
+    /// Fills _skinLayoutInputs from the standing mover order.
+    void _ResolveSkinLayoutInputs() const;
+    /// Whether any override in \p overrides can change a cached skin layout.
+    ///
+    /// Conservative in the direction of YES: a computation override, which
+    /// names no property to compare, and a rig whose movers have not been
+    /// resolved yet both answer true. The cost of a wrong yes is one
+    /// re-read; the cost of a wrong no is a stale deformation.
+    bool _OverridesReachSkinLayout(
+        const std::vector<RigExecValueOverride> &overrides) const;
     /// One transform-valued input to a pose-domain constraint.
     ///
     /// RigExec providers publish computePointFrame and are therefore tapped;

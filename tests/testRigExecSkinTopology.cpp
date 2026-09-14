@@ -231,7 +231,13 @@ TestInteractiveOverrideOnTheLayout()
     override.prim = kSkin;
     override.attribute = TfToken("rigExec:jointWeights");
     override.value = VtValue(Weights(0.0f, 1.0f));
+    // The layout really was dropped, rather than the override reaching the
+    // deformation by some other route: the cache is emptied by an override
+    // that names a layout attribute, which is the YES branch of the
+    // predicate SetInteractiveOverrides narrowed the clear to.
+    CHECK(evaluator.GetSkinTopologyCacheSize() > 0);
     evaluator.SetInteractiveOverrides({override});
+    CHECK(evaluator.GetSkinTopologyCacheSize() == 0);
     CheckSkinned(evaluator.Evaluate(UsdTimeCode::Default()), 0.0f, 1.0f,
                  "overridden weights");
 
@@ -490,6 +496,130 @@ TestAnUnrelatedEditDoesNotRerunTheKernel()
     CHECK(repainted.moverGraphRevisionsExecuted > 0);
 }
 
+// An override one hop UPSTREAM of a layout attribute drops the layouts, and
+// reaches the deformation.
+//
+// The hazard the narrow clear has to survive. An override is compared against
+// the properties that can REACH a layout, and "reach" has to mean the same
+// walk the value is read through: RigExecResolvedInputs::GetAttribute follows
+// one authored connection per hop and consults the overrides at every hop, so
+// a value placed on the SOURCE of a connected rigExec:skinningMethod is the
+// value the mover assembles with. Compare an override against the mover's own
+// four attributes alone and that one is called unrelated, the layouts are
+// kept, and a mover deforms against a binding nobody has any more.
+//
+// Two halves, and they prove different things. The deformation changing is
+// the read walk: skinningMethod is assembled per frame, so it would follow
+// the override whatever this cache did. The cache EMPTYING is the predicate:
+// nothing else in a generation drops it, and the mover's layout is cached
+// here (only the three array attributes decide that, and none of them is
+// connected on this rig).
+void
+TestAnOverrideUpstreamOfTheLayoutDropsTheCache()
+{
+    const auto build = [](const TfToken &method) {
+        UsdStageRefPtr stage = MakeSkinnedRig();
+        const UsdPrim skin = stage->GetPrimAtPath(kSkin);
+        skin.CreateAttribute(TfToken("rigExec:jointWeights"),
+                             SdfValueTypeNames->FloatArray)
+            .Set(Weights(0.5f, 0.5f));
+        // A rotating influence, so that the two skinning methods answer
+        // differently: dual-quaternion and linear blending agree exactly
+        // while every influence is a pure translation.
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/AlongY"))
+            .GetAttribute(TfToken("avars:rz")).Set(90.0);
+        const UsdAttribute source = skin.CreateAttribute(
+            TfToken("inputs:method"), SdfValueTypeNames->Token);
+        source.Set(method);
+        const UsdAttribute declared = skin.CreateAttribute(
+            TfToken("rigExec:skinningMethod"), SdfValueTypeNames->Token);
+        declared.Set(TfToken("classicLinear"));
+        declared.AddConnection(source.GetPath());
+        return stage;
+    };
+    const auto deformed = [](RigExecRigEvaluator *evaluator) {
+        const RigExecRigPose pose = evaluator->Evaluate(UsdTimeCode::Default());
+        const auto found = pose.movedProperties.find(kTarget);
+        return found == pose.movedProperties.end()
+                   ? VtVec3fArray()
+                   : found->second.Get<VtVec3fArray>();
+    };
+
+    // What the stage says when the connection's source is authored either
+    // way, with no override anywhere: the two answers this rig can give.
+    UsdStageRefPtr linearStage = build(TfToken("classicLinear"));
+    UsdStageRefPtr dualStage = build(TfToken("dualQuaternion"));
+    RigExecRigEvaluator linear(linearStage, SdfPath("/Asset/Rig"));
+    RigExecRigEvaluator dual(dualStage, SdfPath("/Asset/Rig"));
+    CompileOrReport(&linear);
+    CompileOrReport(&dual);
+    const VtVec3fArray linearPoints = deformed(&linear);
+    const VtVec3fArray dualPoints = deformed(&dual);
+    CHECK(linearPoints.size() == kPointCount);
+    // The fixture is only worth anything while the two methods disagree.
+    CHECK(linearPoints != dualPoints);
+
+    // Now the same difference asked for with an override, one hop upstream
+    // of the attribute the mover declares.
+    UsdStageRefPtr stage = build(TfToken("classicLinear"));
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CompileOrReport(&evaluator);
+    CHECK(deformed(&evaluator) == linearPoints);
+    CHECK(evaluator.GetSkinTopologyCacheSize() > 0);
+
+    RigExecValueOverride override;
+    override.prim = kSkin;
+    override.attribute = TfToken("inputs:method");
+    override.value = VtValue(TfToken("dualQuaternion"));
+    evaluator.SetInteractiveOverrides({override});
+    CHECK(evaluator.GetSkinTopologyCacheSize() == 0);
+    CHECK(deformed(&evaluator) == dualPoints);
+
+    evaluator.ClearInteractiveOverrides();
+    CHECK(evaluator.GetSkinTopologyCacheSize() == 0);
+    CHECK(deformed(&evaluator) == linearPoints);
+}
+
+// An override on a control keeps them.
+//
+// The whole point of narrowing the clear: a drag names a control avar, and
+// re-reading and re-comparing every skinned mesh's layout for it costs about
+// a third of a baked drag frame on a biped (~400us of ~1.1ms) for arrays no
+// manipulator can touch. The deformation still follows the drag -- the
+// layout is not what a control moves.
+void
+TestAnUnrelatedOverrideKeepsTheCache()
+{
+    UsdStageRefPtr stage = MakeSkinnedRig();
+    stage->GetPrimAtPath(kSkin)
+        .CreateAttribute(TfToken("rigExec:jointWeights"),
+                         SdfValueTypeNames->FloatArray)
+        .Set(Weights(1.0f, 0.0f));
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    CompileOrReport(&evaluator);
+    CheckSkinned(evaluator.Evaluate(UsdTimeCode::Default()), 1.0f, 0.0f,
+                 "before the drag");
+    const size_t cached = evaluator.GetSkinTopologyCacheSize();
+    CHECK(cached > 0);
+
+    RigExecValueOverride override;
+    override.prim = SdfPath("/Asset/Rig/AlongX");
+    override.attribute = TfToken("avars:tx");
+    override.value = VtValue(20.0);
+    evaluator.SetInteractiveOverrides({override});
+    CHECK(evaluator.GetSkinTopologyCacheSize() == cached);
+    // tx = 20 against a rest of 10 is two units of the influence's
+    // displacement, which is what CheckSkinned's first argument scales.
+    CheckSkinned(evaluator.Evaluate(UsdTimeCode::Default()), 2.0f, 0.0f,
+                 "during the drag");
+    CHECK(evaluator.GetSkinTopologyCacheSize() == cached);
+    evaluator.ClearInteractiveOverrides();
+    CHECK(evaluator.GetSkinTopologyCacheSize() == cached);
+    CheckSkinned(evaluator.Evaluate(UsdTimeCode::Default()), 1.0f, 0.0f,
+                 "after the drag");
+}
+
 }  // namespace
 
 int
@@ -509,6 +639,8 @@ main()
     TestWeightsBecomeTimeSampledAfterCompile();
     TestWeightsBecomeConnectedAfterCompile();
     TestAnUnrelatedEditDoesNotRerunTheKernel();
+    TestAnOverrideUpstreamOfTheLayoutDropsTheCache();
+    TestAnUnrelatedOverrideKeepsTheCache();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);
