@@ -75,7 +75,8 @@ using MakeStage = std::function<UsdStageRefPtr()>;
 /// a fixture whose rig declines would agree perfectly and say nothing.
 void
 CheckParity(const char *what, const MakeStage &make,
-            const std::vector<double> &frames, bool expectBaked)
+            const std::vector<double> &frames, bool expectBaked,
+            bool guides = true)
 {
     const UsdStageRefPtr referenceStage = make();
     const UsdStageRefPtr bakedStage = make();
@@ -94,6 +95,12 @@ CheckParity(const char *what, const MakeStage &make,
         return;
     }
     baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    // A headless consumer skips the guide request outright, and the program
+    // has to skip its publication with it -- while still running the solvers
+    // it would have published, because the toggle can move without the epoch
+    // moving.
+    reference.SetSolverGuidesEnabled(guides);
+    baked.SetSolverGuidesEnabled(guides);
 
     std::vector<std::string> reasons;
     const bool bakeable = baked.IsBakeable(&reasons);
@@ -404,6 +411,47 @@ MakeGuideOnlyRibbonRig()
                "rigExec:joints", {});
     stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineRibbon"))
         .GetAttribute(TfToken("rigExec:jointElements")).Set(VtIntArray{});
+    stage->RemovePrim(SdfPath("/Asset/Rig/Joints/RibbonMid"));
+    return stage;
+}
+
+/// The same for a twist distribution, whose endpoints are provider frames:
+/// a guide-only solver reads the FINAL frame of each, which is the whole
+/// reason its Solve step runs after the walk rather than inside it.
+UsdStageRefPtr
+MakeGuideOnlyTwistRig()
+{
+    const UsdStageRefPtr stage = MakeTwistRig();
+    SetTargets(stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineTwist")),
+               "rigExec:joints", {});
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/SpineTwist"))
+        .GetAttribute(TfToken("rigExec:jointElements")).Set(VtIntArray{});
+    stage->RemovePrim(SdfPath("/Asset/Rig/Joints/TwistMid"));
+    return stage;
+}
+
+/// A guide-only blend of two guide-only solvers. This is the only fixture
+/// that can tell whether the dependency ORDER among them is right: the blend
+/// reads both aggregates, and reading one a step later fills it would
+/// publish last run's frames.
+UsdStageRefPtr
+MakeGuideOnlyBlendRig()
+{
+    const UsdStageRefPtr stage = MakeGuideOnlyTwistRig();
+    const UsdPrim second = Define(stage, "/Asset/Rig/Solvers/SecondTwist",
+                                  "RigExecTwistDistribution");
+    second.GetAttribute(TfToken("rigExec:count")).Set(5);
+    second.GetAttribute(TfToken("inputs:twistTurns")).Set(0.75);
+    SetTargets(second, "rigExec:start",
+               {SdfPath("/Asset/Rig/Joints/Root/Chest")});
+    SetTargets(second, "rigExec:end", {SdfPath("/Asset/Rig/Joints/Root")});
+
+    const UsdPrim blend = Define(stage, "/Asset/Rig/Solvers/GuideBlend",
+                                 "RigExecBlendPointFrames");
+    SetTargets(blend, "rigExec:inputA",
+               {SdfPath("/Asset/Rig/Solvers/SpineTwist")});
+    SetTargets(blend, "rigExec:inputB", {second.GetPath()});
+    blend.GetAttribute(TfToken("inputs:weight")).Set(0.35f);
     return stage;
 }
 
@@ -738,6 +786,15 @@ main(int argc, char **argv)
                 MakeBlendRigWithLinearRotation, frames, true);
     CheckParity("ik/fk blend with a non-solver input",
                 MakeBlendRigWithANonSolverInput, frames, true);
+
+    CheckParity("guide-only ribbon", MakeGuideOnlyRibbonRig, frames, true);
+    CheckParity("guide-only twist distribution", MakeGuideOnlyTwistRig,
+                frames, true);
+    CheckParity("guide-only blend of two guide-only solvers",
+                MakeGuideOnlyBlendRig, frames, true);
+    CheckParity("guide-only solvers with the guides switched off",
+                MakeGuideOnlyBlendRig, frames, true,
+                /* guides = */ false);
 
     if (failures) {
         std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);

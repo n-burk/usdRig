@@ -1239,6 +1239,10 @@ struct RigExecBakedProgramImpl {
         uint32_t rootRead = 0, midRead = 0, endRead = 0, poleRead = 0;
     };
     std::vector<Solver> solvers;
+    /// The solver slots no batch runs, in dependency order. Their Solve
+    /// steps sit after the whole walk, because the frames the dynamic path's
+    /// guide request hands them are the FINAL ones.
+    std::vector<int> guideSolvers;
     std::map<SdfPath, int> solverIndex;
     std::vector<RigExecPointFrameArray> aggregates;
 
@@ -1912,6 +1916,10 @@ struct RigExecBakedBuildContext {
     /// Each RigExecRibbon's resolved driver-points attribute, restated from
     /// the evaluator's own compiled map (which only Build's file can name).
     std::map<SdfPath, SdfPath> ribbonDriverPoints;
+    /// The aggregate solvers no batch runs, in dependency order: a guide-only
+    /// RigExecBlendPointFrames may read another one's aggregate, and the
+    /// order is what makes the reader run second.
+    std::vector<SdfPath> guideOnlySolvers;
     std::vector<std::string> *reasons = nullptr;
     bool ok = true;
 

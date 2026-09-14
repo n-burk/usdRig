@@ -680,6 +680,17 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         }
         B.walkSteps.push_back(std::move(st));
     }
+
+    // The solvers no batch runs. A solver that binds no joint and that no
+    // mover names on rigExec:driverFrames is not required, so the walk never
+    // reaches it -- but it is still an aggregate solver, and the dynamic
+    // path still publishes its frames as guides, out of a SECOND exec
+    // request that genuinely computes it against the walk's FINAL provider
+    // frames. Baked here, in the dependency order Build resolved, and run as
+    // ordinary Solve steps after the walk.
+    for (const SdfPath &solverPath : ctx->guideOnlySolvers) {
+        B.guideSolvers.push_back(bakeSolver(solverPath, {}));
+    }
     B.aggregates.resize(B.solvers.size());
 }
 
@@ -767,6 +778,22 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     const auto readFin = [&liveFin, n](int slot) {
         return slot >= 0 && size_t(slot) < n ? liveFin[size_t(slot)] : 0u;
     };
+    // One solver's frame reads, bound to the versions live where it runs.
+    // Written once because two callers need it at two different points of
+    // the sweep: a batch's solvers read the versions live where their batch
+    // begins, and the guide-only solvers -- which run after the whole walk
+    // -- read the last version of everything.
+    const auto bindSolverReads =
+        [&readFin](RigExecBakedProgramImpl::Solver &solver) {
+        solver.controlReads.clear();
+        for (const int control : solver.controls) {
+            solver.controlReads.push_back(readFin(control));
+        }
+        solver.rootRead = readFin(solver.root);
+        solver.midRead = readFin(solver.mid);
+        solver.endRead = readFin(solver.end);
+        solver.poleRead = readFin(solver.pole);
+    };
 
     for (size_t w = 0; w < B.walkSteps.size(); ++w) {
         const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
@@ -776,15 +803,7 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
         // where the commit's own reads are taken too.
         if (walk.solverBatch) {
             for (const int si : walk.batchSolvers) {
-                RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
-                solver.controlReads.clear();
-                for (const int control : solver.controls) {
-                    solver.controlReads.push_back(readFin(control));
-                }
-                solver.rootRead = readFin(solver.root);
-                solver.midRead = readFin(solver.mid);
-                solver.endRead = readFin(solver.end);
-                solver.poleRead = readFin(solver.pole);
+                bindSolverReads(B.solvers[size_t(si)]);
             }
         } else {
             const RigExecBakedProgramImpl::Constraint &constraint =
@@ -846,6 +865,13 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
                 liveBase[slot] = commit.descendantBaseWrites[k];
             }
         }
+    }
+
+    // And the guide-only solvers, against what the walk left standing: the
+    // dynamic path's guide request overrides every provider with its FINAL
+    // frame, which is what liveFin holds now that the sweep is over.
+    for (const int si : B.guideSolvers) {
+        bindSolverReads(B.solvers[size_t(si)]);
     }
 
     B.finLast.assign(liveFin.begin(), liveFin.end());
@@ -1239,6 +1265,55 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // Before the matrices, which read the LAST version of a slot: the table
     // that says which entry that is comes out of this sweep.
     BindPoseVersions(&B);
+
+    // ---- the solvers no batch runs ------------------------------------------
+    //
+    // The dynamic path answers these from a second exec request, whose
+    // per-provider override is the FINAL frame rather than the mid-walk one
+    // a batch sees -- so they run HERE, after the whole walk, and read the
+    // last version of everything. They write no candidate and bump no
+    // counter: a solver that binds a joint or drives geometry is required
+    // and therefore batched, so one of these poses nothing and the only
+    // thing that reads it is the guide publication.
+    //
+    // Not gated on the guide toggle. The toggle can move without the epoch
+    // moving, so gating would be a runtime branch in a step body; running
+    // and not publishing is the same published generation, because
+    // RigExecBakedRead only READS the override table and the epilogue
+    // consults the toggle where the dynamic path does.
+    for (const int si : B.guideSolvers) {
+        RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
+        solver.elements.resize(solver.controls.size());
+        RigExecBakedStep &step =
+            AddStep(&B, RigExecBakedStepKind::Solve, si);
+        for (const int control : solver.controls) {
+            if (control >= 0) {
+                step.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, control));
+            }
+        }
+        for (const int control :
+                 {solver.root, solver.mid, solver.end, solver.pole}) {
+            if (control >= 0) {
+                step.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, control));
+            }
+        }
+        if (!solver.ribbonPointsPath.IsEmpty()) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::SolverPoints, si));
+        }
+        for (const int input : {solver.inA, solver.inB}) {
+            if (input >= 0) {
+                step.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::Aggregate, input));
+            }
+        }
+        step.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::Aggregate, si));
+        step.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::Candidates, si));
+    }
 
     // ---- the rest->pose matrices --------------------------------------------
     //

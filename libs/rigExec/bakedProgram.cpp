@@ -319,9 +319,21 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             // expression of the rule, in the place that needs its answer.
         }
     }
+    // An aggregate solver no batch runs is not a rig the program cannot
+    // express: the dynamic path computes it inside the guide request,
+    // against the walk's FINAL frames, and the program runs it as a Solve
+    // step after the walk for the same reason. Its TYPE still has to be one
+    // the program expresses, which the batch loop above never asked about
+    // because it never saw it.
     for (const auto &[solverPath, tap] : E._solverArrayTaps) {
-        if (!batched.count(solverPath)) {
-            say("solver publishes guides but is in no batch", solverPath);
+        if (batched.count(solverPath)) {
+            continue;
+        }
+        const UsdPrim prim = E._stage->GetPrimAtPath(solverPath);
+        const TfToken type = prim ? prim.GetTypeName() : TfToken();
+        if (!_IsBakedSolverType(type)) {
+            say("solver type not baked (" + type.GetString() + ")",
+                solverPath);
         }
     }
 
@@ -1203,6 +1215,56 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
         walk.push_back(std::move(entry));
     }
+    // The aggregate solvers no batch runs, in DEPENDENCY order. A guide-only
+    // RigExecBlendPointFrames reads another solver's aggregate, so the
+    // reader has to be baked -- and later, run -- second; a dependency that
+    // is itself batched is satisfied by the walk and drops out of the
+    // ordering. The edges are the evaluator's own (_solverDependencies),
+    // because re-deriving them here would be a second expression of the rule
+    // that decides the batch levels.
+    {
+        std::set<SdfPath> batched;
+        for (const auto &batch : E._solverBatches) {
+            for (const auto &[solverPath, tap] : batch.solvers) {
+                batched.insert(solverPath);
+            }
+        }
+        std::set<SdfPath> pending;
+        for (const auto &[solverPath, tap] : E._solverArrayTaps) {
+            if (!batched.count(solverPath)) {
+                pending.insert(solverPath);
+            }
+        }
+        while (!pending.empty()) {
+            bool progressed = false;
+            for (auto it = pending.begin(); it != pending.end();) {
+                const auto edges = E._solverDependencies.find(*it);
+                bool ready = true;
+                if (edges != E._solverDependencies.end()) {
+                    for (const SdfPath &dependency : edges->second) {
+                        ready = ready && !pending.count(dependency);
+                    }
+                }
+                if (!ready) {
+                    ++it;
+                    continue;
+                }
+                ctx.guideOnlySolvers.push_back(*it);
+                it = pending.erase(it);
+                progressed = true;
+            }
+            if (!progressed) {
+                // A cycle among unbatched solvers. The compile's own Kahn
+                // pass would have refused to schedule one, so this cannot
+                // happen; taking the rest in path order rather than looping
+                // for ever is what an assertion would cost anyway.
+                for (const SdfPath &solverPath : pending) {
+                    ctx.guideOnlySolvers.push_back(solverPath);
+                }
+                pending.clear();
+            }
+        }
+    }
     RigExecBakedBuildWalk(&ctx, walk);
 
     // ---- publication ---------------------------------------------------------
@@ -1217,6 +1279,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     for (const auto &[solverPath, tap] : E._solverArrayTaps) {
         const auto it = B.solverIndex.find(solverPath);
         if (it == B.solverIndex.end()) {
+            // An assertion now rather than a feature: the walk bakes every
+            // batched solver and the guide pass above bakes the rest of
+            // _solverArrayTaps, so the two together cover this map exactly.
             refuse("solver publishes guides but was not baked", solverPath);
             continue;
         }

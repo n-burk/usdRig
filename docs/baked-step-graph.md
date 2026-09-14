@@ -635,6 +635,12 @@ computation of §7.
      `ok` flag into per-step scratch; `CommitApply(p)` ANDs the flags, emits the diagnostic for the
      LOWEST-indexed failing descendant (today's loop returns at the first failure in `propagate`
      order), and copies staged frames into `PoseFin`/`PoseBase`. Atomicity and diagnostic preserved.
+   * After the whole walk, one `Solve(s)` for each aggregate solver NO batch runs, in the
+     dependency order Build resolved over the evaluator's `_solverDependencies`. The dynamic path
+     answers these from a second exec request whose per-provider override is the FINAL frame, so
+     these read the LAST version of everything; they write only `Aggregate(s)` and bump no counter.
+     Not gated on the guide toggle, which can move without the epoch moving: the epilogue consults
+     it where the dynamic path does.
 3. `ProviderMatrix(i)` for every slot some later step or the epilogue reads a matrix of, computing
    exactly the set today's lazy `finalMatrixOf`/`baseMatrixOf` compute (final for published joints
    and final-phase influences, base for base-phase influences; both when both are used) [P34].
