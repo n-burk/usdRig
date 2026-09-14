@@ -406,6 +406,8 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                        // that none of them needs a value the pose walk has
                        // not already produced.
                        r.op == RigExecRevisionOp::BlendShape ||
+                       r.op == RigExecRevisionOp::EmitGuidePoints ||
+                       r.op == RigExecRevisionOp::Ribbon ||
                        r.op == RigExecRevisionOp::VolumeCorrect ||
                        r.op == RigExecRevisionOp::Smooth ||
                        r.op == RigExecRevisionOp::Lattice ||
@@ -437,8 +439,15 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             !r.binding.curvenet.IsEmpty()) {
             say("curvenet on mover", r.moverPath);
         }
-        if (r.driverFramesTap >= 0) {
-            say("driver frames on mover", r.moverPath);
+        // The frames the walk hands a curve mover are the aggregate a
+        // BATCHED solver publishes -- the dynamic path taps the solver's
+        // computePointFrameArray and then overrides the tap with the walk's
+        // own solve, so the program's aggregate table is the same number.
+        // A solver in no batch has no aggregate for the program to point at,
+        // and one whose type the bake declines has already said so above.
+        if (!r.binding.driverFrames.IsEmpty() &&
+            !batched.count(r.binding.driverFrames)) {
+            say("driver frames solver is in no batch", r.binding.driverFrames);
         }
         if (r.op == RigExecRevisionOp::Skin) {
             const UsdPrim prim = E._stage->GetPrimAtPath(r.moverPath);

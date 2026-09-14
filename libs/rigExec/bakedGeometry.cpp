@@ -202,6 +202,20 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                        r.binding.transform);
             }
         }
+        // The solver whose aggregate supplies values.driverFrames, resolved
+        // once here: the walk's solver table is built before the geometry
+        // half, so the per-revision tap the dynamic path reads becomes an
+        // index into it.
+        if (!r.binding.driverFrames.IsEmpty()) {
+            B.prims.insert(r.binding.driverFrames);
+            const auto solver = B.solverIndex.find(r.binding.driverFrames);
+            if (solver == B.solverIndex.end()) {
+                refuse("driver frames solver was not baked",
+                       r.binding.driverFrames);
+            } else {
+                out.driverFramesSolver = solver->second;
+            }
+        }
         for (const SdfPath &influence : r.binding.influences) {
             const int slot = slotOf(influence);
             if (slot < 0) refuse("skin influence is not a provider", influence);
@@ -625,6 +639,11 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
                 assemble.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
+                if (revision.driverFramesSolver >= 0) {
+                    assemble.reads.push_back(
+                        RigExecBakedOne(RigExecBakedSlotDomain::Aggregate,
+                                        revision.driverFramesSolver));
+                }
                 if (revision.readsSnapshots) {
                     assemble.reads.push_back(RigExecBakedRange(
                         RigExecBakedSlotDomain::Snapshots, 0,
@@ -1142,6 +1161,16 @@ AssembleRevision(RigExecBakedProgramImpl &B,
         values.influenceTransforms = &table;
     }
     values.basePoints.assign(basePoints, basePoints + basePointCount);
+    // The driver solver's aggregate, which is what the dynamic path's
+    // per-revision tap resolves to: exec computes one and the pose walk then
+    // OVERRIDES the tap with its own solve, so the program's table -- the
+    // same solve, by the same kernel -- is the authoritative value on both
+    // paths. Declared as a read of the Aggregate slot, which is the edge
+    // from the solver's Solve step to this revision.
+    if (revision->driverFramesSolver >= 0) {
+        values.driverFrames =
+            &B.aggregates[size_t(revision->driverFramesSolver)];
+    }
     // The blend channels. Gathered here rather than inside the assembler
     // because the dynamic walk gathers them here too, and the ORDER is the
     // whole contract: channels in `binding.blendInputs` order, which compile
