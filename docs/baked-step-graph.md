@@ -510,6 +510,25 @@ re-fitted whenever the shape of a step changes. Calibration is opt-in, runs the 
 whatever the mode asks for, and times each step into that step's own accumulator; `Build` measures
 nothing, so the same program produces the same schedule on the same machine however busy it is.
 
+Three rows could not be fitted on the biped because no rig that baked had the step. Phase 3 made
+those rigs bake, so they are now measured -- the median of five calibration runs (40 frames each)
+of the one rig that exercises each, fitted through the origin because one or five samples of one
+size cannot separate the fixed term from the per-unit one:
+
+| row | rig | steps | was | is | spread over five runs |
+|---|---|---|---|---|---|
+| `SnapshotFinals` | `13_ReadPhases` | 1 | `{1.0, 0.2}` | `{0, 0.0935}` | 0.0899 .. 0.0959 (a sixth run gave 0.1909 and was dropped as the load spike it was) |
+| `VolumePlacements` | `11_VolumeWeights` | 1 | `{0.5, 0.01}` | `{0, 0.1623}` | 0.1587 .. 0.1675 |
+| `WeightPacket` | `11_VolumeWeights` | 5 | `{0, 0.05}` | `{0, 0.0772}` | 0.0742 .. 0.0779 |
+
+So the guesses were wrong by -53%, +16x and +54% respectively, in the direction that matters least
+-- a cost row can only pack a bin badly, never change an answer -- and all three sizes are small (a
+handful of providers, one volume, a few packet elements), so the per-unit terms are honest at that
+scale and extrapolate on trust. `WeightPacket` is the only one of the three with enough steps for
+the fit to mean anything; the other two are one step apiece and should be re-fitted the moment a
+rig with several lands. No other rig in `examples/` produces a sample for any of them -- the biped,
+the spider and every 0x/1x rig print `0 sample(s)` for all three.
+
 Three things the parallel executor and the cone found that a serial full run could not, recorded
 so they are not rediscovered. A `RevisionChunk` reads the chain's running value BEFORE its
 revision, which is two things: the earlier revisions' buffers, and the `currentSource` indirection

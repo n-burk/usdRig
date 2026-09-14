@@ -195,9 +195,9 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0324, 0.016869},   // PropagateChunk    4
     {0.0000, 0.004088},   // CommitApply       2
     {0.0000, 0.051952},   // ProviderMatrix  252
-    {1.0000, 0.200000},   // SnapshotFinals    0 -- unmeasured, see below
-    {0.5000, 0.010000},   // VolumePlacements  0 -- unmeasured, see below
-    {0.0000, 0.050000},   // WeightPacket      0 -- unmeasured, see below
+    {0.0000, 0.093500},   // SnapshotFinals    1 -- 13_ReadPhases
+    {0.0000, 0.162300},   // VolumePlacements  1 -- 11_VolumeWeights
+    {0.0000, 0.077173},   // WeightPacket      5 -- 11_VolumeWeights
     {0.0000, 0.003781},   // InfluenceFold     1
     {0.0000, 0.000487},   // RevisionStatic    1
     {11.3239, 0.000714},  // RevisionChunk     7 -- see below
@@ -208,12 +208,23 @@ constexpr StepCostConstants kStepCosts[] = {
 static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
               "rigExec: every baked step kind needs a cost row");
 
-// Two rows are worth reading twice before they are trusted:
+// Four rows are worth reading twice before they are trusted:
 //
-//  * SnapshotFinals does not exist on any rig that bakes today, so nothing
-//    measured it and the row is the guess it started as. It is a per-provider
-//    matrix pass, so it should land near ProviderMatrix's per-unit cost when a
-//    phased rig finally fits it.
+//  * SnapshotFinals, VolumePlacements and WeightPacket were guesses until
+//    Phase 3 made the rigs that exercise them bake; each is now the MEDIAN of
+//    five calibration runs of the one rig that has it, and each carries a
+//    caveat the next fitter should know. They are fitted through the ORIGIN
+//    because the sample count could not separate the two terms (see FitKind):
+//    SnapshotFinals 0.0899..0.0959 over one step of 13_ReadPhases (a sixth
+//    run gave 0.1909 and was dropped as the load spike it was);
+//    VolumePlacements 0.1587..0.1675 over one step of 11_VolumeWeights;
+//    WeightPacket 0.0742..0.0779 over five steps of the same rig, which is
+//    the only one of the three with enough steps for the fit to mean
+//    anything. All three sizes are small -- a handful of providers, one
+//    volume, a few packet elements -- so the per-unit terms are honest at
+//    that scale and extrapolate on trust. The guesses they replace were
+//    {1.0, 0.2}, {0.5, 0.01} and {0, 0.05}: SnapshotFinals was over-costed by
+//    half, VolumePlacements under-costed by sixteen, WeightPacket by half.
 //  * ChainStatus is sized by the chain's vertices, and its row was
 //    re-fitted after that correction: the median per-unit of four
 //    calibration runs of the biped (0.000318 .. 0.000351), which
