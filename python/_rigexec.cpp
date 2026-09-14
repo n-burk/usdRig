@@ -537,6 +537,21 @@ _ModeName(rigExec::RigExecEvaluationMode mode)
     return "dynamic";
 }
 
+// Who chose the mode. Spelled as the thing a reader would go and look at:
+// the attribute by its property name, the variable by its own name.
+const char *
+_ModeSourceName(rigExec::RigExecEvaluationModeSource source)
+{
+    switch (source) {
+    case rigExec::RigExecEvaluationModeSource::Explicit: return "explicit";
+    case rigExec::RigExecEvaluationModeSource::Environment:
+        return "environment";
+    case rigExec::RigExecEvaluationModeSource::Attribute: return "attribute";
+    case rigExec::RigExecEvaluationModeSource::Default: break;
+    }
+    return "default";
+}
+
 rigExec::RigExecEvaluationMode
 _ParseMode(const std::string &name)
 {
@@ -653,7 +668,19 @@ PYBIND11_MODULE(_rigexec, m) {
             "epoch when the rig allows it, dynamic otherwise), or 'parity'\n"
             "(both, compared with exact equality; see\n"
             "Pose.baked_parity_mismatches). Baked is a request: setting it\n"
-            "can never change an answer, only how fast it arrives.")
+            "can never change an answer, only how fast it arrives.\n"
+            "Setting it also takes the decision away from the rig's own\n"
+            "rigExec:baked for good; see evaluation_mode_source.")
+        .def_property_readonly("evaluation_mode_source",
+            [](_Rig &r) {
+                return _ModeSourceName(r.evaluator->GetEvaluationModeSource());
+            },
+            "Who chose evaluation_mode: 'explicit' (this property was set),\n"
+            "'environment' (a non-empty RIGEXEC_EVALUATION_MODE),\n"
+            "'attribute' (the rig's own uniform bool rigExec:baked) or\n"
+            "'default' (nobody asked). That is also the precedence, highest\n"
+            "first -- an interactive host leaves the mode alone so a rig\n"
+            "authored rigExec:baked = true opens through the program.")
         .def("is_bakeable", [](const _Rig &r) {
             return r.evaluator->IsBakeable(nullptr);
         }, "Whether the compiled epoch can be expressed as a baked program.")

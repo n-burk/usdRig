@@ -10,6 +10,15 @@ def "Biped"
     def RigExecRoot "Rig"
     {
         custom uniform int rigExec:restFrameVersion = 2
+        # This asset asks to be evaluated through the BAKED PROGRAM: the
+        # flattened, epoch-constant form of the rig, which answers a frame
+        # without going back through OpenExec and the pose walk. It is a
+        # request and not an assertion -- every value published is the same
+        # either way, and a generation the program cannot answer falls back
+        # to the dynamic path and says so -- so what it changes is how fast
+        # the biped poses, not how it poses. An explicit --mode, or
+        # RIGEXEC_EVALUATION_MODE in the environment, outranks it.
+        uniform bool rigExec:baked = true
 
         def Scope "Joints"
         {

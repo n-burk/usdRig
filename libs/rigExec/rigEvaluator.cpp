@@ -1263,14 +1263,24 @@ _CollectPoseInputInfo(const UsdPrim &prim)
 
 namespace {
 
-// The evaluation mode every new evaluator starts in.
+// What RIGEXEC_EVALUATION_MODE asked this process for, if anything.
 //
 // Not a code path: it selects the initial value of a setting callers can set
 // themselves, so nothing here behaves differently for having been reached
 // through the environment. It exists so an EXISTING suite can be re-run under
 // the baked mode without every test in it learning about the mode -- which is
 // the only way to check the program against the several hundred rigs those
-// suites already build. Unset, or anything unrecognised, means Dynamic.
+// suites already build. Unset means nothing was asked and the rig's own
+// rigExec:baked gets to answer instead.
+//
+// `authored` is the half the mode alone cannot carry, and it is about
+// PRECEDENCE rather than about the value: an unset variable and
+// RIGEXEC_EVALUATION_MODE=dynamic both mean Dynamic, and only the second is
+// an instruction -- a suite that sets it is saying "every stage this process
+// opens runs dynamically", including one whose attribute asks for the
+// program. An unrecognised value counts as authored for the same reason: a
+// typo must not silently hand the decision back to the stage, so it warns,
+// means dynamic, and still outranks the attribute.
 //
 // Read ONCE per process, at the construction of the first evaluator, and
 // fixed from then on: the function-local static below is initialised on its
@@ -1278,26 +1288,40 @@ namespace {
 // that -- with setenv, or between two tests in one binary -- changes nothing;
 // SetEvaluationMode is the only way to move an evaluator afterwards, and it
 // moves that evaluator alone.
-RigExecEvaluationMode
-_DefaultEvaluationMode()
+struct _EnvironmentMode {
+    bool authored = false;
+    RigExecEvaluationMode mode = RigExecEvaluationMode::Dynamic;
+};
+
+const _EnvironmentMode &
+_EnvironmentEvaluationMode()
 {
-    static const RigExecEvaluationMode mode = [] {
-        const std::string requested =
-            TfGetenv("RIGEXEC_EVALUATION_MODE", "");
-        if (requested == "baked") {
-            return RigExecEvaluationMode::Baked;
-        }
-        if (requested == "parity") {
-            return RigExecEvaluationMode::BakedWithParityCheck;
-        }
-        if (!requested.empty() && requested != "dynamic") {
+    static const _EnvironmentMode requested = [] {
+        _EnvironmentMode result;
+        const std::string value = TfGetenv("RIGEXEC_EVALUATION_MODE", "");
+        result.authored = !value.empty();
+        if (value == "baked") {
+            result.mode = RigExecEvaluationMode::Baked;
+        } else if (value == "parity") {
+            result.mode = RigExecEvaluationMode::BakedWithParityCheck;
+        } else if (result.authored && value != "dynamic") {
             TF_WARN("rigExec: RIGEXEC_EVALUATION_MODE=%s is not one of "
                     "dynamic, baked, parity; using dynamic",
-                    requested.c_str());
+                    value.c_str());
         }
-        return RigExecEvaluationMode::Dynamic;
+        return result;
     }();
-    return mode;
+    return requested;
+}
+
+// The attribute a rig asks for the baked program with (schema.usda,
+// RigExecRoot). Uniform and epoch-level: it decides which path answers the
+// rig, not what any frame of it is.
+const TfToken &
+_BakedAttributeName()
+{
+    static const TfToken name("rigExec:baked");
+    return name;
 }
 
 // Whether a fallback to the dynamic path is a FAILURE.
@@ -1389,7 +1413,10 @@ RigExecRigEvaluator::RigExecRigEvaluator(
     const UsdStageRefPtr &stage, const SdfPath &rigPath)
     : _stage(stage)
     , _rigPath(rigPath)
-    , _evaluationMode(_DefaultEvaluationMode())
+    , _evaluationMode(_EnvironmentEvaluationMode().mode)
+    , _evaluationModeSource(_EnvironmentEvaluationMode().authored
+                                ? RigExecEvaluationModeSource::Environment
+                                : RigExecEvaluationModeSource::Default)
 {
     // The static-input cache lives here and is consulted through the
     // resolved-input lookup every read already goes through.
@@ -1471,6 +1498,20 @@ RigExecRigEvaluator::_OnObjectsChanged(
             // sources by value from then on.
             _bakedProgram->BumpProgramStamp();
         }
+    }
+    // rigExec:baked is a VALUE on the rig root, so the epoch digest is blind
+    // to it and _SettleEpoch will not recompile for it: this is the only
+    // place a flip can be seen. Nothing is BUILT here -- never evaluate in a
+    // notice callback -- and nothing needs to be. Dropping the program is
+    // the whole of true -> false, and false -> true is built by the lazy
+    // build in Evaluate, which is the same path SetEvaluationMode leaves
+    // behind when it is asked on an epoch that has not settled.
+    if (_NoticeNamesTheBakedAttribute(notice) &&
+        _RefreshAttributeEvaluationMode() &&
+        _evaluationMode == RigExecEvaluationMode::Dynamic) {
+        _bakedProgram.reset();
+        _bakedProgramPublished = false;
+        _bakedProgramStale = false;
     }
     // The seed, connected, and guide requests read authored values straight
     // off the stage; an edit that leaves the override tuple unchanged (a
@@ -5823,6 +5864,14 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // charge one interactive frame for the whole bake.
     // An epoch the program cannot express is not a compile error: the rig
     // evaluates dynamically and IsBakeable says why.
+    //
+    // The rig's own request is re-read first, and here rather than at the
+    // head of Compile: rigExec:baked is composed, so a reference swap or a
+    // muted layer can change the answer with nothing else on the stage
+    // moving, and the rebuild below has to be told which path this new epoch
+    // is for. It is ignored where a tool or the environment already chose --
+    // that is the whole of the precedence rule.
+    _RefreshAttributeEvaluationMode();
     _RebuildBakedProgram(std::move(retiringBakedProgram));
     return true;
 }
@@ -8645,14 +8694,18 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         // a rig that bakes perfectly still runs here and has nothing to
         // report. The other two ways in do: either no program was built, or
         // one was and could not answer the question the drag asks.
-        if (_BakeRequired() && !cpuParityMode) {
-            _ReportBakeRequired(
+        if (!cpuParityMode && _FallbackIsWorthAnnouncing()) {
+            // One reason, two audiences: the harness reads the first line
+            // and an artist reads the second, and a generation that fell
+            // back for one reason must not be able to name two.
+            const std::string why =
                 overridesPlaceable
                     ? (_bakeRefusalReasons.empty()
                            ? std::string("no baked program")
                            : _bakeRefusalReasons.front())
-                    : std::string("interactive overrides are not placeable"),
-                &dynamic);
+                    : std::string("interactive overrides are not placeable");
+            _ReportBakeRequired(why, &dynamic);
+            _ReportAttributeBakeFallback(why, &dynamic);
         }
         return dynamic;
     }
@@ -8664,13 +8717,16 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         // caches no longer describe a completed frame. Drop it rather than
         // reuse it, and answer from the path that cannot decline.
         _bakedProgram.reset();
+        _bakedProgramPublished = false;
         RigExecRigPose dynamic = _EvaluateDynamic(time, std::move(settled));
-        if (_BakeRequired()) {
+        if (_FallbackIsWorthAnnouncing()) {
             _ReportBakeRequired("program run failed", &dynamic);
+            _ReportAttributeBakeFallback("program run failed", &dynamic);
         }
         return dynamic;
     }
     ++_bakedGenerations;
+    _bakedProgramPublished = true;
     if (_evaluationMode == RigExecEvaluationMode::Baked) {
         return baked;
     }
@@ -8718,8 +8774,126 @@ RigExecRigEvaluator::_ReportBakeRequired(const std::string &detail,
 }
 
 void
+RigExecRigEvaluator::_ReportAttributeBakeFallback(const std::string &detail,
+                                                  RigExecRigPose *pose) const
+{
+    if (_evaluationModeSource != RigExecEvaluationModeSource::Attribute ||
+        _evaluationMode == RigExecEvaluationMode::Dynamic) {
+        return;
+    }
+    // Deliberately NOT the prefix above, and deliberately uncounted. That
+    // prefix is a test harness's failure signal and bakedParityMismatches is
+    // what it counts; an attribute somebody authored on the asset is a
+    // REQUEST, and a rig that asks for the program and is answered by the
+    // dynamic path has been answered CORRECTLY, only slowly. Turning that
+    // into a suite failure would make authoring the attribute the dangerous
+    // choice, which is the opposite of what it is for.
+    //
+    // No TF_WARN either: the fallback is a property of the epoch, so the
+    // line would repeat on every frame of a session for as long as the
+    // epoch stands. It goes on the pose, where a consumer reads it once per
+    // generation and a tool prints it beside the rig's other diagnostics.
+    pose->diagnostics.push_back(
+        "rigExec:baked is set on " + _rigPath.GetString() +
+        " but this generation was evaluated dynamically: " + detail);
+}
+
+bool
+RigExecRigEvaluator::_FallbackIsWorthAnnouncing() const
+{
+    // A mode nobody asked to be baked cannot fall back to anything: the
+    // dynamic path is the answer, not a substitute for one.
+    if (_evaluationMode == RigExecEvaluationMode::Dynamic) {
+        return false;
+    }
+    return _BakeRequired() ||
+        _evaluationModeSource == RigExecEvaluationModeSource::Attribute;
+}
+
+bool
+RigExecRigEvaluator::_WantsBakeRefusalReasons() const
+{
+    return _BakeRequired() ||
+        _evaluationModeSource == RigExecEvaluationModeSource::Attribute;
+}
+
+bool
+RigExecRigEvaluator::_RefreshAttributeEvaluationMode()
+{
+    // The attribute is the weakest of the three requests, so this is a
+    // no-op the moment a stronger one has been made: SetEvaluationMode is a
+    // caller that chose knowing more than the asset does, and
+    // RIGEXEC_EVALUATION_MODE is a whole session's answer that the parity
+    // suites depend on being able to force onto any stage they open.
+    if (_evaluationModeSource == RigExecEvaluationModeSource::Explicit ||
+        _evaluationModeSource == RigExecEvaluationModeSource::Environment) {
+        return false;
+    }
+    bool authored = false;
+    bool baked = false;
+    if (_stage) {
+        if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
+            const UsdAttribute attribute =
+                rig.GetAttribute(_BakedAttributeName());
+            // AUTHORED, not merely readable: the schema answers false on
+            // every RigExecRoot ever written, so a value alone cannot say
+            // whether anybody asked. An authored false is still somebody
+            // asking -- it is how an asset says "not this one" over a
+            // reference that says otherwise -- so it keeps the source and
+            // only the MODE goes back to Dynamic.
+            if (attribute && attribute.HasAuthoredValue()) {
+                authored = attribute.Get(&baked);
+            }
+        }
+    }
+    _evaluationModeSource = authored
+        ? RigExecEvaluationModeSource::Attribute
+        : RigExecEvaluationModeSource::Default;
+    const RigExecEvaluationMode mode = authored && baked
+        ? RigExecEvaluationMode::Baked
+        : RigExecEvaluationMode::Dynamic;
+    if (mode == _evaluationMode) {
+        return false;
+    }
+    _evaluationMode = mode;
+    // Same reasoning SetEvaluationMode states: the question is being asked
+    // again, and a refusal remembered from the last answer says nothing
+    // about this one.
+    _bakeRefused = false;
+    _bakeRefusalReasons.clear();
+    return true;
+}
+
+bool
+RigExecRigEvaluator::_NoticeNamesTheBakedAttribute(
+    const UsdNotice::ObjectsChanged &notice) const
+{
+    const SdfPath baked = _rigPath.AppendProperty(_BakedAttributeName());
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        if (path == baked) {
+            return true;
+        }
+    }
+    // A resync names a prim and everything under it went with it, which is
+    // how the attribute arrives on a reference arc or leaves with a muted
+    // layer -- neither of which reports a changed-info path for it.
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        if (baked.HasPrefix(path)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void
 RigExecRigEvaluator::SetEvaluationMode(RigExecEvaluationMode mode)
 {
+    // Before the early return, because what this call settles is WHO
+    // decides and not only what was decided: a tool that asks for the mode
+    // it is already in has still taken the decision away from the rig's
+    // rigExec:baked, and a later notice on that attribute must not take it
+    // back.
+    _evaluationModeSource = RigExecEvaluationModeSource::Explicit;
     if (mode == _evaluationMode) {
         return;
     }
@@ -8737,6 +8911,7 @@ RigExecRigEvaluator::SetEvaluationMode(RigExecEvaluationMode mode)
         // Dynamic, or an epoch that has not settled. Either way this
         // evaluator has no program until Evaluate builds one.
         _bakedProgram.reset();
+        _bakedProgramPublished = false;
     }
     // A dirty epoch is not a refusal: Evaluate builds the program once the
     // epoch has settled, which is where it can know what it would be baking.
@@ -8746,6 +8921,11 @@ void
 RigExecRigEvaluator::_RebuildBakedProgram(
     std::unique_ptr<RigExecBakedProgram> outgoing)
 {
+    // Read before anything can replace the program it describes, and cleared
+    // here because from this line on no program of this evaluator has
+    // published anything.
+    const bool outgoingPublished = _bakedProgramPublished;
+    _bakedProgramPublished = false;
     if (_evaluationMode == RigExecEvaluationMode::Dynamic) {
         _bakedProgram.reset();
         return;
@@ -8755,13 +8935,16 @@ RigExecRigEvaluator::_RebuildBakedProgram(
     // A refusal is only reportable if somebody collected it: Build is the
     // one thing that knows why, and it fills a reasons vector only when it
     // is given one. Production passes nullptr and pays nothing to build
-    // strings no caller reads -- the dispatch needs the yes/no alone.
+    // strings no caller reads -- the dispatch needs the yes/no alone. The
+    // two callers that do read them are RIGEXEC_BAKE_REQUIRED and a rig that
+    // asked for the program through its own attribute, which is owed the
+    // reason it did not get one; see _WantsBakeRefusalReasons.
     std::vector<std::string> reasons;
     _bakedProgram = RigExecBakedProgram::Build(
-        this, _BakeRequired() ? &reasons : nullptr);
+        this, _WantsBakeRefusalReasons() ? &reasons : nullptr);
     if (_bakedProgram) {
         ++_bakedProgramBuilds;
-        if (outgoing) {
+        if (outgoing && outgoingPublished) {
             // The replacement inherits the geometry nodes that survive,
             // matched the way the dynamic walk matches its VdfNetwork nodes.
             // Without it a rebuilt program re-runs every per-point kernel and
@@ -8769,6 +8952,16 @@ RigExecRigEvaluator::_RebuildBakedProgram(
             // graph diagnostic, for nodes nothing rebuilt -- while the
             // dynamic path, whose graphs stood through the same edit, reports
             // none of it.
+            //
+            // Only from a program that PUBLISHED a generation, which is what
+            // makes the sentence above true: the whole of what an unrun
+            // program carries here is `created = false` on nodes whose
+            // creation no consumer has been told about, so adopting it makes
+            // the replacement under-report work the dynamic path -- whose
+            // graphs are still cold -- goes on to report. The case is reached
+            // by building at Compile and changing the mode afterwards, which
+            // is what a rig carrying rigExec:baked does whenever a tool then
+            // asks for the parity check.
             _bakedProgram->AdoptGeometryStateFrom(*outgoing);
         }
     }

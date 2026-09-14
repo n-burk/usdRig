@@ -100,6 +100,11 @@ Three consequences worth knowing before touching it:
 | `RIGEXEC_BAKED_SCHEDULE_CALIBRATE` | off | fit and print a replacement cost table |
 | `RIGEXEC_BAKED_STEP_TIMING` | off | sum the three phases and every step kind over N frames (8 when set to 1) and print the table |
 
+The two that decide WHETHER the program runs at all -- `RIGEXEC_EVALUATION_MODE`
+and `RIGEXEC_BAKE_REQUIRED` -- and the rig's own `uniform bool rigExec:baked`,
+which is how an ASSET asks for the program, are in *The knobs* under *State at
+the end of the work*, with the precedence between the three.
+
 ### The schedule, on the biped
 
 ```
@@ -842,13 +847,37 @@ of 512 in `moverGraph.cpp`/`parallel.h`, not in the step region.
 
 **The knobs**, in three groups. The scheduler's own are in *The environment* above
 (`RIGEXEC_BAKED_SCHEDULE`, `_GRAIN_US`, `_CHUNK_VERTS`, `_MAX_CHUNKS`, `_CHUNK_ALWAYS`,
-`_VERIFY_CONES`, `_SCHEDULE_REPORT`, `_SCHEDULE_CALIBRATE`, `_STEP_TIMING`). Two more decide
-WHICH path runs and whether a fallback is a failure:
+`_VERIFY_CONES`, `_SCHEDULE_REPORT`, `_SCHEDULE_CALIBRATE`, `_STEP_TIMING`). Three more decide
+WHICH path runs and whether a fallback is a failure -- and one of the three is not a
+variable at all but an attribute on the rig:
 
 | variable | default | what it does |
 |---|---|---|
-| `RIGEXEC_EVALUATION_MODE` | `dynamic` | `dynamic`, `baked`, or `parity` (both paths in one generation, compared exactly). An explicit `SetEvaluationMode` outranks it. |
+| `RIGEXEC_EVALUATION_MODE` | unset | `dynamic`, `baked`, or `parity` (both paths in one generation, compared exactly). Read once per process. Any non-empty value is an instruction and outranks a rig's `rigExec:baked` -- `=dynamic` included, which is how a suite forces the dynamic path onto a stage that asks for the program. An explicit `SetEvaluationMode` outranks it in turn. |
+| `rigExec:baked` | `false` | NOT a variable: a `uniform bool` on the `RigExecRoot`, so an ASSET can ask to be evaluated through the program. True means Baked, absent or false means Dynamic. Read at every `Compile` and re-read from the notice handler, so flipping it under a running evaluator drops or builds the program on the fly. It is the weakest of the three -- see the precedence below. |
 | `RIGEXEC_BAKE_REQUIRED` | off | a generation that fell back to the dynamic path reports `baked parity mismatch: bake required, evaluated dynamically: <reason>`. Changes no value and no dispatch -- it is how a suite asks "did the PROGRAM answer this?". Read once, so setting it mid-process does nothing. |
+
+**Who decides which path runs**, highest first, and `GetEvaluationModeSource()`
+answers which one did:
+
+1. `SetEvaluationMode` -- a caller that chose deliberately (`rigExecPose --mode`,
+   the suites). It owns the mode from then on: no later notice, recompile or
+   attribute edit takes it back, and asking for the mode already in force still
+   takes ownership, because what the call settles is who decides.
+2. A non-empty `RIGEXEC_EVALUATION_MODE` -- one session's answer for every stage
+   it opens, which is what the parity suites are built on.
+3. The rig's `rigExec:baked`.
+4. Otherwise Dynamic.
+
+A rig that asked through its attribute and was answered dynamically anyway --
+not bakeable, the program's `Run` declined, an override the program cannot
+place -- publishes ONE plain diagnostic per generation naming the first reason:
+`rigExec:baked is set on <rig> but this generation was evaluated dynamically:
+<reason>`. Deliberately not the `baked parity mismatch` prefix and deliberately
+not counted on `bakedParityMismatches`: that prefix is a harness's failure
+signal, and an attribute an artist authored is a REQUEST, which a correct-but-
+slow answer has not violated. `RIGEXEC_BAKE_REQUIRED` is unchanged and is still
+the way a suite turns the same fallback into a failure.
 
 And three that belong to the evaluator rather than to the bake: `RIGEXEC_ENABLE_PARALLEL_EVAL`
 (TfEnvSetting, default true; forces the serial schedule when off), `RIGEXEC_ENABLE_SIMD` (default

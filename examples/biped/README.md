@@ -62,6 +62,20 @@ starting with:
 **RigExec → Viewport Tools** gives move/rotate/scale gizmos that write
 avars directly, if you would rather drag than type.
 
+## Why it is fast
+
+`Biped.usda` authors `uniform bool rigExec:baked = true` on its
+`RigExecRoot` (and so does `Biped_layered_center.usda`, which is where the
+layered variants define theirs), so opening it — here, or through
+`rigExecPose` with no `--mode` — evaluates it through the BAKED PROGRAM: the
+compiled epoch as a graph of steps over dense slots, with no exec round trip
+per frame. It is a request and not an assertion. Every value published is the
+same either way — that is proven exactly, frame by frame, by the parity
+entries — so what the attribute changes is how fast the character poses, not
+how it poses, and a generation the program cannot answer falls back to the
+dynamic path and says so on the pose. Delete the line, or pass an explicit
+`--mode dynamic`, to drive it the other way.
+
 ## Rebuilding it
 
 These files are generated, and checked in so the character can just be

@@ -65,6 +65,13 @@ class RigExecRoot "RigExecRoot" (
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
+    uniform bool rigExec:baked = 0 (
+        customData = {
+            string userDocBrief = """Asks the evaluator to answer this rig through its BAKED
+        PROGRAM -- the flattened, epoch-constant form of the rig -- instead
+        of through OpenExec and the in-memory pose walk."""
+        }
+    )
     uniform token rigExec:partition = ""
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]

@@ -18,6 +18,14 @@
 // the stage has no time range). Exit status is non-zero when the rig fails to
 // compile or an evaluation comes back invalid, so it can gate a build.
 //
+// --mode is a request, and giving it takes the decision away from everything
+// else: without it the tool leaves the evaluator to decide for itself, which
+// is RIGEXEC_EVALUATION_MODE if the session set one and the stage's own
+// `uniform bool rigExec:baked` otherwise. The compile line reports the mode
+// that resulted and who chose it, so a run that expected the program and got
+// the dynamic path says so in its first three lines rather than in an
+// accounting total at the end.
+//
 // --guides re-enables the observational solver-guide request, which is off
 // by default here. pose.solverFrames is one of the domains the parity check
 // compares, and with guides off both paths fill it with nothing -- so a
@@ -503,6 +511,34 @@ ParseFrames(const std::string &text)
     return frames;
 }
 
+// The two halves of "which path is answering this rig", for the compile
+// line. Spelled the way --mode spells them, so a reader can paste the
+// reported mode back onto the command line and pin what they just saw.
+const char *
+ModeName(rigExec::RigExecEvaluationMode mode)
+{
+    switch (mode) {
+    case rigExec::RigExecEvaluationMode::Baked: return "baked";
+    case rigExec::RigExecEvaluationMode::BakedWithParityCheck: return "parity";
+    case rigExec::RigExecEvaluationMode::Dynamic: break;
+    }
+    return "dynamic";
+}
+
+const char *
+ModeSourceName(rigExec::RigExecEvaluationModeSource source)
+{
+    switch (source) {
+    case rigExec::RigExecEvaluationModeSource::Explicit: return "--mode";
+    case rigExec::RigExecEvaluationModeSource::Environment:
+        return "RIGEXEC_EVALUATION_MODE";
+    case rigExec::RigExecEvaluationModeSource::Attribute:
+        return "rigExec:baked";
+    case rigExec::RigExecEvaluationModeSource::Default: break;
+    }
+    return "the default";
+}
+
 }  // namespace
 
 int
@@ -523,8 +559,14 @@ main(int argc, char **argv)
     std::string jointsOut;
     std::string poseOut;
     std::string profileOut;
+    // Two facts, not one: which mode --mode named, and whether it was given
+    // at all. An absent --mode is not a request for Dynamic -- it is this
+    // tool declining to make the choice, which is what lets a stage carrying
+    // rigExec:baked be opened through the program by running the tool the
+    // way an author would.
     rigExec::RigExecEvaluationMode mode =
         rigExec::RigExecEvaluationMode::Dynamic;
+    bool modeGiven = false;
     std::vector<UsdTimeCode> frames;
     std::string dragPrim, dragAttr;
     int dragSteps = 0;
@@ -569,6 +611,7 @@ main(int argc, char **argv)
             profileOut = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
             const std::string value = argv[++i];
+            modeGiven = true;
             if (value == "dynamic") {
                 mode = rigExec::RigExecEvaluationMode::Dynamic;
             } else if (value == "baked") {
@@ -633,23 +676,43 @@ main(int argc, char **argv)
     }
     // Before Compile, so the bake happens inside it rather than on the first
     // frame; the mode is a request either way.
-    evaluator.SetEvaluationMode(mode);
+    //
+    // Only when --mode was GIVEN. SetEvaluationMode is the top of the
+    // precedence ladder and setting it unasked would pin every run of this
+    // tool to Dynamic -- which would make the tool the one place a rig's
+    // own rigExec:baked can never be honoured, and the attribute untestable
+    // through it.
+    if (modeGiven) {
+        evaluator.SetEvaluationMode(mode);
+    }
     std::vector<std::string> errors;
     const bool compiled = evaluator.Compile(&errors);
     for (const std::string &error : errors) {
         std::printf("  %s\n", error.c_str());
     }
-    std::printf("  compile: %s (%zu mover applications, digest %zu)\n",
+    // The mode is READ BACK rather than reported from the parsed argument:
+    // Compile is where the rig's own rigExec:baked is consulted, so the
+    // evaluator is the only thing that knows which path this run ended up
+    // on, and printing what was asked for instead would name Dynamic on
+    // every attribute-driven run.
+    std::printf("  compile: %s (%zu mover applications, digest %zu, "
+                "mode %s from %s)\n",
                 compiled ? "ok" : "FAILED",
                 evaluator.GetMoverOrder().size(),
-                evaluator.GetBindingEpochDigest());
+                evaluator.GetBindingEpochDigest(),
+                ModeName(evaluator.GetEvaluationMode()),
+                ModeSourceName(evaluator.GetEvaluationModeSource()));
     if (!compiled) {
         return 1;
     }
+    // Everything below asks the evaluator rather than the command line, for
+    // the reason the compile line does.
+    const rigExec::RigExecEvaluationMode resolvedMode =
+        evaluator.GetEvaluationMode();
     int status = 0;
     // Only in a non-default mode: the reasons are the actionable half of a
     // fallback, and printing them unasked would change every existing run.
-    if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
+    if (resolvedMode != rigExec::RigExecEvaluationMode::Dynamic) {
         std::vector<std::string> reasons;
         if (!evaluator.IsBakeable(&reasons)) {
             std::printf("  not bakeable; evaluating dynamically\n");
@@ -785,7 +848,7 @@ main(int argc, char **argv)
     // The accounting, in every non-dynamic mode. A run that reports a mode
     // it never took is the failure this tool used to print as success, and a
     // human reading the output should see the same fact a ctest asserts.
-    if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
+    if (resolvedMode != rigExec::RigExecEvaluationMode::Dynamic) {
         // frames.size() * repeat, which is frames.size() itself unless
         // --repeat asked for more: the line a reader has always seen.
         const size_t evaluated = frames.size() * size_t(repeat);
@@ -885,7 +948,7 @@ main(int argc, char **argv)
                         dragPrim.c_str(), dragAttr.c_str(), stepUs.size(),
                         median, sorted.empty() ? 0.0 : sorted.front(),
                         sorted.empty() ? 0.0 : sorted.back());
-            if (mode != rigExec::RigExecEvaluationMode::Dynamic) {
+            if (resolvedMode != rigExec::RigExecEvaluationMode::Dynamic) {
                 std::printf("    baked: %zu of %zu drag generation(s)\n",
                             evaluator.GetBakedGenerationCount() -
                                 generationsBefore,

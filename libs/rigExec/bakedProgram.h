@@ -56,6 +56,29 @@ enum class RigExecEvaluationMode {
     BakedWithParityCheck,
 };
 
+/// WHO chose the evaluation mode an evaluator is in.
+///
+/// Three things can ask for a path and they do not carry the same weight, so
+/// the mode alone cannot answer "may I change this?" or "why is this rig
+/// baked?". The answer is the source, and the order below is the precedence,
+/// weakest first: a rig's authored `rigExec:baked` is the asset's own
+/// request, RIGEXEC_EVALUATION_MODE is one session's answer for every stage
+/// it opens (which is what lets a parity suite force a mode onto rigs that
+/// ask for another), and SetEvaluationMode is a caller that chose knowing
+/// what it was doing and is therefore never overridden -- not by a later
+/// notice, not by a recompile.
+enum class RigExecEvaluationModeSource {
+    /// Nobody asked. The mode is Dynamic.
+    Default,
+    /// The rig's `uniform bool rigExec:baked`, re-read at every Compile and
+    /// whenever a notice names it.
+    Attribute,
+    /// A non-empty RIGEXEC_EVALUATION_MODE, read once per process.
+    Environment,
+    /// RigExecRigEvaluator::SetEvaluationMode.
+    Explicit,
+};
+
 /// Appends one diagnostic per exact-equality disagreement between \p baked
 /// and \p reference, counting them on \p out->bakedParityMismatches.
 ///

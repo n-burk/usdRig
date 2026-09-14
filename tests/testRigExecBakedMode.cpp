@@ -97,6 +97,28 @@ BakeRequired()
     return required;
 }
 
+// The REFERENCE half of a comparison says its mode out loud.
+//
+// It used to be enough to leave such an evaluator alone: one nobody set was
+// Dynamic, or whatever RIGEXEC_EVALUATION_MODE asked this whole suite for.
+// examples/biped now authors `uniform bool rigExec:baked = true` on its rig
+// root, and an evaluator nobody sets compiles that stage into the PROGRAM --
+// which would leave every comparison below holding the program against
+// itself, passing, and proving nothing. Stating the harness's own mode is
+// exactly the behaviour these evaluators had before the attribute existed,
+// in both environments, and makes the stage unable to change it: the source
+// becomes Explicit, which outranks the attribute.
+//
+// Only for the evaluators a test uses AS a reference. An evaluator the test
+// is measuring says what it is measuring for itself.
+static void
+MakeItTheReference(RigExecRigEvaluator *rig)
+{
+    rig->SetEvaluationMode(DefaultEvaluationMode());
+    CHECK(rig->GetEvaluationModeSource() ==
+          RigExecEvaluationModeSource::Explicit);
+}
+
 // The prefix RigExecRigEvaluator::_ReportBakeRequired pushes onto a
 // generation that ran dynamically while its mode asked for the program.
 static const char *const kBakeRequiredPrefix =
@@ -161,6 +183,7 @@ TestModeIsExact(const std::string &examplesDir, const char *stageName)
     // warm exec cache into the other.
     RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
     RigExecRigEvaluator bakedRig(bakedStage, rigPath);
+    MakeItTheReference(&dynamicRig);
     bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     CHECK(bakedRig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
 
@@ -325,6 +348,22 @@ TestDynamicModeIsTheDefault(const std::string &examplesDir)
     CHECK(rig.GetEvaluationMode() == DefaultEvaluationMode());
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
+    // Compile is where the STAGE gets its say, and this one has something to
+    // say: the biped authors rigExec:baked. The assertion above is about
+    // what an evaluator starts in, which is a fact about the process; this
+    // is about what the rig asked for, and only the second survives a
+    // compile. Under the parity harness the variable outranks the attribute
+    // and nothing moves, which is the half that keeps the suite exact in
+    // both environments.
+    if (DefaultEvaluationMode() == RigExecEvaluationMode::Dynamic) {
+        CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Baked);
+        CHECK(rig.GetEvaluationModeSource() ==
+              RigExecEvaluationModeSource::Attribute);
+    } else {
+        CHECK(rig.GetEvaluationMode() == DefaultEvaluationMode());
+        CHECK(rig.GetEvaluationModeSource() ==
+              RigExecEvaluationModeSource::Environment);
+    }
     // Switching after a compile builds the program without a recompile, and
     // switching back drops it.
     rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
@@ -412,6 +451,7 @@ TestAnEditAfterTheBakeIsFollowed(const std::string &examplesDir)
               .GetAttribute(avar)
               .Set(authored + 3.0));
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
 
@@ -459,6 +499,7 @@ TestAnInteractiveOverrideAfterTheBakeIsFollowed(const std::string &examplesDir)
     UsdStageRefPtr referenceStage =
         UsdStage::Open(examplesDir + "/biped/Biped.usda");
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
     referenceRig.SetInteractiveOverrides(
         {RigExecValueOverride{control, TfToken(), avar,
@@ -567,6 +608,7 @@ TestEditAfterTheBake(const std::string &examplesDir, const char *stageName,
     UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
     edit(referenceStage, rigPath);
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
 
     bool moved = false;
@@ -668,6 +710,7 @@ TestEditBeforeTheBake(const std::string &examplesDir, const char *stageName,
 
     RigExecRigEvaluator bakedRig(bakedStage, rigPath);
     RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
+    MakeItTheReference(&dynamicRig);
     bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     std::vector<std::string> errors;
     CHECK(bakedRig.Compile(&errors));
@@ -892,6 +935,7 @@ TestAnOverrideOnAConstraintWeightIsFollowed(const std::string &examplesDir)
 
     UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
     referenceRig.SetInteractiveOverrides(overrides);
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
@@ -1270,6 +1314,7 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
         // And the dynamic answer it fell back to is the right one.
         UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
         RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+        MakeItTheReference(&referenceRig);
         CHECK(referenceRig.Compile(&errors));
         referenceRig.SetInteractiveOverrides({override});
         CompareEveryMap(std::string(what) + " on Biped.usda",
@@ -1290,6 +1335,7 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
         CHECK(rig.GetBakedGenerationCount() == bakedGenerations + 1);
         UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
         RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+        MakeItTheReference(&referenceRig);
         CHECK(referenceRig.Compile(&errors));
         referenceRig.SetInteractiveOverrides({restDrag});
         CompareEveryMap("a placed rest drag on Biped.usda",
@@ -1461,6 +1507,7 @@ TestAnOverrideOnAConnectionSourceIsFollowed(const std::string &examplesDir)
     CHECK(rig.GetBakedGenerationCount() == 2);
 
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    MakeItTheReference(&referenceRig);
     CHECK(referenceRig.Compile(&errors));
     referenceRig.SetInteractiveOverrides(overrides);
     const RigExecRigPose reference = referenceRig.Evaluate(UsdTimeCode(1.0));
@@ -1819,6 +1866,7 @@ TestBakedModeRequestedOnADirtyEpoch(const std::string &examplesDir)
 
     RigExecRigEvaluator rig(stage, rigPath);
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    MakeItTheReference(&referenceRig);
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     CHECK(referenceRig.Compile(&errors));
@@ -1904,6 +1952,7 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
     RigExecRigEvaluator bakedRig(bakedStage, rigPath);
     RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
     RigExecRigEvaluator parityRig(parityStage, rigPath);
+    MakeItTheReference(&dynamicRig);
     bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     parityRig.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
     std::vector<std::string> errors;
@@ -2380,6 +2429,7 @@ TestEveryExampleStage(const std::string &examplesDir)
 
         RigExecRigEvaluator dynamicRig(dynamicStage, rigPath);
         RigExecRigEvaluator bakedRig(bakedStage, rigPath);
+        MakeItTheReference(&dynamicRig);
         bakedRig.SetEvaluationMode(RigExecEvaluationMode::Baked);
         std::vector<std::string> errors;
         if (!dynamicRig.Compile(&errors) || !bakedRig.Compile(&errors)) {

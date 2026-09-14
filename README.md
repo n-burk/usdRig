@@ -285,6 +285,23 @@ The easiest way to author a first rig is to copy
    the first evaluator is constructed, and the value is then fixed for the
    life of the process: changing the environment afterwards has no effect,
    and the only way to change an evaluator's mode is `SetEvaluationMode`.
+   A rig can also ask for the program itself, by authoring
+   `uniform bool rigExec:baked = true` on its `RigExecRoot` -- which is what
+   `examples/biped` does, so opening the biped in a host, or running
+   `rigExecPose` on it with no `--mode`, evaluates it through the program.
+   The attribute is read at every compile and re-read when a notice names it,
+   so flipping it under a running evaluator drops or builds the program on
+   the fly. It is the WEAKEST of the three requests and is consulted only
+   where neither stronger one has been made: `SetEvaluationMode` outranks it
+   (including `rigExecPose --mode`, which is why the parity entries are
+   unaffected by it), and so does a non-empty `RIGEXEC_EVALUATION_MODE`,
+   `=dynamic` included. `GetEvaluationModeSource()` -- `Rig`
+   `.evaluation_mode_source` in Python, and the `mode ... from ...` half of
+   `rigExecPose`'s compile line -- says which of them answered. A rig that
+   asked and was evaluated dynamically anyway publishes one plain diagnostic
+   per generation saying so and naming the first reason; it is news, not a
+   failure, and is not the `baked parity mismatch` line `RIGEXEC_BAKE_REQUIRED`
+   produces.
 10. Evaluation spreads two kinds of work across cores: the per-point geometry
     kernels (linear blend skinning and the envelope blend, split by point
     range), and the geometry chain walk, whose mutually independent chains run

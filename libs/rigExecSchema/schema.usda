@@ -112,6 +112,29 @@ class RigExecRoot "RigExecRoot" (
 )
 {
     uniform token rigExec:partition = ""
+    uniform bool rigExec:baked = false (
+        doc = """Asks the evaluator to answer this rig through its BAKED
+        PROGRAM -- the flattened, epoch-constant form of the rig -- instead
+        of through OpenExec and the in-memory pose walk. It is a request and
+        never an assertion: the program is built only for an epoch it can
+        express, every generation it cannot answer falls back to the dynamic
+        path, and both paths publish the same values. So setting it can
+        change how fast a frame arrives and not what the frame is. A rig
+        that asked and fell back says so once per generation, as a plain
+        diagnostic on the pose naming the first reason.
+
+        Uniform because it is a decision about the whole compiled epoch --
+        which path evaluates the rig -- and not a channel an animator keys.
+
+        It is the WEAKEST of the three ways the mode is chosen, and is
+        consulted only when neither stronger one has spoken:
+        an explicit RigExecRigEvaluator::SetEvaluationMode call (a tool that
+        chose deliberately) outranks it, and so does a non-empty
+        RIGEXEC_EVALUATION_MODE in the environment (a session-wide override,
+        including =dynamic, which the parity suites rely on being able to
+        force onto any stage they open). Absent or false, and with neither
+        of those set, the rig evaluates dynamically."""
+    )
 }
 
 ################################################################

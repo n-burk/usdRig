@@ -515,6 +515,23 @@ target_compile_definitions(testRigExecBakedMode PRIVATE ${_rigexec_schema_resour
 add_test(NAME testRigExecBakedMode COMMAND testRigExecBakedMode
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
+# `uniform bool rigExec:baked` on the rig root, and the precedence ladder
+# around it. Registered TWICE: the second entry is the only way to test that
+# RIGEXEC_EVALUATION_MODE outranks the attribute, since the variable is read
+# once per process and a second evaluator in the same binary cannot see a
+# different answer.
+add_executable(testRigExecBakedAttribute tests/testRigExecBakedAttribute.cpp)
+target_link_libraries(testRigExecBakedAttribute PRIVATE rigExec)
+target_compile_definitions(testRigExecBakedAttribute
+    PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecBakedAttribute COMMAND testRigExecBakedAttribute
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecBakedAttributeEnvironment
+    COMMAND testRigExecBakedAttribute
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples" --expect-environment)
+set_tests_properties(testRigExecBakedAttributeEnvironment PROPERTIES
+    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=dynamic")
+
 # The step graph behind the baked program: the edges, not the values.
 add_executable(testRigExecBakedSchedule tests/testRigExecBakedSchedule.cpp)
 target_link_libraries(testRigExecBakedSchedule PRIVATE rigExec)
@@ -875,6 +892,13 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecEpochConstants COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_epoch_constants.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # The schema half of rigExec:baked (the registry's own answer for its
+    # type, variability and fallback -- which is what a stale
+    # generatedSchema.usda would get wrong) and the path usdview takes to it.
+    add_test(NAME testRigExecBakedAttributePython
+        COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_attribute.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
     # Headless usdview-plugin tests (Qt-free modules under plugin/).

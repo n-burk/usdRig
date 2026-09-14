@@ -288,9 +288,26 @@ public:
     /// diagnostic and counts it on RigExecRigPose::bakedParityMismatches.
     /// It changes no evaluated value, and Dynamic ignores it entirely. Read
     /// once per process, so a tool must setenv before the first evaluator.
+    /// Calling this makes the caller the OWNER of the mode: the source
+    /// below becomes Explicit and nothing weaker moves it again -- not the
+    /// rig's own rigExec:baked, not a recompile, not a notice. That holds
+    /// even when the mode asked for is the one already in force, because
+    /// what the call settles is who decides, not only what was decided.
     void SetEvaluationMode(RigExecEvaluationMode mode);
     RigExecEvaluationMode GetEvaluationMode() const {
         return _evaluationMode;
+    }
+
+    /// Who chose the mode above; see RigExecEvaluationModeSource.
+    ///
+    /// Read it beside the mode whenever "is this rig baked" is not the whole
+    /// question: a tool deciding whether it may set the mode, a test
+    /// separating the environment's answer from the stage's, and the
+    /// fallback report, which is loud for an asset that asked through its
+    /// attribute and silent for an evaluator that inherited the mode from a
+    /// session-wide variable.
+    RigExecEvaluationModeSource GetEvaluationModeSource() const {
+        return _evaluationModeSource;
     }
 
     /// Whether the compiled epoch can be baked, appending one reason per
@@ -1100,6 +1117,43 @@ private:
     /// is Baked or BakedWithParityCheck. Publishes no value of its own.
     void _ReportBakeRequired(const std::string &detail,
                              RigExecRigPose *pose) const;
+
+    /// The same fact, said to the ARTIST instead of to the harness: a plain
+    /// line on \p pose reporting that the rig's rigExec:baked asked for the
+    /// program and this generation was answered dynamically anyway, and why.
+    /// No-op unless the attribute is what chose the mode. Publishes no value
+    /// of its own, carries no "baked parity mismatch" prefix and moves no
+    /// counter -- an authored attribute is a REQUEST, and a request that
+    /// cannot be met is news, not a failure.
+    void _ReportAttributeBakeFallback(const std::string &detail,
+                                      RigExecRigPose *pose) const;
+
+    /// Whether either report above would say anything about a fallback.
+    ///
+    /// The detail string they share costs an allocation to assemble and the
+    /// ordinary dynamic path passes the same point on EVERY generation, so
+    /// it is assembled only where somebody is listening.
+    bool _FallbackIsWorthAnnouncing() const;
+
+    /// Whether a refused bake has to say WHICH feature refused it.
+    ///
+    /// Collecting the reasons walks every refusal on the rig instead of
+    /// stopping at the first, so it is done only for the two callers that
+    /// report them: RIGEXEC_BAKE_REQUIRED, and a rig that asked for the
+    /// program through its own attribute and is owed the reason it did not
+    /// get one.
+    bool _WantsBakeRefusalReasons() const;
+
+    /// Re-reads the rig's rigExec:baked and moves the mode to what it asks
+    /// for, unless something stronger already chose (see
+    /// RigExecEvaluationModeSource). Returns true when the mode MOVED, which
+    /// is what a caller has to build or drop a program for.
+    bool _RefreshAttributeEvaluationMode();
+
+    /// Whether \p notice names the rig's rigExec:baked attribute -- changed
+    /// in place, or resynced along with a prim above it.
+    bool _NoticeNamesTheBakedAttribute(
+        const UsdNotice::ObjectsChanged &notice) const;
     /// Re-pulls the epoch's rest frames after a stage edit no recompile
     /// covered. Returns false when the request could not produce them,
     /// which is what an incomplete per-frame rest tap used to mean.
@@ -1186,6 +1240,15 @@ private:
     /// generation has settled whether the epoch itself moved. A notice that
     /// misses the index leaves the program standing.
     std::unique_ptr<RigExecBakedProgram> _bakedProgram;
+    /// Whether _bakedProgram has published a generation.
+    ///
+    /// What a rebuild inherits from its predecessor is the predecessor's
+    /// REPORTED state -- which geometry nodes a consumer has already been
+    /// told were created, what each of them last ran with -- so a program
+    /// that never ran has nothing to hand over, and handing it over anyway
+    /// makes the replacement's first generation claim less work than the
+    /// dynamic path does. See _RebuildBakedProgram.
+    bool _bakedProgramPublished = false;
     bool _bakedProgramStale = false;
     /// This epoch already asked for a program and was refused.
     ///
@@ -1205,6 +1268,8 @@ private:
     size_t _bakedProgramBuildAttempts = 0;
     size_t _bakedGenerations = 0;
     RigExecEvaluationMode _evaluationMode = RigExecEvaluationMode::Dynamic;
+    RigExecEvaluationModeSource _evaluationModeSource =
+        RigExecEvaluationModeSource::Default;
 
     size_t _structureDigest = 0;
     TfNotice::Key _noticeKey;
