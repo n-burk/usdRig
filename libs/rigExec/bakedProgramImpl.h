@@ -885,6 +885,10 @@ struct RigExecBakedCones {
     /// the cluster of its RevisionStatic alone.
     std::vector<std::vector<int>> revisionClusters;
     std::vector<int> revisionStaticCluster;
+    /// Native source -> the clusters of every constraint step that reads the
+    /// frame the prologue read for it. What a moved stage transform under a
+    /// constraint source makes dirty.
+    std::vector<std::vector<int>> nativeSourceClusters;
     /// Steps whose dirtiness depends on time or on a standing override.
     std::vector<int> varyingSteps, overrideSteps;
 };
@@ -966,6 +970,19 @@ struct RigExecBakedCommit {
     /// A constraint's own reads: one per source, plus the world-up object.
     std::vector<uint32_t> sourceReads;
     uint32_t worldUpRead = 0;
+    /// One provider above a NATIVE Xformable source: the slot, and the
+    /// versions of its base and final frames live where this commit runs.
+    /// The deepest one whose points moved is the revision such a source
+    /// rides (RigExecApplyRevisedAncestorDelta).
+    struct AncestorRead {
+        int slot = -1;
+        uint32_t fin = 0;
+        uint32_t base = 0;
+    };
+    /// Parallel to `sources`, and empty for a source the walk holds a frame
+    /// for: the ancestor slots of a native source, in increasing depth.
+    std::vector<std::vector<AncestorRead>> sourceAncestors;
+    std::vector<AncestorRead> worldUpAncestors;
 };
 
 /// What a staged propagation pair turned into. Ordered so that the first
@@ -1056,6 +1073,29 @@ struct RigExecBakedProgramImpl {
     /// readers dirty is the two compared by VALUE, never "the time moved".
     /// It is also what `providerBaseXforms` publishes.
     std::vector<GfMatrix4d> xformBase, lastXformBase;
+
+    // ---- native Xformable constraint sources ------------------------------
+    //
+    // A constraint source (or aim world-up object) that is neither a
+    // RigExecControl nor a RigExecJoint is read off the stage, exactly as a
+    // target is -- and then RIDDEN on the revision of the deepest provider
+    // above it that the walk has already moved. The stage read is the
+    // prologue's; the ride is the constraint step's, out of declared slots.
+    struct NativeXformSource {
+        SdfPath path;
+        /// Every slot that is a STRICT namespace prefix of `path`, in
+        /// increasing depth. Which of them is the revised one is a per-frame
+        /// question the step asks; which of them could be is namespace
+        /// topology and is settled here.
+        std::vector<int> ancestorSlots;
+    };
+    std::vector<NativeXformSource> nativeSources;
+    /// Per entry: the frame the prologue read, whether it read at all, and
+    /// the pair the run before left -- the value comparison that dirties the
+    /// constraint steps reading it, because a source is never dirtied by
+    /// "the time moved".
+    std::vector<RigExecPointFrame> nativeFrames, lastNativeFrames;
+    std::vector<char> nativeFrameOk, lastNativeFrameOk;
 
     // ---- epoch constants resolved at bake ---------------------------------
     std::vector<GfMatrix4d> restM;                     // asset-space rest
@@ -1229,7 +1269,13 @@ struct RigExecBakedProgramImpl {
         SdfPath path;
         TfToken type;
         int target = -1;
+        /// Per source, in compiled order: the slot the walk holds a frame
+        /// for, or -1; the entry in `nativeSources` read off the stage when
+        /// it does not; and the path either way, which is what a diagnostic
+        /// about the source names.
         std::vector<int> sources;
+        std::vector<int> sourceNatives;
+        std::vector<SdfPath> sourcePaths;
         RigExecBakedInput<bool> enabled;
         RigExecBakedInput<float> defaultWeight;
         // The authored table only.
@@ -1252,6 +1298,8 @@ struct RigExecBakedProgramImpl {
         TfToken worldUpType;
         GfVec3d sceneUp{0, 1, 0};
         int worldUpObject = -1;
+        int worldUpNative = -1;
+        SdfPath worldUpPath;
         bool worldUpObjectNamed = false;
         /// A read phase named this constraint as the point in the walk it
         /// wants its target's frame from, so the walk records the target's
@@ -1836,10 +1884,15 @@ struct RigExecBakedConstraintSpec {
     /// Whether a read phase asked for the target's frame as of this
     /// constraint (the evaluator's _snapshotPoints membership).
     bool snapshotAfter = false;
-    /// One source path per binding, in the compiled order.
+    /// One source path per binding, in the compiled order, and beside it the
+    /// plain Xformable the binding reads off the stage when the walk holds
+    /// no frame for it (the compiled _FrameSourceBinding::xformPath). Empty
+    /// for a RigExec provider, whose frame the walk always has.
     SdfPathVector sources;
+    SdfPathVector sourceXforms;
     /// Empty when the aim constraint named no world-up object.
     SdfPath worldUpObject;
+    SdfPath worldUpXform;
 };
 
 /// One geometry revision of a compiled chain.

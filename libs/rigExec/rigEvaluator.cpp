@@ -8256,22 +8256,20 @@ RigExecRigEvaluator::_FrameFromXformRelativeToAsset(
 }
 
 bool
-RigExecRigEvaluator::_ResolveNativeXformSource(
-    const UsdPrim &assetRoot,
-    UsdGeomXformCache *xformCache,
+RigExecApplyRevisedAncestorDelta(
     const SdfPath &xformPath,
     const RigExecPoseFrameEnumerator &providers,
-    RigExecPointFrame *out) const
+    RigExecPointFrame *frame)
 {
-    if (!_FrameFromXformRelativeToAsset(assetRoot, xformCache, xformPath, out,
-                                        nullptr) ||
-        !out->IsValid()) {
-        return false;
-    }
     // A native source that is not itself a written provider may still
     // sit beneath a constrained transform provider. The closest
     // revised ancestor contains all higher ancestor deltas, so apply
     // it once to the stage-derived source frame.
+    //
+    // The comparison is over POINTS and not whole frames: a provider whose
+    // flags differ from its base while its points do not has not moved, and
+    // comparing the frames would make it the closest revised ancestor and
+    // ride the source on an identity that is not one.
     SdfPath closest;
     RigExecPointFrame closestBase, closestCurrent;
     auto select = [&](const SdfPath &provider,
@@ -8296,9 +8294,25 @@ RigExecRigEvaluator::_ResolveNativeXformSource(
                 closestBase.points, closestCurrent.points, &delta)) {
             return false;
         }
-        *out = RigExecMatrixToPoints(out->points, delta);
+        *frame = RigExecMatrixToPoints(frame->points, delta);
     }
-    return out->IsValid();
+    return frame->IsValid();
+}
+
+bool
+RigExecRigEvaluator::_ResolveNativeXformSource(
+    const UsdPrim &assetRoot,
+    UsdGeomXformCache *xformCache,
+    const SdfPath &xformPath,
+    const RigExecPoseFrameEnumerator &providers,
+    RigExecPointFrame *out) const
+{
+    if (!_FrameFromXformRelativeToAsset(assetRoot, xformCache, xformPath, out,
+                                        nullptr) ||
+        !out->IsValid()) {
+        return false;
+    }
+    return RigExecApplyRevisedAncestorDelta(xformPath, providers, out);
 }
 
 void

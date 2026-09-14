@@ -1760,14 +1760,7 @@ static const char *const kExpectedToDecline[] = {
     "13_ReadPhases.usda",            // ... (lattice)
     "ArmRig.usda",                   // ... (blendShape)
     "ArmShotAnim.usda",              // ... (blendShape), through ArmRig
-    "aim_par_combo_flattened.usd",   // constraint target is a plain Xformable
-    "aimtest.usda",                  // constraint target is a plain Xformable
-    "aimtest_points.usda",           // constraint target is a plain Xformable
-    "par_rot_aim.usd",               // constraint target is a plain Xformable
-    "par_rot_aim_redorder.usd",      // constraint target is a plain Xformable
-    "rigexec_flat.usda",             // constraint target is a plain Xformable
-    "rot_par_combo.usd",             // constraint target is a plain Xformable
-    "rotateConstraint.usda",         // constraint target is a plain Xformable
+    "aimtest_points.usda",           // geometry-domain constraint
 };
 
 // The index of \p name in kExpectedToDecline, or -1 if it is not listed.

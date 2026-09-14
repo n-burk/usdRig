@@ -1031,6 +1031,35 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             break;
         }
     }
+    // Which constraint steps a native source's stage transform reaches.
+    cones.nativeSourceClusters.assign(B.nativeSources.size(), {});
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind != RigExecBakedStepKind::Constraint) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::WalkStep &walk =
+            B.walkSteps[size_t(step.object)];
+        if (walk.solverBatch || walk.index < 0) {
+            continue;
+        }
+        const RigExecBakedProgramImpl::Constraint &constraint =
+            B.constraints[size_t(walk.index)];
+        for (const int native : constraint.sourceNatives) {
+            if (native >= 0) {
+                cones.nativeSourceClusters[size_t(native)].push_back(
+                    step.cluster);
+            }
+        }
+        if (constraint.worldUpNative >= 0) {
+            cones.nativeSourceClusters[size_t(constraint.worldUpNative)]
+                .push_back(step.cluster);
+        }
+    }
+    for (std::vector<int> &clusters : cones.nativeSourceClusters) {
+        std::sort(clusters.begin(), clusters.end());
+        clusters.erase(std::unique(clusters.begin(), clusters.end()),
+                       clusters.end());
+    }
     for (std::vector<int> &clusters : cones.chainBaseClusters) {
         std::sort(clusters.begin(), clusters.end());
         clusters.erase(std::unique(clusters.begin(), clusters.end()),
@@ -1175,6 +1204,18 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 dirty.Set(cones.avarCluster[size_t(B.xformSlots[k])]);
             }
         }
+        // And the transforms of the plain Xformables a constraint names as
+        // a SOURCE, compared the same way -- frame and read-or-not together,
+        // because a source that stopped resolving has moved as surely as one
+        // that moved.
+        for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+            if (B.nativeFrameOk[k] != B.lastNativeFrameOk[k] ||
+                B.nativeFrames[k].points != B.lastNativeFrames[k].points) {
+                for (const int cluster : cones.nativeSourceClusters[k]) {
+                    dirty.Set(cluster);
+                }
+            }
+        }
         // Each chain's authored base, and whether it read at all.
         for (size_t c = 0; c < B.chains.size(); ++c) {
             const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
@@ -1243,6 +1284,8 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // last run SAW, and a forced run saw them too.
     B.lastAvars = B.avars;
     B.lastXformBase = B.xformBase;
+    B.lastNativeFrames = B.nativeFrames;
+    B.lastNativeFrameOk = B.nativeFrameOk;
     B.lastOverridden = B.overridden;
     B.lastPropertyResults = B.propertyResults;
     B.lastHaveBase.resize(B.chains.size());

@@ -294,6 +294,41 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         return slot;
     };
 
+    // One plain Xformable a constraint reads off the stage, registered once
+    // however many bindings name it.
+    //
+    // The ancestor list is pure namespace topology -- every slot that is a
+    // STRICT prefix of the path, shallowest first -- so it is settled here;
+    // WHICH of them the source rides is a per-frame question about frames
+    // the step reads out of declared slots. The prim and its ancestors go
+    // into the resync index only: the transform is re-read every frame, so
+    // a value edit on it must not rebuild the program.
+    auto nativeSource = [&](const SdfPath &path) {
+        for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+            if (B.nativeSources[k].path == path) {
+                return int(k);
+            }
+        }
+        RigExecBakedProgramImpl::NativeXformSource source;
+        source.path = path;
+        for (int i = 0; i < N; ++i) {
+            if (B.paths[size_t(i)] != path &&
+                path.HasPrefix(B.paths[size_t(i)])) {
+                source.ancestorSlots.push_back(i);
+            }
+        }
+        for (SdfPath p = path;
+             !p.IsEmpty() && p != SdfPath::AbsoluteRootPath();
+             p = p.GetParentPath()) {
+            B.prims.insert(p);
+            if (p == B.assetRootPath) {
+                break;
+            }
+        }
+        B.nativeSources.push_back(std::move(source));
+        return int(B.nativeSources.size()) - 1;
+    };
+
     // ---- constraints --------------------------------------------------------
     auto bakeConstraint = [&](const RigExecBakedConstraintSpec &fc) {
         RigExecBakedProgramImpl::Constraint c;
@@ -302,12 +337,25 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         c.snapshotAfter = fc.snapshotAfter;
         const UsdPrim prim = B.stage->GetPrimAtPath(fc.moverPath);
         c.target = fc.targets.empty() ? -1 : slotOf(fc.targets[0]);
-        for (const SdfPath &source : fc.sources) {
-            const int slot = slotOf(source);
-            if (slot < 0) {
-                refuse("constraint source is not a pose provider", source);
+        for (size_t k = 0; k < fc.sources.size(); ++k) {
+            // resolveBinding's order, decided once: the walk's own frame
+            // when it holds one -- which is every RigExec provider and every
+            // plain Xformable some constraint targets -- and the stage
+            // otherwise. A source that is itself an xform-derived target must
+            // take the SLOT, or a constraint chained onto another
+            // constraint's target would read the unrevised transform.
+            const int slot = slotOf(fc.sources[k]);
+            const SdfPath &xform =
+                k < fc.sourceXforms.size() ? fc.sourceXforms[k] : SdfPath();
+            const int native =
+                slot < 0 && !xform.IsEmpty() ? nativeSource(xform) : -1;
+            if (slot < 0 && native < 0) {
+                refuse("constraint source is not a pose provider",
+                       fc.sources[k]);
             }
             c.sources.push_back(slot);
+            c.sourceNatives.push_back(native);
+            c.sourcePaths.push_back(fc.sources[k]);
         }
         c.enabled = bind(prim, "inputs:enabled", true);
         c.defaultWeight = bind(prim, "inputs:defaultWeight", 1.0f);
@@ -430,9 +478,15 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             c.preserveInputUp =
                 targets(prim, "rigExec:sources").empty();
             c.worldUpObjectNamed = !fc.worldUpObject.IsEmpty();
+            c.worldUpPath = fc.worldUpObject;
             c.worldUpObject =
                 c.worldUpObjectNamed ? slotOf(fc.worldUpObject) : -1;
-            if (c.worldUpObjectNamed && c.worldUpObject < 0) {
+            if (c.worldUpObjectNamed && c.worldUpObject < 0 &&
+                !fc.worldUpXform.IsEmpty()) {
+                c.worldUpNative = nativeSource(fc.worldUpXform);
+            }
+            if (c.worldUpObjectNamed && c.worldUpObject < 0 &&
+                c.worldUpNative < 0) {
                 refuse("aim world-up object is not a pose provider",
                        fc.worldUpObject);
             }
@@ -610,6 +664,9 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     const auto readFin = [&liveFin, n](int slot) {
         return slot >= 0 && size_t(slot) < n ? liveFin[size_t(slot)] : 0u;
     };
+    const auto readBase = [&liveBase, n](int slot) {
+        return slot >= 0 && size_t(slot) < n ? liveBase[size_t(slot)] : 0u;
+    };
 
     for (size_t w = 0; w < B.walkSteps.size(); ++w) {
         const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
@@ -637,6 +694,28 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
                 commit.sourceReads.push_back(readFin(source));
             }
             commit.worldUpRead = readFin(constraint.worldUpObject);
+            // A native source rides the deepest ancestor the walk has moved
+            // BY THIS POINT, so both halves of every candidate ancestor --
+            // its base and its final -- are read at the versions live here.
+            const auto ancestorReads =
+                [&](int native,
+                    std::vector<RigExecBakedCommit::AncestorRead> *out) {
+                out->clear();
+                if (native < 0) {
+                    return;
+                }
+                for (const int slot :
+                         B.nativeSources[size_t(native)].ancestorSlots) {
+                    out->push_back({slot, readFin(slot), readBase(slot)});
+                }
+            };
+            commit.sourceAncestors.resize(constraint.sources.size());
+            for (size_t k = 0; k < constraint.sourceNatives.size(); ++k) {
+                ancestorReads(constraint.sourceNatives[k],
+                              &commit.sourceAncestors[k]);
+            }
+            ancestorReads(constraint.worldUpNative,
+                          &commit.worldUpAncestors);
         }
         commit.slotReads.clear();
         for (const int slot : commit.slots) {
@@ -928,6 +1007,31 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 commitStep.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::PoseFin,
                     constraint.worldUpObject));
+            }
+            // Both frames of every provider a native source might ride: the
+            // step compares them to decide which ancestor moved, so both are
+            // reads whatever this frame's answer turns out to be.
+            for (const int native : constraint.sourceNatives) {
+                if (native < 0) {
+                    continue;
+                }
+                for (const int slot :
+                         B.nativeSources[size_t(native)].ancestorSlots) {
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseFin, slot));
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseBase, slot));
+                }
+            }
+            if (constraint.worldUpNative >= 0) {
+                for (const int slot :
+                         B.nativeSources[size_t(constraint.worldUpNative)]
+                             .ancestorSlots) {
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseFin, slot));
+                    commitStep.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseBase, slot));
+                }
             }
         }
         commitStep.writes.push_back(
@@ -1762,14 +1866,48 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             finish();
             return;
         }
+        // One frame source, resolved in resolveBinding's order: the walk's
+        // own frame when it holds one, and otherwise the transform the
+        // prologue read off the stage, ridden on the revision of the deepest
+        // provider above it that the walk has already moved. The ride is the
+        // shared routine both paths call, so the two cannot pick different
+        // ancestors or measure different deltas.
+        const auto resolveSource =
+            [&B](int slot, uint32_t finRead, int native,
+                 const std::vector<RigExecBakedCommit::AncestorRead>
+                     &ancestors,
+                 RigExecPointFrame *out) {
+            if (slot >= 0) {
+                *out = B.fin[size_t(finRead)];
+                return out->IsValid();
+            }
+            if (native < 0 || !B.nativeFrameOk[size_t(native)]) {
+                return false;
+            }
+            *out = B.nativeFrames[size_t(native)];
+            if (!out->IsValid()) {
+                return false;
+            }
+            const auto enumerate =
+                [&B, &ancestors](const RigExecPoseFrameVisitor &visit) {
+                for (const RigExecBakedCommit::AncestorRead &a : ancestors) {
+                    visit(B.paths[size_t(a.slot)], B.base[size_t(a.base)],
+                          B.fin[size_t(a.fin)]);
+                }
+            };
+            const RigExecPoseFrameEnumerator providers(enumerate);
+            return RigExecApplyRevisedAncestorDelta(
+                B.nativeSources[size_t(native)].path, providers, out);
+        };
         bool sourcesReady = true;
         for (size_t k = 0; k < c.sources.size(); ++k) {
-            const RigExecPointFrame &frame =
-                B.fin[size_t(commit.sourceReads[k])];
-            if (!frame.IsValid()) {
+            RigExecPointFrame frame;
+            if (!resolveSource(c.sources[k], commit.sourceReads[k],
+                               c.sourceNatives[k], commit.sourceAncestors[k],
+                               &frame)) {
                 step->diagnostics.push_back(
                     c.path.GetString() + " could not resolve source " +
-                    B.paths[size_t(c.sources[k])].GetString());
+                    c.sourcePaths[k].GetString());
                 sourcesReady = false;
                 break;
             }
@@ -1864,25 +2002,51 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 } else if (c.worldUpType == "objectUp") {
                     // FBX ObjectUp with no reference object uses the world
                     // origin as the object point.
-                    params.worldUpDirection =
-                        c.worldUpObjectNamed
-                            ? GfVec3d(B.fin[size_t(commit.worldUpRead)]
-                                          .Origin() - input.Origin())
-                            : GfVec3d(-input.Origin());
+                    RigExecPointFrame upObject;
+                    if (!c.worldUpObjectNamed) {
+                        params.worldUpDirection = GfVec3d(-input.Origin());
+                    } else if (!resolveSource(c.worldUpObject,
+                                              commit.worldUpRead,
+                                              c.worldUpNative,
+                                              commit.worldUpAncestors,
+                                              &upObject)) {
+                        step->diagnostics.push_back(
+                            c.path.GetString() +
+                            " could not resolve its world-up object; "
+                            "constraint passed through");
+                        candidateReady = false;
+                    } else {
+                        params.worldUpDirection =
+                            upObject.Origin() - input.Origin();
+                    }
                 } else if (c.worldUpType == "objectRotationUp") {
+                    // With no object, FBX applies WorldUpVector directly in
+                    // world space rather than treating a missing binding as
+                    // a failed constraint.
                     if (!c.worldUpObjectNamed) {
                         params.worldUpDirection = authoredWorldUp;
                     } else {
+                        RigExecPointFrame upObject;
+                        if (!resolveSource(c.worldUpObject,
+                                           commit.worldUpRead,
+                                           c.worldUpNative,
+                                           commit.worldUpAncestors,
+                                           &upObject)) {
+                            step->diagnostics.push_back(
+                                c.path.GetString() +
+                                " could not resolve its world-up object; "
+                                "constraint passed through");
+                            candidateReady = false;
+                        }
                         GfMatrix4d up(1.0);
-                        if (!RigExecPointsToMatrix(
-                                RigExecIdentityLandmarks(),
-                                B.fin[size_t(commit.worldUpRead)].points,
-                                &up)) {
+                        if (candidateReady &&
+                            !RigExecPointsToMatrix(RigExecIdentityLandmarks(),
+                                                   upObject.points, &up)) {
                             step->diagnostics.push_back(
                                 c.path.GetString() +
                                 " has a degenerate world-up object");
                             candidateReady = false;
-                        } else {
+                        } else if (candidateReady) {
                             params.worldUpDirection =
                                 up.ExtractRotation().TransformDir(
                                     authoredWorldUp);

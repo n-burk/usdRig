@@ -210,6 +210,26 @@ using RigExecPoseFrameEnumerator =
 using RigExecPoseFrameLookup =
     TfFunctionRef<bool(const SdfPath &provider, RigExecPointFrame *frame)>;
 
+/// Rides \p frame on the revision of the deepest provider above \p xformPath
+/// that the walk has already moved.
+///
+/// A frame read off the stage knows nothing about what the pose walk has done
+/// to the transforms ABOVE it. The closest revised ancestor's delta already
+/// contains every higher ancestor's, so applying that one delta applies all
+/// of them. Which ancestor that is -- a STRICT namespace prefix, whose points
+/// actually moved, deepest wins -- and the delta itself are here, in one
+/// body, so that the dense baked program and the map walk cannot pick
+/// different ancestors or measure different deltas. \p providers enumerates
+/// whatever frame store the caller keeps.
+///
+/// False only when the delta will not resolve or the result is unusable; a
+/// walk that has revised nothing above \p xformPath leaves \p frame alone
+/// and returns true.
+bool RigExecApplyRevisedAncestorDelta(
+    const SdfPath &xformPath,
+    const RigExecPoseFrameEnumerator &providers,
+    RigExecPointFrame *frame);
+
 /// Compiles and evaluates one RigExecRoot prim.
 class RigExecRigEvaluator : public TfWeakBase {
 public:

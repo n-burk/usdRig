@@ -383,15 +383,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             say("constraint target is not a seeded pose provider",
                 constraint.targets[0]);
         }
-        for (const auto &source : constraint.sources) {
-            if (!source.xformPath.IsEmpty()) {
-                say("native Xformable constraint source", source.sourcePath);
-            }
-        }
-        if (!constraint.worldUpObject.xformPath.IsEmpty()) {
-            say("native Xformable world-up object",
-                constraint.worldUpObject.sourcePath);
-        }
     }
 
     // ---- geometry ----------------------------------------------------------
@@ -1244,12 +1235,21 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                 snapshotAfter(fc.targets[0], fc.moverPath);
             for (const auto &source : fc.sources) {
                 entry.constraint.sources.push_back(source.sourcePath);
+                entry.constraint.sourceXforms.push_back(source.xformPath);
             }
             entry.constraint.worldUpObject = fc.worldUpObject.sourcePath;
+            entry.constraint.worldUpXform = fc.worldUpObject.xformPath;
         }
         walk.push_back(std::move(entry));
     }
     RigExecBakedBuildWalk(&ctx, walk);
+    // The native sources the walk registered, and the two buffers the
+    // prologue fills and the cone compares. Sized here, once, and never
+    // resized in a run.
+    B.nativeFrames.assign(B.nativeSources.size(), RigExecPointFrame());
+    B.lastNativeFrames = B.nativeFrames;
+    B.nativeFrameOk.assign(B.nativeSources.size(), 0);
+    B.lastNativeFrameOk = B.nativeFrameOk;
 
     // ---- publication ---------------------------------------------------------
     for (const SdfPath &joint : E._jointPaths) {
@@ -1453,7 +1453,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // False means a target's transform could not be resolved at all, which
     // is the one thing the dynamic walk gives the generation back for here.
     const auto stageFrames = [&B, &E, time, pose]() {
-        if (B.xformSlots.empty()) {
+        if (B.xformSlots.empty() && B.nativeSources.empty()) {
             return true;
         }
         UsdGeomXformCache cache(time);
@@ -1473,6 +1473,22 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
             B.xformBase[k] = matrix;
             B.base[slot] = frame;
             B.fin[slot] = frame;
+        }
+        // And the plain Xformables a constraint reads as a SOURCE. Only the
+        // stage half is settled here: the delta such a source rides is the
+        // deepest revision above it, which is a frame the walk has not
+        // produced yet, so the constraint step performs the ride out of the
+        // slots it declared. A source the stage cannot answer for is not a
+        // bail -- the dynamic walk diagnoses it per constraint and passes
+        // that constraint through -- so the failure is recorded and carried
+        // into the step.
+        for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+            RigExecPointFrame frame;
+            B.nativeFrameOk[k] = E._FrameFromXformRelativeToAsset(
+                B.assetRoot, &cache, B.nativeSources[k].path, &frame,
+                nullptr);
+            B.nativeFrames[k] = B.nativeFrameOk[k] ? frame
+                                                   : RigExecPointFrame();
         }
         return true;
     };
