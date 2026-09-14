@@ -15,6 +15,7 @@
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
+#include "rigExec/moverGraph.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
@@ -25,6 +26,7 @@
 #include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
 #include <algorithm>
@@ -1787,6 +1789,187 @@ _SweepFrames(const UsdStageRefPtr &stage)
     return {start, start + double(long((end - start) / 2)), end};
 }
 
+
+// ---------------------------------------------------------------------------
+// A read phase on rigExec:transform that names a POINT IN THE POSE WALK.
+//
+// The general form of the three shorthands (base, preceding, final): the
+// matrix a mover consumes is the provider's frame as it stood immediately
+// after one named constraint, rather than before the walk or after all of
+// it. Nothing in examples/ authors it and no other suite builds it, which is
+// why the program could refuse it for three phases with no parity evidence
+// either way -- so the fixture comes first and the bake follows it.
+//
+// Two constraints revise ONE joint in the walk, and the mover names the
+// first. That is what makes the case discriminating: the phase's answer is
+// neither the joint's base frame nor its final one, and a program that
+// silently read either would deform the slab to a different place with
+// nothing to say so. TestAReadPhaseOnTheTransformIsExact asserts exactly
+// that, by building the same rig with a "final" phase and demanding the two
+// disagree.
+// ---------------------------------------------------------------------------
+
+static UsdStageRefPtr
+MakeAPoseWalkReadPhaseRig(const char *phase)
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+    // Two sources, each moved by an avar, so the two revisions of the joint
+    // land in different places and the phase has something to choose between.
+    const auto control = [&](const char *name, double tx, double ty) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+            .Set(tx);
+        prim.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+            .Set(ty);
+        return prim;
+    };
+    const UsdPrim first = control("First", 3.0, 0.0);
+    const UsdPrim second = control("Second", 0.0, 7.0);
+
+    const SdfPath jointPath("/Asset/Rig/Joints/Arm");
+    stage->DefinePrim(jointPath, TfToken("RigExecJoint"));
+
+    // Both constraints revise the same joint, in namespace order: A leaves it
+    // where First is, B then leaves it where Second is.
+    const auto constrain = [&](const char *name, const UsdPrim &source) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Movers/Constrain/") + name),
+            TfToken("RigExecPositionConstraint"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({jointPath});
+        prim.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({source.GetPath()});
+        return prim;
+    };
+    const UsdPrim constraintA = constrain("A", first);
+    constrain("B", second);
+
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh = stage->DefinePrim(SdfPath("/Asset/Geom/Slab"),
+                                           TfToken("Points"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                          GfVec3f(0, 1, 0)});
+
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Geometry/Slide"),
+        TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({mesh.GetPath().AppendProperty(TfToken("points"))});
+    const UsdRelationship transform =
+        mover.CreateRelationship(TfToken("rigExec:transform"));
+    transform.SetTargets({jointPath});
+    // The phase itself, as METADATA on the relationship rather than through
+    // the role-named attribute: rigExec:transformReadPhase is the v0.1
+    // spelling and admits only base and final, so a pose-walk point can only
+    // be said the general way. "A" is spelled as the constraint's own path
+    // because an AtPrim phase is an ABSOLUTE prim path and nothing else.
+    const std::string authored = std::string(phase) == "atPrim"
+                                     ? constraintA.GetPath().GetString()
+                                     : std::string(phase);
+    transform.SetMetadata(TfToken(RigExecReadPhaseMetadataName), authored);
+
+    // A SKIN mover with the same phase on rigExec:influences is deliberately
+    // NOT here. Compile validates an AtPrim phase against
+    // binding.transform alone (rigEvaluator.cpp, "names a point in the pose
+    // walk, but ... is revised by no pose mover"), and a skin mover's
+    // binding.transform is empty -- so such a rig is refused by the DYNAMIC
+    // path before either evaluator sees it. The fold answers the influence
+    // entries out of the store anyway, because that is what the dynamic
+    // fold does with them; neither branch is reachable while the validator
+    // stands, and making it reachable would be a change to the dynamic
+    // path's answer.
+    return stage;
+}
+
+// Compiles \p stage twice -- once dynamic, once baked -- and demands the bake
+// happened and every published map agrees over four frames. Returns the moved
+// points of the last frame so a caller can assert the fixture discriminates.
+static VtVec3fArray
+BakedAndDynamicAgree(const char *what, const UsdStageRefPtr &stage,
+                     const UsdStageRefPtr &referenceStage)
+{
+    VtVec3fArray moved;
+    const SdfPath rigPath = FindRig(stage);
+    if (rigPath.IsEmpty()) { ++failures; return moved; }
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    if (!rig.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        return moved;
+    }
+    // Named, and not just counted: a refusal here is the whole point of the
+    // case, so the reason has to reach the log.
+    std::vector<std::string> reasons;
+    if (!rig.IsBakeable(&reasons)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture is not bakeable\n", what);
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+        return moved;
+    }
+
+    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    errors.clear();
+    CHECK(referenceRig.Compile(&errors));
+    for (double frame = 1; frame <= 4; ++frame) {
+        const RigExecRigPose reference =
+            referenceRig.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(baked.valid);
+        CHECK(!baked.movedProperties.empty());
+        CompareEveryMap(std::string(what) + " frame " +
+                            std::to_string(int(frame)),
+                        reference, baked);
+        const auto it =
+            baked.movedProperties.find(SdfPath("/Asset/Geom/Slab.points"));
+        if (it != baked.movedProperties.end() &&
+            it->second.IsHolding<VtVec3fArray>()) {
+            moved = it->second.UncheckedGet<VtVec3fArray>();
+        }
+    }
+    // Every generation came from the program: a fallback would have compared
+    // the dynamic path with itself.
+    CHECK(rig.GetBakedGenerationCount() == 4);
+    return moved;
+}
+
+static void
+TestAReadPhaseOnTheTransformIsExact()
+{
+    const VtVec3fArray atPrim = BakedAndDynamicAgree(
+        "a pose-walk read phase on rigExec:transform",
+        MakeAPoseWalkReadPhaseRig("atPrim"),
+        MakeAPoseWalkReadPhaseRig("atPrim"));
+    const VtVec3fArray final = BakedAndDynamicAgree(
+        "a final read phase on rigExec:transform",
+        MakeAPoseWalkReadPhaseRig("final"),
+        MakeAPoseWalkReadPhaseRig("final"));
+    const VtVec3fArray base = BakedAndDynamicAgree(
+        "a base read phase on rigExec:transform",
+        MakeAPoseWalkReadPhaseRig("base"),
+        MakeAPoseWalkReadPhaseRig("base"));
+    // The fixture discriminates, measured rather than assumed: if the phase
+    // named a point the two shorthands already reach, a program that ignored
+    // it entirely would pass every comparison above.
+    CHECK(!atPrim.empty());
+    CHECK(atPrim != final);
+    CHECK(atPrim != base);
+}
+
 static void
 TestEveryExampleStage(const std::string &examplesDir)
 {
@@ -2007,6 +2190,10 @@ main(int argc, char **argv)
     // of the pose walk and not a kernel waiting to be hoisted.
     TestANonBakeableRigFallsBack("a connected posed:space",
                                  "connected posed:space");
+
+    // A read phase naming a point in the pose walk, which no shipped rig
+    // authors and no other suite builds.
+    TestAReadPhaseOnTheTransformIsExact();
 
     // And everything in examples/, whether it bakes or not.
     TestEveryExampleStage(examplesDir);

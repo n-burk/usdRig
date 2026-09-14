@@ -508,19 +508,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             return;
         }
         sayUnbakedWeights(r.binding.weightObject);
-        // A phase that names a POINT IN THE POSE WALK on rigExec:transform
-        // is the one read phase the program cannot answer. Both halves of
-        // the store are filled -- the pose walk records a provider's matrix
-        // after each constraint that names it, the chains record their own
-        // points -- but the CONSUMER is missing: the influence fold takes
-        // the provider's base or final matrix out of the dense tables and has
-        // no branch that takes it out of the store instead. Refusing is the
-        // honest answer while that is true; reading the base matrix silently
-        // would be a different deformation with nothing to say so.
-        if (r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim) {
-            say("read phase naming a pose-walk point on rigExec:transform",
-                r.moverPath);
-        }
         // The frames the walk hands a curve mover are the aggregate a
         // BATCHED solver publishes -- the dynamic path taps the solver's
         // computePointFrameArray and then overrides the tap with the walk's
