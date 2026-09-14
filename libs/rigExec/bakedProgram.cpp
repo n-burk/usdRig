@@ -382,7 +382,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
-    // ---- weight objects ------------------------------------------------------
+    // ---- weight objects -----------------------------------------------------
     //
     // A weight object is a COMPOSITION -- a dynamic weight remaps a base, a
     // combine folds a list -- so every question about one is a question about
