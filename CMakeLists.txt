@@ -632,11 +632,16 @@ add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
 # CONE_VERIFY but NOT REQUIRE_BAKE, and the asymmetry is the honest state of
 # the tree rather than an oversight. Under the verifier it is clean in both
 # schedules. Under a bake requirement it is not, because the suite authors on
-# purpose the three things the program still refuses: an animated or
-# connected rest:tx on a provider, a property chain that writes rest:space,
-# and a generation whose interactive overrides are not placeable. Those are
-# missing features, not disagreements -- every generation that DOES bake
-# agrees exactly -- and the flag goes on the day the rest-channel work lands.
+# purpose the FIVE things the program still refuses: an animated or connected
+# rest:tx on a provider, a property chain that writes rest:space, a
+# generation whose interactive overrides are not placeable, and -- as of the
+# Phase 4 fixtures -- an intervening Xform above a provider and an animated
+# one. Those are missing features, not disagreements: every generation that
+# DOES bake agrees exactly, and each of the two Xform cases asserts the
+# refusal by name and then compares the fallback generation, domain by
+# domain, with a plain dynamic evaluator. All five are the same rework -- the
+# program holds one rest per slot and both matrices come off it -- so the
+# flag goes on the day the rest-channel work lands.
 rigexec_add_baked_parity_test(testRigExecEpochRests CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
