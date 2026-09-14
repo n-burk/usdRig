@@ -475,10 +475,19 @@ add_test(NAME testRigExecCurvenetAdjuster COMMAND testRigExecCurvenetAdjuster)
 # cpuParityMode, which asks for the dynamic path, so the suite grew one
 # generation that does not -- over a net carrying an xform op, which is what
 # exercises the net -> asset ladder the adjusted control frames publish
-# through. No REQUIRE_BAKE: one LATER fixture in this suite connects
-# parent:space on a provider, which the program still refuses, and that
-# refusal belongs to the providers group rather than to the adjuster.
-rigexec_add_baked_parity_test(testRigExecCurvenetAdjuster)
+# through. REQUIRE_BAKE is what stops that generation passing vacuously: it
+# asserts only that the pose is valid and agreed, which a generation the
+# program never ran would satisfy too. The suite's LATER fixtures connect
+# parent:space on a provider, which the program still refuses -- but they
+# reach it on the cpuParityMode evaluator, which asks for the dynamic path,
+# and a bake required is not reported against a run that asked for it. So
+# the flag guards the one generation it should and is silent on the rest.
+# CONE_VERIFY because this is the only place an adjuster runs at all, and
+# the control frames it leaves on the revision are per-revision state no
+# declared slot covers -- the verifier re-running the whole generation
+# beside the cone is what holds that to account.
+rigexec_add_baked_parity_test(testRigExecCurvenetAdjuster
+    REQUIRE_BAKE CONE_VERIFY)
 
 add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
 target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)
