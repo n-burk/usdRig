@@ -1292,7 +1292,10 @@ struct RigExecBakedProgramImpl {
     /// Whether the sorted orders above are STRICTLY ascending -- which they
     /// are unless a list names one path twice. A repeated path would make an
     /// emplace keep the first value where the assignment it replaces kept
-    /// the last, so such a list is published the old way.
+    /// the last, so such a list is published the old way -- and the sort
+    /// that built the permutation is stable, so "the last" is still the last
+    /// of the two in the publication list, as it was before the permutation
+    /// existed.
     bool jointPathsAscending = false;
     bool controlPathsAscending = false;
     bool solverArraysAscending = false;

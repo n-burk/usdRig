@@ -1253,7 +1253,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                                  std::vector<int> *order) {
         order->resize(paths.size());
         std::iota(order->begin(), order->end(), 0);
-        std::sort(order->begin(), order->end(), [&](int a, int b) {
+        // STABLE, because of the fallback below: when a list does name one
+        // path twice the permutation is still what both fill loops walk,
+        // and only a stable sort leaves two equal paths in the order the
+        // publication list had them -- which is what makes the assigning
+        // fallback publish the same value the assignment it replaces did.
+        std::stable_sort(order->begin(), order->end(), [&](int a, int b) {
             return paths[size_t(a)] < paths[size_t(b)];
         });
         // Strictly ascending, not merely sorted: a repeated path would make

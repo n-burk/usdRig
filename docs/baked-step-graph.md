@@ -580,8 +580,10 @@ compose), a few thousand edges.
    biped's joints and controls both arrive in binding order -- so Build sorts a permutation of each
    (`jointPublishOrder`, `controlPublishOrder`, `solverPublishOrder`) and records whether it is
    STRICTLY ascending; a list that names one path twice is published the old assigning way, because
-   an emplace would keep the first value where the assignment kept the last. Control frames the
-   same. Solver guides: read `B.aggregates` directly under the runtime toggle
+   an emplace would keep the first value where the assignment kept the last. The permutation is
+   built with `std::stable_sort` for that fallback's sake: both fill loops walk the permutation
+   whichever branch they take, so only a stable order leaves two equal paths in publication order
+   and makes last-wins mean what it meant before. Control frames the same. Solver guides: read `B.aggregates` directly under the runtime toggle
    `E._guideTaps && E._solverGuidesEnabled`, never cached in a step [P22].
 5. Property-domain results into `movedProperties`.
 6. Per chain in chain order: each revision's `RevisionStatic` diagnostics (the `inputs:defaultWeight`
