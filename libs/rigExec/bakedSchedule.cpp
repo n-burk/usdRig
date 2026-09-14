@@ -1164,6 +1164,17 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 dirty.Set(cones.avarCluster[i]);
             }
         }
+        // The transforms the prologue read off the stage for the plain
+        // Xformables a constraint targets: sixteen numbers per slot compared
+        // by VALUE, exactly as the avars above are, because "the time moved"
+        // is never the predicate for a source. The compose group covering
+        // the slot is what declares a write of its frame, so its cluster is
+        // the one every reader of that frame hangs off.
+        for (size_t k = 0; k < B.xformSlots.size(); ++k) {
+            if (B.xformBase[k] != B.lastXformBase[k]) {
+                dirty.Set(cones.avarCluster[size_t(B.xformSlots[k])]);
+            }
+        }
         // Each chain's authored base, and whether it read at all.
         for (size_t c = 0; c < B.chains.size(); ++c) {
             const RigExecBakedProgramImpl::GeomChain &chain = B.chains[c];
@@ -1231,6 +1242,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // this run skipped anything: the comparison is always with the values the
     // last run SAW, and a forced run saw them too.
     B.lastAvars = B.avars;
+    B.lastXformBase = B.xformBase;
     B.lastOverridden = B.overridden;
     B.lastPropertyResults = B.propertyResults;
     B.lastHaveBase.resize(B.chains.size());

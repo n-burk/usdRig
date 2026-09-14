@@ -1036,6 +1036,27 @@ struct RigExecBakedProgramImpl {
     /// ancestor a propagated descendant rides.
     std::vector<int> propParent;
 
+    // ---- xform-derived provider slots -------------------------------------
+    //
+    // A plain Xformable a constraint targets has no rest chain and no avars:
+    // its pose is whatever the stage says its transform is, measured relative
+    // to the asset root. The run reads that in its PROLOGUE -- it is a stage
+    // read, which no step may make -- and leaves the frame in the slot's
+    // FIRST version, where the compose would have left one.
+    /// The XformDerived slots, ascending, and the prim each one reads.
+    std::vector<int> xformSlots;
+    std::vector<UsdPrim> xformPrimsBySlot;
+    /// The asset root every relative transform is measured against, which is
+    /// the rig prim's parent (rigEvaluator.cpp's `assetRoot`).
+    UsdPrim assetRoot;
+    SdfPath assetRootPath;
+    /// Per entry of `xformSlots`: the relative transform this run read, and
+    /// the one the run before it read. The seed is a SOURCE (docs §7) -- it
+    /// reads outside the program and always runs -- so what makes its
+    /// readers dirty is the two compared by VALUE, never "the time moved".
+    /// It is also what `providerBaseXforms` publishes.
+    std::vector<GfMatrix4d> xformBase, lastXformBase;
+
     // ---- epoch constants resolved at bake ---------------------------------
     std::vector<GfMatrix4d> restM;                     // asset-space rest
     std::vector<std::array<GfVec3d, 4>> restPts;

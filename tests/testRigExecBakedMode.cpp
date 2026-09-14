@@ -1754,7 +1754,6 @@ static const char *const kExpectedToDecline[] = {
     "07_SurfaceDrape.usda",          // ... (surfaceProject)
     "08_AimEyes.usda",               // weight object on mover
     "09_PropertyMathMovers.usda",    // weight object on mover
-    "10_AimXformTurret.usda",        // constraint target is a plain Xformable
     "11_VolumeWeights.usda",         // provider type not baked
                                      // (RigExecCurveWeight)
     "12_CurvenetProfile.usda",       // mover operation not baked (curvenet)

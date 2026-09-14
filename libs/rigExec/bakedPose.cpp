@@ -2031,6 +2031,33 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
             "; joint fell back to its rest chain");
     }
 
+    // The plain Xformables a constraint targets, in slot (== path) order.
+    // The dynamic walk publishes these from one pass over its frame map,
+    // BETWEEN the fallback-joint lines above and the joint publication's own
+    // "degenerate final frame" lines below, and the comparator compares
+    // diagnostics in order -- so the position of this loop is as much of the
+    // answer as its contents are.
+    for (size_t k = 0; k < B.xformSlots.size(); ++k) {
+        const size_t slot = size_t(B.xformSlots[k]);
+        const RigExecPointFrame &frame = B.fin[size_t(B.finLast[slot])];
+        if (!RigExecBakedUsable(frame)) {
+            pose->diagnostics.push_back(
+                "constraint target " + B.paths[slot].GetString() +
+                " has an invalid final frame; transform omitted");
+            continue;
+        }
+        GfMatrix4d revised(1.0);
+        if (RigExecPointsToMatrix(RigExecIdentityLandmarks(), frame.points,
+                                  &revised)) {
+            // Slot order is path order and no slot is named twice, so both
+            // maps are filled strictly ascending from empty.
+            RigExecBakedEmplace(&pose->providerXforms, true, B.paths[slot],
+                                revised);
+            RigExecBakedEmplace(&pose->providerBaseXforms, true,
+                                B.paths[slot], B.xformBase[k]);
+        }
+    }
+
     {
         RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "BakedPublish", "baked");
         // A biped frame publishes about 850 keys into five ordered maps and
@@ -2113,15 +2140,14 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         }
     }
 
-    // Four published domains have no baked counterpart YET, because
+    // Two published domains have no baked counterpart YET, because
     // bakeability still rules out everything that fills them -- so leaving
     // them empty is what agrees with the dynamic path rather than a gap in
-    // the publication: providerXforms/providerBaseXforms come only from
-    // _xformDerivedProviders ("constraint target is a plain Xformable"),
-    // weightFrames only from volume weight objects, weightFields only from a
-    // mover's weight object. solverOverridesConverged stays true for the
-    // same kind of reason: it is cleared only by an incomplete exec
-    // snapshot, and there is no exec here.
+    // the publication: weightFrames comes only from volume weight objects,
+    // weightFields only from a mover's weight object.
+    // solverOverridesConverged stays true for the same kind of reason: it is
+    // cleared only by an incomplete exec snapshot, and there is no exec
+    // here.
     //
     // RigExecComparePoses compares all four regardless, so this block is a
     // checklist rather than a licence: as each refusal above goes away, the
