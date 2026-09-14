@@ -1969,6 +1969,18 @@ RigExecAssembleParameters(
             break;  // the pool changed shape under the bind
         }
 
+        // A caller that resolved the bind for itself -- because it may not
+        // touch the cache where it assembles -- says so here, before the
+        // digest, which is the cache's KEY and nothing else. Everything
+        // above this line is still read and still lands in the packet: the
+        // rest surface and the topology are compared per frame whoever bound
+        // the mover.
+        if (values.curvenetBinding) {
+            params.curvenetBinding = *values.curvenetBinding;
+            params.valid = params.curvenetBinding != nullptr;
+            break;
+        }
+
         size_t digest = TfHash()(basisToken);
         digest = TfHash::Combine(digest, samplesPerSpline);
         for (int index : splineIndices) {

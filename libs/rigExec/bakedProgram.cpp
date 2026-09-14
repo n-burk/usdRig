@@ -243,9 +243,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             }
         }
     }
-    for (const auto &[path, movers] : E._snapshotPoints) {
-        say("read-phase snapshot required on", path);
-    }
 
     const UsdTimeCode probe = _ProbeTime(E._stage);
     // A property chain RECOMPUTES its target every generation, so a value
@@ -485,7 +482,24 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             derived ? (r.op == RigExecRevisionOp::RecomputeExtent ||
                        r.op == RigExecRevisionOp::RecomputeNormals)
                     : (r.op == RigExecRevisionOp::Skin ||
-                       r.op == RigExecRevisionOp::Matrix);
+                       r.op == RigExecRevisionOp::Matrix ||
+                       // Every operation whose whole packet the per-frame
+                       // assembler reads off the stage: the program hands
+                       // RigExecAssembleParameters the same binding and the
+                       // same resolved inputs the dynamic walk hands it, and
+                       // RigExecRunRevisionKernel is the same kernel. What
+                       // separates these from the ones still refused below is
+                       // that none of them needs a value the pose walk has
+                       // not already produced.
+                       r.op == RigExecRevisionOp::BlendShape ||
+                       r.op == RigExecRevisionOp::Curvenet ||
+                       r.op == RigExecRevisionOp::CurvenetAdjuster ||
+                       r.op == RigExecRevisionOp::EmitGuidePoints ||
+                       r.op == RigExecRevisionOp::Ribbon ||
+                       r.op == RigExecRevisionOp::VolumeCorrect ||
+                       r.op == RigExecRevisionOp::Smooth ||
+                       r.op == RigExecRevisionOp::Lattice ||
+                       r.op == RigExecRevisionOp::SurfaceProject);
         if (!supported) {
             say(std::string("mover operation not baked (") +
                     RigExecBakedOpName(r.op) +
@@ -494,18 +508,28 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             return;
         }
         sayUnbakedWeights(r.binding.weightObject);
-        if (!r.binding.blendInputs.empty()) {
-            say("blend shape inputs on mover", r.moverPath);
+        // A phase that names a POINT IN THE POSE WALK on rigExec:transform
+        // is the one read phase the program cannot answer. Both halves of
+        // the store are filled -- the pose walk records a provider's matrix
+        // after each constraint that names it, the chains record their own
+        // points -- but the CONSUMER is missing: the influence fold takes
+        // the provider's base or final matrix out of the dense tables and has
+        // no branch that takes it out of the store instead. Refusing is the
+        // honest answer while that is true; reading the base matrix silently
+        // would be a different deformation with nothing to say so.
+        if (r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim) {
+            say("read phase naming a pose-walk point on rigExec:transform",
+                r.moverPath);
         }
-        if (!r.binding.phases.empty()) {
-            say("read phase on a mover input", r.moverPath);
-        }
-        if (!r.binding.curvenetPoints.IsEmpty() ||
-            !r.binding.curvenet.IsEmpty()) {
-            say("curvenet on mover", r.moverPath);
-        }
-        if (r.driverFramesTap >= 0) {
-            say("driver frames on mover", r.moverPath);
+        // The frames the walk hands a curve mover are the aggregate a
+        // BATCHED solver publishes -- the dynamic path taps the solver's
+        // computePointFrameArray and then overrides the tap with the walk's
+        // own solve, so the program's aggregate table is the same number.
+        // A solver in no batch has no aggregate for the program to point at,
+        // and one whose type the bake declines has already said so above.
+        if (!r.binding.driverFrames.IsEmpty() &&
+            !batched.count(r.binding.driverFrames)) {
+            say("driver frames solver is in no batch", r.binding.driverFrames);
         }
         if (r.op == RigExecRevisionOp::Skin) {
             const UsdPrim prim = E._stage->GetPrimAtPath(r.moverPath);
@@ -587,6 +611,13 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
                           RigExecBakedProgramImpl::GeomRevision *source,
                           bool keepRun) {
         destination->created = false;
+        // The adjuster's control frames are the node's MUTABLE member state,
+        // which survives a Compute the node did not run -- so they survive a
+        // rebuild the node survived, whatever happens to its result. A
+        // revision below the first divergence re-executes and overwrites
+        // them; one that does not would otherwise publish nothing where the
+        // dynamic path publishes its last answer.
+        destination->controlFrames = std::move(source->controlFrames);
         if (!keepRun) {
             return;
         }
@@ -1034,6 +1065,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     RigExecBakedProgramImpl &B = *impl;
     B.evaluator = evaluator;
     B.stage = E._stage;
+    B.assetRootPath = E._rigPath.GetParentPath();
     // The evaluator state a frame reads, captured here because this is the
     // only translation unit its friendship reaches; bakedProgramImpl.h says
     // why each one is a pointer rather than a copy.
@@ -1123,8 +1155,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.rebuild.insert(SdfPath::AbsoluteRootPath());
 
     // What a plain Xformable's transform is measured relative to, which is
-    // the one prim rigEvaluator.cpp's pose walk measures against too.
-    B.assetRootPath = E._rigPath.GetParentPath();
+    // the one prim rigEvaluator.cpp's pose walk measures against too -- and
+    // the same asset root the adjuster publication composes against, set
+    // once at the head of Build.
     B.assetRoot = B.stage->GetPrimAtPath(B.assetRootPath);
 
     // ---- dense provider slots ---------------------------------------------
@@ -1952,7 +1985,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     if (B.volumeWeightMatrices) {
         pose->weightFrames = *B.volumeWeightMatrices;
     }
-    RigExecBakedPublishGeometry(&B, pose);
+    RigExecBakedPublishGeometry(&B, time, pose);
 
     // The generation's work counters. Two of them are PROGRAM CONSTANTS
     // rather than observations -- the dynamic path's override rounds are the

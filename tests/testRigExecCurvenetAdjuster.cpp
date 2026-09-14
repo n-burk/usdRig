@@ -54,6 +54,24 @@ int main() {
         GfVec3f(netToAsset.Transform(GfVec3d(points()[1])))));
     CHECK(pose.moverGraphParityMismatches==0);
 
+    // The same rig once more with the CPU oracle OFF, because cpuParityMode
+    // does not merely add an oracle -- it ASKS for the dynamic path, so the
+    // evaluator above never builds a baked program and the adjuster's bake
+    // has no coverage anywhere else. Under RIGEXEC_EVALUATION_MODE=parity
+    // this generation runs both paths over one rig whose curvenet carries an
+    // xform op, which is what exercises the net -> asset ladder the control
+    // frames are published through.
+    {
+        RigExecRigEvaluator bakedEvaluator(stage,builder.GetRootPath());
+        std::vector<std::string> bakedErrors;
+        CHECK(bakedEvaluator.Compile(&bakedErrors));
+        const auto bakedPose=bakedEvaluator.Evaluate(UsdTimeCode(1));
+        CHECK(bakedPose.valid && bakedPose.bakedParityMismatches==0);
+        CHECK(bakedPose.movedProperties.count(target));
+        CHECK(bakedPose.controlFrames.count(knot.GetPath()) &&
+            bakedPose.controlFrames.count(tangent.GetPath()));
+    }
+
     pose=evaluator.Evaluate(UsdTimeCode(1));
     CHECK(pose.valid && pose.moverGraphRevisionsExecuted==0);
     CHECK(pose.controlFrames.count(knot.GetPath()));

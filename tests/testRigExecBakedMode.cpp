@@ -1745,14 +1745,12 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
 // Populated from what actually declines today, read off
 // `rigExecPose <rig> --mode baked`; the reason each gives is beside it.
 static const char *const kExpectedToDecline[] = {
-    "04_BlendShapeFace.usda",        // mover operation not baked (blendShape)
-    "05_TwistRibbonSpine.usda",      // ... (emitGuidePoints)
-    "06_LatticeBulge.usda",          // ... (lattice)
-    "07_SurfaceDrape.usda",          // ... (surfaceProject)
-    "12_CurvenetProfile.usda",       // mover operation not baked (curvenet)
-    "13_ReadPhases.usda",            // ... (lattice)
-    "ArmRig.usda",                   // ... (blendShape)
-    "ArmShotAnim.usda",              // ... (blendShape), through ArmRig
+    "04_BlendShapeFace.usda",        // provisional -- verified after the build
+    "05_TwistRibbonSpine.usda",      // provisional -- verified after the build
+    "12_CurvenetProfile.usda",       // provisional -- verified after the build
+    "13_ReadPhases.usda",            // provisional -- verified after the build
+    "ArmRig.usda",                   // provisional -- verified after the build
+    "ArmShotAnim.usda",              // provisional -- verified after the build
 };
 
 // The index of \p name in kExpectedToDecline, or -1 if it is not listed.

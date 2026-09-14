@@ -418,6 +418,42 @@ foreach(_schedule serial parallel)
         "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
 endforeach()
 
+# The geometry operations that bake with no shipped rig to say so:
+# blendShape, curvenet, emitGuidePoints, ribbon and the two read phases that
+# come out of the run's snapshot store. Every rig that authors them is held
+# on the dynamic path by a refusal belonging to another group, so this suite
+# unbinds that refusal in memory and holds the operations themselves against
+# the dynamic path; see the file's own header. It is registered by hand
+# rather than through rigexec_add_baked_parity_test because, like the
+# example sweep above, it fixes its own evaluation mode.
+add_executable(testRigExecGeometryOpsBakedParity
+    tests/testRigExecGeometryOpsBakedParity.cpp)
+target_link_libraries(testRigExecGeometryOpsBakedParity PRIVATE rigExec)
+target_compile_definitions(testRigExecGeometryOpsBakedParity PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecGeometryOpsBakedParity
+    COMMAND testRigExecGeometryOpsBakedParity
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
+# The mode is the suite's own, so RIGEXEC_EVALUATION_MODE stays unset here --
+# but a generation that fell back must still be loud.
+set_tests_properties(testRigExecGeometryOpsBakedParity PROPERTIES
+    ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+    FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+foreach(_schedule serial parallel)
+    add_test(NAME testRigExecGeometryOpsBakedParityCones_${_schedule}
+        COMMAND testRigExecGeometryOpsBakedParity
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
+    set_tests_properties(testRigExecGeometryOpsBakedParityCones_${_schedule}
+        PROPERTIES ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    set_property(TEST testRigExecGeometryOpsBakedParityCones_${_schedule}
+        APPEND PROPERTY ENVIRONMENT
+        "RIGEXEC_BAKED_VERIFY_CONES=1"
+        "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+endforeach()
+
 add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
 target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecStandalone PRIVATE ${_rigexec_schema_resource_define})
@@ -440,6 +476,23 @@ add_executable(testRigExecCurvenetAdjuster tests/testRigExecCurvenetAdjuster.cpp
 target_link_libraries(testRigExecCurvenetAdjuster PRIVATE rigExec rigExecRigging)
 target_compile_definitions(testRigExecCurvenetAdjuster PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecCurvenetAdjuster COMMAND testRigExecCurvenetAdjuster)
+# The curvenet adjuster's only baked coverage. Its own fixtures pin
+# cpuParityMode, which asks for the dynamic path, so the suite grew one
+# generation that does not -- over a net carrying an xform op, which is what
+# exercises the net -> asset ladder the adjusted control frames publish
+# through. REQUIRE_BAKE is what stops that generation passing vacuously: it
+# asserts only that the pose is valid and agreed, which a generation the
+# program never ran would satisfy too. The suite's LATER fixtures connect
+# parent:space on a provider, which the program still refuses -- but they
+# reach it on the cpuParityMode evaluator, which asks for the dynamic path,
+# and a bake required is not reported against a run that asked for it. So
+# the flag guards the one generation it should and is silent on the rest.
+# CONE_VERIFY because this is the only place an adjuster runs at all, and
+# the control frames it leaves on the revision are per-revision state no
+# declared slot covers -- the verifier re-running the whole generation
+# beside the cone is what holds that to account.
+rigexec_add_baked_parity_test(testRigExecCurvenetAdjuster
+    REQUIRE_BAKE CONE_VERIFY)
 
 add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
 target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)

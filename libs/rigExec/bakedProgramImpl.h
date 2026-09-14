@@ -1055,6 +1055,15 @@ enum class RigExecBakedPropagateOutcome : uint8_t {
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
+    /// The rig's asset root: the parent of the RigExecRoot, which is the
+    /// space every control frame the rig publishes is expressed in, and the
+    /// prim a plain Xformable's transform is measured relative to. Two
+    /// groups arrived at it independently -- the epilogue's curvenet-adjuster
+    /// publication composes the ladder from the net's own prim up to here,
+    /// and the xform-derived provider seed measures against it -- and it is
+    /// ONE field because it is one prim: rigEvaluator.cpp's pose walk uses
+    /// the same `_rigPath.GetParentPath()` for both.
+    SdfPath assetRootPath;
 
     // ---- the evaluator state the frame path reads --------------------------
     //
@@ -1121,7 +1130,6 @@ struct RigExecBakedProgramImpl {
     /// The asset root every relative transform is measured against, which is
     /// the rig prim's parent (rigEvaluator.cpp's `assetRoot`).
     UsdPrim assetRoot;
-    SdfPath assetRootPath;
     /// Per entry of `xformSlots`: the relative transform this run read, and
     /// the one the run before it read. The seed is a SOURCE (docs §7) -- it
     /// reads outside the program and always runs -- so what makes its
@@ -1702,12 +1710,65 @@ struct RigExecBakedProgramImpl {
         bool ok = false;
     };
 
+    /// One blend channel's stage handles, resolved once at Build.
+    ///
+    /// The channels themselves are per-frame reads -- a channel weight is
+    /// what an animator drags -- so nothing here is a VALUE. What is captured
+    /// is which attribute to ask, in the order the accumulation is defined
+    /// over: `binding.blendInputs` is canonically sorted at compile and the
+    /// samples of one channel are stable-sorted by activation every frame.
+    /// Float addition is not associative, so an order that differs from the
+    /// dynamic walk's is a different last bit.
+    struct GeomBlendChannel {
+        /// `inputs:weight` on the RigExecBlendInput prim. Invalid when the
+        /// prim or the attribute is absent, which reads as the channel's
+        /// default exactly as the dynamic walk's invalid handle does.
+        UsdAttribute weight;
+        struct Sample {
+            /// `rigExec:activation` on the RigExecBlendSample prim.
+            UsdAttribute activation;
+            /// The sample's target-shape points, and the path a declared
+            /// read phase looks that array up under.
+            UsdAttribute points;
+            SdfPath pointsPath;
+            RigExecReadPhase phase;
+        };
+        std::vector<Sample> samples;
+    };
+
     struct GeomRevision {
         SdfPath moverPath;
         SdfPath target;
         UsdPrim moverPrim;
         RigExecRevisionOp op = RigExecRevisionOp::Skin;
         RigExecRevisionBinding binding;
+        /// The chain whose published points are this curvenet mover's POSED
+        /// net, as an index into `chains`, or -1. E._chainOrder runs a net's
+        /// own chain before any mover that reads it, so the value is this
+        /// run's by the time the revision is assembled -- and the static
+        /// step declares the chain's ChainPoints slot, which is what says so
+        /// to the scheduler.
+        int curvenetChain = -1;
+        /// The curvenet adjuster's second output: one fully adjusted frame
+        /// per adjustment, in RigExecCurvenetAdjustmentPaths order.
+        ///
+        /// Persistent, because the revision node keeps its own as MUTABLE
+        /// member state that survives a Compute it did not run -- a revision
+        /// whose inputs stood still still publishes the frames it last
+        /// produced, and the published map is one of the seven the
+        /// comparator checks.
+        std::vector<GfMatrix4d> controlFrames;
+        /// The Profile Mover bind, resolved in the PROLOGUE.
+        ///
+        /// RigExecCurvenetBindCache has no locking at all and reports one
+        /// diagnostic per bind, so it belongs to serial code; a null pointer
+        /// here is a remembered failed bind and not "not asked yet", which
+        /// `curvenetBindResolved` says.
+        std::shared_ptr<const RigExecProfileMoverBinding> curvenetBind;
+        bool curvenetBindResolved = false;
+        /// This revision's blend channels, in `binding.blendInputs` order.
+        /// Empty for every operation but a blend shape.
+        std::vector<GeomBlendChannel> blendChannels;
         std::vector<int> influenceSlots;
         int transformSlot = -1;
         /// The geometry-domain constraint whose delta IS this revision's
@@ -1742,6 +1803,14 @@ struct RigExecBakedProgramImpl {
         /// wants the target's points from, so the chain records them after
         /// it. Decided at bake out of the evaluator's _snapshotPoints.
         bool snapshotAfter = false;
+        /// This revision LOOKS the run's phased-read store up, so its static
+        /// step declares every step before it as a read. Two things can make
+        /// it true and the second is easy to miss: a declared input phase
+        /// (`binding.phases`), and a blend sample whose target shape carries
+        /// one -- that lookup is made directly by the channel gather rather
+        /// than through the revision's overlay, so the overlay's own
+        /// predicate does not cover it.
+        bool readsSnapshots = false;
         /// This node is new to the rig's geometry state and its creation has
         /// not been reported yet. Cleared by AdoptGeometryStateFrom for a
         /// node the outgoing program already held, which is the same
@@ -2452,9 +2521,11 @@ bool RigExecBakedPublishPose(RigExecBakedProgramImpl *program,
                              RigExecRigPose *pose);
 
 /// The geometry half of the epilogue: each chain's diagnostics and points
-/// and each derived target's, in chain order.
+/// and each derived target's, in chain order, plus the control frames a
+/// curvenet adjuster publishes -- which need \p time, because the ladder
+/// from the net to the asset root is composed at the evaluated time.
 void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
-                                 RigExecRigPose *pose);
+                                 UsdTimeCode time, RigExecRigPose *pose);
 
 /// Cuts \p revision's vertices into chunks, from \p indices and
 /// \p elementSize.
