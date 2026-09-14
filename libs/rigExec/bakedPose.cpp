@@ -1160,21 +1160,14 @@ namespace {
 
 /// Records \p input against \p step: what a frame can move it with.
 ///
-/// Three answers, and each is a different way a value can arrive: it is a
-/// function of time (a keyframe), it resolves through the generation's
-/// resolved inputs every frame (a property chain writes it), or an
-/// interactive override can be placed on it. Anything else was folded at
-/// bake and cannot move without a rebuild.
+/// The rule itself is RigExecBakedNoteInput in bakedProgramImpl.h, because
+/// the weight half declares its inputs the same way and two spellings of
+/// "what can move this" is a step the cone cannot dirty.
 template <class T>
 void
 NoteInput(const RigExecBakedInput<T> &input, RigExecBakedStep *step)
 {
-    step->varyingInputs = step->varyingInputs || input.varying;
-    step->resolvedInputReads =
-        step->resolvedInputReads || bool(input.resolvedAttr);
-    if (input.overrideIndex >= 0) {
-        step->overrideInputs.push_back(input.overrideIndex);
-    }
+    RigExecBakedNoteInput(input, step);
 }
 
 /// Every per-frame input one solver's Solve step reads.
@@ -1250,6 +1243,10 @@ RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program)
             }
             break;
         }
+        case RigExecBakedStepKind::WeightPacket:
+            RigExecBakedNoteWeightInputs(
+                B.weightObjects[size_t(step.object)], &step);
+            break;
         default:
             break;
         }

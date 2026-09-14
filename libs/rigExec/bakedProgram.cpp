@@ -47,6 +47,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -116,6 +117,23 @@ _IsBakedSolverType(const TfToken &type)
 {
     return type == "RigExecFkChain" || type == "RigExecTwoBoneIk" ||
            type == "RigExecBlendPointFrames" || type == "RigExecSplineIk";
+}
+
+// The weight-object schemas the program can build a packet for.
+//
+// It is about the BUILDER and nothing else. The volumetric three are here
+// because RigExecBuildVolumeWeightPacket is one of the builders, and they are
+// still refused above by the _volumeWeightMatrixTaps loop, which is about the
+// PLACEMENT a volume's field needs; the day that placement is maintained,
+// deleting that loop is the whole change and this predicate does not move.
+// RigExecCurvenetWeight is the one weight object left out: its field comes off
+// a curvenet bind, which the program does not hold.
+bool
+_IsBakedWeightType(const TfToken &type)
+{
+    return type == "RigExecStaticWeight" || type == "RigExecDynamicWeight" ||
+           type == "RigExecCombineWeight" || type == "RigExecSphereWeight" ||
+           type == "RigExecPlaneWeight" || type == "RigExecCurveWeight";
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on
@@ -392,6 +410,40 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
+    // ---- weight objects ------------------------------------------------------
+    //
+    // A weight object is a COMPOSITION -- a dynamic weight remaps a base, a
+    // combine folds a list -- so the question is about the closure and not
+    // about the object a mover happens to name. Walked with a visited set of
+    // its own rather than trusting the compile pass to have rejected a cycle
+    // first: a bakeability check that only terminates because somebody else
+    // checked is not one to leave in place.
+    std::set<SdfPath> weightsSeen;
+    std::function<void(const SdfPath &)> sayUnbakedWeights =
+        [&](const SdfPath &path) {
+            if (path.IsEmpty() || !weightsSeen.insert(path).second) {
+                return;
+            }
+            const UsdPrim prim = E._stage->GetPrimAtPath(path);
+            if (!prim) {
+                say("weight object prim is missing", path);
+                return;
+            }
+            const TfToken type = prim.GetTypeName();
+            if (!_IsBakedWeightType(type)) {
+                say("weight object type not baked (" + type.GetString() + ")",
+                    path);
+                return;
+            }
+            for (const SdfPath &base : _Targets(prim, "rigExec:baseWeight")) {
+                sayUnbakedWeights(base);
+            }
+            for (const SdfPath &input :
+                     _Targets(prim, "rigExec:inputWeights")) {
+                sayUnbakedWeights(input);
+            }
+        };
+
     // ---- geometry ----------------------------------------------------------
     auto checkRevision = [&](const RigExecRigEvaluator::_GraphRevision &r,
                              bool derived) {
@@ -407,9 +459,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 r.moverPath);
             return;
         }
-        if (!r.binding.weightObject.IsEmpty()) {
-            say("weight object on mover", r.moverPath);
-        }
+        sayUnbakedWeights(r.binding.weightObject);
         if (!r.binding.blendInputs.empty()) {
             say("blend shape inputs on mover", r.moverPath);
         }
@@ -1370,6 +1420,10 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // between them follow from the slot ranges each piece declares. Built
     // once here, so that a frame costs the graph nothing.
     RigExecBakedBuildPoseSteps(&B);
+    // Between the two halves, which is where a weight object belongs in
+    // program order: its placement comes from the pose walk and its packet is
+    // what a revision assembles against.
+    RigExecBakedBuildWeightSteps(&B);
     RigExecBakedBuildGeometrySteps(&B);
     RigExecBakedBuildSchedule(&B);
     if (RigExecBakedScheduleReportRequested()) {

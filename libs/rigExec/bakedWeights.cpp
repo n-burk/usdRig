@@ -19,10 +19,27 @@
 // reports errors as strings where exec publishes an invalid packet -- and its
 // value is exactly that it was written separately.
 //
-// Nothing here runs yet: IsBakeable still refuses "weight object on mover"
-// and "weight object on constraint", so no rig reaches the table. It is here
-// because the operator groups that remove those refusals would otherwise each
-// write it.
+// WHICH SIDE EACH CALL SITE COPIES. The dynamic path resolves a weight in
+// two different ways, and every parity bug in this domain is a call site
+// copying the wrong one. So it is written down once, here, and obeyed:
+//
+//   * a MOVER copies EXEC. Its packet is the one the computeWeightPacket
+//     callbacks publish -- these builders -- placed against the volume's
+//     BASE frame, with exec's validity ladder, and an invalid packet is a
+//     MoverFailed pass-through rather than a diagnostic string.
+//   * a CONSTRAINT copies the ORACLE. The dynamic constraint path does not
+//     go through exec at all: it calls RigExecRigEvaluator::_ResolveWeights
+//     and takes its error string, against the FINAL-frame placement in
+//     _volumeWeightMatrices. So does the baked one, for the same value.
+//   * a CURRENT-PHASE field copies the ORACLE, for the same reason: the
+//     dynamic path patches the tapped packet with what _ResolveWeights
+//     measured against the in-flight points.
+//   * pose.weightFrames copies the walk's FINAL frames, which is what
+//     _UpdateVolumePlacements publishes and what the oracle then reads.
+//
+// The two placements genuinely differ for a volume some constraint revises,
+// and reproducing BOTH is the contract: parity is with the dynamic path as
+// it stands, not with the dynamic path as it might be tidied.
 //
 #include "bakedProgramImpl.h"
 
@@ -201,6 +218,80 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
     // invalid packet, which is a MoverFailed pass-through rather than a
     // plausible wrong deformation.
     return RigExecWeightPacket();
+}
+
+void
+RigExecBakedNoteWeightInputs(
+    const RigExecBakedProgramImpl::WeightObject &weight,
+    RigExecBakedStep *step)
+{
+    // This object's OWN inputs only. Every object it composes has a step of
+    // its own, and that step declares its own inputs; a packet moves when
+    // any of them does, and the cone carries it forward along the
+    // WeightPacket edges between them.
+    RigExecBakedNoteInput(weight.defaultWeight, step);
+    RigExecBakedNoteInput(weight.driver, step);
+    RigExecBakedNoteInput(weight.scale, step);
+    RigExecBakedNoteInput(weight.bias, step);
+    RigExecBakedNoteInput(weight.strength, step);
+    RigExecBakedNoteInput(weight.invert, step);
+}
+
+void
+RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    // The slot storage, sized once. A consumer holds a pointer into it for
+    // the whole region, so it is never resized inside one.
+    B.weightPackets.assign(B.weightObjects.size(), RigExecWeightPacket());
+    for (size_t i = 0; i < B.weightObjects.size(); ++i) {
+        const RigExecBakedProgramImpl::WeightObject &weight =
+            B.weightObjects[i];
+        RigExecBakedStep step;
+        step.kind = RigExecBakedStepKind::WeightPacket;
+        step.object = int(i);
+        step.maxDiagnostics = 0;
+        // The composition, as edges. The table is in dependency order, so
+        // every one of these names a lower index and the edge sweep sees a
+        // forward edge like any other.
+        if (weight.base >= 0) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::WeightPacket, weight.base));
+        }
+        for (const int input : weight.inputs) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::WeightPacket, input));
+        }
+        step.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::WeightPacket, int(i)));
+        B.steps.push_back(std::move(step));
+    }
+}
+
+void
+RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
+                          RigExecBakedStep *step, UsdTimeCode time)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const RigExecBakedProgramImpl::WeightObject &weight =
+        B.weightObjects[size_t(step->object)];
+    // Rebuilt every frame rather than replayed out of `cached`.
+    //
+    // The table carries a cache and the frame path does not use it yet, and
+    // that is a decision rather than an omission: the predicate is the hard
+    // part. `varying` says no input of the closure is a function of TIME,
+    // which is not the same as "nothing can have moved" -- an interactive
+    // override standing on a painted weight moves it, and so does the frame
+    // AFTER one is lifted, and a volume's placement moves with the rig
+    // whatever its own inputs do. A packet built from values that did not
+    // move is the same packet, so the only thing at stake here is the work,
+    // and the only object for which that work is more than a few floats is a
+    // volume field over a large mesh -- which is also the object the
+    // predicate cannot cover. Sharing the packet between the movers that
+    // bind it, which is what exec's node cache buys and what this step IS,
+    // is the part that mattered.
+    B.weightPackets[size_t(step->object)] =
+        RigExecBakedWeightPacket(B, weight, B.weightPackets, time);
 }
 
 }  // namespace rigExec

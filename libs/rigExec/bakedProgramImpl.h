@@ -442,6 +442,7 @@ enum class RigExecBakedSlotDomain : uint8_t {
     ChainDirty,          ///< the chain's sticky dirty bit as of one revision
     ChainPoints,         ///< the chain's published points
     DerivedOut,          ///< one derived target's output
+    WeightPacket,        ///< one weight object's packet for this frame
     Snapshots,           ///< the phased-read records one step made
 };
 /// Derived from the last enumerator rather than written out: an array
@@ -551,6 +552,7 @@ enum class RigExecBakedStepKind {
     CommitApply,      ///< a split commit's decision and write-back
     ProviderMatrix,   ///< one provider's rest -> final or rest -> base matrix
     SnapshotFinals,   ///< every provider's final matrix, for a phased read
+    WeightPacket,     ///< one weight object's packet, built once per frame
     InfluenceFold,    ///< one revision's influence table
     RevisionStatic,   ///< one revision's packet, status and executed decision
     RevisionChunk,    ///< one vertex range of one revision
@@ -618,6 +620,7 @@ struct RigExecBakedStep {
     ///     PropagateChunk/CommitApply                index into commits
     ///   ProviderMatrix                              provider slot
     ///   SnapshotFinals                              unused
+    ///   WeightPacket                                index into weightObjects
     ///   InfluenceFold/RevisionStatic/
     ///     RevisionChunk/RevisionFuse                index into revisionIndex
     ///   ChainStatus                                 index into chains
@@ -1570,6 +1573,26 @@ struct RigExecBakedProgramImpl {
         /// whole rather than a chunk deforming a vertex against an identity.
         bool partitionStale = false;
 
+        // ---- the weight object this revision binds -------------------------
+        /// rigExec:weightObject as an index into `weightObjects`, or -1.
+        /// The packet itself is shared -- one per object per frame, however
+        /// many movers bind it -- so what a revision holds is the index.
+        int weightObject = -1;
+        /// Whether the weight object weights the MOVER (one declared target,
+        /// and it is this mover) rather than the points. Decided at Build
+        /// because it is a relationship read, and the relationship is epoch
+        /// state; the condition is the dynamic path's, verbatim.
+        bool weightOperationDomain = false;
+        /// The property the published field says it weights: the mover for
+        /// an operation-domain object, the chain's target otherwise.
+        SdfPath weightFieldTarget;
+        /// The field this revision published this run, and whether it
+        /// published one at all. Written by RevisionStatic -- which is where
+        /// the dynamic path publishes it, from the packet the mover is about
+        /// to consume -- and drained by the epilogue in chain order.
+        std::vector<float> weightField;
+        bool weightFieldPublished = false;
+
         // ---- what InfluenceFold decides for the whole array ----------------
         /// Every influence matrix finite and affine. For a skin revision the
         /// packet cannot answer this -- it is assembled before the matrices
@@ -1703,6 +1726,11 @@ struct RigExecBakedProgramImpl {
     /// composition walk is under way (the bake is depth first and enters the
     /// table on the way out), so meeting one is a cycle.
     std::map<SdfPath, int> weightIndex;
+    /// This frame's packet per weight object -- the WeightPacket slot
+    /// domain's storage. Sized at Build and never resized in a run, like
+    /// every other slot: a consumer holds a pointer into it for the whole
+    /// region.
+    std::vector<RigExecWeightPacket> weightPackets;
 
     // ---- the invalidation index --------------------------------------------
     //
@@ -1981,6 +2009,19 @@ void RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 void RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                  RigExecBakedStep *step, UsdTimeCode time);
 
+/// Appends one WeightPacket step per weight object, in the table's
+/// dependency order, between the pose half and the geometry half.
+void RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program);
+
+/// Runs one WeightPacket step, under the same rule as the other two.
+void RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
+                               RigExecBakedStep *step, UsdTimeCode time);
+
+/// Every per-frame input one weight object's step reads.
+void RigExecBakedNoteWeightInputs(
+    const RigExecBakedProgramImpl::WeightObject &weight,
+    RigExecBakedStep *step);
+
 /// Resets the per-run DELTAS a geometry step would have written, for a run
 /// that skipped it (§7).
 ///
@@ -2045,6 +2086,30 @@ void RigExecBakedPartitionRevision(
 /// longer wait for the leg constraints" a measured claim per asset rather
 /// than a design intention.
 std::string RigExecBakedGeometryReport(const RigExecBakedProgramImpl &program);
+
+/// Records \p input against \p step: what a frame can move it with.
+///
+/// Three answers, and each is a different way a value can arrive: it is a
+/// function of time (a keyframe), it resolves through the generation's
+/// resolved inputs every frame (a property chain writes it), or an
+/// interactive override can be placed on it. Anything else was folded at
+/// bake and cannot move without a rebuild.
+///
+/// It is here rather than beside one domain's step builders because all
+/// three domains declare inputs and a domain that declared them its own way
+/// would be a step the cone cannot dirty.
+template <class T>
+inline void
+RigExecBakedNoteInput(const RigExecBakedInput<T> &input,
+                      RigExecBakedStep *step)
+{
+    step->varyingInputs = step->varyingInputs || input.varying;
+    step->resolvedInputReads =
+        step->resolvedInputReads || bool(input.resolvedAttr);
+    if (input.overrideIndex >= 0) {
+        step->overrideInputs.push_back(input.overrideIndex);
+    }
+}
 
 /// Bakes the weight object at \p path, and everything it composes, into
 /// \p ctx's table; returns its index, or -1 when there is nothing there.
@@ -2177,6 +2242,8 @@ struct RigExecBakedRunShadow {
         bool influencesValid = false, influencesChanged = false;
         bool staticDirty = false, partitionStale = false;
         bool layoutUsable = false, envelopeOk = false, fullStrength = false;
+        std::vector<float> weightField;
+        bool weightFieldPublished = false;
     };
     struct DerivedState {
         RevisionState revision;
@@ -2204,6 +2271,7 @@ struct RigExecBakedRunShadow {
     };
 
     std::vector<double> avars;
+    std::vector<RigExecWeightPacket> weightPackets;
     std::vector<GfMatrix4d> posedM, finalMatrix, baseMatrix;
     std::vector<RigExecPointFrame> base, fin;
     std::vector<RigExecPointFrameArray> aggregates;

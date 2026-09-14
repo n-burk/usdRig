@@ -57,6 +57,7 @@ RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain)
     case RigExecBakedSlotDomain::ChainDirty: return "ChainDirty";
     case RigExecBakedSlotDomain::ChainPoints: return "ChainPoints";
     case RigExecBakedSlotDomain::DerivedOut: return "DerivedOut";
+    case RigExecBakedSlotDomain::WeightPacket: return "WeightPacket";
     case RigExecBakedSlotDomain::Snapshots: return "Snapshots";
     }
     return "unknown";
@@ -75,6 +76,7 @@ RigExecBakedStepKindName(RigExecBakedStepKind kind)
     case RigExecBakedStepKind::CommitApply: return "CommitApply";
     case RigExecBakedStepKind::ProviderMatrix: return "ProviderMatrix";
     case RigExecBakedStepKind::SnapshotFinals: return "SnapshotFinals";
+    case RigExecBakedStepKind::WeightPacket: return "WeightPacket";
     case RigExecBakedStepKind::InfluenceFold: return "InfluenceFold";
     case RigExecBakedStepKind::RevisionStatic: return "RevisionStatic";
     case RigExecBakedStepKind::RevisionChunk: return "RevisionChunk";
@@ -190,6 +192,7 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0000, 0.004088},   // CommitApply       2
     {0.0000, 0.051952},   // ProviderMatrix  252
     {1.0000, 0.200000},   // SnapshotFinals    0 -- unmeasured, see below
+    {0.0000, 0.050000},   // WeightPacket      0 -- unmeasured, see below
     {0.0000, 0.003781},   // InfluenceFold     1
     {0.0000, 0.000487},   // RevisionStatic    1
     {11.3239, 0.000714},  // RevisionChunk     7 -- see below
@@ -363,6 +366,17 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
         return 1;
     case RigExecBakedStepKind::SnapshotFinals:
         return double(B.paths.size());
+    case RigExecBakedStepKind::WeightPacket: {
+        // The ELEMENTS the packet carries, which is what every one of the
+        // builders costs per unit: a painted table's values, a volume's
+        // weighted points, a combine's cardinality. A constant packet is one
+        // element and is very nearly free, which is the common case and the
+        // reason the fixed term is zero.
+        const RigExecBakedProgramImpl::WeightObject &weight =
+            B.weightObjects[object];
+        return double(std::max<size_t>(
+            {weight.values.size(), weight.weightTargetCount, size_t(1)}));
+    }
     case RigExecBakedStepKind::InfluenceFold: {
         const auto &[chain, revision] = B.revisionIndex[object];
         return double(B.chains[size_t(chain)]
@@ -961,12 +975,42 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     // outside the graph and does have predecessors cannot be, so its cluster
     // is simply dirty every run; its own value comparison is what keeps the
     // counters saying what the dynamic path says.
+    // Which weight objects are built from the stage alone. A painted or
+    // driven weight reads no slot, so its step is a source like any other --
+    // it runs in the source pass, ahead of the dirty set, and a consumer of
+    // its packet can still be a source itself. A VOLUME reads the frame its
+    // provider was posed into, so it is a step with predecessors and its
+    // consumers are not sources either. Filled in program order, which is
+    // dependency order for the weight steps and puts every one of them ahead
+    // of the RevisionStatic that reads it.
+    std::vector<char> sourcePacket(B.weightObjects.size(), 0);
     for (RigExecBakedStep &step : B.steps) {
         step.isSource = false;
         step.externalReads = false;
-        if (step.kind == RigExecBakedStepKind::RevisionStatic) {
+        if (step.kind == RigExecBakedStepKind::WeightPacket) {
             bool pure = true;
             for (const RigExecBakedSlotRange &range : step.reads) {
+                pure = pure &&
+                       range.domain == RigExecBakedSlotDomain::WeightPacket &&
+                       [&] {
+                           for (uint32_t w = range.begin; w < range.end; ++w) {
+                               if (!sourcePacket[w]) return false;
+                           }
+                           return true;
+                       }();
+            }
+            sourcePacket[size_t(step.object)] = pure ? 1 : 0;
+            step.isSource = pure;
+            step.externalReads = !pure;
+        } else if (step.kind == RigExecBakedStepKind::RevisionStatic) {
+            bool pure = true;
+            for (const RigExecBakedSlotRange &range : step.reads) {
+                if (range.domain == RigExecBakedSlotDomain::WeightPacket) {
+                    for (uint32_t w = range.begin; w < range.end && pure; ++w) {
+                        pure = sourcePacket[w] != 0;
+                    }
+                    continue;
+                }
                 pure = pure &&
                        (range.domain == RigExecBakedSlotDomain::Avars ||
                         range.domain ==
@@ -1258,7 +1302,12 @@ RunStepBody(RigExecBakedProgramImpl *B, RigExecBakedStep *step,
     // clearing is the executor's promise and not something fifteen bodies
     // each have to remember.
     step->BeginRun();
-    if (RigExecBakedIsGeometryStep(step->kind)) {
+    if (step->kind == RigExecBakedStepKind::WeightPacket) {
+        // Neither half's: a weight object is bound by movers and by
+        // constraints, so its packet is built between the two rather than
+        // inside either (bakedWeights.cpp).
+        RigExecBakedRunWeightStep(B, step, time);
+    } else if (RigExecBakedIsGeometryStep(step->kind)) {
         RigExecBakedRunGeometryStep(B, step, time);
     } else {
         RigExecBakedRunPoseStep(B, step, time);
@@ -1819,6 +1868,8 @@ StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step)
                (step.part ? " final" : " base");
     case RigExecBakedStepKind::SnapshotFinals:
         return "every provider";
+    case RigExecBakedStepKind::WeightPacket:
+        return B.weightObjects[size_t(step.object)].path.GetString();
     case RigExecBakedStepKind::InfluenceFold:
     case RigExecBakedStepKind::RevisionStatic:
     case RigExecBakedStepKind::RevisionChunk:

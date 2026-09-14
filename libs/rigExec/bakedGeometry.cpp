@@ -131,6 +131,27 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
             if (slot < 0) refuse("skin influence is not a provider", influence);
             out.influenceSlots.push_back(slot);
         }
+        // The weight object, baked once however many revisions bind it: what
+        // this revision holds is its index in the shared table, and the
+        // packet itself is built once per frame by that object's own step.
+        out.weightObject =
+            RigExecBakedBakeWeightObject(ctx, r.binding.weightObject);
+        if (out.weightObject >= 0) {
+            // WHAT the published field says it weights, decided here because
+            // it is a relationship read and a relationship is epoch state.
+            // The condition is the dynamic path's, verbatim: exactly one
+            // declared target, and it is this mover, means the field weights
+            // the OPERATION and carries one element; anything else weights
+            // the chain's points.
+            const UsdPrim weightPrim =
+                B.stage->GetPrimAtPath(r.binding.weightObject);
+            const SdfPathVector declared =
+                ctx->Targets(weightPrim, "rigExec:weightTarget");
+            out.weightOperationDomain =
+                declared.size() == 1 && declared[0] == r.moverPath;
+            out.weightFieldTarget =
+                out.weightOperationDomain ? r.moverPath : r.target;
+        }
         return out;
     };
     for (const RigExecBakedChainSpec &spec : chains) {
@@ -549,6 +570,11 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
                 assemble.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
+                if (revision.weightObject >= 0) {
+                    assemble.reads.push_back(
+                        RigExecBakedOne(RigExecBakedSlotDomain::WeightPacket,
+                                        revision.weightObject));
+                }
                 if (!revision.binding.phases.empty()) {
                     assemble.reads.push_back(RigExecBakedRange(
                         RigExecBakedSlotDomain::Snapshots, 0,
@@ -1065,6 +1091,15 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     if (!table.empty()) {
         values.influenceTransforms = &table;
     }
+    // The weight object's packet, shared with every other mover that binds
+    // it and built by its own step earlier in the frame. A mover copies EXEC
+    // here (see bakedWeights.cpp): this is the packet the tap would have
+    // carried, and `inputs:defaultWeight` is deliberately NOT consulted
+    // beside it -- the assembler falls back to that scalar only when no
+    // packet is bound at all.
+    if (revision->weightObject >= 0) {
+        values.weights = &B.weightPackets[size_t(revision->weightObject)];
+    }
     values.basePoints.assign(basePoints, basePoints + basePointCount);
     // Epoch-fixed layouts were resolved in the PROLOGUE, through the same
     // evaluator cache the dynamic path's assembly resolves through -- so the
@@ -1513,6 +1548,30 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                revision.defaultWeight !=
                                    revision.lastDefaultWeight;
         revision.lastDefaultWeight = revision.defaultWeight;
+        // The field an authoring tool paints as an influence overlay, taken
+        // from the packet the mover is about to consume so that what a
+        // rigger sees is what deformed the geometry. Published from HERE
+        // because this is where the dynamic path publishes it -- beside the
+        // assemble, whether or not the revision then executes -- and the
+        // epilogue drains it in chain and revision order, which is what
+        // makes two revisions sharing one weight object last-writer-wins the
+        // way the dynamic walk's per-chain merge does.
+        revision.weightFieldPublished = false;
+        if (revision.weightObject >= 0) {
+            const RigExecWeightPacket &packet =
+                B.weightPackets[size_t(revision.weightObject)];
+            if (packet.valid) {
+                const size_t logicalCount =
+                    revision.weightOperationDomain ? size_t(1)
+                                                   : chain.lastBase.size();
+                revision.weightField.assign(logicalCount, 0.0f);
+                for (size_t i = 0; i < logicalCount; ++i) {
+                    const float w = packet.Resolve(i, logicalCount);
+                    revision.weightField[i] = w < 0.0f ? 0.0f : w;
+                }
+                revision.weightFieldPublished = true;
+            }
+        }
         // Every revision of a chain is applied to the same number of points:
         // a kernel that resized its output failed the application, so no
         // buffer the chain ever reads holds a different count. Sizing the
@@ -1662,7 +1721,8 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         const bool packetValid =
             revision.parameters.valid &&
             (!skin || revision.influencesValid);
-        if (revision.parameters.enabled && !packetValid) {
+        if (revision.parameters.enabled && !packetValid &&
+            revision.weightObject < 0) {
             // Read by RevisionStatic, which always runs: a step body that
             // went to the stage for a value would be a step outside its own
             // declarations, and the cone could not tell when it moved.
@@ -1673,6 +1733,17 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                     ": inputs:defaultWeight must be finite and in "
                     "[0, 1]; revision passed through");
             }
+        } else if (revision.parameters.enabled && !packetValid &&
+                   revision.weightObject >= 0 &&
+                   !B.weightPackets[size_t(revision.weightObject)].valid) {
+            // The other half of the same sentence, and the reason the arms
+            // are exclusive: with a weight object bound, the assembler never
+            // reads inputs:defaultWeight, so a rig whose scalar is out of
+            // range and whose object is fine must stay silent.
+            step->diagnostics.push_back(
+                "MoverFailed " + revision.moverPath.GetString() +
+                ": rigExec:weightObject produced an invalid common "
+                "envelope; revision passed through");
         }
         revision.executed = chainDirty || revision.staticDirty ||
                             (skin && revision.influencesChanged);
@@ -1969,7 +2040,20 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
         for (const std::string &diagnostic : step.diagnostics) {
             pose->diagnostics.push_back(diagnostic);
         }
-        if (step.kind == RigExecBakedStepKind::ChainStatus) {
+        if (step.kind == RigExecBakedStepKind::RevisionStatic) {
+            const auto &[chainIndex, revisionIndex] =
+                B.revisionIndex[size_t(step.object)];
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                B.chains[size_t(chainIndex)]
+                    .revisions[size_t(revisionIndex)];
+            if (revision.weightFieldPublished) {
+                RigExecResolvedWeightField &field =
+                    pose->weightFields[
+                        B.weightObjects[size_t(revision.weightObject)].path];
+                field.target = revision.weightFieldTarget;
+                field.weights = revision.weightField;
+            }
+        } else if (step.kind == RigExecBakedStepKind::ChainStatus) {
             const RigExecBakedProgramImpl::GeomChain &chain =
                 B.chains[size_t(step.object)];
             if (chain.haveBase) {

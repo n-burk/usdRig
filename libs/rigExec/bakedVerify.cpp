@@ -379,6 +379,8 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->influencesChanged = revision.influencesChanged;
     state->staticDirty = revision.staticDirty;
     state->partitionStale = revision.partitionStale;
+    state->weightField = revision.weightField;
+    state->weightFieldPublished = revision.weightFieldPublished;
     state->layoutUsable = revision.layoutUsable;
     state->envelopeOk = revision.envelopeOk;
     state->fullStrength = revision.fullStrength;
@@ -420,6 +422,8 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->influencesChanged = state.influencesChanged;
     revision->staticDirty = state.staticDirty;
     revision->partitionStale = state.partitionStale;
+    revision->weightField = state.weightField;
+    revision->weightFieldPublished = state.weightFieldPublished;
     revision->layoutUsable = state.layoutUsable;
     revision->envelopeOk = state.envelopeOk;
     revision->fullStrength = state.fullStrength;
@@ -484,6 +488,14 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                  shadow.fullStrength, revision.fullStrength);
     CompareValue(differences, count, where + " partitionStale",
                  shadow.partitionStale, revision.partitionStale);
+    // The published influence overlay, which no slot names and which the
+    // comparator DOES compare on the pose: a cone that skipped the assemble
+    // of a revision whose packet moved would publish last generation's field
+    // beside this generation's points.
+    CompareVector(differences, count, where + " weightField",
+                  shadow.weightField, revision.weightField);
+    CompareValue(differences, count, where + " weightFieldPublished",
+                 shadow.weightFieldPublished, revision.weightFieldPublished);
     CompareValue(differences, count, where + " influencesValid",
                  shadow.influencesValid, revision.influencesValid);
     // The per-run DELTAS. These are the fields a skip resets
@@ -521,6 +533,7 @@ void
 RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
 {
     avars = program.avars;
+    weightPackets = program.weightPackets;
     posedM = program.posedM;
     finalMatrix = program.finalMatrix;
     baseMatrix = program.baseMatrix;
@@ -585,6 +598,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
 {
     RigExecBakedProgramImpl &B = *program;
     B.avars = avars;
+    B.weightPackets = weightPackets;
     B.posedM = posedM;
     B.finalMatrix = finalMatrix;
     B.baseMatrix = baseMatrix;
@@ -654,6 +668,8 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     // difference here is a STEP that wrote it, which is the one thing
     // nothing else in the program is positioned to notice.
     CompareVector(differences, &count, "avars", avars, program.avars);
+    CompareVector(differences, &count, "weightPackets", weightPackets,
+                  program.weightPackets);
     CompareVector(differences, &count, "posedM", posedM, program.posedM);
     CompareVector(differences, &count, "base", base, program.base);
     CompareVector(differences, &count, "fin", fin, program.fin);

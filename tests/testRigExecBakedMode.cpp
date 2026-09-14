@@ -1745,15 +1745,10 @@ TestAnInEpochRebuildPublishesTheSameCounters(const std::string &examplesDir)
 // Populated from what actually declines today, read off
 // `rigExecPose <rig> --mode baked`; the reason each gives is beside it.
 static const char *const kExpectedToDecline[] = {
-    "01_FkChainTail.usda",           // weight object on mover
-    "02_TwoBoneIkLeg.usda",          // weight object on mover
-    "03_IkFkBlendClamp.usda",        // weight object on mover
     "04_BlendShapeFace.usda",        // mover operation not baked (blendShape)
     "05_TwistRibbonSpine.usda",      // ... (emitGuidePoints)
     "06_LatticeBulge.usda",          // ... (lattice)
     "07_SurfaceDrape.usda",          // ... (surfaceProject)
-    "08_AimEyes.usda",               // weight object on mover
-    "09_PropertyMathMovers.usda",    // weight object on mover
     "10_AimXformTurret.usda",        // constraint target is a plain Xformable
     "11_VolumeWeights.usda",         // provider type not baked
                                      // (RigExecCurveWeight)
