@@ -289,14 +289,21 @@ function(rigexec_add_baked_parity_test name)
         endforeach()
     endif()
 endfunction()
-# CONE_VERIFY, not REQUIRE_BAKE: every constraint operator this suite builds
-# now comes from the program, and both schedules agree with a whole run from
-# the same state. The solver and weight-object refusals this comment used to
-# blame are gone as of the Phase 3 merge; what is left is three PROVIDER
-# refusals the suite authors deliberately -- an animated or connected rest:tx,
-# an animated or connected default:space, and an animated posed:space -- so a
-# bake requirement here would still fail on a missing feature rather than on
-# anything this entry is about.
+# CONE_VERIFY, not REQUIRE_BAKE, and now for ONE reason rather than three.
+# The provider-ladder work took the animated rest:tx and the animated
+# posed:space this comment used to name: both are per-frame inputs of the
+# compose, and the suite's generations that carry them bake. What is left is
+# eight generations of TestConnectedParentSpaceSolverInputs, which connects
+# a provider's default:space to another provider's parent:space -- a CONNECTED
+# SPACE, whose value is a posed frame the dynamic path re-evaluates through
+# exec at defined points in the walk, carrying a base and a final phase into
+# namespace descendants. That is the connected-space-provider feature, not a
+# ladder value read off the stage, and the flag goes on with it.
+#
+# The WARNING such a run prints names "connected default:space", not
+# "connected-space provider": IsBakeable sorts its reasons and the evaluator
+# reports the first one. Both come from the same rig and the same feature --
+# read the whole reasons vector, not the warning, when chasing this.
 rigexec_add_baked_parity_test(testRigExecConstraints CONE_VERIFY)
 
 # The per-example parity entries: one named red/green signal per shipped rig.
@@ -629,15 +636,16 @@ add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
 # other is exactly what the comparator is for, and this is the suite that
 # moves rests on purpose.
 #
-# CONE_VERIFY but NOT REQUIRE_BAKE, and the asymmetry is the honest state of
-# the tree rather than an oversight. Under the verifier it is clean in both
-# schedules. Under a bake requirement it is not, because the suite authors on
-# purpose the three things the program still refuses: an animated or
-# connected rest:tx on a provider, a property chain that writes rest:space,
-# and a generation whose interactive overrides are not placeable. Those are
-# missing features, not disagreements -- every generation that DOES bake
-# agrees exactly -- and the flag goes on the day the rest-channel work lands.
-rigexec_add_baked_parity_test(testRigExecEpochRests CONE_VERIFY
+# REQUIRE_BAKE as of the provider-ladder work, which is the day this comment
+# said the flag would go on. The three things the suite authors on purpose --
+# an animated or connected rest:tx, a property chain writing rest:space, and
+# a drag standing on a rest channel -- are all per-frame inputs of the
+# compose now, so every generation of this suite comes from the program and a
+# fallback here is a regression rather than a missing feature. It is the
+# sharpest entry in the tree for that work: nothing else moves a rest on
+# purpose, and a program that quietly went back to folding one would show up
+# here as a fallback and nowhere else.
+rigexec_add_baked_parity_test(testRigExecEpochRests REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 # Bit-identical results from the parallel per-point kernels, both ways round:

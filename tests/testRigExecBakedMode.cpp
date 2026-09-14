@@ -984,11 +984,17 @@ TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
 // the dynamic path, not be quietly ignored.
 //
 // Three shapes of unplaceable, one per authored reason:
-//   * a value folded into bake state -- a rest, which the program resolved
-//     once into the rest chain and the default-space ladder;
+//   * a value folded into bake state -- a SPACE EXPRESSION, which the bake
+//     accepted because it is unauthored and whose authoring would replace
+//     the compose rather than move a value in it;
 //   * a property the program never reads, so there is no slot to put it in
 //     and no promise that some other reader would pick it up;
 //   * a computation override, which names something only exec can answer.
+//
+// A rest used to be the first of these and is not one any more: the ladder
+// is a per-frame input, so a rest drag PLACES. The second half of this test
+// is that half, because "it falls back" and "it is answered correctly" are
+// the two ways an override can be handled and only one of them is progress.
 static void
 TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
 {
@@ -1023,9 +1029,9 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
         point[1] += 5.0;
     }
     const std::vector<std::pair<const char *, RigExecValueOverride>> cases{
-        {"a folded rest",
+        {"a folded space expression",
          RigExecValueOverride{joint.GetPath(), TfToken(),
-                              TfToken("rest:space"), VtValue(moved)}},
+                              TfToken("parent:space"), VtValue(moved)}},
         {"a property the bake never read",
          RigExecValueOverride{joint.GetPath(), TfToken(),
                               TfToken("custom:notAnInput"), VtValue(1.0)}},
@@ -1051,6 +1057,26 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
         referenceRig.SetInteractiveOverrides({override});
         CompareEveryMap(std::string(what) + " on Biped.usda",
                         referenceRig.Evaluate(UsdTimeCode(1.0)), held);
+    }
+    // And the rest drag, which the ladder work moved from the list above to
+    // here: the program ANSWERS it, and answers it the way exec does. Both
+    // halves matter -- a program that placed the override and then composed
+    // against the authored rest would still count a baked generation.
+    {
+        const RigExecValueOverride restDrag{joint.GetPath(), TfToken(),
+                                            TfToken("rest:space"),
+                                            VtValue(moved)};
+        rig.SetInteractiveOverrides({restDrag});
+        const size_t bakedGenerations = rig.GetBakedGenerationCount();
+        const RigExecRigPose dragged = rig.Evaluate(UsdTimeCode(1.0));
+        CHECK(dragged.valid);
+        CHECK(rig.GetBakedGenerationCount() == bakedGenerations + 1);
+        UsdStageRefPtr referenceStage = UsdStage::Open(stagePath);
+        RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+        CHECK(referenceRig.Compile(&errors));
+        referenceRig.SetInteractiveOverrides({restDrag});
+        CompareEveryMap("a placed rest drag on Biped.usda",
+                        referenceRig.Evaluate(UsdTimeCode(1.0)), dragged);
     }
     // Releasing every one of them puts the rig back on the program.
     rig.ClearInteractiveOverrides();

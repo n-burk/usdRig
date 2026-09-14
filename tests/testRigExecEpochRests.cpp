@@ -87,6 +87,26 @@ RestTx(const UsdStageRefPtr &stage)
                                  SdfValueTypeNames->Double);
 }
 
+UsdAttribute
+RestSpace(const UsdStageRefPtr &stage)
+{
+    const UsdPrim joint = stage->GetPrimAtPath(kJoint);
+    if (const UsdAttribute existing =
+            joint.GetAttribute(TfToken("rest:space"))) {
+        return existing;
+    }
+    return joint.CreateAttribute(TfToken("rest:space"),
+                                 SdfValueTypeNames->Matrix4d);
+}
+
+GfMatrix4d
+Translation(double x)
+{
+    GfMatrix4d m(1.0);
+    m[3][0] = x;
+    return m;
+}
+
 // Every published domain of one generation, so a case compares the whole
 // answer rather than the part it happened to think of.
 void
@@ -166,6 +186,22 @@ RunWithConstantRestTx(const std::string &examplesDir, double value,
                [value](const UsdStageRefPtr &stage) {
                    EditInSession(stage);
                    RestTx(stage).Set(value);
+               },
+               epochRestCount);
+}
+
+// The same reference for rest:space, which the tail already authors on this
+// joint -- so the value below REPLACES a rest space rather than introducing
+// one, and a case that failed to apply would be visible as a pose that did
+// not move at all.
+std::vector<RigExecRigPose>
+RunWithConstantRestSpace(const std::string &examplesDir,
+                         const GfMatrix4d &value, size_t *epochRestCount)
+{
+    return Run(examplesDir,
+               [&value](const UsdStageRefPtr &stage) {
+                   EditInSession(stage);
+                   RestSpace(stage).Set(value);
                },
                epochRestCount);
 }
@@ -299,6 +335,172 @@ TestAConnectedRestIsPulledPerFrame(const std::string &examplesDir)
         ComparePoses("a connected rest at frame " +
                          std::to_string(int(kFrames[i])),
                      reference[i], subject[i]);
+    }
+}
+
+// rest:space carrying a connection.
+//
+// It is the one MATRIX channel of the ladder exec reads with a plain
+// AttributeValue -- computations.cpp declares it in computeRestFrame beside
+// AttributeValue<double>(rest:tx), and registers its five space expressions
+// on OTHER attributes -- so a connection on it resolves by the same
+// single-connection walk the scalar rests resolve by, and the program may
+// read it per frame instead of refusing. The reference is the identical
+// matrix authored plainly, exactly as the rest:tx case above.
+void
+TestAConnectedRestSpaceIsPulledPerFrame(const std::string &examplesDir)
+{
+    size_t epochRests = 1;
+    const std::vector<RigExecRigPose> subject = Run(
+        examplesDir,
+        [](const UsdStageRefPtr &stage) {
+            EditInSession(stage);
+            const UsdPrim joint = stage->GetPrimAtPath(kJoint);
+            const UsdAttribute driver = joint.CreateAttribute(
+                TfToken("inputs:restSpaceDriver"),
+                SdfValueTypeNames->Matrix4d);
+            driver.Set(Translation(5.0));
+            const UsdAttribute restSpace = RestSpace(stage);
+            restSpace.SetConnections({driver.GetPath()});
+            CHECK(restSpace.HasAuthoredConnections());
+        },
+        &epochRests);
+    CHECK(epochRests == 0);
+    if (subject.size() != kFrames.size()) return;
+
+    size_t referenceRests = 0;
+    const std::vector<RigExecRigPose> reference =
+        RunWithConstantRestSpace(examplesDir, Translation(5.0),
+                                 &referenceRests);
+    CHECK(referenceRests > 0);
+    if (reference.size() != kFrames.size()) return;
+    for (size_t i = 0; i < kFrames.size(); ++i) {
+        ComparePoses("a connected rest space at frame " +
+                         std::to_string(int(kFrames[i])),
+                     reference[i], subject[i]);
+    }
+    // And it is not the plain rig wearing a connection: the reference has to
+    // have moved the joint, or both halves could agree on the unedited pose.
+    size_t untouchedRests = 0;
+    const std::vector<RigExecRigPose> untouched =
+        Run(examplesDir, _Edit(), &untouchedRests);
+    CHECK(untouched.size() == kFrames.size());
+    if (untouched.size() == kFrames.size()) {
+        const SdfPath child = kJoint.AppendChild(TfToken("Seg3"));
+        const auto moved = reference[0].jointMatricesFinal.find(child);
+        const auto still = untouched[0].jointMatricesFinal.find(child);
+        CHECK(moved != reference[0].jointMatricesFinal.end());
+        CHECK(still != untouched[0].jointMatricesFinal.end());
+        if (moved != reference[0].jointMatricesFinal.end() &&
+            still != untouched[0].jointMatricesFinal.end()) {
+            CHECK(moved->second != still->second);
+        }
+    }
+}
+
+// The boundary of that walk, and the reason the case above is a rule and not
+// a blanket permission: a connection that ENDS at one of the six computed
+// spaces reaches a COMPUTATION -- here the space expression that follows the
+// namespace parent -- and the walk would read the target's raw authored
+// value instead. The program must hand that rig back rather than answer it.
+//
+// Bakeability only: this suite's ctest entries require the bake, so a case
+// that EVALUATED an unbakeable rig would fail them by design.
+void
+TestARestSpaceConnectedToAComputedSpaceRefusesTheBake(
+    const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(StagePath(examplesDir));
+    CHECK(stage);
+    if (!stage) return;
+    EditInSession(stage);
+    const UsdPrim parent = stage->GetPrimAtPath(kJoint.GetParentPath());
+    CHECK(parent);
+    if (!parent) return;
+    RestSpace(stage).SetConnections(
+        {parent.GetPath().AppendProperty(TfToken("parent:space"))});
+    RigExecRigEvaluator rig(stage, kRig);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    std::vector<std::string> reasons;
+    CHECK(!rig.IsBakeable(&reasons));
+    bool named = false;
+    for (const std::string &reason : reasons) {
+        named = named ||
+                reason.find("connected rest:space") != std::string::npos;
+    }
+    CHECK(named);
+}
+
+// A rest that moves while nothing else in the rig does.
+//
+// The pose prologue recomposing a ladder is a per-run delta like any other,
+// and it owes the schedule a dirty hook: without one, a frame whose avars
+// and whose time-sampled inputs all stood still would skip the compose that
+// the moved rest was the only reason to run. No SHIPPED rig can show that --
+// on the tail every compose shares its cluster with the skin sources, which
+// run on every frame -- so the case is built here, with static avars, one
+// animated rest and nothing else that moves.
+void
+TestARestThatMovesAloneStillRecomposes(const std::string &examplesDir)
+{
+    (void)examplesDir;
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    const SdfPath rigPath("/Asset/Rig");
+    stage->DefinePrim(rigPath, TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls/Ctl"),
+                      TfToken("RigExecControl"))
+        .CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+        .Set(0.25);
+    stage->DefinePrim(SdfPath("/Asset/Rig/Joints"), TfToken("Scope"));
+    const UsdPrim root = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Joints/Root"), TfToken("RigExecJoint"));
+    root.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+        .Set(1.0);
+    const SdfPath childPath("/Asset/Rig/Joints/Root/Child");
+    const UsdPrim child =
+        stage->DefinePrim(childPath, TfToken("RigExecJoint"));
+    const UsdAttribute restTx =
+        child.CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double);
+    restTx.Set(0.0, UsdTimeCode(1.0));
+    restTx.Set(2.0, UsdTimeCode(2.0));
+    restTx.Set(5.0, UsdTimeCode(3.0));
+    const SdfPath leafPath("/Asset/Rig/Joints/Root/Child/Leaf");
+    stage->DefinePrim(leafPath, TfToken("RigExecJoint"))
+        .CreateAttribute(TfToken("rest:tx"), SdfValueTypeNames->Double)
+        .Set(1.0);
+
+    RigExecRigEvaluator rig(stage, rigPath);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    std::vector<std::string> reasons;
+    CHECK(rig.IsBakeable(&reasons));
+    for (const std::string &reason : reasons) {
+        std::printf("    unexpected refusal: %s\n", reason.c_str());
+    }
+    // Frame 1 first, so the frames that follow are STEADY-STATE frames --
+    // the state in which the dirty set, and not the first-run "everything
+    // runs" path, decides what is recomposed.
+    for (const auto &[frame, x] : {std::make_pair(1.0, 1.0),
+                                   std::make_pair(2.0, 3.0),
+                                   std::make_pair(3.0, 6.0),
+                                   std::make_pair(1.0, 1.0)}) {
+        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(pose.valid);
+        const auto found = pose.jointFramesFinal.find(childPath);
+        CHECK(found != pose.jointFramesFinal.end());
+        if (found != pose.jointFramesFinal.end()) {
+            const double origin = found->second.Origin()[0];
+            CHECK(GfIsClose(origin, x, 1e-9));
+            if (!GfIsClose(origin, x, 1e-9)) {
+                std::printf("    frame %g: child at %g, expected %g\n",
+                            frame, origin, x);
+            }
+        }
     }
 }
 
@@ -486,6 +688,9 @@ main(int argc, char **argv)
     TestATimeSampledRestIsPulledPerFrame(examplesDir);
     TestARestThatBecomesTimeSampledAfterCompile(examplesDir);
     TestAConnectedRestIsPulledPerFrame(examplesDir);
+    TestAConnectedRestSpaceIsPulledPerFrame(examplesDir);
+    TestARestSpaceConnectedToAComputedSpaceRefusesTheBake(examplesDir);
+    TestARestThatMovesAloneStillRecomposes(examplesDir);
     TestAPropertyChainOnARestRefusesTheEpochPath(examplesDir);
     TestAnInteractiveOverrideOnARestIsFollowed(examplesDir);
     TestAnOverrideElsewhereLeavesTheRestsAlone(examplesDir);
