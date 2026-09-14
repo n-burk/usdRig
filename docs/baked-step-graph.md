@@ -290,10 +290,14 @@ comes with it. Where cone re-execution pays on this rig is the case it was writt
   and a delta is the one thing last run's answer is never this run's. A fuse that ran while its
   fold was skipped read last run's "the matrices moved" and executed a revision the dynamic path
   did not. `RigExecBakedSkipGeometryStep` writes what a step that compared nothing means.
-* §7's run rule is `closed |= OR of restoreOf[c] for c in closed`. The code takes the CONE of each
-  restored cluster as well, to a fixpoint. Re-running a writer to restore the version a reader saw
-  leaves the slot holding that version, so every later writer of it -- and every reader between --
-  has to run too, which is exactly its forward cone.
+* §3.1's version table replaced §7's restore closure outright, rather than being implemented
+  beside it. The closure shipped first and was sound; it was also the reason a constraint-only
+  drag ran every cluster on the biped. Giving each writer its own storage makes the closure empty
+  by construction, so `restoreOf`, `RigExecBakedStep::restorePreds` and the run-time fixpoint are
+  gone and what is left is one forward cone. The property they bought is still asserted, now
+  against the program's tables: `TestEveryPoseWriteHasItsOwnStorage` checks that no two write
+  sites share an entry, that every read and carry names a version live at its own point, and that
+  the last-version table names the last write of each slot.
 * `RIGEXEC_BAKED_SCHEDULE=parallel` is not the default. §5.2 makes it the default "once §8
   passes"; §8.1, §8.2, §8.3 and the first half of §8.4 pass, and the second half of §8.4 --
   "parallel mode faster than serial on the biped and on the drag benchmark" -- does not. See the
@@ -379,9 +383,10 @@ written off the owning thread.
 
 * `tests/testRigExecBakedSchedule` -- every edge forward, every read written or sourced, no two
   steps writing one slot without an edge, the report deterministic, the chunks covering every
-  vertex once with no missing influence, the cone and restore closures closed, a repeated time
-  running less than the whole program, a control held at its own authored value executing nothing,
-  and a constraint-input drag publishing the dynamic path's pose.
+  vertex once with no missing influence, the cone closure closed, every pose write holding storage
+  of its own, a repeated time running less than the whole program, a control held at its own
+  authored value executing nothing, and a constraint-input drag and a leaf-control drag each
+  publishing the dynamic path's pose from inside the cone the graph says it may reach.
 * `testRigExecBakedScheduleCones_{serial,parallel}` -- the same suite under
   `RIGEXEC_BAKED_VERIFY_CONES=1`. It is the only place the VERIFIER'S OWN comparison is exercised,
   because it is the only suite that drives a NaN into a published packet on purpose: a comparison
@@ -494,11 +499,34 @@ previous run's well-formed values at this run's size; successors may read them w
 ### 3.1 Multi-writer slots and versions [P20]
 
 `PoseFin(i)` and `PoseBase(i)` have several writers per run (compose, commits, propagation). A step
-reads a specific VERSION: the one live at its program point. Build records for every read
-`(slot, version k, writer W_k)`. Cone re-execution (§7) must therefore also re-run W_k whenever a
-dirty reader needs version k and the slot has a later writer in program order (the storage holds
-the last writer's value). This "restore closure" is computed at Build (§7) and is what makes
-"clean steps keep last run's values" sound.
+reads a specific VERSION: the one live at its program point. The storage is therefore SSA -- every
+writer of a pose slot gets an entry of its own, and every reader binds at Build to the entry
+holding the version live where it runs. Slot i's FIRST version is entry i, which is what the
+compose writes; its LAST is entry N + i, laid out densely because the matrices, the phased-read
+records and the publication read nothing else; the versions in between are an arena past 2N. A
+write site that does NOT write -- a candidate its batch published nothing for, a propagation pair
+stepped over, a constraint that passed through -- CARRIES the version it found into its own entry,
+so every version a reader can name is well formed however the run went.
+
+Cost: Σ|writes| frames of 96 bytes, sized at Build and never resized in a run -- on the biped 1 777
+write sites over 326 slots, 2 015 `fin` + 652 `base` entries, 270 KB. A read is one indirection
+through a table Build computed.
+
+This is what makes "clean steps keep last run's values" sound, and unlike the alternative it costs
+cone re-execution nothing. The alternative, which earlier drafts of this document specified and
+which the first implementation shipped, was a RESTORE CLOSURE: with one storage per slot, the end
+of a run holds only the LAST writer's value, so re-running a reader of an earlier version meant
+re-running that version's writer first, transitively. It was sound and it was ruinous on a drag --
+a constraint read-modify-writes its target, so restoring what it read pulled in the compose that
+wrote it and, with it, everything downstream of that compose, which on a biped is the whole
+program. Versioned storage retires it by construction: no version is ever overwritten, so nothing
+ever has to be re-run to put a value back. See "What a drag costs" for what that changed.
+
+The same sweep tells the edge construction one more thing. A write-after-read edge exists only
+where a writer can land on storage a reader is still entitled to, and in a versioned domain it
+never can, so §4.1's WAR pass skips `PoseFin`/`PoseBase` (`RigExecBakedIsVersionedDomain`).
+Nothing else about §4.1 moves: read-after-write and write-after-write edges still come from the
+declared slot RANGES, and the version table is derived from the same lastWriter sweep.
 
 ## 4. Steps and the graph
 
@@ -844,13 +872,15 @@ marks everything dirty for one run; Set/ClearInteractiveOverrides do NOT bump it
 
 ```
 Build:  coneOf[c]    = forward closure of cluster c (bitset over clusters, |clusters| <= 128)
-        restoreOf[c] = for each read (slot, version k) of a step in c whose slot has a later writer:
-                       the writer's cluster, closed transitively over ITS reads (§3.1)
 Run:    dirty = everRan && stamp == lastStamp ? OR of bit(c) for sources that wrote a different value
                                              : ALL pose clusters ∪ geometry clusters with !revision.ran
-        closed = OR of coneOf[c] for dirty c;  closed |= OR of restoreOf[c] for c in closed  (fixpoint)
+        closed = OR of coneOf[c] for dirty c
         remaining[c] = closed[c] ? |preds[c] ∩ closed| : skipped
 ```
+
+That is the whole closure. There is no restore closure beside it: versioned pose storage (§3.1)
+leaves the version a clean reader wants in the entry its writer put it in, however often the SLOT
+was revised afterwards, so a run never grows to put a value back.
 
 Cost: a few hundred bitset ORs. The initial dirty set after a rebuild is all pose clusters plus the
 geometry clusters whose adoption (`AdoptGeometryStateFrom`) did not keep `ran` -- never all geometry,
@@ -864,6 +894,9 @@ structural counters are constants (§4.2).
 Measure and record (§8.4): drag frame cost with and without the per-override-set
 `_skinTopologies.Clear()` in `SetInteractiveOverrides` (rigEvaluator.cpp:7853); if it dominates,
 §10 clears only when the override set names a skin mover property [S29].
+   STATUS: measured at a third of every baked drag frame and narrowed -- the clear now fires only
+   for an override that can REACH a skin mover's layout along the connection walk the layout is
+   read through. See "What a drag costs".
 
 ## 8. Acceptance (all mandatory before Phase 3 starts)
 
@@ -876,7 +909,8 @@ Measure and record (§8.4): drag frame cost with and without the per-override-se
    `RIGEXEC_BAKED_VERIFY_CONES=1`, which re-runs everything after the cone run and compares every
    slot, the counters and the diagnostics [S27]. Add a test where a control is dragged and returned
    to its exact original value (executed counter must not move) and one where a constraint is
-   dirty while its target's compose is clean (the restore closure).
+   dirty while its target's compose is clean (§3.1: it must publish the dynamic path's pose while
+   running strictly fewer clusters than the program has).
 4. Performance (informational, `rigExecPose --profile` with prologue / region / epilogue as
    separate lines [S30]): serial mode within 5% of today's `Run` on the biped frame; parallel mode
    faster than serial on the biped and on the drag benchmark. Expectation, not a target: the

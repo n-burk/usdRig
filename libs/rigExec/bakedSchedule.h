@@ -82,13 +82,16 @@ RigExecBakedClustering RigExecBakedBuildClusters(
 /// otherwise `clamp(total cost / (4 x concurrency), 5us, 50us)`.
 double RigExecBakedScheduleGrainUs(double totalCost);
 
-/// Computes the cone and restore closures of \p program's clusters (§7).
+/// Computes the cone closure of \p program's clusters (§7).
 ///
 /// Once, at Build, from the edges and the clustering: `cone[c]` is every
-/// cluster that has to run when c does, `restore[c]` every cluster that has
-/// to run before c can, and the three lookup tables beside them are what a
-/// frame maps a changed source onto. Nothing here measures anything and
-/// nothing depends on a run.
+/// cluster that has to run when c does, and the lookup tables beside it are
+/// what a frame maps a changed source onto. Nothing here measures anything
+/// and nothing depends on a run.
+///
+/// There is no second closure. A cluster never has to run so that another
+/// can read what it wrote LAST run -- versioned pose storage (§3.1) leaves
+/// every version where its writer left it.
 void RigExecBakedBuildCones(RigExecBakedProgramImpl *program);
 
 /// Decides which clusters this run executes, and updates the source state

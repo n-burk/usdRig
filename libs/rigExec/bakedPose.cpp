@@ -552,6 +552,151 @@ AddStep(RigExecBakedProgramImpl *program, RigExecBakedStepKind kind,
     return program->steps.back();
 }
 
+/// Binds every pose read and write of the walk to a VERSION of its slot
+/// (§3.1).
+///
+/// One sweep in program order over the same writes the edge sweep sees,
+/// keeping the entry that holds each slot's current version. A read is bound
+/// to the entry standing when the reader runs; a write gets an entry of its
+/// own, which nothing else in the program writes. Slot i's first version is
+/// entry i -- the compose writes there, an xform-derived slot's seed sits
+/// there -- so a rig with no commits allocates nothing and the compose body
+/// needs no table at all.
+///
+/// The carry entries are what a write site that does not write means: it
+/// copies the version standing at ITS point into its own storage, so every
+/// version a later reader can name is well formed however the run went.
+void
+BindPoseVersions(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    const size_t n = B.paths.size();
+    // How many versions each slot ends up with, counted before any is handed
+    // out. The LAST version of a slot is what the matrices, the phased-read
+    // records and the publication all read -- 252 matrix steps and ~850 keys
+    // on a biped -- so those entries are laid out DENSELY, one per slot at
+    // [n, 2n), and only the versions in between go into the arena past them.
+    // Without that the frame's most-walked reads scatter over the whole
+    // version table and the publication alone costs a third more.
+    std::vector<uint32_t> finWrites(n, 0), baseWrites(n, 0);
+    for (const RigExecBakedCommit &commit : B.commits) {
+        for (const int slot : commit.slots) {
+            ++finWrites[size_t(slot)];
+            if (commit.solverOutput) {
+                ++baseWrites[size_t(slot)];
+            }
+        }
+        for (const auto &[descendant, closest] : commit.propagate) {
+            ++finWrites[size_t(descendant)];
+            if (commit.solverOutput) {
+                ++baseWrites[size_t(descendant)];
+            }
+        }
+    }
+    // Slot -> the entry holding its current version, as the sweep stands,
+    // and how many of its versions are still to come.
+    std::vector<uint32_t> liveFin(n), liveBase(n);
+    for (size_t i = 0; i < n; ++i) {
+        liveFin[i] = uint32_t(i);
+        liveBase[i] = uint32_t(i);
+    }
+    uint32_t finNext = uint32_t(2 * n), baseNext = uint32_t(2 * n);
+    // The next entry for one slot: its dense last-version entry when this is
+    // the last write of it, an arena entry otherwise.
+    const auto take = [n](std::vector<uint32_t> *remaining, uint32_t *next,
+                          size_t slot) {
+        return --(*remaining)[slot] == 0 ? uint32_t(n + slot) : (*next)++;
+    };
+    const auto readFin = [&liveFin, n](int slot) {
+        return slot >= 0 && size_t(slot) < n ? liveFin[size_t(slot)] : 0u;
+    };
+
+    for (size_t w = 0; w < B.walkSteps.size(); ++w) {
+        const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
+        RigExecBakedCommit &commit = B.commits[w];
+        // The producers first: a batch's solvers and a constraint's own
+        // inputs read the versions live where the batch begins, which is
+        // where the commit's own reads are taken too.
+        if (walk.solverBatch) {
+            for (const int si : walk.batchSolvers) {
+                RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
+                solver.controlReads.clear();
+                for (const int control : solver.controls) {
+                    solver.controlReads.push_back(readFin(control));
+                }
+                solver.rootRead = readFin(solver.root);
+                solver.midRead = readFin(solver.mid);
+                solver.endRead = readFin(solver.end);
+                solver.poleRead = readFin(solver.pole);
+            }
+        } else {
+            const RigExecBakedProgramImpl::Constraint &constraint =
+                B.constraints[size_t(walk.index)];
+            commit.sourceReads.clear();
+            for (const int source : constraint.sources) {
+                commit.sourceReads.push_back(readFin(source));
+            }
+            commit.worldUpRead = readFin(constraint.worldUpObject);
+        }
+        commit.slotReads.clear();
+        for (const int slot : commit.slots) {
+            commit.slotReads.push_back(readFin(slot));
+        }
+        commit.descendantReads.clear();
+        commit.closestReads.clear();
+        for (const auto &[descendant, closest] : commit.propagate) {
+            commit.descendantReads.push_back(readFin(descendant));
+            commit.closestReads.push_back(readFin(closest));
+        }
+
+        // Then the write-back, in the order it happens: the candidates in
+        // slot order, then the descendants in propagation order. A slot that
+        // is both gets two versions, and the second carries the first --
+        // which is exactly what the one storage used to end up holding.
+        commit.slotWrites.assign(commit.slots.size(), 0);
+        commit.slotCarry.assign(commit.slots.size(), 0);
+        commit.slotBaseWrites.assign(
+            commit.solverOutput ? commit.slots.size() : 0, 0);
+        commit.slotBaseCarry.assign(
+            commit.solverOutput ? commit.slots.size() : 0, 0);
+        for (size_t pos = 0; pos < commit.slots.size(); ++pos) {
+            const size_t slot = size_t(commit.slots[pos]);
+            commit.slotCarry[pos] = liveFin[slot];
+            commit.slotWrites[pos] = take(&finWrites, &finNext, slot);
+            liveFin[slot] = commit.slotWrites[pos];
+            if (commit.solverOutput) {
+                commit.slotBaseCarry[pos] = liveBase[slot];
+                commit.slotBaseWrites[pos] =
+                    take(&baseWrites, &baseNext, slot);
+                liveBase[slot] = commit.slotBaseWrites[pos];
+            }
+        }
+        commit.descendantWrites.assign(commit.propagate.size(), 0);
+        commit.descendantCarry.assign(commit.propagate.size(), 0);
+        commit.descendantBaseWrites.assign(
+            commit.solverOutput ? commit.propagate.size() : 0, 0);
+        commit.descendantBaseCarry.assign(
+            commit.solverOutput ? commit.propagate.size() : 0, 0);
+        for (size_t k = 0; k < commit.propagate.size(); ++k) {
+            const size_t slot = size_t(commit.propagate[k].first);
+            commit.descendantCarry[k] = liveFin[slot];
+            commit.descendantWrites[k] = take(&finWrites, &finNext, slot);
+            liveFin[slot] = commit.descendantWrites[k];
+            if (commit.solverOutput) {
+                commit.descendantBaseCarry[k] = liveBase[slot];
+                commit.descendantBaseWrites[k] =
+                    take(&baseWrites, &baseNext, slot);
+                liveBase[slot] = commit.descendantBaseWrites[k];
+            }
+        }
+    }
+
+    B.finLast.assign(liveFin.begin(), liveFin.end());
+    B.baseLast.assign(liveBase.begin(), liveBase.end());
+    B.fin.resize(finNext);
+    B.base.resize(baseNext);
+}
+
 /// A commit split into delta / staging / apply once its descendant list is
 /// this long. Below it the three phases run as one step: the split buys
 /// parallelism inside one propagation and costs two more steps, which is a
@@ -894,6 +1039,9 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         }
     }
     B.solverOverrideRounds = levels.size();
+    // Before the matrices, which read the LAST version of a slot: the table
+    // that says which entry that is comes out of this sweep.
+    BindPoseVersions(&B);
 
     // ---- the rest->pose matrices --------------------------------------------
     //
@@ -1130,7 +1278,7 @@ ComputeCommitDeltas(const RigExecBakedProgramImpl &B,
         commit->deltas[pos] = GfMatrix4d(1.0);
         commit->deltaOk[pos] =
             RigExecPointsToMatrix(
-                B.fin[size_t(commit->slots[pos])].points,
+                B.fin[size_t(commit->slotReads[pos])].points,
                 commit->frames[pos].points, &commit->deltas[pos])
                 ? 1
                 : 2;
@@ -1148,7 +1296,6 @@ StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
                  size_t begin, size_t end)
 {
     for (size_t k = begin; k < end; ++k) {
-        const auto &[descendant, closest] = commit->propagate[k];
         const int pos = commit->closestPos[k];
         if (pos < 0 || !commit->present[size_t(pos)]) {
             // A solver published no element for this ancestor, so the baked
@@ -1157,8 +1304,10 @@ StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
                 uint8_t(RigExecBakedPropagateOutcome::NoCandidate);
             continue;
         }
-        const RigExecPointFrame &current = B.fin[size_t(descendant)];
-        const RigExecPointFrame &before = B.fin[size_t(closest)];
+        const RigExecPointFrame &current =
+            B.fin[size_t(commit->descendantReads[k])];
+        const RigExecPointFrame &before =
+            B.fin[size_t(commit->closestReads[k])];
         if (commit->solverOutput &&
             (!RigExecBakedUsable(current) || !RigExecBakedUsable(before) ||
              !RigExecBakedUsable(commit->frames[size_t(pos)]))) {
@@ -1196,12 +1345,16 @@ StageCommitPairs(const RigExecBakedProgramImpl &B, RigExecBakedCommit *commit,
 void
 RecordFrame(const RigExecBakedProgramImpl &B,
             const RigExecBakedProgramImpl::Constraint &constraint,
-            RigExecBakedStep *step)
+            uint32_t targetVersion, RigExecBakedStep *step)
 {
     if (!constraint.snapshotAfter || constraint.target < 0) {
         return;
     }
-    const RigExecPointFrame &frame = B.fin[size_t(constraint.target)];
+    // The target as THIS commit left it, which is the commit's own version
+    // of the slot whether it revised it or carried the one it found: a
+    // phase names a point in the walk, and a constraint that passed through
+    // still leaves its target standing at that point.
+    const RigExecPointFrame &frame = B.fin[size_t(targetVersion)];
     if (!frame.IsValid()) {
         return;
     }
@@ -1231,12 +1384,50 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
             ? nullptr
             : &B.constraints[size_t(
                   B.walkSteps[size_t(step->object)].index)];
+    // What a write site that does not write leaves behind: the version this
+    // commit found, copied into the storage this commit owns, so that a
+    // reader bound to the commit's version reads the value the one frame map
+    // used to hold at this point in the walk (§3.1). Cheap where it matters
+    // -- a commit that applies carries only the candidates its batch
+    // published nothing for -- and paid in full only by a commit that passes
+    // through, which is the arithmetic it did not do.
+    const auto carry = [&B, commit](size_t pos, size_t k, bool candidates,
+                                    bool descendants) {
+        if (candidates) {
+            B.fin[size_t(commit->slotWrites[pos])] =
+                B.fin[size_t(commit->slotCarry[pos])];
+            if (commit->solverOutput) {
+                B.base[size_t(commit->slotBaseWrites[pos])] =
+                    B.base[size_t(commit->slotBaseCarry[pos])];
+            }
+        }
+        if (descendants) {
+            B.fin[size_t(commit->descendantWrites[k])] =
+                B.fin[size_t(commit->descendantCarry[k])];
+            if (commit->solverOutput) {
+                B.base[size_t(commit->descendantBaseWrites[k])] =
+                    B.base[size_t(commit->descendantBaseCarry[k])];
+            }
+        }
+    };
+    const auto carryEverything = [&] {
+        for (size_t pos = 0; pos < commit->slots.size(); ++pos) {
+            carry(pos, 0, /* candidates = */ true, /* descendants = */ false);
+        }
+        for (size_t k = 0; k < commit->propagate.size(); ++k) {
+            carry(0, k, /* candidates = */ false, /* descendants = */ true);
+        }
+    };
     const auto record = [&] {
         if (constraint) {
-            RecordFrame(B, *constraint, step);
+            RecordFrame(B, *constraint,
+                        commit->slotWrites.empty() ? 0
+                                                   : commit->slotWrites[0],
+                        step);
         }
     };
     if (commit->abandoned) {
+        carryEverything();
         record();
         return;
     }
@@ -1249,6 +1440,11 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         }
         switch (outcome) {
         case RigExecBakedPropagateOutcome::NoCandidate:
+            // The generation is given back here, and the caller destroys the
+            // program, so nothing will ever read these versions -- but a
+            // step that leaves storage it declared unwritten is a rule with
+            // an exception, and this one is not worth having.
+            carryEverything();
             step->bail = true;
             return;
         case RigExecBakedPropagateOutcome::UnusableDescendant:
@@ -1269,6 +1465,7 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
                 "; constraint passed through");
             break;
         }
+        carryEverything();
         record();
         return;
     }
@@ -1277,22 +1474,24 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
     // two write-back loops of commitConstraintFrames run.
     for (size_t pos = 0; pos < commit->slots.size(); ++pos) {
         if (!commit->present[pos]) {
+            carry(pos, 0, /* candidates = */ true, /* descendants = */ false);
             continue;
         }
-        B.fin[size_t(commit->slots[pos])] = commit->frames[pos];
+        B.fin[size_t(commit->slotWrites[pos])] = commit->frames[pos];
         if (commit->solverOutput) {
-            B.base[size_t(commit->slots[pos])] = commit->frames[pos];
+            B.base[size_t(commit->slotBaseWrites[pos])] = commit->frames[pos];
         }
     }
     for (size_t k = 0; k < commit->propagate.size(); ++k) {
         if (RigExecBakedPropagateOutcome(commit->outcome[k]) !=
             RigExecBakedPropagateOutcome::Staged) {
+            carry(0, k, /* candidates = */ false, /* descendants = */ true);
             continue;
         }
-        const int descendant = commit->propagate[k].first;
-        B.fin[size_t(descendant)] = commit->staged[k];
+        B.fin[size_t(commit->descendantWrites[k])] = commit->staged[k];
         if (commit->solverOutput) {
-            B.base[size_t(descendant)] = commit->staged[k];
+            B.base[size_t(commit->descendantBaseWrites[k])] =
+                commit->staged[k];
         }
     }
     record();
@@ -1378,7 +1577,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 s.elements[k].restPoints = s.controlRests[k];
                 s.elements[k].posePoints =
                     s.controls[k] >= 0
-                        ? B.fin[size_t(s.controls[k])].points
+                        ? B.fin[size_t(s.controlReads[k])].points
                         : RigExecIdentityLandmarks();
                 s.elements[k].parentIndex =
                     s.parentRelative ? -1 : int(k) - 1;
@@ -1396,8 +1595,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 params.lowerLength = s.lowerLengthBase + rd(s.lowerOffset);
             }
             const auto frames = RigExecSolveTwoBoneIk(
-                B.fin[size_t(s.root)], B.fin[size_t(s.end)],
-                B.fin[size_t(s.pole)], s.ikRests, params);
+                B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
+                B.fin[size_t(s.poleRead)], s.ikRests, params);
             aggregate.frames.assign(frames.begin(), frames.end());
             aggregate.rests.assign(s.ikRests.begin(), s.ikRests.end());
         } else if (s.type == "RigExecBlendPointFrames") {
@@ -1430,9 +1629,9 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 params.minLengthRatio = rd(s.minLengthRatio);
             }
             RigExecSplineIkControls controls;
-            controls.root = B.fin[size_t(s.root)];
-            controls.mid = B.fin[size_t(s.mid)];
-            controls.end = B.fin[size_t(s.end)];
+            controls.root = B.fin[size_t(s.rootRead)];
+            controls.mid = B.fin[size_t(s.midRead)];
+            controls.end = B.fin[size_t(s.endRead)];
             RigExecSplineIkResult solved;
             RigExecSolveSplineIk(s.splineRest, controls, params, &solved);
             if (solved.joints.size() == s.splineCount) {
@@ -1534,7 +1733,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         }
         bool sourcesReady = true;
         for (size_t k = 0; k < c.sources.size(); ++k) {
-            const RigExecPointFrame &frame = B.fin[size_t(c.sources[k])];
+            const RigExecPointFrame &frame =
+                B.fin[size_t(commit.sourceReads[k])];
             if (!frame.IsValid()) {
                 step->diagnostics.push_back(
                     c.path.GetString() + " could not resolve source " +
@@ -1555,7 +1755,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             return;
         }
         const std::vector<RigExecConstraintSource> &sources = commit.sources;
-        const RigExecPointFrame input = B.fin[size_t(c.target)];
+        const RigExecPointFrame input = B.fin[size_t(commit.slotReads[0])];
         RigExecPointFrame candidate = input;
         bool candidateReady = true;
         RigExecConstraintAxisMask affect;
@@ -1635,8 +1835,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     // origin as the object point.
                     params.worldUpDirection =
                         c.worldUpObjectNamed
-                            ? GfVec3d(B.fin[size_t(c.worldUpObject)].Origin() -
-                                      input.Origin())
+                            ? GfVec3d(B.fin[size_t(commit.worldUpRead)]
+                                          .Origin() - input.Origin())
                             : GfVec3d(-input.Origin());
                 } else if (c.worldUpType == "objectRotationUp") {
                     if (!c.worldUpObjectNamed) {
@@ -1645,7 +1845,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                         GfMatrix4d up(1.0);
                         if (!RigExecPointsToMatrix(
                                 RigExecIdentityLandmarks(),
-                                B.fin[size_t(c.worldUpObject)].points, &up)) {
+                                B.fin[size_t(commit.worldUpRead)].points,
+                                &up)) {
                             step->diagnostics.push_back(
                                 c.path.GetString() +
                                 " has a degenerate world-up object");
@@ -1714,17 +1915,19 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // whose rest or final frame is not usable -- is the epilogue's.
         GfMatrix4d matrix(1.0);
         if (step->part) {
+            // The LAST version of the slot: these steps run after the whole
+            // walk, so what they describe is where the provider ended up.
+            const RigExecPointFrame &frame = B.fin[size_t(B.finLast[slot])];
             if (RigExecBakedUsable(B.restFrames[slot]) &&
-                RigExecBakedUsable(B.fin[slot])) {
-                RigExecPointsToMatrix(B.restPts[slot], B.fin[slot].points,
-                                      &matrix);
+                RigExecBakedUsable(frame)) {
+                RigExecPointsToMatrix(B.restPts[slot], frame.points, &matrix);
             }
             B.finalMatrix[slot] = matrix;
         } else {
+            const RigExecPointFrame &frame = B.base[size_t(B.baseLast[slot])];
             if (RigExecBakedUsable(B.restFrames[slot]) &&
-                RigExecBakedUsable(B.base[slot])) {
-                RigExecPointsToMatrix(B.restPts[slot], B.base[slot].points,
-                                      &matrix);
+                RigExecBakedUsable(frame)) {
+                RigExecPointsToMatrix(B.restPts[slot], frame.points, &matrix);
             }
             B.baseMatrix[slot] = matrix;
         }
@@ -1737,12 +1940,13 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // something can look it up, because filling it otherwise would
         // compute a matrix per slot per frame that no step reads.
         for (size_t i = 0; i < B.paths.size(); ++i) {
+            const RigExecPointFrame &frame = B.fin[size_t(B.finLast[i])];
             if (!RigExecBakedUsable(B.restFrames[i]) ||
-                !RigExecBakedUsable(B.fin[i])) {
+                !RigExecBakedUsable(frame)) {
                 continue;
             }
             GfMatrix4d matrix(1.0);
-            if (RigExecPointsToMatrix(B.restPts[i], B.fin[i].points,
+            if (RigExecPointsToMatrix(B.restPts[i], frame.points,
                                       &matrix)) {
                 step->snapshots.RecordFinal(B.paths[i], VtValue(matrix));
             }
@@ -1812,7 +2016,8 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         // with the maps half filled. The caller drops the pose either way.
         for (size_t k = 0; k < B.jointPaths.size(); ++k) {
             const int slot = B.jointSlots[k];
-            const RigExecPointFrame &finalFrame = B.fin[size_t(slot)];
+            const RigExecPointFrame &finalFrame =
+                B.fin[size_t(B.finLast[size_t(slot)])];
             // The point frame is the status bearer; publishing an identity
             // matrix for a degenerate frame would let a matrix-only consumer
             // deform with a plausible-but-wrong transform.
@@ -1834,9 +2039,11 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
             const size_t k = size_t(index);
             const int slot = B.jointSlots[k];
             RigExecBakedEmplace(&pose->jointFramesBase, jointsInOrder,
-                                B.jointPaths[k], B.base[size_t(slot)]);
+                                B.jointPaths[k],
+                                B.base[size_t(B.baseLast[size_t(slot)])]);
             RigExecBakedEmplace(&pose->jointFramesFinal, jointsInOrder,
-                                B.jointPaths[k], B.fin[size_t(slot)]);
+                                B.jointPaths[k],
+                                B.fin[size_t(B.finLast[size_t(slot)])]);
             if (B.jointMatrixPublished[k]) {
                 // A skipped key leaves the hint at the last one that landed,
                 // which is still the largest in the map: omitting entries
@@ -1848,12 +2055,14 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         }
         // Most controls are animator inputs and publish their base frame; a
         // control a constraint names publishes the revised one. Both are the
-        // same slot here, because the walk wrote the revision into it.
+        // LAST version of the same slot here, because the walk wrote the
+        // revision into a version of it.
         for (const int index : B.controlPublishOrder) {
             const size_t k = size_t(index);
-            RigExecBakedEmplace(&pose->controlFrames, B.controlPathsAscending,
-                                B.controlPaths[k],
-                                B.fin[size_t(B.controlSlots[k])]);
+            RigExecBakedEmplace(
+                &pose->controlFrames, B.controlPathsAscending,
+                B.controlPaths[k],
+                B.fin[size_t(B.finLast[size_t(B.controlSlots[k])])]);
         }
     }
 

@@ -1257,18 +1257,7 @@ TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
     const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
     const size_t clusters = B.clustering.clusters.size();
     CHECK(B.cones.cone.size() == clusters);
-    CHECK(B.cones.restore.size() == clusters);
     size_t broken = 0;
-    for (const RigExecBakedStep &step : B.steps) {
-        // A restore edge is a read edge the end of a run erases, so it is
-        // always one of the step's own predecessors.
-        for (const int pred : step.restorePreds) {
-            if (!std::binary_search(step.preds.begin(), step.preds.end(),
-                                    pred)) {
-                ++broken;
-            }
-        }
-    }
     for (size_t c = 0; c < clusters; ++c) {
         if (!B.cones.cone[c].Test(int(c))) {
             ++broken;
@@ -1287,28 +1276,146 @@ TestTheConeClosuresAreSound(const BuiltProgram &built, const char *name)
                     }
                 }
             }
-            if (B.cones.restore[c].Test(int(d))) {
-                for (size_t e = 0; e < clusters; ++e) {
-                    if (B.cones.restore[d].Test(int(e)) &&
-                        !B.cones.restore[c].Test(int(e))) {
-                        ++broken;
-                    }
-                }
-            }
         }
     }
     if (broken) {
         ++failures;
-        std::printf("FAIL %s: %zu cone/restore closure violation(s)\n", name,
+        std::printf("FAIL %s: %zu cone closure violation(s)\n", name, broken);
+        return;
+    }
+    size_t reach = 0;
+    for (size_t c = 0; c < clusters; ++c) {
+        reach += B.cones.cone[c].Count();
+    }
+    std::printf("  %s: %zu cluster(s), %.1f cluster(s) in the average cone\n",
+                name, clusters,
+                clusters ? double(reach) / double(clusters) : 0.0);
+}
+
+/// Every pose write has storage of its own, and every read names a version
+/// some writer produced (§3.1).
+///
+/// The property the restore closure used to buy at runtime and the versioned
+/// storage now has by construction. Three things make it true, and all three
+/// are checked here against the program's own tables rather than against a
+/// number: no two write sites share an entry (that is what SSA IS), every
+/// read and every carry names an entry that exists and is not a later
+/// version than the reader's own point, and the last-version table really
+/// does name the last write of each slot.
+void
+TestEveryPoseWriteHasItsOwnStorage(const BuiltProgram &built,
+                                   const char *name)
+{
+    if (!built.program) {
+        ++failures;
+        std::printf("FAIL %s: no program to check versions of\n", name);
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    const size_t slots = B.paths.size();
+    CHECK(B.finLast.size() == slots);
+    CHECK(B.baseLast.size() == slots);
+    // The layout: entry i is slot i's first version (the compose writes it),
+    // entry n + i is its LAST -- dense, because that is what the matrices
+    // and the publication read -- and everything past 2n is a version in
+    // between. So a write site's entry is never below n, an entry in
+    // [n, 2n) belongs to the slot it is named after, and every entry past
+    // 2n belongs to exactly one site.
+    std::vector<int> finWriter(B.fin.size(), -1), baseWriter(B.base.size(), -1);
+    std::vector<uint32_t> liveFin(slots), liveBase(slots);
+    for (size_t i = 0; i < slots; ++i) {
+        liveFin[i] = uint32_t(i);
+        liveBase[i] = uint32_t(i);
+    }
+    size_t broken = 0, writes = 0;
+    const auto claim = [&broken, &writes](std::vector<int> *writer,
+                                          uint32_t entry, size_t slots,
+                                          size_t slot, int commit) {
+        ++writes;
+        if (entry >= writer->size() || entry < slots ||
+            (entry < 2 * slots && entry != slots + slot)) {
+            ++broken;
+            return;
+        }
+        if ((*writer)[entry] >= 0) {
+            ++broken;  // two commits writing one entry: not SSA
+        }
+        (*writer)[entry] = commit;
+    };
+    const auto names = [&broken](const std::vector<RigExecPointFrame> &table,
+                                 uint32_t entry) {
+        if (entry >= table.size()) {
+            ++broken;
+        }
+    };
+    for (size_t w = 0; w < B.commits.size(); ++w) {
+        const RigExecBakedCommit &commit = B.commits[w];
+        CHECK(commit.slotReads.size() == commit.slots.size());
+        CHECK(commit.descendantReads.size() == commit.propagate.size());
+        for (size_t pos = 0; pos < commit.slots.size(); ++pos) {
+            const size_t slot = size_t(commit.slots[pos]);
+            // The read is the version live where the commit runs, and the
+            // carry is the version live where the write-back reaches this
+            // site -- the same thing for a candidate, which is written
+            // before any descendant is.
+            if (commit.slotReads[pos] != liveFin[slot] ||
+                commit.slotCarry[pos] != liveFin[slot]) {
+                ++broken;
+            }
+            claim(&finWriter, commit.slotWrites[pos], slots, slot,
+                  int(w));
+            liveFin[slot] = commit.slotWrites[pos];
+            if (commit.solverOutput) {
+                if (commit.slotBaseCarry[pos] != liveBase[slot]) ++broken;
+                claim(&baseWriter, commit.slotBaseWrites[pos], slots,
+                      slot, int(w));
+                liveBase[slot] = commit.slotBaseWrites[pos];
+            }
+        }
+        for (size_t k = 0; k < commit.propagate.size(); ++k) {
+            const size_t slot = size_t(commit.propagate[k].first);
+            names(B.fin, commit.descendantReads[k]);
+            names(B.fin, commit.closestReads[k]);
+            if (commit.descendantCarry[k] != liveFin[slot]) {
+                ++broken;
+            }
+            claim(&finWriter, commit.descendantWrites[k], slots, slot,
+                  int(w));
+            liveFin[slot] = commit.descendantWrites[k];
+            if (commit.solverOutput) {
+                if (commit.descendantBaseCarry[k] != liveBase[slot]) ++broken;
+                claim(&baseWriter, commit.descendantBaseWrites[k], slots,
+                      slot, int(w));
+                liveBase[slot] = commit.descendantBaseWrites[k];
+            }
+        }
+    }
+    for (size_t i = 0; i < slots; ++i) {
+        if (B.finLast[i] != liveFin[i] || B.baseLast[i] != liveBase[i]) {
+            ++broken;
+        }
+    }
+    // Every arena entry belongs to exactly one write site: the table holds
+    // no storage nothing writes. (A dense last-version entry of a slot no
+    // commit ever writes is the one exception, and it is the table's shape
+    // rather than a hole in it.)
+    for (size_t e = 2 * slots; e < B.fin.size(); ++e) {
+        if (finWriter[e] < 0) ++broken;
+    }
+    for (size_t e = 2 * slots; e < B.base.size(); ++e) {
+        if (baseWriter[e] < 0) ++broken;
+    }
+    if (broken) {
+        ++failures;
+        std::printf("FAIL %s: %zu version table violation(s)\n", name,
                     broken);
         return;
     }
-    size_t restored = 0;
-    for (size_t c = 0; c < clusters; ++c) {
-        restored += B.cones.restore[c].Count();
-    }
-    std::printf("  %s: %zu cluster(s), %zu restore edge(s) in the closure\n",
-                name, clusters, restored);
+    std::printf("  %s: %zu slot(s), %zu pose write(s) with storage of their "
+                "own (%zu fin + %zu base entries, %zu KB)\n",
+                name, slots, writes, B.fin.size(), B.base.size(),
+                (B.fin.size() + B.base.size()) * sizeof(RigExecPointFrame) /
+                    1024);
 }
 
 /// One rig, compiled and evaluating through the program.
@@ -1470,21 +1577,73 @@ TestADragReturnedToItsValueExecutesNothing(const std::string &stagePath,
                 E.GetBakedClusterCount());
 }
 
-/// A constraint dirtied while its target's compose is clean still reads the
-/// frame its program point saw (§3.1, the restore closure).
+/// The clusters a run may touch when \p dirty is what moved.
+///
+/// The bound a drag is asserted against, computed from the graph the program
+/// actually holds rather than from a number: the forward closure of the
+/// clusters a change can start, plus the clusters that read outside the
+/// graph and are therefore dirty every run. A run that stays inside it
+/// touched nothing the change could not reach.
+size_t
+ConeBound(const RigExecBakedProgramImpl &B,
+          const std::vector<int> &dirty)
+{
+    const size_t clusters = B.clustering.clusters.size();
+    RigExecBakedClusterSet closed;
+    closed.Resize(clusters);
+    RigExecBakedClusterSet seeds = B.cones.always;
+    seeds.Resize(clusters);
+    for (const int cluster : dirty) {
+        if (cluster >= 0) {
+            seeds.Set(cluster);
+        }
+    }
+    // A step whose own baked input the standing override names is dirty
+    // too, and on a rig where a drag lands on one -- a constraint weight, an
+    // IK offset -- that widens what the drag may reach. A control avar is
+    // not one of those, so on this fixture the test is asked after the run
+    // and the set comes back empty; it is here so that the bound stays a
+    // bound on a rig where it does not.
+    for (const int index : B.cones.overrideSteps) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        for (const int input : step.overrideInputs) {
+            if (size_t(input) < B.overridden.size() &&
+                B.overridden[size_t(input)]) {
+                seeds.Set(step.cluster);
+                break;
+            }
+        }
+    }
+    for (size_t c = 0; c < clusters; ++c) {
+        if (seeds.Test(int(c))) {
+            closed.Union(B.cones.cone[c]);
+        }
+    }
+    return closed.Count();
+}
+
+/// A constraint dirtied while its target's compose is clean re-runs its own
+/// cone and nothing else (§3.1).
 ///
 /// An override on a constraint's own input moves nothing upstream of it: the
 /// controls are where they were, so the compose that produced its target's
-/// frame is clean and would be skipped. But that frame is READ-MODIFY-
-/// WRITTEN by the constraint, so the slot at the end of the last run holds
-/// the constrained value and not the composed one -- re-running the
-/// constraint over it would constrain a constrained frame. The restore
-/// closure is what puts the compose back in the run, and the only way to see
-/// that it did is to compare with a path that never skipped anything.
+/// frame is clean. That frame used to be READ-MODIFY-WRITTEN in place, so the
+/// one storage at the end of a run held the constrained value and not the
+/// composed one -- re-running the constraint over it would have constrained a
+/// constrained frame, and the restore closure put the whole compose (and
+/// everything downstream of it, which on a biped is the program) back into
+/// the run to prevent exactly that. Versioned storage ends it: the constraint
+/// reads the version its program point names, that version is still in the
+/// entry the compose wrote it to, and the run is the constraint's own cone.
+///
+/// Both halves are asserted. The pose must equal a path that never skipped
+/// anything -- which is what a missing version would break -- and the run
+/// must be strictly smaller than the program, which is what the restore
+/// closure made impossible.
 void
-TestAConstraintDragRestoresWhatItReads(const std::string &stagePath,
-                                       const SdfPath &mover,
-                                       const TfToken &input)
+TestAConstraintDragRunsOnlyItsCone(const std::string &stagePath,
+                                   const SdfPath &mover,
+                                   const TfToken &input)
 {
     const UsdStageRefPtr probe = UsdStage::Open(stagePath);
     CHECK(probe);
@@ -1530,6 +1689,7 @@ TestAConstraintDragRestoresWhatItReads(const std::string &stagePath,
     const size_t ran = baked.evaluator->GetBakedClustersRunLastGeneration();
     const size_t clusters = baked.evaluator->GetBakedClusterCount();
     CHECK(ran > 0);
+    CHECK(clusters > 0 && ran < clusters);
 
     reference.evaluator->SetInteractiveOverrides(overrides);
     const RigExecRigPose expected =
@@ -1537,15 +1697,100 @@ TestAConstraintDragRestoresWhatItReads(const std::string &stagePath,
     CHECK(expected.valid && constrained.valid);
     rigExecTest::CompareEveryMap(&failures, "constraint input drag", expected,
                                  constrained);
-    // The ratio is reported rather than asserted on, and the number it
-    // usually shows is the whole program: a constraint READ-MODIFY-WRITES
-    // its target's frame, so restoring the version it read pulls in the
-    // compose that wrote it, and everything downstream of that compose comes
-    // with it. That is the closure being right, not being lazy -- the
-    // assertion above it is that the pose matches a path that skipped
-    // nothing, which is exactly what a missing restore would break.
     std::printf("  constraint input drag: ran %zu of %zu cluster(s) and "
                 "published the dynamic path's pose\n", ran, clusters);
+}
+
+/// A leaf control drags its own cone: its compose subtree, the pose steps
+/// that read it, their matrices, and the skin chunks whose key holds one of
+/// their joints.
+///
+/// The interactive case the whole graph exists for, and the one a number
+/// cannot state: which clusters those are is a property of the rig, so the
+/// bound is computed from the program's own cones -- the forward closure of
+/// the compose cluster the control's avars feed, plus what is dirty every
+/// run whatever happened. A run inside that bound touched nothing the drag
+/// could not reach; a run outside it is a cone that leaks.
+void
+TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
+                                    const SdfPath &control,
+                                    const TfToken &avar)
+{
+    const UsdStageRefPtr probe = UsdStage::Open(stagePath);
+    CHECK(probe);
+    if (!probe) {
+        return;
+    }
+    const UsdPrim prim = probe->GetPrimAtPath(control);
+    VtValue dragged;
+    if (!prim || !AvarValue(prim.GetAttribute(avar), UsdTimeCode(1), 3.0,
+                            &dragged)) {
+        ++failures;
+        std::printf("FAIL leaf-drag: no double or float %s on %s\n",
+                    avar.GetText(), control.GetText());
+        return;
+    }
+    const std::vector<RigExecValueOverride> overrides = {
+        RigExecValueOverride{control, TfToken(), avar, dragged}};
+
+    const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
+    const LiveRig reference =
+        OpenRig(stagePath, RigExecEvaluationMode::Dynamic);
+    if (!baked.evaluator || !reference.evaluator) {
+        ++failures;
+        std::printf("FAIL leaf-drag: does not compile\n");
+        return;
+    }
+    baked.evaluator->Evaluate(UsdTimeCode(1));
+    baked.evaluator->Evaluate(UsdTimeCode(1));
+    const RigExecBakedProgram *program = baked.evaluator->GetBakedProgram();
+    if (!program) {
+        ++failures;
+        std::printf("FAIL leaf-drag: the rig did not bake\n");
+        return;
+    }
+    const RigExecBakedProgramImpl &B = program->GetStepGraph();
+    const auto slot = B.index.find(control);
+    if (slot == B.index.end()) {
+        ++failures;
+        std::printf("FAIL leaf-drag: %s is not a provider slot\n",
+                    control.GetText());
+        return;
+    }
+
+    baked.evaluator->SetInteractiveOverrides(overrides);
+    const RigExecRigPose moved = baked.evaluator->Evaluate(UsdTimeCode(1));
+    if (baked.evaluator->GetBakedGenerationCount() != 3) {
+        ++failures;
+        std::printf("FAIL leaf-drag: %zu of 3 generation(s) came from the "
+                    "program\n", baked.evaluator->GetBakedGenerationCount());
+        return;
+    }
+    const size_t ran = baked.evaluator->GetBakedClustersRunLastGeneration();
+    const size_t clusters = baked.evaluator->GetBakedClusterCount();
+    // Exactly what the drag moves: the eleven avars of one provider, which
+    // reach the graph through the compose step that reads them.
+    const size_t bound =
+        ConeBound(B, {B.cones.avarCluster[size_t(slot->second)]});
+    CHECK(ran > 0 && ran < clusters);
+    if (ran > bound) {
+        ++failures;
+        std::printf("FAIL leaf-drag: ran %zu cluster(s), and the drag's cone "
+                    "is %zu\n", ran, bound);
+    }
+    // The drag really moved the rig, rather than the cone being small
+    // because nothing happened.
+    CHECK(moved.moverGraphRevisionsExecuted > 0);
+
+    reference.evaluator->SetInteractiveOverrides(overrides);
+    const RigExecRigPose expected =
+        reference.evaluator->Evaluate(UsdTimeCode(1));
+    CHECK(expected.valid && moved.valid);
+    rigExecTest::CompareEveryMap(&failures, "leaf control drag", expected,
+                                 moved);
+    std::printf("  leaf control drag: ran %zu of %zu cluster(s), cone bound "
+                "%zu, and published the dynamic path's pose\n",
+                ran, clusters, bound);
 }
 
 /// A program that legitimately holds a NaN is still a program whose cone the
@@ -1686,6 +1931,9 @@ main(int argc, char **argv)
     TestTheConeClosuresAreSound(biped, "Biped");
     TestTheConeClosuresAreSound(spider, "spider_legs");
     TestTheConeClosuresAreSound(stacked, "stacked_revisions");
+    TestEveryPoseWriteHasItsOwnStorage(biped, "Biped");
+    TestEveryPoseWriteHasItsOwnStorage(spider, "spider_legs");
+    TestEveryPoseWriteHasItsOwnStorage(stacked, "stacked_revisions");
     TestTheReportIsDeterministic(examplesDir + "/biped/Biped.usda");
     TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects();
     TestTheRangeFormDeformsLikeTheWholeArray("classicLinear");
@@ -1714,10 +1962,16 @@ main(int argc, char **argv)
     TestADragReturnedToItsValueExecutesNothing(
         examplesDir + "/biped/Biped.usda",
         SdfPath("/Biped/Rig/Controls/hips_ctl"), TfToken("avars:ty"));
-    TestAConstraintDragRestoresWhatItReads(
+    TestAConstraintDragRunsOnlyItsCone(
         examplesDir + "/biped/Biped.usda",
         SdfPath("/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim"),
         TfToken("inputs:defaultWeight"));
+    TestALeafControlDragRunsOnlyItsCone(
+        examplesDir + "/biped/Biped.usda",
+        SdfPath("/Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/"
+                "spine_end_ctl/clavicle_l_ctl/arm_l_fk_shoulder_l_bind/"
+                "arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind"),
+        TfToken("avars:rz"));
     TestANonFiniteValueIsNotAConeMismatch(
         examplesDir + "/biped/Biped.usda", TfToken("inputs:defaultWeight"),
         VtValue(std::nanf("")));

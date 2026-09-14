@@ -526,6 +526,20 @@ RigExecBakedIsSourceDomain(RigExecBakedSlotDomain domain)
            domain == RigExecBakedSlotDomain::Aggregate;
 }
 
+/// Whether \p domain's storage is SSA, one entry per writer (§3.1).
+///
+/// The two pose frame domains are. Everything else has one writer per slot
+/// per run, or is scratch a single step owns, so there is no version to
+/// speak of: the entry IS the value. The distinction is the edge sweep's:
+/// a write-after-read edge exists only where a writer can land on storage a
+/// reader is still entitled to, and in a versioned domain it never can.
+inline bool
+RigExecBakedIsVersionedDomain(RigExecBakedSlotDomain domain)
+{
+    return domain == RigExecBakedSlotDomain::PoseFin ||
+           domain == RigExecBakedSlotDomain::PoseBase;
+}
+
 /// What one step of the program does.
 enum class RigExecBakedStepKind {
     ComposeSubtree,   ///< one subtree of the provider forest
@@ -617,13 +631,15 @@ struct RigExecBakedStep {
     /// Sorted, deduplicated. Writes are an upper bound (see above).
     std::vector<RigExecBakedSlotRange> reads, writes;
     /// Program indices, sorted; every entry of preds is < this step's index.
+    ///
+    /// There is no second list beside this one. A step used to also carry
+    /// its RESTORE predecessors -- the writers whose version the end of a
+    /// run no longer held, because a later step had overwritten the slot --
+    /// and cone re-execution had to close over them. Versioned storage
+    /// (§3.1) makes that list empty by construction: no version is ever
+    /// overwritten, so re-running a reader never means re-running a writer
+    /// to put a slot back.
     std::vector<int> preds, succs;
-    /// The preds whose value a re-run of this step needs RESTORED: the ones
-    /// that wrote a slot this step reads which a LATER step overwrites, so
-    /// that the storage at the end of a run no longer holds the version this
-    /// step read (§3.1). Cone re-execution closes over these, which is what
-    /// makes "a skipped step keeps last run's values" sound.
-    std::vector<int> restorePreds;
 
     // ---- what a run outside the graph can change ---------------------------
     //
@@ -848,9 +864,11 @@ struct RigExecBakedClusterSet {
 /// left behind.
 struct RigExecBakedCones {
     /// Forward closure of each cluster, including itself.
+    ///
+    /// The only closure there is. The restore closure that used to sit
+    /// beside it -- "run this cluster and all of THIS had to have run first"
+    /// -- is gone with the storage that made it necessary (§3.1).
     std::vector<RigExecBakedClusterSet> cone;
-    /// The restore closure of each cluster (§3.1), transitively closed.
-    std::vector<RigExecBakedClusterSet> restore;
     /// Clusters holding a step that reads outside the graph at a point the
     /// graph cannot order. Dirty every run.
     RigExecBakedClusterSet always;
@@ -921,6 +939,33 @@ struct RigExecBakedCommit {
     int stagingBase = 0;
     /// A constraint step's source scratch, sized at Build.
     std::vector<RigExecConstraintSource> sources;
+
+    // ---- where this commit's frames come from and go (§3.1) ---------------
+    //
+    // Every index below is into `fin` / `base`, and every one of them was
+    // decided at Build: a read names the VERSION of a slot that was live at
+    // this commit's point in the program, and a write names storage no other
+    // step writes. Which is why a re-run of this commit cannot need an
+    // earlier step re-run first to put a slot back the way it found it --
+    // nothing ever puts it back, because nothing else writes there.
+    /// Per candidate position: the version the delta is measured against and
+    /// the version the write-back produces, in `fin` and (solver commits
+    /// only) in `base`.
+    std::vector<uint32_t> slotReads, slotWrites, slotBaseWrites;
+    /// Per propagation pair: the descendant's version and its closest
+    /// revised ancestor's, then the descendant's own new versions.
+    std::vector<uint32_t> descendantReads, closestReads;
+    std::vector<uint32_t> descendantWrites, descendantBaseWrites;
+    /// Per write site, the version whose value stands where the site does
+    /// not write one -- a candidate the batch published nothing for, a pair
+    /// that was stepped over, a commit that passed through. Usually the read
+    /// beside it; not always, because a slot can be both a candidate and a
+    /// propagated descendant and the second write carries the first.
+    std::vector<uint32_t> slotCarry, slotBaseCarry;
+    std::vector<uint32_t> descendantCarry, descendantBaseCarry;
+    /// A constraint's own reads: one per source, plus the world-up object.
+    std::vector<uint32_t> sourceReads;
+    uint32_t worldUpRead = 0;
 };
 
 /// What a staged propagation pair turned into. Ordered so that the first
@@ -1015,7 +1060,29 @@ struct RigExecBakedProgramImpl {
     // ---- per-frame working state (dense) ----------------------------------
     std::vector<double> avars;
     std::vector<GfMatrix4d> posedM;
+    /// The pose frames, in SSA form (§3.1).
+    ///
+    /// Slot i's FIRST version is entry i -- what the compose writes, and for
+    /// an xform-derived slot what the seed leaves -- and every later writer
+    /// of that slot gets storage of its own beyond the slot table: entry
+    /// [N, ...) is one commit's answer for one slot, written by that commit
+    /// and by nothing else. A reader binds at Build to the exact entry
+    /// holding the version live at its own point in the program, so a read
+    /// is one indirection and no version is ever overwritten by a later one.
+    ///
+    /// That is what makes "a skipped step keeps last run's values" true
+    /// without a restore closure: the value a clean reader wants is still
+    /// in the storage its writer left it in, however many times the SLOT
+    /// was revised afterwards. A step that declares a write it does not
+    /// perform carries the version it found into its own storage, so every
+    /// version a reader can name is well formed whatever a run decided.
+    ///
+    /// Cost: Sigma|writes| frames, 96 bytes each -- a biped's walk is under
+    /// 200 KB -- allocated once at Build and never resized in a run.
     std::vector<RigExecPointFrame> base, fin;
+    /// Slot -> the entry holding its LAST version, which is what the
+    /// matrices and the publication read. Sized N at Build.
+    std::vector<uint32_t> finLast, baseLast;
 
     /// This frame's property-chain results, per target. The prologue fills it
     /// and the pose half publishes it; program-owned so the two halves cannot
@@ -1125,6 +1192,12 @@ struct RigExecBakedProgramImpl {
         std::vector<SdfPath> fallbackJoints;
         /// FkChain's element table, so the solve allocates nothing.
         std::vector<RigExecFkChainElement> elements;
+        /// The `fin` versions this solve reads: one per control, then the
+        /// four named controls. Decided at Build like every other read
+        /// (§3.1); -1 controls are bound to their own slot's seed and never
+        /// read.
+        std::vector<uint32_t> controlReads;
+        uint32_t rootRead = 0, midRead = 0, endRead = 0, poleRead = 0;
     };
     std::vector<Solver> solvers;
     std::map<SdfPath, int> solverIndex;

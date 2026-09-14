@@ -777,31 +777,6 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
             }
         }
     }
-    // The LAST step that writes each slot, before the sweep needs it: a read
-    // of a slot some later step overwrites is a read of a version the
-    // storage does not hold at the end of a run, so re-running that reader
-    // means re-running its writer first (§3.1). Which reads those are is a
-    // property of the whole program, so it is answered here, once, rather
-    // than guessed at per frame.
-    std::array<std::vector<int>, RigExecBakedSlotDomainCount> maxWriter;
-    for (const RigExecBakedStep &step : B.steps) {
-        for (const RigExecBakedSlotRange &range : step.writes) {
-            std::vector<int> &table = maxWriter[size_t(range.domain)];
-            if (table.size() < range.end) {
-                table.resize(range.end, -1);
-            }
-        }
-    }
-    for (int index = 0; index < int(B.steps.size()); ++index) {
-        for (const RigExecBakedSlotRange &range :
-                 B.steps[size_t(index)].writes) {
-            std::vector<int> &table = maxWriter[size_t(range.domain)];
-            for (uint32_t slot = range.begin; slot < range.end; ++slot) {
-                table[slot] = index;
-            }
-        }
-    }
-
     std::array<std::vector<SlotInterval>, RigExecBakedSlotDomainCount>
         writers, readers;
     for (int index = 0; index < int(B.steps.size()); ++index) {
@@ -809,7 +784,6 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
         SortRanges(&step.reads);
         SortRanges(&step.writes);
         step.preds.clear();
-        step.restorePreds.clear();
         const auto overlapping = [&](const std::vector<SlotInterval> &table,
                                      const RigExecBakedSlotRange &range) {
             for (const SlotInterval &interval : table) {
@@ -819,32 +793,8 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
                 }
             }
         };
-        // The read pass, which also decides which of its edges are RESTORE
-        // edges: the writer's value is still in the slot at the end of the
-        // run unless something later in the program overwrote part of what
-        // this read covered.
-        const auto overlappingRead =
-            [&](const std::vector<SlotInterval> &table,
-                const RigExecBakedSlotRange &range) {
-            const std::vector<int> &latest = maxWriter[size_t(range.domain)];
-            for (const SlotInterval &interval : table) {
-                if (interval.end <= range.begin ||
-                    range.end <= interval.begin || interval.step == index) {
-                    continue;
-                }
-                step.preds.push_back(interval.step);
-                const uint32_t lo = std::max(interval.begin, range.begin);
-                const uint32_t hi = std::min(interval.end, range.end);
-                for (uint32_t slot = lo; slot < hi; ++slot) {
-                    if (slot < latest.size() && latest[slot] > interval.step) {
-                        step.restorePreds.push_back(interval.step);
-                        break;
-                    }
-                }
-            }
-        };
         for (const RigExecBakedSlotRange &range : step.reads) {
-            overlappingRead(writers[size_t(range.domain)], range);
+            overlapping(writers[size_t(range.domain)], range);
         }
         // Registered before the write pass, so that a read-modify-write step
         // -- every constraint is one -- does not raise a write-after-read
@@ -854,8 +804,22 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
                 {range.begin, range.end, index});
         }
         for (const RigExecBakedSlotRange &range : step.writes) {
+            // Write after write, always: two writers of one slot are ordered
+            // by the program, and the later one CARRIES the earlier one's
+            // version where it does not write (§3.1), which makes this a
+            // true data edge and not only an ordering one.
             overlapping(writers[size_t(range.domain)], range);
-            overlapping(readers[size_t(range.domain)], range);
+            // Write after read, only where the two would share storage.
+            // They do not in the versioned pose domains: a writer there
+            // writes storage of its own, so a reader of an earlier version
+            // and a later writer touch different memory and may run in
+            // either order or at once. Dropping the edge is not a
+            // scheduling nicety -- it is what keeps a dragged constraint's
+            // cone from reaching every commit that happens to revise a slot
+            // it read.
+            if (!RigExecBakedIsVersionedDomain(range.domain)) {
+                overlapping(readers[size_t(range.domain)], range);
+            }
         }
         for (const RigExecBakedSlotRange &range : step.writes) {
             std::vector<SlotInterval> &writerTable =
@@ -868,10 +832,6 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
         std::sort(step.preds.begin(), step.preds.end());
         step.preds.erase(std::unique(step.preds.begin(), step.preds.end()),
                          step.preds.end());
-        std::sort(step.restorePreds.begin(), step.restorePreds.end());
-        step.restorePreds.erase(
-            std::unique(step.restorePreds.begin(), step.restorePreds.end()),
-            step.restorePreds.end());
         // The invariant the whole design rests on: an edge only ever leaves a
         // step the sweep has already passed, so a cluster running its members
         // in increasing program index is always in topological order.
@@ -914,14 +874,19 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
 // ---------------------------------------------------------------------------
 // Cone re-execution (§7).
 //
-// What a frame may skip, and why skipping it is not an approximation. Two
-// closures decide it, both computed once at Build:
+// What a frame may skip, and why skipping it is not an approximation. ONE
+// closure decides it, computed once at Build:
 //
 //   cone[c]    -- run c and you have to run all of this
-//   restore[c] -- run c and all of THIS had to have run first, because c
-//                 reads a slot version the end of a run does not hold
 //
-// and one rule decides what starts them: a SOURCE -- the avar table, a
+// There used to be a second, the restore closure: "run c and all of THIS had
+// to have run first, because c reads a slot version the end of a run does not
+// hold". Versioned pose storage (§3.1) retired it. Every writer writes its
+// own entry, so the version a clean reader wants is exactly where its writer
+// left it however often the SLOT was revised afterwards, and nothing ever has
+// to be re-run to put a value back.
+//
+// One rule decides what starts the closure: a SOURCE -- the avar table, a
 // chain's base points, a skin revision's static packet, the property-chain
 // results -- always runs, and its output is compared with the last run's by
 // VALUE. Never "the time changed", never "an override stands": those two
@@ -982,12 +947,10 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         return;
     }
     cones.cone.resize(count);
-    cones.restore.resize(count);
     cones.always.Resize(count);
     cones.poseClusters.Resize(count);
     for (size_t c = 0; c < count; ++c) {
         cones.cone[c].Resize(count);
-        cones.restore[c].Resize(count);
     }
 
     // ---- which steps read outside the graph ---------------------------------
@@ -1087,36 +1050,6 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         cone.Set(cluster);
         for (const int succ : B.clustering.clusters[size_t(cluster)].succs) {
             cone.Union(cones.cone[size_t(succ)]);
-        }
-    }
-
-    // ---- the restore closure ------------------------------------------------
-    //
-    // Transitive, because restoring a version means re-running the step that
-    // produced it, and THAT step's own reads may name versions the end of a
-    // run does not hold either. Cluster-level restore edges can run in both
-    // directions between two clusters, so this is a worklist to a fixpoint
-    // rather than one pass over a topological order.
-    for (const RigExecBakedStep &step : B.steps) {
-        RigExecBakedClusterSet &restore = cones.restore[size_t(step.cluster)];
-        for (const int pred : step.restorePreds) {
-            const int cluster = B.steps[size_t(pred)].cluster;
-            if (cluster != step.cluster) {
-                restore.Set(cluster);
-            }
-        }
-    }
-    for (bool grew = true; grew;) {
-        grew = false;
-        for (size_t c = 0; c < count; ++c) {
-            RigExecBakedClusterSet closure = cones.restore[c];
-            for (size_t d = 0; d < count; ++d) {
-                if (cones.restore[c].Test(int(d))) {
-                    closure.Union(cones.restore[d]);
-                }
-            }
-            closure.words[c >> 6] &= ~(uint64_t(1) << (c & 63));
-            grew = cones.restore[c].Union(closure) || grew;
         }
     }
 }
@@ -1289,29 +1222,10 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
             B.closed.Union(cones.cone[c]);
         }
     }
-    // The restore closure, to a fixpoint: a cluster pulled in to restore a
-    // version has to be run WHOLE, which means everything downstream of it
-    // runs too -- otherwise the run would end with a slot holding the
-    // restored version instead of the final one.
-    for (;;) {
-        RigExecBakedClusterSet pending;
-        pending.Resize(count);
-        for (size_t c = 0; c < count; ++c) {
-            if (B.closed.Test(int(c))) {
-                pending.Union(cones.restore[c]);
-            }
-        }
-        bool grew = false;
-        for (size_t c = 0; c < count; ++c) {
-            if (pending.Test(int(c)) && !B.closed.Test(int(c))) {
-                B.closed.Union(cones.cone[c]);
-                grew = true;
-            }
-        }
-        if (!grew) {
-            break;
-        }
-    }
+    // And that is the whole closure. Nothing is added to it to RESTORE a
+    // version a later writer took over, because no later writer takes one
+    // over (§3.1): what a skipped step left in its own storage is what the
+    // readers bound to it are still entitled to read.
 
     // What the next run compares against. Updated here, once, whether or not
     // this run skipped anything: the comparison is always with the values the

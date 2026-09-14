@@ -310,6 +310,16 @@ public:
     size_t GetBakedClusterCount() const;
     size_t GetBakedClustersRunLastGeneration() const;
 
+    /// The standing baked program, or null where this generation is dynamic.
+    ///
+    /// For the suites that assert on the program's STRUCTURE -- what a
+    /// drag's cone may reach, which entry holds which version -- against the
+    /// graph rather than against a number somebody wrote down. Nothing in
+    /// the library reads it.
+    const RigExecBakedProgram *GetBakedProgram() const {
+        return _bakedProgram.get();
+    }
+
     /// How many skin layouts the epoch's topology cache is holding answers
     /// for.
     ///

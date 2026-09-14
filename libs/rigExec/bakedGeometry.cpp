@@ -1299,6 +1299,16 @@ RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
         return;
     case RigExecBakedStepKind::RevisionChunk:
         revision.chunks[size_t(step->part)].keyChanged = false;
+        if (!revision.chunked) {
+            // A whole-array chunk opens every run saying it has produced
+            // nothing, and says otherwise only where the revision executed;
+            // a run that skipped it produced nothing either. The
+            // SPECULATIVE form's `ok` is the opposite kind of flag -- it
+            // describes what its range of the buffer holds, across runs,
+            // and the step reads it back to decide whether it may keep it
+            // -- so that one is left exactly where the chunk left it.
+            revision.chunks[size_t(step->part)].ok = false;
+        }
         return;
     case RigExecBakedStepKind::RevisionFuse:
         // The chain's sticky dirty bit as the NEXT revision reads it: this
