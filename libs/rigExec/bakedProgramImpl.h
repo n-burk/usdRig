@@ -999,8 +999,13 @@ struct RigExecBakedCommit {
     std::vector<AncestorRead> effectorAncestors;
     std::vector<uint32_t> poleReads;
     std::vector<std::vector<AncestorRead>> poleAncestors;
-    /// Scratch for the chain the solver is handed and the chain it returns,
-    /// sized at Build so a step allocates nothing.
+    /// Scratch for the chain the solver is handed and the chain it returns.
+    /// The first three are sized at Build; `ikSolved` cannot be, because the
+    /// shared solve kernel RETURNS its chain by value and the assignment
+    /// takes that buffer -- reserving here would only be discarded. It is
+    /// the one per-frame allocation a SingleChainIK step makes, and closing
+    /// it means giving the kernel an out-parameter form, which is a change
+    /// to a kernel the dynamic path calls too.
     std::vector<RigExecPointFrame> ikChain, ikPrepared, ikRest, ikSolved;
     /// Whether this run's exit records the target's frame for a read phase.
     /// True for every transform-domain exit and for a geometry-domain

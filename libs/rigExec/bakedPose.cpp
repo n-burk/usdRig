@@ -383,11 +383,15 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         // dynamic walk gives a malformed one is reproduced from this run's
         // numbers rather than refused at bake.
         //
-        // FoldShape and not Fold: the property is `named` for the resync
-        // index, because a connection appearing on one is a structural edit,
-        // but nothing about its VALUE is folded -- so a value edit needs no
-        // rebuild, and an override on one is not placeable, which agrees
-        // with the dynamic path ignoring such an override too.
+        // FoldShape and not Fold: nothing about the VALUE is folded, so an
+        // interactive override on one of these tables is not placeable --
+        // which agrees with the dynamic path, whose raw read ignores such an
+        // override too. What FoldShape does NOT buy is edit-time cheapness:
+        // like Fold it puts the property in `rebuild`, so authoring a new
+        // weight rebuilds the program even though the run would have re-read
+        // it anyway. Conservative and correct; the day that costs a rigger
+        // scrubbing a blend curve, the fix is a `Name` that indexes without
+        // rebuilding, not a quieter comment here.
         {
             RigExecBakedProgramImpl::ConstraintArrays arrays;
             arrays.prim = prim;
@@ -1024,7 +1028,6 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             commit.ikChain.resize(constraint.targetSlots.size());
             commit.ikRest.resize(constraint.targetSlots.size());
             commit.ikPrepared.reserve(constraint.targetSlots.size());
-            commit.ikSolved.reserve(constraint.targetSlots.size());
         }
         std::sort(commit.slots.begin(), commit.slots.end());
         commit.slots.erase(

@@ -464,10 +464,14 @@ TestEvaluatorSemantics()
         CHECK(!Near(oneAt->second.ExtractTranslation(),
                     twoAt->second.ExtractTranslation()));
     }
+    // Back to the MALFORMED table the dormant case above left standing --
+    // not a well-formed one -- so the disabled case below keeps proving what
+    // it always proved: that a shape-preserving pass-through does not
+    // inspect the source data either.
     position.GetAttribute(TfToken("inputs:sourceWeights"))
         .Clear();
     position.GetAttribute(TfToken("inputs:sourceWeights"))
-        .Set(VtFloatArray{1, 3});
+        .Set(VtFloatArray{1, 2, 3});
 
     // MoverAPI enable is a shape-preserving pass-through.
     position.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.0f);
