@@ -46,6 +46,7 @@
 #include "types.h"
 #include "weightPackets.h"
 
+#include "pxr/base/tf/staticTokens.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/usd/usd/attribute.h"
@@ -54,6 +55,21 @@
 
 #include <string>
 #include <vector>
+
+// The six weight object types, spelled once. The per-frame dispatch runs a
+// step body down this list, and TfToken(const char *) takes the token
+// registry's spin lock on every construction -- which a step body may not
+// take (docs/baked-step-graph.md section 2) -- so the comparison is against
+// interned tokens rather than against literals.
+TF_DEFINE_PRIVATE_TOKENS(
+    _tokens,
+    ((staticWeight, "RigExecStaticWeight"))
+    ((dynamicWeight, "RigExecDynamicWeight"))
+    ((combineWeight, "RigExecCombineWeight"))
+    ((sphereWeight, "RigExecSphereWeight"))
+    ((planeWeight, "RigExecPlaneWeight"))
+    ((curveWeight, "RigExecCurveWeight"))
+);
 
 namespace rigExec {
 
@@ -118,7 +134,6 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     object.representation = ctx->ReadToken(prim, "rigExec:representation",
                                            "constant");
     object.rangePolicy = ctx->ReadToken(prim, "rigExec:rangePolicy", "strict");
-    object.operation = ctx->ReadToken(prim, "rigExec:operation", "");
     object.combineMode = ctx->ReadToken(prim, "rigExec:combineMode", "");
 
     // The painted arrays. Uniform by schema, so they fold; still named, so a
@@ -151,12 +166,9 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     // PLACEMENT: they are RigExecXformables, so the pose walk composes them
     // into a provider slot like a joint, and the field is generated about
     // that frame.
-    static const TfToken sphereType("RigExecSphereWeight");
-    static const TfToken planeType("RigExecPlaneWeight");
-    static const TfToken curveType("RigExecCurveWeight");
-    const bool volumetric = object.type == sphereType ||
-                            object.type == planeType ||
-                            object.type == curveType;
+    const bool volumetric = object.type == _tokens->sphereWeight ||
+                            object.type == _tokens->planeWeight ||
+                            object.type == _tokens->curveWeight;
     if (volumetric) {
         object.providerSlot = ctx->SlotOf(path);
         if (object.providerSlot < 0) {
@@ -201,7 +213,7 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
         object.targetPoints = pointsOf("rigExec:weightTarget");
         object.samplePoints = pointsOf("rigExec:sampleSource");
         object.curvePoints = pointsOf("rigExec:curve");
-    } else if (object.type == "RigExecCombineWeight") {
+    } else if (object.type == _tokens->combineWeight) {
         // Read for its SIZE and never for its points: the combine consults
         // its own weight target only when no input is dense enough to carry
         // the cardinality itself.
@@ -215,24 +227,6 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
             if (const UsdAttribute a = B.stage->GetAttributeAtPath(target)) {
                 object.combineTargetPoints.push_back(a);
             }
-        }
-    }
-
-    object.varying = object.defaultWeight.varying || object.driver.varying ||
-                     object.scale.varying || object.bias.varying ||
-                     object.strength.varying || object.invert.varying ||
-                     object.falloffMin.varying || object.falloffMax.varying ||
-                     object.scaleX.varying || object.scaleY.varying ||
-                     object.scaleZ.varying || object.extentU.varying ||
-                     object.extentV.varying;
-    // A composed object moves when anything it composes moves, and the
-    // dependency order above guarantees those are already decided.
-    if (object.base >= 0 && B.weightObjects[size_t(object.base)].varying) {
-        object.varying = true;
-    }
-    for (const int input : object.inputs) {
-        if (B.weightObjects[size_t(input)].varying) {
-            object.varying = true;
         }
     }
 
@@ -266,7 +260,7 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
     const auto rd = [&](const auto &input) {
         return RigExecBakedRead(input, *B.resolvedInputs, time, &B.overridden);
     };
-    if (object.type == "RigExecStaticWeight") {
+    if (object.type == _tokens->staticWeight) {
         RigExecStaticWeightInputs inputs;
         inputs.representation = object.representation;
         inputs.rangePolicy = object.rangePolicy;
@@ -275,7 +269,7 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         inputs.defaultWeight = rd(object.defaultWeight);
         return RigExecBuildStaticWeightPacket(inputs);
     }
-    if (object.type == "RigExecDynamicWeight") {
+    if (object.type == _tokens->dynamicWeight) {
         RigExecDynamicWeightInputs inputs;
         inputs.representation = object.representation;
         inputs.rangePolicy = object.rangePolicy;
@@ -289,7 +283,7 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
             object.base >= 0 ? &packets[size_t(object.base)] : nullptr;
         return RigExecBuildDynamicWeightPacket(inputs, base);
     }
-    if (object.type == "RigExecCombineWeight") {
+    if (object.type == _tokens->combineWeight) {
         std::vector<RigExecWeightPacket> inputs;
         inputs.reserve(object.inputs.size());
         for (const int input : object.inputs) {
@@ -310,11 +304,9 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
             object.representation, object.rangePolicy, object.combineMode,
             inputs, targetCount, rd(object.strength), rd(object.invert));
     }
-    static const TfToken sphereType("RigExecSphereWeight");
-    static const TfToken planeType("RigExecPlaneWeight");
-    static const TfToken curveType("RigExecCurveWeight");
-    if (object.type == sphereType || object.type == planeType ||
-        object.type == curveType) {
+    if (object.type == _tokens->sphereWeight ||
+        object.type == _tokens->planeWeight ||
+        object.type == _tokens->curveWeight) {
         RigExecVolumeWeightInputs inputs;
         inputs.representation = object.representation;
         inputs.rangePolicy = object.rangePolicy;
@@ -337,7 +329,7 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         inputs.params.invert = rd(object.invert);
         inputs.params.strength = rd(object.strength);
         inputs.params.curve = object.falloffCurve;
-        if (object.type != planeType) {
+        if (object.type != _tokens->planeWeight) {
             inputs.scales = GfVec3f(rd(object.scaleX), rd(object.scaleY),
                                     rd(object.scaleZ));
         } else {
@@ -367,7 +359,7 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         if (RigExecVolumeWeightCanBuild(object.type, inputs)) {
             gather(object.targetPoints, &inputs.targetPoints);
             gather(object.samplePoints, &inputs.samplePoints);
-            if (object.type == curveType) {
+            if (object.type == _tokens->curveWeight) {
                 gather(object.curvePoints, &inputs.curvePoints);
             }
         }
@@ -517,21 +509,24 @@ RigExecBakedRunWeightStep(RigExecBakedProgramImpl *program,
     }
     const RigExecBakedProgramImpl::WeightObject &weight =
         B.weightObjects[size_t(step->object)];
-    // Rebuilt every frame rather than replayed out of `cached`.
-    //
-    // The table carries a cache and the frame path does not use it yet, and
-    // that is a decision rather than an omission: the predicate is the hard
-    // part. `varying` says no input of the closure is a function of TIME,
-    // which is not the same as "nothing can have moved" -- an interactive
-    // override standing on a painted weight moves it, and so does the frame
-    // AFTER one is lifted, and a volume's placement moves with the rig
-    // whatever its own inputs do. A packet built from values that did not
-    // move is the same packet, so the only thing at stake here is the work,
-    // and the only object for which that work is more than a few floats is a
-    // volume field over a large mesh -- which is also the object the
-    // predicate cannot cover. Sharing the packet between the movers that
-    // bind it, which is what exec's node cache buys and what this step IS,
-    // is the part that mattered.
+    // Rebuilt every frame, with NO packet carried over from the last one,
+    // and that is a decision rather than an omission: the predicate is the
+    // hard part. The obvious one -- "no input of this closure is a function
+    // of TIME" -- is not "nothing moved": an interactive override standing
+    // on a painted weight moves it, so does the frame AFTER one is lifted,
+    // and a volume's placement moves with the rig whatever its own inputs
+    // do. A wrong predicate here is a silently stale field, while a packet
+    // rebuilt from values that did not move is the same packet, so the only
+    // thing at stake is the work -- and the only object for which that work
+    // is more than a few floats is a volume field over a large mesh, which
+    // is also the object the tempting predicate cannot cover. The sharing
+    // that did matter is what this step IS: one packet per object per
+    // frame rather than per consumer, which is what exec's node cache buys.
+    // If a large painted weight ever measures, the predicate to write is
+    // "no override index in this closure is set now or was set last run",
+    // and it is sound only for a SOURCE weight step, because
+    // RigExecBakedComputeClosure rewrites lastOverridden between the source
+    // pass and everything else.
     B.weightPackets[size_t(step->object)] =
         RigExecBakedWeightPacket(B, weight, B.weightPackets, time);
 }

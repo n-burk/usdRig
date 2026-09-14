@@ -1727,7 +1727,7 @@ struct RigExecBakedProgramImpl {
     struct WeightObject {
         SdfPath path;
         TfToken type;
-        TfToken representation, rangePolicy, operation;
+        TfToken representation, rangePolicy;
         // RigExecStaticWeight: every field is uniform, so all three fold --
         // but they are still REGISTERED, so a drag on a painted weight can
         // be placed.
@@ -1780,12 +1780,6 @@ struct RigExecBakedProgramImpl {
         std::vector<UsdAttribute> targetPoints, samplePoints, curvePoints;
         /// The epoch's resampled falloff remap, copied from falloffLuts.
         std::vector<float> falloffCurve;
-        /// True when anything this object reads can move between frames --
-        /// its own bound inputs, or any object it composes. A false one is
-        /// built once and replayed.
-        bool varying = false;
-        RigExecWeightPacket cached;
-        bool haveCached = false;
     };
     std::vector<WeightObject> weightObjects;
     /// Path to index in weightObjects. A NEGATIVE entry is an object whose
