@@ -385,6 +385,58 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
+    // ---- weight objects ------------------------------------------------------
+    //
+    // A weight object is a COMPOSITION -- a dynamic weight remaps a base, a
+    // combine folds a list -- so every question about one is a question about
+    // its closure and not about the object a mover or a constraint happens to
+    // name. Both walks below carry a visited set of their own rather than
+    // trusting the compile pass to have rejected a cycle first: a
+    // bakeability check that only terminates because somebody else checked is
+    // not one to leave in place.
+    const auto walkWeights = [&E](const SdfPath &root,
+                                  const std::function<bool(const UsdPrim &)>
+                                      &visit) {
+        std::set<SdfPath> seen;
+        std::function<void(const SdfPath &)> walk = [&](const SdfPath &path) {
+            if (path.IsEmpty() || !seen.insert(path).second) {
+                return;
+            }
+            const UsdPrim prim = E._stage->GetPrimAtPath(path);
+            if (!prim || !visit(prim)) {
+                return;
+            }
+            for (const char *name : {"rigExec:baseWeight",
+                                     "rigExec:inputWeights"}) {
+                for (const SdfPath &input : _Targets(prim, name)) {
+                    walk(input);
+                }
+            }
+        };
+        walk(root);
+    };
+    const auto sayVolumeWeightOnConstraint = [&](const SdfPath &root,
+                                                 const SdfPath &where) {
+        walkWeights(root, [&](const UsdPrim &prim) {
+            if (_IsVolumeWeightTypeName(prim.GetTypeName())) {
+                say("volume weight object on constraint", where);
+                return false;
+            }
+            return true;
+        });
+    };
+    const auto sayUnbakedWeights = [&](const SdfPath &root) {
+        walkWeights(root, [&](const UsdPrim &prim) {
+            const TfToken type = prim.GetTypeName();
+            if (!_IsBakedWeightType(type)) {
+                say("weight object type not baked (" + type.GetString() + ")",
+                    prim.GetPath());
+                return false;
+            }
+            return true;
+        });
+    };
+
     // ---- constraints -------------------------------------------------------
     for (const auto &constraint : E._frameConstraints) {
         if (!constraint.pointsTarget.IsEmpty()) {
@@ -400,9 +452,16 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 constraint.moverPath);
             continue;
         }
-        if (!constraint.weightObject.IsEmpty()) {
-            say("weight object on constraint", constraint.moverPath);
-        }
+        // A constraint's envelope is resolved by the CPU oracle, which
+        // reads a volume's placement out of _volumeWeightMatrices as that
+        // map stands AT THE CONSTRAINT'S POINT IN THE WALK. The program
+        // republishes that map once, after the walk, because nothing else it
+        // does reads the map at all -- so a volume anywhere in a
+        // constraint's weight closure is still refused, and lifting this is
+        // the same change as moving that call into the commits.
+        sayVolumeWeightOnConstraint(constraint.weightObject,
+                                    constraint.moverPath);
+        sayUnbakedWeights(constraint.weightObject);
         if (constraint.targets.size() != 1) {
             say("constraint does not write exactly one target",
                 constraint.moverPath);
@@ -422,40 +481,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 constraint.worldUpObject.sourcePath);
         }
     }
-
-    // ---- weight objects ------------------------------------------------------
-    //
-    // A weight object is a COMPOSITION -- a dynamic weight remaps a base, a
-    // combine folds a list -- so the question is about the closure and not
-    // about the object a mover happens to name. Walked with a visited set of
-    // its own rather than trusting the compile pass to have rejected a cycle
-    // first: a bakeability check that only terminates because somebody else
-    // checked is not one to leave in place.
-    std::set<SdfPath> weightsSeen;
-    std::function<void(const SdfPath &)> sayUnbakedWeights =
-        [&](const SdfPath &path) {
-            if (path.IsEmpty() || !weightsSeen.insert(path).second) {
-                return;
-            }
-            const UsdPrim prim = E._stage->GetPrimAtPath(path);
-            if (!prim) {
-                say("weight object prim is missing", path);
-                return;
-            }
-            const TfToken type = prim.GetTypeName();
-            if (!_IsBakedWeightType(type)) {
-                say("weight object type not baked (" + type.GetString() + ")",
-                    path);
-                return;
-            }
-            for (const SdfPath &base : _Targets(prim, "rigExec:baseWeight")) {
-                sayUnbakedWeights(base);
-            }
-            for (const SdfPath &input :
-                     _Targets(prim, "rigExec:inputWeights")) {
-                sayUnbakedWeights(input);
-            }
-        };
 
     // ---- geometry ----------------------------------------------------------
     auto checkRevision = [&](const RigExecRigEvaluator::_GraphRevision &r,
@@ -1030,6 +1055,19 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // recomputed: these are the same bytes the authoritative snapshot hands
     // exec, and resampling the curve again here would risk a different
     // answer for a spline edited between Compile and Build.
+    // The oracle a constraint's envelope resolves through, bound here
+    // because this is the only translation unit the evaluator's friendship
+    // reaches. `evaluator` outlives the program -- the evaluator owns it and
+    // drops it on any epoch change -- so capturing the pointer is safe in
+    // exactly the way every other capture in this block is.
+    B.resolveWeights = [evaluator](const SdfPath &weightPath, size_t count,
+                                   UsdTimeCode time,
+                                   std::vector<float> *weights,
+                                   std::string *error,
+                                   const std::vector<GfVec3f> *current) {
+        return evaluator->_ResolveWeights(weightPath, count, time, weights,
+                                          error, current);
+    };
     for (const RigExecValueOverride &override : E._falloffLutOverrides) {
         if (override.value.IsHolding<RigExecFalloffLut>()) {
             B.falloffLuts[override.prim] =
@@ -1303,6 +1341,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                 entry.constraint.sources.push_back(source.sourcePath);
             }
             entry.constraint.worldUpObject = fc.worldUpObject.sourcePath;
+            entry.constraint.weightObject = fc.weightObject;
         }
         walk.push_back(std::move(entry));
     }

@@ -1016,6 +1016,17 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             }
             step.isSource = pure;
             step.externalReads = !pure;
+        } else if (step.kind == RigExecBakedStepKind::Constraint) {
+            // A constraint's envelope object is resolved from the stage by
+            // the oracle, at the constraint's own point in the walk, and no
+            // slot names it. That is a read outside the program, so the
+            // cluster is dirty every run and the resolve's own answer is
+            // what decides the rest.
+            const RigExecBakedProgramImpl::WalkStep &walk =
+                B.walkSteps[size_t(step.object)];
+            step.externalReads =
+                !walk.solverBatch && walk.index >= 0 &&
+                !B.constraints[size_t(walk.index)].weightObject.IsEmpty();
         } else if (step.kind == RigExecBakedStepKind::Derived) {
             // A derived target assembles its own packet against its own
             // inputs, and does it after the chain it maintains has published

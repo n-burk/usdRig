@@ -49,6 +49,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -1221,6 +1222,16 @@ struct RigExecBakedProgramImpl {
     struct Constraint {
         SdfPath path;
         TfToken type;
+        /// rigExec:weightObject, empty when the constraint binds none.
+        ///
+        /// Deliberately NOT an index into `weightObjects`: a constraint
+        /// copies the ORACLE, and the oracle resolves the whole composition
+        /// itself from the stage (see the head of bakedWeights.cpp).
+        SdfPath weightObject;
+        /// The one float the oracle resolves into, and the string it would
+        /// report. Sized at Build so the step body allocates neither.
+        std::vector<float> weightScratch;
+        std::string weightError;
         int target = -1;
         std::vector<int> sources;
         RigExecBakedInput<bool> enabled;
@@ -1772,6 +1783,20 @@ struct RigExecBakedProgramImpl {
     /// composition walk is under way (the bake is depth first and enters the
     /// table on the way out), so meeting one is a cycle.
     std::map<SdfPath, int> weightIndex;
+    /// The weight oracle, as the evaluator's own RigExecRigEvaluator::
+    /// _ResolveWeights.
+    ///
+    /// A pointer to a member function rather than a call, because only
+    /// bakedProgram.cpp is the evaluator's friend and the constraint that
+    /// needs it lives in bakedPose.cpp. It is the SAME function the dynamic
+    /// constraint path calls with the same arguments, which is what makes
+    /// the answer and the error string identical by construction rather
+    /// than by review -- a constraint's envelope is one of the two places
+    /// the dynamic path does not go through exec at all.
+    std::function<bool(const SdfPath &, size_t, UsdTimeCode,
+                       std::vector<float> *, std::string *,
+                       const std::vector<GfVec3f> *)> resolveWeights;
+
     /// Every volumetric weight object's baked falloff remap, by prim path.
     ///
     /// Copied out of the evaluator's own _falloffLutOverrides at Build, not
@@ -1901,6 +1926,8 @@ struct RigExecBakedConstraintSpec {
     SdfPathVector sources;
     /// Empty when the aim constraint named no world-up object.
     SdfPath worldUpObject;
+    /// rigExec:weightObject, empty when the constraint binds none.
+    SdfPath weightObject;
 };
 
 /// One geometry revision of a compiled chain.

@@ -311,6 +311,19 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         }
         c.enabled = bind(prim, "inputs:enabled", true);
         c.defaultWeight = bind(prim, "inputs:defaultWeight", 1.0f);
+        // The envelope object, resolved per frame by the oracle and not
+        // captured here: what the bake records is only that the constraint
+        // HAS one, and enough of the invalidation index to notice the object
+        // changing. Every read the oracle makes goes through the
+        // generation's resolved inputs, so the prim is routed rather than
+        // bound -- an interactive override on any property of it reaches the
+        // next generation with nothing to place.
+        c.weightObject = fc.weightObject;
+        c.weightScratch.reserve(1);
+        if (!c.weightObject.IsEmpty()) {
+            B.prims.insert(c.weightObject);
+            B.resolvedRoutedPrims.insert(c.weightObject);
+        }
 
         // inputs:sourceWeights / the parent offsets are authored tables, read
         // as arrays rather than as a per-source scalar.
@@ -1723,7 +1736,10 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         RigExecBakedCommit &commit = B.commits[size_t(step->object)];
         commit.abandoned = true;
         std::fill(commit.present.begin(), commit.present.end(), 0);
-        const RigExecBakedProgramImpl::Constraint &c =
+        // Non-const because the envelope arm below resolves into this
+        // constraint's own scratch, which is storage one step owns and no
+        // other step names.
+        RigExecBakedProgramImpl::Constraint &c =
             B.constraints[size_t(B.walkSteps[size_t(step->object)].index)];
         // Every exit below records the target's frame, because the dynamic
         // walk does: a phase names a POINT in the walk, and a constraint that
@@ -1751,14 +1767,39 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             finish();
             return;
         }
-        const double weight = rd(c.defaultWeight);
-        if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
-            step->diagnostics.push_back(
-                c.path.GetString() +
-                " has inputs:defaultWeight outside finite [0, 1]; "
-                "constraint passed through");
-            finish();
-            return;
+        // The envelope, in the dynamic path's two exclusive arms. A
+        // constraint copies the ORACLE -- the dynamic constraint path does
+        // not go through exec at all, it calls _ResolveWeights and takes its
+        // error string -- so this calls the same function with the same
+        // arguments and the answer is identical by construction.
+        //
+        // The finite-[0, 1] check belongs to the OTHER arm and must not be
+        // applied to a resolved envelope: the dynamic path does not check
+        // there, so checking would emit a diagnostic it never emits.
+        double weight = 1.0;
+        if (!c.weightObject.IsEmpty()) {
+            c.weightScratch.clear();
+            c.weightError.clear();
+            if (!B.resolveWeights(c.weightObject, 1, time, &c.weightScratch,
+                                  &c.weightError, nullptr) ||
+                c.weightScratch.size() != 1) {
+                step->diagnostics.push_back(
+                    c.path.GetString() + ": " + c.weightError +
+                    "; constraint passed through");
+                finish();
+                return;
+            }
+            weight = c.weightScratch[0];
+        } else {
+            weight = rd(c.defaultWeight);
+            if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
+                step->diagnostics.push_back(
+                    c.path.GetString() +
+                    " has inputs:defaultWeight outside finite [0, 1]; "
+                    "constraint passed through");
+                finish();
+                return;
+            }
         }
         if (weight <= 0.0) {
             // A zero envelope is an exact dormant pass-through, decided
