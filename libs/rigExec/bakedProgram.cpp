@@ -656,6 +656,39 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
     // cache is the same judgement the revision results below get, and it also
     // carries any bind diagnostic the outgoing program had not drained yet.
     B.curvenetBindings = std::move(P.curvenetBindings);
+    // A curvenet WEIGHT object's bind is the same judgement and the
+    // expensive one -- it cuts the mesh and factorizes its Laplacian, which
+    // is the costliest step a rig can carry on its first frame -- so an edit
+    // that rebuilt the program for some unrelated reason must not pay for it
+    // again. Matched by PATH, because a rebuild can add or drop objects and
+    // the indices need not line up, and only where the TYPE still agrees.
+    // Correctness does not rest on this: the step compares the layout it
+    // holds against the frame's own before it uses the bind, and re-cuts on
+    // any difference, so a carried bind is a hint and never an answer.
+    {
+        std::map<SdfPath, RigExecBakedProgramImpl::WeightObject *> outgoing;
+        for (RigExecBakedProgramImpl::WeightObject &object : P.weightObjects) {
+            if (object.bound) {
+                outgoing.emplace(object.path, &object);
+            }
+        }
+        for (RigExecBakedProgramImpl::WeightObject &object : B.weightObjects) {
+            const auto found = outgoing.find(object.path);
+            if (found == outgoing.end() || found->second->type != object.type) {
+                continue;
+            }
+            RigExecBakedProgramImpl::WeightObject &source = *found->second;
+            object.curvenetBinding = std::move(source.curvenetBinding);
+            object.boundMesh = std::move(source.boundMesh);
+            object.boundNet = std::move(source.boundNet);
+            object.boundCounts = std::move(source.boundCounts);
+            object.boundIndices = std::move(source.boundIndices);
+            object.boundSplines = std::move(source.boundSplines);
+            object.boundSmooth = std::move(source.boundSmooth);
+            object.boundSamples = source.boundSamples;
+            object.bound = true;
+        }
+    }
     std::map<SdfPath, RigExecBakedProgramImpl::GeomChain *> outgoing;
     for (RigExecBakedProgramImpl::GeomChain &chain : P.chains) {
         outgoing.emplace(chain.target, &chain);

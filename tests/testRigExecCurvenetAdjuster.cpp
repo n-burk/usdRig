@@ -13,21 +13,9 @@ static int failures=0;
 #define CHECK(x) do { if (!(x)) { ++failures; std::printf("FAIL %d: %s\n",__LINE__,#x); } } while(0)
 static bool Near(const GfVec3f &a,const GfVec3f &b) { return (a-b).GetLength()<2e-4; }
 
-// A RigExecCurvenetWeight driving a matrix mover, in the BAKED program.
-//
-// The sixth weight-object schema, and the one the program left out: its
-// field is not a formula over a few floats but the solution of a factorized
-// Laplacian over the cut mesh, so a packet cannot be built without the BIND
-// that factorization lives in. The exec computation holds one in a static
-// LRU behind a mutex; a step body may take no lock, so the program resolves
-// its own -- in the prologue, into program-owned state -- and the step then
-// evaluates the same right-hand side through the same kernel.
-//
-// cpuParityMode is deliberately OFF: it asks for the dynamic path, so an
-// evaluator that pinned it would never build a program at all. Under
-// RIGEXEC_EVALUATION_MODE=parity this generation runs both paths over one
-// rig and compares them exactly.
-static void TestCurvenetWeightObject() {
+// The rig both curvenet-weight tests stand on: a two-quad mesh, a four-point
+// net across it, and a matrix mover that moves the mesh by the field.
+static UsdStageRefPtr MakeACurvenetWeightRig() {
     const auto stage=UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"),TfToken("Scope"));
     stage->DefinePrim(SdfPath("/Asset/Rig"),TfToken("RigExecRoot"));
@@ -74,6 +62,28 @@ static void TestCurvenetWeightObject() {
     mover.GetRelationship(TfToken("rigExec:weightObject")).SetTargets(
         {weight.GetPath()});
 
+    return stage;
+}
+
+// A RigExecCurvenetWeight driving a matrix mover, in the BAKED program.
+//
+// The sixth weight-object schema, and the one the program left out: its
+// field is not a formula over a few floats but the solution of a factorized
+// Laplacian over the cut mesh, so a packet cannot be built without the BIND
+// that factorization lives in. The exec computation holds one in a static
+// LRU behind a mutex; a step body may take no lock, so the program resolves
+// its own -- in the prologue, into program-owned state -- and the step then
+// evaluates the same right-hand side through the same kernel.
+//
+// cpuParityMode is deliberately OFF: it asks for the dynamic path, so an
+// evaluator that pinned it would never build a program at all. Under
+// RIGEXEC_EVALUATION_MODE=parity this generation runs both paths over one
+// rig and compares them exactly.
+static void TestCurvenetWeightObject() {
+    const auto stage=MakeACurvenetWeightRig();
+    const auto weight=stage->GetPrimAtPath(
+        SdfPath("/Asset/Rig/Weights/Net"));
+    const SdfPath target("/Asset/Mesh.points");
     RigExecRigEvaluator evaluator(stage,SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -116,9 +126,56 @@ static void TestCurvenetWeightObject() {
     }
 }
 
+// A rebuild carries the BIND. Editing the rig's structure ends the epoch and
+// builds a second program; the cut mesh and its factorized Laplacian did not
+// move, so AdoptGeometryStateFrom hands them over -- and the step compares
+// the layout it inherited against the frame's own before using it, so the
+// answer has to be the dynamic path's either way. That is what this asserts:
+// the carry is a cost decision, and a wrong one would show up here as a
+// wrong field rather than as a slow one.
+static void TestARebuildKeepsTheCurvenetBind() {
+    const auto stage=MakeACurvenetWeightRig();
+    const SdfPath target("/Asset/Mesh.points");
+    RigExecRigEvaluator rig(stage,SdfPath("/Asset/Rig"));
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    CHECK(rig.Evaluate(UsdTimeCode(1)).valid);
+    const size_t builds=rig.GetBakedProgramBuildCount();
+
+    // Structural, and unrelated to the weight: a control nothing drives.
+    stage->DefinePrim(SdfPath("/Asset/Rig/Controls/Spare"),
+        TfToken("RigExecControl"));
+    const auto after=rig.Evaluate(UsdTimeCode(1));
+    CHECK(after.valid);
+    if (rig.GetBakedProgramBuildCount()<=builds) {
+        ++failures;
+        std::printf("FAIL a rebuild after a structural edit: the program was "
+            "not rebuilt, so the carry was never exercised\n");
+    }
+    // Still the program's own generation, and still the dynamic answer.
+    CHECK(rig.GetBakedGenerationCount()==2);
+    const auto referenceStage=MakeACurvenetWeightRig();
+    referenceStage->DefinePrim(SdfPath("/Asset/Rig/Controls/Spare"),
+        TfToken("RigExecControl"));
+    RigExecRigEvaluator reference(referenceStage,SdfPath("/Asset/Rig"));
+    reference.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    CHECK(reference.Compile(&errors));
+    const auto expected=reference.Evaluate(UsdTimeCode(1));
+    CHECK(expected.valid);
+    if (expected.movedProperties.count(target) &&
+        after.movedProperties.count(target)) {
+        CHECK(expected.movedProperties.at(target)==
+              after.movedProperties.at(target));
+    } else {
+        ++failures;
+    }
+}
+
 int main() {
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
     TestCurvenetWeightObject();
+    TestARebuildKeepsTheCurvenetBind();
     const auto stage=UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"),TfToken("Scope"));
     auto builder=RigExecRigBuilder::Create(stage,SdfPath("/Asset/Rig"));
