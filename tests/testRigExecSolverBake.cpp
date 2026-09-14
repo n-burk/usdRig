@@ -22,6 +22,7 @@
 
 #include "rigExec/bakedProgram.h"
 #include "rigExec/rigEvaluator.h"
+#include "rigExec/tapSet.h"
 
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/plug/registry.h"
@@ -146,6 +147,70 @@ CheckParity(const char *what, const MakeStage &make,
         std::printf("FAIL %s: %zu of %zu generation(s) came from the "
                     "program\n", what, baked.GetBakedGenerationCount(),
                     generations);
+    }
+}
+
+/// Compares the two paths while an interactive override stands on
+/// \p prim.\p attribute -- the drag a gizmo makes, on a solver's own input.
+///
+/// Every per-frame input a new solver reads has to reach the program through
+/// the binding table, or a drag that lands on it will be answered with the
+/// value the bake captured. That is invisible to a frame sweep, because the
+/// authored value is what a sweep reads.
+void
+CheckDrag(const char *what, const MakeStage &make, const SdfPath &prim,
+          const char *attribute, const VtValue &held)
+{
+    const UsdStageRefPtr referenceStage = make();
+    const UsdStageRefPtr bakedStage = make();
+    CHECK(referenceStage && bakedStage);
+    if (!referenceStage || !bakedStage) return;
+
+    RigExecRigEvaluator reference(referenceStage, kRigPath);
+    RigExecRigEvaluator baked(bakedStage, kRigPath);
+    std::vector<std::string> errors;
+    if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        return;
+    }
+    baked.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+
+    const std::vector<RigExecValueOverride> drag{
+        RigExecValueOverride{prim, TfToken(), TfToken(attribute), held}};
+    // Settled, then held, then released: the release is the half a drag test
+    // usually forgets, and the one a value captured at Build survives.
+    const RigExecRigPose settledA = reference.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose settledB = baked.Evaluate(UsdTimeCode(2.0));
+    rigExecTest::ComparePose(&failures, std::string(what) + " settled",
+                             settledA, settledB);
+    reference.SetInteractiveOverrides(drag);
+    baked.SetInteractiveOverrides(drag);
+    const RigExecRigPose heldA = reference.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose heldB = baked.Evaluate(UsdTimeCode(2.0));
+    rigExecTest::ComparePose(&failures, std::string(what) + " held", heldA,
+                             heldB);
+    reference.ClearInteractiveOverrides();
+    baked.ClearInteractiveOverrides();
+    const RigExecRigPose freedA = reference.Evaluate(UsdTimeCode(2.0));
+    const RigExecRigPose freedB = baked.Evaluate(UsdTimeCode(2.0));
+    rigExecTest::ComparePose(&failures, std::string(what) + " released",
+                             freedA, freedB);
+    // The drag has to MOVE something, or the comparison above is two
+    // identical generations agreeing about nothing.
+    if (heldA.solverFrames == settledA.solverFrames &&
+        heldA.jointFramesFinal == settledA.jointFramesFinal) {
+        ++failures;
+        std::printf("FAIL %s: the drag moved nothing on the dynamic path\n",
+                    what);
+    }
+    // And all three generations have to come FROM the program. An override
+    // the program cannot place sends the generation down the dynamic path,
+    // where the two sides agree for the wrong reason.
+    if (baked.GetBakedGenerationCount() != 3) {
+        ++failures;
+        std::printf("FAIL %s: %zu of 3 generation(s) came from the "
+                    "program\n", what, baked.GetBakedGenerationCount());
     }
 }
 
@@ -795,6 +860,17 @@ main(int argc, char **argv)
     CheckParity("guide-only solvers with the guides switched off",
                 MakeGuideOnlyBlendRig, frames, true,
                 /* guides = */ false);
+
+    // The drags: one per per-frame input this group added to a solver.
+    CheckDrag("a drag on inputs:twistTurns", MakeTwistRig,
+              SdfPath("/Asset/Rig/Solvers/SpineTwist"), "inputs:twistTurns",
+              VtValue(0.4));
+    CheckDrag("a drag on rigExec:sampleCount", MakeAnimatedRibbonRig,
+              SdfPath("/Asset/Rig/Solvers/SpineRibbon"),
+              "rigExec:sampleCount", VtValue(int(4)));
+    CheckDrag("a drag on a guide-only solver's turns", MakeGuideOnlyBlendRig,
+              SdfPath("/Asset/Rig/Solvers/SecondTwist"), "inputs:twistTurns",
+              VtValue(0.2));
 
     if (failures) {
         std::printf("testRigExecSolverBake: %d FAILURE(S)\n", failures);
