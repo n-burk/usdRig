@@ -636,15 +636,26 @@ add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
 # other is exactly what the comparator is for, and this is the suite that
 # moves rests on purpose.
 #
-# REQUIRE_BAKE as of the provider-ladder work, which is the day this comment
-# said the flag would go on. The three things the suite authors on purpose --
-# an animated or connected rest:tx, a property chain writing rest:space, and
-# a drag standing on a rest channel -- are all per-frame inputs of the
-# compose now, so every generation of this suite comes from the program and a
-# fallback here is a regression rather than a missing feature. It is the
-# sharpest entry in the tree for that work: nothing else moves a rest on
+# REQUIRE_BAKE as of the provider-ladder work, which is the day the comment
+# here said the flag would go on. The three things this suite authors on
+# purpose -- an animated or connected rest channel, a property chain writing
+# rest:space, and a drag standing on a rest -- are all per-frame inputs of
+# the compose now, so every generation of this suite comes from the program
+# and a fallback here is a regression rather than a missing feature. It is
+# the sharpest entry in the tree for that work: nothing else moves a rest on
 # purpose, and a program that quietly went back to folding one would show up
 # here as a fallback and nowhere else.
+#
+# The Phase 4 deferrals branch authored two DELIBERATE negatives against this
+# same suite -- an intervening Xform above a provider and an animated one,
+# both still refused, both comparing their fallback with a plain dynamic
+# evaluator. A declining fixture cannot live under a bake requirement (the
+# requirement reports a fallback with the same "baked parity mismatch"
+# prefix a real disagreement carries), so at the merge they moved to
+# testRigExecBakedMode, which is where this tree keeps its deliberate
+# negatives and is deliberately not a parity entry. Both intents survive:
+# the refusals still have live fixtures that assert them by name, and this
+# suite stays the scoreboard that has to read zero.
 rigexec_add_baked_parity_test(testRigExecEpochRests REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 

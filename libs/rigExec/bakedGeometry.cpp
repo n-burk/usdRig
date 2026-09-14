@@ -116,7 +116,8 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
             }
         }
         out.readsSnapshots =
-            out.readsSnapshots || !r.binding.phases.empty();
+            out.readsSnapshots || !r.binding.phases.empty() ||
+            r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim;
         if (phased) {
             B.phasedReads = true;
         }
@@ -737,6 +738,19 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                         RigExecBakedSlotDomain::ConstraintDelta,
                         revision.constraintDelta));
                 }
+                // A pose-walk read phase is answered out of the run's
+                // snapshot store, so the fold waits for every recorder
+                // before it -- which is what the pose walk's own constraint
+                // exits are. The range is the same one the assemble
+                // declares, and it is the assemble's for the same reason:
+                // the store is ONE container and a reader of it has to be
+                // ordered against every writer that could still reach it.
+                if (revision.binding.transformPhase.kind ==
+                    RigExecReadPhaseKind::AtPrim) {
+                    fold.reads.push_back(RigExecBakedRange(
+                        RigExecBakedSlotDomain::Snapshots, 0,
+                        int(B.steps.size()) - 1));
+                }
                 if (skin) {
                     fold.reads.push_back(RigExecBakedOne(
                         RigExecBakedSlotDomain::RevisionPacket, id));
@@ -1066,10 +1080,56 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
         revision->transform = B.deltaValues[size_t(revision->constraintDelta)];
         revision->haveTransform = true;
     }
+    // A read phase naming a POINT IN THE POSE WALK, which is the general
+    // form `base`, `preceding` and `final` abbreviate: the provider's matrix
+    // as it stood immediately after one named constraint, out of the run's
+    // snapshot store instead of out of the dense tables.
+    //
+    // AFTER the delta, exactly as the dynamic path orders the two, and the
+    // two can no more both apply here than they can there: an AtPrim phase
+    // needs a bound rigExec:transform to name a frame chain of, and a
+    // geometry-domain constraint's binding.transform is empty -- which is
+    // what makes its delta the only source of the matrix.
+    //
+    // A phase that resolved to NOTHING leaves the dense-table value
+    // standing and says nothing, because that is what the dynamic path does
+    // with it: compile has already refused a phase naming a prim that
+    // revises the provider nowhere, so the only way to get here is a
+    // constraint whose exit this run declined to record -- an unusable
+    // frame -- and the base matrix is then the same fallback both paths
+    // take.
+    const auto phased = [&B, revision](const SdfPath &provider,
+                                       GfMatrix4d *matrix) {
+        const VtValue *recorded = B.runSnapshots.Lookup(
+            provider, revision->binding.transformPhase, revision->moverPath);
+        if (recorded && recorded->IsHolding<GfMatrix4d>()) {
+            *matrix = recorded->UncheckedGet<GfMatrix4d>();
+            return true;
+        }
+        return false;
+    };
+    const bool atPrim = revision->binding.transformPhase.kind ==
+                        RigExecReadPhaseKind::AtPrim;
+    if (atPrim && phased(revision->binding.transform, &revision->transform)) {
+        // Set rather than left alone: the dynamic path binds its matrix
+        // pointer whenever the store answered, whatever the tap held.
+        revision->haveTransform = true;
+    }
     for (size_t k = 0; k < revision->influenceSlots.size(); ++k) {
         const size_t slot = size_t(revision->influenceSlots[k]);
-        const GfMatrix4d &matrix = revision->finalPhase ? B.finalMatrix[slot]
-                                                        : B.baseMatrix[slot];
+        GfMatrix4d matrix = revision->finalPhase ? B.finalMatrix[slot]
+                                                 : B.baseMatrix[slot];
+        // Every influence shares the one declared phase, so the substitution
+        // is per ENTRY and the provider is the entry's own. No rig reaches
+        // this today: compile validates an AtPrim phase against
+        // binding.transform alone, and a skin mover's is empty, so such a
+        // rig is refused before either path evaluates it. Written anyway,
+        // and written the same way, because the dynamic fold does exactly
+        // this with its influence entries -- the day the validator learns
+        // about rigExec:influences, the two paths already agree.
+        if (atPrim && k < revision->binding.influences.size()) {
+            phased(revision->binding.influences[k], &matrix);
+        }
         if (revision->influences[k] != matrix) {
             revision->influences[k] = matrix;
             changed = true;

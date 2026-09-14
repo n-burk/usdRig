@@ -26,6 +26,7 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/xform.h"
 
 #include <cstdio>
 #include <string>
@@ -1192,6 +1193,167 @@ TestCombineCycleFailsCompile()
     CHECK(!errors.empty());
 }
 
+
+// ---------------------------------------------------------------------------
+// A volume weight object bound to a CONSTRAINT.
+//
+// The reachable shape of it is a GEOMETRY-DOMAIN constraint: a volumetric
+// field needs a point domain (_ValidateWeightObjectDomain refuses one on a
+// transform domain outright, composed inputs included), so the constraint
+// that can bind a sphere is one whose rigExec:moves names a .points
+// attribute. Its envelope is then per POINT and resolves on the Matrix
+// revision the constraint's delta feeds -- a constraint and its revision
+// being the same mover prim -- rather than as the one scalar a
+// transform-domain constraint would resolve.
+//
+// Nothing in examples/ and nothing in this suite reached it, which is why
+// the program refused "volume weight object on constraint" outright and
+// with no parity evidence either way.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct ConstraintEnvelopeFixture {
+    UsdStageRefPtr stage;
+    VtVec3fArray base;
+
+    // \p volumeAt places the sphere through its own avars.
+    //
+    // The sphere is deliberately NOT a constraint target here. Making one is
+    // a rig the program refuses ("constraint target is both exec-seeded and
+    // xform-derived"), for a reason that belongs to the dynamic path rather
+    // than to the bake: see TestAConstrainedVolumeWeightFallsBack in
+    // testRigExecBakedMode.
+    ConstraintEnvelopeFixture(const GfVec3d &volumeAt,
+                              const char *samplePhase)
+    {
+        stage = UsdStage::CreateInMemory();
+        stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+        base = VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 4, 0),
+                            GfVec3f(0, 8, 0)};
+        const UsdPrim mesh =
+            stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Points"));
+        mesh.CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray).Set(base);
+
+        // Where the geometry constraint pulls the point set to. A position
+        // constraint rather than an aim: a translation shows the resolved
+        // field directly in the answer, which is what the assertions read.
+        const UsdGeomXform source =
+            UsdGeomXform::Define(stage, SdfPath("/Asset/PullTo"));
+        source.MakeMatrixXform().Set(
+            GfMatrix4d(1.0).SetTranslate(GfVec3d(6, 0, 0)));
+
+        // The sphere, painted over the three points and ramped across them,
+        // so the envelope is strictly inside (0, 1) on at least one of them
+        // and the placement is visible in the answer.
+        const UsdPrim sphere = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Weights/Sphere"),
+            TfToken("RigExecSphereWeight"));
+        Fixture::PlaceAt(sphere, volumeAt);
+        sphere.CreateRelationship(TfToken("rigExec:weightTarget"))
+            .SetTargets({SdfPath("/Asset/Geom/M.points")});
+        sphere.CreateAttribute(TfToken("inputs:falloffMin"),
+                               SdfValueTypeNames->Float).Set(0.0f);
+        sphere.CreateAttribute(TfToken("inputs:falloffMax"),
+                               SdfValueTypeNames->Float).Set(8.0f);
+        sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
+                               SdfValueTypeNames->Token)
+            .Set(TfToken("linear"));
+        sphere.CreateAttribute(TfToken("rigExec:samplePhase"),
+                               SdfValueTypeNames->Token)
+            .Set(TfToken(samplePhase));
+
+        // The geometry-domain constraint, and the weight object on it.
+        const UsdPrim constraint = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/Sweep/Pull"),
+            TfToken("RigExecPositionConstraint"));
+        constraint.ApplyAPI(TfToken("RigExecMoverAPI"));
+        constraint.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({SdfPath("/Asset/Geom/M.points")});
+        constraint.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({source.GetPath()});
+        constraint.CreateRelationship(TfToken("rigExec:weightObject"))
+            .SetTargets({sphere.GetPath()});
+    }
+
+    VtVec3fArray Resolve(const std::string &label)
+    {
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        evaluator.cpuParityMode = !BakedPathRequested();
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            for (const std::string &e : errors) {
+                std::printf("%s: compile error: %s\n", label.c_str(),
+                            e.c_str());
+            }
+            ++failures;
+            return {};
+        }
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+        if (!pose.valid) {
+            for (const std::string &d : pose.diagnostics) {
+                std::printf("%s: diagnostic: %s\n", label.c_str(), d.c_str());
+            }
+            std::printf("%s: pose invalid\n", label.c_str());
+            ++failures;
+            return {};
+        }
+        CheckTheHarnessRan(label.c_str(), pose);
+        const auto it =
+            pose.movedProperties.find(SdfPath("/Asset/Geom/M.points"));
+        if (it == pose.movedProperties.end()) {
+            std::printf("%s: no moved points\n", label.c_str());
+            ++failures;
+            return {};
+        }
+        return it->second.Get<VtVec3fArray>();
+    }
+};
+
+// How many of \p points the constraint moved, and how many it left alone.
+std::pair<size_t, size_t>
+SplitByMovement(const VtVec3fArray &points, const VtVec3fArray &base)
+{
+    size_t moved = 0, held = 0;
+    for (size_t i = 0; i < points.size() && i < base.size(); ++i) {
+        (Near(points[i], base[i]) ? held : moved) += 1;
+    }
+    return {moved, held};
+}
+
+}  // namespace
+
+static void
+TestVolumeWeightOnAConstraint(const char *samplePhase)
+{
+    const std::string what =
+        std::string("volume envelope on a geometry constraint, ") +
+        samplePhase;
+    ConstraintEnvelopeFixture low(GfVec3d(0, 0, 0), samplePhase);
+    ConstraintEnvelopeFixture high(GfVec3d(0, 8, 0), samplePhase);
+    const VtVec3fArray lowPoints = low.Resolve(what + ", low");
+    const VtVec3fArray highPoints = high.Resolve(what + ", high");
+    if (lowPoints.size() != low.base.size() ||
+        highPoints.size() != high.base.size()) {
+        return;
+    }
+    // The envelope is partial: the constraint moved some points and not all
+    // of them. An all-or-nothing field would agree between the two rigs
+    // whatever the placement and prove nothing about either.
+    const auto [moved, held] = SplitByMovement(lowPoints, low.base);
+    CHECK(moved > 0);
+    CHECK(held > 0);
+    // And the sphere's own placement reaches the field: the two rigs differ
+    // in nothing else.
+    bool differs = false;
+    for (size_t i = 0; i < lowPoints.size(); ++i) {
+        differs = differs || !Near(lowPoints[i], highPoints[i]);
+    }
+    CHECK(differs);
+}
+
 static std::string
 DefaultResourceDir()
 {
@@ -1236,6 +1398,8 @@ main(int argc, char **argv)
     TestSamplePhase(/* current */ true);
     TestVolumeWeightTargetMismatchFailsCompile();
     TestCurveWeightRejectsTwoCurves();
+    TestVolumeWeightOnAConstraint("reference");
+    TestVolumeWeightOnAConstraint("current");
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

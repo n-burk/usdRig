@@ -139,13 +139,15 @@ _IsVolumeWeightTypeName(const TfToken &type)
 // still refused above by the _volumeWeightMatrixTaps loop, which is about the
 // PLACEMENT a volume's field needs -- which the pose walk now composes, so
 // the two questions have one answer again.
-// RigExecCurvenetWeight is the one weight object left out: its field comes off
-// a curvenet bind, which the program does not hold.
+// RigExecCurvenetWeight is here too, now that the program holds a bind of its
+// own: the cut and the factorization are resolved into the weight object and
+// only the right-hand side is solved per frame.
 bool
 _IsBakedWeightType(const TfToken &type)
 {
     return type == "RigExecStaticWeight" || type == "RigExecDynamicWeight" ||
-           type == "RigExecCombineWeight" || _IsVolumeWeightTypeName(type);
+           type == "RigExecCombineWeight" ||
+           type == "RigExecCurvenetWeight" || _IsVolumeWeightTypeName(type);
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on
@@ -470,16 +472,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         };
         walk(root);
     };
-    const auto sayVolumeWeightOnConstraint = [&](const SdfPath &root,
-                                                 const SdfPath &where) {
-        walkWeights(root, [&](const UsdPrim &prim) {
-            if (_IsVolumeWeightTypeName(prim.GetTypeName())) {
-                say("volume weight object on constraint", where);
-                return false;
-            }
-            return true;
-        });
-    };
     const auto sayUnbakedWeights = [&](const SdfPath &root) {
         walkWeights(root, [&](const UsdPrim &prim) {
             const TfToken type = prim.GetTypeName();
@@ -500,15 +492,20 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 constraint.moverPath);
             continue;
         }
-        // A constraint's envelope is resolved by the CPU oracle, which
-        // reads a volume's placement out of _volumeWeightMatrices as that
-        // map stands AT THE CONSTRAINT'S POINT IN THE WALK. The program
-        // republishes that map once, after the walk, because nothing else it
-        // does reads the map at all -- so a volume anywhere in a
-        // constraint's weight closure is still refused, and lifting this is
-        // the same change as moving that call into the commits.
-        sayVolumeWeightOnConstraint(constraint.weightObject,
-                                    constraint.moverPath);
+        // A volume anywhere in the closure used to be refused here, on the
+        // grounds that a constraint's envelope is resolved by the CPU oracle
+        // out of _volumeWeightMatrices AS THAT MAP STANDS AT THE
+        // CONSTRAINT'S POINT IN THE WALK, while the program republishes the
+        // map once, after the walk. That reasoning describes a constraint
+        // the epoch cannot hold: a volumetric field requires a POINT domain
+        // (_ValidateWeightObjectDomain, composed inputs included), so the
+        // only constraint that can bind one is a geometry-domain constraint
+        // -- and a geometry-domain constraint resolves NO envelope in the
+        // walk at all. Its weight is per point and resolves after the solve,
+        // on the revision its delta feeds, where the placement is the same
+        // one every other mover's packet uses. So the map is never read
+        // mid-walk by anything, and one republication after it is what every
+        // reader of it sees.
         sayUnbakedWeights(constraint.weightObject);
         if (constraint.targets.empty()) {
             say("constraint names no target", constraint.moverPath);
@@ -524,6 +521,32 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             if (!E._poseSeedFrames.count(target) &&
                 !E._xformDerivedProviders.count(target)) {
                 say("constraint target is not a seeded pose provider",
+                    target);
+            } else if (E._poseSeedFrames.count(target) &&
+                       E._xformDerivedProviders.count(target)) {
+                // The two families are documented as disjoint, and they are
+                // for every provider but one: a VOLUME WEIGHT is exec-seeded
+                // like a joint AND, because its type is neither
+                // RigExecControl nor RigExecJoint, is catalogued as a plain
+                // Xformable the moment a constraint targets it. The dynamic
+                // walk then resolves the collision by LAST WRITER: the
+                // xform-derived pass runs after the compose and overwrites
+                // the volume's rest, base and final with an identity rest
+                // and a transform read off the stage, discarding the avar
+                // composition entirely -- while exec's computeWeightPacket
+                // goes on placing that same volume from its avars. Two
+                // placements, and the program has one slot to hold them in.
+                //
+                // Refused rather than guessed, and refused narrowly: a
+                // volume a constraint does NOT target bakes, which is what
+                // lifting "volume weight object on constraint" above was
+                // about. The dynamic path's own parity mode declines to
+                // publish a reference-phase field on such a volume
+                // ("mover graph parity failed"), so which of the two
+                // placements is intended is not a question the program can
+                // answer by reading either side.
+                say("constraint target is both exec-seeded and "
+                    "xform-derived",
                     target);
             }
         }
@@ -562,19 +585,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             return;
         }
         sayUnbakedWeights(r.binding.weightObject);
-        // A phase that names a POINT IN THE POSE WALK on rigExec:transform
-        // is the one read phase the program cannot answer. Both halves of
-        // the store are filled -- the pose walk records a provider's matrix
-        // after each constraint that names it, the chains record their own
-        // points -- but the CONSUMER is missing: the influence fold takes
-        // the provider's base or final matrix out of the dense tables and has
-        // no branch that takes it out of the store instead. Refusing is the
-        // honest answer while that is true; reading the base matrix silently
-        // would be a different deformation with nothing to say so.
-        if (r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim) {
-            say("read phase naming a pose-walk point on rigExec:transform",
-                r.moverPath);
-        }
         // The frames the walk hands a curve mover are the aggregate a
         // BATCHED solver publishes -- the dynamic path taps the solver's
         // computePointFrameArray and then overrides the tap with the walk's
@@ -700,6 +710,39 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
     // cache is the same judgement the revision results below get, and it also
     // carries any bind diagnostic the outgoing program had not drained yet.
     B.curvenetBindings = std::move(P.curvenetBindings);
+    // A curvenet WEIGHT object's bind is the same judgement and the
+    // expensive one -- it cuts the mesh and factorizes its Laplacian, which
+    // is the costliest step a rig can carry on its first frame -- so an edit
+    // that rebuilt the program for some unrelated reason must not pay for it
+    // again. Matched by PATH, because a rebuild can add or drop objects and
+    // the indices need not line up, and only where the TYPE still agrees.
+    // Correctness does not rest on this: the step compares the layout it
+    // holds against the frame's own before it uses the bind, and re-cuts on
+    // any difference, so a carried bind is a hint and never an answer.
+    {
+        std::map<SdfPath, RigExecBakedProgramImpl::WeightObject *> outgoing;
+        for (RigExecBakedProgramImpl::WeightObject &object : P.weightObjects) {
+            if (object.bound) {
+                outgoing.emplace(object.path, &object);
+            }
+        }
+        for (RigExecBakedProgramImpl::WeightObject &object : B.weightObjects) {
+            const auto found = outgoing.find(object.path);
+            if (found == outgoing.end() || found->second->type != object.type) {
+                continue;
+            }
+            RigExecBakedProgramImpl::WeightObject &source = *found->second;
+            object.curvenetBinding = std::move(source.curvenetBinding);
+            object.boundMesh = std::move(source.boundMesh);
+            object.boundNet = std::move(source.boundNet);
+            object.boundCounts = std::move(source.boundCounts);
+            object.boundIndices = std::move(source.boundIndices);
+            object.boundSplines = std::move(source.boundSplines);
+            object.boundSmooth = std::move(source.boundSmooth);
+            object.boundSamples = source.boundSamples;
+            object.bound = true;
+        }
+    }
     std::map<SdfPath, RigExecBakedProgramImpl::GeomChain *> outgoing;
     for (RigExecBakedProgramImpl::GeomChain &chain : P.chains) {
         outgoing.emplace(chain.target, &chain);
@@ -1029,6 +1072,15 @@ RigExecBakedProgram::SetOverrides(
         // Folded first: a property can be both a per-frame input and the
         // source of something resolved once, and the once wins.
         if (B.folded.count(path)) {
+            placeable = false;
+            continue;
+        }
+        // Unplaceable for the opposite reason to `folded`: the value IS
+        // re-read every frame, and the program would honour the override
+        // while exec type-rejects it. See execTypedArrayInputs. Ahead of
+        // the routed-prim test below, which would otherwise say "already
+        // routed, nothing to do" for the prim these properties live on.
+        if (B.execTypedArrayInputs.count(path)) {
             placeable = false;
             continue;
         }

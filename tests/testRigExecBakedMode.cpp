@@ -15,9 +15,11 @@
 #include "rigExecPoseCompare.h"
 
 #include "rigExec/bakedProgram.h"
+#include "rigExec/moverGraph.h"
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/tf/fileUtils.h"
 #include "pxr/base/tf/stringUtils.h"
@@ -25,9 +27,12 @@
 #include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <iterator>
@@ -57,6 +62,72 @@ FindRig(const UsdStageRefPtr &stage)
         }
     }
     return SdfPath();
+}
+
+// The two environment variables the parity harness runs this suite under,
+// read the way the evaluator reads them -- once, into a function-local
+// static -- because the evaluator fixes both at the construction of its
+// first one and a test that re-read them could disagree with the path it is
+// measuring. They are here so that the suite is exact under
+// RIGEXEC_EVALUATION_MODE=parity RIGEXEC_BAKE_REQUIRED=1 rather than merely
+// runnable: an assertion about the DEFAULT mode is an assertion about what
+// this variable says, and the fallback line bake-required adds is asserted
+// present in that environment and absent outside it.
+static RigExecEvaluationMode
+DefaultEvaluationMode()
+{
+    static const RigExecEvaluationMode mode = [] {
+        const std::string requested = TfGetenv("RIGEXEC_EVALUATION_MODE", "");
+        if (requested == "baked") {
+            return RigExecEvaluationMode::Baked;
+        }
+        if (requested == "parity") {
+            return RigExecEvaluationMode::BakedWithParityCheck;
+        }
+        return RigExecEvaluationMode::Dynamic;
+    }();
+    return mode;
+}
+
+static bool
+BakeRequired()
+{
+    static const bool required =
+        TfGetenvBool("RIGEXEC_BAKE_REQUIRED", false);
+    return required;
+}
+
+// The prefix RigExecRigEvaluator::_ReportBakeRequired pushes onto a
+// generation that ran dynamically while its mode asked for the program.
+static const char *const kBakeRequiredPrefix =
+    "baked parity mismatch: bake required, evaluated dynamically: ";
+
+// What a consumer would see with that line filtered out, and how many were
+// filtered. Splitting them is what lets a fallback test assert BOTH halves:
+// that nothing else on the generation moved, and that the announcement is
+// there exactly when the environment asked for it.
+static std::vector<std::string>
+WithoutTheBakeRequiredLine(const std::vector<std::string> &diagnostics,
+                           size_t *announced)
+{
+    std::vector<std::string> rest;
+    *announced = 0;
+    for (const std::string &line : diagnostics) {
+        if (line.rfind(kBakeRequiredPrefix, 0) == 0) {
+            ++*announced;
+        } else {
+            rest.push_back(line);
+        }
+    }
+    return rest;
+}
+
+// One line per fallen generation under RIGEXEC_BAKE_REQUIRED, and none at
+// all in a mode that never asked for the program.
+static size_t
+ExpectedBakeRequiredLines(RigExecEvaluationMode mode)
+{
+    return BakeRequired() && mode != RigExecEvaluationMode::Dynamic ? 1 : 0;
 }
 
 // "The same published generation" is defined once, in the shared header, so
@@ -246,7 +317,12 @@ TestDynamicModeIsTheDefault(const std::string &examplesDir)
     const SdfPath rigPath = FindRig(stage);
     if (rigPath.IsEmpty()) { ++failures; return; }
     RigExecRigEvaluator rig(stage, rigPath);
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Dynamic);
+    // The default is the PROCESS default: Dynamic, unless the harness asked
+    // for another with RIGEXEC_EVALUATION_MODE, which is how this suite is
+    // re-run against the program. Asserting Dynamic unconditionally would
+    // fail the whole suite in exactly that environment while saying nothing
+    // about the evaluator.
+    CHECK(rig.GetEvaluationMode() == DefaultEvaluationMode());
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     // Switching after a compile builds the program without a recompile, and
@@ -966,7 +1042,21 @@ TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
                         reference, fallen);
         // Silent: the fallback is not a diagnostic on the generation, which
         // a consumer would have to filter out of a rig's real problems.
-        CHECK(reference.diagnostics == fallen.diagnostics);
+        // Under RIGEXEC_BAKE_REQUIRED it is the opposite -- saying so is the
+        // whole point of that variable -- so both halves are asserted: one
+        // announcement per fallen generation there and none elsewhere, and
+        // nothing else on either generation moved.
+        size_t announcedFallen = 0, announcedReference = 0;
+        const std::vector<std::string> quietFallen =
+            WithoutTheBakeRequiredLine(fallen.diagnostics, &announcedFallen);
+        const std::vector<std::string> quietReference =
+            WithoutTheBakeRequiredLine(reference.diagnostics,
+                                       &announcedReference);
+        CHECK(quietReference == quietFallen);
+        CHECK(announcedFallen == ExpectedBakeRequiredLines(
+                                     RigExecEvaluationMode::Baked));
+        CHECK(announcedReference ==
+              ExpectedBakeRequiredLines(DefaultEvaluationMode()));
     }
     // Nothing ran baked, and nothing pretended to. The REQUEST stands,
     // though: a rig that declines has not had its mode taken away, and a
@@ -978,6 +1068,133 @@ TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
     CHECK(rig.GetBakedProgramBuildAttemptCount() == attempts);
 }
 
+
+// A curvenet weight driving a matrix mover: the one baked object that reads
+// an ARRAY off its own prim every frame.
+static UsdStageRefPtr
+MakeACurvenetWeightRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Mesh"), TfToken("Mesh"));
+    mesh.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                          GfVec3f(2, 0, 0), GfVec3f(0, 1, 0),
+                          GfVec3f(1, 1, 0), GfVec3f(2, 1, 0)});
+    mesh.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{4, 4});
+    mesh.GetAttribute(TfToken("faceVertexIndices"))
+        .Set(VtIntArray{0, 1, 4, 3, 1, 2, 5, 4});
+    const UsdPrim net =
+        stage->DefinePrim(SdfPath("/Asset/Net"), TfToken("RigExecCurvenet"));
+    net.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0, 0.5f, 0), GfVec3f(0.67f, 0.5f, 0),
+                          GfVec3f(1.33f, 0.5f, 0), GfVec3f(2, 0.5f, 0)});
+    net.GetAttribute(TfToken("rigExec:splineIndices"))
+        .Set(VtIntArray{0, 1, 2, 3});
+
+    const SdfPath target = mesh.GetPath().AppendProperty(TfToken("points"));
+    const UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Net"), TfToken("RigExecCurvenetWeight"));
+    weight.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({target});
+    weight.GetRelationship(TfToken("rigExec:curvenetPoints"))
+        .SetTargets({net.GetPath().AppendProperty(TfToken("points"))});
+    weight.GetRelationship(TfToken("rigExec:curvenetSplineIndices"))
+        .SetTargets({net.GetPath().AppendProperty(
+            TfToken("rigExec:splineIndices"))});
+    weight.GetRelationship(TfToken("rigExec:meshFaceCounts"))
+        .SetTargets({mesh.GetPath().AppendProperty(
+            TfToken("faceVertexCounts"))});
+    weight.GetRelationship(TfToken("rigExec:meshFaceIndices"))
+        .SetTargets({mesh.GetPath().AppendProperty(
+            TfToken("faceVertexIndices"))});
+    weight.GetAttribute(TfToken("inputs:weights"))
+        .Set(VtFloatArray{1.0f, 0.75f, 0.25f, 0.0f});
+
+    const UsdPrim driver = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Push"), TfToken("RigExecControl"));
+    driver.GetAttribute(TfToken("avars:tz")).Set(4.0);
+    const UsdPrim mover = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/M"),
+                                            TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    mover.GetRelationship(TfToken("rigExec:transform"))
+        .SetTargets({driver.GetPath()});
+    mover.GetRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({weight.GetPath()});
+    return stage;
+}
+
+// The fourth shape of unplaceable, and the one that is unplaceable because
+// the DYNAMIC path cannot hold it either.
+//
+// A curvenet weight's inputs:weights and rigExec:autoSmooth are arrays, read
+// through the generation's resolved inputs every frame -- which an override
+// is written into, so the program would honour one. Exec cannot: its
+// computeWeightPacket declares both as AttributeValue<float>/<int>, and an
+// override carrying the array they actually hold is rejected there by type
+// ("expected 'float', got 'VtArray<float>'"), leaving the dynamic path
+// answering from the authored value. Honouring it here would be the program
+// answering a question the dynamic path refuses -- pose.valid on both sides
+// and a different mesh. Measured before the two properties were declared
+// unplaceable: the program published z = 2.368 where the dynamic path
+// published z = 4.
+//
+// It lives in THIS suite and not beside the curvenet's own tests because a
+// deliberate fallback is a "bake required" line, and that suite runs under
+// RIGEXEC_BAKE_REQUIRED=1 where such a line is a failure -- correctly.
+static void
+TestAnArrayOverrideOnACurvenetWeightFallsBack()
+{
+    UsdStageRefPtr stage = MakeACurvenetWeightRig();
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath target("/Asset/Mesh.points");
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    CHECK(rig.Evaluate(UsdTimeCode(1.0)).valid);
+    // The program is standing and answering, so a generation that does not
+    // run baked below fell back rather than never having been baked at all.
+    CHECK(rig.GetBakedGenerationCount() == 1);
+
+    const std::vector<std::pair<const char *, RigExecValueOverride>> cases{
+        {"an overridden inputs:weights",
+         RigExecValueOverride{
+             SdfPath("/Asset/Rig/Weights/Net"), TfToken(),
+             TfToken("inputs:weights"),
+             VtValue(VtFloatArray{0.5f, 0.375f, 0.125f, 0.0f})}},
+        {"an overridden rigExec:autoSmooth",
+         RigExecValueOverride{SdfPath("/Asset/Rig/Weights/Net"), TfToken(),
+                              TfToken("rigExec:autoSmooth"),
+                              VtValue(VtIntArray{1, 1, 1, 1})}}};
+    for (const auto &[what, override] : cases) {
+        rig.SetInteractiveOverrides({override});
+        const size_t bakedGenerations = rig.GetBakedGenerationCount();
+        const RigExecRigPose held = rig.Evaluate(UsdTimeCode(1.0));
+        CHECK(held.valid);
+        if (rig.GetBakedGenerationCount() != bakedGenerations) {
+            ++failures;
+            std::printf("FAIL %s: the program answered a generation holding "
+                        "an override exec rejects by type\n", what);
+        }
+        // And what it fell back to is the dynamic path's own answer, which
+        // is the authored field: the override reaches neither side.
+        UsdStageRefPtr referenceStage = MakeACurvenetWeightRig();
+        RigExecRigEvaluator reference(referenceStage, rigPath);
+        reference.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+        CHECK(reference.Compile(&errors));
+        reference.SetInteractiveOverrides({override});
+        const RigExecRigPose expected = reference.Evaluate(UsdTimeCode(1.0));
+        CHECK(expected.valid);
+        CompareEveryMap(what, expected, held);
+        CHECK(expected.movedProperties.count(target) == 1);
+        CHECK(held.movedProperties.count(target) == 1);
+    }
+    rig.SetInteractiveOverrides({});
+}
 
 // The other half of override placement, and the half that has to be wrong
 // SAFELY: an override the program cannot place must send the generation down
@@ -1813,6 +2030,330 @@ _SweepFrames(const UsdStageRefPtr &stage)
     return {start, start + double(long((end - start) / 2)), end};
 }
 
+
+// ---------------------------------------------------------------------------
+// A volume weight that is ITSELF A CONSTRAINT TARGET: the second deliberate
+// negative, and like the first it is a property of the rig rather than a gap
+// in the bake.
+//
+// A RigExecSphereWeight is exec-seeded like a joint, so it has a pose seed
+// frame and an avar composition. It is also not a RigExecControl and not a
+// RigExecJoint, so the moment a constraint targets it the compiler
+// catalogues it as a plain UsdGeomXformable as well -- and the two families
+// the program's slot table merges, which its comment calls disjoint, are not
+// disjoint for this one provider.
+//
+// The dynamic walk resolves the collision by last writer: the xform-derived
+// pass runs after the compose and replaces the volume's rest, base and final
+// with an identity rest and a transform read off the stage. Exec's
+// computeWeightPacket goes on placing the same volume from its avars. So the
+// volume has two placements at once, the program has one slot to hold them
+// in, and there is no reading of either side that says which is meant -- the
+// dynamic path's own CPU parity mode refuses to publish a reference-phase
+// field on such a volume rather than choose.
+//
+// Refused, therefore, and narrowly: a volume weight on a constraint bakes
+// (testRigExecVolumeWeights covers both sample phases); a volume weight a
+// constraint MOVES does not.
+// ---------------------------------------------------------------------------
+
+static UsdStageRefPtr
+MakeAConstrainedVolumeRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh = stage->DefinePrim(SdfPath("/Asset/Geom/Slab"),
+                                           TfToken("Points"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 4, 0),
+                          GfVec3f(0, 8, 0)});
+
+    const UsdPrim lift = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Lift"), TfToken("RigExecControl"));
+    lift.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+        .Set(8.0);
+
+    const UsdPrim sphere = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Sphere"), TfToken("RigExecSphereWeight"));
+    sphere.CreateRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({SdfPath("/Asset/Geom/Slab.points")});
+    sphere.CreateAttribute(TfToken("inputs:falloffMin"),
+                           SdfValueTypeNames->Float).Set(0.0f);
+    sphere.CreateAttribute(TfToken("inputs:falloffMax"),
+                           SdfValueTypeNames->Float).Set(8.0f);
+    sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
+                           SdfValueTypeNames->Token).Set(TfToken("linear"));
+    // `current`, so the field is resolved by the oracle on both paths: a
+    // `reference` field on a constrained volume is the arm the dynamic
+    // path's own parity mode refuses, and this test is about the SLOT
+    // collision rather than about that.
+    sphere.CreateAttribute(TfToken("rigExec:samplePhase"),
+                           SdfValueTypeNames->Token).Set(TfToken("current"));
+
+    // The constraint that moves the volume. This is the whole fixture.
+    const UsdPrim move = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Pose/MoveVolume"),
+        TfToken("RigExecPositionConstraint"));
+    move.ApplyAPI(TfToken("RigExecMoverAPI"));
+    move.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({sphere.GetPath()});
+    move.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({lift.GetPath()});
+
+    const UsdGeomXform pull =
+        UsdGeomXform::Define(stage, SdfPath("/Asset/PullTo"));
+    pull.MakeMatrixXform().Set(
+        GfMatrix4d(1.0).SetTranslate(GfVec3d(6, 0, 0)));
+    const UsdPrim constraint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Sweep/Pull"),
+        TfToken("RigExecPositionConstraint"));
+    constraint.ApplyAPI(TfToken("RigExecMoverAPI"));
+    constraint.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/Slab.points")});
+    constraint.CreateRelationship(TfToken("rigExec:sources"))
+        .SetTargets({pull.GetPath()});
+    constraint.CreateRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({sphere.GetPath()});
+    return stage;
+}
+
+static void
+TestAConstrainedVolumeWeightFallsBack()
+{
+    const char *const what = "a volume weight a constraint moves";
+    UsdStageRefPtr stage = MakeAConstrainedVolumeRig();
+    const SdfPath rigPath = FindRig(stage);
+    if (rigPath.IsEmpty()) { ++failures; return; }
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    if (!rig.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        return;
+    }
+    std::vector<std::string> reasons;
+    CHECK(!rig.IsBakeable(&reasons));
+    bool named = false;
+    for (const std::string &reason : reasons) {
+        named = named ||
+                reason.find("both exec-seeded and xform-derived") !=
+                    std::string::npos;
+    }
+    if (!named) {
+        ++failures;
+        std::printf("FAIL %s: no reason names the slot collision\n", what);
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+    }
+
+    // And the fallback is a real generation, identical to a plain dynamic
+    // evaluator's: a refusal that also changed the answer would be worse
+    // than the divergence it exists to avoid.
+    UsdStageRefPtr referenceStage = MakeAConstrainedVolumeRig();
+    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    errors.clear();
+    CHECK(referenceRig.Compile(&errors));
+    for (double frame = 1; frame <= 2; ++frame) {
+        const RigExecRigPose reference =
+            referenceRig.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose fallen = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(fallen.valid);
+        CHECK(!fallen.movedProperties.empty());
+        CompareEveryMap(std::string(what) + " frame " +
+                            std::to_string(int(frame)),
+                        reference, fallen);
+    }
+    CHECK(rig.GetBakedGenerationCount() == 0);
+}
+
+// ---------------------------------------------------------------------------
+// A read phase on rigExec:transform that names a POINT IN THE POSE WALK.
+//
+// The general form of the three shorthands (base, preceding, final): the
+// matrix a mover consumes is the provider's frame as it stood immediately
+// after one named constraint, rather than before the walk or after all of
+// it. Nothing in examples/ authors it and no other suite builds it, which is
+// why the program could refuse it for three phases with no parity evidence
+// either way -- so the fixture comes first and the bake follows it.
+//
+// Two constraints revise ONE joint in the walk, and the mover names the
+// first. That is what makes the case discriminating: the phase's answer is
+// neither the joint's base frame nor its final one, and a program that
+// silently read either would deform the slab to a different place with
+// nothing to say so. TestAReadPhaseOnTheTransformIsExact asserts exactly
+// that, by building the same rig with a "final" phase and demanding the two
+// disagree.
+// ---------------------------------------------------------------------------
+
+static UsdStageRefPtr
+MakeAPoseWalkReadPhaseRig(const char *phase)
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+    // Two sources, each moved by an avar, so the two revisions of the joint
+    // land in different places and the phase has something to choose between.
+    const auto control = [&](const char *name, double tx, double ty) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Controls/") + name),
+            TfToken("RigExecControl"));
+        prim.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+            .Set(tx);
+        prim.CreateAttribute(TfToken("avars:ty"), SdfValueTypeNames->Double)
+            .Set(ty);
+        return prim;
+    };
+    const UsdPrim first = control("First", 3.0, 0.0);
+    const UsdPrim second = control("Second", 0.0, 7.0);
+
+    const SdfPath jointPath("/Asset/Rig/Joints/Arm");
+    stage->DefinePrim(jointPath, TfToken("RigExecJoint"));
+
+    // Both constraints revise the same joint, in namespace order: A leaves it
+    // where First is, B then leaves it where Second is.
+    const auto constrain = [&](const char *name, const UsdPrim &source) {
+        const UsdPrim prim = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Movers/Constrain/") + name),
+            TfToken("RigExecPositionConstraint"));
+        prim.ApplyAPI(TfToken("RigExecMoverAPI"));
+        prim.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({jointPath});
+        prim.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({source.GetPath()});
+        return prim;
+    };
+    const UsdPrim constraintA = constrain("A", first);
+    constrain("B", second);
+
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh = stage->DefinePrim(SdfPath("/Asset/Geom/Slab"),
+                                           TfToken("Points"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                          GfVec3f(0, 1, 0)});
+
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Geometry/Slide"),
+        TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({mesh.GetPath().AppendProperty(TfToken("points"))});
+    const UsdRelationship transform =
+        mover.CreateRelationship(TfToken("rigExec:transform"));
+    transform.SetTargets({jointPath});
+    // The phase itself, as METADATA on the relationship rather than through
+    // the role-named attribute: rigExec:transformReadPhase is the v0.1
+    // spelling and admits only base and final, so a pose-walk point can only
+    // be said the general way. "A" is spelled as the constraint's own path
+    // because an AtPrim phase is an ABSOLUTE prim path and nothing else.
+    const std::string authored = std::string(phase) == "atPrim"
+                                     ? constraintA.GetPath().GetString()
+                                     : std::string(phase);
+    transform.SetMetadata(TfToken(RigExecReadPhaseMetadataName), authored);
+
+    // A SKIN mover with the same phase on rigExec:influences is deliberately
+    // NOT here. Compile validates an AtPrim phase against
+    // binding.transform alone (rigEvaluator.cpp, "names a point in the pose
+    // walk, but ... is revised by no pose mover"), and a skin mover's
+    // binding.transform is empty -- so such a rig is refused by the DYNAMIC
+    // path before either evaluator sees it. The fold answers the influence
+    // entries out of the store anyway, because that is what the dynamic
+    // fold does with them; neither branch is reachable while the validator
+    // stands, and making it reachable would be a change to the dynamic
+    // path's answer.
+    return stage;
+}
+
+// Compiles \p stage twice -- once dynamic, once baked -- and demands the bake
+// happened and every published map agrees over four frames. Returns the moved
+// points of the last frame so a caller can assert the fixture discriminates.
+static VtVec3fArray
+BakedAndDynamicAgree(const char *what, const UsdStageRefPtr &stage,
+                     const UsdStageRefPtr &referenceStage)
+{
+    VtVec3fArray moved;
+    const SdfPath rigPath = FindRig(stage);
+    if (rigPath.IsEmpty()) { ++failures; return moved; }
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    if (!rig.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        return moved;
+    }
+    // Named, and not just counted: a refusal here is the whole point of the
+    // case, so the reason has to reach the log.
+    std::vector<std::string> reasons;
+    if (!rig.IsBakeable(&reasons)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture is not bakeable\n", what);
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+        return moved;
+    }
+
+    RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    errors.clear();
+    CHECK(referenceRig.Compile(&errors));
+    for (double frame = 1; frame <= 4; ++frame) {
+        const RigExecRigPose reference =
+            referenceRig.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(frame));
+        CHECK(baked.valid);
+        CHECK(!baked.movedProperties.empty());
+        CompareEveryMap(std::string(what) + " frame " +
+                            std::to_string(int(frame)),
+                        reference, baked);
+        const auto it =
+            baked.movedProperties.find(SdfPath("/Asset/Geom/Slab.points"));
+        if (it != baked.movedProperties.end() &&
+            it->second.IsHolding<VtVec3fArray>()) {
+            moved = it->second.UncheckedGet<VtVec3fArray>();
+        }
+    }
+    // Every generation came from the program: a fallback would have compared
+    // the dynamic path with itself.
+    CHECK(rig.GetBakedGenerationCount() == 4);
+    return moved;
+}
+
+static void
+TestAReadPhaseOnTheTransformIsExact()
+{
+    const VtVec3fArray atPrim = BakedAndDynamicAgree(
+        "a pose-walk read phase on rigExec:transform",
+        MakeAPoseWalkReadPhaseRig("atPrim"),
+        MakeAPoseWalkReadPhaseRig("atPrim"));
+    const VtVec3fArray final = BakedAndDynamicAgree(
+        "a final read phase on rigExec:transform",
+        MakeAPoseWalkReadPhaseRig("final"),
+        MakeAPoseWalkReadPhaseRig("final"));
+    const VtVec3fArray base = BakedAndDynamicAgree(
+        "a base read phase on rigExec:transform",
+        MakeAPoseWalkReadPhaseRig("base"),
+        MakeAPoseWalkReadPhaseRig("base"));
+    // The fixture discriminates, measured rather than assumed: if the phase
+    // named a point the two shorthands already reach, a program that ignored
+    // it entirely would pass every comparison above.
+    CHECK(!atPrim.empty());
+    CHECK(atPrim != final);
+    CHECK(atPrim != base);
+}
+
 static void
 TestEveryExampleStage(const std::string &examplesDir)
 {
@@ -1942,6 +2483,366 @@ TestEveryExampleStage(const std::string &examplesDir)
     CHECK(declined == kExpectedToDeclineCount);
 }
 
+// ---------------------------------------------------------------------------
+// THE INTERVENING-XFORM NEGATIVES, and why they live in THIS suite.
+//
+// They were written against tests/testRigExecEpochRests, which is where the
+// rest work keeps its fixtures. That suite carries REQUIRE_BAKE as of the
+// provider-ladder work, and a bake requirement reports a FALLBACK with the
+// same "baked parity mismatch" prefix a real disagreement carries -- so a
+// fixture that declines on purpose cannot live under one without turning
+// the suite's scoreboard red for a feature nobody claimed. They moved here
+// at the Phase 4 merge, beside this file's other deliberate negatives (a
+// connected posed:space, an unplaceable override, a constrained volume
+// weight), and this suite is deliberately not a parity entry. Nothing about
+// them weakened in the move: the comparison against the dynamic path is now
+// CompareEveryMap, which is every map domain the comparator has rather than
+// the four the other suite's local helper compared.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// A plain Xform standing BETWEEN a provider and its anchor.
+//
+// Exec resolves such a prim as the identity and drops it, so the rig would
+// evaluate as if the grouping transform were not there at all. The dynamic
+// walk composes it back in at evaluation (_ComposeInterveningXforms): X(P)
+// lands BETWEEN a provider and its anchor, which is a uniform right-multiply
+// only while every such Xform sits above every chain root, and is not one
+// otherwise.
+//
+// The program refuses both shapes of it -- a non-identity transform, and one
+// that is identity today but animates -- and refused them BLIND: no rig and
+// no fixture in the tree tripped either, so there was no parity evidence
+// either way and no way to tell a correct bake from a plausible one.
+//
+// These fixtures are that evidence. They assert the refusal by NAME and then
+// assert the fallback generation is a plain dynamic evaluator's, every
+// published domain of it, so the refusal cannot quietly become a wrong
+// answer -- and the day the correction is baked, the one line each case
+// carries flips from false to true.
+//
+// WHY IT IS STILL REFUSED, measured rather than assumed. The correction is
+// not confined to the walk. It rewrites the REST frames as well as the base
+// ones, and the two halves do not reach the same consumers: the walk's
+// frames are pushed back into exec as computePointFrame overrides before
+// the authoritative snapshot, so exec's computeMatrix is built from the
+// CORRECTED pose and the UN-corrected rest, while the walk's own
+// jointMatricesFinal is built from both corrected. Two matrices, one slot,
+// one generation -- see
+// TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix below, which
+// measures both of them on this very fixture. A solver's element rests are
+// a third reader on the exec side: they come from computeRestFrame, which
+// no override touches.
+//
+// The program holds ONE rest per slot and derives both matrices from it, so
+// expressing that means holding an exec rest and a walk rest side by side
+// and routing every consumer to the right one -- which is the same rework
+// an animated rest:tx needs, and is why the animated case below is a second
+// refusal rather than a second arm of the first. A bake that corrected the
+// one rest the program has would publish the right joint matrices and move
+// a skinned mesh somewhere nobody asked for, or the reverse; that is
+// exactly the shape of wrong the refusal is in front of.
+// ---------------------------------------------------------------------------
+
+// \p animated keys the grouping transform instead of authoring it plainly;
+// \p identityToday additionally makes every sample the identity at the frames
+// the sweep reads, which is the case the "is it identity" test cannot see.
+static UsdStageRefPtr
+MakeAnInterveningXformRig(bool animated, bool identityToday = false)
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->SetStartTimeCode(1.0);
+    stage->SetEndTimeCode(3.0);
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+    // The grouping Xform. Every rig has these -- a Scope named Joints, a
+    // Scope named Controls -- and they compose to the identity, which is
+    // why the program's candidate list is not by itself a refusal. This one
+    // carries a transform.
+    const UsdGeomXform group =
+        UsdGeomXform::Define(stage, SdfPath("/Asset/Rig/Group"));
+    const UsdGeomXformOp op = group.AddTranslateOp();
+    if (animated) {
+        op.Set(GfVec3d(0, identityToday ? 0 : 3, 0), UsdTimeCode(1.0));
+        op.Set(GfVec3d(0, identityToday ? 0 : 6, 0), UsdTimeCode(3.0));
+    } else {
+        op.Set(GfVec3d(0, 3, 0));
+    }
+
+    const UsdPrim joint = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Group/Arm"), TfToken("RigExecJoint"));
+    joint.CreateAttribute(TfToken("avars:tx"), SdfValueTypeNames->Double)
+        .Set(2.0);
+    // A child of the joint, so the correction is exercised where it is NOT a
+    // uniform right-multiply: the child's own anchor is the joint, which the
+    // pass has already corrected.
+    const UsdPrim tip = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Group/Arm/Tip"), TfToken("RigExecJoint"));
+    tip.CreateAttribute(TfToken("avars:tz"), SdfValueTypeNames->Double)
+        .Set(1.0);
+
+    stage->DefinePrim(SdfPath("/Asset/Geom"), TfToken("Scope"));
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Points"));
+    mesh.CreateAttribute(TfToken("points"), SdfValueTypeNames->Point3fArray)
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0)});
+    const UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/M"), TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.CreateRelationship(TfToken("rigExec:moves"))
+        .SetTargets({SdfPath("/Asset/Geom/M.points")});
+    mover.CreateRelationship(TfToken("rigExec:transform"))
+        .SetTargets({tip.GetPath()});
+    return stage;
+}
+
+// Compiles \p stage in baked mode, reports whether it bakes and why not, and
+// compares every published domain against a dynamic evaluator over the
+// sweep. Returns the baked generation count.
+static size_t
+BakedAgreesWithDynamic(const char *what, const UsdStageRefPtr &stage,
+                       const UsdStageRefPtr &referenceStage,
+                       bool expectBakeable,
+                       std::vector<std::string> *refusals = nullptr)
+{
+    const SdfPath rig("/Asset/Rig");
+    RigExecRigEvaluator baked(stage, rig);
+    baked.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    if (!baked.Compile(&errors)) {
+        ++failures;
+        std::printf("FAIL %s: the fixture does not compile\n", what);
+        for (const std::string &error : errors) {
+            std::printf("    %s\n", error.c_str());
+        }
+        return 0;
+    }
+    std::vector<std::string> reasons;
+    const bool bakeable = baked.IsBakeable(&reasons);
+    if (bakeable != expectBakeable) {
+        ++failures;
+        std::printf("FAIL %s: bakeable=%d, expected %d\n", what, int(bakeable),
+                    int(expectBakeable));
+    }
+    if (refusals) {
+        *refusals = reasons;
+    }
+
+    RigExecRigEvaluator reference(referenceStage, rig);
+    errors.clear();
+    CHECK(reference.Compile(&errors));
+    for (double frame : {1.0, 2.0, 3.0}) {
+        const RigExecRigPose expected = reference.Evaluate(UsdTimeCode(frame));
+        const RigExecRigPose actual = baked.Evaluate(UsdTimeCode(frame));
+        CHECK(expected.valid && actual.valid);
+        CHECK(!actual.movedProperties.empty());
+        CompareEveryMap(std::string(what) + " frame " +
+                            std::to_string(int(frame)),
+                        expected, actual);
+    }
+    return baked.GetBakedGenerationCount();
+}
+
+// Asserts that \p reasons names \p expected, so a refusal that changed its
+// mind about WHY is a failure rather than a pass.
+static void
+RefusalNames(const char *what, const std::vector<std::string> &reasons,
+             const char *expected)
+{
+    for (const std::string &reason : reasons) {
+        if (reason.find(expected) != std::string::npos) {
+            return;
+        }
+    }
+    ++failures;
+    std::printf("FAIL %s: no refusal mentions \"%s\"\n", what, expected);
+    for (const std::string &reason : reasons) {
+        std::printf("    %s\n", reason.c_str());
+    }
+}
+
+static void
+TestAnInterveningXformAboveAProvider()
+{
+    // The grouping transform reaches the pose: without it the tip would sit
+    // at (2, 0, 1) and the mesh with it. Measured, not assumed, because a
+    // program that dropped X(P) would agree with a reference that also
+    // dropped it -- and the reference here is the DYNAMIC path, which does
+    // not.
+    const UsdStageRefPtr probeStage = MakeAnInterveningXformRig(false);
+    RigExecRigEvaluator probe(probeStage, SdfPath("/Asset/Rig"));
+    CHECK(probe.Compile());
+    const RigExecRigPose pose = probe.Evaluate(UsdTimeCode(1.0));
+    CHECK(pose.valid);
+    const auto tip = pose.jointFramesFinal.find(
+        SdfPath("/Asset/Rig/Group/Arm/Tip"));
+    CHECK(tip != pose.jointFramesFinal.end());
+    if (tip != pose.jointFramesFinal.end()) {
+        CHECK(std::abs(tip->second.points[0][1] - 3.0) < 1e-9);
+    }
+
+    // The refusal, by name, and the fallback, in full.
+    std::vector<std::string> refusals;
+    const char *const what = "an intervening Xform above a provider";
+    const size_t generations = BakedAgreesWithDynamic(
+        what, MakeAnInterveningXformRig(false),
+        MakeAnInterveningXformRig(false), /* expectBakeable = */ false,
+        &refusals);
+    RefusalNames(what, refusals, "intervening Xform above provider");
+    // Nothing ran baked, and the comparison above still held: the fallback
+    // is the dynamic path, not a program that answered anyway.
+    CHECK(generations == 0);
+}
+
+static void
+TestAnAnimatedXformAboveAProvider()
+{
+    std::vector<std::string> refusals;
+    const char *const what = "an animated Xform above a provider";
+    const size_t generations = BakedAgreesWithDynamic(
+        what, MakeAnInterveningXformRig(true), MakeAnInterveningXformRig(true),
+        /* expectBakeable = */ false, &refusals);
+    RefusalNames(what, refusals, "animated Xform above provider");
+    CHECK(generations == 0);
+
+    // And the shape an "is it identity today" test cannot see: every sample
+    // the sweep reads IS the identity, so the transform composes to nothing
+    // at every frame anyone looks at -- and it is still refused, because the
+    // epoch is not a frame. A bake that judged the transform once would pass
+    // this one and be wrong about the case above.
+    refusals.clear();
+    const char *const quietWhat =
+        "an identity-valued animated Xform above a provider";
+    const size_t quiet = BakedAgreesWithDynamic(
+        quietWhat, MakeAnInterveningXformRig(true, /* identityToday = */ true),
+        MakeAnInterveningXformRig(true, /* identityToday = */ true),
+        /* expectBakeable = */ false, &refusals);
+    RefusalNames(quietWhat, refusals, "animated Xform above provider");
+    CHECK(quiet == 0);
+}
+
+// WHY the refusals above are still refusals, as a running measurement of the
+// DYNAMIC path rather than a paragraph about it.
+//
+// The correction rewrites the walk's rest frames as well as its base ones,
+// and the two halves do not reach the same consumers. The walk's frames are
+// pushed BACK INTO EXEC as computePointFrame overrides before the
+// authoritative snapshot is evaluated (`_taps->Evaluate(time,
+// jointOverrides)`), and every exec computation downstream of a frame then
+// sees the corrected pose -- while computeRestFrame, which no override
+// touches, goes on reading the authored rest:space and rest avars and knows
+// nothing about the grouping transform. So exec's computeMatrix, which a
+// geometry mover reads in the base phase, is
+//
+//     PointsToMatrix(rest_exec, pose_corrected)
+//
+// while pose.jointMatricesFinal, built in the walk, is
+//
+//     PointsToMatrix(rest_corrected, pose_corrected).
+//
+// On this fixture those are two different matrices -- translate (2, 3, 1)
+// and translate (2, 0, 1) -- and both are published in the same generation.
+// A program that holds ONE rest per slot can produce one of them or the
+// other and not both: correcting its rest publishes the right joint matrix
+// and moves the mesh to the wrong place, and leaving it uncorrected does the
+// reverse. That is the rework the refusals above are in front of (an exec
+// rest and a walk rest side by side, every consumer routed to the right
+// one), and it is the same rework an animated rest:tx needs.
+//
+// Pinned here as three assertions about today's dynamic answers, so the
+// branch that lands the correction has to decide about this case
+// deliberately: if any of the three moves, the dynamic path's answer
+// changed, and that is a decision rather than a test to update.
+static void
+TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix()
+{
+    // The same rig twice, with and without the grouping transform. Nothing
+    // else differs, so every difference below is X(P) and only X(P).
+    const UsdStageRefPtr withXform = MakeAnInterveningXformRig(false);
+    const UsdStageRefPtr withoutXform = MakeAnInterveningXformRig(false);
+    {
+        bool resets = false;
+        const std::vector<UsdGeomXformOp> ops =
+            UsdGeomXform(
+                withoutXform->GetPrimAtPath(SdfPath("/Asset/Rig/Group")))
+                .GetOrderedXformOps(&resets);
+        CHECK(ops.size() == 1);
+        if (ops.size() != 1) return;
+        ops.front().Set(GfVec3d(0, 0, 0));
+    }
+
+    const SdfPath rigPath("/Asset/Rig");
+    RigExecRigEvaluator moved(withXform, rigPath);
+    RigExecRigEvaluator plain(withoutXform, rigPath);
+    CHECK(moved.Compile());
+    CHECK(plain.Compile());
+    const RigExecRigPose a = moved.Evaluate(UsdTimeCode(1.0));
+    const RigExecRigPose b = plain.Evaluate(UsdTimeCode(1.0));
+    CHECK(a.valid && b.valid);
+    if (!a.valid || !b.valid) return;
+
+    // 1. The published FRAMES follow the grouping Xform: the correction is
+    //    what put them in the group's space.
+    const SdfPath tipPath("/Asset/Rig/Group/Arm/Tip");
+    const auto tipA = a.jointFramesFinal.find(tipPath);
+    const auto tipB = b.jointFramesFinal.find(tipPath);
+    CHECK(tipA != a.jointFramesFinal.end());
+    CHECK(tipB != b.jointFramesFinal.end());
+    if (tipA == a.jointFramesFinal.end() ||
+        tipB == b.jointFramesFinal.end()) {
+        return;
+    }
+    CHECK(std::abs((tipA->second.points[0][1] - tipB->second.points[0][1]) -
+                   3.0) < 1e-9);
+
+    // 2. The published MATRIX does not. Rest and pose are corrected
+    //    together, so X cancels out of the rest-to-pose map -- translate
+    //    (2, 0, 1) either way.
+    const auto matrixA = a.jointMatricesFinal.find(tipPath);
+    const auto matrixB = b.jointMatricesFinal.find(tipPath);
+    CHECK(matrixA != a.jointMatricesFinal.end());
+    CHECK(matrixB != b.jointMatricesFinal.end());
+    if (matrixA != a.jointMatricesFinal.end() &&
+        matrixB != b.jointMatricesFinal.end()) {
+        CHECK(matrixA->second == matrixB->second);
+        CHECK(GfIsClose(matrixA->second.ExtractTranslation(),
+                        GfVec3d(2, 0, 1), 1e-9));
+    }
+
+    // 3. And the mesh a base-phase mover drives off that same joint DOES
+    //    follow it, by exactly X: exec composed its matrix from the
+    //    overridden pose and the un-overridden rest. Two answers, one
+    //    generation, one slot.
+    const SdfPath target("/Asset/Geom/M.points");
+    const auto pointsA = a.movedProperties.find(target);
+    const auto pointsB = b.movedProperties.find(target);
+    CHECK(pointsA != a.movedProperties.end());
+    CHECK(pointsB != b.movedProperties.end());
+    if (pointsA == a.movedProperties.end() ||
+        pointsB == b.movedProperties.end()) {
+        return;
+    }
+    const VtVec3fArray movedWith = pointsA->second.Get<VtVec3fArray>();
+    const VtVec3fArray movedWithout = pointsB->second.Get<VtVec3fArray>();
+    CHECK(movedWith.size() == movedWithout.size());
+    if (movedWith.size() != movedWithout.size()) return;
+    for (size_t i = 0; i < movedWith.size(); ++i) {
+        if (!GfIsClose(GfVec3f(movedWith[i] - movedWithout[i]),
+                       GfVec3f(0, 3, 0), 1e-5)) {
+            ++failures;
+            std::printf("FAIL an intervening Xform: moved point %zu did not "
+                        "follow the grouping transform (%g %g %g against "
+                        "%g %g %g); the asymmetry the refusal stands in "
+                        "front of has changed\n",
+                        i, movedWith[i][0], movedWith[i][1], movedWith[i][2],
+                        movedWithout[i][0], movedWithout[i][1],
+                        movedWithout[i][2]);
+            break;
+        }
+    }
+}
+
 static std::string
 _SchemaResourceDir(const std::string &examplesDir)
 {
@@ -1984,6 +2885,7 @@ main(int argc, char **argv)
     TestAnInteractiveOverrideAfterTheBakeIsFollowed(examplesDir);
     TestAnOverrideOnAConstraintWeightIsFollowed(examplesDir);
     TestAnUnplaceableOverrideFallsBack(examplesDir);
+    TestAnArrayOverrideOnACurvenetWeightFallsBack();
 
     // Invalidation, both directions.
     TestEditAfterTheBake(examplesDir, "biped/Biped.usda",
@@ -2033,6 +2935,20 @@ main(int argc, char **argv)
     // of the pose walk and not a kernel waiting to be hoisted.
     TestANonBakeableRigFallsBack("a connected posed:space",
                                  "connected posed:space");
+
+    // A read phase naming a point in the pose walk, which no shipped rig
+    // authors and no other suite builds.
+    TestAReadPhaseOnTheTransformIsExact();
+    // The second deliberate negative: a volume weight a constraint moves,
+    // which the DYNAMIC path gives two placements at once.
+    TestAConstrainedVolumeWeightFallsBack();
+    // And the two the rest suite cannot hold under its bake requirement:
+    // a grouping Xform between a provider and its anchor, authored and
+    // animated, plus the measurement of the dynamic-path asymmetry both
+    // refusals stand on.
+    TestAnInterveningXformAboveAProvider();
+    TestAnAnimatedXformAboveAProvider();
+    TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix();
 
     // And everything in examples/, whether it bakes or not.
     TestEveryExampleStage(examplesDir);

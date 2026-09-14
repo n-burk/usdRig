@@ -581,6 +581,60 @@ inputs now. What that adds to the model, for a later group:
   authoritative even at the identity, and a raw identity selects the computed fallback), and a
   connected `posed:space` refuses as the deliberate negative it has always been.
 
+### Phase 4: the four deferrals
+
+Phase 3 left four features refused because nothing in the tree reached them. Three are baked;
+the fourth is now reachable and still refused, and that is a measurement rather than an omission.
+Each one started with a FIXTURE that fails under `RIGEXEC_BAKE_REQUIRED=1`, because a bake with
+no rig to compare against is a second rig.
+
+* **A read phase naming a pose-walk point on `rigExec:transform`.** `AtPrim` is the general form
+  `base`, `preceding` and `final` abbreviate: the provider's matrix as it stood immediately after
+  one named constraint. Both halves of the store were already filled and only the CONSUMER was
+  missing; `FoldInfluences` now answers out of `runSnapshots`, after the geometry-domain
+  constraint delta exactly as the dynamic path orders the two, and declares the store so the fold
+  waits for every recorder before it. A phase that resolves to nothing leaves the dense-table
+  value standing and says nothing, because that is what the dynamic path leaves standing. The
+  influence entries of a SKIN mover are answered the same way and no rig can reach that: compile
+  validates an `AtPrim` phase against `binding.transform` alone, and a skin mover's is empty.
+* **A volume weight object on a constraint.** The refusal described a constraint the epoch cannot
+  hold. A volumetric field requires a POINT domain, so the only constraint that can bind one is a
+  geometry-domain constraint -- and such a constraint resolves no envelope in the walk at all: its
+  weight is per point and resolves on the revision its delta feeds. Nothing reads
+  `_volumeWeightMatrices` mid-walk, so the one republication after the walk is what every reader
+  of it sees and no placement step moved. What the refusal was hiding is a SLOT COLLISION: a
+  volume weight is exec-seeded AND, because its type is neither `RigExecControl` nor
+  `RigExecJoint`, catalogued as a plain `UsdGeomXformable` the moment a constraint targets it, so
+  the two families §3's slot table calls disjoint are not disjoint for this one provider. The
+  dynamic walk resolves it by last writer and discards the avar composition, while exec's
+  `computeWeightPacket` goes on placing the volume from its avars -- two placements, one slot. The
+  narrow "constraint target is both exec-seeded and xform-derived" is what stands there now.
+* **`RigExecCurvenetWeight`.** The one weight object whose field is not a formula but the solution
+  of a factorized system over the cut mesh. The kernel was CUT where the lock is:
+  `RigExecComputeCurvenetWeightPacket` is now a token check, a bind and a field solve, exec calls
+  all three, and the program holds a bind of its own -- one per weight object, written by that
+  object's own step and read by nothing else, which is the same cache with the only capacity a
+  program can use. It is the third named mechanism for keeping locks out of step bodies, beside
+  the prologue's resolved values and the program-owned caches.
+* **Intervening and animated Xforms above a provider.** Still refused, and now with fixtures that
+  reach both refusals by name, assert the fallback is exact, and MEASURE why the refusal stands.
+  The correction rewrites the REST frames as well as the base ones, and the two halves do not reach
+  the same consumers -- but not by the route the first reading of it suggested. The walk's frames
+  are pushed back into exec as `computePointFrame` overrides before the authoritative snapshot
+  (`_taps->Evaluate(time, jointOverrides)`), so every exec computation downstream of a frame sees
+  the CORRECTED pose, while `computeRestFrame`, which no override touches, keeps reading the
+  authored rest. So exec's `computeMatrix` -- what a geometry mover reads in the base phase -- is
+  `PointsToMatrix(rest_exec, pose_corrected)`, and `pose.jointMatricesFinal`, built in the walk,
+  is `PointsToMatrix(rest_corrected, pose_corrected)`. On the fixture those are translate
+  (2, 3, 1) and translate (2, 0, 1), published in one generation off one slot; a solver's element
+  rests (exec's `computeRestFrame`, un-overridden) are a third reader on the exec side. A program
+  holding ONE rest per slot can publish one of those matrices or the other and not both, so
+  expressing this means holding an exec rest and a walk rest side by side and routing every
+  consumer to the right one -- the same rework an animated `rest:tx` needs. A working
+  implementation of the static half was measured and reverted; the three numbers are pinned by
+  `TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix`, which fails if the dynamic path's
+  asymmetry ever changes.
+
 ### What holds it to account
 
 * `tests/testRigExecBakedSchedule` -- every edge forward, every read written or sourced, no two

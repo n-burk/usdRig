@@ -656,6 +656,7 @@ TestAnOverrideElsewhereLeavesTheRestsAlone(const std::string &examplesDir)
                  rig.Evaluate(UsdTimeCode(kFrames[1])));
 }
 
+
 std::string
 SchemaResourceDir(const std::string &examplesDir)
 {
