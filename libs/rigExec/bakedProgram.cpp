@@ -408,6 +408,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                        // separates these from the ones still refused below is
                        // that none of them needs a value the pose walk has
                        // not already produced.
+                       r.op == RigExecRevisionOp::BlendShape ||
                        r.op == RigExecRevisionOp::VolumeCorrect ||
                        r.op == RigExecRevisionOp::Smooth ||
                        r.op == RigExecRevisionOp::Lattice ||
@@ -421,9 +422,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
         if (!r.binding.weightObject.IsEmpty()) {
             say("weight object on mover", r.moverPath);
-        }
-        if (!r.binding.blendInputs.empty()) {
-            say("blend shape inputs on mover", r.moverPath);
         }
         if (!r.binding.phases.empty()) {
             say("read phase on a mover input", r.moverPath);

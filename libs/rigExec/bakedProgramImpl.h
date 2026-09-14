@@ -1437,12 +1437,41 @@ struct RigExecBakedProgramImpl {
         bool ok = false;
     };
 
+    /// One blend channel's stage handles, resolved once at Build.
+    ///
+    /// The channels themselves are per-frame reads -- a channel weight is
+    /// what an animator drags -- so nothing here is a VALUE. What is captured
+    /// is which attribute to ask, in the order the accumulation is defined
+    /// over: `binding.blendInputs` is canonically sorted at compile and the
+    /// samples of one channel are stable-sorted by activation every frame.
+    /// Float addition is not associative, so an order that differs from the
+    /// dynamic walk's is a different last bit.
+    struct GeomBlendChannel {
+        /// `inputs:weight` on the RigExecBlendInput prim. Invalid when the
+        /// prim or the attribute is absent, which reads as the channel's
+        /// default exactly as the dynamic walk's invalid handle does.
+        UsdAttribute weight;
+        struct Sample {
+            /// `rigExec:activation` on the RigExecBlendSample prim.
+            UsdAttribute activation;
+            /// The sample's target-shape points, and the path a declared
+            /// read phase looks that array up under.
+            UsdAttribute points;
+            SdfPath pointsPath;
+            RigExecReadPhase phase;
+        };
+        std::vector<Sample> samples;
+    };
+
     struct GeomRevision {
         SdfPath moverPath;
         SdfPath target;
         UsdPrim moverPrim;
         RigExecRevisionOp op = RigExecRevisionOp::Skin;
         RigExecRevisionBinding binding;
+        /// This revision's blend channels, in `binding.blendInputs` order.
+        /// Empty for every operation but a blend shape.
+        std::vector<GeomBlendChannel> blendChannels;
         std::vector<int> influenceSlots;
         int transformSlot = -1;
         /// The solver whose aggregate supplies values.driverFrames, as an
@@ -1472,6 +1501,14 @@ struct RigExecBakedProgramImpl {
         /// wants the target's points from, so the chain records them after
         /// it. Decided at bake out of the evaluator's _snapshotPoints.
         bool snapshotAfter = false;
+        /// This revision LOOKS the run's phased-read store up, so its static
+        /// step declares every step before it as a read. Two things can make
+        /// it true and the second is easy to miss: a declared input phase
+        /// (`binding.phases`), and a blend sample whose target shape carries
+        /// one -- that lookup is made directly by the channel gather rather
+        /// than through the revision's overlay, so the overlay's own
+        /// predicate does not cover it.
+        bool readsSnapshots = false;
         /// This node is new to the rig's geometry state and its creation has
         /// not been reported yet. Cleared by AdoptGeometryStateFrom for a
         /// node the outgoing program already held, which is the same

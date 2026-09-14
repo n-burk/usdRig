@@ -94,8 +94,12 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         for (const auto &[input, samples] : r.binding.blendSamples) {
             for (const RigExecBlendSampleBinding &sample : samples) {
                 phased = phased || !sample.phase.IsBase();
+                out.readsSnapshots =
+                    out.readsSnapshots || !sample.phase.IsBase();
             }
         }
+        out.readsSnapshots =
+            out.readsSnapshots || !r.binding.phases.empty();
         if (phased) {
             B.phasedReads = true;
         }
@@ -152,6 +156,44 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         // one the bake asked about either way.
         for (const auto &[input, phase] : r.binding.phases) {
             name(input);
+        }
+        // The blend channels, in the order the accumulation is defined over.
+        // Only the HANDLES are captured: every channel weight, every
+        // activation and every target shape is re-read per frame through the
+        // generation's resolved inputs, which is what lets an animator drag a
+        // channel weight and see it -- so the input and sample prims go into
+        // `resolvedRoutedPrims` beside the mover's, where an override on one
+        // of their properties places with nothing else to do.
+        for (const SdfPath &input : r.binding.blendInputs) {
+            RigExecBakedProgramImpl::GeomBlendChannel channel;
+            B.prims.insert(input);
+            B.resolvedRoutedPrims.insert(input);
+            const SdfPath weightPath =
+                input.AppendProperty(TfToken("inputs:weight"));
+            B.named.insert(weightPath);
+            channel.weight = B.stage->GetAttributeAtPath(weightPath);
+            const auto samples = r.binding.blendSamples.find(input);
+            if (samples != r.binding.blendSamples.end()) {
+                for (const RigExecBlendSampleBinding &binding :
+                         samples->second) {
+                    RigExecBakedProgramImpl::GeomBlendChannel::Sample sample;
+                    B.prims.insert(binding.sample);
+                    B.resolvedRoutedPrims.insert(binding.sample);
+                    const SdfPath activationPath =
+                        binding.sample.AppendProperty(
+                            TfToken("rigExec:activation"));
+                    B.named.insert(activationPath);
+                    sample.activation =
+                        B.stage->GetAttributeAtPath(activationPath);
+                    sample.pointsPath = binding.points;
+                    sample.phase = binding.phase;
+                    name(binding.points);
+                    sample.points =
+                        B.stage->GetAttributeAtPath(binding.points);
+                    channel.samples.push_back(std::move(sample));
+                }
+            }
+            out.blendChannels.push_back(std::move(channel));
         }
         if (!r.binding.transform.IsEmpty()) {
             out.transformSlot = slotOf(r.binding.transform);
@@ -583,7 +625,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
                 assemble.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
-                if (!revision.binding.phases.empty()) {
+                if (revision.readsSnapshots) {
                     assemble.reads.push_back(RigExecBakedRange(
                         RigExecBakedSlotDomain::Snapshots, 0,
                         int(B.steps.size()) - 1));
@@ -740,7 +782,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             // its assemble reads the run's store for them -- so it declares
             // the store the same way a chain revision does: every step before
             // it, because which of them recorded what is a runtime answer.
-            if (!derived.revision.binding.phases.empty()) {
+            if (derived.revision.readsSnapshots) {
                 step.reads.push_back(RigExecBakedRange(
                     RigExecBakedSlotDomain::Snapshots, 0,
                     int(B.steps.size()) - 1));
@@ -1100,6 +1142,55 @@ AssembleRevision(RigExecBakedProgramImpl &B,
         values.influenceTransforms = &table;
     }
     values.basePoints.assign(basePoints, basePoints + basePointCount);
+    // The blend channels. Gathered here rather than inside the assembler
+    // because the dynamic walk gathers them here too, and the ORDER is the
+    // whole contract: channels in `binding.blendInputs` order, which compile
+    // sorted, and each channel's samples stable-sorted by activation. Float
+    // addition is not associative, so a different order is a different last
+    // bit of every point.
+    //
+    // The reads go through the generation-wide resolved inputs and NOT
+    // through this revision's phase overlay: a sample's own phase is looked
+    // up directly, which is what lets one blend sample read another chain
+    // while the rest of the channel reads the stage.
+    if (!revision->blendChannels.empty()) {
+        std::vector<RigExecBlendChannel> channels;
+        channels.reserve(revision->blendChannels.size());
+        for (const RigExecBakedProgramImpl::GeomBlendChannel &bound :
+                 revision->blendChannels) {
+            RigExecBlendChannel channel;
+            R.GetAttribute(bound.weight, time, &channel.weight);
+            for (const auto &boundSample : bound.samples) {
+                RigExecBlendSampleData sample;
+                R.GetAttribute(boundSample.activation, time,
+                               &sample.activation);
+                VtVec3fArray points;
+                const VtValue *phased = B.runSnapshots.Lookup(
+                    boundSample.pointsPath, boundSample.phase,
+                    revision->moverPath);
+                if (phased && phased->IsHolding<VtVec3fArray>()) {
+                    points = phased->UncheckedGet<VtVec3fArray>();
+                } else {
+                    R.GetAttribute(boundSample.points, time, &points);
+                }
+                sample.points.assign(points.begin(), points.end());
+                channel.samples.push_back(std::move(sample));
+            }
+            std::stable_sort(channel.samples.begin(), channel.samples.end(),
+                             [](const RigExecBlendSampleData &a,
+                                const RigExecBlendSampleData &b) {
+                                 return a.activation < b.activation;
+                             });
+            channels.push_back(std::move(channel));
+        }
+        // A structural failure leaves blendDeltas empty, which is what makes
+        // the assembled packet invalid -- the same atomic MoverFailed
+        // pass-through the kernel produces.
+        if (!RigExecSumBlendChannels(channels, values.basePoints,
+                                     &values.blendDeltas)) {
+            values.blendDeltas.clear();
+        }
+    }
     // Epoch-fixed layouts were resolved in the PROLOGUE, through the same
     // evaluator cache the dynamic path's assembly resolves through -- so the
     // two paths cannot hold different arrays, and no step body takes the
