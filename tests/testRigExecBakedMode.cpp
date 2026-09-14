@@ -1748,17 +1748,17 @@ static const char *const kExpectedToDecline[] = {
     "01_FkChainTail.usda",           // weight object on mover
     "02_TwoBoneIkLeg.usda",          // weight object on mover
     "03_IkFkBlendClamp.usda",        // weight object on mover
-    "04_BlendShapeFace.usda",        // mover operation not baked (blendShape)
-    "05_TwistRibbonSpine.usda",      // ... (emitGuidePoints)
+    "04_BlendShapeFace.usda",        // weight object on mover
+    "05_TwistRibbonSpine.usda",      // ribbon driver curve
     "08_AimEyes.usda",               // weight object on mover
     "09_PropertyMathMovers.usda",    // weight object on mover
     "10_AimXformTurret.usda",        // constraint target is a plain Xformable
     "11_VolumeWeights.usda",         // provider type not baked
                                      // (RigExecCurveWeight)
-    "12_CurvenetProfile.usda",       // mover operation not baked (curvenet)
-    "13_ReadPhases.usda",            // ... (lattice)
-    "ArmRig.usda",                   // ... (blendShape)
-    "ArmShotAnim.usda",              // ... (blendShape), through ArmRig
+    "12_CurvenetProfile.usda",       // weight object on mover
+    "13_ReadPhases.usda",            // weight object on mover
+    "ArmRig.usda",                   // ribbon driver curve
+    "ArmShotAnim.usda",              // ... likewise, through ArmRig
     "aim_par_combo_flattened.usd",   // constraint target is a plain Xformable
     "aimtest.usda",                  // constraint target is a plain Xformable
     "aimtest_points.usda",           // constraint target is a plain Xformable
