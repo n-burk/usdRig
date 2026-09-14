@@ -15,6 +15,7 @@
 #include "frameExtraction.h"
 #include "moverGraph.h"
 #include "rigEvaluator.h"
+#include "solverKernels.h"
 #include "types.h"
 
 #include "rigExecMath/pointFrame.h"
@@ -75,6 +76,20 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         return ctx->Bind(prim, name, fallback);
     };
     auto slotOf = [&](const SdfPath &path) { return ctx->SlotOf(path); };
+    // "Publishes computePointFrame and computeRestFrame", which is what a
+    // solver relationship target has to do for its frame to reach the
+    // computation at all: the two are registered for RigExecJoint,
+    // RigExecControl and the volume weights, and for nothing else. An
+    // xform-derived slot is in the table so a constraint can name it, but
+    // the walk seeds it from the stage and it declares no computation, so a
+    // solver naming one reads a null pointer and publishes nothing.
+    auto providerSlot = [&](const SdfPath &path) {
+        const int slot = slotOf(path);
+        return slot >= 0 && B.slotKind[size_t(slot)] ==
+                                RigExecBakedSlotKind::PoseSeed
+                   ? slot
+                   : -1;
+    };
 
     auto bakeSolver = [&](const SdfPath &solverPath,
                           const std::vector<std::pair<SdfPath, int>>
@@ -140,7 +155,11 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         for (const auto &[joint, element] : jointOutputs) {
             const int slot = slotOf(joint);
             if (slot < 0) {
-                refuse("solver output is not a pose provider", joint);
+                // Unreachable: these joints come from the compiler's joint
+                // binding, so they are in _jointPaths, and IsBakeable
+                // refuses a rig whose joint is not a seeded pose provider.
+                // Skipped rather than refused because exec's answer to it is
+                // simply that no element is ever extracted for the joint.
                 continue;
             }
             s.outputs.emplace_back(slot, element);
@@ -150,27 +169,51 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             s.parentRelative =
                 readToken(prim, "rigExec:controlSpace", "") ==
                 "parentRelative";
+            // The chain is the FILTERED list. The computation reads its
+            // controls through a read iterator over the relationship's
+            // targeted objects, so a target that publishes no frame
+            // contributes no input at all: the chain SHORTENS and every
+            // later element renumbers, which is what `int(k) - 1` then
+            // means by a parent. The outputs mapping is not filtered -- its
+            // element indices are the compiler's, over the same shortened
+            // aggregate.
             for (const SdfPath &t : targets(prim, "rigExec:controls")) {
-                const int slot = slotOf(t);
-                if (slot < 0) refuse("FkChain control is not a provider", t);
+                const int slot = providerSlot(t);
+                if (slot < 0) {
+                    continue;
+                }
                 s.controls.push_back(slot);
-                s.controlRests.push_back(
-                    slot >= 0 ? B.restPts[slot] : RigExecIdentityLandmarks());
+                s.controlRests.push_back(B.restPts[slot]);
             }
         } else if (s.type == "RigExecTwoBoneIk") {
             const auto r = targets(prim, "rigExec:rootControl");
             const auto e = targets(prim, "rigExec:effectorControl");
             const auto p = targets(prim, "rigExec:poleControl");
-            s.root = r.empty() ? -1 : slotOf(r[0]);
-            s.end = e.empty() ? -1 : slotOf(e[0]);
-            s.pole = p.empty() ? -1 : slotOf(p[0]);
+            s.root = r.empty() ? -1 : providerSlot(r[0]);
+            s.end = e.empty() ? -1 : providerSlot(e[0]);
+            s.pole = p.empty() ? -1 : providerSlot(p[0]);
             if (s.root < 0 || s.end < 0 || s.pole < 0) {
-                refuse("TwoBoneIk control is not a provider", solverPath);
+                // All three frames are REQUIRED inputs: an unwired or
+                // non-publishing control is a null pointer and an empty
+                // aggregate, not a rig the program cannot express.
+                s.degenerate = true;
             }
+            // Bone lengths are MEASURED from the rests of the joints this
+            // solver binds, so all three chain slots have to be bound by
+            // one. The computation returns empty on the first element out
+            // of [0, 3) and again when the three are not all seen; the two
+            // give the same aggregate, so one flag answers both.
+            std::array<bool, 3> seen{false, false, false};
             for (const auto &[slot, element] : restRefs) {
-                if (slot >= 0 && element >= 0 && element < 3) {
-                    s.ikRests[size_t(element)] = B.restPts[slot];
+                if (element < 0 || element >= 3) {
+                    s.degenerate = true;
+                    continue;
                 }
+                s.ikRests[size_t(element)] = B.restPts[slot];
+                seen[size_t(element)] = true;
+            }
+            if (!(seen[0] && seen[1] && seen[2])) {
+                s.degenerate = true;
             }
             // The bone lengths exec measures every evaluation, measured once.
             s.upperLengthBase = (s.ikRests[1][0] - s.ikRests[0][0]).GetLength();
@@ -193,33 +236,52 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 const auto it = B.solverIndex.find(v[0]);
                 return it == B.solverIndex.end() ? -1 : it->second;
             };
+            // -1 is the computation's null pointer, and it means exactly
+            // what a null pointer means there: one missing input passes the
+            // OTHER through unchanged, rests and all, and two missing
+            // inputs publish nothing. It can never mean "not baked yet" --
+            // an inputA/inputB solver is a dependency, so the Kahn levels
+            // put it in an earlier batch.
             s.inA = solverSlot(targets(prim, "rigExec:inputA"));
             s.inB = solverSlot(targets(prim, "rigExec:inputB"));
-            if (s.inA < 0 || s.inB < 0) {
-                refuse("BlendPointFrames input is not an earlier solver",
-                       solverPath);
-            }
             s.blendWeight = bind(prim, "inputs:weight", 0.0f);
             s.scaleMode =
                 readToken(prim, "rigExec:scaleBlend", "") == "linear"
                     ? RigExecScaleBlend::Linear
                     : RigExecScaleBlend::Log;
+            // The fallback is the only mode there is, so an unauthored
+            // token is never rejected; anything else warns and publishes an
+            // empty array -- but only once the computation has TWO inputs in
+            // hand. A null input returns the other before the token is ever
+            // read, so this cannot be `degenerate`, which would answer the
+            // half-wired blend with an empty aggregate the computation never
+            // publishes.
             if (readToken(prim, "rigExec:rotationBlend", "shortestArc") !=
                 "shortestArc") {
-                refuse("BlendPointFrames rotationBlend is not shortestArc",
-                       solverPath);
+                s.blendRotationRejected = true;
             }
         } else if (s.type == "RigExecSplineIk") {
             const auto r = targets(prim, "rigExec:rootControl");
             const auto m = targets(prim, "rigExec:midControl");
             const auto e = targets(prim, "rigExec:endControl");
-            s.root = r.empty() ? -1 : slotOf(r[0]);
-            s.mid = m.empty() ? -1 : slotOf(m[0]);
-            s.end = e.empty() ? -1 : slotOf(e[0]);
+            s.root = r.empty() ? -1 : providerSlot(r[0]);
+            s.mid = m.empty() ? -1 : providerSlot(m[0]);
+            s.end = e.empty() ? -1 : providerSlot(e[0]);
             if (s.root < 0 || s.mid < 0 || s.end < 0) {
-                refuse("SplineIk control is not a provider", solverPath);
+                // Both halves of the computation's answer at once: the three
+                // posed frames are REQUIRED inputs, and it refuses again
+                // when one of the three rest frames is missing. Either way
+                // it publishes an empty aggregate.
+                s.degenerate = true;
             }
             const size_t count = restRefs.size();
+            if (count == 0) {
+                // "rigExec:joints binds no joints; there is no chain to
+                // measure rest CVs from". The empty rest description would
+                // have solved to an empty aggregate anyway; saying so is
+                // what keeps the two paths' reasons the same shape.
+                s.degenerate = true;
+            }
             s.splineCount = count;
             std::vector<RigExecPointFrame> restJoints(count);
             s.splineJointRests.resize(count);
@@ -229,9 +291,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // twice") rather than solving against a hole.
             std::vector<bool> filled(count, false);
             for (const auto &[slot, element] : restRefs) {
-                if (slot < 0 || element < 0 || size_t(element) >= count) {
-                    refuse("SplineIk joint element is out of range",
-                           solverPath);
+                if (element < 0 || size_t(element) >= count) {
+                    s.degenerate = true;
                     continue;
                 }
                 if (filled[size_t(element)]) {
@@ -251,12 +312,12 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             }
             for (float w : authoredWeights) weights.push_back(w);
             if (!weights.empty() && weights.size() != count) {
-                refuse("SplineIk volumeWeights cardinality", solverPath);
+                s.degenerate = true;
             }
             const TfToken restTok = readToken(prim, "rigExec:restLength", "");
             if (!restTok.IsEmpty() && restTok != "curve" &&
                 restTok != "chain") {
-                refuse("SplineIk restLength is unsupported", solverPath);
+                s.degenerate = true;
             }
             // Exec rebuilds this description every evaluation; it is a pure
             // function of epoch-constant rests, so it bakes out.
@@ -285,8 +346,119 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             if (tangent == "aim") {
                 s.splineParams.aimRootTangent = true;
             } else if (!tangent.IsEmpty() && tangent != "rigid") {
-                refuse("SplineIk rootTangent is unsupported", solverPath);
+                s.degenerate = true;
             }
+        } else if (s.type == "RigExecTwistDistribution") {
+            // The two endpoint frames arrive on the batch request as FINAL
+            // frames, the same way an FkChain's controls do, so they are
+            // provider slots read out of `fin`.
+            //
+            // A target that is no provider slot, or one the exec network
+            // seeds from the stage rather than computing (an xform-derived
+            // slot declares neither computePointFrame nor computeRestFrame),
+            // leaves the computation's REQUIRED start or end input unbound:
+            // it publishes an empty aggregate and every joint it names falls
+            // back. That is `degenerate`, not a refusal.
+            const auto endpoint = [&](const SdfPathVector &v) {
+                return v.empty() ? -1 : providerSlot(v[0]);
+            };
+            s.root = endpoint(targets(prim, "rigExec:start"));
+            s.end = endpoint(targets(prim, "rigExec:end"));
+            if (s.root < 0 || s.end < 0) {
+                s.degenerate = true;
+            } else {
+                // The rests are OPTIONAL inputs of the computation, but
+                // every seeded provider publishes computeRestFrame, so a
+                // resolved endpoint always has one and the identity
+                // substitution exec makes for a missing one is unreachable
+                // from here.
+                s.twistStartRest = B.restPts[size_t(s.root)];
+                s.twistEndRest = B.restPts[size_t(s.end)];
+            }
+            // rigExec:weights and rigExec:count define the frame cardinality,
+            // which compile refuses to let vary with time, so both are read
+            // once and folded. The float -> double widening is element-wise
+            // and in array order, as the computation's read iterator does it.
+            VtFloatArray authoredWeights;
+            fold(prim, "rigExec:weights");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:weights"))) {
+                a.Get(&authoredWeights);
+            }
+            for (float w : authoredWeights) s.twistWeights.push_back(w);
+            int count = 1;
+            fold(prim, "rigExec:count");
+            if (const UsdAttribute a =
+                    prim.GetAttribute(TfToken("rigExec:count"))) {
+                a.Get(&count);
+            }
+            RigExecResolveTwistWeights(count, &s.twistWeights);
+            s.twistTurns = bind(prim, "inputs:twistTurns", 0.0);
+        } else if (s.type == "RigExecRibbon") {
+            // The driver curve's points, resolved by the compiler to the
+            // exact native attribute (a prim target becomes its .points).
+            // The dynamic path reads that attribute with UsdAttribute::Get
+            // and hands exec the two values as packet overrides, so it
+            // honours neither a connection on it nor the generation's
+            // resolved inputs -- which is why this is NOT bind(): the
+            // connection walk bind() performs would answer differently on a
+            // connected points attribute.
+            const auto found = ctx->ribbonDriverPoints.find(solverPath);
+            if (found != ctx->ribbonDriverPoints.end()) {
+                s.ribbonPointsPath = found->second;
+            }
+            if (const UsdAttribute a =
+                    B.stage->GetAttributeAtPath(s.ribbonPointsPath)) {
+                // Read at Default, and left empty when nothing answers
+                // there: a curve carrying only time samples has no bind-time
+                // value, and an empty rest is what makes the sampler publish
+                // nothing at all.
+                VtVec3fArray rest;
+                a.Get(&rest, UsdTimeCode::Default());
+                s.ribbonRestPoints.assign(rest.begin(), rest.end());
+                s.ribbonPointsVarying = a.ValueMightBeTimeVarying() ||
+                                        a.GetNumTimeSamples() > 0;
+                if (s.ribbonPointsVarying) {
+                    s.ribbonPointsQuery = UsdAttributeQuery(a);
+                } else {
+                    // One value at every time code, so the prologue has
+                    // nothing to read and the cone nothing to compare.
+                    VtVec3fArray live;
+                    a.Get(&live, ctx->capture);
+                    s.ribbonConstantPoints.assign(live.begin(), live.end());
+                }
+                // Registered BY PATH rather than through fold(prim, name):
+                // the driver curve is another prim entirely, and the target
+                // may be an arbitrary property path. The rest capture makes
+                // it folded -- a value edit on the curve rebuilds, and an
+                // override on it cannot be placed, which is right because
+                // the dynamic path would ignore that override.
+                //
+                // Inside the read, and deliberately so: a resolved path
+                // that names nothing on this stage was never read, and the
+                // day an attribute appears there it is the epoch digest
+                // that sees it -- creating a property is a structural edit,
+                // so the epoch recompiles and this program is rebuilt with
+                // it before the next generation chooses a path. Registering
+                // a path the bake could not read would claim an
+                // invalidation this index does not owe. The fixture "the
+                // driver curve's points created later" is where that is
+                // measured.
+                B.rebuild.insert(s.ribbonPointsPath);
+                B.folded.insert(s.ribbonPointsPath);
+                B.named.insert(s.ribbonPointsPath);
+                B.prims.insert(s.ribbonPointsPath.GetPrimPath());
+            }
+            // bind(), not fold(): a sampleCount edit is a value edit exec
+            // answers per frame, and the epoch digest already forces a
+            // recompile when the count changes the frame cardinality.
+            s.ribbonSampleCount = bind(prim, "rigExec:sampleCount", 5);
+            // rigExec:parameterization, frameTransport, startFrame,
+            // endFrame, twistFrames and driverCurveReadPhase are
+            // deliberately NOT read: the computation does not read them
+            // either -- they shape batching and the epoch digest -- and
+            // folding one would rebuild the program for an edit that cannot
+            // change what it publishes.
         }
         const int slot = int(B.solvers.size());
         B.solverIndex[solverPath] = slot;
@@ -523,6 +695,17 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         }
         B.walkSteps.push_back(std::move(st));
     }
+
+    // The solvers no batch runs. A solver that binds no joint and that no
+    // mover names on rigExec:driverFrames is not required, so the walk never
+    // reaches it -- but it is still an aggregate solver, and the dynamic
+    // path still publishes its frames as guides, out of a SECOND exec
+    // request that genuinely computes it against the walk's FINAL provider
+    // frames. Baked here, in the dependency order Build resolved, and run as
+    // ordinary Solve steps after the walk.
+    for (const SdfPath &solverPath : ctx->guideOnlySolvers) {
+        B.guideSolvers.push_back(bakeSolver(solverPath, {}));
+    }
     B.aggregates.resize(B.solvers.size());
 }
 
@@ -610,6 +793,22 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
     const auto readFin = [&liveFin, n](int slot) {
         return slot >= 0 && size_t(slot) < n ? liveFin[size_t(slot)] : 0u;
     };
+    // One solver's frame reads, bound to the versions live where it runs.
+    // Written once because two callers need it at two different points of
+    // the sweep: a batch's solvers read the versions live where their batch
+    // begins, and the guide-only solvers -- which run after the whole walk
+    // -- read the last version of everything.
+    const auto bindSolverReads =
+        [&readFin](RigExecBakedProgramImpl::Solver &solver) {
+        solver.controlReads.clear();
+        for (const int control : solver.controls) {
+            solver.controlReads.push_back(readFin(control));
+        }
+        solver.rootRead = readFin(solver.root);
+        solver.midRead = readFin(solver.mid);
+        solver.endRead = readFin(solver.end);
+        solver.poleRead = readFin(solver.pole);
+    };
 
     for (size_t w = 0; w < B.walkSteps.size(); ++w) {
         const RigExecBakedProgramImpl::WalkStep &walk = B.walkSteps[w];
@@ -619,15 +818,7 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
         // where the commit's own reads are taken too.
         if (walk.solverBatch) {
             for (const int si : walk.batchSolvers) {
-                RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
-                solver.controlReads.clear();
-                for (const int control : solver.controls) {
-                    solver.controlReads.push_back(readFin(control));
-                }
-                solver.rootRead = readFin(solver.root);
-                solver.midRead = readFin(solver.mid);
-                solver.endRead = readFin(solver.end);
-                solver.poleRead = readFin(solver.pole);
+                bindSolverReads(B.solvers[size_t(si)]);
             }
         } else {
             const RigExecBakedProgramImpl::Constraint &constraint =
@@ -689,6 +880,13 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
                 liveBase[slot] = commit.descendantBaseWrites[k];
             }
         }
+    }
+
+    // And the guide-only solvers, against what the walk left standing: the
+    // dynamic path's guide request overrides every provider with its FINAL
+    // frame, which is what liveFin holds now that the sweep is over.
+    for (const int si : B.guideSolvers) {
+        bindSolverReads(B.solvers[size_t(si)]);
     }
 
     B.finLast.assign(liveFin.begin(), liveFin.end());
@@ -880,6 +1078,15 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                         step.reads.push_back(RigExecBakedOne(
                             RigExecBakedSlotDomain::PoseFin, control));
                     }
+                }
+                // The ribbon's driver points, filled by the prologue.
+                // Nothing in the program writes the domain, so the read
+                // raises no edge; it is declared because it is what the cone
+                // follows when the curve moves, and because a step's
+                // declaration is meant to say what the step touches.
+                if (!solver.ribbonPointsPath.IsEmpty()) {
+                    step.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::SolverPoints, si));
                 }
                 // A BlendPointFrames input solver normally runs in an
                 // earlier batch; when it does not, the read is of last run's
@@ -1074,6 +1281,63 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // that says which entry that is comes out of this sweep.
     BindPoseVersions(&B);
 
+    // ---- the solvers no batch runs ------------------------------------------
+    //
+    // The dynamic path answers these from a second exec request, whose
+    // per-provider override is the FINAL frame rather than the mid-walk one
+    // a batch sees -- so they run HERE, after the whole walk, and read the
+    // last version of everything. They write no candidate and bump no
+    // counter: a solver that binds a joint or drives geometry is required
+    // and therefore batched, so one of these poses nothing and the only
+    // thing that reads it is the guide publication.
+    //
+    // Not gated on the guide toggle. The toggle can move without the epoch
+    // moving, so gating would be a runtime branch in a step body; running
+    // and not publishing is the same published generation, because
+    // RigExecBakedRead only READS the override table and the epilogue
+    // consults the toggle where the dynamic path does.
+    //
+    // The one thing it does move with the guides off is the static-input
+    // cache: RigExecBakedRead's resolved path goes through
+    // RigExecResolvedInputs::GetAttribute, whose hit/miss/bypass counters
+    // are an observable of their own (spec 5.2 [P37][S36]). Nothing in the
+    // pose can see it, and no rig asserts on those counters for a
+    // guide-only solver -- but anyone measuring that cache should know the
+    // guide pass is a client of it whether the guides are drawn or not.
+    for (const int si : B.guideSolvers) {
+        RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
+        solver.elements.resize(solver.controls.size());
+        RigExecBakedStep &step =
+            AddStep(&B, RigExecBakedStepKind::Solve, si);
+        for (const int control : solver.controls) {
+            if (control >= 0) {
+                step.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, control));
+            }
+        }
+        for (const int control :
+                 {solver.root, solver.mid, solver.end, solver.pole}) {
+            if (control >= 0) {
+                step.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::PoseFin, control));
+            }
+        }
+        if (!solver.ribbonPointsPath.IsEmpty()) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::SolverPoints, si));
+        }
+        for (const int input : {solver.inA, solver.inB}) {
+            if (input >= 0) {
+                step.reads.push_back(RigExecBakedOne(
+                    RigExecBakedSlotDomain::Aggregate, input));
+            }
+        }
+        step.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::Aggregate, si));
+        step.writes.push_back(
+            RigExecBakedOne(RigExecBakedSlotDomain::Candidates, si));
+    }
+
     // ---- the rest->pose matrices --------------------------------------------
     //
     // Exactly the set today's lazy finalMatrixOf/baseMatrixOf computed:
@@ -1193,6 +1457,8 @@ NoteSolverInputs(const RigExecBakedProgramImpl::Solver &solver,
     NoteInput(solver.roll, step);
     NoteInput(solver.twist, step);
     NoteInput(solver.minLengthRatio, step);
+    NoteInput(solver.twistTurns, step);
+    NoteInput(solver.ribbonSampleCount, step);
     // The spline parameters the bake could not fold, which the solve re-reads
     // as a group rather than one input at a time.
     step->varyingInputs = step->varyingInputs || solver.splineParamsVary;
@@ -1286,6 +1552,31 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
                     : binding.input.constant;
         }
         B.avarsDisturbed = B.anyOverridden;
+    }
+}
+
+void
+RigExecBakedRunSolverSources(RigExecBakedProgramImpl *program,
+                             UsdTimeCode time)
+{
+    RigExecBakedProgramImpl &B = *program;
+    for (RigExecBakedProgramImpl::Solver &s : B.solvers) {
+        if (!s.ribbonPointsVarying || !s.ribbonPointsQuery.IsValid()) {
+            continue;
+        }
+        // The dynamic path's read, verbatim: the driver attribute's value at
+        // this generation's time, with a failed read leaving the array as it
+        // found it -- which is empty, the way the dynamic path's freshly
+        // constructed VtVec3fArray is. The pinned query answers the same
+        // value the attribute does; only the resolve is cached.
+        VtVec3fArray live;
+        s.ribbonPointsQuery.Get(&live, time);
+        s.lastRibbonPoints.swap(s.ribbonPoints);
+        s.ribbonPoints.assign(live.begin(), live.end());
+        // By VALUE, never "the time moved": a curve keyed on two frames
+        // holds the same points across most of a sweep, and comparing is
+        // what lets the ribbon's whole cone sit out those frames.
+        s.ribbonPointsDirty = s.ribbonPoints != s.lastRibbonPoints;
     }
 }
 
@@ -1606,10 +1897,10 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         } else if (s.type == "RigExecFkChain") {
             for (size_t k = 0; k < s.controls.size(); ++k) {
                 s.elements[k].restPoints = s.controlRests[k];
+                // Every entry is a provider: the bake filtered the list
+                // the way the computation's read iterator does.
                 s.elements[k].posePoints =
-                    s.controls[k] >= 0
-                        ? B.fin[size_t(s.controlReads[k])].points
-                        : RigExecIdentityLandmarks();
+                    B.fin[size_t(s.controlReads[k])].points;
                 s.elements[k].parentIndex =
                     s.parentRelative ? -1 : int(k) - 1;
             }
@@ -1631,23 +1922,53 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             aggregate.frames.assign(frames.begin(), frames.end());
             aggregate.rests.assign(s.ikRests.begin(), s.ikRests.end());
         } else if (s.type == "RigExecBlendPointFrames") {
-            const RigExecPointFrameArray &a = B.aggregates[size_t(s.inA)];
-            const RigExecPointFrameArray &b = B.aggregates[size_t(s.inB)];
-            const size_t n = a.GetSize();
-            // Clamp to [0, 1]: a blend weight outside the unit interval
-            // extrapolates past both inputs.
-            const double w =
-                std::min(std::max(double(rd(s.blendWeight)), 0.0), 1.0);
-            if (n == b.GetSize() && a.rests.size() == n) {
-                aggregate.frames.reserve(n);
-                aggregate.rests.reserve(n);
-                for (size_t k = 0; k < n; ++k) {
-                    aggregate.frames.push_back(RigExecBlendFrames(
-                        a.frames[k], b.frames[k], a.rests[k], w,
-                        RigExecRotationBlend::ShortestArc, s.scaleMode));
-                    aggregate.rests.push_back(a.rests[k]);
+            // An unwired input is the computation's null pointer, and a null
+            // pointer passes the OTHER input through BY VALUE -- rests
+            // included, because element extraction reads them and dropping
+            // them would move every posed joint without moving a frame.
+            const RigExecPointFrameArray *a =
+                s.inA >= 0 ? &B.aggregates[size_t(s.inA)] : nullptr;
+            const RigExecPointFrameArray *b =
+                s.inB >= 0 ? &B.aggregates[size_t(s.inB)] : nullptr;
+            if (!a) {
+                if (b) aggregate = *b;
+            } else if (!b) {
+                aggregate = *a;
+            } else if (s.blendRotationRejected) {
+                // Both bound, so the token is reached: the computation warns
+                // and returns nothing. The aggregate is already clear.
+            } else {
+                const size_t n = a->GetSize();
+                // Clamp to [0, 1]: a blend weight outside the unit interval
+                // extrapolates past both inputs.
+                const double w =
+                    std::min(std::max(double(rd(s.blendWeight)), 0.0), 1.0);
+                if (n == b->GetSize() && a->rests.size() == n) {
+                    aggregate.frames.reserve(n);
+                    aggregate.rests.reserve(n);
+                    for (size_t k = 0; k < n; ++k) {
+                        aggregate.frames.push_back(RigExecBlendFrames(
+                            a->frames[k], b->frames[k], a->rests[k], w,
+                            RigExecRotationBlend::ShortestArc, s.scaleMode));
+                        aggregate.rests.push_back(a->rests[k]);
+                    }
                 }
             }
+        } else if (s.type == "RigExecTwistDistribution") {
+            aggregate = RigExecSolveTwistDistribution(
+                B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
+                s.twistStartRest, s.twistEndRest, s.twistWeights,
+                rd(s.twistTurns));
+        } else if (s.type == "RigExecRibbon") {
+            // Both curves go in as the dynamic path supplies them: the live
+            // points the prologue read (or the folded constant, for a curve
+            // that cannot vary with time), and the bind-time points captured
+            // at Build. Either one empty is the sampler's own guard, and an
+            // empty aggregate is what it answers with.
+            aggregate = RigExecSampleRibbonFrames(
+                s.ribbonPointsVarying ? s.ribbonPoints
+                                      : s.ribbonConstantPoints,
+                s.ribbonRestPoints, rd(s.ribbonSampleCount));
         } else if (s.type == "RigExecSplineIk") {
             RigExecSplineIkParams params = s.splineParams;
             if (s.splineParamsVary || live(s.preserveVolume) ||
@@ -1705,11 +2026,22 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         commit.abandoned = std::find(commit.present.begin(),
                                      commit.present.end(), 1) ==
                            commit.present.end();
-        if (commit.split || commit.abandoned) {
-            return;
+        if (commit.split) {
+            return;  // CommitApply finishes, and carries
         }
-        ComputeCommitDeltas(B, &commit);
-        StageCommitPairs(B, &commit, 0, commit.propagate.size());
+        // A batch that published NOTHING still reaches FinishCommit, the
+        // same way a constraint that passes through does. It writes no
+        // frame, but it owns a version of every slot it could have written
+        // (§3.1) and a write site that leaves its own storage untouched
+        // leaves every reader bound to it -- the matrices and the
+        // publication among them -- reading whatever the last run left
+        // there. Reachable only from a batch whose every solver published an
+        // empty aggregate, which until RigExecTwistDistribution baked no rig
+        // in the tree could produce.
+        if (!commit.abandoned) {
+            ComputeCommitDeltas(B, &commit);
+            StageCommitPairs(B, &commit, 0, commit.propagate.size());
+        }
         FinishCommit(&B, step, &commit);
         return;
     }

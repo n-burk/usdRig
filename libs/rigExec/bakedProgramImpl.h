@@ -34,6 +34,7 @@
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/vec3d.h"
+#include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/token.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
@@ -429,6 +430,7 @@ enum class RigExecBakedSlotDomain : uint8_t {
     FinalMatrix,         ///< finalMatrix[i]
     BaseMatrix,          ///< baseMatrix[i]
     Aggregate,           ///< aggregates[s]
+    SolverPoints,        ///< one ribbon's live driver points; the prologue
     Candidates,          ///< one Solve step's own (slot, frame) scratch
     CommitTable,         ///< one commit's merged candidate table
     CommitDelta,         ///< one commit's per-candidate hierarchy delta
@@ -881,6 +883,9 @@ struct RigExecBakedCones {
     std::vector<int> avarCluster;
     /// Chain -> the clusters of every step that reads its base points.
     std::vector<std::vector<int>> chainBaseClusters;
+    /// Solver -> the clusters of every step that reads its driver points.
+    /// What a ribbon's moved driver curve makes dirty, and nothing else.
+    std::vector<std::vector<int>> solverPointsClusters;
     /// Dense revision id -> the clusters of every step of that revision, and
     /// the cluster of its RevisionStatic alone.
     std::vector<std::vector<int>> revisionClusters;
@@ -1166,6 +1171,12 @@ struct RigExecBakedProgramImpl {
         int inA = -1, inB = -1;
         RigExecBakedInput<float> blendWeight;
         RigExecScaleBlend scaleMode = RigExecScaleBlend::Log;
+        /// An unsupported rigExec:rotationBlend, which is NOT a
+        /// `degenerate`: the computation returns the surviving input before
+        /// it ever looks at the token, so the rejection only bites when
+        /// BOTH inputs are bound. It is checked where the computation
+        /// checks it -- in the arm that has two aggregates in hand.
+        bool blendRotationRejected = false;
         // SplineIk: the rest description is a pure function of epoch-constant
         // rests, so exec's per-evaluation rebuild bakes out.
         RigExecSplineIkRest splineRest;
@@ -1175,6 +1186,40 @@ struct RigExecBakedProgramImpl {
         RigExecBakedInput<double> preserveVolume, midFollowWeight, roll, twist,
             minLengthRatio;
         bool splineParamsVary = false;
+        // TwistDistribution. rigExec:start and rigExec:end ride on the shared
+        // `root` and `end` members rather than a pair of their own: they are
+        // provider slots read out of `fin` exactly as an IK control is, and
+        // the version binding and the Solve step's read declaration are each
+        // written once over those members. The two landmark sets are the
+        // START and END rests, which exec substitutes with identity landmarks
+        // for an unwired end -- a case the bake answers with `degenerate`
+        // instead, because an unwired end also leaves the REQUIRED frame
+        // input unbound and the computation publishes nothing at all.
+        std::array<GfVec3d, 4> twistStartRest{}, twistEndRest{};
+        std::vector<double> twistWeights;
+        RigExecBakedInput<double> twistTurns;
+        // Ribbon. The driver curve's points are the one solver input that
+        // is scene data rather than rig state: the dynamic path reads the
+        // attribute straight off the stage and hands exec both values as
+        // packet overrides, honouring neither connections nor the resolved
+        // inputs. So they are read the same way -- but in the PROLOGUE, into
+        // the SolverPoints slot the Solve step declares, because a step body
+        // may not touch USD.
+        SdfPath ribbonPointsPath;
+        UsdAttributeQuery ribbonPointsQuery;
+        /// The bind-time value, read once at Default. An attribute carrying
+        /// only time samples answers nothing there, which is how the dynamic
+        /// path ends up with an empty rest and an empty aggregate.
+        std::vector<GfVec3f> ribbonRestPoints;
+        /// This run's live value and the last run's, compared by value so a
+        /// moved driver curve dirties this solver's cluster and nothing
+        /// else. Both empty for a curve that cannot vary with time, whose
+        /// value is folded into ribbonConstantPoints instead.
+        std::vector<GfVec3f> ribbonPoints, lastRibbonPoints;
+        std::vector<GfVec3f> ribbonConstantPoints;
+        bool ribbonPointsVarying = false;
+        bool ribbonPointsDirty = false;
+        RigExecBakedInput<int> ribbonSampleCount;
         // (providerSlot, element) pairs this solver writes
         std::vector<std::pair<int, int>> outputs;
 
@@ -1200,6 +1245,10 @@ struct RigExecBakedProgramImpl {
         uint32_t rootRead = 0, midRead = 0, endRead = 0, poleRead = 0;
     };
     std::vector<Solver> solvers;
+    /// The solver slots no batch runs, in dependency order. Their Solve
+    /// steps sit after the whole walk, because the frames the dynamic path's
+    /// guide request hands them are the FINAL ones.
+    std::vector<int> guideSolvers;
     std::map<SdfPath, int> solverIndex;
     std::vector<RigExecPointFrameArray> aggregates;
 
@@ -1870,6 +1919,13 @@ struct RigExecBakedBuildContext {
     /// Every property a chain writes; an input resolving through one cannot
     /// be captured.
     std::set<SdfPath> chainTargets;
+    /// Each RigExecRibbon's resolved driver-points attribute, restated from
+    /// the evaluator's own compiled map (which only Build's file can name).
+    std::map<SdfPath, SdfPath> ribbonDriverPoints;
+    /// The aggregate solvers no batch runs, in dependency order: a guide-only
+    /// RigExecBlendPointFrames may read another one's aggregate, and the
+    /// order is what makes the reader run second.
+    std::vector<SdfPath> guideOnlySolvers;
     std::vector<std::string> *reasons = nullptr;
     bool ok = true;
 
@@ -1997,6 +2053,16 @@ void RigExecBakedSkipGeometryStep(RigExecBakedProgramImpl *program,
 
 /// The pose half of the prologue: the bound inputs, once per run.
 void RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time);
+
+/// The solver half of the prologue: every ribbon's live driver-curve points,
+/// read off the stage and compared with the last run's.
+///
+/// A source in the sense of §7 -- it reads outside the program and its
+/// comparison is what dirties the solvers that read it -- but a prologue
+/// pass rather than a step, for the same reason the bound inputs are one:
+/// it takes the stage's locks, and a step body may not.
+void RigExecBakedRunSolverSources(RigExecBakedProgramImpl *program,
+                                  UsdTimeCode time);
 
 /// The geometry half of the prologue: every chain's and derived target's
 /// authored base, the point-count-moved reset, the node-creation accounting,

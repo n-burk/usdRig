@@ -43,6 +43,7 @@ RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain)
     case RigExecBakedSlotDomain::FinalMatrix: return "FinalMatrix";
     case RigExecBakedSlotDomain::BaseMatrix: return "BaseMatrix";
     case RigExecBakedSlotDomain::Aggregate: return "Aggregate";
+    case RigExecBakedSlotDomain::SolverPoints: return "SolverPoints";
     case RigExecBakedSlotDomain::Candidates: return "Candidates";
     case RigExecBakedSlotDomain::CommitTable: return "CommitTable";
     case RigExecBakedSlotDomain::CommitDelta: return "CommitDelta";
@@ -998,6 +999,7 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     // ---- what a changed source makes dirty ----------------------------------
     cones.avarCluster.assign(B.paths.size(), -1);
     cones.chainBaseClusters.assign(B.chains.size(), {});
+    cones.solverPointsClusters.assign(B.solvers.size(), {});
     cones.revisionClusters.assign(B.revisionIndex.size(), {});
     cones.revisionStaticCluster.assign(B.revisionIndex.size(), -1);
     for (const RigExecBakedStep &step : B.steps) {
@@ -1009,12 +1011,19 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             }
         }
         for (const RigExecBakedSlotRange &range : step.reads) {
-            if (range.domain != RigExecBakedSlotDomain::ChainBase) {
-                continue;
-            }
-            for (uint32_t c = range.begin;
-                 c < range.end && c < cones.chainBaseClusters.size(); ++c) {
-                cones.chainBaseClusters[c].push_back(step.cluster);
+            if (range.domain == RigExecBakedSlotDomain::ChainBase) {
+                for (uint32_t c = range.begin;
+                     c < range.end && c < cones.chainBaseClusters.size();
+                     ++c) {
+                    cones.chainBaseClusters[c].push_back(step.cluster);
+                }
+            } else if (range.domain ==
+                       RigExecBakedSlotDomain::SolverPoints) {
+                for (uint32_t si = range.begin;
+                     si < range.end && si < cones.solverPointsClusters.size();
+                     ++si) {
+                    cones.solverPointsClusters[si].push_back(step.cluster);
+                }
             }
         }
         switch (step.kind) {
@@ -1032,6 +1041,11 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         }
     }
     for (std::vector<int> &clusters : cones.chainBaseClusters) {
+        std::sort(clusters.begin(), clusters.end());
+        clusters.erase(std::unique(clusters.begin(), clusters.end()),
+                       clusters.end());
+    }
+    for (std::vector<int> &clusters : cones.solverPointsClusters) {
         std::sort(clusters.begin(), clusters.end());
         clusters.erase(std::unique(clusters.begin(), clusters.end()),
                        clusters.end());
@@ -1172,6 +1186,17 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 continue;
             }
             for (const int cluster : cones.chainBaseClusters[c]) {
+                dirty.Set(cluster);
+            }
+        }
+        // Each ribbon's driver curve, which the prologue has already read
+        // and compared this run. Scene data, not rig state: nothing in the
+        // program writes it, so nothing else can say that it moved.
+        for (size_t si = 0; si < B.solvers.size(); ++si) {
+            if (!B.solvers[si].ribbonPointsDirty) {
+                continue;
+            }
+            for (const int cluster : cones.solverPointsClusters[si]) {
                 dirty.Set(cluster);
             }
         }

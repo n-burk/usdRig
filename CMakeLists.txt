@@ -471,6 +471,21 @@ foreach(_schedule serial parallel)
         PROPERTY ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
 endforeach()
 
+# The solver half of the baked program, on rigs the examples do not have:
+# every shipped ribbon and twist stage also carries geometry the program
+# still declines, so without these the solvers would be compared with the
+# dynamic path only through a generation neither of them baked. Registered
+# under the cone verifier as well, because the fixtures are small enough
+# that a run skips most of the program.
+add_executable(testRigExecSolverBake tests/testRigExecSolverBake.cpp)
+target_link_libraries(testRigExecSolverBake PRIVATE rigExec)
+target_compile_definitions(testRigExecSolverBake
+    PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSolverBake COMMAND testRigExecSolverBake
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+rigexec_add_baked_parity_test(testRigExecSolverBake REQUIRE_BAKE CONE_VERIFY
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
 add_executable(testRigExecArm tests/testRigExecArm.cpp)
 target_link_libraries(testRigExecArm PRIVATE rigExec)
 target_compile_definitions(testRigExecArm PRIVATE ${_rigexec_schema_resource_define})

@@ -115,7 +115,8 @@ bool
 _IsBakedSolverType(const TfToken &type)
 {
     return type == "RigExecFkChain" || type == "RigExecTwoBoneIk" ||
-           type == "RigExecBlendPointFrames" || type == "RigExecSplineIk";
+           type == "RigExecBlendPointFrames" || type == "RigExecSplineIk" ||
+           type == "RigExecTwistDistribution" || type == "RigExecRibbon";
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on
@@ -225,9 +226,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     for (const auto &[path, movers] : E._snapshotPoints) {
         say("read-phase snapshot required on", path);
     }
-    for (const auto &[path, points] : E._ribbonDriverPoints) {
-        say("ribbon driver curve", path);
-    }
 
     const UsdTimeCode probe = _ProbeTime(E._stage);
     // A property chain RECOMPUTES its target every generation, so a value
@@ -311,46 +309,30 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             if (!_IsBakedSolverType(type)) {
                 say("solver type not baked (" + type.GetString() + ")",
                     solverPath);
-                continue;
             }
-            if (type == "RigExecTwoBoneIk") {
-                // Bone lengths are MEASURED from the rests of the joints the
-                // solver names; without all three there is nothing to bake.
-                //
-                // Resolved the way bakeSolver resolves it, so the two do not
-                // drift: one rest per rigExec:joints target that publishes
-                // computeRestFrame, and the remap indexed by position within
-                // THAT list. A cardinality mismatch is deliberately not a
-                // refusal here -- exec's computation warns and publishes an
-                // empty aggregate, and the bake reproduces that through
-                // Solver::degenerate rather than declining the rig.
-                std::array<bool, 3> seen{false, false, false};
-                std::vector<SdfPath> rests;
-                for (const SdfPath &joint : _Targets(prim, "rigExec:joints")) {
-                    if (E._poseSeedFrames.count(joint)) {
-                        rests.push_back(joint);
-                    }
-                }
-                VtIntArray elements;
-                if (const UsdAttribute a = prim.GetAttribute(
-                        TfToken("rigExec:jointElements"))) {
-                    a.Get(&elements);
-                }
-                for (size_t k = 0; k < rests.size(); ++k) {
-                    const int element =
-                        elements.size() == rests.size() ? elements[k] : int(k);
-                    if (element >= 0 && element < 3) seen[element] = true;
-                }
-                if (!(seen[0] && seen[1] && seen[2])) {
-                    say("TwoBoneIk does not bind three joint rests",
-                        solverPath);
-                }
-            }
+            // A TwoBoneIk that does not bind three joint rests used to be
+            // refused here, resolved a second time by a copy of bakeSolver's
+            // rule. It is not a rig the program cannot express: the
+            // computation warns and publishes an empty aggregate, and
+            // bakeSolver reproduces that through Solver::degenerate. One
+            // expression of the rule, in the place that needs its answer.
         }
     }
+    // An aggregate solver no batch runs is not a rig the program cannot
+    // express: the dynamic path computes it inside the guide request,
+    // against the walk's FINAL frames, and the program runs it as a Solve
+    // step after the walk for the same reason. Its TYPE still has to be one
+    // the program expresses, which the batch loop above never asked about
+    // because it never saw it.
     for (const auto &[solverPath, tap] : E._solverArrayTaps) {
-        if (!batched.count(solverPath)) {
-            say("solver publishes guides but is in no batch", solverPath);
+        if (batched.count(solverPath)) {
+            continue;
+        }
+        const UsdPrim prim = E._stage->GetPrimAtPath(solverPath);
+        const TfToken type = prim ? prim.GetTypeName() : TfToken();
+        if (!_IsBakedSolverType(type)) {
+            say("solver type not baked (" + type.GetString() + ")",
+                solverPath);
         }
     }
 
@@ -975,6 +957,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     for (const auto &[target, revisions] : E._propertyChains) {
         ctx.chainTargets.insert(target);
     }
+    // Each ribbon's driver-points attribute, resolved once by the compiler.
+    // Restated here because bakedPose.cpp cannot name the evaluator's
+    // private map, and re-deriving the resolution (a prim target becomes its
+    // .points, a property target is taken verbatim) would be a second
+    // expression of a rule the compiler already applied.
+    ctx.ribbonDriverPoints = E._ribbonDriverPoints;
     const UsdTimeCode capture = ctx.capture;
     const std::set<SdfPath> &chainTargets = ctx.chainTargets;
     // The bodies below were written against these as lambdas of this
@@ -1226,6 +1214,56 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
         walk.push_back(std::move(entry));
     }
+    // The aggregate solvers no batch runs, in DEPENDENCY order. A guide-only
+    // RigExecBlendPointFrames reads another solver's aggregate, so the
+    // reader has to be baked -- and later, run -- second; a dependency that
+    // is itself batched is satisfied by the walk and drops out of the
+    // ordering. The edges are the evaluator's own (_solverDependencies),
+    // because re-deriving them here would be a second expression of the rule
+    // that decides the batch levels.
+    {
+        std::set<SdfPath> batched;
+        for (const auto &batch : E._solverBatches) {
+            for (const auto &[solverPath, tap] : batch.solvers) {
+                batched.insert(solverPath);
+            }
+        }
+        std::set<SdfPath> pending;
+        for (const auto &[solverPath, tap] : E._solverArrayTaps) {
+            if (!batched.count(solverPath)) {
+                pending.insert(solverPath);
+            }
+        }
+        while (!pending.empty()) {
+            bool progressed = false;
+            for (auto it = pending.begin(); it != pending.end();) {
+                const auto edges = E._solverDependencies.find(*it);
+                bool ready = true;
+                if (edges != E._solverDependencies.end()) {
+                    for (const SdfPath &dependency : edges->second) {
+                        ready = ready && !pending.count(dependency);
+                    }
+                }
+                if (!ready) {
+                    ++it;
+                    continue;
+                }
+                ctx.guideOnlySolvers.push_back(*it);
+                it = pending.erase(it);
+                progressed = true;
+            }
+            if (!progressed) {
+                // A cycle among unbatched solvers. The compile's own Kahn
+                // pass would have refused to schedule one, so this cannot
+                // happen; taking the rest in path order rather than looping
+                // for ever is what an assertion would cost anyway.
+                for (const SdfPath &solverPath : pending) {
+                    ctx.guideOnlySolvers.push_back(solverPath);
+                }
+                pending.clear();
+            }
+        }
+    }
     RigExecBakedBuildWalk(&ctx, walk);
 
     // ---- publication ---------------------------------------------------------
@@ -1240,6 +1278,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     for (const auto &[solverPath, tap] : E._solverArrayTaps) {
         const auto it = B.solverIndex.find(solverPath);
         if (it == B.solverIndex.end()) {
+            // An assertion now rather than a feature: the walk bakes every
+            // batched solver and the guide pass above bakes the rest of
+            // _solverArrayTaps, so the two together cover this map exactly.
             refuse("solver publishes guides but was not baked", solverPath);
             continue;
         }
@@ -1468,6 +1509,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
                                                    &B.propertyResults);
         }
         RigExecBakedRunInputs(&B, time);
+        RigExecBakedRunSolverSources(&B, time);
         RigExecBakedRunGeometryPrologue(&B, time, pose);
     }
     if (measuring) {
