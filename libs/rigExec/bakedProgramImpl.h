@@ -1877,6 +1877,18 @@ struct RigExecBakedProgramImpl {
         /// The keys are used -- more than one chunk, so an influence outside
         /// a chunk's key is an influence that chunk will not see.
         bool chunked = false;
+        /// What the cut decision saw, recorded so it can be asserted and
+        /// printed rather than re-derived. `partitionCandidates` is how many
+        /// ranges the vertex target and the cap produced, and the two levels
+        /// are the lowest and highest level at which one of those ranges has
+        /// every joint it reads. Cutting pays only when they differ -- a
+        /// range that cannot start before the whole revision could is a
+        /// serial loop where a self-parallelising kernel call used to be --
+        /// so `chunked` is `partitionCandidates > 1 && readyMin < readyMax`,
+        /// unless RIGEXEC_BAKED_CHUNK_ALWAYS asked for the cut regardless.
+        size_t partitionCandidates = 0;
+        int partitionReadyMin = 0;
+        int partitionReadyMax = 0;
 
         // ---- what RevisionStatic decides for the whole array ---------------
         /// The layout half of the skin kernel's validation (the matrix half

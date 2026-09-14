@@ -389,6 +389,72 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
 
 namespace {
 
+/// The level at which every provider's matrix is final, indexed by slot:
+/// [1] the rest -> final matrices, [0] the rest -> base ones. A slot no
+/// ProviderMatrix step writes stays at -1, which reads as "not scheduled"
+/// rather than "ready at level 0".
+struct ProviderLevels {
+    std::vector<int> byPhase[2];
+    int maxLevel = 0;
+
+    int Of(int slot, bool finalPhase) const
+    {
+        const std::vector<int> &levels = byPhase[finalPhase ? 1 : 0];
+        return slot >= 0 && size_t(slot) < levels.size()
+                   ? levels[size_t(slot)]
+                   : -1;
+    }
+};
+
+ProviderLevels
+GatherProviderLevels(const RigExecBakedProgramImpl &B)
+{
+    ProviderLevels levels;
+    levels.byPhase[0].assign(B.paths.size(), -1);
+    levels.byPhase[1].assign(B.paths.size(), -1);
+    for (const RigExecBakedStep &step : B.steps) {
+        levels.maxLevel = std::max(levels.maxLevel, step.level);
+        if (step.kind != RigExecBakedStepKind::ProviderMatrix) {
+            continue;
+        }
+        // part 1 is the final-phase matrix, part 0 the base one; object is
+        // the provider slot.
+        if (step.object >= 0 && size_t(step.object) < B.paths.size() &&
+            (step.part == 0 || step.part == 1)) {
+            levels.byPhase[size_t(step.part)][size_t(step.object)] =
+                step.level;
+        }
+    }
+    return levels;
+}
+
+/// The level at which chunk \p k of \p revision has every joint it reads.
+///
+/// The one number the cut is decided on, and the one the report prints, so
+/// that the decision and the record of it cannot drift apart. An
+/// unpartitioned revision is one chunk over every influence, which is the
+/// degenerate case of the same maximum.
+int
+ChunkReadyLevel(const RigExecBakedProgramImpl::GeomRevision &revision,
+                const RigExecBakedProgramImpl::GeomChunk &chunk,
+                bool chunked, const ProviderLevels &levels)
+{
+    const size_t influences = revision.influenceSlots.size();
+    const size_t keySize = chunked ? chunk.key.size() : influences;
+    int ready = 0;
+    for (size_t e = 0; e < keySize; ++e) {
+        const size_t position = chunked ? size_t(chunk.key[e]) : e;
+        if (position >= influences) {
+            continue;
+        }
+        ready = std::max(
+            ready,
+            levels.Of(revision.influenceSlots[position],
+                      revision.finalPhase));
+    }
+    return ready;
+}
+
 /// How many vertices one chunk covers before the cap takes over.
 ///
 /// The default is the point count at which the geometry kernels start
@@ -418,6 +484,21 @@ ChunkCap()
         return authored < 1 ? size_t(1) : size_t(authored);
     }();
     return cap;
+}
+
+/// Whether a skin revision is cut whatever its chunks' ready levels say.
+///
+/// RIGEXEC_BAKED_CHUNK_ALWAYS=1. The escape hatch for the rules' own
+/// fixtures: the chunked path has to be exercised on a real rig, and the
+/// rigs that bake today all pose every joint of a mesh at the same level, so
+/// with the rule ON nothing would cut and every assertion about a chunk would
+/// pass vacuously. Read on each call rather than cached in a static, so one
+/// process can build a program both ways -- which is exactly what the
+/// decision test does.
+bool
+ChunkAlways()
+{
+    return TfGetenvInt("RIGEXEC_BAKED_CHUNK_ALWAYS", 0) != 0;
 }
 
 /// Whether every element of ascending \p a appears in ascending \p b.
@@ -633,10 +714,14 @@ namespace {
 /// -- is one chunk over the whole array, which is the degenerate case of the
 /// same step.
 void
-PartitionAtBuild(RigExecBakedProgramImpl::GeomRevision *revision)
+PartitionAtBuild(const ProviderLevels &levels,
+                 RigExecBakedProgramImpl::GeomRevision *revision)
 {
     revision->chunks.assign(1, RigExecBakedProgramImpl::GeomChunk());
     revision->chunked = false;
+    revision->partitionCandidates = 0;
+    revision->partitionReadyMin = 0;
+    revision->partitionReadyMax = 0;
     if (revision->op != RigExecRevisionOp::Skin ||
         !revision->skinTopologyFixed || !revision->moverPrim) {
         return;
@@ -664,6 +749,46 @@ PartitionAtBuild(RigExecBakedProgramImpl::GeomRevision *revision)
     }
     RigExecBakedPartitionRevision(revision, indices.cdata(), indices.size(),
                                   elementSize, /*chunkCount=*/0);
+    revision->partitionCandidates = revision->chunks.size();
+
+    // Whether the cut pays, which is a question about LEVELS and not about
+    // vertex counts.
+    //
+    // A chunk body is a serial loop over its range; an uncut revision is one
+    // call to RigExecApplySkinKernel over the whole array, and that kernel
+    // spreads itself over the arena. So cutting a revision into seven ranges
+    // that all become runnable at the same level does not overlap anything
+    // -- it replaces one data-parallel call with seven serial ones, measured
+    // at 47us serial and 92us parallel of the biped's frame. What the cut is
+    // FOR is the range whose own joints land early: it may start while the
+    // rest of the rig is still being posed, and that is only possible when
+    // the candidate ranges become ready at different levels.
+    //
+    // Equivalently, and this is how the rule reads in §6: the whole revision
+    // is ready when its LAST joint is, which is the maximum below, so a
+    // range readier than that maximum is exactly a range that can start
+    // earlier than the revision could.
+    int readyMin = -1, readyMax = -1;
+    for (const RigExecBakedProgramImpl::GeomChunk &chunk : revision->chunks) {
+        const int ready = ChunkReadyLevel(*revision, chunk,
+                                          /*chunked=*/true, levels);
+        readyMin = readyMin < 0 ? ready : std::min(readyMin, ready);
+        readyMax = std::max(readyMax, ready);
+    }
+    revision->partitionReadyMin = readyMin < 0 ? 0 : readyMin;
+    revision->partitionReadyMax = readyMax < 0 ? 0 : readyMax;
+    if (revision->chunked && revision->partitionReadyMin >=
+                                 revision->partitionReadyMax &&
+        !ChunkAlways()) {
+        // Back to the degenerate cut, which is the shape every other
+        // operation already has: one range over the whole array, no keys and
+        // no per-chunk tables, so the fuse's whole-array path runs the
+        // revision through the self-parallelising kernel. The partition
+        // FIELDS stay where the cut left them -- the point and index counts
+        // are the layout's, not the cut's, and the report reads them.
+        revision->chunks.assign(1, RigExecBakedProgramImpl::GeomChunk());
+        revision->chunked = false;
+    }
 }
 
 }  // namespace
@@ -672,6 +797,12 @@ void
 RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
+    // The pose half's levels, swept in Build before this function is called.
+    // Every ProviderMatrix step exists and carries its final level, because a
+    // geometry step never precedes a pose step -- so the partition can ask
+    // when a chunk's joints land without the geometry steps being in the
+    // graph yet.
+    const ProviderLevels levels = GatherProviderLevels(B);
     B.chainRevisionBegin.assign(B.chains.size(), 0);
     B.chainRevisionEnd.assign(B.chains.size(), 0);
     B.chainChunkBegin.assign(B.chains.size(), 0);
@@ -714,7 +845,7 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
             // in exactly where the assembler's would have landed.
             revision.packetInfluences.assign(revision.influenceSlots.size(),
                                              GfMatrix4d(1.0));
-            PartitionAtBuild(&revision);
+            PartitionAtBuild(levels, &revision);
             revision.chunkBase = nextChunk;
             nextChunk += int(revision.chunks.size());
             B.revisionChunkBase.push_back(revision.chunkBase);
@@ -2190,45 +2321,6 @@ Fixed2(double value)
     return buffer;
 }
 
-/// The level at which every provider's matrix is final, indexed by slot:
-/// [1] the rest -> final matrices, [0] the rest -> base ones. A slot no
-/// ProviderMatrix step writes stays at -1, which reads as "not scheduled"
-/// rather than "ready at level 0".
-struct ProviderLevels {
-    std::vector<int> byPhase[2];
-    int maxLevel = 0;
-
-    int Of(int slot, bool finalPhase) const
-    {
-        const std::vector<int> &levels = byPhase[finalPhase ? 1 : 0];
-        return slot >= 0 && size_t(slot) < levels.size()
-                   ? levels[size_t(slot)]
-                   : -1;
-    }
-};
-
-ProviderLevels
-GatherProviderLevels(const RigExecBakedProgramImpl &B)
-{
-    ProviderLevels levels;
-    levels.byPhase[0].assign(B.paths.size(), -1);
-    levels.byPhase[1].assign(B.paths.size(), -1);
-    for (const RigExecBakedStep &step : B.steps) {
-        levels.maxLevel = std::max(levels.maxLevel, step.level);
-        if (step.kind != RigExecBakedStepKind::ProviderMatrix) {
-            continue;
-        }
-        // part 1 is the final-phase matrix, part 0 the base one; object is
-        // the provider slot.
-        if (step.object >= 0 && size_t(step.object) < B.paths.size() &&
-            (step.part == 0 || step.part == 1)) {
-            levels.byPhase[size_t(step.part)][size_t(step.object)] =
-                step.level;
-        }
-    }
-    return levels;
-}
-
 /// Whether \p step is one of the four steps that make up revision \p id.
 bool
 IsStepOfRevision(const RigExecBakedStep &step, int id)
@@ -2359,20 +2451,8 @@ RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
             for (size_t k = 0; k < chunks; ++k) {
                 const RigExecBakedProgramImpl::GeomChunk &chunk =
                     revision.chunks[k];
-                int ready = 0;
-                const size_t keySize =
-                    revision.chunked ? chunk.key.size() : influences;
-                for (size_t e = 0; e < keySize; ++e) {
-                    const size_t position =
-                        revision.chunked ? size_t(chunk.key[e]) : e;
-                    if (position >= revision.influenceSlots.size()) {
-                        continue;
-                    }
-                    ready = std::max(
-                        ready,
-                        levels.Of(revision.influenceSlots[position],
-                                  revision.finalPhase));
-                }
+                const int ready = ChunkReadyLevel(revision, chunk,
+                                                  revision.chunked, levels);
                 readyMin = readyMin < 0 ? ready : std::min(readyMin, ready);
                 readyMax = std::max(readyMax, ready);
                 std::snprintf(line, sizeof(line),

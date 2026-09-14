@@ -1655,6 +1655,15 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // program order: its placement comes from the pose walk and its packet is
     // what a revision assembles against.
     RigExecBakedBuildWeightSteps(&B);
+    // The pose half's edges and levels, settled BEFORE the geometry half is
+    // built. A skin revision is cut into chunks only where the chunks' joints
+    // land at different levels (§6), and that question cannot be asked until
+    // the ProviderMatrix steps have levels -- so the sweep runs here, over
+    // the pose steps alone, and again inside RigExecBakedBuildSchedule once
+    // the geometry steps exist. A geometry step never precedes a pose step,
+    // so the levels this pass assigns are the levels the final graph holds.
+    RigExecBakedBuildStepEdges(&B);
+    RigExecBakedAssignStepCosts(&B);
     RigExecBakedBuildGeometrySteps(&B);
     RigExecBakedBuildSchedule(&B);
     if (RigExecBakedScheduleReportRequested()) {

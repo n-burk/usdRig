@@ -94,6 +94,7 @@ Three consequences worth knowing before touching it:
 | `RIGEXEC_BAKED_GRAIN_US` | `clamp(total/(4P), 5, 50)` | the packing grain; 0 is one step per cluster |
 | `RIGEXEC_BAKED_CHUNK_VERTS` | 4096 | vertices per skin chunk before the cap |
 | `RIGEXEC_BAKED_MAX_CHUNKS` | 32 | chunks per skin revision; the range grows to meet it |
+| `RIGEXEC_BAKED_CHUNK_ALWAYS` | off | cut every fixed-layout skin revision, whatever the ready-level rule says (the chunk fixtures' escape hatch) |
 | `RIGEXEC_BAKED_VERIFY_CONES` | off | run every frame twice and compare, slot by slot |
 | `RIGEXEC_BAKED_SCHEDULE_REPORT` | off | the structural report at Build and the run report per frame |
 | `RIGEXEC_BAKED_SCHEDULE_CALIBRATE` | off | fit and print a replacement cost table |
@@ -919,6 +920,26 @@ unspecified, an unknown skinning method. The design that keeps both facts:
   merged shells) depends on both and simply waits longer; the other chunks still start when their
   own joints land, which is strictly better than today. The schedule report (§8.5) prints per chunk
   |key| and the ready level so the claim is measurable per asset.
+* **The cut is only made where it pays** [S19a]. Build cuts the candidate ranges, computes each
+  one's READY LEVEL -- the level at which the last of its own influences is final -- and keeps the
+  cut only when those levels DIFFER; otherwise the revision collapses back to one whole-array
+  chunk. The reason is that a chunk body is a serial loop while an uncut revision is a single
+  `RigExecApplySkinKernel` call that spreads itself over the arena, and
+  `RIGEXEC_BAKED_CHUNK_VERTS` defaults to `RigExecGeometryParallelThreshold` precisely so that a
+  chunk is too small for that kernel to split: seven ranges that all become runnable at the same
+  level are seven serial loops where one data-parallel call used to be. Measured on the biped at 47
+  µs serial / 92 µs parallel of the frame, with all seven chunks ready at level 40 of 44 -- so the
+  biped no longer cuts. Equivalently: the whole revision is ready when its LAST joint is, which is
+  the maximum of the ranges' ready levels, so a range readier than that maximum is exactly a range
+  that can start earlier than the revision could.
+  This needs the pose steps' levels at the moment of the cut, which is why Build runs
+  `RigExecBakedBuildStepEdges` + `RigExecBakedAssignStepCosts` over the pose half BEFORE
+  `RigExecBakedBuildGeometrySteps`, and again from `RigExecBakedBuildSchedule` once the geometry
+  steps exist. The second sweep clears and re-derives every edge, so running it twice produces
+  exactly the graph running it once would have; it is sound because a geometry step never precedes
+  a pose step. `RIGEXEC_BAKED_CHUNK_ALWAYS=1` skips the rule, which is what lets the chunk
+  fixtures in `tests/testRigExecBakedSchedule.cpp` exercise a cut revision on a rig that would not
+  otherwise be cut.
 * **`RevisionChunk(c, r, k)`** is SPECULATIVE [S20][P2]: it reads `RevisionPacket(c, r)`, the
   `FinalMatrix`/`BaseMatrix` of its key influences only, and the overlapping chunks of revision
   r-1's buffer (or `ChainBase` for r = 0); it writes its range of `revisions[r].output` -- the

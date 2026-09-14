@@ -772,7 +772,7 @@ std::string StepLabel(const RigExecBakedProgramImpl &B,
 }  // namespace
 
 void
-RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
+RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     if (B.phasedReads) {
@@ -871,6 +871,17 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
             B.steps[size_t(pred)].succs.push_back(index);
         }
     }
+}
+
+void
+RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
+{
+    RigExecBakedProgramImpl &B = *program;
+    // Re-run rather than assumed done: Build calls the sweep once over the
+    // pose half alone, so that the partition rule (§6) can read the pose
+    // steps' levels before it decides where to cut, and the geometry steps
+    // it then appends need edges of their own.
+    RigExecBakedBuildStepEdges(&B);
 
     // The schedule the parallel executor runs, chosen once here so that a
     // frame costs it nothing: the cost model, the packing, and one padded

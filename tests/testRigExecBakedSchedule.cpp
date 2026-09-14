@@ -48,6 +48,7 @@
 #include "pxr/base/plug/registry.h"
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/vt/array.h"
 #include "pxr/base/vt/value.h"
@@ -992,6 +993,64 @@ TestTheVertexPartitionCoversEveryVertexOnce(const std::string &stagePath,
     if (report) {
         std::printf("%s", RigExecBakedGeometryReport(B).c_str());
     }
+}
+
+/// A revision is cut into chunks only where the cut buys a head start.
+///
+/// The rule (§6): a chunk body is a serial loop, while an uncut revision is
+/// one RigExecApplySkinKernel call that spreads itself over the arena -- so
+/// cutting is a LOSS unless some range becomes runnable before the whole
+/// revision could. That is a question about levels, which is why Build sweeps
+/// the pose half's edges before the geometry half is built.
+///
+/// Asserted on the decision the program recorded rather than on a rig that
+/// happens to answer one way: `chunked` must be exactly "more than one
+/// candidate range, and their ready levels differ". The environment override
+/// is checked in the same breath, because it is what keeps every other chunk
+/// assertion in this file from passing vacuously.
+void
+TestThePartitionIsCutOnlyWhereItPays(const BuiltProgram &built,
+                                     const char *name, bool always)
+{
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    size_t skins = 0, cut = 0;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.op != RigExecRevisionOp::Skin) {
+                continue;
+            }
+            ++skins;
+            const bool differ =
+                revision.partitionReadyMin < revision.partitionReadyMax;
+            const bool expected = revision.partitionCandidates > 1 &&
+                                  (always || differ);
+            if (revision.chunked != expected) {
+                ++failures;
+                std::printf("FAIL %s: %s is %scut with %zu candidate(s) and "
+                            "ready levels %d..%d\n", name,
+                            revision.moverPath.GetString().c_str(),
+                            revision.chunked ? "" : "not ",
+                            revision.partitionCandidates,
+                            revision.partitionReadyMin,
+                            revision.partitionReadyMax);
+            }
+            cut += revision.chunked ? 1 : 0;
+            // An uncut revision is the degenerate partition, not a partition
+            // with its keys quietly dropped: one range, and the fuse's
+            // whole-array path is what runs it.
+            if (!revision.chunked) {
+                CHECK(revision.chunks.size() == 1);
+                CHECK(revision.chunks[0].key.empty());
+            }
+        }
+    }
+    std::printf("  %s: %zu of %zu skin revision(s) cut%s\n", name, cut, skins,
+                always ? " (cut forced)" : "");
 }
 
 /// A skin revision the frame rejects publishes what the dynamic path
@@ -1970,6 +2029,18 @@ main(int argc, char **argv)
     TestTheRangeFormDeformsLikeTheWholeArray("dualQuaternion");
     TestAChunkSeesOnlyItsOwnInfluences("classicLinear");
     TestAChunkSeesOnlyItsOwnInfluences("dualQuaternion");
+    // The cut decision, both ways round. The rigs that bake today pose every
+    // joint of a mesh at the same level, so with the rule alone nothing is
+    // cut -- which is the right answer and would leave every assertion below
+    // about a chunk true of no chunk at all. So the chunk fixtures run with
+    // RIGEXEC_BAKED_CHUNK_ALWAYS=1, and the rule itself is asserted in both
+    // environments.
+    TestThePartitionIsCutOnlyWhereItPays(biped, "Biped", /*always=*/false);
+    TestThePartitionIsCutOnlyWhereItPays(spider, "spider_legs",
+                                         /*always=*/false);
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "1");
+    TestThePartitionIsCutOnlyWhereItPays(
+        Build(examplesDir + "/biped/Biped.usda"), "Biped", /*always=*/true);
     TestTheVertexPartitionCoversEveryVertexOnce(
         examplesDir + "/biped/Biped.usda", "Biped", /*report=*/true);
     TestTheVertexPartitionCoversEveryVertexOnce(
@@ -1985,6 +2056,7 @@ main(int argc, char **argv)
         examplesDir + "/biped/Biped.usda");
     TestAStalePartitionRunsTheRevisionWhole(
         examplesDir + "/biped/Biped.usda");
+    TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
     TestARepeatedTimeReExecutesNothing(examplesDir + "/biped/Biped.usda",
                                        "Biped");
     TestARepeatedTimeReExecutesNothing(
