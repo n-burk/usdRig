@@ -490,6 +490,23 @@ target_link_libraries(testRigExecVolumeWeights PRIVATE rigExec)
 target_compile_definitions(testRigExecVolumeWeights PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecVolumeWeights COMMAND testRigExecVolumeWeights
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# And again through the BAKED program. The suite's default turns the baked
+# path off, because cpuParityMode is what it was written for -- an
+# independently written CPU resolver checked against exec on every shape,
+# both plane bounds, invert, strength, sampleSource, every combine mode and
+# both sample phases. That is also the widest volumetric coverage in the
+# tree, so it is worth running a second time with the oracle off and the
+# program on: same assertions, both paths compared exactly in every
+# generation, and RIGEXEC_BAKE_REQUIRED so a rig that quietly declined
+# cannot pass. RIGEXEC_TEST_BAKED_PATH is what the suite reads to choose.
+rigexec_add_baked_parity_test(testRigExecVolumeWeights REQUIRE_BAKE
+    CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+foreach(_entry testRigExecVolumeWeightsBakedParity
+               testRigExecVolumeWeightsCones_serial
+               testRigExecVolumeWeightsCones_parallel)
+    set_property(TEST ${_entry} APPEND PROPERTY ENVIRONMENT
+        "RIGEXEC_TEST_BAKED_PATH=1")
+endforeach()
 
 add_executable(testRigExecWeightOverlay tests/testRigExecWeightOverlay.cpp)
 target_link_libraries(testRigExecWeightOverlay PRIVATE rigExecImaging)
