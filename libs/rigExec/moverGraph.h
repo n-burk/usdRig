@@ -935,6 +935,15 @@ struct RigExecProviderValues {
     /// Cache for the expensive half of the Profile Mover. Null binds fresh
     /// every call, which is correct but only sane in a test.
     RigExecCurvenetBindCache *curvenetCache = nullptr;
+    /// A bind the CALLER already resolved, for a caller that may not touch
+    /// the cache where it assembles -- RigExecCurvenetBindCache has no
+    /// locking at all, so the baked program resolves it in its serial
+    /// prologue and hands the answer in here. Set -- even to a shared_ptr
+    /// holding null, which is a remembered failed bind -- it is used and
+    /// `curvenetCache` is not consulted. Peer of `skinTopology` below, and
+    /// there for the same reason.
+    const std::shared_ptr<const RigExecProfileMoverBinding> *curvenetBinding =
+        nullptr;
     /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
     /// and re-validates the arrays every call, which is what a layout that
     /// is animated, connected, or written by a property chain requires.

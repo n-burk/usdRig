@@ -406,6 +406,8 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                        // that none of them needs a value the pose walk has
                        // not already produced.
                        r.op == RigExecRevisionOp::BlendShape ||
+                       r.op == RigExecRevisionOp::Curvenet ||
+                       r.op == RigExecRevisionOp::CurvenetAdjuster ||
                        r.op == RigExecRevisionOp::EmitGuidePoints ||
                        r.op == RigExecRevisionOp::Ribbon ||
                        r.op == RigExecRevisionOp::VolumeCorrect ||
@@ -434,10 +436,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         if (r.binding.transformPhase.kind == RigExecReadPhaseKind::AtPrim) {
             say("read phase naming a pose-walk point on rigExec:transform",
                 r.moverPath);
-        }
-        if (!r.binding.curvenetPoints.IsEmpty() ||
-            !r.binding.curvenet.IsEmpty()) {
-            say("curvenet on mover", r.moverPath);
         }
         // The frames the walk hands a curve mover are the aggregate a
         // BATCHED solver publishes -- the dynamic path taps the solver's
@@ -529,6 +527,13 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
                           RigExecBakedProgramImpl::GeomRevision *source,
                           bool keepRun) {
         destination->created = false;
+        // The adjuster's control frames are the node's MUTABLE member state,
+        // which survives a Compute the node did not run -- so they survive a
+        // rebuild the node survived, whatever happens to its result. A
+        // revision below the first divergence re-executes and overwrites
+        // them; one that does not would otherwise publish nothing where the
+        // dynamic path publishes its last answer.
+        destination->controlFrames = std::move(source->controlFrames);
         if (!keepRun) {
             return;
         }
@@ -977,6 +982,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     RigExecBakedProgramImpl &B = *impl;
     B.evaluator = evaluator;
     B.stage = E._stage;
+    B.assetRootPath = E._rigPath.GetParentPath();
     // The evaluator state a frame reads, captured here because this is the
     // only translation unit its friendship reaches; bakedProgramImpl.h says
     // why each one is a pointer rather than a copy.
@@ -1599,7 +1605,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     if (!RigExecBakedPublishPose(&B, pose)) {
         return false;  // the dynamic fallback needs exec
     }
-    RigExecBakedPublishGeometry(&B, pose);
+    RigExecBakedPublishGeometry(&B, time, pose);
 
     // The generation's work counters. Two of them are PROGRAM CONSTANTS
     // rather than observations -- the dynamic path's override rounds are the

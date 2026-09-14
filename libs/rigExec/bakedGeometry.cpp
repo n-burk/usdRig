@@ -10,6 +10,8 @@
 //
 #include "bakedProgramImpl.h"
 
+#include "curvenetAdjuster.h"
+#include "frameExtraction.h"
 #include "moverGraph.h"
 #include "parallel.h"
 #include "rigEvaluator.h"
@@ -29,11 +31,14 @@
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/attributeQuery.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/xformCache.h"
+#include "pxr/usd/usdGeom/xformable.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -151,6 +156,51 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         name(r.binding.surfacePoints);
         name(r.binding.bindCoords);
         name(r.binding.widths);
+        name(r.binding.curvenetPoints);
+        if (r.op == RigExecRevisionOp::CurvenetAdjuster) {
+            // The adjuster reads the NET it writes -- its authored points at
+            // Default, its spline indices and its basis -- and then every
+            // adjustment prim's rest/default/parent/posed/avars ladder,
+            // which is what an animator drags. All of it per frame through
+            // the generation's resolved inputs, so the adjustment prims join
+            // the mover in resolvedRoutedPrims and nothing is captured.
+            const SdfPath netPrim = r.target.GetPrimPath();
+            B.prims.insert(netPrim);
+            B.named.insert(netPrim.AppendProperty(TfToken("points")));
+            for (const char *attribute : {"rigExec:splineIndices",
+                                          "rigExec:basis"}) {
+                B.named.insert(netPrim.AppendProperty(TfToken(attribute)));
+            }
+            B.named.insert(
+                r.moverPath.AppendProperty(TfToken("rigExec:adjustments")));
+            for (const SdfPath &adjustment :
+                     RigExecCurvenetAdjustmentPaths(out.moverPrim)) {
+                B.prims.insert(adjustment);
+                B.resolvedRoutedPrims.insert(adjustment);
+                B.named.insert(
+                    adjustment.AppendProperty(TfToken("rigExec:curvenet")));
+                for (const char *attribute : {"rigExec:knotIndex",
+                                              "rigExec:pointKind",
+                                              "rigExec:includeTangents"}) {
+                    B.named.insert(
+                        adjustment.AppendProperty(TfToken(attribute)));
+                }
+            }
+        }
+        if (!r.binding.curvenet.IsEmpty()) {
+            // The net prim itself: its rigExec:splineIndices,
+            // rigExec:samplesPerSpline and rigExec:basis are the bind's
+            // shape, read at Default on every frame and digested rather than
+            // captured -- so a resync that retargets one has to be seen, and
+            // an edit to one re-cuts through the digest with no rebuild.
+            B.prims.insert(r.binding.curvenet);
+            for (const char *attribute : {"rigExec:splineIndices",
+                                          "rigExec:samplesPerSpline",
+                                          "rigExec:basis"}) {
+                B.named.insert(
+                    r.binding.curvenet.AppendProperty(TfToken(attribute)));
+            }
+        }
         // A phased input is read out of the run's snapshot store when the
         // phase resolves and off the stage when it does not, so the path is
         // one the bake asked about either way.
@@ -254,6 +304,31 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
             chain.derived.push_back(std::move(d));
         }
         B.chains.push_back(std::move(chain));
+    }
+    // The posed net a curvenet mover reads is another CHAIN's published
+    // points, so the link is an index into the table just built. Resolved in
+    // a second pass because the chains are appended in E._chainOrder and the
+    // net's own chain, while always EARLIER than its reader, is not in the
+    // table yet while the reader is being baked.
+    std::map<SdfPath, int> chainIndex;
+    for (size_t c = 0; c < B.chains.size(); ++c) {
+        chainIndex[B.chains[c].target] = int(c);
+    }
+    for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.binding.curvenetPoints.IsEmpty()) {
+                continue;
+            }
+            const auto found = chainIndex.find(revision.binding.curvenetPoints);
+            if (found != chainIndex.end()) {
+                revision.curvenetChain = found->second;
+            }
+            // Not found is not a refusal: a net that no mover chain poses
+            // has no chain of its own, and the assembler falls back to its
+            // authored points at the evaluated time -- which is exactly what
+            // the dynamic walk does when movedProperties has no entry.
+        }
     }
 }
 
@@ -639,6 +714,11 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                 }
                 assemble.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::ChainBase, int(c)));
+                if (revision.curvenetChain >= 0) {
+                    assemble.reads.push_back(
+                        RigExecBakedOne(RigExecBakedSlotDomain::ChainPoints,
+                                        revision.curvenetChain));
+                }
                 if (revision.driverFramesSolver >= 0) {
                     assemble.reads.push_back(
                         RigExecBakedOne(RigExecBakedSlotDomain::Aggregate,
@@ -1161,6 +1241,28 @@ AssembleRevision(RigExecBakedProgramImpl &B,
         values.influenceTransforms = &table;
     }
     values.basePoints.assign(basePoints, basePoints + basePointCount);
+    // The curvenet: the bind out of the program's OWN cache, resolved in the
+    // prologue because that cache has no locking and reports a diagnostic per
+    // bind; and the POSED net, which is the net's own chain result. The
+    // dynamic walk takes the latter out of pose.movedProperties, which is the
+    // same array this chain published -- the walk runs a net's chain before
+    // any mover that reads it and so does the program.
+    if (revision->op == RigExecRevisionOp::Curvenet) {
+        if (revision->curvenetBindResolved) {
+            values.curvenetBinding = &revision->curvenetBind;
+        } else {
+            // The prologue's own call, which is the one that binds.
+            values.curvenetCache = &B.curvenetBindings;
+        }
+        if (revision->curvenetChain >= 0) {
+            const RigExecBakedProgramImpl::GeomChain &net =
+                B.chains[size_t(revision->curvenetChain)];
+            if (net.haveBase && net.haveResult) {
+                values.curvenetPoints.assign(net.result.begin(),
+                                             net.result.end());
+            }
+        }
+    }
     // The driver solver's aggregate, which is what the dynamic path's
     // per-revision tap resolves to: exec computes one and the pose walk then
     // OVERRIDES the tap with its own solve, so the program's table -- the
@@ -1344,6 +1446,36 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
             int(revision->chunks.size()));
         revision->partitionTopology = revision->topology;
     };
+    // The Profile Mover's bind, resolved HERE and never in a step.
+    //
+    // RigExecCurvenetBindCache mutates its entry map and appends to its
+    // pending diagnostics with no synchronisation whatever, so it belongs to
+    // serial code -- and a step body may take no lock to make it belong
+    // anywhere else. Everything the bind depends on is read at Default with
+    // the resolved inputs bypassed, so the answer cannot depend on where in
+    // the frame it is taken; what the packet's own assembly then adds is the
+    // POSED net, which decides no part of the cut and is compared only
+    // against the rest net's cardinality. The bind is therefore this frame's
+    // whichever points stand in the net chain's buffer while the prologue
+    // runs, and the step is left with a pointer and no cache.
+    //
+    // The price is one extra curvenet packet assembly per frame per curvenet
+    // mover, paid so that the bind cannot be reached from two threads. It is
+    // the same assembly the dynamic walk performs once, over the same arrays.
+    const auto resolveCurvenetBind =
+        [&B, time](const RigExecBakedProgramImpl::GeomChain &chain,
+                   RigExecBakedProgramImpl::GeomRevision *revision) {
+        if (revision->op != RigExecRevisionOp::Curvenet) {
+            return;
+        }
+        revision->curvenetBindResolved = false;
+        RigExecBakedStep scratch;
+        const RigExecMoverParameters bound =
+            AssembleRevision(B, revision, chain.lastBase.cdata(),
+                             chain.lastBase.size(), time, &scratch);
+        revision->curvenetBind = bound.curvenetBinding;
+        revision->curvenetBindResolved = true;
+    };
     for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         VtVec3fArray basePoints;
         chain.haveBase =
@@ -1391,6 +1523,7 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
         for (RigExecBakedProgramImpl::GeomRevision &revision :
                  chain.revisions) {
             resolveTopology(&revision);
+            resolveCurvenetBind(chain, &revision);
         }
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
                  chain.derived) {
@@ -1758,9 +1891,15 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 // full-strength fast path, the kernel and the "apply once"
                 // blend all live in RigExecRunRevisionKernel, so an
                 // operation cannot mean one thing here and another there.
+                // The control frames are handed over for every operation
+                // and written by one, exactly as the revision node hands its
+                // own buffer to the same kernel whatever it is running: the
+                // adjuster's second output is the only thing that touches
+                // them, and it keeps its last answer through a run it sat
+                // out because the buffer outlives the run.
                 chunk.ok = RigExecRunRevisionKernel(
                     revision.op, revision.parameters, &revision.output,
-                    /*controlFrames=*/nullptr);
+                    &revision.controlFrames);
                 return;
             }
             if (!revision.parameters.valid ||
@@ -2108,9 +2247,63 @@ RigExecBakedGeometryReport(const RigExecBakedProgramImpl &B)
 
 void
 RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
-                            RigExecRigPose *pose)
+                            UsdTimeCode time, RigExecRigPose *pose)
 {
     RigExecBakedProgramImpl &B = *program;
+    // The ladder from a curvenet's own prim up to the asset root, composed
+    // at the evaluated time. Built LAZILY and at most once per frame: a rig
+    // with no adjuster never constructs a UsdGeomXformCache, and one with
+    // several composes each net's ladder through the same cache.
+    //
+    // Here rather than in a step because it reads the stage and writes the
+    // pose, and both are the epilogue's business. The kernel's own output --
+    // the adjusted frames in net-local space -- was produced in the region;
+    // this only moves them into the space every rig control publishes in.
+    std::unique_ptr<UsdGeomXformCache> xformCache;
+    const UsdPrim assetRoot = B.stage->GetPrimAtPath(B.assetRootPath);
+    const auto publishAdjuster =
+        [&](const RigExecBakedProgramImpl::GeomRevision &revision) {
+        if (revision.op != RigExecRevisionOp::CurvenetAdjuster ||
+            revision.resultStatus != "ok") {
+            return;
+        }
+        if (!xformCache) {
+            xformCache = std::make_unique<UsdGeomXformCache>(time);
+        }
+        const std::vector<SdfPath> paths = RigExecCurvenetAdjustmentPaths(
+            B.stage->GetPrimAtPath(revision.moverPath));
+        GfMatrix4d netToAsset(1.0);
+        for (UsdPrim prim =
+                 B.stage->GetPrimAtPath(revision.target.GetPrimPath());
+             prim && !prim.IsPseudoRoot() && prim != assetRoot;
+             prim = prim.GetParent()) {
+            const UsdGeomXformable xform(prim);
+            if (!xform) {
+                continue;
+            }
+            GfMatrix4d local(1.0);
+            bool reset = false;
+            xform.GetLocalTransformation(&local, &reset, time);
+            const auto driven = pose->providerXforms.find(prim.GetPath());
+            if (driven != pose->providerXforms.end()) {
+                local = driven->second;
+            }
+            netToAsset = netToAsset * local;
+            if (reset) {
+                netToAsset =
+                    netToAsset * xformCache->GetLocalToWorldTransform(assetRoot)
+                                     .GetInverse();
+                break;
+            }
+        }
+        // min(), and not a cardinality refusal: the walk publishes what both
+        // sides have and says nothing about the rest.
+        for (size_t j = 0;
+             j < std::min(revision.controlFrames.size(), paths.size()); ++j) {
+            pose->controlFrames[paths[j]] =
+                RigExecFrameFromMatrix(revision.controlFrames[j] * netToAsset);
+        }
+    };
     // Chain by chain, in chain order, and inside a chain exactly where the
     // straight line put each line: every revision's assemble diagnostics
     // first, then the status sweep's, then the chain's points, then each
@@ -2127,6 +2320,16 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
             const RigExecBakedProgramImpl::GeomChain &chain =
                 B.chains[size_t(step.object)];
             if (chain.haveBase) {
+                // The adjusters of this chain, in revision order, where the
+                // walk publishes them: inside the same per-revision sweep
+                // that reports the chain's MoverFailed lines, and after the
+                // pose half published the rig's own controls -- so an
+                // adjustment path that collides with a RigExecControl path
+                // wins, as it does there.
+                for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                         chain.revisions) {
+                    publishAdjuster(revision);
+                }
                 pose->movedProperties[chain.target] = VtValue(chain.result);
             }
         } else if (step.kind == RigExecBakedStepKind::Derived) {

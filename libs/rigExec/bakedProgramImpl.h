@@ -983,6 +983,11 @@ enum class RigExecBakedPropagateOutcome : uint8_t {
 struct RigExecBakedProgramImpl {
     RigExecRigEvaluator *evaluator = nullptr;
     UsdStageRefPtr stage;
+    /// The rig's asset root: the parent of the RigExecRoot, which is the
+    /// space every control frame the rig publishes is expressed in. Read by
+    /// the epilogue's curvenet-adjuster publication, which composes the
+    /// ladder from the net's own prim up to here.
+    SdfPath assetRootPath;
 
     // ---- the evaluator state the frame path reads --------------------------
     //
@@ -1469,6 +1474,30 @@ struct RigExecBakedProgramImpl {
         UsdPrim moverPrim;
         RigExecRevisionOp op = RigExecRevisionOp::Skin;
         RigExecRevisionBinding binding;
+        /// The chain whose published points are this curvenet mover's POSED
+        /// net, as an index into `chains`, or -1. E._chainOrder runs a net's
+        /// own chain before any mover that reads it, so the value is this
+        /// run's by the time the revision is assembled -- and the static
+        /// step declares the chain's ChainPoints slot, which is what says so
+        /// to the scheduler.
+        int curvenetChain = -1;
+        /// The curvenet adjuster's second output: one fully adjusted frame
+        /// per adjustment, in RigExecCurvenetAdjustmentPaths order.
+        ///
+        /// Persistent, because the revision node keeps its own as MUTABLE
+        /// member state that survives a Compute it did not run -- a revision
+        /// whose inputs stood still still publishes the frames it last
+        /// produced, and the published map is one of the seven the
+        /// comparator checks.
+        std::vector<GfMatrix4d> controlFrames;
+        /// The Profile Mover bind, resolved in the PROLOGUE.
+        ///
+        /// RigExecCurvenetBindCache has no locking at all and reports one
+        /// diagnostic per bind, so it belongs to serial code; a null pointer
+        /// here is a remembered failed bind and not "not asked yet", which
+        /// `curvenetBindResolved` says.
+        std::shared_ptr<const RigExecProfileMoverBinding> curvenetBind;
+        bool curvenetBindResolved = false;
         /// This revision's blend channels, in `binding.blendInputs` order.
         /// Empty for every operation but a blend shape.
         std::vector<GeomBlendChannel> blendChannels;
@@ -2052,9 +2081,11 @@ bool RigExecBakedPublishPose(RigExecBakedProgramImpl *program,
                              RigExecRigPose *pose);
 
 /// The geometry half of the epilogue: each chain's diagnostics and points
-/// and each derived target's, in chain order.
+/// and each derived target's, in chain order, plus the control frames a
+/// curvenet adjuster publishes -- which need \p time, because the ladder
+/// from the net to the asset root is composed at the evaluated time.
 void RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
-                                 RigExecRigPose *pose);
+                                 UsdTimeCode time, RigExecRigPose *pose);
 
 /// Cuts \p revision's vertices into chunks, from \p indices and
 /// \p elementSize.

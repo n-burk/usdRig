@@ -435,6 +435,14 @@ add_executable(testRigExecCurvenetAdjuster tests/testRigExecCurvenetAdjuster.cpp
 target_link_libraries(testRigExecCurvenetAdjuster PRIVATE rigExec rigExecRigging)
 target_compile_definitions(testRigExecCurvenetAdjuster PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecCurvenetAdjuster COMMAND testRigExecCurvenetAdjuster)
+# The curvenet adjuster's only baked coverage. Its own fixtures pin
+# cpuParityMode, which asks for the dynamic path, so the suite grew one
+# generation that does not -- over a net carrying an xform op, which is what
+# exercises the net -> asset ladder the adjusted control frames publish
+# through. No REQUIRE_BAKE: one LATER fixture in this suite connects
+# parent:space on a provider, which the program still refuses, and that
+# refusal belongs to the providers group rather than to the adjuster.
+rigexec_add_baked_parity_test(testRigExecCurvenetAdjuster)
 
 add_executable(testRigExecWeightFields tests/testRigExecWeightFields.cpp)
 target_link_libraries(testRigExecWeightFields PRIVATE rigExecMath)
