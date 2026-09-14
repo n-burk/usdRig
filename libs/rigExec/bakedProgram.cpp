@@ -509,6 +509,12 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         destination->lastParameters = std::move(source->lastParameters);
         destination->lastStatus = source->lastStatus;
         destination->ran = source->ran;
+        // The last run's envelope scalar belongs to the cached result the
+        // same way the packet does: a node whose `ran` survives a rebuild
+        // must not then compare this against the zero a fresh revision
+        // starts at, or every revision of the rig re-executes on the first
+        // generation after any edit.
+        destination->lastDefaultWeight = source->lastDefaultWeight;
         // WHICH buffer the chain's running value was in, which is as much a
         // part of the cached result as the buffer itself: a revision that
         // does not execute publishes through this indirection, and a kept
@@ -1360,6 +1366,16 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // exec nothing and resolves first -- which is why this op can be the
         // same routine the dynamic path runs rather than a second copy of it.
         B.propertyResults.clear();
+        // RUN-LOCAL, and therefore a cone hazard the group that lands the
+        // writer has to answer (§7): this map is emptied here and filled by
+        // the pose walk's geometry-domain constraint, which does not exist
+        // yet. A run that SKIPS that constraint would leave the entry
+        // missing rather than leaving last run's value in it, and the
+        // assemble that find-guards it would deform as though no constraint
+        // had ever measured a delta. The two answers are to keep the map
+        // across runs the way a slot is kept, or to force a full run the way
+        // `phasedReads` does for the snapshot store. Whichever, it is a
+        // decision, not something to leave to the first frame that skips.
         B.constraintDeltas.clear();
         B.resolvedInputs->Clear();
         B.runSnapshots.Clear();

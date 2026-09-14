@@ -1,35 +1,208 @@
-# Baked program as a step graph (Phase 2 specification, v2)
+# Baked program as a step graph (Phase 2)
 
-Status: specification for the restructure of `RigExecBakedProgram` (libs/rigExec/bakedProgram.cpp)
-into a dependency graph of steps. v2 incorporates two independent design reviews (exact-parity
-lens, scheduling lens) of v1; the review findings are cited as [P#] (parity) and [S#] (scheduling)
-where a rule exists because of them. Line numbers refer to bakedProgram.cpp on branch
-`bake-all/infra` before Phase 2 (Run at 2124-2980). The implementer commits this document as
-`docs/baked-step-graph.md` and keeps it in sync with the code.
+Status: BUILT. §§1-10 below are the specification the restructure of `RigExecBakedProgram` was
+made against, kept verbatim so the rules can still be read as rules; the review findings that
+produced them are cited as [P#] (parity) and [S#] (scheduling), and line numbers refer to
+bakedProgram.cpp on branch `bake-all/infra` before Phase 2 (Run at 2124-2980). Everything above
+§1 says what the code actually does, with the numbers it does it in. Where the two disagree the
+deviation is listed, with its reason.
 
-Implementation status: §9's file split has landed, and so have the graph, the cost model, the
-level-pack clustering and BOTH executors. `bakedProgramImpl.h` holds the program state, the slot
-domains, `RigExecBakedStep`, `RigExecBakedCluster`/`RigExecBakedClustering` and the helpers more
-than one file calls; `bakedPose.cpp` and `bakedGeometry.cpp` hold each domain's bake, its step
-builders and its step bodies; `bakedSchedule.{h,cpp}` holds the edge sweep, the cost model, the
-clustering, the serial and parallel executors, the calibration mode, the timing replay and the
-`RIGEXEC_BAKED_SCHEDULE_REPORT` dumps; and `bakedProgram.cpp` keeps the public surface,
-`IsBakeable`, the `Build` skeleton, the run prologue and epilogue, and `RigExecComparePoses`.
-Every published value, diagnostic and compared counter of the three rigs that bake is
-byte-identical to before, in serial and in parallel, at grain 0, at the default grain and at 200
-microseconds. Vertex-chunked skinning (§6) and cone re-execution (§7) are still to come, and
-until the vertex partition lands a revision is one whole-range chunk, so a biped's geometry tail
-is a chain of four steps and the schedule's critical-path estimate is 491us of a 531us program --
-which is why `RIGEXEC_BAKED_SCHEDULE` still DEFAULTS to `serial`: parallel is correct at every
-grain but not yet faster, and the default flips after the acceptance matrix of §8.
+## What was built
 
-The cost table in `bakedSchedule.cpp` is the one place a machine's numbers are written down. It
-was fitted by `RIGEXEC_BAKED_SCHEDULE_CALIBRATE=1` over eight frames of `Biped_anim` and should be
-re-fitted whenever the shape of a step changes -- the vertex partition will change
-`RevisionChunk`'s row in particular, because the row currently measures a step that spreads itself
-over the arena. Calibration is opt-in, runs the serial executor whatever the mode asks for, and
-times each step into that step's own accumulator; `Build` measures nothing, so the same program
-produces the same schedule on the same machine however busy it is.
+`Run` is no longer a straight line. A frame is a serial prologue, a region of STEPS over dense
+slots, and a serial epilogue; the steps form a dependency graph derived at Build from the slot
+ranges each step declares, and the whole graph is partitioned into clusters that either the serial
+executor walks in program order or the parallel one spreads across the work arena. The files are
+§9's: `bakedProgramImpl.h` (program state, slot domains, `RigExecBakedStep`, clusters, cones),
+`bakedPose.cpp` and `bakedGeometry.cpp` (each domain's bake, step builders and step bodies),
+`bakedSchedule.{h,cpp}` (the edge sweep, the cost model, the clustering, both executors, the cone
+closures, the calibration mode, the timing replay, the reports), `bakedVerify.cpp` (the run shadow
+`RIGEXEC_BAKED_VERIFY_CONES` compares two runs of one frame with) and `bakedProgram.cpp` (the
+public surface, `IsBakeable`, the `Build` skeleton, the prologue, the epilogue and
+`RigExecComparePoses`).
+
+A skin revision is cut into contiguous vertex chunks at Build (§6); each chunk waits for the
+`FinalMatrix`/`BaseMatrix` slots of ITS OWN influences and for nothing else, writes its range of
+the revision's own buffer, and the fuse decides afterwards whether the revision applied at all.
+
+A frame runs only the CLOSURE of what its sources say moved (§7). Sources always run and are
+compared by value; a skipped cluster keeps its slots, its diagnostics and its structural counters.
+`RIGEXEC_BAKED_VERIFY_CONES=1` runs every generation twice -- once as the cone decided, once
+whole, from the state the prologue left -- and reports every slot, counter and diagnostic the two
+disagree about as a mismatch on the pose.
+
+Every published value, every diagnostic in order and every compared counter of the three rigs that
+bake is byte-identical to the straight line it replaced, in serial and in parallel, at grain 0,
+the default grain and 200us, at 1, 8 and 32 chunks, at 512 and 4096 chunk vertices, and with the
+cone verifier on in each.
+
+### The environment
+
+| variable | default | what it does |
+|---|---|---|
+| `RIGEXEC_BAKED_SCHEDULE` | `serial` | `serial` or `parallel`; forced to serial when `RIGEXEC_ENABLE_PARALLEL_EVAL=0` |
+| `RIGEXEC_BAKED_GRAIN_US` | `clamp(total/(4P), 5, 50)` | the packing grain; 0 is one step per cluster |
+| `RIGEXEC_BAKED_CHUNK_VERTS` | 4096 | vertices per skin chunk before the cap |
+| `RIGEXEC_BAKED_MAX_CHUNKS` | 32 | chunks per skin revision; the range grows to meet it |
+| `RIGEXEC_BAKED_VERIFY_CONES` | off | run every frame twice and compare, slot by slot |
+| `RIGEXEC_BAKED_SCHEDULE_REPORT` | off | the structural report at Build and the run report per frame |
+| `RIGEXEC_BAKED_SCHEDULE_CALIBRATE` | off | fit and print a replacement cost table |
+
+### The schedule, on the biped
+
+```
+rigExec baked schedule: 458 step(s), 1068 edge(s), 326 provider slot(s)
+  mode=serial grain=6.98us concurrency=20
+  clusters=57 (289 edge(s)) serial=558.08us criticalPath=294.46us (1.90x)
+  ChainStatus 1        CommitApply 2      CommitDelta 2      ComposeSubtree 93
+  Constraint 65        Derived 1          InfluenceFold 1    PropagateChunk 4
+  ProviderMatrix 252   RevisionChunk 7    RevisionFuse 1     RevisionStatic 1
+  Solve 14             SolverCommit 14
+  skin revisions:
+  /Biped/Rig/Movers/skin_body_geo/body_geo_skin: 7 chunk(s), 26276 vertex(es), 137 influence(s)
+    vertices/chunk min 1700 mean 3753.7 max 4096
+    |key| min 24 mean 41.3 max 58; 0/7 chunk(s) reach half the influences
+    skin serial 280.79us critical path 53.96us (5.20x)
+    ready level min 40 max 40 of 44
+```
+
+The partition bought what §6 hoped it would and the report says so per asset: no chunk of the
+biped's body mesh depends on as much as half of the 137 influences, the mean chunk waits for 41 of
+them, and the skin's critical path is 54us against 281us of serial skinning. What it did not buy
+is a spread of READY LEVELS -- all seven chunks become runnable at level 40 of 44 -- because the
+biped's constraints finalise nearly every joint in the same few levels. The arm vertices no longer
+wait for the leg constraints ARITHMETICALLY; on this rig they happen to be ready at the same time
+anyway.
+
+### What a frame costs
+
+`rigExecPose --profile`, `Biped_anim` frames 1-8, median of frames 2-8, best of five runs, on a
+20-core box. `b705950` is the Phase 1 head, before any of this:
+
+| | Baked | prologue | region | epilogue |
+|---|---|---|---|---|
+| b705950 (straight line) | 738us | -- | -- | -- |
+| serial | 802us | 122us | 513us | 150us |
+| parallel | 1273us | 123us | 992us | 150us |
+
+The profiler is not free here: it takes two clock reads per step in parallel mode against one per
+step boundary in serial, so the same frames were also timed by the wall clock with the profiler
+off, as (800 frames - 400 frames)/400 to subtract stage opening, best of five:
+
+| | us/frame |
+|---|---|
+| b705950 | 766 |
+| serial | 753 |
+| parallel (default grain) | 820 |
+| parallel (grain 20 / 50 / 200) | 813 / 846 / 852 |
+
+So §8.4's first half holds -- serial is within 5% of the straight line, and in fact slightly
+faster -- and its second half does not: parallel is 9% SLOWER than serial on this machine at every
+grain tried. **`RIGEXEC_BAKED_SCHEDULE` therefore still defaults to `serial`**, which §5.2 makes
+conditional on §8 passing. The schedule's own estimate says why the margin is thin: 558us of
+modelled serial work against a 294us critical path is at most 1.9x before any overhead, the
+epilogue's 150us of map publication is irreducibly serial, and 57 clusters averaging 10us each are
+close to the cost of spawning them. A frame that is actually quicker is the evidence that flips
+the default; the mode is correct at every grain today and one environment variable away.
+
+### What a drag costs
+
+No tool takes a drag, so this is 50 `SetInteractiveOverrides` + `Evaluate` iterations on one
+control of `Biped.usda`, best of five, us per frame:
+
+| control | dynamic | baked | baked, without the per-override `_skinTopologies.Clear()` |
+|---|---|---|---|
+| `arm_l_fk_wrist_l_bind` (small cone) | 7800 | 1167 | 759 |
+| `hips_ctl` (large cone) | 9290 | 1373 | 929 |
+
+The baked path is 6.7-7.7x the dynamic one on a drag. Of what is left, the single largest line
+item is the cache clear [S29] names: dropping `_skinTopologies` on every override set costs
+~405us on the wrist drag (35% of the frame) and ~430us on the hips drag (31%), because the
+prologue then re-reads and re-compares 105k layout elements. It buys nothing numerically -- the
+cache keeps the previous layout as a CANDIDATE and hands back the same pointer for arrays that
+compare equal, which is exactly why the packet does not change and the revision does not
+re-execute. **The clear is left alone**, because a third of a drag frame is a large cost and not a
+dominating one, and because the narrow version is not as simple as it looks: the predicate
+"the override set names a skin mover property" has to follow the same connection walk the layout
+attributes are read through, or an override one hop upstream of a connected `jointIndices` is
+missed and the deformation is silently stale. The number is recorded here so the group that lands
+the narrow clear lands the connection walk and a test with it.
+
+Both drags run every cluster of the program (57 of 57), and that is the restore closure doing its
+job rather than failing to: a constraint READ-MODIFY-WRITES its target's frame, so restoring the
+version it read pulls in the compose that wrote it, and everything downstream of that compose
+comes with it. Where cone re-execution pays on this rig is the case it was written for:
+
+| | clusters run |
+|---|---|
+| `Biped_anim`, a frame already evaluated at that time | 8 of 57 |
+| `Biped.usda`, a control overridden with its own authored value and held | 8 of 57, 0 revisions executed |
+| `spider_legs`, a repeated frame | 0 of 1 |
+
+### Deviations from §§1-10, each with its reason
+
+* The slot **kind** of §3 is called a slot DOMAIN in the code (`RigExecBakedSlotDomain`), because
+  `RigExecBakedSlotKind` already says what a PROVIDER slot is.
+* `InfluenceFold(c, r)` runs BEFORE `RevisionStatic(c, r)` for every operation but a SKIN, and the
+  packet depends on it. §6 wants the static packet to be independent of the influence matrices,
+  which for a skin revision it now is -- that is what lets a chunk start on its own joints. For
+  everything else the assembler reads the table, and splitting `RigExecAssembleParameters` in two
+  for operations that are not chunked buys nothing.
+* `graphChainsBuilt` / `graphRevisionsBuilt` are summed from per-step counter deltas rather than
+  taken as program constants (§4.2 item 7). A chain -- or a derived target -- whose base attribute
+  does not read at the frame's time is skipped entirely by the dynamic path and by today's `Run`,
+  counters included, and a constant cannot reproduce that. A skipped step keeps these two and
+  loses `revisionsExecuted`, which is the one that is an observation.
+* A commit's size in the cost model is its CANDIDATES PLUS its propagation pairs, not §5.1's
+  `|propagate|` alone. Both halves of the commit walk the candidate table in slot order, and a
+  solver batch with forty candidates and no descendants is not free.
+* A `Derived` step's size is the CHAIN's vertex count, which §5.1 does not name. `recomputeExtent`
+  walks the points it is maintained from and publishes two vectors; sizing it by its own array
+  made the fitted per-unit cost 50us, which is the same number saying the model was wrong. A
+  `ChainStatus` step's size is the chain's vertex count for the same reason and against §5.1's
+  "revisions of the chain": the sweep ends by copying the chain's published point array whole.
+* Every recorder of the run's phased-read store declares the whole store up to its own step,
+  instead of only its own slot, on a rig where something can look a record up (`phasedReads`).
+  Per-step slots order a record against its READERS, which is what §4 asks for, but the records
+  reach one container through a fold the executor performs, and two folds at once is a race
+  whatever the slots say. Widening a declared write is always sound (§2.5), the widening costs
+  nothing on a rig with no read phase, and the alternative -- a lock around the store -- is
+  forbidden. Such a rig also runs every cluster of every frame, for the same reason: the store is
+  emptied at the head of a run, so a skipped recorder leaves a hole in it rather than last run's
+  answer.
+* The schedule report is TWO reports. `RigExecBakedScheduleReport` is structural and
+  deterministic, so two builds of one stage produce the same text and a test can say so; the
+  per-cluster wait and run times of §8.5 are in `RigExecBakedScheduleRunReport`, which needs a
+  frame to have happened -- and only the parallel executor stamps them, so after a serial frame
+  that report says the run was serial instead of printing a table of zeros that would read as
+  "every cluster was free". It does report how many clusters the last run ran, in both modes.
+  §8.5's per-skin-revision chunk statistics are printed by the structural half:
+  `RigExecBakedGeometryReport` writes them (it owns the chunk keys) and
+  `RigExecBakedScheduleReport` calls it.
+* §7's sources are "Inputs, ChainBase, PropertyChains, RevisionStatic". Two of those are not the
+  whole story in the code and both are named rather than papered over. A `Solve` and a
+  `Constraint` read their OWN parameters off the stage every frame -- weights, offsets, axis
+  masks, world-up vectors -- so Build walks those inputs once
+  (`RigExecBakedDeclareInputDependencies`) and leaves each step saying whether any of them varies
+  with time and which override indices reach it; the dirty set names those steps when the time
+  moved, or an override stands on one of their inputs, or stood on one last run. And a
+  `RevisionStatic` that is NOT a source, because its packet depends on the influence table, is
+  marked `externalReads` together with every `Derived` step, and its cluster is dirty every
+  run; its own value comparison is what keeps the counters saying what the dynamic path says.
+* §7 says "skipped steps keep slots and replay stored diagnostics". They also RESET their deltas,
+  which the specification does not say and which a test found: a geometry step writes flags
+  beside its values -- "the influence table moved", "the packet moved", "the revision executed" --
+  and a delta is the one thing last run's answer is never this run's. A fuse that ran while its
+  fold was skipped read last run's "the matrices moved" and executed a revision the dynamic path
+  did not. `RigExecBakedSkipGeometryStep` writes what a step that compared nothing means.
+* §7's run rule is `closed |= OR of restoreOf[c] for c in closed`. The code takes the CONE of each
+  restored cluster as well, to a fixpoint. Re-running a writer to restore the version a reader saw
+  leaves the slot holding that version, so every later writer of it -- and every reader between --
+  has to run too, which is exactly its forward cone.
+* `RIGEXEC_BAKED_SCHEDULE=parallel` is not the default. §5.2 makes it the default "once §8
+  passes"; §8.1, §8.2, §8.3 and the first half of §8.4 pass, and the second half of §8.4 --
+  "parallel mode faster than serial on the biped and on the drag benchmark" -- does not. See the
+  measurements above.
 
 Two rules of §2 and §4.3 that a serial run cannot enforce, and where they are enforced instead:
 the per-frame assemblers take no token-registry lock -- every `TfToken(const char *)` on the step
@@ -40,84 +213,48 @@ a source domain -- every record in the run's store is written by a step, so a st
 store declares the steps before it, which `tests/testRigExecBakedSchedule` then checks like any
 other read.
 
-Nine deviations from the sections below, each made for a stated reason:
+The cost table in `bakedSchedule.cpp` is the one place a machine's numbers are written down. It
+was fitted by `RIGEXEC_BAKED_SCHEDULE_CALIBRATE=1` over eight frames of `Biped_anim` and should be
+re-fitted whenever the shape of a step changes. Calibration is opt-in, runs the serial executor
+whatever the mode asks for, and times each step into that step's own accumulator; `Build` measures
+nothing, so the same program produces the same schedule on the same machine however busy it is.
 
-* The slot **kind** of §3 is called a slot DOMAIN in the code (`RigExecBakedSlotDomain`), because
-  `RigExecBakedSlotKind` already says what a PROVIDER slot is.
-* `InfluenceFold(c, r)` runs BEFORE `RevisionStatic(c, r)` and the packet depends on it.
-  §6 wants the static packet to be independent of the influence matrices, which would mean
-  splitting `RigExecAssembleParameters` in two; with one whole-range chunk per revision the chunk
-  needs every influence anyway, so the split buys nothing until the vertex partition lands and it
-  is a parity hazard until then.
-* The `executed` decision is made in `RevisionStatic` rather than in `RevisionFuse`. The predicate
-  and its inputs are exactly §6's (a value comparison, never dirtiness), but the CHUNK has to know
-  it: without §7's cone to skip a clean revision, a fuse-side decision would run every skin kernel
-  on every frame. The fuse still owns `applied`, `resultStatus`, the sticky chain bit and the
-  `currentSource` indirection.
-* `graphChainsBuilt` / `graphRevisionsBuilt` are summed from per-step counter deltas rather than
-  taken as program constants (§4.2 item 7). A chain -- or a derived target -- whose base attribute
-  does not read at the frame's time is skipped entirely by the dynamic path and by today's `Run`,
-  counters included, and a constant cannot reproduce that.
-* A commit's size in the cost model is its CANDIDATES PLUS its propagation pairs, not §5.1's
-  `|propagate|` alone. Both halves of the commit walk the candidate table in slot order, and a
-  solver batch with forty candidates and no descendants is not free.
-* A `Derived` step's size is the CHAIN's vertex count, which §5.1 does not name. `recomputeExtent`
-  walks the points it is maintained from and publishes two vectors; sizing it by its own array
-  made the fitted per-unit cost 50us, which is the same number saying the model was wrong. A
-  `ChainStatus` step's size is the chain's vertex count for the same reason and against §5.1's
-  "revisions of the chain": the sweep ends by copying the chain's published point array whole, so
-  its row was re-fitted (0.000336us per point) after the size was corrected. The row it replaced,
-  7.79us per revision, was one 26276-point copy with the mesh hidden in it.
-* Every recorder of the run's phased-read store declares the whole store up to its own step,
-  instead of only its own slot, on a rig where something can look a record up (`phasedReads`).
-  Per-step slots order a record against its READERS, which is what §4 asks for, but the records
-  reach one container through a fold the executor performs, and two folds at once is a race
-  whatever the slots say. Widening a declared write is always sound (§2.5), the widening costs
-  nothing on a rig with no read phase, and the alternative -- a lock around the store -- is
-  forbidden.
-* The schedule report is TWO reports. `RigExecBakedScheduleReport` is structural and
-  deterministic, so two builds of one stage produce the same text and a test can say so; the
-  per-cluster wait and run times of §8.5 are in `RigExecBakedScheduleRunReport`, which needs a
-  frame to have happened -- and only the parallel executor stamps them, so after a serial frame
-  that report says the run was serial instead of printing a table of zeros that would read as
-  "every cluster was free". §8.5's per-skin-revision chunk statistics are printed by the
-  structural half, now that the vertex partition gives it something to say: `RigExecBakedGeometryReport`
-  writes them (it owns the chunk keys) and `RigExecBakedScheduleReport` calls it, so the chunk
-  shape, each chunk's ready level and the skin's critical path against its serial cost land in one
-  report with the clusters they explain.
-* `RIGEXEC_BAKED_SCHEDULE=parallel` is still not the default, though §8's chunk-count and
-  chunk-vertex rows now pass. §5.2 makes it the default "once §8 passes", and §8.3 (cones) and
-  §8.4 (parallel faster than serial) do not pass yet: the measured frame times are level, not
-  faster. Flipping the default is the decision that follows a frame that is actually quicker.
-
-Merging the scheduler and the vertex partition needed one cost-model correction, recorded because
-the number it produced was alarming and its cause was not. `StepSize` sized a `RevisionChunk` by
-its REVISION's vertices -- correct while a revision was one chunk, and a sixfold overcount once
-the partition cut the biped's skin into seven. The modelled serial cost read 1972us for a program
-that runs in 531us, and the level packing binned every chunk as though it were the largest step in
-the frame. A chunk is now sized by its own range, and `RevisionChunk`'s cost row was re-fitted as
-its own comment asked: the old row measured one chunk over a whole skin, which
-`RigExecApplySkinKernel` spread over the arena itself, so it timed an internally parallel step.
-
-Two things the parallel executor found that a serial one could not, recorded so they are not
-rediscovered. A `RevisionChunk` reads the chain's running value BEFORE its revision, which is two
-things: the earlier revisions' buffers, and the `currentSource` indirection that says which of
-them to read. It declared only the buffers, so at one cluster per step a chunk could overtake the
-fuse that decides the indirection -- deterministically wrong points on
+Three things the parallel executor and the cone found that a serial full run could not, recorded
+so they are not rediscovered. A `RevisionChunk` reads the chain's running value BEFORE its
+revision, which is two things: the earlier revisions' buffers, and the `currentSource` indirection
+that says which of them to read. It declared only the buffers, so at one cluster per step a chunk
+could overtake the fuse that decides the indirection -- deterministically wrong points on
 `tests/testRigExecInteractive`, and invisible in every serial order. It now declares both, and the
 rule is asserted by `tests/testRigExecBakedSchedule` on a three-revision chain the suite builds
-itself (no example rig stacks revisions, so on those the rule is vacuous): a step that reads
-`RevisionOut[r]` must read `RevisionDone[r]` unless it is the fuse that writes it. The vertex
-partition rewrites that declaration, so the test is what keeps it.
+itself. The stale-delta defect above is the second. And `RigExecStaticInputCache` answers a read
+from a worker thread by bypassing itself (its owner-thread rule, moverGraph.h), so a step running
+off the evaluator's thread resolves its inputs the long way and gets the same value; what moves is
+that cache's bypass COUNTER, which `tests/testRigExecStaticInputCache` asserts on only for its own
+fixture. That is the §5.2 "check the static input cache before merging" item, and the check comes
+back clean: `_bypasses` is already a `std::atomic<size_t>`, which is the one member of the cache
+written off the owning thread.
 
-And `RigExecStaticInputCache` answers a read from a worker thread by bypassing itself (its
-owner-thread rule, moverGraph.h), so a step running off the evaluator's thread resolves its inputs
-the long way and gets the same value; what moves is that cache's bypass COUNTER, which
-`tests/testRigExecStaticInputCache` asserts on only for its own fixture. This is the §5.2 "check
-the static input cache before merging" item, and the check comes back clean: `_bypasses` is
-already a `std::atomic<size_t>` (moverGraph.h), which is the one member of the cache written off
-the owning thread, so the off-thread increment is the only shared write and it is synchronised.
-Nothing here needs changing before parallel becomes the default.
+### What holds it to account
+
+* `tests/testRigExecBakedSchedule` -- every edge forward, every read written or sourced, no two
+  steps writing one slot without an edge, the report deterministic, the chunks covering every
+  vertex once with no missing influence, the cone and restore closures closed, a repeated time
+  running less than the whole program, a control held at its own authored value executing nothing,
+  and a constraint-input drag publishing the dynamic path's pose.
+* `testRigExecInteractiveCones_{serial,parallel}` and
+  `testRigExecExampleParityCones_{serial,parallel}` -- the two suites that drag, run with
+  `RIGEXEC_BAKED_VERIFY_CONES=1` under each schedule, so every generation is compared with a run
+  of the whole program from the same starting state.
+* `example_parity_*` and the `*BakedParity` suites -- both paths in one generation, compared
+  exactly, on every shipped rig that bakes.
+
+---
+
+*Everything below this line is the specification as it was written, before any of it existed.
+"Today" in it means the straight line Phase 2 replaced, not the code in the tree. It is kept
+because the rules are still the rules -- a Phase 3 group adding an operator reads §§4, 6 and 7 to
+know what a step may and may not do -- and because the deviations above are only readable against
+what they deviate from.*
 
 ## 1. Why
 

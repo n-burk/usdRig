@@ -775,7 +775,8 @@ struct RigExecBakedClusterSet {
     }
     void Set(int cluster) {
         if (cluster >= 0) {
-            words[size_t(cluster) >> 6] |= uint64_t(1) << (size_t(cluster) & 63);
+            words[size_t(cluster) >> 6] |=
+                uint64_t(1) << (size_t(cluster) & 63);
         }
     }
     void SetAll(size_t clusters) {
@@ -1404,6 +1405,15 @@ struct RigExecBakedProgramImpl {
         /// chain's sticky bit and the influence table's compare are ORed in
         /// by the fuse; this is only what the static half saw.
         bool staticDirty = false;
+        /// `inputs:defaultWeight` as the stage reads it, and the value the
+        /// last run read.
+        ///
+        /// The one number the FUSE would otherwise have to read off the
+        /// stage, for the one diagnostic it can emit. A source reads it
+        /// instead, and compares it, so that the fuse is a pure function of
+        /// its declared slots and a run that skips the fuse is a run in
+        /// which this did not move either (§7).
+        float defaultWeight = 0, lastDefaultWeight = 0;
         /// The partition no longer describes the layout the packet carries,
         /// so the keys cannot be trusted and the fuse runs the revision
         /// whole rather than a chunk deforming a vertex against an identity.
@@ -1956,6 +1966,7 @@ struct RigExecBakedRunShadow {
         GfMatrix4d transform{1.0};
         size_t precedingCount = 0;
         int currentSource = -1;
+        float defaultWeight = 0, lastDefaultWeight = 0;
         bool haveTransform = false, ran = false, executed = false;
         bool influencesValid = false, influencesChanged = false;
         bool staticDirty = false, partitionStale = false;

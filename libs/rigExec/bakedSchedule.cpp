@@ -828,8 +828,8 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
                 const RigExecBakedSlotRange &range) {
             const std::vector<int> &latest = maxWriter[size_t(range.domain)];
             for (const SlotInterval &interval : table) {
-                if (interval.end <= range.begin || range.end <= interval.begin ||
-                    interval.step == index) {
+                if (interval.end <= range.begin ||
+                    range.end <= interval.begin || interval.step == index) {
                     continue;
                 }
                 step.preds.push_back(interval.step);

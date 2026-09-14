@@ -1486,9 +1486,23 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // This is the half of the decision the packet and the status carry;
         // the chain's sticky bit and the influence table's own comparison are
         // ORed in by the fuse, which is the first step that has all three.
+        //
+        // The scalar the fuse's one diagnostic is about, read here because
+        // this step always runs and the fuse may not. Compared like every
+        // other source value: two different out-of-range weights can leave
+        // the packet identical, and the line the fuse emits is about the
+        // weight rather than about the packet.
+        revision.defaultWeight = 1.0f;
+        if (const UsdAttribute attribute =
+                revision.moverPrim.GetAttribute(_tokens->defaultWeight)) {
+            R.GetAttribute(attribute, time, &revision.defaultWeight);
+        }
         revision.staticDirty = !revision.ran ||
                                revision.parameters != revision.lastParameters ||
-                               revision.status != revision.lastStatus;
+                               revision.status != revision.lastStatus ||
+                               revision.defaultWeight !=
+                                   revision.lastDefaultWeight;
+        revision.lastDefaultWeight = revision.defaultWeight;
         // Every revision of a chain is applied to the same number of points:
         // a kernel that resized its output failed the application, so no
         // buffer the chain ever reads holds a different count. Sizing the
@@ -1639,11 +1653,10 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
             revision.parameters.valid &&
             (!skin || revision.influencesValid);
         if (revision.parameters.enabled && !packetValid) {
-            float scalar = 1.0f;
-            if (const UsdAttribute a = revision.moverPrim.GetAttribute(
-                    _tokens->defaultWeight)) {
-                R.GetAttribute(a, time, &scalar);
-            }
+            // Read by RevisionStatic, which always runs: a step body that
+            // went to the stage for a value would be a step outside its own
+            // declarations, and the cone could not tell when it moved.
+            const float scalar = revision.defaultWeight;
             if (!std::isfinite(scalar) || scalar < 0.0f || scalar > 1.0f) {
                 step->diagnostics.push_back(
                     "MoverFailed " + revision.moverPath.GetString() +

@@ -89,6 +89,8 @@ CaptureRevision(const RigExecBakedProgramImpl::GeomRevision &revision,
     state->transform = revision.transform;
     state->precedingCount = revision.precedingCount;
     state->currentSource = revision.currentSource;
+    state->defaultWeight = revision.defaultWeight;
+    state->lastDefaultWeight = revision.lastDefaultWeight;
     state->haveTransform = revision.haveTransform;
     state->ran = revision.ran;
     state->executed = revision.executed;
@@ -124,6 +126,8 @@ RestoreRevision(const RigExecBakedRunShadow::RevisionState &state,
     revision->transform = state.transform;
     revision->precedingCount = state.precedingCount;
     revision->currentSource = state.currentSource;
+    revision->defaultWeight = state.defaultWeight;
+    revision->lastDefaultWeight = state.lastDefaultWeight;
     revision->haveTransform = state.haveTransform;
     revision->ran = state.ran;
     revision->executed = state.executed;
@@ -166,6 +170,8 @@ CompareRevision(std::vector<std::string> *differences, size_t *count,
                  shadow.resultStatus, revision.resultStatus);
     CompareValue(differences, count, where + " currentSource",
                  shadow.currentSource, revision.currentSource);
+    CompareValue(differences, count, where + " defaultWeight",
+                 shadow.defaultWeight, revision.defaultWeight);
     CompareValue(differences, count, where + " ran", shadow.ran, revision.ran);
     CompareValue(differences, count, where + " executed", shadow.executed,
                  revision.executed);
@@ -334,7 +340,8 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     CompareVector(differences, &count, "aggregates", aggregates,
                   program.aggregates);
     for (size_t s = 0; s < program.solvers.size() && s < solvers.size(); ++s) {
-        const std::string where = "solver " + program.solvers[s].path.GetString();
+        const std::string where =
+            "solver " + program.solvers[s].path.GetString();
         CompareVector(differences, &count, where + " outFrames",
                       solvers[s].outFrames, program.solvers[s].outFrames);
         CompareVector(differences, &count, where + " outPresent",
