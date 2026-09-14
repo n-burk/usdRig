@@ -19,6 +19,7 @@
 #include "rigExec/rigEvaluator.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/tf/fileUtils.h"
 #include "pxr/base/tf/stringUtils.h"
@@ -60,6 +61,72 @@ FindRig(const UsdStageRefPtr &stage)
         }
     }
     return SdfPath();
+}
+
+// The two environment variables the parity harness runs this suite under,
+// read the way the evaluator reads them -- once, into a function-local
+// static -- because the evaluator fixes both at the construction of its
+// first one and a test that re-read them could disagree with the path it is
+// measuring. They are here so that the suite is exact under
+// RIGEXEC_EVALUATION_MODE=parity RIGEXEC_BAKE_REQUIRED=1 rather than merely
+// runnable: an assertion about the DEFAULT mode is an assertion about what
+// this variable says, and the fallback line bake-required adds is asserted
+// present in that environment and absent outside it.
+static RigExecEvaluationMode
+DefaultEvaluationMode()
+{
+    static const RigExecEvaluationMode mode = [] {
+        const std::string requested = TfGetenv("RIGEXEC_EVALUATION_MODE", "");
+        if (requested == "baked") {
+            return RigExecEvaluationMode::Baked;
+        }
+        if (requested == "parity") {
+            return RigExecEvaluationMode::BakedWithParityCheck;
+        }
+        return RigExecEvaluationMode::Dynamic;
+    }();
+    return mode;
+}
+
+static bool
+BakeRequired()
+{
+    static const bool required =
+        TfGetenvBool("RIGEXEC_BAKE_REQUIRED", false);
+    return required;
+}
+
+// The prefix RigExecRigEvaluator::_ReportBakeRequired pushes onto a
+// generation that ran dynamically while its mode asked for the program.
+static const char *const kBakeRequiredPrefix =
+    "baked parity mismatch: bake required, evaluated dynamically: ";
+
+// What a consumer would see with that line filtered out, and how many were
+// filtered. Splitting them is what lets a fallback test assert BOTH halves:
+// that nothing else on the generation moved, and that the announcement is
+// there exactly when the environment asked for it.
+static std::vector<std::string>
+WithoutTheBakeRequiredLine(const std::vector<std::string> &diagnostics,
+                           size_t *announced)
+{
+    std::vector<std::string> rest;
+    *announced = 0;
+    for (const std::string &line : diagnostics) {
+        if (line.rfind(kBakeRequiredPrefix, 0) == 0) {
+            ++*announced;
+        } else {
+            rest.push_back(line);
+        }
+    }
+    return rest;
+}
+
+// One line per fallen generation under RIGEXEC_BAKE_REQUIRED, and none at
+// all in a mode that never asked for the program.
+static size_t
+ExpectedBakeRequiredLines(RigExecEvaluationMode mode)
+{
+    return BakeRequired() && mode != RigExecEvaluationMode::Dynamic ? 1 : 0;
 }
 
 // "The same published generation" is defined once, in the shared header, so
@@ -249,7 +316,12 @@ TestDynamicModeIsTheDefault(const std::string &examplesDir)
     const SdfPath rigPath = FindRig(stage);
     if (rigPath.IsEmpty()) { ++failures; return; }
     RigExecRigEvaluator rig(stage, rigPath);
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Dynamic);
+    // The default is the PROCESS default: Dynamic, unless the harness asked
+    // for another with RIGEXEC_EVALUATION_MODE, which is how this suite is
+    // re-run against the program. Asserting Dynamic unconditionally would
+    // fail the whole suite in exactly that environment while saying nothing
+    // about the evaluator.
+    CHECK(rig.GetEvaluationMode() == DefaultEvaluationMode());
     std::vector<std::string> errors;
     CHECK(rig.Compile(&errors));
     // Switching after a compile builds the program without a recompile, and
@@ -969,7 +1041,21 @@ TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
                         reference, fallen);
         // Silent: the fallback is not a diagnostic on the generation, which
         // a consumer would have to filter out of a rig's real problems.
-        CHECK(reference.diagnostics == fallen.diagnostics);
+        // Under RIGEXEC_BAKE_REQUIRED it is the opposite -- saying so is the
+        // whole point of that variable -- so both halves are asserted: one
+        // announcement per fallen generation there and none elsewhere, and
+        // nothing else on either generation moved.
+        size_t announcedFallen = 0, announcedReference = 0;
+        const std::vector<std::string> quietFallen =
+            WithoutTheBakeRequiredLine(fallen.diagnostics, &announcedFallen);
+        const std::vector<std::string> quietReference =
+            WithoutTheBakeRequiredLine(reference.diagnostics,
+                                       &announcedReference);
+        CHECK(quietReference == quietFallen);
+        CHECK(announcedFallen == ExpectedBakeRequiredLines(
+                                     RigExecEvaluationMode::Baked));
+        CHECK(announcedReference ==
+              ExpectedBakeRequiredLines(DefaultEvaluationMode()));
     }
     // Nothing ran baked, and nothing pretended to. The REQUEST stands,
     // though: a rig that declines has not had its mode taken away, and a
