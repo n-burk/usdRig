@@ -23,6 +23,7 @@
 #include "profiler.h"
 #include "tapSet.h"
 #include "types.h"
+#include "curvenetWeightComputations.h"
 #include "weightPackets.h"
 
 #include "rigExecMath/avarScale.h"
@@ -2103,6 +2104,39 @@ struct RigExecBakedProgramImpl {
         std::vector<UsdAttribute> targetPoints, samplePoints, curvePoints;
         /// The epoch's resampled falloff remap, copied from falloffLuts.
         std::vector<float> falloffCurve;
+
+        // ---- RigExecCurvenetWeight -----------------------------------------
+        //
+        // The one weight object whose field is not a formula over a few
+        // floats: it is the solution of a factorized system over the CUT
+        // mesh, so the packet needs the BIND that factorization lives in.
+        // The exec computation keeps a process-wide LRU of those behind a
+        // mutex, and a step body may take no lock -- so the program keeps
+        // one binding per object, in the object, written by that object's
+        // OWN step and read by nothing else. It is the same cache with a
+        // capacity of one entry per weight object, which is all a program
+        // can use: a weight object has exactly one layout per frame.
+        /// The five array relationships, as the attributes their authored
+        /// targets name, read exactly the way `targetPoints` is.
+        std::vector<UsdAttribute> curvenetMeshPoints, curvenetPoints;
+        std::vector<UsdAttribute> curvenetCounts, curvenetIndices;
+        std::vector<UsdAttribute> curvenetSplines;
+        /// inputs:weights and rigExec:autoSmooth, which exec reads per frame
+        /// off the prim itself. Arrays, so they go through the generation's
+        /// resolved inputs rather than through a RigExecBakedInput.
+        UsdAttribute curvenetWeights, curvenetAutoSmooth;
+        TfToken curvenetBasis;
+        RigExecBakedInput<int> curvenetSamples;
+        RigExecBakedInput<float> curvenetUnreached;
+        /// This object's binding, and the layout it was cut for. Compared by
+        /// VALUE, like every other decision in the frame path: an equal
+        /// layout is the same cut, and a rig whose mesh or net moves per
+        /// frame re-cuts on both paths alike.
+        std::shared_ptr<RigExecCurvenetWeightBinding> curvenetBinding;
+        std::vector<GfVec3f> boundMesh, boundNet;
+        std::vector<int> boundCounts, boundIndices, boundSplines, boundSmooth;
+        int boundSamples = -1;
+        bool bound = false;
     };
     std::vector<WeightObject> weightObjects;
     /// Path to index in weightObjects. A NEGATIVE entry is an object whose
@@ -2595,9 +2629,13 @@ int RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
 /// \p packets holds the packets already built for the objects BEFORE this
 /// one in the table, which dependency order guarantees are the ones it
 /// composes.
+///
+/// \p object is NOT const, and only a curvenet weight uses that: it carries
+/// its own bind, which is state this frame may replace and which nothing
+/// but this object's own step ever touches.
 RigExecWeightPacket RigExecBakedWeightPacket(
     const RigExecBakedProgramImpl &program,
-    const RigExecBakedProgramImpl::WeightObject &object,
+    RigExecBakedProgramImpl::WeightObject *object,
     const std::vector<RigExecWeightPacket> &packets, UsdTimeCode time);
 
 /// Records, per pose step, which of its baked inputs a run can move.

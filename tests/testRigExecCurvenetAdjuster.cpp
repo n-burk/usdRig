@@ -13,8 +13,112 @@ static int failures=0;
 #define CHECK(x) do { if (!(x)) { ++failures; std::printf("FAIL %d: %s\n",__LINE__,#x); } } while(0)
 static bool Near(const GfVec3f &a,const GfVec3f &b) { return (a-b).GetLength()<2e-4; }
 
+// A RigExecCurvenetWeight driving a matrix mover, in the BAKED program.
+//
+// The sixth weight-object schema, and the one the program left out: its
+// field is not a formula over a few floats but the solution of a factorized
+// Laplacian over the cut mesh, so a packet cannot be built without the BIND
+// that factorization lives in. The exec computation holds one in a static
+// LRU behind a mutex; a step body may take no lock, so the program resolves
+// its own -- in the prologue, into program-owned state -- and the step then
+// evaluates the same right-hand side through the same kernel.
+//
+// cpuParityMode is deliberately OFF: it asks for the dynamic path, so an
+// evaluator that pinned it would never build a program at all. Under
+// RIGEXEC_EVALUATION_MODE=parity this generation runs both paths over one
+// rig and compares them exactly.
+static void TestCurvenetWeightObject() {
+    const auto stage=UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"),TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"),TfToken("RigExecRoot"));
+    const auto mesh=stage->DefinePrim(SdfPath("/Asset/Mesh"),TfToken("Mesh"));
+    // Two quads, so the field has somewhere to fall off across the surface
+    // rather than resolving to one value everywhere.
+    mesh.GetAttribute(TfToken("points")).Set(VtVec3fArray{
+        {0,0,0},{1,0,0},{2,0,0},{0,1,0},{1,1,0},{2,1,0}});
+    mesh.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{4,4});
+    mesh.GetAttribute(TfToken("faceVertexIndices")).Set(
+        VtIntArray{0,1,4,3, 1,2,5,4});
+    const auto net=stage->DefinePrim(SdfPath("/Asset/Net"),
+        TfToken("RigExecCurvenet"));
+    net.GetAttribute(TfToken("points")).Set(VtVec3fArray{
+        {0,0.5f,0},{0.67f,0.5f,0},{1.33f,0.5f,0},{2,0.5f,0}});
+    net.GetAttribute(TfToken("rigExec:splineIndices")).Set(VtIntArray{0,1,2,3});
+
+    const auto weight=stage->DefinePrim(SdfPath("/Asset/Rig/Weights/Net"),
+        TfToken("RigExecCurvenetWeight"));
+    const auto target=mesh.GetPath().AppendProperty(TfToken("points"));
+    weight.GetRelationship(TfToken("rigExec:weightTarget")).SetTargets({target});
+    weight.GetRelationship(TfToken("rigExec:curvenetPoints")).SetTargets(
+        {net.GetPath().AppendProperty(TfToken("points"))});
+    weight.GetRelationship(TfToken("rigExec:curvenetSplineIndices")).SetTargets(
+        {net.GetPath().AppendProperty(TfToken("rigExec:splineIndices"))});
+    weight.GetRelationship(TfToken("rigExec:meshFaceCounts")).SetTargets(
+        {mesh.GetPath().AppendProperty(TfToken("faceVertexCounts"))});
+    weight.GetRelationship(TfToken("rigExec:meshFaceIndices")).SetTargets(
+        {mesh.GetPath().AppendProperty(TfToken("faceVertexIndices"))});
+    // A gradient along the net, so the solved field is not constant and a
+    // program that resolved nothing would land somewhere visibly else.
+    weight.GetAttribute(TfToken("inputs:weights")).Set(
+        VtFloatArray{1.0f,0.75f,0.25f,0.0f});
+
+    const auto driver=stage->DefinePrim(SdfPath("/Asset/Rig/Controls/Push"),
+        TfToken("RigExecControl"));
+    driver.GetAttribute(TfToken("avars:tz")).Set(4.0);
+    const auto mover=stage->DefinePrim(SdfPath("/Asset/Rig/Movers/M"),
+        TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    mover.GetRelationship(TfToken("rigExec:transform")).SetTargets(
+        {driver.GetPath()});
+    mover.GetRelationship(TfToken("rigExec:weightObject")).SetTargets(
+        {weight.GetPath()});
+
+    RigExecRigEvaluator evaluator(stage,SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const auto &e:errors) std::printf("curvenet weight compile: %s\n",
+        e.c_str());
+    std::vector<std::string> reasons;
+    if (!evaluator.IsBakeable(&reasons)) {
+        ++failures;
+        std::printf("FAIL curvenet weight object: not bakeable\n");
+        for (const auto &r:reasons) std::printf("    %s\n",r.c_str());
+        return;
+    }
+    const auto pose=evaluator.Evaluate(UsdTimeCode(1));
+    CHECK(pose.valid && pose.bakedParityMismatches==0);
+    if (!pose.valid || !pose.movedProperties.count(target)) { ++failures; return; }
+    const auto points=pose.movedProperties.at(target).Get<VtVec3fArray>();
+    CHECK(points.size()==6);
+    if (points.size()!=6) return;
+    // The field is a real gradient: fully on at the net's first control
+    // point, off at its last, and strictly between them in the middle. An
+    // all-ones or all-zeros field would satisfy nothing below.
+    CHECK(std::abs(points[0][2]-4.0f)<1e-3f);
+    CHECK(std::abs(points[2][2])<1e-3f);
+    CHECK(points[1][2]>0.01f && points[1][2]<3.99f);
+    // And an ANIMATED weight moves it without rebuilding the bind, which is
+    // what separates the bind from the right-hand side.
+    weight.GetAttribute(TfToken("inputs:weights")).Set(
+        VtFloatArray{0.5f,0.375f,0.125f,0.0f});
+    const auto halved=evaluator.Evaluate(UsdTimeCode(1));
+    CHECK(halved.valid && halved.bakedParityMismatches==0);
+    if (!halved.valid || !halved.movedProperties.count(target)) return;
+    const auto after=halved.movedProperties.at(target).Get<VtVec3fArray>();
+    CHECK(after.size()==6);
+    // Strictly less and still there. NOT half: the solved field is clamped
+    // into [0,1] before it becomes a packet, so halving the control values
+    // is not a scaling of the answer -- which is exactly why the
+    // right-hand side has to be re-solved rather than scaled.
+    if (after.size()==6) {
+        CHECK(after[0][2]>0.01f && after[0][2]<points[0][2]-0.01f);
+    }
+}
+
 int main() {
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
+    TestCurvenetWeightObject();
     const auto stage=UsdStage::CreateInMemory();
     stage->DefinePrim(SdfPath("/Asset"),TfToken("Scope"));
     auto builder=RigExecRigBuilder::Create(stage,SdfPath("/Asset/Rig"));

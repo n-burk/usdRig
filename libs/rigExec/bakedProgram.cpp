@@ -139,13 +139,15 @@ _IsVolumeWeightTypeName(const TfToken &type)
 // still refused above by the _volumeWeightMatrixTaps loop, which is about the
 // PLACEMENT a volume's field needs -- which the pose walk now composes, so
 // the two questions have one answer again.
-// RigExecCurvenetWeight is the one weight object left out: its field comes off
-// a curvenet bind, which the program does not hold.
+// RigExecCurvenetWeight is here too, now that the program holds a bind of its
+// own: the cut and the factorization are resolved into the weight object and
+// only the right-hand side is solved per frame.
 bool
 _IsBakedWeightType(const TfToken &type)
 {
     return type == "RigExecStaticWeight" || type == "RigExecDynamicWeight" ||
-           type == "RigExecCombineWeight" || _IsVolumeWeightTypeName(type);
+           type == "RigExecCombineWeight" ||
+           type == "RigExecCurvenetWeight" || _IsVolumeWeightTypeName(type);
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on

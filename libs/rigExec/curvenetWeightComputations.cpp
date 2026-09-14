@@ -12,6 +12,50 @@
 #include <mutex>
 
 namespace rigExec {
+bool RigExecCurvenetWeightTokensAreValid(const TfToken &basis,
+                                         const TfToken &rangePolicy)
+{
+    return (basis == "bezier" || basis == "catmullRom") &&
+           (rangePolicy == "strict" || rangePolicy == "clamp");
+}
+
+std::shared_ptr<RigExecCurvenetWeightBinding> RigExecBindCurvenetWeightPacket(
+    const std::vector<GfVec3f> &mesh, const std::vector<int> &counts,
+    const std::vector<int> &indices, const std::vector<GfVec3f> &net,
+    const std::vector<int> &splines, const TfToken &basis, int samples,
+    const std::vector<int> &autoSmooth, std::string *error)
+{
+    RigExecCurvenetTopology topology;
+    if (!RigExecBuildCurvenetTopology(splines, net.size(),
+            basis == "bezier" ? RigExecCurvenetBasis::Bezier : RigExecCurvenetBasis::CatmullRom,
+            net, nullptr, &topology, error)) return nullptr;
+    auto binding = std::make_shared<RigExecCurvenetWeightBinding>();
+    if (!RigExecBindCurvenetWeights(topology, net, mesh, counts, indices,
+            autoSmooth, samples, binding.get(), error)) return nullptr;
+    return binding;
+}
+
+RigExecWeightPacket RigExecCurvenetWeightPacketFromBinding(
+    const RigExecCurvenetWeightBinding &binding,
+    const std::vector<float> &weights, const TfToken &rangePolicy,
+    float fallback, std::string *error)
+{
+    RigExecWeightPacket packet;
+    packet.representation = TfToken("dense");
+    packet.rangePolicy = rangePolicy;
+    if (!RigExecEvaluateCurvenetWeights(binding, weights, 1, fallback, &packet.values, error))
+        return packet;
+    for (float &value : packet.values) {
+        if (!std::isfinite(value) || (rangePolicy == "strict" && (value < 0 || value > 1))) {
+            if (error) *error = "curvenet weights violate the finite [0,1] envelope range";
+            return packet;
+        }
+        value = std::clamp(value, 0.0f, 1.0f);
+    }
+    packet.valid = true;
+    return packet;
+}
+
 RigExecWeightPacket RigExecComputeCurvenetWeightPacket(
     const std::vector<GfVec3f> &mesh, const std::vector<int> &counts,
     const std::vector<int> &indices, const std::vector<GfVec3f> &net,
@@ -19,11 +63,10 @@ RigExecWeightPacket RigExecComputeCurvenetWeightPacket(
     const std::vector<int> &autoSmooth, const std::vector<float> &weights,
     const TfToken &rangePolicy, float fallback, std::string *error)
 {
-    RigExecWeightPacket packet;
-    packet.representation = TfToken("dense");
-    packet.rangePolicy = rangePolicy;
-    if ((basis != "bezier" && basis != "catmullRom") ||
-        (rangePolicy != "strict" && rangePolicy != "clamp")) {
+    if (!RigExecCurvenetWeightTokensAreValid(basis, rangePolicy)) {
+        RigExecWeightPacket packet;
+        packet.representation = TfToken("dense");
+        packet.rangePolicy = rangePolicy;
         if (error) *error = "invalid curvenet weight basis or range policy";
         return packet;
     }
@@ -52,28 +95,20 @@ RigExecWeightPacket RigExecComputeCurvenetWeightPacket(
         }
     }
     if (!binding) {
-        RigExecCurvenetTopology topology;
-        if (!RigExecBuildCurvenetTopology(splines, net.size(),
-                basis == "bezier" ? RigExecCurvenetBasis::Bezier : RigExecCurvenetBasis::CatmullRom,
-                net, nullptr, &topology, error)) return packet;
-        binding = std::make_shared<RigExecCurvenetWeightBinding>();
-        if (!RigExecBindCurvenetWeights(topology, net, mesh, counts, indices,
-                autoSmooth, samples, binding.get(), error)) return packet;
+        binding = RigExecBindCurvenetWeightPacket(mesh, counts, indices, net,
+            splines, basis, samples, autoSmooth, error);
+        if (!binding) {
+            RigExecWeightPacket packet;
+            packet.representation = TfToken("dense");
+            packet.rangePolicy = rangePolicy;
+            return packet;
+        }
         std::lock_guard<std::mutex> lock(mutex);
         cache.push_front({mesh,net,counts,indices,splines,autoSmooth,basis,samples,binding});
         if (cache.size() > 32) cache.pop_back();
     }
-    if (!RigExecEvaluateCurvenetWeights(*binding, weights, 1, fallback, &packet.values, error))
-        return packet;
-    for (float &value : packet.values) {
-        if (!std::isfinite(value) || (rangePolicy == "strict" && (value < 0 || value > 1))) {
-            if (error) *error = "curvenet weights violate the finite [0,1] envelope range";
-            return packet;
-        }
-        value = std::clamp(value, 0.0f, 1.0f);
-    }
-    packet.valid = true;
-    return packet;
+    return RigExecCurvenetWeightPacketFromBinding(*binding, weights,
+                                                  rangePolicy, fallback, error);
 }
 }
 
