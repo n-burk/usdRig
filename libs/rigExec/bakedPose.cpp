@@ -2399,7 +2399,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             finish();
             return;
         }
-        // The envelope, in the dynamic path's two exclusive arms. A
+        // The envelope, in the dynamic path's THREE exclusive arms. A
         // constraint copies the ORACLE -- the dynamic constraint path does
         // not go through exec at all, it calls _ResolveWeights and takes its
         // error string -- so this calls the same function with the same
@@ -2408,8 +2408,23 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // The finite-[0, 1] check belongs to the OTHER arm and must not be
         // applied to a resolved envelope: the dynamic path does not check
         // there, so checking would emit a diagnostic it never emits.
+        //
+        // The third arm is a GEOMETRY-domain constraint that binds a weight
+        // object, and it is the one this block did not have while the two
+        // features lived on different branches: weight objects on
+        // constraints were this group's, geometry-domain constraints were
+        // another's, and neither branch alone could build the rig that needs
+        // it. Such a constraint resolves NO envelope here. Its weight is per
+        // POINT and resolves after the solve, on the revision this delta
+        // feeds -- and because a constraint and its revision are the same
+        // mover prim, that revision's own weight packet IS this constraint's
+        // weight object. Leaving `weight` at 1.0 is what hands the revision
+        // a full-strength delta for the per-point lerp to scale; resolving
+        // one element here instead would apply a one-point answer to the
+        // whole mesh AND square the envelope on the point the packet also
+        // covers.
         double weight = 1.0;
-        if (!c.weightObject.IsEmpty()) {
+        if (!c.weightObject.IsEmpty() && c.pointsTarget.IsEmpty()) {
             c.weightScratch.clear();
             c.weightError.clear();
             if (!B.resolveWeights(c.weightObject, 1, time, &c.weightScratch,
@@ -2422,7 +2437,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 return;
             }
             weight = c.weightScratch[0];
-        } else {
+        } else if (c.weightObject.IsEmpty()) {
             weight = rd(c.defaultWeight);
             if (!std::isfinite(weight) || weight < 0.0 || weight > 1.0) {
                 step->diagnostics.push_back(
@@ -2433,7 +2448,15 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 return;
             }
         }
-        if (weight <= 0.0) {
+        // Textually the dynamic path's gate, second clause included. With
+        // the three arms above the clause cannot change the answer -- the
+        // only constraint that reaches here with a bound geometry weight
+        // object has weight == 1.0 -- but the two conditions are kept alike
+        // on purpose: this is the pair that silently disagreed when the
+        // third arm was missing, and the next person to add an arm should
+        // find one shape to compare, not two.
+        if (weight <= 0.0 &&
+            (c.pointsTarget.IsEmpty() || c.weightObject.IsEmpty())) {
             // A zero envelope is an exact dormant pass-through, decided
             // before any source is resolved so a malformed disconnected input
             // cannot make a disabled constraint fail. A DORMANT geometry
