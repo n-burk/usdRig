@@ -103,28 +103,33 @@ Three consequences worth knowing before touching it:
 ### The schedule, on the biped
 
 ```
-rigExec baked schedule: 458 step(s), 1066 edge(s), 326 provider slot(s)
-  mode=serial grain=6.98us concurrency=20
-  clusters=57 (288 edge(s)) serial=558.08us criticalPath=294.46us (1.90x)
+rigExec baked schedule: 452 step(s), 766 edge(s), 326 provider slot(s)
+  mode=serial grain=6.13us concurrency=20
+  clusters=56 (192 edge(s)) serial=490.14us criticalPath=441.43us (1.11x)
   ChainStatus 1        CommitApply 2      CommitDelta 2      ComposeSubtree 93
   Constraint 65        Derived 1          InfluenceFold 1    PropagateChunk 4
-  ProviderMatrix 252   RevisionChunk 7    RevisionFuse 1     RevisionStatic 1
+  ProviderMatrix 252   RevisionChunk 1    RevisionFuse 1     RevisionStatic 1
   Solve 14             SolverCommit 14
   skin revisions:
-  /Biped/Rig/Movers/skin_body_geo/body_geo_skin: 7 chunk(s), 26276 vertex(es), 137 influence(s)
-    vertices/chunk min 1700 mean 3753.7 max 4096
-    |key| min 24 mean 41.3 max 58; 0/7 chunk(s) reach half the influences
-    skin serial 280.79us critical path 53.96us (5.20x)
-    ready level min 40 max 40 of 44
+  /Biped/Rig/Movers/skin_body_geo/body_geo_skin: 1 chunk(s), 26276 vertex(es), 137 influence(s) [not partitioned]
+    |key| min 137 mean 137.0 max 137; 1/1 chunk(s) reach half the influences
+    skin serial 212.84us critical path 212.84us (1.00x)
+    ready level min 40 max 40 of 45
 ```
 
-The partition bought what §6 hoped it would and the report says so per asset: no chunk of the
-biped's body mesh depends on as much as half of the 137 influences, the mean chunk waits for 41 of
-them, and the skin's critical path is 54us against 281us of serial skinning. What it did not buy
-is a spread of READY LEVELS -- all seven chunks become runnable at level 40 of 44 -- because the
-biped's constraints finalise nearly every joint in the same few levels. The arm vertices no longer
-wait for the leg constraints ARITHMETICALLY; on this rig they happen to be ready at the same time
-anyway.
+**The biped is not cut, and the report is what decided that.** With
+`RIGEXEC_BAKED_CHUNK_ALWAYS=1` the same rig cuts into seven chunks and the report reads: no chunk
+of the body mesh depends on as much as half of the 137 influences, the mean chunk waits for 41 of
+them, and the skin's critical path is 54us against 281us of serial skinning (458 steps, 57
+clusters, serial 558.08us against a 294.46us critical path, 1.90x). Every one of those numbers is
+a promise about WIDTH. What the cut never bought is a spread of READY LEVELS -- all seven chunks
+become runnable at level 40 of 44, because the biped's constraints finalise nearly every joint in
+the same few levels -- and without that spread the seven serial chunk loops simply replace one
+`RigExecApplySkinKernel` call that spread itself over the arena. Measured at 47us serial and 92us
+parallel, which is why the cut is now gated on the levels differing (§6) and why the uncut column
+above is the one the biped actually runs. The arm vertices no longer wait for the leg constraints
+ARITHMETICALLY; on this rig they happen to be ready at the same time anyway, and the program now
+says so instead of paying for the possibility.
 
 ### What a frame costs
 
@@ -137,90 +142,132 @@ the bake out of the number; `RIGEXEC_BAKED_STEP_TIMING=N` sums the three phases 
 with two clock reads apiece. It counts only frames that published a pose -- a frame a step hands
 back, or one the publication declines, contributes to neither the numerator nor the divisor -- and
 under `RIGEXEC_BAKED_VERIFY_CONES=1` the verifier's second whole-program pass is charged to no
-phase and kept out of the per-step accumulators, so the table still says what ONE frame costs. Numbers below are `Biped_anim` frames 2-8 on a 20-core box, and
-`b705950` is the Phase 1 head -- the straight line, before any of this.
+phase and kept out of the per-step accumulators, so the table still says what ONE frame costs.
+Numbers below are on a 20-core box; `b705950` is the Phase 1 head -- the straight line, before any
+of this -- and `a1c2ea9` is the Phase 3 merge, the head this stage started from. Every number in
+this section was taken with the other two branches of this round building and testing on the same
+box, so compare minima with minima and read a 5% difference as noise.
 
-**The frame.** In-process, frames 2-8 cycled 150x, minimum of nine runs, and (for `b705950`, whose
-tool has no `--repeat`) the same frames as a 2800-frame and a 700-frame process, differenced:
+**The frame, rig by rig.** In-process with `--repeat`, minimum and median of the runs, all four
+columns interleaved in ONE session because this box scatters +-8% between sessions. `b705950`'s
+tool has no `--repeat`, so its column is a long frame list and a short one differenced. Biped_anim
+is frames 2-8 at 150 repeats x 7 runs; the rest are the fixture frames at 400 repeats x 5 runs.
 
-| | us/frame | user CPU | system CPU |
-|---|---|---|---|
-| b705950 (straight line) | 757 | 1019us | 329us |
-| serial | **662** | 671us | ~5us |
-| parallel | 705 | 1210us | 824us |
+| rig | b705950 | a1c2ea9 serial | here serial | here parallel |
+|---|---|---|---|---|
+| `Biped_anim` (2-8) | 742.9 / 778.6 | 705.8 / 720.8 | **587.7 / 604.4** | 614.2 / 638.3 |
+| `spider_legs` | 2.8 / 5.6 | 1.2 / 1.2 | **1.2 / 1.2** | 1.4 / 1.4 |
+| `04_BlendShapeFace` | 94.0 / 138.0 (dyn) | 8.6 / 8.7 | **8.6 / 8.9** | 8.9 / 9.0 |
+| `05_TwistRibbonSpine` | 288.0 / 304.0 (dyn) | 17.7 / 17.9 | **17.7 / 17.9** | 25.1 / 29.8 |
+| `06_LatticeBulge` | 50.0 / 56.0 (dyn) | 11.3 / 11.7 | **11.2 / 11.4** | 11.8 / 11.8 |
+| `11_VolumeWeights` | 172.0 / 176.0 (dyn) | 9.9 / 10.1 | **10.1 / 10.1** | 10.5 / 10.7 |
+| `ArmRig` | 400.0 / 412.0 (dyn) | 20.8 / 20.9 | **19.3 / 19.3** | 28.1 / 28.7 |
 
-Serial is 12.5% FASTER than the straight line and runs on half the CPU. §8.4's first half (within
-5% of `b705950`) therefore passes with room; its second half -- parallel faster than serial -- does
-not, and **`RIGEXEC_BAKED_SCHEDULE` still defaults to `serial`**. What follows is why, measured
-rather than argued, so that nobody repeats the experiment.
+`(dyn)` marks a cell where `b705950` could not bake the rig at all and the number is the dynamic
+walk -- six of the seven rows, because those rigs only started baking in Phase 3. Read those cells
+as "what the bake is worth on this rig", not as a scheduler comparison; the two rows without the
+marker are the like-for-like ones.
 
-Versioned storage (§3.1) did not move that. The two libraries were measured A/B through one
-`rigExecPose --repeat 150`, twelve interleaved pairs on a busier box: min 666.8 -> 665.1us, median
-716.2 -> 700.4us in serial, and 713.7 -> 725.9us (min) in parallel. The carry copies are the only
-per-frame work the version table adds and they measure nothing -- compiled out, the serial min
-moves 666.2 -> 660.4us, inside a box whose samples are bimodal at 670 and 720. Measure both
-libraries in one session before quoting either: a single-sided run of the same pair read +1.6% the
-other way an hour earlier.
+**The default stays `serial`, decided again from the table above.** Parallel is slower on the biped
+(614/638 against 588/604) and slower on every other rig measured, by 5% on the small meshes and by
+40-45% on `05_TwistRibbonSpine` and `ArmRig`, whose frames are ~20us -- far too short to pay for
+waking an arena. The rule the decision was taken under was "flip only if parallel is faster on the
+biped AND not slower on any rig measured", and it fails both halves. §8.4's first half passes with
+room -- serial is 21% faster than `b705950` on the biped, where `b705950` can bake -- and its
+second half still does not.
 
-**Where the frame goes** (`RIGEXEC_BAKED_STEP_TIMING=40`, us/frame; the instrument costs about 5%
-of what it reports, so read the shares, not the total). Both executors time a step with a PAIR of
-clock reads around the body and nothing else, so the two columns measure the same interval and may
-be read against each other; the trace's per-step intervals are a different measurement (serial
-shares one read per step boundary there, so a trace interval also covers the bookkeeping under the
-step) and the two must not be mixed:
+**What this stage took off the biped frame** (a1c2ea9 705.8 -> 587.7 min, -17%), each measured on
+its own before the next landed:
+
+| change | serial | parallel |
+|---|---|---|
+| a1c2ea9 | 704.4 | 766.8 |
+| + cut the skin only where the cut pays (§6) | 636.7 | 728.2 |
+| + bind the property chains' reads once per epoch | 530.8* | 642.8 |
+| + keep a derived revision's points by handle | 581.4* | 610.6 |
+
+`*` the middle two rows were measured in a noisier window and the property-chain row caught a
+lucky minimum; the interleaved four-way table above is the number to quote. The three changes are
+independent and their phase effects are not: the prologue went 190.8 -> 139.3us (the chains), the
+`Derived` step 95-107 -> 74-76us (the handle), and the region lost the seven serial chunk loops
+that had replaced one self-parallelising kernel call.
+
+**Where the frame goes now** (`RIGEXEC_BAKED_STEP_TIMING=40`, us/frame; the instrument costs about
+5% of what it reports in serial and considerably more in parallel -- it reads 634-675 against an
+untraced 588-604 serial, and 832-898 against an untraced 614-638 -- so read the SHARES). Both
+executors time a step with a pair of clock reads around the body and nothing else, so the two
+columns measure the same interval:
 
 | | serial | parallel |
 |---|---|---|
-| prologue | 160 | 157 |
-| region | 554 | 787 |
-| epilogue | 52 | 46 |
-| RevisionChunk (7 runs) | 262 | 339 |
-| Derived (1 run) | 103 | **336** |
-| Constraint (65 runs) | 97 | 118 |
-| ComposeSubtree (93 runs) | 32 | 36 |
-| ProviderMatrix (252 runs) | 13 | 16 |
+| prologue | 134-146 | 141-150 |
+| region | 457-479 | 647-700 |
+| epilogue | 43-50 | 43-49 |
+| RevisionChunk (1 run, the whole array) | 186-198 | 98-109 |
+| Constraint (65 runs) | 94-99 | 138-179 |
+| Derived (1 run) | 70-76 | 244-275 |
+| ComposeSubtree (93 runs) | 32 | 40-44 |
+| ProviderMatrix (252 runs) | 13-15 | 17-24 |
+| ChainStatus (1 run) | 7-8 | 13-14 |
 
-**The parallel region is slower because every step in it is slower, not because the schedule is
-wrong.** The same bodies, doing the same arithmetic, cost 888us of step time in parallel against
-535us in serial. (Those two figures predate the pairing described above: the serial column was
-measured with the rolling boundary and so carries the snapshot merge and the skipped-step scan with
-it, worth about 2% of the region -- 12us of 550 -- which makes the gap wider, not narrower. Every
-later comparison uses the pair.) The three control experiments say where that comes from:
+**The parallel region is still slower because every step in it is slower, not because the schedule
+is wrong.** The one row that gets FASTER is `RevisionChunk` -- the whole-array skin kernel, which
+is the only step in the frame with real width -- and everything narrow around it roughly doubles.
+`Derived` is the extreme: one bounding box over 26276 points, 70-76us alone and 244-275us with
+nineteen workers yielding beside it.
 
-| control | us/frame |
-|---|---|
-| the whole frame, no step bodies, but the same 57 clusters spawned | 248 |
-| the same, with no clusters spawned at all | 243 |
-| every step on the calling thread, inside the same `WorkWithScopedParallelism` + `WorkDispatcher` | 714 |
+The three control experiments from the previous stage still hold and are not repeated here:
+spawning the clusters costs 5us of WALL time (the whole frame with empty bodies but the same
+clusters spawned is 248us against 243us with no clusters at all), the `WorkDispatcher` +
+`WorkWithScopedParallelism` envelope costs nothing, and cluster count from 41 to 458 does not move
+the frame. `strace -f -c` over 700 frames named the cost exactly: 192 `sched_yield` per frame in
+parallel and 203 in `b705950` against 48 in serial -- TBB workers spinning in their steal loop
+through a frame too short to let them sleep.
 
-Spawning 57 tasks costs 5us of WALL time, and the envelope costs nothing: `WorkDispatcher` is a
-`tbb::task_group` plus a context, and `WorkWithScopedParallelism` is `tbb::this_task_arena::isolate`
-with no arena construction in it. Cluster count is not the problem either -- `GRAIN_US=0` (458
-clusters), the default (57) and `GRAIN_US=400` (41) all land within noise of 790us. What the
-spawning DOES cost is 424us/frame of system time in the workers, and `strace -f -c` over 700 frames
-names it exactly:
+**A private arena does not fix that, and was measured rather than argued.** OpenUSD 26.08's work
+library exposes no way to run a region at a chosen concurrency: `WorkSetConcurrencyLimit` is
+process-wide and its own documentation says lower-level library code should never call it, and
+`WorkIsolatingDispatcher` does construct a `tbb::task_arena`
+(`workTBB/isolatingDispatcher_impl.h`) but at the default size with no parameter. So the experiment
+was done with `tbb::task_arena` directly, one static arena wrapping the region in both modes, at 4,
+6, 8 and 12 threads, interleaved against no arena in the same session (minima of three runs, six
+rounds):
 
-| | sched_yield | futex |
+| | parallel | serial |
 |---|---|---|
-| b705950 | 142098 (203/frame) | 1601 |
-| serial | 33542 (48/frame) | 906 |
-| parallel | 134527 (192/frame) | 1518 |
+| no arena | 615-658 | 536-591 |
+| arena of 4 | 622-687 | 557-623 |
 
-Those are TBB workers spinning in their steal loop. A frame of 660us that wakes the arena never
-lets them get to sleep, so nineteen threads yield their way through the frame -- including through
-the region's memory-bound serial tail, where one thread makes seven passes over a 26k-point mesh.
-That is the `Derived` row above: the same bounding box, 103us alone and 336us with the arena awake
-beside it. `b705950` pays the same spin for the same reason (its skin kernel calls
-`WorkParallelForN` every frame); the serial executor is the only one of the three that leaves the
-arena alone, and it is the fastest of the three.
+That is noise, in both directions, and the code was reverted rather than shipped: a raw
+`<tbb/task_arena.h>` include would tie rigExec to the TBB work implementation -- OpenUSD 26.08's
+work library is pluggable, `workTBB` is one impl of several -- in exchange for a knob measured to
+be worth nothing.
 
-So the honest statement of the ceiling is: **this frame is too small and too memory-bound for the
-arena to pay.** 558us of modelled serial work against a 294us critical path is at most 1.9x before
-overhead; of the real 660us, 160us is the serial prologue (almost all of it the property chains,
-119us, which are USD value resolution and not arithmetic) and about 190us is a strictly serial tail
-(the fuse, the chain status sweep and the extent, each a pass over the whole mesh). A frame that is
-actually quicker is the evidence that flips the default; the mode is correct at every grain and
-every chunk count today, and one environment variable away.
+**What DOES move it is a smaller GLOBAL pool, and that is not rigExec's to set.** With
+`PXR_WORK_THREAD_LIMIT` (minimum / median of five):
+
+| threads | parallel | serial |
+|---|---|---|
+| 1 | 635.9 / 640.5 | 629.6 / 636.2 |
+| 4 | **539.4 / 560.4** | 566.5 / 623.3 |
+| 6 | 581.8 / 602.8 | 547.7 / 572.1 |
+| 8 | 570.1 / 600.5 | **512.7 / 567.9** |
+| 20 (default) | 641.0 / 652.4 | 577.6 / 583.2 |
+
+5-10% in both modes, and the gain vanishes entirely with `RIGEXEC_ENABLE_PARALLEL_EVAL=false`
+(667.5 at 4 threads against 672.5 at 20, and both far slower than either column above). So the
+cost is inside the GEOMETRY KERNELS, not in the step region: `WorkParallelForN` is called with a
+fixed grain of `RigExecGeometryGrainSize` = 512, so a 26276-point skin is ~52 tasks whatever the
+pool size, and what the thread limit changes is how many threads contend on a memory-bandwidth-
+bound loop. That is why the arena around the region cannot reach it, and it is the next lever:
+the kernels' concurrency, decided per call from the point count, and not the scheduler's.
+
+**The ceiling, restated.** 558us of modelled serial work against a 294us critical path is at most
+1.9x before overhead; of the real ~590us, 134-146us is the serial prologue and 79-85us is a
+strictly serial tail (the fuse, the chain status sweep and the extent). Both of the numbers the
+previous stage named as the obstacle are down by a third: the prologue from 190.8us at a1c2ea9,
+and the tail from 105-117us (`Derived` 95-107, `ChainStatus` ~9, `RevisionFuse` ~0.7). Parallel is
+still slower, because what it loses is in the bodies and not in the schedule.
 
 **What a default frame is instrumented with.** Nothing inside a step. No step body opens a profile
 scope (`RIGEXEC_PROFILE_SCOPE_CAT` calls `IsEnabled()` three times and each call takes a mutex,
@@ -230,34 +277,14 @@ twenty scopes in the serial prologue, the serial epilogue and around the region 
 uncontended mutex acquisitions, which is below the run-to-run spread of the frame measurement
 itself and is not separately visible in it.
 
-**What was removed, and what was measured and left.** The epilogue's map publication went from
-152us to about 50us by filling the published maps from their end (`emplace_hint`) in path order --
-about 850 keys that were each a search from the root. Rejected by measurement rather than by
-preference: a coarser grain or a cluster cap (cluster count does not move the frame); a persistent
-`WorkDispatcher` owned by the program (construction is not the cost); moving `Solve` and
-`Constraint` parameter reads into the prologue source pass (worth the 21us those 65 steps lose to
-the static input cache's worker-thread bypass, and nothing at all in serial mode); and removing the
-allocations from `RigExecResolvedInputs::GetAttribute` (no measurable change -- the cost of a
-parameter read is USD's value resolution, about 0.38us of the 0.43us).
-
-**The one number a next stage should act on first.** The skin partition costs more than it buys on
-this rig, because a chunk body is a serial loop where an unpartitioned revision calls a kernel that
-spreads itself over the arena:
-
-| | serial | parallel |
-|---|---|---|
-| default (7 chunks) | 662 | 705 |
-| `RIGEXEC_BAKED_MAX_CHUNKS=1` | **615** | 628 |
-
-50-90us per frame, and it agrees with the report's own finding above: all seven chunks are ready at
-level 40 of 44, so there is no head start to pay for the loss of the data-parallel kernel. The rule
-that would settle it is "cut a revision only when its chunks' ready levels differ", and the reason
-it is not implemented here is ordering: `PartitionAtBuild` runs before the edge sweep, so the levels
-it needs do not exist yet. Running the sweep and `RigExecBakedAssignStepCosts` over the pose steps
-first -- geometry steps never precede a pose step, so their absence cannot change a
-`ProviderMatrix` level -- would make the levels available where the cut is decided. The defaults
-are left where Phase 2 set them until that is done, so that the feature is not switched off on the
-strength of one asset.
+**What was measured and left, so nobody repeats it.** A coarser grain or a cluster cap (cluster
+count does not move the frame); a persistent `WorkDispatcher` owned by the program (construction is
+not the cost); moving `Solve` and `Constraint` parameter reads into the prologue source pass (worth
+the 21us those 65 steps lose to the static input cache's worker-thread bypass, and nothing at all
+in serial mode); removing the allocations from `RigExecResolvedInputs::GetAttribute` (no measurable
+change -- the cost of a parameter read is USD's value resolution, about 0.38us of the 0.43us, which
+is why the chains were given pinned `UsdAttributeQuery` reads instead); and the private arena
+above.
 
 ### What a drag costs
 
@@ -282,6 +309,12 @@ nothing in its history to say so -- so the comparison binary is built beside it 
 
 The biped authors no `brow` control -- the `brow_*_bind` prims are joints -- so the head end of the
 control chain stands in for the smallest facial cone the rig has.
+
+That table is Phase 2's and has not been re-measured across all six columns. The two columns that
+moved since were spot-checked on this head against `a1c2ea9`, serial, median of 60 steps, best of
+three runs: `hips_ctl` 771-857 -> 587-596, `spine_end_ctl` 772.9 -> 522.2, `arm_l_fk_wrist_l_bind`
+601.5 -> 443.8. A drag frame runs the prologue whole, so the property-chain binding reaches it in
+full; the derived handle and the uncut skin reach whatever part of the cone the drag opens.
 
 Two changes account for the drop from 1135-1177 to 565-759. The larger is the topology clear
 [S29]: dropping every skin layout on every override set costs 280-460µs of a drag frame, because
@@ -1123,11 +1156,13 @@ Measure and record (§8.4): drag frame cost with and without the per-override-se
    epilogue's map publication (~50-150 µs) is irreducible serial work, so the biped frame should
    land around 2-2.5× faster than serial, not 8× [S30]. A serial regression means per-frame work
    that belongs at Build.
-   STATUS: the first half passes -- serial is 662us against `b705950`'s 757us, 12.5% faster, not
-   within 5% of it -- and the second half does not: parallel is 705us. `--profile` turned out to be
-   the wrong instrument for a frame this size and was replaced by `--repeat` and
-   `RIGEXEC_BAKED_STEP_TIMING`; see "What a frame costs" for the numbers and for the three control
-   experiments that say where the parallel time goes.
+   STATUS: the first half passes -- serial is 588us against `b705950`'s 743us, 21% faster, not
+   within 5% of it -- and the second half does not: parallel is 614us on the biped and slower than
+   serial on every one of the seven rigs measured. `--profile` turned out to be the wrong
+   instrument for a frame this size and was replaced by `--repeat` and
+   `RIGEXEC_BAKED_STEP_TIMING`; see "What a frame costs" for the per-rig table, for the three
+   control experiments that say where the parallel time goes, and for the private-arena experiment
+   that did not change it.
 5. `RIGEXEC_BAKED_SCHEDULE_REPORT=1` prints steps, edges, clusters, critical-path estimate, and per
    skin revision: chunk count, vertices per chunk, |key| min/mean/max, fraction of chunks covering
    ≥ 50% of influences, each chunk's ready level vs the global max level, and skin critical path vs
