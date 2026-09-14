@@ -1053,6 +1053,81 @@ TestThePartitionIsCutOnlyWhereItPays(const BuiltProgram &built,
                 always ? " (cut forced)" : "");
 }
 
+/// A derived revision keeps its 26k-point input by HANDLE, and that
+/// comparison is the elementwise one with the identity case taken first.
+///
+/// The derived maintenance step is the frame's serial tail -- one bounding
+/// box over the whole mesh -- and it used to make three passes over 315KB
+/// before it computed anything: the assemble copied the chain's points into
+/// the packet, `parameters != lastParameters` walked them, and
+/// `lastParameters = parameters` copied them again. The last two are gone
+/// because auxPoints IS the chain's final buffer and VtArray is
+/// copy-on-write, so identity decides the value.
+///
+/// That substitution is only sound if two things hold, and both are asserted
+/// here rather than assumed: the run really does remember the buffer rather
+/// than a copy of it, and VtArray's own equality falls THROUGH a
+/// non-identical pair to the values -- otherwise a chain that recomputed the
+/// same points (a forced pass, a drag returned to its value) would count as
+/// having moved, and `revisionsExecuted` is counter-parity-bearing.
+void
+TestTheDerivedCompareAgreesWithTheElementwiseOne(const std::string &stagePath)
+{
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    RigExecRigPose first, repeated;
+    CHECK(built.program->Run(UsdTimeCode::Default(), &first));
+    CHECK(built.program->Run(UsdTimeCode::Default(), &repeated));
+    // The identity arm, end to end: nothing moved, so nothing re-executed.
+    CHECK(repeated.moverGraphRevisionsExecuted == 0);
+    const RigExecBakedProgramImpl &B = built.program->GetStepGraph();
+    size_t derivedRevisions = 0;
+    for (const RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                derived.revision;
+            if (!revision.ran) {
+                continue;
+            }
+            ++derivedRevisions;
+            // The remembered packet carries no points at all ...
+            CHECK(revision.lastParameters.auxPoints.empty());
+            // ... and what stands in for them is the chain's published
+            // points. Equal by VALUE and not necessarily by buffer: the
+            // chain publishes into a double buffer, so a generation in which
+            // the status sweep ran has swapped the array since.
+            CHECK(revision.lastAuxPoints == chain.result);
+
+            // Remembering them costs a refcount and not 315KB: assigning the
+            // handle shares the buffer, which is the whole reason the packet
+            // may keep them at all.
+            const VtVec3fArray shared = chain.result;
+            CHECK(shared.IsIdentical(chain.result));
+
+            // A DEEP copy is a different buffer that still compares equal:
+            // the fall-through the handle test relies on, and the arm that
+            // runs on every generation where the status sweep republished.
+            VtVec3fArray copy;
+            copy.assign(chain.result.begin(), chain.result.end());
+            CHECK(!copy.IsIdentical(chain.result));
+            CHECK(copy == chain.result);
+            CHECK(!(copy != chain.result));
+            // And values that moved are still not equal, however the buffer
+            // got there.
+            if (!copy.empty()) {
+                copy[0] += GfVec3f(1.0f, 0.0f, 0.0f);
+                CHECK(copy != chain.result);
+            }
+        }
+    }
+    std::printf("  derived compare: %zu derived revision(s) keep their "
+                "points by handle\n", derivedRevisions);
+}
+
 /// A skin revision the frame rejects publishes what the dynamic path
 /// publishes: the preceding points, and the MoverFailed line.
 ///
@@ -2057,6 +2132,8 @@ main(int argc, char **argv)
     TestAStalePartitionRunsTheRevisionWhole(
         examplesDir + "/biped/Biped.usda");
     TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
+    TestTheDerivedCompareAgreesWithTheElementwiseOne(
+        examplesDir + "/biped/Biped.usda");
     TestARepeatedTimeReExecutesNothing(examplesDir + "/biped/Biped.usda",
                                        "Biped");
     TestARepeatedTimeReExecutesNothing(

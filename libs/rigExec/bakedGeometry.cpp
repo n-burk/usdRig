@@ -1613,6 +1613,7 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
         revision->output.clear();
         revision->currentSource = -1;
         revision->lastParameters = RigExecMoverParameters();
+        revision->lastAuxPoints = VtVec3fArray();
         revision->lastStatus = RigExecMoverStatus();
     };
     const auto resolveTopology =
@@ -1835,19 +1836,44 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         }
         RigExecBakedProgramImpl::GeomRevision &revision = derived.revision;
         FoldInfluences(B, &revision);
-        const RigExecMoverParameters parameters = AssembleRevision(
+        RigExecMoverParameters parameters = AssembleRevision(
             B, &revision, chain.result.cdata(), chain.result.size(), time,
             step);
         const RigExecMoverStatus status =
             RigExecStatusForParameters(parameters, revision.moverPath);
         step->counters.revisionsBuilt = 1;
-        if (derived.baseDirty || !revision.ran ||
-            parameters != revision.lastParameters ||
+        // The 26k-point input is remembered by HANDLE, not by copy.
+        //
+        // A derived revision's auxPoints IS the chain's own published
+        // buffer, and nothing else in the packet is that size -- so the run
+        // remembers the packet with that one field emptied and the points
+        // beside it as the VtArray the chain published, which costs a
+        // refcount. `chain.result != lastAuxPoints` is then the same test
+        // `parameters != lastParameters` performed over the same values:
+        // VtArray's operator== is `IsIdentical(other) || (shape equal &&
+        // std::equal(...))`, so it is the elementwise walk with the identity
+        // case taken first. The identity case is the rarer one here, because
+        // the status sweep publishes into a double buffer and so hands out a
+        // different array whenever it runs; what this removes for certain is
+        // the pass that was never a comparison at all -- copying 315KB into
+        // lastParameters every time the extent was recomputed, for a
+        // bounding box that reads the points once. Measured on the biped:
+        // the Derived step from 95-107us to 74-76us.
+        std::vector<GfVec3f> aux;
+        aux.swap(parameters.auxPoints);
+        const bool moved = chain.result != revision.lastAuxPoints ||
+                           parameters != revision.lastParameters;
+        parameters.auxPoints.swap(aux);
+        if (derived.baseDirty || !revision.ran || moved ||
             status != revision.lastStatus) {
             step->counters.revisionsExecuted = 1;
-            const std::vector<GfVec3f> preceding(derived.lastBase.begin(),
-                                                 derived.lastBase.end());
-            std::vector<GfVec3f> values = preceding;
+            // The derived target's own authored array, which is what the
+            // recomputation writes over: two vectors for an extent, the
+            // whole mesh for normals. Built once and re-assigned on the
+            // failure arm rather than copied into a `preceding` that exists
+            // only to be copied again.
+            std::vector<GfVec3f> values(derived.lastBase.begin(),
+                                        derived.lastBase.end());
             // The same function the revision node calls, and not a second
             // arrangement of the same rules: the kind check, the empty and
             // size-2 guards, the derived property keeping its authored
@@ -1862,13 +1888,21 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                                          /*controlFrames=*/nullptr);
             revision.resultStatus = status.state;
             if (!applied) {
-                values = preceding;
+                values.assign(derived.lastBase.begin(),
+                              derived.lastBase.end());
                 if (status.AllowsApply()) {
                     revision.resultStatus = _tokens->moverFailed;
                 }
             }
-            revision.output = values;
-            revision.lastParameters = parameters;
+            revision.output = std::move(values);
+            // The packet WITHOUT its points, and the points beside it. Both
+            // are the run's, and both are replaced only where the revision
+            // executed -- the comparison above is against the last packet
+            // that produced an answer, not against last frame's inputs.
+            parameters.auxPoints.clear();
+            parameters.auxPoints.shrink_to_fit();
+            revision.lastParameters = std::move(parameters);
+            revision.lastAuxPoints = chain.result;
             revision.lastStatus = status;
             revision.ran = true;
         }

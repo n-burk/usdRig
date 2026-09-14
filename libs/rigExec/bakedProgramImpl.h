@@ -1797,6 +1797,15 @@ struct RigExecBakedProgramImpl {
         // re-publishes instead of re-running -- which is the accounting the
         // VdfNetwork performs for the dynamic path.
         RigExecMoverParameters lastParameters;
+        /// A DERIVED revision's `auxPoints` -- the chain's final points, up
+        /// to 315KB of them -- held here as the handle the chain published
+        /// rather than copied into `lastParameters` above, which is left
+        /// with that field empty. The comparison agrees with the elementwise
+        /// one by construction: VtArray is copy-on-write and its operator==
+        /// short-circuits on a shared buffer, so this is the same test with
+        /// the identity case taken first. Empty, and never read, for every
+        /// other revision.
+        VtVec3fArray lastAuxPoints;
         RigExecMoverStatus lastStatus;
         bool ran = false;
         /// A read phase named this revision as the point in the chain it
@@ -2711,6 +2720,7 @@ struct RigExecBakedRunShadow {
         std::vector<RigExecScaledDualQuat> palette;
         std::vector<ChunkState> chunks;
         RigExecMoverParameters parameters, lastParameters;
+        VtVec3fArray lastAuxPoints;
         RigExecMoverStatus status, lastStatus;
         TfToken resultStatus;
         GfMatrix4d transform{1.0};
