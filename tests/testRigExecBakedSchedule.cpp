@@ -65,6 +65,7 @@
 #include <set>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -1128,6 +1129,156 @@ TestTheDerivedCompareAgreesWithTheElementwiseOne(const std::string &stagePath)
                 "points by handle\n", derivedRevisions);
 }
 
+/// A rebuilt program inherits everything a revision's `ran` promises a
+/// comparison against, and not just the packet.
+///
+/// AdoptGeometryStateFrom is what stops a rebuild from re-running every
+/// per-point kernel the edit did not touch: it hands one revision's run
+/// state across to the node that replaced it. A derived revision's run state
+/// now lives in TWO fields rather than one -- the packet with its points
+/// emptied, and the chain's buffer held by handle beside it -- and a carry
+/// that takes only the packet leaves the node saying "compare against what I
+/// last saw" with an empty array to compare against. Every derived revision
+/// of the rig then re-executes on the first generation after any edit, which
+/// is a `revisionsExecuted` and a diagnostic the dynamic path does not
+/// report, because its own graphs stood through the same edit.
+///
+/// Two arms, because neither alone is the contract. The first asks the
+/// adopted node what it carries, which is the invariant and is rig
+/// independent. The second recompiles a parity-checked rig for real and
+/// evaluates it, which is the shape no other fixture has: every suite here
+/// runs generations of ONE program, so nothing else evaluates after an
+/// adopt at all.
+void
+TestARebuiltProgramKeepsItsRunState(const std::string &stagePath,
+                                    const char *name)
+{
+    const BuiltProgram built = Build(stagePath);
+    CHECK(built.program != nullptr);
+    if (!built.program) {
+        return;
+    }
+    RigExecRigPose first, repeated;
+    CHECK(built.program->Run(UsdTimeCode::Default(), &first));
+    CHECK(built.program->Run(UsdTimeCode::Default(), &repeated));
+
+    // What the outgoing program remembers, read BEFORE the adopt moves it
+    // out from under us.
+    std::map<SdfPath, VtVec3fArray> remembered;
+    std::map<SdfPath, std::vector<GfMatrix4d>> folded;
+    for (const RigExecBakedProgramImpl::GeomChain &chain :
+             built.program->GetStepGraph().chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            if (revision.ran && !revision.influences.empty()) {
+                folded.emplace(revision.moverPath, revision.influences);
+            }
+        }
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            if (derived.revision.ran) {
+                remembered.emplace(derived.target,
+                                   derived.revision.lastAuxPoints);
+            }
+        }
+    }
+
+    std::vector<std::string> reasons;
+    std::unique_ptr<RigExecBakedProgram> rebuilt =
+        RigExecBakedProgram::Build(built.evaluator.get(), &reasons);
+    CHECK(rebuilt != nullptr);
+    if (!rebuilt) {
+        return;
+    }
+    rebuilt->AdoptGeometryStateFrom(*built.program);
+
+    size_t carried = 0, tables = 0;
+    for (const RigExecBakedProgramImpl::GeomChain &chain :
+             rebuilt->GetStepGraph().chains) {
+        for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                 chain.revisions) {
+            const auto found = folded.find(revision.moverPath);
+            if (found == folded.end()) {
+                continue;
+            }
+            // The fold decides `influencesChanged` against this table, so an
+            // adopted node that lost it reports every matrix moved and runs.
+            // The binding did not change here, so the shapes agree and the
+            // whole table comes across.
+            CHECK(revision.influences == found->second);
+            ++tables;
+        }
+        for (const RigExecBakedProgramImpl::GeomChain::Derived &derived :
+                 chain.derived) {
+            const auto found = remembered.find(derived.target);
+            if (found == remembered.end()) {
+                continue;
+            }
+            // A node that kept its `ran` kept everything that `ran` promises
+            // a comparison against -- the packet AND the points, which are
+            // one remembered input split across two fields.
+            CHECK(derived.revision.ran);
+            CHECK(derived.revision.lastAuxPoints == found->second);
+            // And the points are really there: the failure this guards is an
+            // empty array that compares unequal to every non-empty mesh.
+            CHECK(derived.revision.lastAuxPoints.empty() ==
+                  found->second.empty());
+            ++carried;
+        }
+    }
+    std::printf("  %s: %zu derived revision(s) carried their points and %zu "
+                "influence table(s) came across a rebuild\n", name, carried,
+                tables);
+}
+
+/// The same question asked of a real recompile, through the parity check.
+///
+/// Compile() retires the program and rebuilds it, and the replacement adopts
+/// the geometry state of the one it replaced -- so the generation after a
+/// recompile is the one generation in which the two paths can disagree about
+/// how much work there was to do. `revisionsExecuted` is a compared counter,
+/// so RigExecComparePoses is the judge here as everywhere else.
+void
+TestARecompiledRigStillAgreesWithTheDynamicPath(const std::string &stagePath,
+                                                const char *name)
+{
+    const UsdStageRefPtr stage = UsdStage::Open(stagePath);
+    CHECK(stage != nullptr);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath = FindRig(stage);
+    CHECK(!rigPath.IsEmpty());
+    if (rigPath.IsEmpty()) {
+        return;
+    }
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.IsBakeable());
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::BakedWithParityCheck);
+    const RigExecRigPose warm = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(warm.valid);
+    CHECK(warm.bakedParityMismatches == 0);
+
+    // A recompile of the same stage: a new epoch, the same shape, and an
+    // outgoing program for the replacement to adopt.
+    CHECK(evaluator.Compile(&errors));
+    const RigExecRigPose after = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(after.valid);
+    if (after.bakedParityMismatches != 0) {
+        ++failures;
+        std::printf("FAIL %s: %zu mismatch(es) after a recompile\n", name,
+                    after.bakedParityMismatches);
+        for (const std::string &diagnostic : after.diagnostics) {
+            std::printf("    %s\n", diagnostic.c_str());
+        }
+        return;
+    }
+    std::printf("  %s: a recompiled rig agrees, %zu revision(s) executed\n",
+                name, after.moverGraphRevisionsExecuted);
+}
+
 /// A skin revision the frame rejects publishes what the dynamic path
 /// publishes: the preceding points, and the MoverFailed line.
 ///
@@ -2134,6 +2285,14 @@ main(int argc, char **argv)
     TfSetenv("RIGEXEC_BAKED_CHUNK_ALWAYS", "0");
     TestTheDerivedCompareAgreesWithTheElementwiseOne(
         examplesDir + "/biped/Biped.usda");
+    TestARebuiltProgramKeepsItsRunState(
+        examplesDir + "/biped/Biped.usda", "Biped");
+    TestARebuiltProgramKeepsItsRunState(
+        examplesDir + "/04_BlendShapeFace.usda", "04_BlendShapeFace");
+    TestARecompiledRigStillAgreesWithTheDynamicPath(
+        examplesDir + "/biped/Biped.usda", "Biped");
+    TestARecompiledRigStillAgreesWithTheDynamicPath(
+        examplesDir + "/04_BlendShapeFace.usda", "04_BlendShapeFace");
     TestARepeatedTimeReExecutesNothing(examplesDir + "/biped/Biped.usda",
                                        "Biped");
     TestARepeatedTimeReExecutesNothing(

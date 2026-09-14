@@ -624,8 +624,38 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         destination->resultStatus = source->resultStatus;
         destination->output = std::move(source->output);
         destination->lastParameters = std::move(source->lastParameters);
+        // A DERIVED revision's remembered input lives beside the packet
+        // rather than inside it -- the chain's 315KB point buffer, held by
+        // handle with `lastParameters.auxPoints` left empty -- so it has to
+        // travel with the packet it was split from. Leaving it behind gives
+        // the adopted node a `ran` that says "compare against what I last
+        // saw" and an empty array to compare against, so every derived
+        // revision of the rig re-executes on the first generation after any
+        // edit, bumps `revisionsExecuted` and emits its diagnostic, while
+        // the dynamic path -- whose graphs stood through the same edit --
+        // reports none of it. Exactly the failure lastDefaultWeight below
+        // describes, one field further along.
+        destination->lastAuxPoints = std::move(source->lastAuxPoints);
         destination->lastStatus = source->lastStatus;
         destination->ran = source->ran;
+        // The FOLDED influence table, which is the other half of the
+        // comparison `ran` promises. A skin revision re-executes when one of
+        // its matrices moved, and `influencesChanged` is decided by the fold
+        // against the table it last wrote -- so a node that kept its `ran`
+        // and lost its table compares this run's matrices against a table
+        // that has never held one, reports every entry changed and runs.
+        // That is the same divergence the packet fields above describe,
+        // reached through the fold instead of through the packet: the
+        // dynamic path's VdfNetwork keeps the buffers of the nodes it
+        // reconnects, so it reports no such work.
+        //
+        // Carried only where the two tables are the same shape. keepRun says
+        // the revision is the same mover at the same place in the chain; it
+        // does not say its binding still names the same joints, and the fold
+        // writes one entry per influence slot of the NEW binding.
+        if (source->influences.size() == destination->influences.size()) {
+            destination->influences = std::move(source->influences);
+        }
         // The last run's envelope scalar belongs to the cached result the
         // same way the packet does: a node whose `ran` survives a rebuild
         // must not then compare this against the zero a fresh revision
