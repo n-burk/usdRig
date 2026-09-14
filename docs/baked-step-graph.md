@@ -544,17 +544,33 @@ whatever the mode asks for, and times each step into that step's own accumulator
 nothing, so the same program produces the same schedule on the same machine however busy it is.
 
 Three rows could not be fitted on the biped because no rig that baked had the step. Phase 3 made
-those rigs bake, so they are now measured -- the median of five calibration runs (40 frames each)
-of the one rig that exercises each, fitted through the origin because one or five samples of one
-size cannot separate the fixed term from the per-unit one:
+those rigs bake, so they are now measured -- the median of nine calibration runs of the one rig
+that exercises each, fitted through the origin because one or five samples of one size cannot
+separate the fixed term from the per-unit one:
 
-| row | rig | steps | was | is | spread over five runs |
+| row | rig | steps | was | is | spread over nine runs |
 |---|---|---|---|---|---|
-| `SnapshotFinals` | `13_ReadPhases` | 1 | `{1.0, 0.2}` | `{0, 0.0935}` | 0.0899 .. 0.0959 (a sixth run gave 0.1909 and was dropped as the load spike it was) |
-| `VolumePlacements` | `11_VolumeWeights` | 1 | `{0.5, 0.01}` | `{0, 0.1623}` | 0.1587 .. 0.1675 |
-| `WeightPacket` | `11_VolumeWeights` | 5 | `{0, 0.05}` | `{0, 0.0772}` | 0.0742 .. 0.0779 |
+| `SnapshotFinals` | `13_ReadPhases` | 1 | `{1.0, 0.2}` | `{0, 0.07714}` | 0.0754 .. 0.0814 |
+| `VolumePlacements` | `11_VolumeWeights` | 1 | `{0.5, 0.01}` | `{0, 0.14388}` | 0.1377 .. 0.1652 |
+| `WeightPacket` | `11_VolumeWeights` | 5 | `{0, 0.05}` | `{0, 0.06648}` | 0.0658 .. 0.0674 |
 
-So the guesses were wrong by -53%, +16x and +54% respectively, in the direction that matters least
+One run of each printed roughly double the rest and is not in the spread; the medians are what
+nine runs agree on.
+
+**Fit a one-step row warm, or it is not reproducible.** These three were first fitted at the
+default `RIGEXEC_BAKED_SCHEDULE_CALIBRATE=1`, which averages eight frames including the cold one,
+and the numbers it printed then (0.0935, 0.1623, 0.0772) do not come back: at 8 frames the same
+tool now reports about 0.16, 0.27 and 0.13 on the same tree, varying run to run. The reason is the
+sample count, not the machine. A rig with ONE step of a kind gives the fit one sample per run, so
+the cold frame -- first touch of the arrays, cold caches, the arena still waking -- is an eighth of
+the average and reads as about 1.8x the steady-state cost. The rows above are therefore fitted at
+`RIGEXEC_BAKED_SCHEDULE_CALIBRATE=200`, where five runs agree to a few percent. The biped's rows do
+not have that problem and did not need the longer run: 93 `ComposeSubtree` samples or 252
+`ProviderMatrix` samples move by 3-5% between 8 frames and 200 (0.0914 -> 0.0880, 0.0530 ->
+0.0515), which is what puts every row of this table on one scale -- and what a row fitted on one
+step has to be fitted warm to join.
+
+So the guesses were wrong by -61%, +14x and +33% respectively, in the direction that matters least
 -- a cost row can only pack a bin badly, never change an answer -- and all three sizes are small (a
 handful of providers, one volume, a few packet elements), so the per-unit terms are honest at that
 scale and extrapolate on trust. `WeightPacket` is the only one of the three with enough steps for
