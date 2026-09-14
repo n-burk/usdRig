@@ -119,21 +119,31 @@ _IsBakedSolverType(const TfToken &type)
            type == "RigExecBlendPointFrames" || type == "RigExecSplineIk";
 }
 
+// The three placeable weight shapes, which the evaluator spells the same way
+// in its own file-static _IsVolumeWeightType. Three tokens, and duplicating
+// them here is cheaper than widening a header for a predicate neither side
+// would ever change without the other.
+bool
+_IsVolumeWeightTypeName(const TfToken &type)
+{
+    return type == "RigExecSphereWeight" || type == "RigExecPlaneWeight" ||
+           type == "RigExecCurveWeight";
+}
+
 // The weight-object schemas the program can build a packet for.
 //
 // It is about the BUILDER and nothing else. The volumetric three are here
 // because RigExecBuildVolumeWeightPacket is one of the builders, and they are
 // still refused above by the _volumeWeightMatrixTaps loop, which is about the
-// PLACEMENT a volume's field needs; the day that placement is maintained,
-// deleting that loop is the whole change and this predicate does not move.
+// PLACEMENT a volume's field needs -- which the pose walk now composes, so
+// the two questions have one answer again.
 // RigExecCurvenetWeight is the one weight object left out: its field comes off
 // a curvenet bind, which the program does not hold.
 bool
 _IsBakedWeightType(const TfToken &type)
 {
     return type == "RigExecStaticWeight" || type == "RigExecDynamicWeight" ||
-           type == "RigExecCombineWeight" || type == "RigExecSphereWeight" ||
-           type == "RigExecPlaneWeight" || type == "RigExecCurveWeight";
+           type == "RigExecCombineWeight" || _IsVolumeWeightTypeName(type);
 }
 
 // A numeric probe time. Selection along a connection chain must not depend on
@@ -234,9 +244,6 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     for (const SdfPath &path : E._xformDerivedProviders) {
         say("constraint target is a plain Xformable", path);
     }
-    for (const auto &[path, tap] : E._volumeWeightMatrixTaps) {
-        say("volume weight object", path);
-    }
     for (const SdfPath &path : E._currentPhaseWeights) {
         say("current-phase volume weight", path);
     }
@@ -265,7 +272,13 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             continue;
         }
         const TfToken type = prim.GetTypeName();
-        if (type != "RigExecJoint" && type != "RigExecControl") {
+        // The volumetric three are RigExecXformables, so the pose walk
+        // composes them into a slot exactly as it composes a joint -- with
+        // one difference the compose has to know about, which is that their
+        // scale avars are read and discarded (RigExecBakedProgramImpl::
+        // noScaleAvars).
+        if (type != "RigExecJoint" && type != "RigExecControl" &&
+            !_IsVolumeWeightTypeName(type)) {
             say("provider type not baked (" + type.GetString() + ")", path);
         }
         // A space expression the compose cannot express: the program builds
@@ -1013,6 +1026,16 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.guideTaps = &E._guideTaps;
     B.solverGuidesEnabled = &E._solverGuidesEnabled;
     B.hasPropertyChains = !E._propertyChains.empty();
+    // Every volumetric weight's baked falloff remap, copied rather than
+    // recomputed: these are the same bytes the authoritative snapshot hands
+    // exec, and resampling the curve again here would risk a different
+    // answer for a spline edited between Compile and Build.
+    for (const RigExecValueOverride &override : E._falloffLutOverrides) {
+        if (override.value.IsHolding<RigExecFalloffLut>()) {
+            B.falloffLuts[override.prim] =
+                override.value.UncheckedGet<RigExecFalloffLut>().samples;
+        }
+    }
 
     RigExecBakedBuildContext ctx;
     ctx.program = &B;
@@ -1068,6 +1091,13 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             B.index[path] = int(B.paths.size());
             B.paths.push_back(path);
             B.slotKind.push_back(kind);
+            // Read here, with the type already in hand, rather than in the
+            // compose: a volume weight's placement is rigid, and the
+            // transform-scale avars it would otherwise compose with are
+            // exactly the ones exec never binds.
+            const UsdPrim prim = B.stage->GetPrimAtPath(path);
+            B.noScaleAvars.push_back(
+                prim && _IsVolumeWeightTypeName(prim.GetTypeName()) ? 1 : 0);
         }
     }
     const int N = int(B.paths.size());
@@ -1626,6 +1656,28 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     }
     if (!RigExecBakedPublishPose(&B, pose)) {
         return false;  // the dynamic fallback needs exec
+    }
+    // Every volume weight object's placement, from the frames the walk ended
+    // with. The dynamic path republishes this after every successful commit
+    // because a weight resolved mid-walk reads the map as it stands then;
+    // nothing the program resolves reads it mid-walk -- a mover's packet is
+    // placed from the volume's own base slot, and a volume weight object on a
+    // constraint is still refused -- so the one call that decides what the
+    // pose carries is this one, and it is the walk's LAST state either way.
+    // The feature that resolves a weight inside the walk is the feature that
+    // has to move it.
+    {
+        const auto finalFrameOf = [&B](const SdfPath &provider,
+                                       RigExecPointFrame *frame) {
+            const auto slot = B.index.find(provider);
+            if (slot == B.index.end()) {
+                return false;
+            }
+            *frame = B.fin[size_t(B.finLast[size_t(slot->second)])];
+            return true;
+        };
+        E._UpdateVolumePlacements(
+            RigExecPoseFrameLookup(finalFrameOf), pose);
     }
     RigExecBakedPublishGeometry(&B, pose);
 

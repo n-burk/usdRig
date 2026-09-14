@@ -1750,8 +1750,6 @@ static const char *const kExpectedToDecline[] = {
     "06_LatticeBulge.usda",          // ... (lattice)
     "07_SurfaceDrape.usda",          // ... (surfaceProject)
     "10_AimXformTurret.usda",        // constraint target is a plain Xformable
-    "11_VolumeWeights.usda",         // provider type not baked
-                                     // (RigExecCurveWeight)
     "12_CurvenetProfile.usda",       // mover operation not baked (curvenet)
     "13_ReadPhases.usda",            // ... (lattice)
     "ArmRig.usda",                   // ... (blendShape)

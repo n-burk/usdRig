@@ -1046,6 +1046,17 @@ struct RigExecBakedProgramImpl {
     std::vector<GfMatrix4d> selfD;                     // default:space
     std::vector<GfMatrix4d> parentDinv;                // parent default^-1
     std::vector<TfToken> rotOrder;
+    /// Per provider slot: the scale avars are read and DISCARDED.
+    ///
+    /// A volume weight is a RigExecXformable whose point frame is composed
+    /// with readScaleAvars = false, because a volume's shape is
+    /// inputs:scaleX/Y/Z's alone and a transform scale left in the placement
+    /// would deform the field without deforming the rigid guide a viewer
+    /// draws. Exec expresses that by never binding avars:sx/sy/sz at all --
+    /// so the discard has to happen at COMPOSE time and not by zeroing the
+    /// captured constants, which an override or an animated channel would
+    /// walk straight past.
+    std::vector<char> noScaleAvars;
 
     // ---- the input binding table ------------------------------------------
     std::vector<double> avarConstants;                 // providers * 11
@@ -1713,7 +1724,42 @@ struct RigExecBakedProgramImpl {
         // Combine.
         TfToken combineMode;
         RigExecBakedInput<float> strength, invert;
-        size_t weightTargetCount = 0;
+        /// The combine's own rigExec:weightTarget, read for its SIZE alone.
+        std::vector<UsdAttribute> combineTargetPoints;
+        /// Roughly how many elements this object's packet carries, for the
+        /// cost model alone. Measured once at Build off the same arrays the
+        /// chain point counts are measured from; a packet whose field turns
+        /// out to be a different size costs the schedule a bin, never an
+        /// answer.
+        size_t costElements = 1;
+
+        // ---- the volumetric three ------------------------------------------
+        /// The provider slot the volume is posed into, and therefore the
+        /// BASE frame its field is placed against -- base and not final,
+        /// because the evaluator overrides every seeded provider's
+        /// computePointFrame with its base frame before the authoritative
+        /// snapshot, and a mover's packet is what that snapshot carries.
+        int providerSlot = -1;
+        RigExecBakedInput<float> falloffMin, falloffMax;
+        RigExecBakedInput<float> scaleX, scaleY, scaleZ;
+        RigExecBakedInput<float> extentU, extentV;
+        TfToken planeAxis, planeBounds;
+        /// The points-bearing relationships, as the attributes their
+        /// AUTHORED targets name, in authored order.
+        ///
+        /// Authored and not canonicalized: exec reaches these through
+        /// Relationship().TargetedObjects<GfVec3f>(computeValue), which
+        /// computes a value on each targeted OBJECT, so a target naming a
+        /// prim rather than its .points contributes nothing there however
+        /// readily the CPU oracle infers one. A mover copies exec, so this
+        /// list holds exactly the properties exec would have reached. No
+        /// shipped rig authors the prim form -- every weightTarget in the
+        /// tree and in the fixtures names `.points` -- so the two readings
+        /// agree everywhere today, and where they would not, this is the
+        /// one that is a mover's answer.
+        std::vector<UsdAttribute> targetPoints, samplePoints, curvePoints;
+        /// The epoch's resampled falloff remap, copied from falloffLuts.
+        std::vector<float> falloffCurve;
         /// True when anything this object reads can move between frames --
         /// its own bound inputs, or any object it composes. A false one is
         /// built once and replayed.
@@ -1726,6 +1772,14 @@ struct RigExecBakedProgramImpl {
     /// composition walk is under way (the bake is depth first and enters the
     /// table on the way out), so meeting one is a cycle.
     std::map<SdfPath, int> weightIndex;
+    /// Every volumetric weight object's baked falloff remap, by prim path.
+    ///
+    /// Copied out of the evaluator's own _falloffLutOverrides at Build, not
+    /// recomputed: a falloff curve is epoch-structural (exec has no accessor
+    /// for an attribute's spline, so the curve is resampled once at Compile
+    /// and replayed unchanged), and these are literally the bytes exec
+    /// receives.
+    std::map<SdfPath, std::vector<float>> falloffLuts;
     /// This frame's packet per weight object -- the WeightPacket slot
     /// domain's storage. Sized at Build and never resized in a run, like
     /// every other slot: a consumer holds a pointer into it for the whole

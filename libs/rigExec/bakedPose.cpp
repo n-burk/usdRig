@@ -1559,8 +1559,16 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             }
             const double *a = &B.avars[size_t(i) * 11];
             const double units = a[10];
+            // A volume weight's placement is RIGID: its shape is
+            // inputs:scaleX/Y/Z's alone, so the transform-scale avars are
+            // read and discarded here rather than zeroed at bake -- exec
+            // never binds them at all, and a captured zero would be walked
+            // straight past by an override or an animated channel.
+            const bool noScale = B.noScaleAvars[size_t(i)] != 0;
             const GfMatrix4d avars = RigExecBakedComposeAvars(
-                a[0] * units, a[1] * units, a[2] * units, a[3], a[4], a[5],
+                a[0] * units, a[1] * units, a[2] * units,
+                noScale ? 1.0 : a[3], noScale ? 1.0 : a[4],
+                noScale ? 1.0 : a[5],
                 a[6], a[7], a[8], a[9], B.rotOrder[size_t(i)]);
             const GfMatrix4d parentPosed =
                 B.parent[size_t(i)] >= 0

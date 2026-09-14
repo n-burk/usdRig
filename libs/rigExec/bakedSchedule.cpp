@@ -372,10 +372,7 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
         // weighted points, a combine's cardinality. A constant packet is one
         // element and is very nearly free, which is the common case and the
         // reason the fixed term is zero.
-        const RigExecBakedProgramImpl::WeightObject &weight =
-            B.weightObjects[object];
-        return double(std::max<size_t>(
-            {weight.values.size(), weight.weightTargetCount, size_t(1)}));
+        return double(B.weightObjects[object].costElements);
     }
     case RigExecBakedStepKind::InfluenceFold: {
         const auto &[chain, revision] = B.revisionIndex[object];

@@ -66,7 +66,7 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "08_AimEyes.usda|1001,1012,1016,1032,1048|/EyesAsset/Rig/Controls/LookAt|avars:tx|/EyesAsset/Rig/Movers/Pose/AimL|inputs:defaultWeight|YES|-"
     "09_PropertyMathMovers.usda|1001,1012,1024,1036,1048|/PropMathAsset/Rig/Controls/RootCtl|avars:ry|/PropMathAsset/Rig/Movers/ClampGain|inputs:max|YES|-"
     "10_AimXformTurret.usda|1001,1012,1024,1036,1048|/TurretAsset/Rig/Controls/TrackTarget|avars:tx|/TurretAsset/Rig/Movers/AimBarrel|inputs:defaultWeight|NO|constraints-providers"
-    "11_VolumeWeights.usda|1001,1012,1024,1036,1048|/VolumeAsset/Rig/Controls/Root|avars:rz|/VolumeAsset/Rig/Joints/Shoulder/ShoulderVolume|inputs:falloffMax|NO|weights"
+    "11_VolumeWeights.usda|1001,1012,1024,1036,1048|/VolumeAsset/Rig/Controls/Root|avars:rz|/VolumeAsset/Rig/Joints/Shoulder/ShoulderVolume|inputs:falloffMax|YES|-"
     "12_CurvenetProfile.usda|1001,1012,1024,1036,1048|/CurvenetAsset/Rig/Controls/BendCtl|avars:rz|/CurvenetAsset/Rig/Movers/Geometry/ProfileMover|inputs:defaultWeight|NO|geometry-ops"
     "13_ReadPhases.usda|1001,1012,1024,1036,1048|/ReadPhaseAsset/Rig/Controls/LiftCtl|avars:ty|/ReadPhaseAsset/Rig/Weights/CageW|rigExec:defaultWeight|NO|geometry-ops"
     # -- the constraint stages: every one aims at a plain UsdGeomXformable --

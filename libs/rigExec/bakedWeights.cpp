@@ -147,9 +147,84 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     object.strength = ctx->Bind(prim, "inputs:strength", 1.0f);
     object.invert = ctx->Bind(prim, "inputs:invert", 0.0f);
 
+    // The volumetric three, which are the only weight objects with a
+    // PLACEMENT: they are RigExecXformables, so the pose walk composes them
+    // into a provider slot like a joint, and the field is generated about
+    // that frame.
+    static const TfToken sphereType("RigExecSphereWeight");
+    static const TfToken planeType("RigExecPlaneWeight");
+    static const TfToken curveType("RigExecCurveWeight");
+    const bool volumetric = object.type == sphereType ||
+                            object.type == planeType ||
+                            object.type == curveType;
+    if (volumetric) {
+        object.providerSlot = ctx->SlotOf(path);
+        if (object.providerSlot < 0) {
+            ctx->Refuse("volume weight is not a pose provider", path);
+        }
+        object.falloffMin = ctx->Bind(prim, "inputs:falloffMin", 0.0f);
+        object.falloffMax = ctx->Bind(prim, "inputs:falloffMax", 1.0f);
+        object.scaleX = ctx->Bind(prim, "inputs:scaleX", 1.0f);
+        object.scaleY = ctx->Bind(prim, "inputs:scaleY", 1.0f);
+        object.scaleZ = ctx->Bind(prim, "inputs:scaleZ", 1.0f);
+        object.extentU = ctx->Bind(prim, "inputs:extentU", 1.0f);
+        object.extentV = ctx->Bind(prim, "inputs:extentV", 1.0f);
+        object.planeAxis = ctx->ReadToken(prim, "rigExec:planeAxis", "y");
+        object.planeBounds =
+            ctx->ReadToken(prim, "rigExec:planeBounds", "unbounded");
+        // The curve the remap was resampled from. Folded, not bound: there
+        // is no rebaking a lookup table mid-drag, so an override on it
+        // correctly reports NOT placeable and forces the dynamic path.
+        ctx->Fold(prim, "rigExec:falloffProfile");
+        ctx->Fold(prim, "rigExec:falloffCurve");
+        const auto lut = B.falloffLuts.find(path);
+        if (lut != B.falloffLuts.end()) {
+            object.falloffCurve = lut->second;
+        }
+        // The points, as the properties exec would have reached: authored
+        // target order, nothing inferred. See WeightObject::targetPoints.
+        const auto pointsOf = [&](const char *name) {
+            std::vector<UsdAttribute> out;
+            for (const SdfPath &target : ctx->Targets(prim, name)) {
+                if (!target.IsPropertyPath()) {
+                    continue;
+                }
+                B.named.insert(target);
+                B.prims.insert(target.GetPrimPath());
+                if (const UsdAttribute a =
+                        B.stage->GetAttributeAtPath(target)) {
+                    out.push_back(a);
+                }
+            }
+            return out;
+        };
+        object.targetPoints = pointsOf("rigExec:weightTarget");
+        object.samplePoints = pointsOf("rigExec:sampleSource");
+        object.curvePoints = pointsOf("rigExec:curve");
+    } else if (object.type == "RigExecCombineWeight") {
+        // Read for its SIZE and never for its points: the combine consults
+        // its own weight target only when no input is dense enough to carry
+        // the cardinality itself.
+        for (const SdfPath &target :
+                 ctx->Targets(prim, "rigExec:weightTarget")) {
+            if (!target.IsPropertyPath()) {
+                continue;
+            }
+            B.named.insert(target);
+            B.prims.insert(target.GetPrimPath());
+            if (const UsdAttribute a = B.stage->GetAttributeAtPath(target)) {
+                object.combineTargetPoints.push_back(a);
+            }
+        }
+    }
+
     object.varying = object.defaultWeight.varying || object.driver.varying ||
                      object.scale.varying || object.bias.varying ||
-                     object.strength.varying || object.invert.varying;
+                     object.strength.varying || object.invert.varying ||
+                     object.falloffMin.varying || object.falloffMax.varying ||
+                     object.scaleX.varying || object.scaleY.varying ||
+                     object.scaleZ.varying || object.extentU.varying ||
+                     object.extentV.varying;
     // A composed object moves when anything it composes moves, and the
     // dependency order above guarantees those are already decided.
     if (object.base >= 0 && B.weightObjects[size_t(object.base)].varying) {
@@ -158,6 +233,20 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
     for (const int input : object.inputs) {
         if (B.weightObjects[size_t(input)].varying) {
             object.varying = true;
+        }
+    }
+
+    // What the schedule sizes this step by. The points if the object reads
+    // any, else the painted table, else one element.
+    object.costElements = std::max<size_t>(object.values.size(), 1);
+    for (const std::vector<UsdAttribute> *points :
+             {&object.targetPoints, &object.combineTargetPoints}) {
+        for (const UsdAttribute &a : *points) {
+            VtVec3fArray value;
+            if (a.Get(&value, UsdTimeCode::EarliestTime())) {
+                object.costElements =
+                    std::max(object.costElements, value.size());
+            }
         }
     }
 
@@ -206,16 +295,88 @@ RigExecBakedWeightPacket(const RigExecBakedProgramImpl &program,
         for (const int input : object.inputs) {
             inputs.push_back(packets[size_t(input)]);
         }
+        // The cardinality fallback, and the reason it is a SIZE and not an
+        // array: a combine consults its own weight target only when every
+        // input is constant and none of them can say how many elements the
+        // field has.
+        size_t targetCount = 0;
+        for (const UsdAttribute &a : object.combineTargetPoints) {
+            VtVec3fArray value;
+            if (B.resolvedInputs->GetAttribute(a, time, &value)) {
+                targetCount += value.size();
+            }
+        }
         return RigExecBuildCombineWeightPacket(
             object.representation, object.rangePolicy, object.combineMode,
-            inputs, object.weightTargetCount, rd(object.strength),
-            rd(object.invert));
+            inputs, targetCount, rd(object.strength), rd(object.invert));
     }
-    // Volumetric and curvenet weights read point arrays and a posed frame
-    // that the table does not carry yet; their arms arrive with the features
-    // that remove their refusals, through RigExecBuildVolumeWeightPacket and
-    // RigExecComputeCurvenetWeightPacket. Until then an unknown type is an
-    // invalid packet, which is a MoverFailed pass-through rather than a
+    static const TfToken sphereType("RigExecSphereWeight");
+    static const TfToken planeType("RigExecPlaneWeight");
+    static const TfToken curveType("RigExecCurveWeight");
+    if (object.type == sphereType || object.type == planeType ||
+        object.type == curveType) {
+        RigExecVolumeWeightInputs inputs;
+        inputs.representation = object.representation;
+        inputs.rangePolicy = object.rangePolicy;
+        // The volume's BASE frame, which is what exec's computePointFrame
+        // carries for every seeded provider in the authoritative snapshot.
+        // NOT B.fin: a volume some constraint revises is placed for a mover
+        // where it was composed and for pose.weightFrames where it ended up,
+        // and reproducing both is the contract (see the head of this file).
+        if (object.providerSlot >= 0) {
+            // The LAST base version of the slot, which is what
+            // `baseFrames.at(provider)` holds when the authoritative
+            // snapshot is taken: a solver commit writes a provider's base as
+            // well as its final, and the packet is built after the walk.
+            inputs.placement =
+                B.base[size_t(B.baseLast[size_t(object.providerSlot)])];
+            inputs.hasPlacement = true;
+        }
+        inputs.params.falloffMin = rd(object.falloffMin);
+        inputs.params.falloffMax = rd(object.falloffMax);
+        inputs.params.invert = rd(object.invert);
+        inputs.params.strength = rd(object.strength);
+        inputs.params.curve = object.falloffCurve;
+        if (object.type != planeType) {
+            inputs.scales = GfVec3f(rd(object.scaleX), rd(object.scaleY),
+                                    rd(object.scaleZ));
+        } else {
+            inputs.planeAxis = object.planeAxis;
+            inputs.planeBounds = object.planeBounds;
+            // Only the bounded arm consults them: an unbounded plane is an
+            // infinite half-space gradient, and a bad extent on one is a
+            // legibility problem rather than a reason to invalidate the rig.
+            if (object.planeBounds == "bounded") {
+                inputs.extentU = rd(object.extentU);
+                inputs.extentV = rd(object.extentV);
+            }
+        }
+        // The points are a whole mesh, so they are gathered only once the
+        // structural half has said the volume can produce a field at all --
+        // which is the order the exec adapters gather them in, and the
+        // reason RigExecVolumeWeightCanBuild exists.
+        const auto gather = [&](const std::vector<UsdAttribute> &attributes,
+                                std::vector<GfVec3f> *out) {
+            for (const UsdAttribute &a : attributes) {
+                VtVec3fArray value;
+                if (B.resolvedInputs->GetAttribute(a, time, &value)) {
+                    out->insert(out->end(), value.begin(), value.end());
+                }
+            }
+        };
+        if (RigExecVolumeWeightCanBuild(object.type, inputs)) {
+            gather(object.targetPoints, &inputs.targetPoints);
+            gather(object.samplePoints, &inputs.samplePoints);
+            if (object.type == curveType) {
+                gather(object.curvePoints, &inputs.curvePoints);
+            }
+        }
+        return RigExecBuildVolumeWeightPacket(object.type, inputs);
+    }
+    // RigExecCurvenetWeight is the one weight object left: its field comes
+    // off a curvenet bind, which the program does not hold. IsBakeable
+    // refuses it by name, so nothing reaches this -- and an unknown type is
+    // an invalid packet, which is a MoverFailed pass-through rather than a
     // plausible wrong deformation.
     return RigExecWeightPacket();
 }
@@ -235,6 +396,28 @@ RigExecBakedNoteWeightInputs(
     RigExecBakedNoteInput(weight.bias, step);
     RigExecBakedNoteInput(weight.strength, step);
     RigExecBakedNoteInput(weight.invert, step);
+    RigExecBakedNoteInput(weight.falloffMin, step);
+    RigExecBakedNoteInput(weight.falloffMax, step);
+    RigExecBakedNoteInput(weight.scaleX, step);
+    RigExecBakedNoteInput(weight.scaleY, step);
+    RigExecBakedNoteInput(weight.scaleZ, step);
+    RigExecBakedNoteInput(weight.extentU, step);
+    RigExecBakedNoteInput(weight.extentV, step);
+    // The point arrays a volume measures, which no RigExecBakedInput covers:
+    // they are read through the generation's resolved inputs every frame, so
+    // a property chain or a drag on the weighted mesh reaches this step the
+    // same way it reaches a geometry mover.
+    for (const std::vector<UsdAttribute> *points :
+             {&weight.targetPoints, &weight.samplePoints, &weight.curvePoints,
+              &weight.combineTargetPoints}) {
+        if (!points->empty()) {
+            step->resolvedInputReads = true;
+            for (const UsdAttribute &a : *points) {
+                step->varyingInputs =
+                    step->varyingInputs || a.ValueMightBeTimeVarying();
+            }
+        }
+    }
 }
 
 void
@@ -261,6 +444,13 @@ RigExecBakedBuildWeightSteps(RigExecBakedProgramImpl *program)
         for (const int input : weight.inputs) {
             step.reads.push_back(RigExecBakedOne(
                 RigExecBakedSlotDomain::WeightPacket, input));
+        }
+        // A volume's placement is a pose frame, which makes its step a
+        // reader of the pose half and so neither a source nor a pure
+        // function of the stage.
+        if (weight.providerSlot >= 0) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::PoseBase, weight.providerSlot));
         }
         step.writes.push_back(
             RigExecBakedOne(RigExecBakedSlotDomain::WeightPacket, int(i)));
