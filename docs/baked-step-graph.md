@@ -81,6 +81,10 @@ Three consequences worth knowing before touching it:
   revision then executes, and drained by the epilogue in chain and revision
   order -- that ordering is what makes two revisions sharing one weight
   object last-writer-wins the way the dynamic walk's per-chain merge does.
+  The drain tests `chain.haveBase` as well as the revision's own flag, for
+  the reason the points and the derived targets beside it do: a chain whose
+  points stop reading at a time returns from the assemble before it looks at
+  a packet, and the dynamic path publishes no field at all for one.
 
 ### The environment
 
