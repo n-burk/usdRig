@@ -8080,8 +8080,6 @@ RigExecRigEvaluator::_ApplyInteractiveOverridesToResolved(
                                nullptr, resolved, published);
 }
 
-namespace {
-
 // One per-frame array of constraint source parameters, read RAW.
 //
 // Straight off the attribute at the frame's time: no connection walk, no
@@ -8093,12 +8091,13 @@ namespace {
 // An absent or empty array is not a failure: it means the neutral value on
 // every source, which is what an unauthored blend has always meant.
 bool
-_ReadConstraintSourceWeights(const UsdPrim &prim,
-                             const char *name,
-                             size_t count,
-                             UsdTimeCode time,
-                             std::vector<std::string> *diagnostics,
-                             std::vector<double> *weights)
+RigExecRigEvaluator::_ReadConstraintSourceWeights(
+    const UsdPrim &prim,
+    const char *name,
+    size_t count,
+    UsdTimeCode time,
+    std::vector<std::string> *diagnostics,
+    std::vector<double> *weights)
 {
     VtFloatArray authored;
     if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
@@ -8120,12 +8119,13 @@ _ReadConstraintSourceWeights(const UsdPrim &prim,
 
 // The same read for a per-source offset array, whose neutral value is zero.
 bool
-_ReadConstraintSourceOffsets(const UsdPrim &prim,
-                             const char *name,
-                             size_t count,
-                             UsdTimeCode time,
-                             std::vector<std::string> *diagnostics,
-                             std::vector<GfVec3d> *offsets)
+RigExecRigEvaluator::_ReadConstraintSourceOffsets(
+    const UsdPrim &prim,
+    const char *name,
+    size_t count,
+    UsdTimeCode time,
+    std::vector<std::string> *diagnostics,
+    std::vector<GfVec3d> *offsets)
 {
     VtVec3dArray authored;
     if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
@@ -8153,9 +8153,10 @@ _ReadConstraintSourceOffsets(const UsdPrim &prim,
 // input chain; evaluator-side preparation decides whether those
 // measurements are rest- or animation-derived.
 bool
-_PrepareRestDerivedIkChain(const std::vector<RigExecPointFrame> &current,
-                           const std::vector<RigExecPointFrame> &rest,
-                           std::vector<RigExecPointFrame> *prepared)
+RigExecRigEvaluator::_PrepareRestDerivedIkChain(
+    const std::vector<RigExecPointFrame> &current,
+    const std::vector<RigExecPointFrame> &rest,
+    std::vector<RigExecPointFrame> *prepared)
 {
     if (current.size() != rest.size() || current.empty()) {
         return false;
@@ -8219,8 +8220,6 @@ _PrepareRestDerivedIkChain(const std::vector<RigExecPointFrame> &current,
     }
     return true;
 }
-
-}  // namespace
 
 // ---------------------------------------------------------------------------
 // The pieces of the pose walk that are not the walk: frames read off the

@@ -1509,6 +1509,45 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         return true;
     };
 
+    // A constraint's own authored tables, read RAW at the frame's time.
+    //
+    // Not through the resolved inputs and not through a bound query: the
+    // dynamic walk reads these straight off the attribute, so a property
+    // chain or an interactive override on one is deliberately honoured by
+    // neither path. The cardinality line each read can produce is kept
+    // beside the values and replayed by the constraint step, which is where
+    // the dynamic walk emits it.
+    const auto constraintArrays = [&B, time]() {
+        for (RigExecBakedProgramImpl::ConstraintArrays &arrays :
+                 B.constraintArrays) {
+            arrays.diagnostics.clear();
+            arrays.ok = RigExecRigEvaluator::_ReadConstraintSourceWeights(
+                arrays.prim, "inputs:sourceWeights", arrays.sourceCount, time,
+                &arrays.diagnostics, &arrays.weights);
+            // The dynamic walk stops at the first table it cannot use, so
+            // the offsets are not read when the weights were malformed --
+            // and a run that read them anyway could produce a second line
+            // the reference generation never produced.
+            if (arrays.parentOffsets) {
+                arrays.ok =
+                    arrays.ok &&
+                    RigExecRigEvaluator::_ReadConstraintSourceOffsets(
+                        arrays.prim, "inputs:translationOffsets",
+                        arrays.sourceCount, time, &arrays.diagnostics,
+                        &arrays.translationOffsets) &&
+                    RigExecRigEvaluator::_ReadConstraintSourceOffsets(
+                        arrays.prim, "inputs:rotationOffsets",
+                        arrays.sourceCount, time, &arrays.diagnostics,
+                        &arrays.rotationOffsets);
+            } else {
+                arrays.translationOffsets.assign(arrays.sourceCount,
+                                                 GfVec3d(0));
+                arrays.rotationOffsets.assign(arrays.sourceCount,
+                                              GfVec3d(0));
+            }
+        }
+    };
+
     // ---- prologue -----------------------------------------------------------
     //
     // Serial, always run, and the only part of a frame that may take a lock,
@@ -1558,6 +1597,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         }
         RigExecBakedRunInputs(&B, time);
         stageFramesOk = stageFrames();
+        constraintArrays();
         RigExecBakedRunGeometryPrologue(&B, time, pose);
     }
     if (!stageFramesOk) {

@@ -1028,6 +1028,40 @@ private:
     void _UpdateVolumePlacements(const RigExecPoseFrameLookup &finalFrameOf,
                                  RigExecRigPose *pose);
 
+    /// One per-frame array of constraint source parameters, read RAW.
+    ///
+    /// Straight off the attribute at the frame's time: no connection walk,
+    /// no resolved-input lookup, no interactive override. A source weight is
+    /// an input of the constraint OPERATOR, not of the rig, and the
+    /// evaluator and the baked program have to read it the same way -- so
+    /// both read it here, and the cardinality diagnostic has one wording
+    /// rather than one per caller. An absent or empty array is not a
+    /// failure: it means the neutral value on every source.
+    static bool _ReadConstraintSourceWeights(
+        const UsdPrim &prim, const char *name, size_t count,
+        UsdTimeCode time, std::vector<std::string> *diagnostics,
+        std::vector<double> *weights);
+
+    /// The same read for a per-source offset array, whose neutral is zero.
+    static bool _ReadConstraintSourceOffsets(
+        const UsdPrim &prim, const char *name, size_t count,
+        UsdTimeCode time, std::vector<std::string> *diagnostics,
+        std::vector<GfVec3d> *offsets);
+
+    /// Rebuilds a SingleChainIK input chain from its rest layout.
+    ///
+    /// `neverTS` retains current rotations and root placement while
+    /// rebuilding child placement and handle lengths from the rest frames. A
+    /// joint with no authored rest transform carries the schema's identity
+    /// fallback, which is not a chain rest layout at all; its current static
+    /// layout stands in. Pure frame math, so the solver keeps measuring its
+    /// input chain and the preparation decides only whether those
+    /// measurements are rest- or animation-derived.
+    static bool _PrepareRestDerivedIkChain(
+        const std::vector<RigExecPointFrame> &current,
+        const std::vector<RigExecPointFrame> &rest,
+        std::vector<RigExecPointFrame> *prepared);
+
     /// Whether a SingleChainIK chain's joints can move with time at all.
     ///
     /// "autoDetect" asks this to choose between solving the chain as it

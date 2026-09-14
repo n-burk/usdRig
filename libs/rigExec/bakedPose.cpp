@@ -360,62 +360,39 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         c.enabled = bind(prim, "inputs:enabled", true);
         c.defaultWeight = bind(prim, "inputs:defaultWeight", 1.0f);
 
-        // inputs:sourceWeights / the parent offsets are authored tables, read
-        // as arrays rather than as a per-source scalar.
-        const size_t n = c.sources.size();
-        VtFloatArray weights;
-        fold(prim, "inputs:sourceWeights");
-        if (const UsdAttribute a =
-                prim.GetAttribute(TfToken("inputs:sourceWeights"))) {
-            if (RigExecBakedAnimatedOrConnected(a)) {
-                refuse("animated inputs:sourceWeights", fc.moverPath);
+        // inputs:sourceWeights and the parent offsets are authored TABLES
+        // the operator reads raw, once per frame, at the frame's own time.
+        // They are re-read rather than captured, so an animated blend
+        // between two parents bakes -- and the cardinality diagnostic the
+        // dynamic walk gives a malformed one is reproduced from this run's
+        // numbers rather than refused at bake.
+        //
+        // FoldShape and not Fold: the property is `named` for the resync
+        // index, because a connection appearing on one is a structural edit,
+        // but nothing about its VALUE is folded -- so a value edit needs no
+        // rebuild, and an override on one is not placeable, which agrees
+        // with the dynamic path ignoring such an override too.
+        {
+            RigExecBakedProgramImpl::ConstraintArrays arrays;
+            arrays.prim = prim;
+            arrays.sourceCount = c.sources.size();
+            arrays.parentOffsets =
+                fc.schemaType == "RigExecParentConstraint";
+            foldShape(prim, "inputs:sourceWeights");
+            if (prim.GetAttribute(TfToken("inputs:sourceWeights"))) {
+                ++B.boundInputs;
             }
-            a.Get(&weights);
-            ++B.boundInputs;
-        }
-        c.authoredSourceWeights = weights.size();
-        c.sourceWeights.resize(n);
-        for (size_t k = 0; k < n; ++k) {
-            c.sourceWeights[k].constant = k < weights.size() ? weights[k] : 1.0f;
-        }
-        if (!weights.empty() && weights.size() != n) {
-            // The dynamic path diagnoses this and passes the constraint
-            // through; the program refuses instead of reproducing a
-            // malformed-input message from baked state.
-            refuse("inputs:sourceWeights cardinality", fc.moverPath);
-        }
-        c.translationOffsets.assign(n, GfVec3d(0));
-        c.rotationOffsets.assign(n, GfVec3d(0));
-        if (fc.schemaType == "RigExecParentConstraint") {
-            VtVec3dArray translations, rotations;
-            for (const char *name : {"inputs:translationOffsets",
-                                     "inputs:rotationOffsets"}) {
-                fold(prim, name);
-                if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
-                    if (RigExecBakedAnimatedOrConnected(a)) {
-                        refuse(std::string("animated ") + name, fc.moverPath);
+            if (arrays.parentOffsets) {
+                for (const char *name : {"inputs:translationOffsets",
+                                         "inputs:rotationOffsets"}) {
+                    foldShape(prim, name);
+                    if (prim.GetAttribute(TfToken(name))) {
+                        ++B.boundInputs;
                     }
-                    ++B.boundInputs;
                 }
             }
-            if (const UsdAttribute a = prim.GetAttribute(
-                    TfToken("inputs:translationOffsets"))) {
-                a.Get(&translations);
-            }
-            if (const UsdAttribute a =
-                    prim.GetAttribute(TfToken("inputs:rotationOffsets"))) {
-                a.Get(&rotations);
-            }
-            if ((!translations.empty() && translations.size() != n) ||
-                (!rotations.empty() && rotations.size() != n)) {
-                refuse("parent constraint offset cardinality", fc.moverPath);
-            }
-            for (size_t k = 0; k < translations.size() && k < n; ++k) {
-                c.translationOffsets[k] = translations[k];
-            }
-            for (size_t k = 0; k < rotations.size() && k < n; ++k) {
-                c.rotationOffsets[k] = rotations[k];
-            }
+            c.arrays = int(B.constraintArrays.size());
+            B.constraintArrays.push_back(std::move(arrays));
         }
         // The GEOMETRY domain, decided once. The delta is measured against
         // the TARGET PRIM's authored transform, which is a stage read the
@@ -1949,8 +1926,18 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             return RigExecApplyRevisedAncestorDelta(
                 B.nativeSources[size_t(native)].path, providers, out);
         };
-        bool sourcesReady = true;
-        for (size_t k = 0; k < c.sources.size(); ++k) {
+        // buildSources' order, which is a diagnostic order as much as an
+        // arithmetic one: the authored tables first, then the source frames.
+        // A rig with both a bad cardinality and an unresolvable source says
+        // so in that order, and the comparator compares diagnostics in
+        // order.
+        const RigExecBakedProgramImpl::ConstraintArrays &arrays =
+            B.constraintArrays[size_t(c.arrays)];
+        bool sourcesReady = arrays.ok;
+        for (const std::string &line : arrays.diagnostics) {
+            step->diagnostics.push_back(line);
+        }
+        for (size_t k = 0; sourcesReady && k < c.sources.size(); ++k) {
             RigExecPointFrame frame;
             if (!resolveSource(c.sources[k], commit.sourceReads[k],
                                c.sourceNatives[k], commit.sourceAncestors[k],
@@ -1962,9 +1949,11 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                 break;
             }
             commit.sources[k].frame = frame;
-            commit.sources[k].normalizedWeight = c.sourceWeights[k].constant;
-            commit.sources[k].translationOffset = c.translationOffsets[k];
-            commit.sources[k].rotationOffsetDegrees = c.rotationOffsets[k];
+            commit.sources[k].normalizedWeight = arrays.weights[k];
+            commit.sources[k].translationOffset =
+                arrays.translationOffsets[k];
+            commit.sources[k].rotationOffsetDegrees =
+                arrays.rotationOffsets[k];
         }
         if (!sourcesReady) {
             step->diagnostics.push_back(

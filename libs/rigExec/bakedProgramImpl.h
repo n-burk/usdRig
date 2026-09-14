@@ -893,6 +893,9 @@ struct RigExecBakedCones {
     /// Geometry-domain delta base -> the cluster of the constraint step that
     /// measures against it.
     std::vector<std::vector<int>> deltaBaseClusters;
+    /// Constraint-array entry -> the cluster of the constraint step that
+    /// reads it.
+    std::vector<std::vector<int>> constraintArrayClusters;
     /// Steps whose dirtiness depends on time or on a standing override.
     std::vector<int> varyingSteps, overrideSteps;
 };
@@ -1086,6 +1089,34 @@ struct RigExecBakedProgramImpl {
     /// readers dirty is the two compared by VALUE, never "the time moved".
     /// It is also what `providerBaseXforms` publishes.
     std::vector<GfMatrix4d> xformBase, lastXformBase;
+
+    // ---- a constraint's own per-frame arrays ------------------------------
+    //
+    // inputs:sourceWeights and the parent offsets are read RAW off the
+    // attribute at the frame's time -- no connection walk, no resolved
+    // input, no interactive override -- because that is what the dynamic
+    // walk does with them, and an operator input is not a rig input. The
+    // read is USD, so it is the PROLOGUE's; the cardinality diagnostic
+    // belongs to the constraint step, at the constraint's own place in the
+    // walk, so what the prologue leaves behind is the line rather than the
+    // pose it would have gone into.
+    struct ConstraintArrays {
+        UsdPrim prim;
+        size_t sourceCount = 0;
+        bool parentOffsets = false;
+        std::vector<double> weights;
+        std::vector<GfVec3d> translationOffsets, rotationOffsets;
+        /// At most one line: the dynamic walk's buildSources stops at the
+        /// first array whose cardinality is wrong.
+        std::vector<std::string> diagnostics;
+        bool ok = true;
+        /// What the run before read. A source is compared by VALUE.
+        std::vector<double> lastWeights;
+        std::vector<GfVec3d> lastTranslationOffsets, lastRotationOffsets;
+        std::vector<std::string> lastDiagnostics;
+        bool lastOk = true;
+    };
+    std::vector<ConstraintArrays> constraintArrays;
 
     // ---- native Xformable constraint sources ------------------------------
     //
@@ -1289,13 +1320,11 @@ struct RigExecBakedProgramImpl {
         std::vector<int> sources;
         std::vector<int> sourceNatives;
         std::vector<SdfPath> sourcePaths;
+        /// This constraint's entry in `constraintArrays`, or -1 when it
+        /// reads no per-frame array at all.
+        int arrays = -1;
         RigExecBakedInput<bool> enabled;
         RigExecBakedInput<float> defaultWeight;
-        // The authored table only.
-        std::vector<RigExecBakedInput<float>> sourceWeights;
-        size_t authoredSourceWeights = 0;
-        std::vector<GfVec3d> translationOffsets, rotationOffsets;
-        bool offsetsVary = false;
         // position/rotation/scale
         RigExecBakedInput<GfVec3d> offset;
         // The operator's own affect group.

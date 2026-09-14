@@ -1036,6 +1036,7 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     // which one each geometry-domain delta base reaches.
     cones.nativeSourceClusters.assign(B.nativeSources.size(), {});
     cones.deltaBaseClusters.assign(B.deltaBasePaths.size(), {});
+    cones.constraintArrayClusters.assign(B.constraintArrays.size(), {});
     for (const RigExecBakedStep &step : B.steps) {
         if (step.kind != RigExecBakedStepKind::Constraint) {
             continue;
@@ -1060,6 +1061,10 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         if (constraint.deltaBase >= 0) {
             cones.deltaBaseClusters[size_t(constraint.deltaBase)].push_back(
                 step.cluster);
+        }
+        if (constraint.arrays >= 0) {
+            cones.constraintArrayClusters[size_t(constraint.arrays)]
+                .push_back(step.cluster);
         }
     }
     for (std::vector<int> &clusters : cones.nativeSourceClusters) {
@@ -1211,6 +1216,24 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 dirty.Set(cones.avarCluster[size_t(B.xformSlots[k])]);
             }
         }
+        // A constraint's own authored tables, which the prologue re-reads
+        // at the frame's time. Compared by value, values and diagnostic
+        // together, because a cardinality line that changed is a published
+        // difference as much as a weight that changed.
+        for (size_t k = 0; k < B.constraintArrays.size(); ++k) {
+            const RigExecBakedProgramImpl::ConstraintArrays &arrays =
+                B.constraintArrays[k];
+            if (arrays.ok == arrays.lastOk &&
+                arrays.weights == arrays.lastWeights &&
+                arrays.translationOffsets == arrays.lastTranslationOffsets &&
+                arrays.rotationOffsets == arrays.lastRotationOffsets &&
+                arrays.diagnostics == arrays.lastDiagnostics) {
+                continue;
+            }
+            for (const int cluster : cones.constraintArrayClusters[k]) {
+                dirty.Set(cluster);
+            }
+        }
         // And the transform each geometry-domain constraint measures its
         // delta against, which is its target prim's own authored one.
         for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
@@ -1305,6 +1328,14 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     B.lastNativeFrameOk = B.nativeFrameOk;
     B.lastDeltaBaseMatrix = B.deltaBaseMatrix;
     B.lastDeltaBaseOk = B.deltaBaseOk;
+    for (RigExecBakedProgramImpl::ConstraintArrays &arrays :
+             B.constraintArrays) {
+        arrays.lastOk = arrays.ok;
+        arrays.lastWeights = arrays.weights;
+        arrays.lastTranslationOffsets = arrays.translationOffsets;
+        arrays.lastRotationOffsets = arrays.rotationOffsets;
+        arrays.lastDiagnostics = arrays.diagnostics;
+    }
     B.lastOverridden = B.overridden;
     B.lastPropertyResults = B.propertyResults;
     B.lastHaveBase.resize(B.chains.size());

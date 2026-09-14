@@ -406,7 +406,71 @@ TestEvaluatorSemantics()
                    GfVec3d(1, 1, 5)));
     }
 
+    // A LIVE constraint with a malformed table says so and passes through,
+    // in the dynamic walk's own order: the cardinality line the raw read
+    // owns, then the mover's "unusable constraint inputs". Both arrays are
+    // read per frame on both paths, so this is also what proves the program
+    // reproduces the diagnostic from THIS run's numbers rather than from
+    // something captured at bake.
+    position.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    const RigExecRigPose malformed =
+        evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(malformed.valid);
+    const auto cardinality = std::find_if(
+        malformed.diagnostics.begin(), malformed.diagnostics.end(),
+        [](const std::string &diagnostic) {
+            return diagnostic.find(
+                       "inputs:sourceWeights has 3 entries for 2 sources") !=
+                   std::string::npos;
+        });
+    CHECK(cardinality != malformed.diagnostics.end());
+    if (cardinality != malformed.diagnostics.end()) {
+        const auto unusable = std::find_if(
+            cardinality, malformed.diagnostics.end(),
+            [](const std::string &diagnostic) {
+                return diagnostic.find("has unusable constraint inputs") !=
+                       std::string::npos;
+            });
+        CHECK(unusable != malformed.diagnostics.end());
+    }
+    const auto malformedPosition =
+        malformed.providerXforms.find(SdfPath("/Asset/Targets/Position"));
+    CHECK(malformedPosition != malformed.providerXforms.end());
+    if (malformedPosition != malformed.providerXforms.end()) {
+        CHECK(Near(malformedPosition->second.ExtractTranslation(),
+                   GfVec3d(1, 1, 5)));
+    }
+
+    // An ANIMATED blend between two parents. The bake used to refuse the rig
+    // outright for this; now the table is re-read per frame, so the two
+    // frames below have to differ -- and differ from each other by the
+    // weights alone, since nothing else on the stage moves.
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Set(VtFloatArray{1, 0}, UsdTimeCode(1.0));
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Set(VtFloatArray{0, 1}, UsdTimeCode(2.0));
+    const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+    const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+    CHECK(atOne.valid);
+    CHECK(atTwo.valid);
+    const auto oneAt = atOne.providerXforms.find(
+        SdfPath("/Asset/Targets/Position"));
+    const auto twoAt = atTwo.providerXforms.find(
+        SdfPath("/Asset/Targets/Position"));
+    CHECK(oneAt != atOne.providerXforms.end());
+    CHECK(twoAt != atTwo.providerXforms.end());
+    if (oneAt != atOne.providerXforms.end() &&
+        twoAt != atTwo.providerXforms.end()) {
+        CHECK(!Near(oneAt->second.ExtractTranslation(),
+                    twoAt->second.ExtractTranslation()));
+    }
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Clear();
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Set(VtFloatArray{1, 3});
+
     // MoverAPI enable is a shape-preserving pass-through.
+    position.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.0f);
     position.GetAttribute(TfToken("inputs:enabled")).Set(false);
     const RigExecRigPose disabled =
         evaluator.Evaluate(UsdTimeCode::Default());
