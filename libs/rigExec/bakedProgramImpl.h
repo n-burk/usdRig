@@ -1976,8 +1976,6 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    arrays after runs that agree exactly about the published one, which is
 ///    `result` -- the buffer is storage, and only what `result` names in it
 ///    is an answer.
-///  * a commit's `deltas` where nothing reads them: see the reason, and the
-///    measurement behind it, at the comparison in bakedVerify.cpp.
 ///  * the snapshot stores: `RigExecBakedProgramImpl::runSnapshots` and each
 ///    step's `snapshots`. A program in which any step records one sets
 ///    `phasedReads`, and `phasedReads` forces every run whole (§7), so a
@@ -1985,9 +1983,20 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    revision's `revisionInputs` overlay is captured and restored for the
 ///    same reason turned around -- it costs nothing and it keeps the second
 ///    pass starting from exactly the first's state -- but not compared.
-///  * per-step `startUs`/`endUs` and `measuredUs`/`measuredRuns`: the
-///    profiler's and the calibrator's own scratch, which the second pass
-///    overwrites by design.
+///  * the RUN STATISTICS, which are restored rather than compared, because
+///    the second pass is forced and so writes different ones by
+///    construction: `lastClosedClusters`, the clustering's `lastRunTimed`
+///    and each `RigExecBakedCluster`'s `readyUs`/`startUs`/`endUs`, and each
+///    step's `startUs`/`endUs`. RigExecBakedRunStatistics takes all of them
+///    before the second pass and puts them back after it, so that every
+///    observer of the frame -- the run report, the profiler trace,
+///    GetClustersRunLastGeneration() -- describes the one run that published
+///    a pose.
+///  * `clusterCounters` and per-step `measuredUs`/`measuredRuns`: the
+///    parallel executor's arrival counters and the calibrator's running
+///    averages. The counters are stored afresh at the head of every parallel
+///    run and mean nothing between runs; the averages are a fit over frames,
+///    which an opt-in calibration reads and this mode does not.
 struct RigExecBakedRunShadow {
     /// Copies everything a step reads or writes out of \p program.
     void Capture(const RigExecBakedProgramImpl &program);
@@ -2069,13 +2078,18 @@ struct RigExecBakedRunShadow {
 ///
 /// RIGEXEC_BAKED_VERIFY_CONES runs the frame a second time, forced, and that
 /// pass writes the same bookkeeping the first one did: how many clusters the
-/// closure held, and the per-cluster intervals the run report prints. But a
-/// verification pass is not a generation -- it publishes nothing -- so what
-/// an observer asks the program afterwards has to be the cone run's answer.
-/// Without this, GetClustersRunLastGeneration() reports every cluster
-/// whenever the verifier is on, and the assertions that prove a cone skipped
-/// anything hold or fail on whether the verifier is on rather than on the
-/// cone.
+/// closure held, and the intervals the run report and the profiler trace
+/// print. But a verification pass is not a generation -- it publishes
+/// nothing -- so what an observer asks the program afterwards has to be the
+/// cone run's answer. Without this, GetClustersRunLastGeneration() reports
+/// every cluster whenever the verifier is on, and the assertions that prove
+/// a cone skipped anything hold or fail on whether the verifier is on rather
+/// than on the cone.
+///
+/// The per-STEP intervals are here for the same reason and not a weaker one:
+/// the epilogue replays them into the profiler after the second pass, so
+/// leaving them would put a trace of the verification pass beside a cluster
+/// table of the cone run and let a reader believe the two describe one run.
 struct RigExecBakedRunStatistics {
     /// Takes the statistics \p program currently holds.
     explicit RigExecBakedRunStatistics(
@@ -2086,7 +2100,11 @@ struct RigExecBakedRunStatistics {
     struct ClusterTimes {
         uint64_t readyUs = 0, startUs = 0, endUs = 0;
     };
+    struct StepTimes {
+        uint64_t startUs = 0, endUs = 0;
+    };
     std::vector<ClusterTimes> clusters;
+    std::vector<StepTimes> steps;
     size_t closedClusters = 0;
     bool timed = false;
 };

@@ -695,22 +695,25 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
         // source frames a constraint gathered.
         CompareVector(differences, &count, where + " deltaOk",
                       commits[c].deltaOk, program.commits[c].deltaOk);
-        // A delta is an answer only where something READS it. It is the
-        // commit's own scratch rather than a slot: StageCommitPairs is the
-        // only reader, over the commit's propagation pairs, and
-        // ComputeCommitDeltas writes an entry only for a PRESENT candidate
-        // (a zero flag is what stops anything reading the rest). So a
-        // commit with no pairs computes a delta for nobody, and the two runs
-        // then legitimately hold different ones -- the cone run's is from
-        // the generation its commit last ran, the forced run's is this
-        // generation's. Measured across every example fixture at three
-        // grains in both schedules: every delta the two runs disagreed about
-        // belonged to a commit with no propagation pairs, and none belonged
-        // to one with any. (A commit with no pairs computing a delta at all
-        // is dead per-frame work, and worth removing where it is built.)
+        // Every delta a candidate is PRESENT for, with nothing excused.
+        //
+        // This comparison used to be guarded, because two runs of one
+        // generation disagreed about the deltas of commits with no
+        // propagation pairs while agreeing about `present`, `frames`,
+        // `staged`, `outcome` and `deltaOk`. A delta is a pure function of
+        // its candidate's frame and of B.fin[slot] as it stands BEFORE the
+        // commit, so two passes that agree about every input to it cannot
+        // disagree about its output unless one of them did not compute it --
+        // and that was the whole story: the head step read B.fin[slot] and
+        // declared it only as a WRITE, so a cone could skip the commit in a
+        // generation that moved the slot and leave the delta measuring
+        // against its own last answer. The read is declared now
+        // (bakedPose.cpp, beside declarePropagation) and the disagreement is
+        // gone: 0 differences over the eight bakeable fixtures at
+        // RIGEXEC_BAKED_GRAIN_US=0, the grain that puts every step in its own
+        // cluster, against 3 per generation without the declaration.
         for (size_t pos = 0;
-             !program.commits[c].propagate.empty() &&
-                 pos < commits[c].deltas.size() &&
+             pos < commits[c].deltas.size() &&
                  pos < program.commits[c].deltas.size() &&
                  pos < program.commits[c].deltaOk.size();
              ++pos) {
@@ -796,6 +799,11 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
         clusters[c].startUs = cluster.startUs;
         clusters[c].endUs = cluster.endUs;
     }
+    steps.resize(program.steps.size());
+    for (size_t k = 0; k < steps.size(); ++k) {
+        steps[k].startUs = program.steps[k].startUs;
+        steps[k].endUs = program.steps[k].endUs;
+    }
 }
 
 void
@@ -809,6 +817,10 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
         B.clustering.clusters[c].readyUs = clusters[c].readyUs;
         B.clustering.clusters[c].startUs = clusters[c].startUs;
         B.clustering.clusters[c].endUs = clusters[c].endUs;
+    }
+    for (size_t k = 0; k < B.steps.size() && k < steps.size(); ++k) {
+        B.steps[k].startUs = steps[k].startUs;
+        B.steps[k].endUs = steps[k].endUs;
     }
 }
 

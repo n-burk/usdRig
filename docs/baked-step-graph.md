@@ -205,16 +205,24 @@ comes with it. Where cone re-execution pays on this rig is the case it was writt
   measurements above.
 * The cone verifier (`RIGEXEC_BAKED_VERIFY_CONES=1`) compares the whole of a run's mutable state,
   and "the whole" needed defining rather than assuming: what it does NOT compare, and why each
-  item is scratch rather than an answer, is listed beside `RigExecBakedRunShadow`. Two of those
-  reasons were found by turning the comparison on. A chain's `spare` is the other half of the
-  published double buffer, so a run that publishes and a run that skips the publication hold
-  different generations' arrays there while agreeing exactly about `result`. And a commit's
-  `deltas` are the commit's own scratch: `StageCommitPairs` is the only reader and it walks the
-  commit's propagation pairs, so a commit with NO pairs computes a delta for nobody and the two
-  runs legitimately hold different ones. Measured over every example fixture at three grains in
-  both schedules: every delta the two runs disagreed about belonged to a commit with no
-  propagation pairs, and none belonged to one with any. That a commit with no descendants computes
-  a delta at all is dead per-frame work, and worth removing where it is built.
+  item is scratch rather than an answer, is listed beside `RigExecBakedRunShadow`. Two candidates
+  for that list were found by turning the comparison on, and only one of them belonged there. A
+  chain's `spare` is the other half of the published double buffer, so a run that publishes and a
+  run that skips the publication hold different generations' arrays there while agreeing exactly
+  about `result`. The second candidate was not scratch at all, and the verifier was right: two
+  runs disagreed about a commit's `deltas` while agreeing about every input to them --
+  `present`, `frames`, `staged`, `outcome`, `deltaOk` -- which can only happen if one of the two
+  did not compute them. It did not: the unsplit commit head reads `B.fin[slot]` for each
+  candidate as it stood BEFORE the commit and declared that slot only as a WRITE, so a cone
+  could skip the commit in a generation that moved
+  the slot and leave the delta measured against the commit's own last answer. The split
+  arrangement's `CommitDelta` step had always declared those reads; the head declares them now,
+  the verifier compares every delta a candidate is present for, and the disagreement is gone --
+  0 differences over the eight bakeable fixtures at `RIGEXEC_BAKED_GRAIN_US=0` against 3 per
+  generation before. No published value moved on any fixture here -- every delta the two runs
+  disagreed about belonged to a commit with no propagation pairs, so the stale number was read by
+  nobody, which is why parity never caught it -- but the undeclared read was the same read on a
+  commit WITH pairs, and there a stale delta is a descendant left where the ancestor used to be.
 * Its equality counts a NaN as equal to a NaN, which `==` does not. A mover whose inputs the
   kernel rejects publishes the packet it rejected, NaN and all -- that is how the pass-through
   diagnostic names the value -- so a non-finite number is ordinary state for a correct program
@@ -229,11 +237,17 @@ comes with it. Where cone re-execution pays on this rig is the case it was writt
   cluster -- a skin chunk reads the matrices of its joints -- so the cone of "all pose clusters"
   covers the whole program. Measured on the biped, `Biped_anim`, `spider_legs` and all eight
   first runs `testRigExecInteractive` makes: 259 of 259, 261 of 261, 514 of 514, 4 of 4, 3 of 3,
-  and 57 of 57 on the biped, with and without the rule. The rule is still the rule, because a chain that no joint
-  drives (a Phase 3 blend shape off its own control, a lattice on a static cage) is exactly the
-  case it was written for. But nobody should read it as the answer to "a value edit re-deforms the
-  skin": what stops a rebuild re-EXECUTING a revision is the fuse's value comparison, which is why
-  the executed counters are right either way, and what would stop it re-running the clusters is a
+  and 57 of 57 on the biped, with and without the rule. The rule is still the rule, because a
+  chain that no joint drives (a Phase 3 blend shape off its own control, a lattice on a static
+  cage) is exactly the case it was written for. It keeps two guards the literal [S28] set does
+  not name, both of them the same sentence about what an adopted `ran` does and does not promise:
+  a revision whose `staticDirty` its own source step raised this run is dirty however its
+  adoption went, because `ran` came across on the revision's IDENTITY and an edit that also moved
+  the mover's parameters leaves it holding an answer to a packet the stage no longer has; and so
+  is the base reader of a chain whose authored points moved with the same edit.
+  But nobody should read the rule as the answer to "a value edit re-deforms the skin": what stops
+  a rebuild re-EXECUTING a revision is the fuse's value comparison, which is why the executed
+  counters are right either way, and what would stop it re-running the clusters is a
   shorter dependency from a control to a chunk -- the same ladder §6.1's chunk report measures.
 
 Two rules of §2 and §4.3 that a serial run cannot enforce, and where they are enforced instead:

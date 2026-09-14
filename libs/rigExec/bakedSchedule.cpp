@@ -1180,9 +1180,23 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         }
         for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
             const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
-            if (B.chains[size_t(chainIndex)]
-                    .revisions[size_t(revisionIndex)]
-                    .ran) {
+            const RigExecBakedProgramImpl::GeomRevision &revision =
+                B.chains[size_t(chainIndex)]
+                    .revisions[size_t(revisionIndex)];
+            // The mover's own half of the same sentence the chain guard
+            // below makes: `ran` came across the rebuild on the revision's
+            // IDENTITY, so an edit that moved a mover's parameters while it
+            // was at it leaves a revision saying it holds an answer to a
+            // packet the stage no longer has. Its RevisionStatic step has
+            // already compared the two this run -- it is a source, so it
+            // runs before this set is computed -- and `staticDirty` is that
+            // comparison. Read the same way the steady-state branch reads
+            // it, and dirtied the same way: the static cluster, whose cone
+            // carries the rest of the revision.
+            if (revision.staticDirty) {
+                dirty.Set(cones.revisionStaticCluster[r]);
+            }
+            if (revision.ran) {
                 continue;
             }
             for (const int cluster : cones.revisionClusters[r]) {

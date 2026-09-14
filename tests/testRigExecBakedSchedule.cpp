@@ -5,9 +5,10 @@
 // executor gets right by running the steps in program order whatever the
 // edges say. That is exactly why the edges need a test of their own: they are
 // the part of this design nothing else exercises yet, and the first thing the
-// parallel executor will trust. So this suite asks the four questions whose
+// parallel executor will trust. So this suite asks the questions whose
 // wrong answer makes a parallel run wrong while leaving a serial run
-// perfect:
+// perfect (and the one whose wrong answer makes a CONE wrong while leaving
+// both executors perfect):
 //
 //   * every edge points FORWARD in program order, so running the steps in
 //     index order is always a topological order;
@@ -16,6 +17,8 @@
 //     produced;
 //   * two steps that declare overlapping WRITES are ordered with respect to
 //     each other, so no schedule can run them at once;
+//   * a step that read-modify-writes a slot declares the READ as well, so no
+//     cone can skip it in a generation that moved the slot;
 //   * the report is deterministic, so a schedule can be diffed between two
 //     builds of the same stage and a change in it is a change someone made.
 //
@@ -412,6 +415,48 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
                         "buffer before the fuse says which one holds the "
                         "points\n", name, index, step.label.c_str(),
                         revision, revision);
+        }
+    }
+
+    // (6) An unsplit commit declares a READ of every candidate slot it
+    // measures its delta against. ComputeCommitDeltas takes B.fin[slot] as
+    // it stood BEFORE the commit and the write-back then overwrites that
+    // slot, so the read is not implied by the write: a cone that sees only
+    // the write is free to skip the commit in a generation that moved the
+    // slot, and the delta -- and so every descendant the commit propagates
+    // to -- is then measured against the commit's own last answer. The
+    // split arrangement states this on its CommitDelta step. It is asserted
+    // here because the symptom is invisible in a serial run, and invisible
+    // in every published value of a commit that has no descendants: what
+    // caught it was the cone verifier at one cluster per step.
+    for (size_t index = 0; index < B.steps.size(); ++index) {
+        const RigExecBakedStep &step = B.steps[index];
+        if (step.kind != RigExecBakedStepKind::SolverCommit &&
+            step.kind != RigExecBakedStepKind::Constraint) {
+            continue;
+        }
+        if (step.object < 0 || size_t(step.object) >= B.commits.size()) {
+            continue;
+        }
+        const RigExecBakedCommit &commit = B.commits[size_t(step.object)];
+        if (commit.split) {
+            continue;  // its CommitDelta step owns the reads
+        }
+        for (const int slot : commit.slots) {
+            bool declared = false;
+            for (const RigExecBakedSlotRange &read : step.reads) {
+                declared = declared ||
+                           (read.domain == RigExecBakedSlotDomain::PoseFin &&
+                            read.begin <= uint32_t(slot) &&
+                            uint32_t(slot) < read.end);
+            }
+            if (declared) {
+                continue;
+            }
+            ++failures;
+            std::printf("FAIL %s: step %zu (%s) measures a delta against "
+                        "PoseFin[%d] without declaring the read\n", name,
+                        index, step.label.c_str(), slot);
         }
     }
 

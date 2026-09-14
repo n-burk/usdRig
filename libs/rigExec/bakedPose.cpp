@@ -820,6 +820,18 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
             }
         };
         if (!commit.split) {
+            // The delta this arrangement measures itself is against each
+            // candidate slot's value BEFORE the commit revises it:
+            // ComputeCommitDeltas reads B.fin[slot] and the write-back then
+            // overwrites it, so the read is real and is not implied by the
+            // write. The split arrangement declares exactly these on its
+            // CommitDelta step; declaring them here too is what keeps a cone
+            // from skipping a commit in a generation that moved one of them
+            // and leaving it measuring against its own last answer.
+            for (const int slot : commit.slots) {
+                commitStep.reads.push_back(
+                    RigExecBakedOne(RigExecBakedSlotDomain::PoseFin, slot));
+            }
             declarePropagation(&commitStep, /* writes = */ true);
             if (!walk.solverBatch) {
                 commitStep.writes.push_back(RigExecBakedOne(
