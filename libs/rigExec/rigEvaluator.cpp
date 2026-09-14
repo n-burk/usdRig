@@ -8189,6 +8189,17 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     // the whole question off the table; ClearInteractiveOverrides does the
     // same so the two halves of a drag cannot be asymmetric.
     _staticInputs.Clear();
+    // _propertyChainBindings is NOT dropped here, and the asymmetry with the
+    // cache above is deliberate. It folds constants for the same class of
+    // attribute, but _PinnedRead consults the resolved inputs FIRST -- and
+    // _ApplyInteractiveOverridesToResolved writes every override into those
+    // before a chain runs, on both paths -- so an overridden attribute can
+    // never reach a folded constant to begin with. Dropping the bindings per
+    // drag would rebind every chain input of the rig on both halves of every
+    // drag, which is the whole of what binding once per compile bought. The
+    // two invalidations it does have are the ones that make a binding WRONG
+    // rather than outranked: a stage edit (_OnObjectsChanged) and the
+    // recompile that replaces the chains the bindings describe.
     // An override is a value the static reads must prefer over the stage,
     // and the skin layout is read through exactly that route -- so a layout
     // resolved before the override set changed was resolved against a
