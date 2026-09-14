@@ -988,6 +988,15 @@ RigExecBakedProgram::SetOverrides(
             placeable = false;
             continue;
         }
+        // Unplaceable for the opposite reason to `folded`: the value IS
+        // re-read every frame, and the program would honour the override
+        // while exec type-rejects it. See execTypedArrayInputs. Ahead of
+        // the routed-prim test below, which would otherwise say "already
+        // routed, nothing to do" for the prim these properties live on.
+        if (B.execTypedArrayInputs.count(path)) {
+            placeable = false;
+            continue;
+        }
         const auto found = B.overridableInputs.find(path);
         if (found != B.overridableInputs.end()) {
             for (int index : found->second) {

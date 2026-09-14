@@ -2240,6 +2240,17 @@ struct RigExecBakedProgramImpl {
     /// Properties folded into bake state. An override here cannot be placed
     /// without rebaking, so it forces the dynamic path instead.
     std::set<SdfPath> folded;
+    /// Properties a step reads through the generation's resolved inputs but
+    /// that EXEC reads as a typed scalar input of its own -- a curvenet
+    /// weight's inputs:weights and rigExec:autoSmooth are the case, and the
+    /// only one: they are arrays, and exec's computeWeightPacket declares
+    /// them AttributeValue<float>/<int>, so an override carrying a VtArray
+    /// is rejected there by type and the dynamic path answers from the
+    /// authored value. The program would see it, so placing it would make
+    /// the program answer a question the dynamic path refuses -- a
+    /// divergence with pose.valid on both sides. Unplaceable on purpose,
+    /// which sends the generation down the path that decides.
+    std::set<SdfPath> execTypedArrayInputs;
     bool anyOverridden = false;
 
     /// Registers \p input so an override can be placed on it, and records

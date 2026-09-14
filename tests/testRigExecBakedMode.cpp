@@ -982,6 +982,133 @@ TestANonBakeableRigFallsBack(const char *what, const char *expectReason)
 }
 
 
+// A curvenet weight driving a matrix mover: the one baked object that reads
+// an ARRAY off its own prim every frame.
+static UsdStageRefPtr
+MakeACurvenetWeightRig()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim mesh =
+        stage->DefinePrim(SdfPath("/Asset/Mesh"), TfToken("Mesh"));
+    mesh.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(1, 0, 0),
+                          GfVec3f(2, 0, 0), GfVec3f(0, 1, 0),
+                          GfVec3f(1, 1, 0), GfVec3f(2, 1, 0)});
+    mesh.GetAttribute(TfToken("faceVertexCounts")).Set(VtIntArray{4, 4});
+    mesh.GetAttribute(TfToken("faceVertexIndices"))
+        .Set(VtIntArray{0, 1, 4, 3, 1, 2, 5, 4});
+    const UsdPrim net =
+        stage->DefinePrim(SdfPath("/Asset/Net"), TfToken("RigExecCurvenet"));
+    net.GetAttribute(TfToken("points"))
+        .Set(VtVec3fArray{GfVec3f(0, 0.5f, 0), GfVec3f(0.67f, 0.5f, 0),
+                          GfVec3f(1.33f, 0.5f, 0), GfVec3f(2, 0.5f, 0)});
+    net.GetAttribute(TfToken("rigExec:splineIndices"))
+        .Set(VtIntArray{0, 1, 2, 3});
+
+    const SdfPath target = mesh.GetPath().AppendProperty(TfToken("points"));
+    const UsdPrim weight = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Weights/Net"), TfToken("RigExecCurvenetWeight"));
+    weight.GetRelationship(TfToken("rigExec:weightTarget"))
+        .SetTargets({target});
+    weight.GetRelationship(TfToken("rigExec:curvenetPoints"))
+        .SetTargets({net.GetPath().AppendProperty(TfToken("points"))});
+    weight.GetRelationship(TfToken("rigExec:curvenetSplineIndices"))
+        .SetTargets({net.GetPath().AppendProperty(
+            TfToken("rigExec:splineIndices"))});
+    weight.GetRelationship(TfToken("rigExec:meshFaceCounts"))
+        .SetTargets({mesh.GetPath().AppendProperty(
+            TfToken("faceVertexCounts"))});
+    weight.GetRelationship(TfToken("rigExec:meshFaceIndices"))
+        .SetTargets({mesh.GetPath().AppendProperty(
+            TfToken("faceVertexIndices"))});
+    weight.GetAttribute(TfToken("inputs:weights"))
+        .Set(VtFloatArray{1.0f, 0.75f, 0.25f, 0.0f});
+
+    const UsdPrim driver = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Push"), TfToken("RigExecControl"));
+    driver.GetAttribute(TfToken("avars:tz")).Set(4.0);
+    const UsdPrim mover = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/M"),
+                                            TfToken("RigExecMatrixMover"));
+    mover.ApplyAPI(TfToken("RigExecMoverAPI"));
+    mover.GetRelationship(TfToken("rigExec:moves")).SetTargets({target});
+    mover.GetRelationship(TfToken("rigExec:transform"))
+        .SetTargets({driver.GetPath()});
+    mover.GetRelationship(TfToken("rigExec:weightObject"))
+        .SetTargets({weight.GetPath()});
+    return stage;
+}
+
+// The fourth shape of unplaceable, and the one that is unplaceable because
+// the DYNAMIC path cannot hold it either.
+//
+// A curvenet weight's inputs:weights and rigExec:autoSmooth are arrays, read
+// through the generation's resolved inputs every frame -- which an override
+// is written into, so the program would honour one. Exec cannot: its
+// computeWeightPacket declares both as AttributeValue<float>/<int>, and an
+// override carrying the array they actually hold is rejected there by type
+// ("expected 'float', got 'VtArray<float>'"), leaving the dynamic path
+// answering from the authored value. Honouring it here would be the program
+// answering a question the dynamic path refuses -- pose.valid on both sides
+// and a different mesh. Measured before the two properties were declared
+// unplaceable: the program published z = 2.368 where the dynamic path
+// published z = 4.
+//
+// It lives in THIS suite and not beside the curvenet's own tests because a
+// deliberate fallback is a "bake required" line, and that suite runs under
+// RIGEXEC_BAKE_REQUIRED=1 where such a line is a failure -- correctly.
+static void
+TestAnArrayOverrideOnACurvenetWeightFallsBack()
+{
+    UsdStageRefPtr stage = MakeACurvenetWeightRig();
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath target("/Asset/Mesh.points");
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    CHECK(rig.Evaluate(UsdTimeCode(1.0)).valid);
+    // The program is standing and answering, so a generation that does not
+    // run baked below fell back rather than never having been baked at all.
+    CHECK(rig.GetBakedGenerationCount() == 1);
+
+    const std::vector<std::pair<const char *, RigExecValueOverride>> cases{
+        {"an overridden inputs:weights",
+         RigExecValueOverride{
+             SdfPath("/Asset/Rig/Weights/Net"), TfToken(),
+             TfToken("inputs:weights"),
+             VtValue(VtFloatArray{0.5f, 0.375f, 0.125f, 0.0f})}},
+        {"an overridden rigExec:autoSmooth",
+         RigExecValueOverride{SdfPath("/Asset/Rig/Weights/Net"), TfToken(),
+                              TfToken("rigExec:autoSmooth"),
+                              VtValue(VtIntArray{1, 1, 1, 1})}}};
+    for (const auto &[what, override] : cases) {
+        rig.SetInteractiveOverrides({override});
+        const size_t bakedGenerations = rig.GetBakedGenerationCount();
+        const RigExecRigPose held = rig.Evaluate(UsdTimeCode(1.0));
+        CHECK(held.valid);
+        if (rig.GetBakedGenerationCount() != bakedGenerations) {
+            ++failures;
+            std::printf("FAIL %s: the program answered a generation holding "
+                        "an override exec rejects by type\n", what);
+        }
+        // And what it fell back to is the dynamic path's own answer, which
+        // is the authored field: the override reaches neither side.
+        UsdStageRefPtr referenceStage = MakeACurvenetWeightRig();
+        RigExecRigEvaluator reference(referenceStage, rigPath);
+        reference.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+        CHECK(reference.Compile(&errors));
+        reference.SetInteractiveOverrides({override});
+        const RigExecRigPose expected = reference.Evaluate(UsdTimeCode(1.0));
+        CHECK(expected.valid);
+        CompareEveryMap(what, expected, held);
+        CHECK(expected.movedProperties.count(target) == 1);
+        CHECK(held.movedProperties.count(target) == 1);
+    }
+    rig.SetInteractiveOverrides({});
+}
+
 // The other half of override placement, and the half that has to be wrong
 // SAFELY: an override the program cannot place must send the generation down
 // the dynamic path, not be quietly ignored.
@@ -2285,6 +2412,7 @@ main(int argc, char **argv)
     TestAnInteractiveOverrideAfterTheBakeIsFollowed(examplesDir);
     TestAnOverrideOnAConstraintWeightIsFollowed(examplesDir);
     TestAnUnplaceableOverrideFallsBack(examplesDir);
+    TestAnArrayOverrideOnACurvenetWeightFallsBack();
 
     // Invalidation, both directions.
     TestEditAfterTheBake(examplesDir, "biped/Biped.usda",

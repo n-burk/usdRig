@@ -232,14 +232,25 @@ RigExecBakedBakeWeightObject(RigExecBakedBuildContext *ctx,
         object.curvenetSplines = attributesOf("rigExec:curvenetSplineIndices");
         // The two ARRAYS exec reads off the prim itself. No RigExecBakedInput
         // covers an array, so they are read through the generation's resolved
-        // inputs every frame -- which is also what lets an animated
-        // inputs:weights move the field without re-cutting the mesh, and
-        // what puts a drag on it in front of the same read.
+        // inputs every frame -- which is what lets an animated inputs:weights
+        // move the field without re-cutting the mesh.
+        //
+        // An interactive OVERRIDE on one is another matter, and the prim is
+        // deliberately NOT routed: exec declares both AttributeValue<float>
+        // and AttributeValue<int>, so an override carrying the array they
+        // actually hold is rejected there by type and the dynamic path goes
+        // on answering from the authored value. The program would honour it.
+        // Naming them unplaceable makes such a generation fall back, which
+        // is the only answer that agrees with the path parity is measured
+        // against -- see execTypedArrayInputs, and
+        // TestAnArrayOverrideOnACurvenetWeightFallsBack for the numbers a
+        // routed prim published instead (z = 2.368 against the dynamic 4).
         for (const char *name : {"inputs:weights", "rigExec:autoSmooth"}) {
-            B.named.insert(path.AppendProperty(TfToken(name)));
+            const SdfPath property = path.AppendProperty(TfToken(name));
+            B.named.insert(property);
+            B.execTypedArrayInputs.insert(property);
         }
         B.prims.insert(path);
-        B.resolvedRoutedPrims.insert(path);
         object.curvenetWeights = prim.GetAttribute(TfToken("inputs:weights"));
         object.curvenetAutoSmooth =
             prim.GetAttribute(TfToken("rigExec:autoSmooth"));
