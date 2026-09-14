@@ -1750,8 +1750,6 @@ static const char *const kExpectedToDecline[] = {
     "03_IkFkBlendClamp.usda",        // weight object on mover
     "04_BlendShapeFace.usda",        // mover operation not baked (blendShape)
     "05_TwistRibbonSpine.usda",      // ... (emitGuidePoints)
-    "06_LatticeBulge.usda",          // ... (lattice)
-    "07_SurfaceDrape.usda",          // ... (surfaceProject)
     "08_AimEyes.usda",               // weight object on mover
     "09_PropertyMathMovers.usda",    // weight object on mover
     "10_AimXformTurret.usda",        // constraint target is a plain Xformable

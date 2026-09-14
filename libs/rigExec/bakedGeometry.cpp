@@ -119,6 +119,40 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                                  "rigExec:skinningMethod"}) {
             B.named.insert(r.moverPath.AppendProperty(TfToken(name)));
         }
+        // Every path an operation's per-frame assembler reads, whatever the
+        // operation is: the cage a lattice deforms through, the surface a
+        // projection lands on, the topology a smooth walks, the bind
+        // coordinates a ribbon rides. None of them is folded into the
+        // program -- they are re-read on every frame through the
+        // generation's resolved inputs -- so they belong in `named`, where a
+        // RESYNC (the property appearing, disappearing or being retargeted,
+        // which also invalidates any retained query) finds them, and in no
+        // case in `rebuild`, which is for values the program captured.
+        //
+        // Named unconditionally rather than per operation: the binding
+        // carries exactly the paths the operation resolved, so an empty one
+        // is an operation that does not read it and an authored one is a
+        // path some assembler will ask for.
+        const auto name = [&](const SdfPath &path) {
+            if (path.IsEmpty()) {
+                return;
+            }
+            B.named.insert(path);
+            B.prims.insert(path.GetPrimPath());
+        };
+        name(r.binding.base);
+        name(r.binding.topologyCounts);
+        name(r.binding.topologyIndices);
+        name(r.binding.cagePoints);
+        name(r.binding.surfacePoints);
+        name(r.binding.bindCoords);
+        name(r.binding.widths);
+        // A phased input is read out of the run's snapshot store when the
+        // phase resolves and off the stage when it does not, so the path is
+        // one the bake asked about either way.
+        for (const auto &[input, phase] : r.binding.phases) {
+            name(input);
+        }
         if (!r.binding.transform.IsEmpty()) {
             out.transformSlot = slotOf(r.binding.transform);
             if (out.transformSlot < 0) {

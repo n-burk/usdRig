@@ -399,7 +399,19 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             derived ? (r.op == RigExecRevisionOp::RecomputeExtent ||
                        r.op == RigExecRevisionOp::RecomputeNormals)
                     : (r.op == RigExecRevisionOp::Skin ||
-                       r.op == RigExecRevisionOp::Matrix);
+                       r.op == RigExecRevisionOp::Matrix ||
+                       // Every operation whose whole packet the per-frame
+                       // assembler reads off the stage: the program hands
+                       // RigExecAssembleParameters the same binding and the
+                       // same resolved inputs the dynamic walk hands it, and
+                       // RigExecRunRevisionKernel is the same kernel. What
+                       // separates these from the ones still refused below is
+                       // that none of them needs a value the pose walk has
+                       // not already produced.
+                       r.op == RigExecRevisionOp::VolumeCorrect ||
+                       r.op == RigExecRevisionOp::Smooth ||
+                       r.op == RigExecRevisionOp::Lattice ||
+                       r.op == RigExecRevisionOp::SurfaceProject);
         if (!supported) {
             say(std::string("mover operation not baked (") +
                     RigExecBakedOpName(r.op) +
