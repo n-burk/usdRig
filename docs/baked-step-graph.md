@@ -543,15 +543,18 @@ inputs now. What that adds to the model, for a later group:
   value in it.
 * **The fast path is the ordinary rig, and it is the same fast path.** `ladderVarying` is false when
   no channel varies; the prologue then does nothing at all and every consumer reads the Build-time
-  arrays. Measured on `Biped_anim.usda`, eight frames, baked mode: 0.45-0.50 s and 135 MB peak RSS
-  against 0.43-0.44 s and 134 MB at a1c2ea9 -- the ~1.7 MB is the retained bindings, and the time is
-  Build's, once.
+  arrays. Measured on `Biped_anim.usda`, eight frames, baked mode, three runs each: 0.27-0.32 s and
+  128-134 MB peak RSS against 0.29-0.35 s and 131-132 MB at a1c2ea9 -- no time cost the noise of a
+  shared box can be told from, and ~2 MB for the retained bindings (fifteen per provider). An
+  earlier reading of this same pair under load said 0.45-0.50 s against 0.43-0.44 s; it did not
+  reproduce, and the difference it showed was Build's, paid once.
 * **A new §7 per-run delta, with its skip hook.** `ladderMovedSlots` is filled by the recompose, by
   VALUE and not by "it was recomputed", and `bakedSchedule.cpp` dirties `cones.avarCluster[slot]` for
   each -- which is the compose group that declares the write every reader of that provider's frame
-  and of its rest -> pose matrices hangs off. The hook is load-bearing: removed, a three-joint rig
-  with static avars and one animated `rest:tx` reports four parity mismatches at frames 2 and 3,
-  from both the comparator and the cone verifier.
+  and of its rest -> pose matrices hangs off. The hook is load-bearing, and
+  `testRigExecEpochRests`'s `TestARestThatMovesAloneStillRecomposes` is the fixture that says so:
+  with the hook deleted it reports the mismatch from the comparator (two generations) and from the
+  cone verifier (three differences in the one cluster), in both schedules.
 * **A solver's REST DESCRIPTION is rebuilt with it.** An FkChain's control rests, a TwoBoneIk's
   measured bone lengths, a SplineIk's rest curve and a twist's two endpoints are pure functions of
   the rests, so `RefreshSolverRests` redoes them in the Solve step on any run whose prologue
@@ -559,13 +562,24 @@ inputs now. What that adds to the model, for a later group:
   declares what can move it the two ways §7 asks about separately: `varyingInputs` for a rest that
   varies with time, and `overrideInputs` carrying every rest-channel override index of the whole
   rest CHAIN above each slot it measured from, for a drag that moves one where no time did.
-* **What still refuses, and why it is not this.** A CONNECTED `rest:space`, `default:space` or
-  `posed:space` stays refused. Exec reads all three through `computeValue`, and on a provider's space
-  attributes `computeValue` is a COMPUTATION -- the space expression that follows the namespace
-  parent, or a posed frame -- so the connection resolves to something no per-frame read off the
-  stage can answer. The scalar and token channels are not the same question: exec resolves each of
-  them through `computeResolvedValue`, which is the single-connection walk
-  `RigExecBakedClassifyInput` performs, so a connected `rest:tx` bakes.
+* **What still refuses, and why it is not this.** The rule is where the CONNECTION ENDS, not what
+  type the channel is. `computations.cpp` reads twelve of the fifteen ladder channels -- every rest
+  and default avar, `avars:rotationOrder`, and `rest:space` -- with a plain `AttributeValue`
+  (`AttributeValue<GfMatrix4d>(restSpace)` sits beside `AttributeValue<double>(restTx)` in the same
+  `computeRestFrame`), so a connection on any of them resolves by the single-connection walk
+  `RigExecBakedClassifyInput` already performs and the binding reads per frame.
+  `testRigExecEpochRests`'s `TestAConnectedRestSpaceIsPulledPerFrame` is the fixture: a connected
+  `rest:space` against the same matrix authored plainly, AND against the unedited rig, because the
+  tail already authors a `rest:space` on that joint and a case that re-authored the value it found
+  would have agreed with everything. What refuses is a connection ENDING at one of the
+  six computed spaces -- the five `RIGEXEC_SPACE_EXPRESSION` attributes (`default:space`,
+  `avars:defaultSpace`, `posed:defaultSpace`, `parent:space`, `parent:defaultSpace`) or
+  `posed:space`, which `computePointFrame` takes through an explicit `Connections` input -- because
+  there `computeValue` IS a computation and the walk would read a raw authored value instead. So a
+  connected `rest:space` bakes unless its walk reaches one of those six; a connected `default:space`
+  refuses outright, because the expression ON it is not a value read at all (a connection is
+  authoritative even at the identity, and a raw identity selects the computed fallback), and a
+  connected `posed:space` refuses as the deliberate negative it has always been.
 
 ### What holds it to account
 
@@ -590,7 +604,11 @@ inputs now. What that adds to the model, for a later group:
 * `testRigExecEpochRests{BakedParity,Cones_serial,Cones_parallel}` -- the suite that moves rests on
   purpose, under `RIGEXEC_BAKE_REQUIRED=1` as of Phase 4. It is the only place a rest is animated,
   connected, written by a property chain and dragged, and the only place a program that went back to
-  folding one would show up.
+  folding one would show up. It also carries the LADDER SKIP HOOK's only red signal
+  (`TestARestThatMovesAloneStillRecomposes`): a three-joint rig with static avars and one animated
+  `rest:tx`, which no shipped rig can stand in for, because on every example the composes share a
+  cluster with skin sources that run on every frame. With the hook deleted that case reports the
+  mismatch in all four entries; every other suite and all 93 example runs stay green.
 
 ---
 

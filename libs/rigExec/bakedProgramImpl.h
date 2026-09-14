@@ -2428,7 +2428,6 @@ struct RigExecBakedBuildContext {
     /// RigExecBlendPointFrames may read another one's aggregate, and the
     /// order is what makes the reader run second.
     std::vector<SdfPath> guideOnlySolvers;
-
     std::vector<std::string> *reasons = nullptr;
     bool ok = true;
 

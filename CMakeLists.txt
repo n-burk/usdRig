@@ -299,6 +299,11 @@ endfunction()
 # exec at defined points in the walk, carrying a base and a final phase into
 # namespace descendants. That is the connected-space-provider feature, not a
 # ladder value read off the stage, and the flag goes on with it.
+#
+# The WARNING such a run prints names "connected default:space", not
+# "connected-space provider": IsBakeable sorts its reasons and the evaluator
+# reports the first one. Both come from the same rig and the same feature --
+# read the whole reasons vector, not the warning, when chasing this.
 rigexec_add_baked_parity_test(testRigExecConstraints CONE_VERIFY)
 
 # The per-example parity entries: one named red/green signal per shipped rig.

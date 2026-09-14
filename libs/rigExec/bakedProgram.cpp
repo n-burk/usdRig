@@ -176,6 +176,45 @@ _AttributeIsIdentity(const UsdPrim &prim, const char *name, bool *connected)
     return !a.Get(&value) || value == GfMatrix4d(1.0);
 }
 
+// The provider space attributes exec does NOT read off the stage. Five of
+// them carry a registered AttributeExpression (computations.cpp's
+// RIGEXEC_SPACE_EXPRESSION), and posed:space is fed to computePointFrame
+// through an explicit Connections input; on any of the six, the builtin
+// computeValue a connection resolves through is a COMPUTATION -- the space
+// expression that follows the namespace parent, or a posed frame -- not the
+// attribute's authored value. A connection that ENDS at one of them is
+// therefore outside the single-connection walk the binding table performs.
+bool
+_ConnectionReachesComputedSpace(const UsdAttribute &attribute)
+{
+    static const char *const kComputedSpaces[] = {
+        "default:space", "avars:defaultSpace", "posed:defaultSpace",
+        "parent:space", "parent:defaultSpace", "posed:space"};
+    // Mirrors RigExecBakedClassifyInput's loop, and stops on the same two
+    // conditions it does: a cycle, or a fan-out the walk cannot follow.
+    std::set<SdfPath> visiting;
+    UsdAttribute a = attribute;
+    bool first = true;
+    while (a && visiting.insert(a.GetPath()).second) {
+        if (!first) {
+            const std::string name = a.GetName().GetString();
+            for (const char *computed : kComputedSpaces) {
+                if (name == computed) {
+                    return true;
+                }
+            }
+        }
+        first = false;
+        SdfPathVector connections;
+        a.GetConnections(&connections);
+        if (connections.size() != 1) {
+            break;
+        }
+        a = a.GetPrim().GetStage()->GetAttributeAtPath(connections[0]);
+    }
+    return false;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -308,25 +347,47 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
             }
         }
         // The ladder is a per-frame input now, so an animated, connected or
-        // chain-written SCALAR channel bakes: exec resolves each of them
-        // through computeResolvedValue, which is the same single-connection
-        // walk RigExecBakedClassifyInput performs, and no double or token
-        // channel of a provider carries a computation that could answer
-        // differently.
+        // chain-written channel bakes wherever exec reads the channel the
+        // way the binding table reads it: a plain AttributeValue, which
+        // resolves a connection by the same single-connection walk
+        // RigExecBakedClassifyInput performs. That is every rest and
+        // default AVAR, avars:rotationOrder -- and rest:space, which is the
+        // one MATRIX channel of the ladder with no registered
+        // AttributeExpression behind it (computations.cpp declares
+        // AttributeValue<GfMatrix4d>(restSpace) beside
+        // AttributeValue<double>(restTx), in the same computeRestFrame, and
+        // registers its five space expressions elsewhere). Measured
+        // against a rig whose rest:space MOVES the joint --
+        // testRigExecEpochRests' TestAConnectedRestSpaceIsPulledPerFrame,
+        // which compares the connection against the same matrix authored
+        // plainly and against the unedited rig, because the tail already
+        // authors a rest:space here and a case that re-authored the value
+        // it found would have agreed with everything.
         //
-        // The three MATRIX channels are not the same question. Each of them
-        // is read by exec through computeValue, and on a provider's space
-        // attributes computeValue is a COMPUTATION -- the space expression
-        // that follows the namespace parent, or a posed frame -- so a
-        // connection reaching one resolves to something the program cannot
-        // read off the stage at all. Those still refuse, by the same
-        // boundary the connected-space providers above sit behind.
-        for (const char *name : {"rest:space", "default:space"}) {
-            const UsdAttribute a = prim.GetAttribute(TfToken(name));
+        // What rest:space cannot carry is a connection that ENDS at one of
+        // the six computed spaces, where exec's computeValue is a
+        // computation and the walk would read a raw authored value instead.
+        {
+            const UsdAttribute a = prim.GetAttribute(TfToken("rest:space"));
+            if (a && _ConnectionReachesComputedSpace(a)) {
+                say("connected rest:space on provider", path);
+            }
+        }
+        // default:space IS one of the five expressions, and the expression
+        // is not a value read at all: a connection is authoritative even
+        // when it resolves to the identity, a raw identity selects the
+        // COMPUTED fallback instead, and only a non-identity raw value is
+        // taken verbatim (_ComputeSpaceExpression). The walk's rule --
+        // deepest attribute on the chain that has a value -- is a different
+        // rule, so a connected one still refuses. Unconnected it is the
+        // ladder proper, and bakes per frame like the rest.
+        {
+            const UsdAttribute a =
+                prim.GetAttribute(TfToken("default:space"));
             SdfPathVector connections;
             if (a && a.HasAuthoredConnections() &&
                 a.GetConnections(&connections) && !connections.empty()) {
-                say(std::string("connected ") + name + " on provider", path);
+                say("connected default:space on provider", path);
             }
         }
         (void)probe;
