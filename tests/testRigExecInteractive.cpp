@@ -1,6 +1,8 @@
 // Persistent graph and interactive edit regressions through the public evaluator.
 #include "rigExec/rigEvaluator.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/ts/knot.h"
+#include "pxr/base/ts/spline.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/relationship.h"
 
@@ -720,6 +722,119 @@ static void TestInteractiveOverrides()
     CHECK(exported() == authored);
 }
 
+// A control dragged TWICE, with each release authored the way the viewport
+// gizmo authors one: as a knot on the attribute's spline (Animation mode,
+// gizmoMath.SetAnimated). The second release is the one that mattered.
+//
+// A released drag is an ordinary value edit, so nothing about the rig's
+// structure moves and no recompile follows it. What the baked program holds
+// across such an edit therefore has to be re-read, and for a spline-valued
+// input it was not: the program pinned a UsdAttributeQuery to the attribute
+// at bake time, and a UsdAttributeQuery does not follow a later edit to a
+// SPLINE the way it follows an edited time sample or default -- it resolves
+// the spline once and keeps answering from that copy.
+//
+// In usdview that read as the drag being ignored. The first release on a
+// control CREATES the property spec, which resyncs and rebakes, so it
+// worked; every release after it re-authored the same knot, which is
+// changed-info only, so nothing rebaked and the rig kept publishing the
+// first drag's pose. The control followed the preview and sprang back the
+// instant the artist let go -- until some other control's first release
+// resynced the stage and rebaked the program for all of them.
+//
+// Two drags is the whole test: one release to create the spec, and one more
+// to be answered from the spline as it now stands. The suite runs under
+// RIGEXEC_EVALUATION_MODE=baked in the parity harness, which is where this
+// fails without the fix; the dynamic path re-binds its queries on every
+// notice and has always passed.
+static void TestReleasedDragsFollowTheReauthoredSpline()
+{
+    const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous(".usda");
+    CHECK(layer);
+    if (!layer || !layer->ImportFromString(kPreviewFixture)) {
+        std::printf("  could not build the preview fixture\n");
+        ++failures;
+        return;
+    }
+    const UsdStageRefPtr stage = UsdStage::Open(layer);
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rigPath("/Asset/Rig");
+    const SdfPath driver("/Asset/Rig/Driver");
+    const SdfPath shapePoints("/Asset/Shape.points");
+    const TfToken tx("avars:tx");
+    const UsdTimeCode frame(1.0);
+
+    RigExecRigEvaluator evaluator(stage, rigPath);
+    std::vector<std::string> errors;
+    if (!evaluator.Compile(&errors)) {
+        for (const std::string &e : errors) {
+            std::printf("    %s\n", e.c_str());
+        }
+    }
+    CHECK(errors.empty());
+
+    auto pointX = [&](const RigExecRigPose &pose, float *out) {
+        const auto it = pose.movedProperties.find(shapePoints);
+        if (it == pose.movedProperties.end()) {
+            return false;
+        }
+        const VtVec3fArray points = it->second.Get<VtVec3fArray>();
+        if (points.size() != 1) {
+            return false;
+        }
+        *out = points[0][0];
+        return true;
+    };
+
+    // gizmoMath.SetAnimated, in C++: one curve-interpolated knot at `frame`,
+    // re-authored in place by every later release on the same control.
+    const UsdAttribute attribute =
+        stage->GetAttributeAtPath(driver.AppendProperty(tx));
+    CHECK(attribute);
+    auto author = [&](double value) {
+        TsSpline spline = attribute.GetSpline();
+        TsKnot knot;
+        knot.SetTime(frame.GetValue());
+        knot.SetValue(value);
+        knot.SetNextInterpolation(TsInterpCurve);
+        spline.SetKnot(knot);
+        CHECK(attribute.SetSpline(spline));
+    };
+
+    float x = 0;
+    for (const double committed : {4.0, 7.0, -3.0}) {
+        // The drag itself: uncommitted values, which author nothing.
+        evaluator.SetInteractiveOverrides({RigExecValueOverride{
+            driver, TfToken(), tx, VtValue(committed)}});
+        RigExecRigPose pose = evaluator.Evaluate(frame);
+        CHECK(pose.valid);
+        CHECK(pointX(pose, &x) && std::abs(x - float(committed)) < 1e-6f);
+
+        // The release: author first, then drop the preview, which is the
+        // order gizmoUI._EndDrag uses -- and the order that decides whether
+        // the frame between the two is the committed pose or the old one.
+        author(committed);
+        evaluator.ClearInteractiveOverrides();
+        pose = evaluator.Evaluate(frame);
+        CHECK(pose.valid);
+        // THE ASSERTION: the released pose is the dragged pose. Not the
+        // previous release's, which is what a stale pinned query answers.
+        CHECK(pointX(pose, &x) && std::abs(x - float(committed)) < 1e-6f);
+        if (std::abs(x - float(committed)) >= 1e-6f) {
+            std::printf("    released at %g, published %g\n", committed,
+                        double(x));
+        }
+        // And again with nothing changing, because a program that re-read
+        // the spline only when something else moved would pass the line
+        // above and still be wrong on the next frame the artist scrubs to.
+        pose = evaluator.Evaluate(frame);
+        CHECK(pointX(pose, &x) && std::abs(x - float(committed)) < 1e-6f);
+    }
+}
+
 int main()
 {
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
@@ -731,6 +846,7 @@ int main()
     TestGeometryConstraintsCompose();
     TestAnimatedPointCounts();
     TestInteractiveOverrides();
+    TestReleasedDragsFollowTheReauthoredSpline();
     std::printf("testRigExecInteractive: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

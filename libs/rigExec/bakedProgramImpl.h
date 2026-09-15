@@ -2577,6 +2577,34 @@ RigExecBakedBuildContext::Bind(const UsdPrim &prim, const char *name,
             input.resolvedAttr = prim.GetAttribute(TfToken(name));
         }
     }
+    // And a SPLINE is read the long way for the same reason, one step
+    // further out: a UsdAttributeQuery pinned to a spline-valued attribute
+    // does not follow a later edit to that spline. A query re-reads a time
+    // sample and a default -- it holds where the value comes from, and the
+    // layer it names still has the new number -- but it resolves the spline
+    // itself once and keeps answering from the copy it took, silently and
+    // with nothing downstream able to tell.
+    //
+    // That is not a hypothetical: Animation mode authors a released gizmo
+    // drag as a spline knot (gizmoMath.SetAnimated), so the FIRST release on
+    // a control creates the property spec -- a resync, which rebakes and
+    // pins a fresh query -- and every release after it re-authors that same
+    // knot, which is changed-info only. Register() leaves a pinned-query
+    // input out of `rebuild` precisely because the query was supposed to
+    // answer such an edit, so nothing rebaked and the rig kept publishing
+    // the first drag's pose: the control moved under the preview and sprang
+    // back the moment the artist let go, until some other control's first
+    // release resynced and rebaked the program for it.
+    //
+    // Reading through the generation's resolved inputs is what the dynamic
+    // path does for the same attribute, so the two still agree by
+    // construction, and `live` in Register() stays honest: the value really
+    // is re-read every frame now.
+    if (input.varying && input.query.IsValid() &&
+        input.query.GetAttribute().HasSpline()) {
+        input.query = UsdAttributeQuery();
+        input.resolvedAttr = prim.GetAttribute(TfToken(name));
+    }
     if (prim && prim.GetAttribute(TfToken(name))) {
         ++B.boundInputs;
         if (input.varying) ++B.varyingInputs;

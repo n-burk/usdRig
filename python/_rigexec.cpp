@@ -580,9 +580,29 @@ struct _Rig {
         evaluator.reset(new rigExec::RigExecRigEvaluator(stage, rigPath));
     }
 
+    // Compile and Evaluate run WITHOUT the GIL, and that is load-bearing.
+    //
+    // Both dispatch work to TBB and wait for it. The first task to ask
+    // OpenExec for a computation definition makes Exec_DefinitionRegistry
+    // load the plugin that defines it, and TfDlopen finishes a load by
+    // importing the library's Python module, which takes the GIL
+    // (TfScriptModuleLoader::LoadModules -> TfPyLock). When that first
+    // task lands on a worker thread while this thread holds the GIL and
+    // spins in WorkDispatcher::Wait for the worker, neither can move --
+    // one in five runs of the evaluator tests hung exactly there, and
+    // PXR_WORK_THREAD_LIMIT=1 made it go away because the task then ran
+    // on this thread. usdview never saw it: ctypes drops the GIL around
+    // every foreign call. Nothing the evaluator does needs the GIL held,
+    // so the two entry points that dispatch work give it up for the
+    // duration; the exception below is thrown with it held again.
     void Compile() {
         std::vector<std::string> errors;
-        if (!evaluator->Compile(&errors)) {
+        bool ok = false;
+        {
+            py::gil_scoped_release release;
+            ok = evaluator->Compile(&errors);
+        }
+        if (!ok) {
             std::string msg = "rig compile failed:";
             for (const auto &e : errors) {
                 msg += "\n  - " + e;
@@ -593,6 +613,7 @@ struct _Rig {
 
     rigExec::RigExecRigPose Evaluate(double timeFrames) const {
         UsdTimeCode t = timeFrames < 0 ? UsdTimeCode::Default() : UsdTimeCode(timeFrames);
+        py::gil_scoped_release release;
         return evaluator->Evaluate(t);
     }
 };

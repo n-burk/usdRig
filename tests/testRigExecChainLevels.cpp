@@ -192,6 +192,18 @@ Identical(const VtVec3fArray &a, const VtVec3fArray &b, const char *what)
 // answer's neighbourhood; a failed one is passed through untouched. Both are
 // checked, because "every chain returned its base" would otherwise satisfy
 // every equality in this file.
+//
+// The neighbourhood is RELATIVE, because the published points are float32
+// and the fixture's coordinates reach ~1600. One ulp there is 1.2e-4, so an
+// absolute 1e-4 asked for agreement finer than the type can represent and
+// passed or failed on which way the last bit of a weighted sum happened to
+// round -- it held under gcc and clang and did not under MSVC, on a result
+// that was correct on both. What the test is actually asserting is that the
+// skin RAN and landed on the analytic answer rather than somewhere else
+// entirely; the deformation it is separating is 10 and 20 units, so a
+// tolerance a few ulps wide still fails every wrong answer this file can
+// produce. Bit-exactness is asserted where it belongs, by Identical()
+// above, which compares two runs of the same arithmetic.
 void
 CheckExpectedDeformation(const RigExecRigPose &pose, size_t mesh,
                          const char *what)
@@ -209,10 +221,16 @@ CheckExpectedDeformation(const RigExecRigPose &pose, size_t mesh,
             fails ? base[i]
                   : base[i] + GfVec3f(AlongX(mesh) * 10.0f,
                                       AlongY(mesh) * 20.0f, 0.0f);
-        if ((GfVec3d(points[i]) - GfVec3d(expected)).GetLength() >= 1e-4) {
+        // Four float ulps of the point's distance from the origin,
+        // never below the absolute floor a point near it needs.
+        const double magnitude =
+            std::max(GfVec3d(expected).GetLength(), 1.0);
+        const double tolerance = std::max(1e-4, magnitude * 5e-7);
+        if ((GfVec3d(points[i]) - GfVec3d(expected)).GetLength() >=
+                tolerance) {
             ++failures;
-            std::printf("FAIL: %s: mesh %zu point %zu is (%g %g %g), "
-                        "expected (%g %g %g)\n", what, mesh, i,
+            std::printf("FAIL: %s: mesh %zu point %zu is (%.9g %.9g %.9g), "
+                        "expected (%.9g %.9g %.9g)\n", what, mesh, i,
                         double(points[i][0]), double(points[i][1]),
                         double(points[i][2]), double(expected[0]),
                         double(expected[1]), double(expected[2]));
