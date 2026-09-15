@@ -33,6 +33,14 @@ export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/touchPose"
 export PYTHONPATH="$RIG/plugin/touchPose:${PYTHONPATH:-}"
 export TOUCHPOSE_PLUGIN_DIR="$RIG/plugin/touchPose"
 
+# The Shape Editor rides along, for the same reason and with the same caveat:
+# a self-contained plugin directory whose container asks findOrCreateMenu for
+# the RigExec menu, so its item lands under the same menu whichever container
+# loads first. `plugin/shapeEditor` is not on _env.sh's PYTHONPATH either, so
+# the module search path is added beside the plugin path.
+export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/plugin/shapeEditor"
+export PYTHONPATH="$RIG/plugin/shapeEditor:${PYTHONPATH:-}"
+
 rigexec_require_python
 rigexec_require_usd "$USDVIEW"
 rigexec_build

@@ -33,6 +33,15 @@ set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\touchPose"
 set "PYTHONPATH=%RIG%\plugin\touchPose;%PYTHONPATH%"
 set "TOUCHPOSE_PLUGIN_DIR=%RIG%\plugin\touchPose"
 
+rem The Shape Editor rides along, for the same reason and with the same
+rem caveat: a self-contained plugin directory whose container asks
+rem findOrCreateMenu for the RigExec menu, so its item lands under the
+rem same menu whichever container loads first. plugin\shapeEditor is not
+rem on _env.bat's PYTHONPATH either, so the module search path is added
+rem beside the plugin path.
+set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\shapeEditor"
+set "PYTHONPATH=%RIG%\plugin\shapeEditor;%PYTHONPATH%"
+
 rem Fail early and legibly rather than deep inside python.
 set "USDVIEW=%USD%\bin\usdview"
 if not exist "%USDVIEW%" (
