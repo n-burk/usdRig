@@ -199,6 +199,76 @@ main()
         CHECK(profiler.GetEventCount() == 1);
     }
 
+    // The enabling thread owns row 0, whoever records first. Without this
+    // the main row of a trace moves between runs, because which thread
+    // finishes a scope first is a race.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.SetEnabled(true);
+        std::thread worker([&profiler] { profiler.Record("w", "rig", 0, 1); });
+        worker.join();
+        profiler.Record("m", "rig", 0, 1);
+        const auto events = profiler.GetEvents();
+        CHECK(events.size() == 2);
+        CHECK(events[0].name == "w");
+        CHECK(events[0].threadIndex != 0);  // the worker, recorded first
+        CHECK(events[1].name == "m");
+        CHECK(events[1].threadIndex == 0);  // the thread that enabled it
+        CHECK(profiler.GetThreadCount() == 2);
+    }
+
+    // RecordOn attributes an interval to the thread that RAN it, not the one
+    // reporting it. This is what lets the baked program's parallel executor
+    // time a step where it runs -- lock-free, no scope -- and replay it from
+    // the epilogue without collapsing every step onto the epilogue's row.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.SetEnabled(true);
+
+        std::thread::id ranOn;
+        std::thread worker([&ranOn] { ranOn = std::this_thread::get_id(); });
+        worker.join();
+
+        // Replayed from THIS thread, on behalf of one that has already gone.
+        profiler.RecordOn(ranOn, "step", "step", 0, 10);
+        profiler.Record("epilogue", "rig", 0, 10);
+
+        const auto events = profiler.GetEvents();
+        CHECK(events.size() == 2);
+        CHECK(events[0].threadIndex != events[1].threadIndex);
+        CHECK(events[1].threadIndex == 0);
+        CHECK(profiler.GetThreadCount() == 2);
+
+        // A default id means "nobody said": fall back to the caller rather
+        // than invent a row.
+        profiler.RecordOn(std::thread::id(), "unattributed", "rig", 0, 10);
+        const auto after = profiler.GetEvents();
+        CHECK(after.back().threadIndex == 0);
+        CHECK(profiler.GetThreadCount() == 2);
+    }
+
+    // Every row is named in the trace, so a reader does not have to guess
+    // which number is the main thread.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.SetEnabled(true);
+        std::thread::id ranOn;
+        std::thread worker([&ranOn] { ranOn = std::this_thread::get_id(); });
+        worker.join();
+        profiler.RecordOn(ranOn, "step", "step", 0, 10);
+        profiler.Record("here", "rig", 0, 10);
+
+        const std::string path = "testRigExecProfilerThreads.trace";
+        CHECK(profiler.WriteChromeTrace(path, nullptr));
+        const std::string text = ReadFile(path);
+        CHECK(text.find("\"thread_name\"") != std::string::npos);
+        CHECK(text.find("main (Evaluate)") != std::string::npos);
+        CHECK(text.find("rigExec worker 1") != std::string::npos);
+        // Two rows, and the step is not on the main one.
+        CHECK(text.find("\"tid\":1") != std::string::npos);
+        std::remove(path.c_str());
+    }
+
     if (failures == 0) {
         std::printf("testRigExecProfiler: all checks passed\n");
     }

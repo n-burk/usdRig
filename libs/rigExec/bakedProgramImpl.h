@@ -58,6 +58,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -779,6 +780,13 @@ struct RigExecBakedCluster {
     /// the schedule report or the profiler asks for them, so a production
     /// frame pays no clock reads for a table nobody prints.
     uint64_t readyUs = 0, startUs = 0, endUs = 0;
+    /// The thread that ran it, stamped beside startUs. A cluster is the unit
+    /// one task runs back to back (see above), so this is also the thread of
+    /// every step in `members` -- which is what lets the epilogue put a
+    /// step's interval on the row it really ran on, having been handed the
+    /// step long after that thread moved on. Default-constructed after a
+    /// serial run, which RecordOn reads as "the calling thread".
+    std::thread::id runner;
 };
 
 /// A partition of one program's steps into clusters.

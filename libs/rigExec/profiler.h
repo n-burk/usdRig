@@ -65,6 +65,17 @@ public:
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _enabled = enabled;
+        if (enabled) {
+            // Claim index 0 for whoever turns recording on. Without this the
+            // indices fall out of the order threads happen to FIRST record,
+            // and a compile-time worker task that finishes its scope before
+            // the main thread finishes its own outer one would take tid 0 --
+            // making the trace's main row a different thread from run to
+            // run. The enabling thread is the one that opens Evaluate, so
+            // this is the row a reader looks at first.
+            _threadIds.clear();
+            _ThreadIndexLocked(std::this_thread::get_id());
+        }
     }
 
     bool IsEnabled() const
@@ -81,12 +92,37 @@ public:
         _threadIds.clear();
     }
 
-    /// Records one completed interval. No-op unless enabled. Const because
-    /// profiling is observability: it never changes evaluated values, so
-    /// const evaluation paths can record into it.
+    /// Records one completed interval, attributed to the calling thread.
+    /// No-op unless enabled. Const because profiling is observability: it
+    /// never changes evaluated values, so const evaluation paths can record
+    /// into it.
     void Record(std::string name, std::string category, uint64_t startUs,
                 uint64_t endUs,
                 std::map<std::string, std::string> args = {}) const
+    {
+        RecordOn(std::this_thread::get_id(), std::move(name),
+                 std::move(category), startUs, endUs, std::move(args));
+    }
+
+    /// Records one completed interval that ran on \p runner, which need not
+    /// be the calling thread.
+    ///
+    /// This is the entry point for work that is timed where it runs and
+    /// reported somewhere else. The baked program's parallel executor is the
+    /// case it exists for: a step cannot open a profile scope, because
+    /// Record takes this mutex and several hundred steps a frame contending
+    /// on it would time the lock rather than the rig -- so a step stamps two
+    /// integers and the thread that ran it into storage it alone owns, and
+    /// the epilogue replays the lot in step order. Without a runner the
+    /// replay would put every step on the epilogue's row and the trace would
+    /// claim a parallel frame ran on one thread.
+    ///
+    /// A default-constructed \p runner means "no thread said", and lands on
+    /// the calling thread's row, so a caller with nothing to pass gets the
+    /// old behaviour rather than a bogus row of its own.
+    void RecordOn(std::thread::id runner, std::string name,
+                  std::string category, uint64_t startUs, uint64_t endUs,
+                  std::map<std::string, std::string> args = {}) const
     {
         std::lock_guard<std::mutex> lock(_mutex);
         if (!_enabled) {
@@ -98,7 +134,8 @@ public:
         event.startUs = startUs;
         event.durationUs = endUs >= startUs ? endUs - startUs : 0;
         event.threadIndex = _ThreadIndexLocked(
-            std::this_thread::get_id());
+            runner == std::thread::id() ? std::this_thread::get_id()
+                                        : runner);
         event.args = std::move(args);
         _events.push_back(std::move(event));
     }
@@ -114,6 +151,16 @@ public:
     {
         std::lock_guard<std::mutex> lock(_mutex);
         return _events.size();
+    }
+
+    /// How many distinct threads have recorded, or been recorded for. One
+    /// means the run really did happen on a single thread -- which, for a
+    /// frame that asked for the parallel schedule, is the finding rather
+    /// than the default.
+    size_t GetThreadCount() const
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _threadIds.size();
     }
 
     /// Per-(category, name) totals, sorted by total cost descending.
@@ -167,6 +214,23 @@ public:
         }
         out << "{\"traceEvents\":[\n";
         bool first = true;
+        // Name the rows before the spans that land on them. Without these
+        // metadata events Perfetto labels each row with a bare number, and
+        // the one question the rows exist to answer -- which of these is the
+        // thread that called Evaluate -- needs a guess. Index 0 is that
+        // thread by construction: SetEnabled claims it.
+        for (const auto &[id, index] : _threadIds) {
+            (void)id;
+            if (!first) {
+                out << ",\n";
+            }
+            first = false;
+            out << "{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":"
+                << index << ",\"args\":{\"name\":\""
+                << (index == 0 ? "main (Evaluate)"
+                               : "rigExec worker " + std::to_string(index))
+                << "\"}}";
+        }
         for (const RigExecProfileEvent &event : _events) {
             if (!first) {
                 out << ",\n";

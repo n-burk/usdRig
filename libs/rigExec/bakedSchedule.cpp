@@ -27,6 +27,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1656,6 +1657,13 @@ ParallelRun::RunFrom(int start)
             B.clustering.clusters[size_t(current)];
         if (timing) {
             cluster.startUs = RigExecProfiler::NowUs();
+            // One store, into the cluster this task now owns outright --
+            // nobody else writes it between the counter that made it
+            // runnable and the counter it decrements at the end. It is what
+            // the epilogue needs to put this cluster's steps on the right
+            // row, and it is the only place the running thread is knowable:
+            // by replay time this task is gone.
+            cluster.runner = std::this_thread::get_id();
         }
         for (const int index : cluster.members) {
             if (bailed.load(std::memory_order_relaxed)) {
@@ -1758,6 +1766,12 @@ RunStepsParallel(RigExecBakedProgramImpl *program, UsdTimeCode time)
     for (size_t c = 0; c < B.clustering.clusters.size(); ++c) {
         RigExecBakedCluster &cluster = B.clustering.clusters[c];
         cluster.readyUs = cluster.startUs = cluster.endUs = opened;
+        // Last frame's thread must not survive into this one, for the same
+        // reason last frame's interval must not: a cluster the cone skips
+        // this frame would otherwise hand the epilogue a row it did not run
+        // on, and a skipped step's event is exactly the one a reader would
+        // take at face value.
+        cluster.runner = std::thread::id();
         if (!B.closed.Test(int(c))) {
             // Skipped: nothing decrements it and it seeds nothing. Its
             // counter is left where a skipped cluster's belongs, at the
@@ -2287,6 +2301,17 @@ RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
     if (!B.profiler || !B.profiler->IsEnabled()) {
         return;
     }
+    const std::vector<RigExecBakedCluster> &clusters = B.clustering.clusters;
+    // The thread a step ran on, or a default id for "the replaying thread".
+    // A serial run leaves every cluster's runner default, which is right:
+    // the steps really did run where the replay is happening.
+    const auto RunnerOf = [&clusters](const RigExecBakedStep &step) {
+        if (step.cluster < 0 || size_t(step.cluster) >= clusters.size()) {
+            return std::thread::id();
+        }
+        return clusters[size_t(step.cluster)].runner;
+    };
+
     for (const RigExecBakedStep &step : B.steps) {
         // A step that did not take a whole microsecond is on nobody's
         // critical path, and a biped's graph holds several hundred of them
@@ -2296,7 +2321,30 @@ RigExecBakedReplayStepTimings(const RigExecBakedProgramImpl &B)
         if (step.endUs <= step.startUs) {
             continue;
         }
-        B.profiler->Record(step.label, "step", step.startUs, step.endUs);
+        B.profiler->RecordOn(RunnerOf(step), step.label, "step",
+                             step.startUs, step.endUs);
+    }
+
+    // The clusters themselves, one span each, on the row that ran them.
+    //
+    // A reader looking at a parallel frame wants the shape before the
+    // detail: how many rows carried work, how long each held one, and where
+    // a row sat idle waiting for a predecessor. The steps alone do not show
+    // that -- they are hundreds of short spans, and the gaps between them
+    // are as often the scheduler as the rig. These are the scheduling unit,
+    // so they are the level the answer lives at. Skipped clusters have no
+    // interval and are left out; they did not run.
+    for (size_t c = 0; c < clusters.size(); ++c) {
+        const RigExecBakedCluster &cluster = clusters[c];
+        if (cluster.endUs <= cluster.startUs) {
+            continue;
+        }
+        B.profiler->RecordOn(
+            cluster.runner, "cluster " + std::to_string(c), "cluster",
+            cluster.startUs, cluster.endUs,
+            {{"level", std::to_string(cluster.level)},
+             {"steps", std::to_string(cluster.members.size())},
+             {"waitUs", std::to_string(cluster.startUs - cluster.readyUs)}});
     }
 }
 
