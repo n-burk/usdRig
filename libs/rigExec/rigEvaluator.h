@@ -18,6 +18,8 @@
 #include "tapSet.h"
 #include "types.h"
 
+#include "rigExecMath/rbf.h"
+
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/functionRef.h"
 #include "pxr/base/tf/notice.h"
@@ -425,6 +427,21 @@ public:
         return !_interactiveOverrides.empty();
     }
 
+    /// Whether each generation resolves RigExecRigPose::weightFields.
+    ///
+    /// The influence overlay is a per-POINT field: resolving it walks every
+    /// point of every weighted mesh, every frame, whether or not anything is
+    /// going to look at it. Exactly one consumer exists (the imaging bridge's
+    /// _FillWeightOverlay, plus the Python weight_field binding), and the
+    /// bridge's is off unless a rigger has selected a weight object -- so the
+    /// bridge turns this off and the overlay costs nothing until it is asked
+    /// for. Defaults to ON: a caller that never sets it (every test, every
+    /// tool, the Python bindings) sees the field exactly as before.
+    void SetPublishWeightFields(bool publish) {
+        _publishWeightFields = publish;
+    }
+    bool GetPublishWeightFields() const { return _publishWeightFields; }
+
     /// Composed mover-stack applications: descendants before their mover
     /// parent, sibling branches in reverse composed child order (the bottom
     /// usdview row executes first; spec §4.2).
@@ -593,6 +610,23 @@ private:
         const SdfPath &weightPrimPath, size_t count, UsdTimeCode time,
         std::vector<float> *weights, std::string *error,
         const std::vector<GfVec3f> *currentPoints = nullptr) const;
+
+    /// Fills \p layout from the UsdSkelBlendShape at \p blendShapePath.
+    ///
+    /// Returns false to REFUSE the epoch cache -- the shape can move within
+    /// this epoch and must be read per frame. The admission rule is the one
+    /// the skin layout uses, minus the half that cannot arise: `offsets` and
+    /// `pointIndices` are declared `uniform`, so USD will not let them carry
+    /// time samples at all, which leaves an authored connection as the only
+    /// way the value can change under a standing epoch.
+    ///
+    /// A shape that is merely INVALID (offsets and indices of different
+    /// lengths, an index outside the mesh) is cached as invalid rather than
+    /// refused: it is a stable wrong answer, and re-reading it every frame to
+    /// reach the same conclusion is the cost this cache exists to avoid.
+    bool _ResolveBlendSampleLayout(
+        const SdfPath &blendShapePath, size_t pointCount,
+        RigExecBlendSampleLayout *layout) const;
 
     /// The volumetric half of _ResolveWeights: sphere, plane, curve, and
     /// the combine that folds them.
@@ -774,6 +808,60 @@ private:
     std::vector<RigExecTapId> _jointFinalMatrixTaps;
     std::map<SdfPath, RigExecTapId> _solverArrayTaps;
 
+    /// One compiled RigExecPoseInterpolator: its solved RBF constant, its
+    /// driver, and the weight property of every pose it publishes.
+    ///
+    /// NOT A MOVER, and it cannot be one. A mover's inputs are resolved by
+    /// the property chains, which run before exec does and therefore cannot
+    /// see the pose; an interpolator reads the FINAL pose of a driver joint
+    /// and writes floats that the geometry chains then consume. So it is its
+    /// own phase of _EvaluateDynamic, sitting between the two.
+    ///
+    /// The solve -- inverting the matrix of every pose's kernel value at
+    /// every other pose -- is a constant of the authored data, so it happens
+    /// once here and the per-frame work is one kernel row, a multiply and a
+    /// divide (libs/rigExecMath/rbf.h). Everything that constant is a
+    /// function of is hashed into the epoch digest, or an edit to a pose
+    /// rotation would leave a stale inverse behind.
+    struct _PoseInterpolator {
+        SdfPath prim;
+        SdfPath driver;
+        /// The driver's namespace ancestor that publishes a frame, or empty
+        /// when there is none and the driver's local rotation is its world
+        /// one. Resolved at compile: namespace topology does not move.
+        SdfPath driverParent;
+        bool allowNegativeWeights = true;
+        /// <pose>.outputs:weight for the poses that are in the solve, in the
+        /// solver's own index order.
+        std::vector<SdfPath> poseWeights;
+        /// The same for poses whose inputs:enabled is off. A disabled pose is
+        /// left out of the solve entirely (schema: leaving it in would keep
+        /// it in every other pose's matrix row) and publishes a hard zero.
+        std::vector<SdfPath> disabledPoseWeights;
+        RigExecRbfSolver solver;
+    };
+    std::vector<_PoseInterpolator> _poseInterpolators;
+    /// Every weight property the phase publishes, flat and in publish order.
+    /// Read by the ordering assertion at the head of the geometry chains.
+    std::vector<SdfPath> _poseWeightProperties;
+
+    /// Discovers, validates and SOLVES the rig's pose interpolators into
+    /// \p out. Phase A of Compile: nothing here touches evaluator state.
+    bool _CompilePoseInterpolators(
+        const std::vector<SdfPath> &joints,
+        const std::vector<SdfPath> &controls,
+        std::vector<_PoseInterpolator> *out,
+        std::vector<std::string> *notes,
+        std::string *error) const;
+
+    /// The pose-interpolator phase: one weight per pose, into
+    /// _resolvedInputs and into \p pose->movedProperties.
+    void _EvaluatePoseInterpolators(
+        UsdTimeCode time,
+        const std::map<SdfPath, RigExecPointFrame> &restFrames,
+        const std::map<SdfPath, RigExecPointFrame> &finalFrames,
+        RigExecRigPose *pose);
+
     /// Compiled mover-graph input bindings.
     ///
     /// The revision bindings are pure path resolution off the authored stage
@@ -794,9 +882,6 @@ private:
         /// is the aim-revised matrix computed in memory rather than the
         /// provider's own tapped computeMatrix.
         bool transformFinalPhase = false;
-        /// computeBlendChannel per resolved blend input, in the canonical
-        /// sorted input order the packet is accumulated in (spec §7.3).
-        std::vector<RigExecTapId> blendChannelTaps;
         /// Skin only: none of rigExec:jointIndices, jointWeights or
         /// elementSize can change within this epoch, so the layout may be
         /// resolved once and shared rather than re-read per frame. False
@@ -929,6 +1014,9 @@ private:
     /// re-read; the cost of a wrong no is a stale deformation.
     bool _OverridesReachSkinLayout(
         const std::vector<RigExecValueOverride> &overrides) const;
+    /// Per-epoch blend sample shapes, keyed by the RigExecBlendSample prim.
+    /// Same lifetime and same clearing rule as _skinTopologies above.
+    RigExecBlendSampleCache _blendSampleShapes;
     /// One transform-valued input to a pose-domain constraint.
     ///
     /// RigExec providers publish computePointFrame and are therefore tapped;
@@ -1230,6 +1318,7 @@ private:
     std::map<SdfPath, RigExecTapId> _volumeWeightMatrixTaps;
     std::map<SdfPath, GfMatrix4d> _volumeWeightMatrices;
 
+    bool _publishWeightFields = true;
     /// The compiled epoch flattened into an exec-free op list, built at the
     /// end of Compile when the mode asks for one.
     ///

@@ -11,6 +11,8 @@
 #include "rigExecMath/envelope.h"
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/propertyMath.h"
+#include "rigExecMath/rbf.h"
+#include "solverKernels.h"
 #include "rigExecMath/singleChainIk.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/weightFields.h"
@@ -22,6 +24,7 @@
 #include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/pyLock.h"
 #include "pxr/base/tf/stringUtils.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/attributeQuery.h"
@@ -38,6 +41,7 @@
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/pointBased.h"
 #include "pxr/usd/usdGeom/points.h"
+#include "pxr/usd/usdSkel/blendShape.h"
 
 #include <algorithm>
 #include <cmath>
@@ -91,6 +95,28 @@ _ResolvedRead(const RigExecResolvedInputs &resolved, const UsdPrim &prim,
     const TfToken token(name);
     if (const UsdAttribute a = prim.GetAttribute(token)) {
         resolved.GetAttribute(a, time, &value);
+    }
+    return value;
+}
+
+// The composed AUTHORED value of one attribute, or \p fallback.
+//
+// The compile-time twin of _ResolvedRead above, and deliberately not the same
+// function: a solve that happens once per epoch has no generation's resolved
+// inputs to consult and no time code that means anything, so it reads the
+// stage at Default. Everything read this way is structure -- it is hashed
+// into the binding-epoch digest, so an edit to one recompiles rather than
+// being picked up mid-epoch.
+template <class T>
+T
+_ReadAttribute(const UsdPrim &prim, const char *name, T fallback)
+{
+    T value = fallback;
+    if (!prim) {
+        return value;
+    }
+    if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+        a.Get(&value);
     }
     return value;
 }
@@ -948,6 +974,31 @@ _DiscoverJointOutputs(const UsdStageRefPtr &stage, const SdfPath &rigPath)
     return joints;
 }
 
+// Discovers the rig's pose interpolators the same implicit way: being a
+// RigExecPoseInterpolator under the rig is what makes a prim one.
+//
+// The interpolators live at <rig>/PoseInterpolators/<name>, OUTSIDE /Movers
+// by design -- an interpolator writes no transform and no points, so it has
+// no place in a mover ordering -- which is exactly why discovery is
+// type-based here rather than a walk of the mover namespace.
+std::vector<SdfPath>
+_DiscoverPoseInterpolators(const UsdStageRefPtr &stage, const SdfPath &rigPath)
+{
+    static const TfToken kInterpolatorType("RigExecPoseInterpolator");
+
+    std::vector<SdfPath> found;
+    const UsdPrim rig = stage->GetPrimAtPath(rigPath);
+    if (!rig) {
+        return found;
+    }
+    for (const UsdPrim &prim : UsdPrimRange(rig)) {
+        if (prim.GetTypeName() == kInterpolatorType) {
+            found.push_back(prim.GetPath());
+        }
+    }
+    return found;
+}
+
 // Discovers the rig's controls the same implicit way (spec §4.1): being a
 // RigExecControl under the rig is what makes a prim a control. Returned in
 // namespace pre-order so the discovered order -- and with it the epoch
@@ -1372,6 +1423,29 @@ _IsRestInputName(const TfToken &name)
     return std::find(names.begin(), names.end(), name) != names.end();
 }
 
+// Whether any override in \p overrides could reach a cached blend sample
+// shape.
+//
+// A shape is a function of exactly `offsets` and `pointIndices` on the
+// UsdSkelBlendShape a sparse sample names, so an avar drag -- which is what
+// every interactive override is -- cannot move one, and dropping 169
+// resolved correctives per mouse sample would re-read 26,276-point arrays
+// for nothing. A computation override names a computation this cannot
+// inspect, so it counts, which is the same conservative reading the skin
+// layout predicate makes.
+bool
+_OverridesReachBlendShapes(const std::vector<RigExecValueOverride> &overrides)
+{
+    static const TfToken offsets("offsets"), pointIndices("pointIndices");
+    for (const RigExecValueOverride &o : overrides) {
+        if (o.attribute.IsEmpty() || o.attribute == offsets ||
+            o.attribute == pointIndices) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Whether any rest channel of \p provider can move within an epoch.
 //
 // Three ways it can, and the epoch-constant rest path is refused for all
@@ -1464,6 +1538,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // Dropping them on every notice is the conservative answer, and the only
     // one that cannot be wrong -- rebuilding costs one read per skinned mesh.
     _skinTopologies.Clear();
+    _blendSampleShapes.Clear();
     // Which properties can REACH a layout is read off the same stage as the
     // layouts themselves -- a connection authored on rigExec:jointWeights
     // moves no epoch digest and recompiles nothing -- so the answer is
@@ -1622,6 +1697,19 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
         digest += name;
         digest += '=';
         digest += value.GetString();
+        digest += '|';
+    };
+    // Any scalar attribute as text. VtValue's stream operator rather than a
+    // type switch: what the digest needs is that two different authored
+    // values produce two different strings, not that the string is pretty.
+    auto appendScalar = [&digest](const UsdPrim &prim, const char *name) {
+        digest += name;
+        digest += '=';
+        VtValue value;
+        if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+            a.Get(&value);
+        }
+        digest += TfStringify(value);
         digest += '|';
     };
     auto appendAttributeBinding =
@@ -1879,6 +1967,51 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     }
     digest += '|';
 
+    // Pose interpolators. The RBF solve is a compile-time CONSTANT -- the
+    // inverted matrix of every pose's kernel value at every other pose -- so
+    // everything that constant is a function of is epoch identity: the
+    // driver, every pose's rotation, translation, type and radii, the kernel,
+    // the twist axis, the regularization and which channels are enabled.
+    // Numeric though most of those are, an edit to one has to reach a solve
+    // that has already happened, and nothing else in this digest even names a
+    // prim outside /Movers.
+    //
+    // inputs:enabled on a POSE is hashed and inputs:enabled on the
+    // INTERPOLATOR is not, which is the same distinction the schema draws: a
+    // disabled pose is left out of the solve entirely (leaving it in would
+    // keep it in every other pose's matrix row, so switching one off would
+    // quietly change all the others), while a disabled interpolator just
+    // publishes zeros and needs no recompile to do it.
+    for (const SdfPath &interpolatorPath :
+         _DiscoverPoseInterpolators(_stage, _rigPath)) {
+        const UsdPrim interpolator = _stage->GetPrimAtPath(interpolatorPath);
+        digest += interpolatorPath.GetString();
+        digest += '|';
+        appendRelTargets(interpolator, "rigExec:driver", false);
+        for (const char *name : {"rigExec:kernel", "rigExec:twistAxis",
+                                 "rigExec:regularization",
+                                 "rigExec:normalize",
+                                 "rigExec:enableRotation",
+                                 "rigExec:enableTranslation",
+                                 "rigExec:allowNegativeWeights"}) {
+            appendScalar(interpolator, name);
+        }
+        for (const UsdPrim &pose : interpolator.GetChildren()) {
+            digest += pose.GetName().GetString();
+            digest += '=';
+            for (const char *name : {"rigExec:poseType", "rigExec:rotation",
+                                     "rigExec:translation",
+                                     "rigExec:rotationRadius",
+                                     "rigExec:translationRadius",
+                                     "inputs:enabled"}) {
+                appendScalar(pose, name);
+            }
+            digest += ';';
+        }
+        digest += '|';
+    }
+    digest += '|';
+
     stampDigestRegion("Digest.OutputSets");
     // Solver->joint wiring is epoch identity (view-free extraction,
     // user-directed 2026-07-25, replaces RigExecPointFrameView): each
@@ -1890,12 +2023,17 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     // The block a prim contributes is a pure function of (prim, composed
     // stage) -- it reads connections and namespace-frame providers and
     // nothing else -- and the stage cannot change underneath a const digest
-    // computation, so the block is memoized for the duration of THIS digest
-    // and the emitted bytes are exactly the bytes the uncached walk emits.
-    // It avoids re-walking the same prim once per ancestor of every target
-    // of every relationship of every aggregate solver, which on a rig whose
-    // joints share a deep parent:space chain re-walks the near-root joints
-    // hundreds of times.
+    // computation, so memoizing it for the duration of THIS digest emits
+    // exactly the bytes the uncached walk emits.
+    //
+    // MEASURED 2026-09-13, biped (24 solvers): uncached, this emission was
+    // 1.15 MILLION UsdAttribute::GetConnections calls per digest -- 2.33 s --
+    // and one digest is computed on EVERY evaluate that follows ANY stage
+    // edit, which is what made letting go of a gizmo take 2.4 s. It runs once
+    // per ancestor, per relationship target, per relationship, per aggregate
+    // solver, and each run re-walked the same pose-input closure from
+    // scratch, so a few hundred prims were re-closed tens of thousands of
+    // times: O(n^2) in solver count, the 455 + 51n + 6.2n^2 ms measured.
     //
     // The caches are function-local: nothing survives the call, so a stage
     // edit between two digests is still seen. They are deliberately NOT
@@ -1903,17 +2041,17 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     // _OnObjectsChanged, and the whole point of the digest is to be the
     // thing that does not trust incremental invalidation.
     std::unordered_map<SdfPath, _PoseInputInfo, SdfPath::Hash> poseInfoCache;
-    std::unordered_map<SdfPath, std::string, SdfPath::Hash> solverInputBlocks;
+    std::unordered_map<SdfPath, std::string, SdfPath::Hash> solverInputTokens;
     // One attribute can sit in many blocks (every joint's parent:space chain
     // republishes its ancestors' attributes), so resolve each path's
     // "path:type->sources|" text once too.
     std::unordered_map<SdfPath, std::string, SdfPath::Hash> connectionText;
     const auto appendSolverInputConnections =
-        [this, &digest, &poseInfoCache, &solverInputBlocks,
+        [this, &digest, &poseInfoCache, &solverInputTokens,
          &connectionText](const UsdPrim &prim) {
         const SdfPath primPath = prim ? prim.GetPath() : SdfPath();
-        const auto cached = solverInputBlocks.find(primPath);
-        if (cached != solverInputBlocks.end()) {
+        const auto cached = solverInputTokens.find(primPath);
+        if (cached != solverInputTokens.end()) {
             digest += cached->second;
             return;
         }
@@ -1946,21 +2084,32 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                     ? attribute.GetTypeName().GetAsToken().GetString()
                     : std::string("missing");
                 entry += "->";
-                if (attribute) {
-                    const SdfPathVector sources =
-                        _AuthoredConnections(attribute);
-                    for (const SdfPath &source : sources) {
-                        entry += source.GetString();
-                        entry += ',';
-                    }
+                for (const SdfPath &source : _AuthoredConnections(attribute)) {
+                    entry += source.GetString();
+                    entry += ',';
                 }
                 entry += '|';
                 text = connectionText.emplace(path, std::move(entry)).first;
             }
             block += text->second;
         }
-        digest += block;
-        solverInputBlocks.emplace(primPath, std::move(block));
+        // What lands in the digest is a TOKEN for this prim's closure, not
+        // the closure text. The same prim's block is emitted once per
+        // ancestor per target per relationship per solver, so appending the
+        // text leaves the digest STRING quadratic in rig size even with the
+        // walking cached away -- tens of MB of std::string concatenation per
+        // evaluate. The digest as a whole is already collapsed to one size_t
+        // by std::hash<std::string> on the way out, so folding a fixed-size
+        // hash of the block in here is the same kind of identity it already
+        // was: different closures give different tokens, and the surrounding
+        // structure (which prim, which relationship, which ancestor) stays in
+        // plain text around it. The length goes in beside the hash, so two
+        // blocks have to collide in both to be confused.
+        std::string token = "closure#" +
+            std::to_string(std::hash<std::string>{}(block)) + ":" +
+            std::to_string(block.size()) + "|";
+        digest += token;
+        solverInputTokens.emplace(primPath, std::move(token));
     };
     if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
         // Recursive over the composed rig subtree (not GetChildren):
@@ -2276,6 +2425,15 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                     appendRelTargets(sample, "rigExec:targetPoints", true);
                     appendPhase(sample, "rigExec:targetPoints");
                     appendToken(sample, "rigExec:pointsReadPhase");
+                    // WHICH blend shape a sparse sample names is structure,
+                    // so it belongs in the epoch digest. What the shape
+                    // CONTAINS deliberately does not: offsets and
+                    // pointIndices are uniform, so they cannot be time
+                    // samples, and RigExecBlendSampleCache is cleared by
+                    // every notice -- a sculpt edit is caught by the cache's
+                    // array compare on the next frame without forcing a
+                    // recompile of the whole rig.
+                    appendRelTargets(sample, "rigExec:blendShape", true);
                     float activation = 1;
                     if (UsdAttribute a = sample.GetAttribute(
                             TfToken("rigExec:activation"))) {
@@ -2293,10 +2451,381 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     return std::hash<std::string>{}(digest);
 }
 
+// ---------------------------------------------------------------------------
+// Pose interpolators (the conventional poseInterpolator)
+// ---------------------------------------------------------------------------
+
+bool
+RigExecRigEvaluator::_CompilePoseInterpolators(
+    const std::vector<SdfPath> &joints,
+    const std::vector<SdfPath> &controls,
+    std::vector<_PoseInterpolator> *out,
+    std::vector<std::string> *notes,
+    std::string *error) const
+{
+    static const TfToken kPoseType("RigExecPose");
+    static const TfToken kDriver("rigExec:driver");
+    static const TfToken kWeight("outputs:weight");
+
+    out->clear();
+    const std::vector<SdfPath> interpolators =
+        _DiscoverPoseInterpolators(_stage, _rigPath);
+    if (interpolators.empty()) {
+        return true;
+    }
+
+    // A driver has to be something that PUBLISHES A FRAME, because a frame is
+    // the only thing this phase can read. A RigExecControl qualifies exactly
+    // as a RigExecJoint does -- the conventional drivers are hidden joints, but a
+    // control has a local rotation just as a joint does -- so the set is both.
+    std::set<SdfPath> providers(joints.begin(), joints.end());
+    providers.insert(controls.begin(), controls.end());
+
+    for (const SdfPath &path : interpolators) {
+        const UsdPrim prim = _stage->GetPrimAtPath(path);
+        _PoseInterpolator record;
+        record.prim = path;
+
+        SdfPathVector driverTargets;
+        if (const UsdRelationship rel = prim.GetRelationship(kDriver)) {
+            rel.GetTargets(&driverTargets);
+        }
+        if (driverTargets.size() != 1) {
+            *error = "pose interpolator " + path.GetString() + " names " +
+                     std::to_string(driverTargets.size()) +
+                     " rigExec:driver targets; exactly one is required";
+            return false;
+        }
+        record.driver = driverTargets[0].GetPrimPath();
+        if (!providers.count(record.driver)) {
+            *error = "pose interpolator " + path.GetString() +
+                     " names a rigExec:driver, " + record.driver.GetString() +
+                     ", that is not a RigExecJoint or RigExecControl of this "
+                     "rig and therefore publishes no frame to measure";
+            return false;
+        }
+        // The driver's local rotation is measured against its nearest
+        // frame-publishing ancestor. That is the immediate namespace parent on
+        // every rig this has been run on; anything else is REPORTED rather
+        // than silently accepted, because it means the delta is being measured
+        // across a prim that may carry a transform of its own.
+        for (SdfPath walk = record.driver.GetParentPath();
+             !walk.IsEmpty() && !walk.IsAbsoluteRootPath() &&
+                 walk != _rigPath.GetParentPath();
+             walk = walk.GetParentPath()) {
+            if (providers.count(walk)) {
+                record.driverParent = walk;
+                break;
+            }
+        }
+        if (notes && !record.driverParent.IsEmpty() &&
+            record.driverParent != record.driver.GetParentPath()) {
+            notes->push_back(
+                "warning: pose interpolator " + path.GetString() +
+                " measures its driver against " +
+                record.driverParent.GetString() +
+                ", which is not the driver's immediate namespace parent");
+        }
+
+        record.allowNegativeWeights =
+            _ReadAttribute(prim, "rigExec:allowNegativeWeights", true);
+
+        RigExecRbfSolverDesc desc;
+        desc.kernel =
+            _ReadAttribute(prim, "rigExec:kernel", TfToken("gaussian")) ==
+                    TfToken("linear")
+                ? RigExecRbfKernel::Linear
+                : RigExecRbfKernel::Gaussian;
+        desc.regularization =
+            _ReadAttribute(prim, "rigExec:regularization", 0.0f);
+        desc.normalize = _ReadAttribute(prim, "rigExec:normalize", true);
+        desc.enableRotation =
+            _ReadAttribute(prim, "rigExec:enableRotation", true);
+        desc.enableTranslation =
+            _ReadAttribute(prim, "rigExec:enableTranslation", false);
+        const TfToken axis =
+            _ReadAttribute(prim, "rigExec:twistAxis", TfToken("X"));
+        desc.twistAxis = axis == TfToken("Y")   ? GfVec3d(0.0, 1.0, 0.0)
+                         : axis == TfToken("Z") ? GfVec3d(0.0, 0.0, 1.0)
+                                                : GfVec3d(1.0, 0.0, 0.0);
+        if (desc.enableTranslation && notes) {
+            // Said once, plainly, rather than measured wrongly. This phase
+            // reads the driver's ROTATION; no interpolator of the shipped
+            // biped enables the translation channel (0 of 29), so the
+            // arithmetic that would measure it has never been run against
+            // anything and is not being guessed at here.
+            notes->push_back(
+                "warning: pose interpolator " + path.GetString() +
+                " sets rigExec:enableTranslation, which the evaluation phase "
+                "does not measure; its poses are judged on rotation alone");
+        }
+
+        std::vector<double> radii;
+        std::vector<double> translationRadii;
+        size_t poseChildren = 0;
+        for (const UsdPrim &child : prim.GetChildren()) {
+            if (child.GetTypeName() != kPoseType) {
+                *error = "pose interpolator " + path.GetString() +
+                         " has a child, " + child.GetPath().GetString() +
+                         ", that is not a RigExecPose but a " +
+                         child.GetTypeName().GetString();
+                return false;
+            }
+            ++poseChildren;
+            const SdfPath weightPath = child.GetPath().AppendProperty(kWeight);
+            if (const UsdAttribute weight = child.GetAttribute(kWeight)) {
+                // outputs:weight is a SOURCE. An authored outbound connection
+                // on it would say it takes its value from somewhere else,
+                // which is the opposite of what this phase does to it.
+                if (weight.HasAuthoredConnections()) {
+                    *error = "pose " + child.GetPath().GetString() +
+                             " carries an authored connection on "
+                             "outputs:weight, which its interpolator writes";
+                    return false;
+                }
+            }
+            if (!_ReadAttribute(child, "inputs:enabled", true)) {
+                record.disabledPoseWeights.push_back(weightPath);
+                continue;
+            }
+
+            const GfQuatf rotation =
+                _ReadAttribute(child, "rigExec:rotation", GfQuatf(1.0f));
+            desc.poses.push_back(RigExecRbfEulerFromQuaternion(
+                GfQuatd(rotation.GetReal(),
+                        GfVec3d(rotation.GetImaginary()))));
+            // The schema stores centimetres, the solver takes metres.
+            const GfVec3f translation =
+                _ReadAttribute(child, "rigExec:translation", GfVec3f(0.0f));
+            desc.translations.push_back(GfVec3d(translation[0] / 100.0,
+                                                translation[1] / 100.0,
+                                                translation[2] / 100.0));
+            const TfToken kind =
+                _ReadAttribute(child, "rigExec:poseType", TfToken("swing"));
+            desc.poseTypes.push_back(
+                kind == TfToken("twist")   ? RigExecRbfPoseType::Twist
+                : kind == TfToken("whole") ? RigExecRbfPoseType::Whole
+                                           : RigExecRbfPoseType::Swing);
+
+            const double radius =
+                _ReadAttribute(child, "rigExec:rotationRadius", 0.0f);
+            const double translationRadius =
+                _ReadAttribute(child, "rigExec:translationRadius", 0.0f);
+            if (!std::isfinite(radius) || radius < 0.0 ||
+                !std::isfinite(translationRadius) ||
+                translationRadius < 0.0) {
+                *error = "pose " + child.GetPath().GetString() +
+                         " has a radius that is negative or not finite";
+                return false;
+            }
+            radii.push_back(radius);
+            // Centimetres here too, and NOT the rotation radius: a brow's
+            // poses sit millimetres apart and a rotation width would swallow
+            // every one of them.
+            translationRadii.push_back(translationRadius / 100.0);
+            record.poseWeights.push_back(weightPath);
+        }
+        if (poseChildren == 0) {
+            *error = "pose interpolator " + path.GetString() +
+                     " has no RigExecPose children";
+            return false;
+        }
+        if (record.poseWeights.empty()) {
+            // Every pose disabled is not an error -- it is a shape-preserving
+            // enable applied to all of them -- and there is nothing to solve.
+            out->push_back(std::move(record));
+            continue;
+        }
+        if (!desc.enableTranslation) {
+            desc.translations.clear();
+            translationRadii.clear();
+        }
+
+        // The shared widths stay at zero and the PER-POSE ones are adopted: a
+        // shipped table's widths carry a painted poseFalloff that no falloff
+        // vector reproduces, so they are data, not something to re-derive
+        // (rbf.h SetSolvedTable). The inverted matrix is the one thing that IS
+        // re-derived, because it is a pure function of everything above and
+        // storing it would be a second copy to keep in step (schema
+        // RigExecPoseInterpolator).
+        desc.radius = 0.0;
+        desc.translationRadius = 0.0;
+        RigExecRbfSolver solver(desc);
+        solver.SetSolvedTable(radii, translationRadii, {});
+        if (!solver.Solve()) {
+            *error = "pose interpolator " + path.GetString() +
+                     " could not be solved";
+            return false;
+        }
+        if (notes && solver.Degenerate()) {
+            notes->push_back(
+                "warning: pose interpolator " + path.GetString() +
+                " has poses that are coincident under the channels it has "
+                "enabled; its weights will sit at 1/n");
+        }
+        record.solver = std::move(solver);
+        out->push_back(std::move(record));
+    }
+    return true;
+}
+
+void
+RigExecRigEvaluator::_EvaluatePoseInterpolators(
+    UsdTimeCode time,
+    const std::map<SdfPath, RigExecPointFrame> &restFrames,
+    const std::map<SdfPath, RigExecPointFrame> &finalFrames,
+    RigExecRigPose *pose)
+{
+    if (_poseInterpolators.empty()) {
+        return;
+    }
+    // Its own scope and its own category. A third of the evaluate was
+    // invisible to the profiler until 2026-09-13, because nobody had scoped
+    // the publish loops; this phase is not going to be the next one.
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PoseInterpolators", "psd");
+
+    // ORDERING, ASSERTED RATHER THAN TRUSTED (first half; the second is at
+    // the head of the geometry chains).
+    //
+    // WHAT THIS PHASE MUST RUN AFTER: the complete pose walk. Not the pose
+    // SEED -- the full pose, every constraint included, and the driver
+    // constraints in particular. the conventional pose drivers are hidden joints
+    // orient-constrained to the bone that carries everything, so that the
+    // parent subtracts the twist back out and the driver's local rotation is
+    // the swing alone; run this before that constraint and every driver reads
+    // its seed, which is its rest, and every neutral weighs 1.000000 forever
+    // however the rig is posed -- a failure that looks exactly like success.
+    // The frame lookup below is what says so out loud: a driver with no
+    // published FINAL frame has not been posed, and its interpolator
+    // diagnoses and publishes zeros rather than quietly measuring a rest.
+    const auto rotationOf =
+        [](const std::map<SdfPath, RigExecPointFrame> &frames,
+           const SdfPath &path, GfQuatd *out) {
+            const auto it = frames.find(path);
+            return it != frames.end() && RigExecFrameRotation(it->second, out);
+        };
+
+    std::vector<double> weights;
+    for (const _PoseInterpolator &interpolator : _poseInterpolators) {
+        const UsdPrim prim = _stage->GetPrimAtPath(interpolator.prim);
+        const bool enabled =
+            _ResolvedRead(_resolvedInputs, prim, "inputs:enabled", true, time);
+
+        // Publishes into BOTH: _resolvedInputs is what a consumer's read
+        // resolves through (a RigExecBlendInput's inputs:weight follows its
+        // single authored connection to <pose>.outputs:weight and finds the
+        // value at that path), and movedProperties is what makes the number
+        // observable to a host, a test and the picker.
+        const auto publish = [&](const SdfPath &path, float value) {
+            _resolvedInputs.SetProperty(path, VtValue(value));
+            pose->movedProperties[path] = VtValue(value);
+        };
+        const auto publishAllZero = [&]() {
+            for (const SdfPath &path : interpolator.poseWeights) {
+                publish(path, 0.0f);
+            }
+        };
+        // A disabled POSE publishes a hard zero whatever else happens: it was
+        // left out of the solve, so it has no weight to be told.
+        for (const SdfPath &path : interpolator.disabledPoseWeights) {
+            publish(path, 0.0f);
+        }
+        if (!enabled) {
+            // Shape-preserving enable: a corrective that is off has to be
+            // off, not frozen at its last value.
+            publishAllZero();
+            continue;
+        }
+
+        GfQuatd driverFinal(1.0), driverRest(1.0);
+        GfQuatd parentFinal(1.0), parentRest(1.0);
+        if (!rotationOf(finalFrames, interpolator.driver, &driverFinal) ||
+            !rotationOf(restFrames, interpolator.driver, &driverRest) ||
+            (!interpolator.driverParent.IsEmpty() &&
+             (!rotationOf(finalFrames, interpolator.driverParent,
+                          &parentFinal) ||
+              !rotationOf(restFrames, interpolator.driverParent,
+                          &parentRest)))) {
+            pose->diagnostics.push_back(
+                "pose interpolator " + interpolator.prim.GetString() +
+                " has no usable frame for its driver " +
+                interpolator.driver.GetString() +
+                " after the pose walk; its weights are zero this generation");
+            publishAllZero();
+            continue;
+        }
+
+        // The driver's LOCAL rotation relative to its own REST, which is what
+        // every authored pose is measured from and why a rig standing still
+        // reads its neutral at 1.000000.
+        //
+        //   local = parent^-1 * world       (row-vector; see RigExecFrameRotation)
+        //   delta = restLocal^-1 * local
+        //
+        // Exactly the `neutral^-1 * pose` the authored quaternions were
+        // rebased by (schema RigExecPose.rigExec:rotation), and therefore
+        // directly comparable to them. The rest local is taken from the
+        // EVALUATED rest frames rather than reconstructed from the driver's
+        // authored rest:space: the two agree on a rig whose rest avars are
+        // default, and the evaluated pair also carries the rest avars and any
+        // intervening plain Xform, which the authored matrix alone does not.
+        const GfQuatd local = parentFinal.GetInverse() * driverFinal;
+        const GfQuatd restLocal = parentRest.GetInverse() * driverRest;
+        const GfQuatd delta = (restLocal.GetInverse() * local).GetNormalized();
+
+        // Through the euler, not around it: rbf_evaluate -- which is what
+        // tools/biped/verify_psd.py computes its expected weights with --
+        // takes an euler and converts it back inside Evaluate. Taking the same
+        // route makes the gate's numbers and the engine's the same
+        // floating-point values and not merely the same rotation.
+        interpolator.solver.Evaluate(
+            RigExecRbfEulerFromQuaternion(delta), nullptr, &weights,
+            interpolator.allowNegativeWeights);
+        if (weights.size() != interpolator.poseWeights.size()) {
+            pose->diagnostics.push_back(
+                "pose interpolator " + interpolator.prim.GetString() +
+                " solved " + std::to_string(weights.size()) +
+                " weights for " +
+                std::to_string(interpolator.poseWeights.size()) + " poses");
+            publishAllZero();
+            continue;
+        }
+        for (size_t i = 0; i < weights.size(); ++i) {
+            // float, not double, and that is load-bearing: a consumer reads
+            // inputs:weight as a float, and RigExecResolvedInputs::Get answers
+            // only the type the VtValue actually holds -- a double here would
+            // miss, fall on through the connection walk, and be answered with
+            // the authored zero with nothing reported anywhere.
+            publish(interpolator.poseWeights[i],
+                    static_cast<float>(weights[i]));
+        }
+    }
+}
+
 bool
 RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 {
     RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile", "compile");
+    // DROP THE GIL FOR THE WHOLE CALL. Compile dispatches exec work to
+    // TBB workers, and the first ExecUsdSystem::PrepareRequest in a
+    // process lazily loads the exec definition plugins -- PlugPlugin::
+    // Load -> TfDlopen -> TfScriptModuleLoader -> TfPyLock -- which
+    // needs the GIL. A Python caller (usdview, the bindings) holds the
+    // GIL across this call, so a worker that WINS the race to that lazy
+    // load blocks on the GIL while this thread blocks in
+    // WorkDispatcher::Wait on the worker, and every other TBB worker
+    // piles up behind the plugin-load mutex the stalled one is holding.
+    // MEASURED: 5 hangs in 12 runs of testRigExecStageEdits, 0 in 15
+    // with RIGEXEC_ENABLE_PARALLEL_EVAL=0. Intermittent because it is a
+    // race for who reaches the registry first.
+    //
+    // Scoped to the whole function, not to the Wait() calls: a
+    // WorkDispatcher also waits in its DESTRUCTOR, and Compile has
+    // early returns between the warm-up Run() and its Wait(), so a
+    // narrower guard would leave those joins exposed. Safe because
+    // libs/rigExec calls no Python at all, and the macro compiles to
+    // nothing when Python is not initialized.
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
     // The program describes the epoch this call is about to replace, so it
     // stops being the rig's program here: a Compile that fails and restores
     // the previous epoch returns before the rebuild at the tail, this local
@@ -2392,6 +2921,22 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         _DiscoverControls(_stage, _rigPath);
     std::vector<SdfPath> newVolumeWeightPaths =
         _DiscoverVolumeWeights(_stage, _rigPath);
+
+    // Pose interpolators, discovered and SOLVED here. Solving is the whole
+    // reason this is compile-time work: inverting the matrix of every pose's
+    // kernel value at every other pose is a constant of the authored data,
+    // and doing it per frame would be inverting the same matrix 326 times a
+    // second to be handed the same answer.
+    std::vector<_PoseInterpolator> newPoseInterpolators;
+    {
+        std::string interpolatorError;
+        if (!_CompilePoseInterpolators(newJointPaths, newControlPaths,
+                                       &newPoseInterpolators, errors,
+                                       &interpolatorError)) {
+            reportError(interpolatorError);
+            return false;
+        }
+    }
 
     // Transform-authority validation (host-durability redesign).
     //
@@ -3157,6 +3702,40 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     for (const SdfPath &samplePath : samples) {
                         const UsdPrim sample = _stage->GetPrimAtPath(samplePath);
                         if (!sample) continue;
+                        // A sample states its shape exactly one way. Both
+                        // authored is refused rather than resolved by
+                        // precedence: two shapes that disagree with a silent
+                        // winner is worse than either shape being wrong.
+                        SdfPathVector densePoints, sparseShape;
+                        if (UsdRelationship rel = sample.GetRelationship(
+                                TfToken("rigExec:targetPoints"))) {
+                            rel.GetTargets(&densePoints);
+                        }
+                        if (UsdRelationship rel = sample.GetRelationship(
+                                TfToken("rigExec:blendShape"))) {
+                            rel.GetTargets(&sparseShape);
+                        }
+                        if (!densePoints.empty() && !sparseShape.empty()) {
+                            reportError(samplePath.GetString() +
+                                ": blend sample authors both rigExec:targetPoints"
+                                " and rigExec:blendShape; exactly one is allowed");
+                            return false;
+                        }
+                        if (!sparseShape.empty()) {
+                            if (sparseShape.size() != 1 ||
+                                !_stage->GetPrimAtPath(
+                                    sparseShape[0].GetPrimPath())
+                                     .IsA<UsdSkelBlendShape>()) {
+                                reportError(samplePath.GetString() +
+                                    ": rigExec:blendShape must name exactly one"
+                                    " UsdSkelBlendShape prim");
+                                return false;
+                            }
+                            // No phased read to validate: the offsets are
+                            // authored data, not a chain revision, so there
+                            // is no preceding or final version of them.
+                            continue;
+                        }
                         RigExecReadPhase phase;
                         std::string error;
                         const UsdAttribute legacy = sample.GetAttribute(
@@ -4795,13 +5374,21 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                         revision.binding.driverFrames,
                         _computePointFrameArray));
             }
-            // binding.blendInputs is already in canonical sorted order, which
-            // is the order the accumulation is defined in.
-            for (const SdfPath &input : revision.binding.blendInputs) {
-                revision.blendChannelTaps.push_back(
-                    newTaps->Add(RigExecValueAddress::Prim(
-                        input, TfToken("computeBlendChannel"))));
-            }
+            // No computeBlendChannel tap here, deliberately.
+            //
+            // There used to be one per blend input, pushed into
+            // revision.blendChannelTaps -- and NOTHING ever read that vector.
+            // The packet is assembled from a direct stage read in
+            // _EvaluateDynamic instead, so every dense sample's full points
+            // array was pulled twice per frame: once through exec to fill a
+            // value that was discarded, once again for real.
+            //
+            // MEASURED (tools/biped/spikes/blend_cost.py, 64 dense samples on
+            // a 26,276-point body, every channel weight 0): the taps cost
+            // 7.72 ms/frame of AuthoritativeSnapshot, about 30% of the whole
+            // per-target blend cost, for nothing. At N=0 AuthoritativeSnapshot
+            // does not reach the profile's top eight at all, which is what
+            // identified it.
             if (revision.op == RigExecRevisionOp::Skin) {
                 // Whether the per-point layout can change WITHIN this epoch
                 // is a question about the stage, so it is answered here once
@@ -5485,6 +6072,16 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _movers = std::move(newMovers);
     _jointPaths = std::move(newJointPaths);
     _controlPaths = std::move(newControlPaths);
+    _poseInterpolators = std::move(newPoseInterpolators);
+    _poseWeightProperties.clear();
+    for (const _PoseInterpolator &interpolator : _poseInterpolators) {
+        _poseWeightProperties.insert(_poseWeightProperties.end(),
+                                     interpolator.disabledPoseWeights.begin(),
+                                     interpolator.disabledPoseWeights.end());
+        _poseWeightProperties.insert(_poseWeightProperties.end(),
+                                     interpolator.poseWeights.begin(),
+                                     interpolator.poseWeights.end());
+    }
     _controlFrameTaps = std::move(newControlFrameTaps);
     _frameConstraints = std::move(newFrameConstraints);
     _frameChains = std::move(newFrameChains);
@@ -5571,6 +6168,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // a source holds are both things a recompile can have changed.
     _skinTopologies.Clear();
     _skinLayoutInputsValid = false;
+    _blendSampleShapes.Clear();
     for (auto &[target, live] : _liveGraphs) {
         if (live) live->basePointsPushed = false;
     }
@@ -6188,6 +6786,68 @@ RigExecRigEvaluator::_ReadTargetPoints(
     }
     points->assign(value.begin(), value.end());
     return true;
+}
+
+bool
+RigExecRigEvaluator::_ResolveBlendSampleLayout(
+    const SdfPath &blendShapePath, size_t pointCount,
+    RigExecBlendSampleLayout *layout) const
+{
+    layout->pointCount = pointCount;
+    layout->valid = false;
+
+    const UsdSkelBlendShape shape(
+        _stage->GetPrimAtPath(blendShapePath.GetPrimPath()));
+    if (!shape) {
+        return true;   // cache the miss; it cannot become a hit this epoch
+    }
+    const UsdAttribute offsetsAttr = shape.GetOffsetsAttr();
+    const UsdAttribute indicesAttr = shape.GetPointIndicesAttr();
+
+    // The admission rule. `uniform` already forbids time samples, so a
+    // connection is the only route by which these can change while the epoch
+    // stands -- and a connected value may itself be animated, which is
+    // exactly what the skin layout refuses for.
+    //
+    // Noted and carried, NOT returned early: a refusal means "read this every
+    // frame", so the read still has to happen. Returning here would hand the
+    // caller an empty layout, the sample would fail validation, and a
+    // perfectly good connected blend shape would come out as MoverFailed
+    // instead of merely uncached.
+    const bool cacheable = !offsetsAttr.HasAuthoredConnections() &&
+                           !indicesAttr.HasAuthoredConnections();
+
+    VtVec3fArray offsets;
+    VtIntArray indices;
+    offsetsAttr.Get(&offsets);
+    indicesAttr.Get(&indices);
+
+    // An empty pointIndices means the offsets are dense and parallel to the
+    // base points -- UsdSkelBlendShape's own convention, kept rather than
+    // invented so an authored blend shape from anywhere else reads correctly.
+    if (!indices.empty()) {
+        if (indices.size() != offsets.size()) {
+            return cacheable;   // stable and wrong; cached as invalid
+        }
+        for (int index : indices) {
+            if (index < 0 || size_t(index) >= pointCount) {
+                return cacheable;
+            }
+        }
+    } else if (!offsets.empty() && offsets.size() != pointCount) {
+        return cacheable;
+    }
+    for (const GfVec3f &offset : offsets) {
+        if (!std::isfinite(offset[0]) || !std::isfinite(offset[1]) ||
+            !std::isfinite(offset[2])) {
+            return cacheable;
+        }
+    }
+
+    layout->offsets.assign(offsets.begin(), offsets.end());
+    layout->indices.assign(indices.begin(), indices.end());
+    layout->valid = true;
+    return cacheable;
 }
 
 bool
@@ -6853,10 +7513,20 @@ RigExecRigEvaluator::_EvaluateChain(
                     break;
                 }
                 float channel = 0;
-                if (UsdAttribute a =
-                        input.GetAttribute(TfToken("inputs:weight"))) {
-                    a.Get(&channel, time);
-                }
+                // Through the resolver, NOT straight off the stage.
+                //
+                // An authored `inputs:weight` and a DRIVEN one are the same
+                // attribute; a plain Get() sees only the first. The moment
+                // anything connects a weight -- which is the entire point of
+                // a pose-space rig, where an interpolator drives every
+                // corrective -- this oracle read 0 while the real path read
+                // the driven value, and then reported the disagreement as a
+                // parity mismatch in the blend kernel. The packet assembly
+                // has always used _resolvedInputs here; this is the oracle
+                // catching up to it.
+                _resolvedInputs.GetAttribute(
+                    input.GetAttribute(TfToken("inputs:weight")), time,
+                    &channel);
                 if (!std::isfinite(channel)) {
                     diagnostics->push_back(
                         "MoverFailed " + mover->moverPath.GetString() +
@@ -6902,21 +7572,74 @@ RigExecRigEvaluator::_EvaluateChain(
                         failed = true;
                         break;
                     }
-                    SdfPathVector shapeTargets;
+                    SdfPathVector shapeTargets, sparseTargets;
                     if (UsdRelationship rel = sample.GetRelationship(
                             TfToken("rigExec:targetPoints"))) {
                         rel.GetTargets(&shapeTargets);
                     }
-                    if (shapeTargets.size() != 1) {
+                    if (UsdRelationship rel = sample.GetRelationship(
+                            TfToken("rigExec:blendShape"))) {
+                        rel.GetTargets(&sparseTargets);
+                    }
+                    if (shapeTargets.size() + sparseTargets.size() != 1) {
                         diagnostics->push_back(
                             "MoverFailed " + mover->moverPath.GetString() +
-                            ": blend sample must target exactly one native "
-                            "points property: " + samplePath.GetString());
+                            ": blend sample must name exactly one of "
+                            "rigExec:targetPoints or rigExec:blendShape: " +
+                            samplePath.GetString());
                         failed = true;
                         break;
                     }
                     _Sample s;
                     s.path = sample.GetPath();
+                    if (sparseTargets.size() == 1) {
+                        // The oracle is a SCALAR REFERENCE, so it reads the
+                        // blend shape straight off the stage and expands it
+                        // to a full moved-points array -- deliberately not
+                        // through RigExecBlendSampleCache. An oracle that
+                        // shared the fast path's cache would agree with it
+                        // about a stale layout, which is precisely the class
+                        // of bug this exists to catch.
+                        RigExecBlendSampleLayout layout;
+                        _ResolveBlendSampleLayout(sparseTargets[0],
+                                                  basePoints.size(), &layout);
+                        if (!layout.valid) {
+                            diagnostics->push_back(
+                                "MoverFailed " + mover->moverPath.GetString() +
+                                ": unusable blend shape at " +
+                                sparseTargets[0].GetString());
+                            failed = true;
+                            break;
+                        }
+                        s.shape = VtVec3fArray(basePoints.begin(),
+                                               basePoints.end());
+                        if (layout.indices.empty()) {
+                            for (size_t i = 0; i < layout.offsets.size(); ++i) {
+                                s.shape[i] += layout.offsets[i];
+                            }
+                        } else {
+                            for (size_t k = 0; k < layout.indices.size(); ++k) {
+                                s.shape[size_t(layout.indices[k])] +=
+                                    layout.offsets[k];
+                            }
+                        }
+                        s.activation = 1;
+                        if (UsdAttribute a = sample.GetAttribute(
+                                TfToken("rigExec:activation"))) {
+                            a.Get(&s.activation, time);
+                        }
+                        if (!std::isfinite(s.activation) ||
+                            s.activation <= 0) {
+                            diagnostics->push_back(
+                                "MoverFailed " + mover->moverPath.GetString() +
+                                ": non-positive activation at " +
+                                s.path.GetString());
+                            failed = true;
+                            break;
+                        }
+                        samples.push_back(std::move(s));
+                        continue;
+                    }
                     const UsdAttribute shapeAttr =
                         _stage->GetAttributeAtPath(shapeTargets[0]);
                     bool gotShape = shapeAttr && shapeAttr.Get(&s.shape, time);
@@ -8229,6 +8952,9 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     const bool touchesLayout =
         _OverridesReachSkinLayout(_interactiveOverrides) ||
         _OverridesReachSkinLayout(overrides);
+    const bool touchesShapes =
+        _OverridesReachBlendShapes(_interactiveOverrides) ||
+        _OverridesReachBlendShapes(overrides);
     _interactiveOverrides = std::move(overrides);
     // Defence in depth, not a correctness requirement: every attribute
     // override is written into the resolved inputs before anything reads
@@ -8265,6 +8991,11 @@ RigExecRigEvaluator::SetInteractiveOverrides(
     if (touchesLayout) {
         _skinTopologies.Clear();
     }
+    // The same rule for the blend sample shapes, which are the other cache a
+    // drag must not pay to rebuild: see _OverridesReachBlendShapes.
+    if (touchesShapes) {
+        _blendSampleShapes.Clear();
+    }
     // Nothing to invalidate: the program is asked to PLACE these at the top
     // of every generation (Evaluate), and it runs only for a set it can place
     // exactly. An override it cannot place -- one standing on a value folded
@@ -8277,6 +9008,8 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
 {
     const bool touchesLayout =
         _OverridesReachSkinLayout(_interactiveOverrides);
+    const bool touchesShapes =
+        _OverridesReachBlendShapes(_interactiveOverrides);
     _interactiveOverrides.clear();
     // Both halves of a drag invalidate the same two caches. See
     // SetInteractiveOverrides: the static-input clear is defence in depth
@@ -8286,6 +9019,11 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
     _staticInputs.Clear();
     if (touchesLayout) {
         _skinTopologies.Clear();
+    }
+    // The same rule for the blend sample shapes, which are the other cache a
+    // drag must not pay to rebuild: see _OverridesReachBlendShapes.
+    if (touchesShapes) {
+        _blendSampleShapes.Clear();
     }
 }
 
@@ -9040,6 +9778,27 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         return pose;
     }
 
+    // Region stamps for the stretches that cannot take an RAII scope,
+    // because a scope needs a block and the block would scope out the
+    // lambdas the rest of the walk calls.
+    //
+    // MEASURED 2026-09-13, biped: 3.3-3.9 ms/frame of this function sat
+    // inside no profiler scope at all -- 24% of a no-change evaluate, more
+    // than AuthoritativeSnapshot. The publish loops turned out to be only
+    // 1.2 ms of that; the rest is here, in the per-provider frame maps that
+    // are rebuilt from scratch every generation. Instrumenting first is what
+    // kept a design from being written against the wrong 2.5 ms.
+    const bool profileRegions = _profiler.IsEnabled();
+    uint64_t regionStart = profileRegions ? RigExecProfiler::NowUs() : 0;
+    auto stampRegion = [&](const char *name) {
+        if (!profileRegions) {
+            return;
+        }
+        const uint64_t now = RigExecProfiler::NowUs();
+        _profiler.Record(name, "evaluate", regionStart, now);
+        regionStart = now;
+    };
+
     // 0. Solver aggregates first, then each solver-posed joint's frame as an
     // override on the authoritative request. This is the whole of the
     // solver->joint binding: the element choice is compiled state, and exec
@@ -9254,6 +10013,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             restFrames = _epochRestFrames;
         }
     }
+    // Everything from here to the pose walk rebuilds the per-provider frame
+    // maps from scratch, and it is the largest cost in this function that
+    // carried no profiler scope: 1.7 ms with nothing changed, 3.2 ms on a
+    // root drag. Stamped rather than scoped because the lambdas the pose
+    // walk calls are declared in the middle of it, and a block would scope
+    // them out.
+    regionStart = profileRegions ? RigExecProfiler::NowUs() : 0;
     for (const auto &[provider, tap] : _poseSeedFrames) {
         const RigExecPointFrame frame = seedSnapshot.Get<RigExecPointFrame>(tap);
         baseFrames.emplace_hint(baseFrames.end(), provider, frame);
@@ -9289,6 +10055,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         baseFrames[provider] = base;
         finalFrames[provider] = base;
     }
+    stampRegion("FrameSeed");
     // The walk's frame store, in the two shapes the routines it shares with
     // the baked program ask for it: one provider by path, and every provider
     // it holds a base frame for. Both answer straight out of the maps as the
@@ -9419,20 +10186,42 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             return result;
         }());
 
+    // MEASURED 2026-09-13, biped: 3003 calls per frame, 8.1 us each -- 24 ms
+    // of a 49 ms evaluate -- because commitConstraintFrames asks this once per
+    // descendant joint per constraint, and the same handful of joints are
+    // walked again for every constraint in the rig.
+    //
+    // The cache is a LOCAL of this Evaluate call, not compiled state. That is
+    // what makes it safe: the predicate reads parent:space AT A TIME, and
+    // parent:space may carry time samples, so a compile-time answer would be
+    // wrong on any frame but the one it was baked at -- and this predicate
+    // decides whether a constraint's pose propagates through a joint, so a
+    // wrong answer moves joints by centimetres (see verify_spine.py). Within
+    // one Evaluate, `time` is fixed and the stage cannot change, so a memo is
+    // byte-identical to recomputing.
+    std::map<SdfPath, bool> namespacePoseCache;
     const auto inheritsNamespacePose = [&](const SdfPath &path) {
+        const auto cached = namespacePoseCache.find(path);
+        if (cached != namespacePoseCache.end()) {
+            return cached->second;
+        }
         const UsdPrim prim = _stage->GetPrimAtPath(path);
+        bool inherits = true;
         for (const char *name : {"parent:space"}) {
             const UsdAttribute attribute = prim.GetAttribute(TfToken(name));
             SdfPathVector connections;
             // HasAuthoredConnections first: see _AuthoredConnections.
+            // `inherits = false; break;` rather than an early return, so the
+            // answer still reaches the memo below.
             if (attribute && attribute.HasAuthoredConnections() &&
                 attribute.GetConnections(&connections) &&
-                !connections.empty()) return false;
+                !connections.empty()) { inherits = false; break; }
             GfMatrix4d authored(1.0);
             if (attribute && attribute.Get(&authored, time) &&
-                authored != GfMatrix4d(1.0)) return false;
+                authored != GfMatrix4d(1.0)) { inherits = false; break; }
         }
-        return true;
+        namespacePoseCache.emplace(path, inherits);
+        return inherits;
     };
 
     // Nearest pose-owning ancestor-or-self of a path, memoized for this
@@ -9695,6 +10484,26 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     };
 
     std::set<size_t> visitedSolverLevels;
+    // 2026-09-13: this stamp was briefly believed to be load-bearing -- moving
+    // it one line earlier appeared to turn testRigExecNoAuthoring into an
+    // access violation and testRigExecWeightOverlay into 0xC0000409. It is
+    // not. The crashes were an ABI mismatch: rigExecImaging/bridge.h includes
+    // rigEvaluator.h, hence types.h, and types.h was being edited in another
+    // window (RigExecBlendSampleData gained a member, so its size changed).
+    // A partial rebuild left rigExec.dll and rigExecImaging.dll disagreeing
+    // about that layout, which is exactly an access violation in one imaging
+    // test and a stack-cookie failure in another -- and why BOTH failures
+    // were imaging tests, the clue the "statement placement" theory never
+    // explained. Every bisect step rebuilt a different subset, so the
+    // pass/fail pattern tracked which DLLs happened to resynchronise, not the
+    // edit under test. Placement is irrelevant; verified green in both
+    // positions at /O2 and /Od once the tree settled.
+    //
+    // Left as a note because the methodological error is worth more than the
+    // finding was: a single non-reproduced observation was treated as a
+    // controlled experiment. Re-run the failing state before believing any
+    // bisect taken while another agent is writing shared headers.
+    stampRegion("PoseWalkSetup");
     for (const _PoseStep &step : _poseSteps) {
         if (step.solverBatch) {
             _SolverBatch &batch = _solverBatches[step.index];
@@ -10288,6 +11097,20 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
 
     // Publish final provider matrices after the atomic pose walk.
+    //
+    // MEASURED 2026-09-13, biped: the three publish loops below cost 3.3-3.9
+    // ms/frame -- 24% of a no-change evaluate, more than AuthoritativeSnapshot
+    // -- and until these scopes existed NONE of it appeared in the profile.
+    // Summing the profiler's rows accounted for only 76% of the floor and
+    // nobody had asked where the rest went. The cost is 252 x 3 std::map
+    // inserts into jointFramesBase/Final/MatricesFinal, done unconditionally
+    // for joints that did not move, plus this provider walk over every
+    // finalFrames entry. Scoped separately from the exec snapshot above it
+    // because the two want opposite fixes: that one is exec, this one is a
+    // container choice (see docs/superpowers/specs/
+    // 2026-09-13-sparse-evaluation-design.md, Gate 3).
+    {
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PublishProviders", "publish");
     for (const auto &[provider, frame] : finalFrames) {
         if (_xformDerivedProviders.count(provider)) {
             if (!_IsUsableConstraintFrame(frame)) {
@@ -10316,12 +11139,15 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
         }
     }
+    }
 
     // 3. Base and final transform revisions plus paired matrices. A
     // solver-posed joint's base value was supplied as an override above, so
     // exec published it as that joint's computePointFrame; the final value is
     // the in-memory frame revision when the joint carries one, and otherwise
     // is the base (which is what the final-phase tap already resolves to).
+    {
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PublishJoints", "publish");
     for (size_t i = 0; i < _jointPaths.size(); ++i) {
         const RigExecPointFrame baseFrame =
             snapshot.Get<RigExecPointFrame>(_jointFrameTaps[i]);
@@ -10366,17 +11192,21 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 " has a degenerate final frame; matrix omitted");
         }
     }
+    }
     // 3a. Control frames. Most are animator-authored inputs and therefore
     // publish their base tap directly; a control explicitly named as a
     // constraint write target publishes the revised frame, matching FBX's
     // ability to constrain any transform object. A degenerate/invalid frame
     // remains the status bearer and lets imaging omit the guide.
+    {
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PublishControls", "publish");
     for (size_t i = 0; i < _controlPaths.size(); ++i) {
         const auto revised = finalFrames.find(_controlPaths[i]);
         pose.controlFrames[_controlPaths[i]] =
             revised != finalFrames.end()
                 ? revised->second
                 : snapshot.Get<RigExecPointFrame>(_controlFrameTaps[i]);
+    }
     }
 
     // Observational solver guides never gate the rig snapshot: an
@@ -10447,6 +11277,16 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         pose.movedProperties[target] = value;
     }
 
+    // 3c. THE POSE-INTERPOLATOR PHASE.
+    //
+    // Here and nowhere else. It reads the FINAL pose -- so it runs after the
+    // whole pose walk, every constraint included and the driver constraints
+    // in particular -- and it writes floats that the geometry chains below
+    // consume, so it runs before them. It is not a mover and cannot be one:
+    // a mover's inputs are resolved by the property chains, which run before
+    // exec does and therefore cannot see the pose at all.
+    _EvaluatePoseInterpolators(time, restFrames, finalFrames, &pose);
+
     // The independent CPU parity path must consume the same declared
     // provider phase as the graph while resolving it independently.  Capture
     // every matrix provider the graph taps (controls as well as joints), then
@@ -10494,6 +11334,39 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // Keep topology and computed checkpoints across pulls. Updating a source
     // or packet invalidates only its downstream revisions. The independent
     // CPU reference is available in cpuParityMode for validation.
+    // ORDERING, ASSERTED RATHER THAN TRUSTED (second half).
+    //
+    // WHAT MUST RUN AFTER THE POSE-INTERPOLATOR PHASE: these chains. A
+    // RigExecBlendInput's inputs:weight carries a single authored connection
+    // to <pose>.outputs:weight, and RigExecResolvedInputs::GetAttribute
+    // follows it into the in-memory map -- so a phase that had not run yet
+    // would be read as the attribute's AUTHORED zero, with no error raised
+    // anywhere and every corrective silently off. An assertion of exactly
+    // this kind caught a real inversion on 2026-09-13, where the shapes chain
+    // landed after the skin.
+    //
+    // One map probe per published weight: 121 on the biped, and the whole
+    // check measures below the profiler's resolution.
+    if (!_poseWeightProperties.empty()) {
+        size_t unpublished = 0;
+        for (const SdfPath &weight : _poseWeightProperties) {
+            if (!_resolvedInputs.Find(weight)) {
+                ++unpublished;
+            }
+        }
+        if (!TF_VERIFY(unpublished == 0,
+                       "%zu of %zu pose weights were not published before the "
+                       "geometry chains; the pose-interpolator phase is out "
+                       "of order",
+                       unpublished, _poseWeightProperties.size())) {
+            pose.diagnostics.push_back(
+                std::to_string(unpublished) + " of " +
+                std::to_string(_poseWeightProperties.size()) +
+                " pose weights were not published before the geometry "
+                "chains read them");
+        }
+    }
+
     size_t graphChainsBuilt = 0;
     size_t graphRevisionsBuilt = 0;
 
@@ -10660,11 +11533,22 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // assembler reads inputs by path and never learns a phase exists
             // -- which is what lets a phase apply to any input, including
             // ones added later, without touching the assembler.
-            RigExecResolvedInputs revisionInputs = _resolvedInputs;
+            //
+            // MEASURED 2026-09-13: declared phases are RARE -- almost every
+            // revision has none -- and the copy this used to make
+            // unconditionally was then bit-identical to _resolvedInputs, one
+            // whole std::map<SdfPath, VtValue> per revision per frame. Copy
+            // only when there is actually something to overlay.
+            const RigExecResolvedInputs *resolved = &_resolvedInputs;
+            std::optional<RigExecResolvedInputs> revisionInputs;
+            if (!revision.binding.phases.empty()) {
+                revisionInputs = _resolvedInputs;
+                resolved = &*revisionInputs;
+            }
             for (const auto &[inputPath, phase] : revision.binding.phases) {
                 if (const VtValue *v = lookupChainSnapshot(
                         inputPath, phase, revision.moverPath)) {
-                    revisionInputs.SetProperty(inputPath, *v);
+                    revisionInputs->SetProperty(inputPath, *v);
                 } else if (phase.kind != RigExecReadPhaseKind::Preceding) {
                     // Preceding falling through to the stage is correct (the
                     // reader is the chain's first revision, so its preceding
@@ -10677,7 +11561,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         " resolved to nothing; read the authored base");
                 }
             }
-            values.resolved = &revisionInputs;
+            values.resolved = resolved;
             GfMatrix4d transform(1.0);
             RigExecWeightPacket weights;
             RigExecPointFrameArray driverFrames;
@@ -10806,7 +11690,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // overlay. Taken from the packet the mover is about to
             // consume, so what a rigger sees is exactly what deformed
             // the geometry -- not a re-derivation that could drift.
-            if (revision.weightTap >= 0 && weights.valid) {
+            if (revision.weightTap >= 0 && weights.valid &&
+                _publishWeightFields) {
                 RigExecResolvedWeightField &field =
                     work.weightFields[revision.binding.weightObject];
                 SdfPathVector declaredTargets;
@@ -10862,6 +11747,36 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                             const UsdPrim samplePrim = _stage->GetPrimAtPath(binding.sample);
                             _resolvedInputs.GetAttribute(samplePrim.GetAttribute(TfToken("rigExec:activation")),
                                                          time, &sample.activation);
+                            if (!binding.blendShape.IsEmpty()) {
+                                // Sparse: the shape is epoch-constant, so it
+                                // is resolved once and shared by pointer.
+                                // This is the whole reason the relationship
+                                // exists -- the dense branch below reads and
+                                // copies 26,276 points per sample per frame
+                                // whether the channel is at 0 or at 1.
+                                sample.layout = _blendSampleShapes.Resolve(
+                                    binding.sample,
+                                    [&](RigExecBlendSampleLayout *layout) {
+                                        return _ResolveBlendSampleLayout(
+                                            binding.blendShape,
+                                            values.basePoints.size(),
+                                            layout);
+                                    });
+                                if (!sample.layout) {
+                                    // Refused the cache: something about the
+                                    // shape can move inside this epoch, so it
+                                    // is read per frame instead.
+                                    auto perFrame = std::make_shared<
+                                        RigExecBlendSampleLayout>();
+                                    _ResolveBlendSampleLayout(
+                                        binding.blendShape,
+                                        values.basePoints.size(),
+                                        perFrame.get());
+                                    sample.layout = perFrame;
+                                }
+                                channel.samples.push_back(std::move(sample));
+                                continue;
+                            }
                             VtVec3fArray points;
                             const VtValue *phased = lookupChainSnapshot(
                                 binding.points, binding.phase, revision.moverPath);

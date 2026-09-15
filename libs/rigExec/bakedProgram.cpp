@@ -289,6 +289,24 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
+    // ---- pose interpolators -------------------------------------------------
+    // The step reads the driver's frame, and its parent's, out of the slots,
+    // so both have to BE slots. Compile already refused a driver that is not a
+    // joint or control of the rig; this is the same fact stated against the
+    // program's own table.
+    for (const RigExecRigEvaluator::_PoseInterpolator &record :
+             E._poseInterpolators) {
+        if (!E._poseSeedFrames.count(record.driver)) {
+            say("pose interpolator driver is not a pose provider",
+                record.driver);
+        }
+        if (!record.driverParent.IsEmpty() &&
+            !E._poseSeedFrames.count(record.driverParent)) {
+            say("pose interpolator driver parent is not a pose provider",
+                record.driverParent);
+        }
+    }
+
     const UsdTimeCode probe = _ProbeTime(E._stage);
     // A property chain RECOMPUTES its target every generation, so a value
     // read once at bake time is not that target's value -- it is whatever
@@ -1212,6 +1230,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.resolvedInputs = &E._resolvedInputs;
     B.chainSnapshots = &E._chainSnapshots;
     B.skinTopologies = &E._skinTopologies;
+    B.blendSampleShapes = &E._blendSampleShapes;
     B.profiler = &E._profiler;
     B.interactiveOverrides = &E._interactiveOverrides;
     B.jointSolverBinding = &E._jointSolverBinding;
@@ -1248,6 +1267,15 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                                    const std::vector<GfVec3f> *current) {
         return evaluator->_ResolveWeights(weightPath, count, time, weights,
                                           error, current);
+    };
+    // The reader a sparse blend sample's shape resolves through, on a cache
+    // miss: the evaluator's own, so the program and the dynamic walk admit
+    // and refuse exactly the same shapes.
+    B.resolveBlendSample = [evaluator](const SdfPath &blendShape,
+                                       size_t pointCount,
+                                       RigExecBlendSampleLayout *layout) {
+        return evaluator->_ResolveBlendSampleLayout(blendShape, pointCount,
+                                                    layout);
     };
     for (const RigExecValueOverride &override : E._falloffLutOverrides) {
         if (override.value.IsHolding<RigExecFalloffLut>()) {
@@ -1729,6 +1757,59 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     //
     // Restated for the same reason the walk was: _GraphRevision is private to
     // the evaluator.
+    // ---- pose interpolators -------------------------------------------------
+    //
+    // Before the geometry, which looks the weights up by property path to
+    // wire a connected blend channel to its slot. The solved table is COPIED
+    // from the compiled record: it is a constant of the epoch, and the
+    // program is dropped with the epoch.
+    for (const RigExecRigEvaluator::_PoseInterpolator &record :
+             E._poseInterpolators) {
+        RigExecBakedProgramImpl::PoseInterpolator out;
+        out.path = record.prim;
+        out.driverSlot = ctx.SlotOf(record.driver);
+        if (out.driverSlot < 0) {
+            ctx.Refuse("pose interpolator driver has no provider slot",
+                       record.driver);
+            continue;
+        }
+        if (!record.driverParent.IsEmpty()) {
+            out.parentSlot = ctx.SlotOf(record.driverParent);
+            if (out.parentSlot < 0) {
+                ctx.Refuse("pose interpolator driver parent has no provider "
+                           "slot", record.driverParent);
+                continue;
+            }
+        }
+        out.allowNegativeWeights = record.allowNegativeWeights;
+        const UsdPrim prim = B.stage->GetPrimAtPath(record.prim);
+        // The interpolator's structure -- its driver, its poses, their
+        // rotations and radii -- is epoch identity and recompiles; what a
+        // frame reads is the one enable, bound like any other input so an
+        // animated or dragged one is honoured and a value edit needs no
+        // rebuild.
+        B.prims.insert(record.prim);
+        B.resolvedRoutedPrims.insert(record.prim);
+        out.enabled = ctx.Bind<bool>(prim, "inputs:enabled", true);
+        const auto addWeight = [&B](const SdfPath &weight) {
+            const int slot = int(B.poseWeightPaths.size());
+            B.poseWeightPaths.push_back(weight);
+            B.poseWeightIndex[weight] = slot;
+            return slot;
+        };
+        out.weightBegin = int(B.poseWeightPaths.size());
+        for (const SdfPath &weight : record.disabledPoseWeights) {
+            out.disabledSlots.push_back(addWeight(weight));
+        }
+        for (const SdfPath &weight : record.poseWeights) {
+            out.poseSlots.push_back(addWeight(weight));
+        }
+        out.weightEnd = int(B.poseWeightPaths.size());
+        out.solver = record.solver;
+        B.poseInterpolators.push_back(std::move(out));
+    }
+    B.poseWeights.assign(B.poseWeightPaths.size(), 0.0f);
+
     std::vector<RigExecBakedChainSpec> chainSpecs;
     const auto revisionSpec =
         [&snapshotAfter](const RigExecRigEvaluator::_GraphRevision &r) {

@@ -1369,13 +1369,14 @@ TestARejectedSkinPacketPassesThroughLikeTheDynamicPath(
 /// A chunked revision skinned with dual quaternions publishes what the
 /// dynamic path publishes.
 ///
-/// The rigs that bake today are all classicLinear, so the chunked
-/// dual-quaternion path -- where each chunk splits its OWN palette out of a
-/// table that is identity outside its key, rather than reading the
-/// revision's -- has no fixture of its own. An interactive override on
-/// rigExec:skinningMethod gives it one: the same rig, the same partition,
-/// the other method, and the parity mode running both paths in one
-/// generation to compare every published map.
+/// The chunked dual-quaternion path -- where each chunk splits its OWN
+/// palette out of a table that is identity outside its key, rather than
+/// reading the revision's -- and the chunked linear path each need a fixture
+/// of the other's shape. An interactive override on rigExec:skinningMethod
+/// gives them one: the same rig, the same partition, the OTHER method from
+/// whichever the rig authored, and the parity mode running both paths in one
+/// generation to compare every published map. The biped has shipped
+/// dual-quaternion since the port, so on it the override is the linear side.
 void
 TestADualQuaternionSkinChunksLikeTheDynamicPath(const std::string &stagePath)
 {
@@ -1400,10 +1401,19 @@ TestADualQuaternionSkinChunksLikeTheDynamicPath(const std::string &stagePath)
     CHECK(linear.valid);
     CHECK(linear.bakedParityMismatches == 0);
 
+    // Whichever method the rig did NOT author, so the override changes the
+    // kernel rather than restating it.
+    TfToken authored("classicLinear");
+    if (const UsdAttribute method = stage->GetPrimAtPath(moverPath)
+            .GetAttribute(TfToken("rigExec:skinningMethod"))) {
+        method.Get(&authored);
+    }
     RigExecValueOverride override;
     override.prim = moverPath;
     override.attribute = TfToken("rigExec:skinningMethod");
-    override.value = VtValue(TfToken("dualQuaternion"));
+    override.value = VtValue(TfToken(authored == TfToken("dualQuaternion")
+                                         ? "classicLinear"
+                                         : "dualQuaternion"));
     evaluator.SetInteractiveOverrides({override});
     const RigExecRigPose dual = evaluator.Evaluate(UsdTimeCode::Default());
     evaluator.ClearInteractiveOverrides();
@@ -2307,8 +2317,9 @@ main(int argc, char **argv)
     TestALeafControlDragRunsOnlyItsCone(
         examplesDir + "/biped/Biped.usda",
         SdfPath("/Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/"
-                "spine_end_ctl/clavicle_l_ctl/arm_l_fk_shoulder_l_bind/"
-                "arm_l_fk_elbow_l_bind/arm_l_fk_wrist_l_bind"),
+                "spine_end_ctl/clavicle_l_ctl/arm_l_root/"
+                "arm_l_fk_shoulder_l_bind/arm_l_fk_elbow_l_bind/"
+                "arm_l_fk_wrist_l_bind"),
         TfToken("avars:rz"));
     TestANonFiniteValueIsNotAConeMismatch(
         examplesDir + "/biped/Biped.usda", TfToken("inputs:defaultWeight"),

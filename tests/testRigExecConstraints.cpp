@@ -3534,7 +3534,7 @@ TestSplineIkRest()
     // Curved chain: the degree-2 curve through rest CVs [0], [1], [N-2],
     // [N-1] interpolates only its end CVs, so the interior joints carry a
     // rest residual. That is inherent to the model (a maintained offset
-    // downstream absorbs it, as Maya's mo=1 constraints do): measure and
+    // downstream absorbs it, as the conventional mo=1 constraints do): measure and
     // bound it, do not assert it away. With restLength = curve the ratio
     // is exactly one at rest, so the tip overshoots the curve end by the
     // chain/curve length difference along the end tangent.
@@ -3731,7 +3731,7 @@ TestSplineIkTwist()
     };
     const auto degrees = [](double d) { return d * kSplineIkPi / 180.0; };
 
-    // inputs:roll is constant along the chain (Maya ikHandle.roll).
+    // inputs:roll is constant along the chain (the handle's roll).
     {
         SplineIkSet(s.solver, "inputs:roll", 35.0);
         const RigExecPointFrameArray r = SplineIkSolve(s);
@@ -3800,7 +3800,7 @@ TestSplineIkTwist()
         }
         SplineIkSet(s.root, "avars:rx", 0.0);
     }
-    // inputs:twist adds a linear gradient on top (Maya ikHandle.twist).
+    // inputs:twist adds a linear gradient on top (the handle's twist).
     {
         SplineIkSet(s.solver, "inputs:twist", 60.0);
         const RigExecPointFrameArray r = SplineIkSolve(s);

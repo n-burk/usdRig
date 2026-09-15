@@ -193,6 +193,9 @@ private:
     std::vector<SdfPath> _resolutions;
     std::atomic<bool> _dirty{false};
     bool _prepared = false;
+    /// Diagnostic only (TF_DEBUG=RIGEXEC_TAP_TIMING): how many times this
+    /// tap set has rebuilt its request.
+    size_t _prepareCount = 0;
 };
 
 }  // namespace rigExec

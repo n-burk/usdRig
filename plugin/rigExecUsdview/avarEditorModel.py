@@ -37,7 +37,7 @@ except ImportError:                    # loader that did not add our dir
 AVAR_PREFIX = "avars:"
 
 # Other namespaces a rig parks animator dials in. `foot:` is the reverse
-# foot's roll/bank/toePlantAngle on `bank_?` -- Maya's footRoll and
+# foot's roll/bank/toePlantAngle on `bank_?` -- the conventional footRoll and
 # footRock. They are float customs rather than avars because a
 # RigExecFloatMathMover target must be `float` while every avar is
 # `double`, so they could never have BEEN avars; that is a typing detail,

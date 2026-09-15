@@ -543,6 +543,7 @@ void
 RigExecBakedRunShadow::Capture(const RigExecBakedProgramImpl &program)
 {
     avars = program.avars;
+    poseWeights = program.poseWeights;
     weightPackets = program.weightPackets;
     posedM = program.posedM;
     finalMatrix = program.finalMatrix;
@@ -609,6 +610,7 @@ RigExecBakedRunShadow::Restore(RigExecBakedProgramImpl *program) const
 {
     RigExecBakedProgramImpl &B = *program;
     B.avars = avars;
+    B.poseWeights = poseWeights;
     B.weightPackets = weightPackets;
     B.posedM = posedM;
     B.finalMatrix = finalMatrix;
@@ -680,6 +682,11 @@ RigExecBakedRunShadow::Compare(const RigExecBakedProgramImpl &program,
     // difference here is a STEP that wrote it, which is the one thing
     // nothing else in the program is positioned to notice.
     CompareVector(differences, &count, "avars", avars, program.avars);
+    // The pose-interpolator hand-off to the geometry half: a cone that
+    // skipped an interpolator kept last run's weights, and they have to be
+    // what a whole run computes again.
+    CompareVector(differences, &count, "poseWeights", poseWeights,
+                  program.poseWeights);
     CompareVector(differences, &count, "weightPackets", weightPackets,
                   program.weightPackets);
     CompareVector(differences, &count, "posedM", posedM, program.posedM);

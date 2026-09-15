@@ -128,14 +128,64 @@ struct RigExecFalloffLut {
     }
 };
 
-/// One blend sample's activation and native target-shape points
-/// (spec §7.3), delivered by RigExecBlendSample.computeBlendSampleData.
+/// One blend sample's shape, resolved once per binding epoch and shared.
+///
+/// Peer of RigExecSkinTopology, and there for the same reason: the expensive
+/// half of the operation depends only on data that cannot move within an
+/// epoch, so it is read once and handed round by pointer.
+///
+/// `indices` empty means `offsets` is dense and parallel to the base points;
+/// otherwise the two are parallel to each other and name the points that
+/// move. The real correctives move 4.87% of a 26,276-point body (1,279 points
+/// on average), which is why the sparse case is the one worth having:
+/// tools/biped/spikes/blend_cost.py measures a dense sample at 0.37-0.38 ms
+/// per frame REGARDLESS of its channel weight, because the cost is reading
+/// and copying the full points array and not the accumulate loop. 169 dense
+/// correctives is ~65 ms/frame with the rig standing at rest.
+struct RigExecBlendSampleLayout {
+    std::vector<GfVec3f> offsets;
+    std::vector<int> indices;
+    size_t pointCount = 0;
+    bool valid = false;
+
+    /// Whether two layouts describe the same shape.
+    ///
+    /// Packets compare layouts by POINTER once a layout is shared. This is
+    /// the one place the arrays are compared by value: a cache dropped and
+    /// re-filled by a notice that touched something else entirely asks it
+    /// once, to decide whether it can hand back the pointer it already had
+    /// rather than make the mover's packet compare unequal and re-run the
+    /// whole accumulate for a shape that did not move.
+    bool operator==(const RigExecBlendSampleLayout &o) const {
+        return valid == o.valid && pointCount == o.pointCount &&
+               indices == o.indices && offsets == o.offsets;
+    }
+    bool operator!=(const RigExecBlendSampleLayout &o) const {
+        return !(*this == o);
+    }
+};
+
+/// One blend sample's activation and shape (spec §7.3), delivered by
+/// RigExecBlendSample.computeBlendSampleData.
+///
+/// The shape arrives one of two ways. `points` is the original dense form:
+/// the target's full moved-points array, from which the accumulator
+/// reconstructs a delta by subtracting the base. `layout` is the sparse form
+/// resolved from rigExec:blendShape, which carries the offsets directly.
+///
+/// Exactly one is populated. `layout` is compared by POINTER, not by value:
+/// two packets naming the same epoch-resolved shape name the same object, so
+/// an unchanged sample costs one pointer compare instead of a 26,276-element
+/// array compare -- the same trick, and the same reason, as
+/// RigExecMoverParameters::skinTopology.
 struct RigExecBlendSampleData {
     float activation = 1.0f;
     std::vector<GfVec3f> points;
+    std::shared_ptr<const RigExecBlendSampleLayout> layout;
 
     bool operator==(const RigExecBlendSampleData &o) const {
-        return activation == o.activation && points == o.points;
+        return activation == o.activation && points == o.points &&
+               layout == o.layout;
     }
     bool operator!=(const RigExecBlendSampleData &o) const {
         return !(*this == o);

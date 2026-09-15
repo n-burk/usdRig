@@ -3,6 +3,7 @@
 // See solverKernels.h.
 //
 #include "solverKernels.h"
+#include "frameExtraction.h"
 
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/solvers.h"
@@ -87,6 +88,21 @@ RigExecSolveTwistDistribution(const RigExecPointFrame &start,
         weights, twistTurns);
     result.rests.assign(result.frames.size(), startRest);
     return result;
+}
+
+bool
+RigExecFrameRotation(const RigExecPointFrame &frame, GfQuatd *out)
+{
+    GfMatrix4d matrix(1.0);
+    if (!frame.IsValid() || frame.IsDegenerate() ||
+        !RigExecPointsToMatrix(RigExecIdentityLandmarks(), frame.points,
+                               &matrix)) {
+        return false;
+    }
+    matrix.SetTranslateOnly(GfVec3d(0.0));
+    *out = matrix.GetOrthonormalized(/* issueWarning = */ false)
+               .ExtractRotationQuat();
+    return true;
 }
 
 }  // namespace rigExec

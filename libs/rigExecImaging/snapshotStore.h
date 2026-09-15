@@ -235,6 +235,24 @@ struct RigExecImagingSnapshot {
     uint64_t generation = 0;
     std::map<SdfPath, RigExecPublishedPrim> prims;
 
+    /// Scalar properties this generation published, keyed by PROPERTY path.
+    ///
+    /// `movedProperties` carries two unrelated kinds of result: geometry,
+    /// which becomes Hydra data below, and the property-domain values a
+    /// rig computes for its own consumption -- a float dial, a blend
+    /// weight, a pose-interpolator output. The second kind has no Hydra
+    /// representation and is deliberately dropped on the way into
+    /// `prims`; see the comment at the filter in bridge.cpp.
+    ///
+    /// But a TOOL wants them. The Shape Editor exists to show which
+    /// pose-space correctives are firing, and without this it has to run
+    /// a SECOND evaluation of the whole rig to recover numbers this
+    /// generation already computed -- measured at 9-15 ms per refresh
+    /// against ~0 for a map lookup. So they are carried here: read-only,
+    /// alongside the generation that produced them, and never touched by
+    /// the scene index.
+    std::map<SdfPath, float> movedFloats;
+
     /// True when any prim in this generation carries a driven transform.
     ///
     /// Resolving a driven transform means walking a prim's ancestors, and

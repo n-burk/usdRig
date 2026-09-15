@@ -4,7 +4,7 @@ The same four-joint chain is built two ways. `world` (the default): sibling
 controls with asset-space rests, and the solver composes the chain,
 W_i = W_(i-1) . A_i. `parentRelative`: each control nested under the one
 before it with a parent-relative rest, so its posed frame travels with its
-parent (Maya FK style) and the solver takes each control's asset-space delta
+parent (the conventional tool FK style) and the solver takes each control's asset-space delta
 as-is. The contract this asserts:
 
   1. `world` with the attribute unauthored and `world` authored explicitly

@@ -29,6 +29,7 @@
 #include "rigExecMath/avarScale.h"
 #include "rigExecMath/dualQuat.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/rbf.h"
 #include "rigExecMath/singleChainIk.h"
 #include "rigExecMath/solvers.h"
 #include "rigExecMath/splineIk.h"
@@ -454,6 +455,7 @@ enum class RigExecBakedSlotDomain : uint8_t {
     DerivedOut,          ///< one derived target's output
     WeightPacket,        ///< one weight object's packet for this frame
     WeightFrames,        ///< where every volume weight is placed, as one slot
+    PoseWeight,          ///< poseWeights[k]: one pose interpolator's weights
     Snapshots,           ///< the phased-read records one step made
 };
 /// Derived from the last enumerator rather than written out: an array
@@ -563,6 +565,7 @@ enum class RigExecBakedStepKind {
     CommitApply,      ///< a split commit's decision and write-back
     ProviderMatrix,   ///< one provider's rest -> final or rest -> base matrix
     SnapshotFinals,   ///< every provider's final matrix, for a phased read
+    PoseInterpolator, ///< one pose interpolator's weights, from the final pose
     VolumePlacements, ///< every volume weight's placement, from the walk
     WeightPacket,     ///< one weight object's packet, built once per frame
     InfluenceFold,    ///< one revision's influence table
@@ -632,6 +635,7 @@ struct RigExecBakedStep {
     ///     PropagateChunk/CommitApply                index into commits
     ///   ProviderMatrix                              provider slot
     ///   SnapshotFinals                              unused
+    ///   PoseInterpolator                            index into poseInterpolators
     ///   VolumePlacements                            unused
     ///   WeightPacket                                index into weightObjects
     ///   InfluenceFold/RevisionStatic/
@@ -1107,6 +1111,15 @@ struct RigExecBakedProgramImpl {
     /// The program records into `runSnapshots` below instead.
     RigExecChainSnapshots *chainSnapshots = nullptr;
     RigExecSkinTopologyCache *skinTopologies = nullptr;
+    /// The evaluator's per-epoch blend sample shapes, resolved in the
+    /// geometry prologue through the same cache the dynamic walk resolves
+    /// through -- so the two paths hold the same layout pointer, and no step
+    /// body takes the cache's lock. Beside it, the evaluator's own reader for
+    /// a shape the cache does not hold, bound at Build because only that
+    /// file can name it.
+    RigExecBlendSampleCache *blendSampleShapes = nullptr;
+    std::function<bool(const SdfPath &, size_t, RigExecBlendSampleLayout *)>
+        resolveBlendSample;
     RigExecProfiler *profiler = nullptr;
     const std::vector<RigExecValueOverride> *interactiveOverrides = nullptr;
     /// Joint -> (solver, element), which names the solver in the diagnostic a
@@ -1299,6 +1312,47 @@ struct RigExecBakedProgramImpl {
     /// captured constants, which an override or an animated channel would
     /// walk straight past.
     std::vector<char> noScaleAvars;
+
+    // ---- pose interpolators ------------------------------------------------
+    //
+    // A RigExecPoseInterpolator reads the FINAL pose of its driver and writes
+    // floats the geometry chains consume, so on the dynamic path it is a
+    // phase of its own between the pose walk and the chains. Here it is a
+    // step: it reads its driver's (and the driver's parent's) last PoseFin
+    // version and writes a range of PoseWeight slots, and a blend channel
+    // whose inputs:weight is connected to one of those reads the slot. The
+    // edges follow, and so does the cone -- a drag that cannot reach the
+    // driver leaves every corrective it drives untouched.
+    struct PoseInterpolator {
+        SdfPath path;
+        int driverSlot = -1;
+        /// The nearest frame-publishing ancestor the driver's local rotation
+        /// is measured against, or -1 when its local rotation is its world
+        /// one. Compiled by the evaluator, restated here as a slot.
+        int parentSlot = -1;
+        bool allowNegativeWeights = true;
+        /// `inputs:enabled`, a per-frame input the prologue reads into
+        /// `enabledValue` so the body touches no USD.
+        RigExecBakedInput<bool> enabled;
+        bool enabledValue = true;
+        /// This interpolator's slots in poseWeights: the whole range it
+        /// writes, the subset the solver fills in ITS pose order, and the
+        /// disabled poses' slots, which publish a hard zero.
+        int weightBegin = 0, weightEnd = 0;
+        std::vector<int> poseSlots;
+        std::vector<int> disabledSlots;
+        /// The solved table, copied from the evaluator's compiled record: a
+        /// constant of the epoch, and the program is dropped with the epoch.
+        RigExecRbfSolver solver;
+        /// The solve's output, retained so a frame allocates nothing.
+        std::vector<double> scratch;
+    };
+    std::vector<PoseInterpolator> poseInterpolators;
+    /// Every weight property the interpolators publish, its value this run,
+    /// and property path -> slot for the blend channel that reads one.
+    std::vector<SdfPath> poseWeightPaths;
+    std::vector<float> poseWeights;
+    std::map<SdfPath, int> poseWeightIndex;
 
     // ---- the input binding table ------------------------------------------
     std::vector<double> avarConstants;                 // providers * 11
@@ -1824,14 +1878,31 @@ struct RigExecBakedProgramImpl {
         /// prim or the attribute is absent, which reads as the channel's
         /// default exactly as the dynamic walk's invalid handle does.
         UsdAttribute weight;
+        SdfPath weightPath;
+        /// The PoseWeight slot `inputs:weight` resolves to through its
+        /// authored connection, or -1 when it resolves to the stage. The
+        /// dynamic walk finds the same value by following the connection
+        /// into the generation's resolved inputs, which the interpolator
+        /// phase filled; here the phase is a step and the value is a slot,
+        /// which is what puts the edge in the graph.
+        int poseWeight = -1;
         struct Sample {
+            /// The RigExecBlendSample prim, which keys the shape cache.
+            SdfPath samplePath;
             /// `rigExec:activation` on the RigExecBlendSample prim.
             UsdAttribute activation;
             /// The sample's target-shape points, and the path a declared
-            /// read phase looks that array up under.
+            /// read phase looks that array up under. Dense form only.
             UsdAttribute points;
             SdfPath pointsPath;
             RigExecReadPhase phase;
+            /// The UsdSkelBlendShape a SPARSE sample names, and the layout
+            /// the prologue resolved for it this frame: shared out of the
+            /// evaluator's cache when the shape is epoch-constant, read per
+            /// frame when the cache refused it. Null until the prologue has
+            /// run once.
+            SdfPath blendShape;
+            std::shared_ptr<const RigExecBlendSampleLayout> layout;
         };
         std::vector<Sample> samples;
     };
@@ -2953,6 +3024,7 @@ struct RigExecBakedRunShadow {
     };
 
     std::vector<double> avars;
+    std::vector<float> poseWeights;
     std::vector<RigExecWeightPacket> weightPackets;
     std::vector<GfMatrix4d> posedM, finalMatrix, baseMatrix;
     std::vector<RigExecPointFrame> base, fin;

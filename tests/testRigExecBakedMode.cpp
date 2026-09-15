@@ -807,7 +807,14 @@ EditKeyedFootRoll(const UsdStageRefPtr &stage, const SdfPath &rigPath)
     EditInSession(stage);
     size_t keyed = 0;
     for (const UsdPrim &prim : UsdPrimRange(stage->GetPrimAtPath(rigPath))) {
-        const UsdAttribute roll = prim.GetAttribute(TfToken("foot:roll"));
+        // `avars:footRoll` since the foot dials moved onto the per-limb
+        // param node (tools/biped/params.py add_foot_params): the dial
+        // was `bank_?.foot:roll`, and params.py now MIGRATES it -- the
+        // connections are re-pointed and the original deleted, so the
+        // old name resolves to nothing and this test silently found no
+        // attribute to key.
+        const UsdAttribute roll =
+            prim.GetAttribute(TfToken("avars:footRoll"));
         if (!roll) {
             continue;
         }
@@ -825,7 +832,14 @@ EditFootRollValue(const UsdStageRefPtr &stage, const SdfPath &rigPath)
     EditInSession(stage);
     size_t edited = 0;
     for (const UsdPrim &prim : UsdPrimRange(stage->GetPrimAtPath(rigPath))) {
-        const UsdAttribute roll = prim.GetAttribute(TfToken("foot:roll"));
+        // `avars:footRoll` since the foot dials moved onto the per-limb
+        // param node (tools/biped/params.py add_foot_params): the dial
+        // was `bank_?.foot:roll`, and params.py now MIGRATES it -- the
+        // connections are re-pointed and the original deleted, so the
+        // old name resolves to nothing and this test silently found no
+        // attribute to key.
+        const UsdAttribute roll =
+            prim.GetAttribute(TfToken("avars:footRoll"));
         if (!roll) {
             continue;
         }

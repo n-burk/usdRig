@@ -596,6 +596,22 @@ RigExecTwistDistributionHandle::SetJointElements(const std::vector<int> &element
         VtValue(VtIntArray(elements.begin(), elements.end())));
 }
 
+void
+RigExecFkChainHandle::SetStartFrame(const SdfPath &path)
+{
+    if (!path.IsEmpty()) {
+        // A frame provider, not a solver: the chain reads one posed frame.
+        const UsdPrim prim = _stage->GetPrimAtPath(path);
+        if (!prim || (prim.GetTypeName() != TfToken("RigExecJoint") &&
+                      prim.GetTypeName() != TfToken("RigExecControl"))) {
+            throw std::invalid_argument(
+                "SetStartFrame requires a RigExecJoint or RigExecControl on "
+                "this stage, got " + path.GetString());
+        }
+    }
+    _SetSingleRel("rigExec:startFrame", path);
+}
+
 void RigExecRibbonHandle::SetDriverCurve(const SdfPath &path)
 { _SetSingleRel("rigExec:driverCurve", path); }
 void RigExecRibbonHandle::SetStartFrame(const SdfPath &path)
@@ -1438,6 +1454,23 @@ RigExecBlendSampleHandle::SetTargetPoints(const SdfPath &path)
 }
 
 void
+RigExecBlendSampleHandle::SetBlendShape(const SdfPath &path)
+{
+    if (path.IsEmpty()) {
+        throw std::invalid_argument("blend sample needs a blend shape prim");
+    }
+    // Clears the dense relationship rather than leaving both authored: the
+    // compiler refuses a sample that names two shapes, and a builder that
+    // silently produced one would be handing the caller a rig that does not
+    // compile for a reason nothing in the calling code mentions.
+    if (UsdRelationship dense =
+            GetPrim().GetRelationship(TfToken("rigExec:targetPoints"))) {
+        dense.ClearTargets(false);
+    }
+    SetRel("rigExec:blendShape", { path });
+}
+
+void
 RigExecBlendSampleHandle::SetReadPhase(const TfToken &phase)
 {
     if (phase.IsEmpty()) {
@@ -1445,6 +1478,228 @@ RigExecBlendSampleHandle::SetReadPhase(const TfToken &phase)
     }
     _Schema(GetPrim()).SetReadPhase(
         TfToken("rigExec:targetPoints"), phase.GetString());
+}
+
+void
+RigExecBlendInputHandle::ConnectWeight(const SdfPath &output)
+{
+    // The attribute has to exist before it can carry a connection, and
+    // authoring the schema default is the cheapest way to make it exist. The
+    // number it holds is then ignored while the connection stands, which is
+    // the right fallback: a stage read without the interpolator compiled
+    // shows the channel at rest rather than at some stale weight.
+    _AuthorAttr(GetPrim(), "inputs:weight", SdfValueTypeNames->Float,
+                VtValue(0.f));
+    UsdAttribute attr =
+        GetPrim().GetAttribute(TfToken("inputs:weight"));
+    if (output.IsEmpty()) {
+        attr.ClearConnections();
+        return;
+    }
+    if (!output.IsPropertyPath()) {
+        throw std::invalid_argument(
+            "blend input weight must connect to a PROPERTY, got: " +
+            output.GetString());
+    }
+    attr.SetConnections({ output });
+}
+
+// ---------------------------------------------------------------------------
+// Pose interpolators
+//
+// the conventional poseInterpolator. The maths is libs/rigExecMath/rbf.h; this is only
+// the authoring side, and it deliberately stores no solved matrix: the
+// inverse is a function of the poses, the per-pose radii, the kernel and the
+// regularization, every one of which is authored here, so re-deriving it at
+// compile time is exact and a stored copy would be a second thing to keep in
+// step.
+// ---------------------------------------------------------------------------
+
+void
+RigExecPoseInterpolatorHandle::SetDriver(const SdfPath &path)
+{
+    if (path.IsEmpty()) {
+        throw std::invalid_argument("pose interpolator needs a driver");
+    }
+    SetRel("rigExec:driver", { path });
+}
+
+void
+RigExecPoseInterpolatorHandle::SetKernel(const TfToken &kernel)
+{
+    if (kernel != TfToken("gaussian") && kernel != TfToken("linear")) {
+        throw std::invalid_argument(
+            "pose interpolator kernel must be gaussian or linear, got: " +
+            kernel.GetString());
+    }
+    _AuthorAttr(GetPrim(), "rigExec:kernel", SdfValueTypeNames->Token,
+                VtValue(kernel));
+}
+
+void
+RigExecPoseInterpolatorHandle::SetChannels(
+    bool enableRotation, bool enableTranslation)
+{
+    if (!enableRotation && !enableTranslation) {
+        throw std::invalid_argument(
+            "a pose interpolator with neither channel enabled measures "
+            "nothing: every pose is equally close and the weights peg at 1/n");
+    }
+    _AuthorAttr(GetPrim(), "rigExec:enableRotation", SdfValueTypeNames->Bool,
+                VtValue(enableRotation));
+    _AuthorAttr(GetPrim(), "rigExec:enableTranslation",
+                SdfValueTypeNames->Bool, VtValue(enableTranslation));
+}
+
+void
+RigExecPoseInterpolatorHandle::SetAllowNegativeWeights(bool allow)
+{
+    _AuthorAttr(GetPrim(), "rigExec:allowNegativeWeights",
+                SdfValueTypeNames->Bool, VtValue(allow));
+}
+
+void
+RigExecPoseInterpolatorHandle::SetNormalize(bool normalize)
+{
+    _AuthorAttr(GetPrim(), "rigExec:normalize", SdfValueTypeNames->Bool,
+                VtValue(normalize));
+}
+
+void
+RigExecPoseInterpolatorHandle::SetRegularization(float regularization)
+{
+    if (!(regularization >= 0.f)) {
+        throw std::invalid_argument(
+            "regularization is added to the matrix diagonal and must not be "
+            "negative");
+    }
+    _AuthorAttr(GetPrim(), "rigExec:regularization", SdfValueTypeNames->Float,
+                VtValue(regularization));
+}
+
+void
+RigExecPoseInterpolatorHandle::SetTwistAxis(const TfToken &axis)
+{
+    if (axis != TfToken("X") && axis != TfToken("Y") && axis != TfToken("Z")) {
+        throw std::invalid_argument(
+            "twist axis must be X, Y or Z, got: " + axis.GetString());
+    }
+    _AuthorAttr(GetPrim(), "rigExec:twistAxis", SdfValueTypeNames->Token,
+                VtValue(axis));
+}
+
+void
+RigExecPoseInterpolatorHandle::SetEnabled(bool enabled)
+{
+    _AuthorAttr(GetPrim(), "inputs:enabled", SdfValueTypeNames->Bool,
+                VtValue(enabled));
+}
+
+RigExecPoseHandle
+RigExecPoseInterpolatorHandle::AddPose(const std::string &name)
+{
+    if (name.empty() || !SdfPath::IsValidIdentifier(name)) {
+        throw std::invalid_argument(
+            "pose name must be a valid USD identifier");
+    }
+    const SdfPath posePath = _path.AppendChild(TfToken(name));
+    if (_stage->GetPrimAtPath(posePath)) {
+        throw std::invalid_argument(
+            "pose already exists: " + posePath.GetString());
+    }
+    UsdPrim prim = RigExecSchemaPrim::Define(
+        _stage, posePath, TfToken("RigExecPose")).GetPrim();
+    _ApplyApiRequired(prim, _kNodeGraphApi);
+    // outputs:weight is authored up front so the connection a blend input
+    // makes to it resolves on a stage that has never been compiled.
+    _AuthorAttr(prim, "outputs:weight", SdfValueTypeNames->Float,
+                VtValue(0.f));
+    return RigExecPoseHandle(_stage, posePath);
+}
+
+void
+RigExecPoseHandle::SetPoseType(const TfToken &poseType)
+{
+    if (poseType != TfToken("swing") && poseType != TfToken("twist") &&
+        poseType != TfToken("whole")) {
+        throw std::invalid_argument(
+            "pose type must be swing, twist or whole, got: " +
+            poseType.GetString());
+    }
+    _AuthorAttr(GetPrim(), "rigExec:poseType", SdfValueTypeNames->Token,
+                VtValue(poseType));
+}
+
+void
+RigExecPoseHandle::SetRotation(const GfQuatf &rotation)
+{
+    _AuthorAttr(GetPrim(), "rigExec:rotation", SdfValueTypeNames->Quatf,
+                VtValue(rotation));
+}
+
+void
+RigExecPoseHandle::SetTranslation(const GfVec3f &translation)
+{
+    _AuthorAttr(GetPrim(), "rigExec:translation", SdfValueTypeNames->Float3,
+                VtValue(translation));
+}
+
+void
+RigExecPoseHandle::SetRadii(float rotationRadius, float translationRadius)
+{
+    if (!(rotationRadius >= 0.f) || !(translationRadius >= 0.f)) {
+        throw std::invalid_argument(
+            "a falloff radius must not be negative; zero means measure one "
+            "from the poses");
+    }
+    _AuthorAttr(GetPrim(), "rigExec:rotationRadius", SdfValueTypeNames->Float,
+                VtValue(rotationRadius));
+    _AuthorAttr(GetPrim(), "rigExec:translationRadius",
+                SdfValueTypeNames->Float, VtValue(translationRadius));
+}
+
+void
+RigExecPoseHandle::SetFalloff(float falloff)
+{
+    _AuthorAttr(GetPrim(), "rigExec:falloff", SdfValueTypeNames->Float,
+                VtValue(falloff));
+}
+
+void
+RigExecPoseHandle::SetPoseControls(
+    const std::vector<SdfPath> &properties, const std::vector<double> &values)
+{
+    if (properties.size() != values.size()) {
+        throw std::invalid_argument(
+            "rigExec:poseControlValues is parallel to rigExec:poseControls; "
+            "got " + std::to_string(properties.size()) + " controls and " +
+            std::to_string(values.size()) + " values");
+    }
+    for (const SdfPath &path : properties) {
+        if (!path.IsPropertyPath()) {
+            throw std::invalid_argument(
+                "a pose control must be a PROPERTY path -- a control carries "
+                "nine channels and a pose usually sets one -- got: " +
+                path.GetString());
+        }
+    }
+    SetRel("rigExec:poseControls", properties);
+    VtArray<double> array(values.begin(), values.end());
+    _AuthorAttr(GetPrim(), "rigExec:poseControlValues",
+                SdfValueTypeNames->DoubleArray, VtValue(array));
+}
+
+void
+RigExecPoseHandle::SetEnabled(bool enabled)
+{
+    _AuthorAttr(GetPrim(), "inputs:enabled", SdfValueTypeNames->Bool,
+                VtValue(enabled));
+}
+
+SdfPath
+RigExecPoseHandle::GetWeightOutput() const
+{
+    return _path.AppendProperty(TfToken("outputs:weight"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2780,6 +3035,19 @@ RigExecRigBuilder::AddBlendInput(const std::string &name, float weight)
     _ApplyApiRequired(prim, _kNodeGraphApi);
     RigExecBlendInputHandle handle(_stage, prim.GetPath());
     handle.SetWeight(weight);
+    return handle;
+}
+
+RigExecPoseInterpolatorHandle
+RigExecRigBuilder::AddPoseInterpolator(
+    const std::string &name, const SdfPath &driver)
+{
+    _RequireName(name, "pose interpolator name");
+    const SdfPath scope = _EnsureScope("PoseInterpolators");
+    UsdPrim prim = _DefineTyped(scope, "RigExecPoseInterpolator", name);
+    _ApplyApiRequired(prim, _kNodeGraphApi);
+    RigExecPoseInterpolatorHandle handle(_stage, prim.GetPath());
+    handle.SetDriver(driver);
     return handle;
 }
 

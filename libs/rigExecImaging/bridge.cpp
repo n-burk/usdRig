@@ -748,6 +748,9 @@ RigExecImagingBridge::RigExecImagingBridge(
     , _evaluator(std::make_unique<RigExecRigEvaluator>(stage, rigPath))
     , _store(std::move(store))
 {
+    // No overlay is selected yet, so nothing consumes the per-point influence
+    // field. SetWeightOverlay turns it back on the moment one is.
+    _evaluator->SetPublishWeightFields(false);
 }
 
 bool
@@ -1395,6 +1398,19 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
             (property == "points" || property == "normals" ||
              property == "extent");
         if (!isGeometry) {
+            // Not Hydra data -- but a scalar here is a rig output a
+            // tool may want (a blend weight, a pose-interpolator
+            // result), and recovering it otherwise costs a whole
+            // second evaluation of the rig. Recorded beside the
+            // generation that produced it; see
+            // RigExecImagingSnapshot::movedFloats.
+            if (value.IsHolding<float>()) {
+                snapshot->movedFloats[propertyPath] =
+                    value.UncheckedGet<float>();
+            } else if (value.IsHolding<double>()) {
+                snapshot->movedFloats[propertyPath] =
+                    static_cast<float>(value.UncheckedGet<double>());
+            }
             continue;
         }
         RigExecPublishedPrim &published = snapshot->prims[primPath];
@@ -1536,6 +1552,19 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
                 (property == "points" || property == "normals" ||
                  property == "extent");
             if (!isGeometry) {
+                // Not Hydra data -- but a scalar here is a rig output a
+                // tool may want (a blend weight, a pose-interpolator
+                // result), and recovering it otherwise costs a whole
+                // second evaluation of the rig. Recorded beside the
+                // generation that produced it; see
+                // RigExecImagingSnapshot::movedFloats.
+                if (value.IsHolding<float>()) {
+                    snapshot->movedFloats[propertyPath] =
+                        value.UncheckedGet<float>();
+                } else if (value.IsHolding<double>()) {
+                    snapshot->movedFloats[propertyPath] =
+                        static_cast<float>(value.UncheckedGet<double>());
+                }
                 continue;
             }
             RigExecPublishedPrim &published = snapshot->prims[primPath];

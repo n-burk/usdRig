@@ -80,3 +80,25 @@ desktop.ini
 # from the Maya data in ~40 seconds; 39 of them were sitting in the repo
 # root at 72 MB total.
 /biped*.usda
+
+# The mesh the skin deforms. 2.4 MB of derived data. To rebuild the rig
+# that is already in examples/, read
+# body_geo's points, faceVertexCounts and faceVertexIndices straight off
+# examples/biped/Biped.usda. NOTE THE UNITS: the manifest is in METRES, because
+# `add_rigexec_skinning` multiplies by 100 on the way in. Handing it
+# centimetres builds a 100x mesh that looks right at rest and explodes to
+# 4452 cm on a 25-degree clavicle rotate.
+/tools/biped/mesh_manifest.json
+
+# TouchPose's importer and development probes. The importer converts source
+# region data this repository does not ship; the probes are one-off
+# measurements kept for their findings, not for running. The regions they
+# produced are checked in as `examples/biped/Biped_touch_regions.usda`.
+/plugin/touchPose/import_touch.py
+/plugin/touchPose/spikes/
+
+# Per-developer environment scripts. These name a specific build directory
+# and a specific machine's USD install, so they are never shareable and must
+# never be committed. `bin/_env.sh` is the shared one.
+/env-*.sh
+

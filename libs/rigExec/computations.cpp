@@ -90,6 +90,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((rotationBlend, "rigExec:rotationBlend"))
     ((scaleBlend, "rigExec:scaleBlend"))
     ((startRel, "rigExec:start"))
+    ((startFrameRel, "rigExec:startFrame"))
     ((endRel, "rigExec:end"))
     ((weights, "rigExec:weights"))
     ((count, "rigExec:count"))
@@ -594,6 +595,20 @@ RIGEXEC_REGISTER_XFORMABLE(
 // pose_i . rest_i^-1 IS W_i and composing the parent in again would apply
 // its motion twice -- every element is solved as a chain root instead.
 // The joints come out the same either way; only the control frames differ.
+//
+// rigExec:startFrame (optional) is the frame the chain HANGS FROM. Without
+// it this solver is absolute: it composes control deltas onto the controls'
+// own asset-space rests and nothing tells it that its joints live under,
+// say, a wrist. Measured on a synthetic `a -> b -> c` with a chain over
+// `[b, c]` only: posing `a` by avars:rz = 90 left b at (10,0,0) and c at
+// (20,0,0), unmoved. With the relationship authored, the start provider's
+// rest-to-pose delta S is PREPENDED as a synthetic element -- reusing the
+// kernel rather than adding a case to it -- so W_0 = S . A_0 in `world`
+// and W_i = S . A_i in `parentRelative` (where each delta is already the
+// whole chain map, hence every real element parents onto the synthetic one
+// rather than onto -1). The synthetic element's own frame is then DROPPED,
+// which is what keeps the published cardinality equal to the control count
+// and every joint's element index unchanged.
 // ---------------------------------------------------------------------------
 
 static RigExecPointFrameArray
@@ -625,7 +640,36 @@ _ComputeFkChain(const VdfContext &ctx)
         }
     }
 
+    // The optional base frame. Both halves are needed to form a delta at
+    // all, so a start provider that published a pose but no rest is an
+    // authoring/compile gap worth naming rather than silently solving as
+    // if the chain were absolute again.
+    const RigExecPointFrame *start =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->startFrame);
+    const RigExecPointFrame *startRest =
+        ctx.GetInputValuePtr<RigExecPointFrame>(_tokens->startRest);
+    if (start && !startRest) {
+        ctx.Warn("FkChain: rigExec:startFrame provider published no rest "
+                 "frame; solving without it");
+    }
+    const bool hasStart = start && startRest;
+
     std::vector<rigExec::RigExecFkChainElement> elements;
+    if (hasStart) {
+        // Synthetic element 0: rest and pose of the start provider, so the
+        // kernel's own rest->pose map for it IS S.
+        rigExec::RigExecFkChainElement e;
+        e.restPoints = startRest->points;
+        e.posePoints = start->points;
+        e.parentIndex = -1;
+        elements.push_back(e);
+    }
+    // Where real element i lands in the solved array, and therefore what
+    // "the element before me" and "chain root" mean. With no start frame
+    // this is 0 and the indices below are exactly the historical
+    // `index - 1` / `-1`.
+    const int base = hasStart ? 1 : 0;
+
     VdfReadIterator<RigExecPointFrame> poseIt(ctx, _tokens->controlFrames);
     VdfReadIterator<RigExecPointFrame> restIt(ctx, _tokens->controlRests);
     int index = 0;
@@ -633,16 +677,21 @@ _ComputeFkChain(const VdfContext &ctx)
         rigExec::RigExecFkChainElement e;
         e.restPoints = (*restIt).points;
         e.posePoints = (*poseIt).points;
-        e.parentIndex = parentRelative ? -1 : index - 1;
+        e.parentIndex = parentRelative ? base - 1 : index + base - 1;
         elements.push_back(e);
         ++index;
     }
 
     RigExecPointFrameArray result;
     result.frames = rigExec::RigExecSolveFkChain(elements);
-    result.rests.reserve(elements.size());
-    for (const auto &e : elements) {
-        result.rests.push_back(e.restPoints);
+    // Discard the synthetic base: it is a solve input, not an output, and
+    // publishing it would shift every joint's element index by one.
+    if (hasStart && !result.frames.empty()) {
+        result.frames.erase(result.frames.begin());
+    }
+    result.rests.reserve(elements.size() - size_t(base));
+    for (size_t i = size_t(base); i < elements.size(); ++i) {
+        result.rests.push_back(elements[i].restPoints);
     }
     return result;
 }
@@ -660,6 +709,14 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecFkChain)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->controlRests)
                 .Required(),
+            // Optional by design: an unauthored relationship contributes no
+            // input, and the kernel then runs the historical absolute path.
+            Relationship(_tokens->startFrameRel)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computePointFrame)
+                .InputName(_tokens->startFrame),
+            Relationship(_tokens->startFrameRel)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->startRest),
             AttributeValue<TfToken>(_tokens->controlSpace));
 }
 
@@ -1089,7 +1146,7 @@ _ComputeSplineIk(const VdfContext &ctx)
     params.minLengthRatio =
         _ScalarInput(ctx, _tokens->inputsMinLengthRatio, 0.0);
     // rigid (the schema default) carries cv1 with the root control; aim
-    // turns it onto the chord to the (floored) end, Maya's neck.
+    // turns it onto the chord to the (floored) end, the conventional neck.
     const TfToken *tangentTok =
         ctx.GetInputValuePtr<TfToken>(_tokens->rootTangent);
     if (tangentTok && *tangentTok == "aim") {

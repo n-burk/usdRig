@@ -274,7 +274,7 @@ class "RigExecXformable" (
 
     Inherits UsdGeomBoundable (and through it Xformable and Imageable) so
     that the guide a provider draws has real BOUNDS: UsdGeomBBoxCache is
-    what usdview, Solaris, and mayaUsd all consult, and a type that is not
+    what usdview and Solaris both consult, and a type that is not
     Boundable reports nothing, so framing a control moved the camera
     nowhere in every host. The extent is computed by a registered
     compute-extent function, never authored -- the engine still writes
@@ -457,13 +457,45 @@ class RigExecFkChain "RigExecFkChain" (
         `parentRelative`: control i is authored as a namespace descendant of
         control i-1 with a rest relative to it, so its computePointFrame is
         already W_(i-1) . restLocal_i . D_i -- it travels with its parent
-        the way a Maya FK limb control does -- and its asset-space
+        the way an FK limb control does -- and its asset-space
         rest-to-pose delta is the whole W_i. The solver therefore takes
         each control's delta as-is instead of composing the parent in
         again, which would apply the parent's motion twice. The joint
         result is identical to `world` for the same avars; only the
         control frames differ. Nesting is what makes the controls follow;
         this token is what keeps the solver honest about it."""
+    )
+    rel rigExec:startFrame (
+        doc = """Optional single provider (joint or control) whose POSED
+        frame is the base the whole chain hangs from: the solver composes
+        every element on top of that provider's rest-to-pose delta S, so
+        W_0 = S . A_0 instead of W_0 = A_0 (and in `parentRelative`,
+        W_i = S . A_i for every i, since there each control's delta is
+        already the whole chain map).
+
+        Unauthored is the historical behaviour, bit for bit: the chain is
+        an ABSOLUTE world solve that ignores whatever its joints hang from.
+        That is what this relationship exists to fix. Measured on a
+        synthetic `a -> b -> c` with an FkChain over `[b, c]` only: posing
+        `a` with avars:rz = 90 left b at (10,0,0) and c at (20,0,0) -- they
+        did not move at all, because nothing told the solver where its
+        chain starts. A hand built that way detaches from the wrist the
+        moment the arm moves.
+
+        Nesting the chain's first control under the thing it should follow
+        is NOT a substitute when that thing is solver-posed: a
+        solver-posed joint is an absolute override and namespace pose does
+        not propagate through it (see rigEvaluator's hierarchicalProviders
+        rule), and nesting under the arm's FK control follows in FK and
+        stands still in IK. Pointing this relationship at the joint the
+        chain hangs from -- the wrist, claimed by the arm's IK/FK blend --
+        follows in BOTH.
+
+        The target is an ordinary frame input, so the compiler already
+        orders this solver after whatever poses the target and rejects a
+        cycle. The start provider's own frame is NOT published as an
+        element: cardinality stays exactly rigExec:controls, and each
+        joint's element index is unchanged."""
     )
     rel rigExec:joints (
         doc = """Ordered output joints this solver poses (view-free
@@ -759,7 +791,7 @@ class RigExecSplineIk "RigExecSplineIk" (
         string className = "SplineIk"
     }
     doc = """Control-driven spline IK for a spine or neck: the counterpart of
-    Maya's ikSplineSolver as the squarebit biped uses it. Three control
+    The spline IK solver as the biped uses it. Three control
     frames (root, mid, end) shape an open degree-2 four-CV B-spline; the
     ordered rigExec:joints chain is laid along it by arc length, each joint
     aims +X at its successor with its rest up carried by the minimal
@@ -826,7 +858,7 @@ class RigExecSplineIk "RigExecSplineIk" (
     uniform token rigExec:restLength = "curve" (
         allowedTokens = ["curve", "chain"]
         doc = """What the stretch ratio is measured against. `curve`: the
-        rest curve's arc length, so ratio == 1 at rest (Maya reads
+        rest curve's arc length, so ratio == 1 at rest (read
         curveInfo.arcLength; the last joint then overshoots the curve end
         by the chain/curve difference, absorbed by maintained offsets).
         `chain`: the sum of rest segment lengths, so the chain spans the
@@ -845,23 +877,22 @@ class RigExecSplineIk "RigExecSplineIk" (
     double inputs:roll = 0 (
         doc = """Additional roll in DEGREES about every joint's +X aim,
         added to the root control's own twist about the rest chain axis
-        (Maya ikHandle.roll)."""
+        (the handle's roll)."""
     )
     double inputs:twist = 0 (
         doc = """Additional twist in DEGREES, linear in arc position from 0
         at the root to the full value at the curve end, added to the end
-        control's twist minus the root's (Maya ikHandle.twist)."""
+        control's twist minus the root's (the handle's twist)."""
     )
     uniform token rigExec:rootTangent = "rigid" (
         allowedTokens = ["rigid", "aim"]
         doc = """How cv1, the root's tangent CV, is posed. `rigid`: carried
-        by the root control like cv0 (Maya's spine, clusters 0-1 under
+        by the root control like cv0 (a spine, clusters 0-1 under
         hip_swivel_grp). `aim`: turned about cv0 by the minimal rotation
         from the root control's posed chain axis onto the chord to the end
         CV after the length floor, so the curve leaves the root pointing at
-        the end -- Maya's neck, whose cluster[1] sits under a joint at the
-        neck control aimed at the head (rig_bits.nxt
-        /neck/head_pivot_connect). Adds no twist; the mid control's offset
+        the end -- a neck, whose cluster[1] sits under a joint at the
+        neck control aimed at the head. Adds no twist; the mid control's offset
         is applied on top."""
     )
     double inputs:minLengthRatio = 0 (
@@ -872,7 +903,7 @@ class RigExecSplineIk "RigExecSplineIk" (
         the floor nor folds it back through the root -- the end joint then
         overshoots its control. The mid control's follow point, the twist
         and the volume ratio read the control frames and are unaffected.
-        Maya's ikSpline has no floor; this is a deliberate departure, and
+        The classical spline IK has no floor; this is a deliberate departure, and
         animatable per shot like every input."""
     )
     double guide:radius = 1.0 (
@@ -1739,17 +1770,307 @@ class RigExecBlendSample "RigExecBlendSample" (
     customData = {
         string className = "BlendSample"
     }
-    doc = """One target or in-between activation related to an exact native
-    target-shape points property; dense deltas are derived against the base
-    points."""
+    doc = """One target or in-between activation, related EITHER to an exact
+    native target-shape points property or to a UsdSkelBlendShape carrying the
+    same shape as sparse offsets. Exactly one of rigExec:targetPoints and
+    rigExec:blendShape may be authored."""
 )
 {
     float rigExec:activation = 1
     rel rigExec:targetPoints (
         doc = "Exact native points property of the target shape."
     )
+    rel rigExec:blendShape (
+        doc = """A UsdSkelBlendShape whose offsets (and pointIndices, when
+        non-empty) ARE the sample's deltas -- the same shape rigExec:targetPoints
+        expresses as a full moved-points array, stored as only the points that
+        move. An empty pointIndices means the offsets are dense and parallel to
+        the base points.
+
+        This exists because the dense form's cost does not depend on the weight.
+        A dense sample's full points array is read and copied off the stage once
+        per sample per frame whether its channel sits at 0 or at 1, measured at
+        0.37-0.38 ms per target per frame on a 26,276-point body -- so 169
+        correctives cost ~65 ms/frame with the rig standing at rest
+        (tools/biped/spikes/blend_cost.py). The real correctives move 4.87% of
+        the mesh, 1,279 points on average, so the sparse form is not an
+        optimization of the dense one; it is the difference between a rig that
+        runs and a rig that does not.
+
+        Mutually exclusive with rigExec:targetPoints: authoring both is a
+        compile error rather than a precedence rule, because a silent winner
+        between two shapes that disagree is the worst of the three outcomes."""
+    )
     uniform token rigExec:pointsReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
+    )
+}
+
+class RigExecPoseInterpolator "RigExecPoseInterpolator" (
+    inherits = </Typed>
+    customData = {
+        string className = "PoseInterpolator"
+    }
+    doc = """A pose interpolator: one driver joint in, one weight per
+    authored RigExecPose child out.
+
+    WHY A DRIVER JOINT AND NOT THE CONTROL THE ANIMATOR MOVES. A corrective
+    wants to fire on one piece of a limb's motion and not another -- a wrist
+    that twists should not trigger the shape for a wrist that bends. the conventional tool
+    builds that split out of the HIERARCHY rather than out of maths: it parks
+    a hidden joint under the bone that already carries the twist and
+    orient-constrains it to the bone that carries everything, so the parent
+    subtracts the twist back out and the driver's LOCAL rotation is the swing
+    alone. Point it the other way and the
+    same subtraction yields the twist. This port keeps those joints --
+    shoulder_?_driver, wristSwing_?_driver and the rest, authored by
+    build_biped_rigexec.add_pose_drivers -- so the weights come out of the
+    same arithmetic the conventional tool used rather than something that resembles it.
+
+    The maths is a radial basis function and lives in libs/rigExecMath/rbf.h,
+    natively ported and pinned against
+    it at 3.41e-11 over 13,400 evaluations (tests/fixtures/psd_parity.json).
+    The solve is a per-interpolator CONSTANT -- invert the matrix of every
+    pose's kernel value at every other pose -- so it happens once and only the
+    kernel row is per-frame. Nothing on this prim is that inverted matrix,
+    because the matrix is a function of the poses, the per-pose radii, the
+    kernel and the regularization, all of which ARE here: re-deriving it at
+    compile time is exact, and storing it would be a second copy to keep in
+    step.
+
+    The falloff width the fit solved with is not carried in the data, so the radii on the
+    poses were FITTED by RigExecRbfFitWidth rather than read -- see rigExec:rotationRadius on RigExecPose
+    for what that means for anyone editing one.
+
+    The prim is not a mover: it writes no transform and no points. It
+    publishes a float per pose and a RigExecBlendInput's inputs:weight
+    connects to it, which is what makes a corrective independently
+    composable -- a layer can retarget one shape's channel without touching
+    the interpolator that drives it."""
+)
+{
+    rel rigExec:driver (
+        doc = """The driver, at most one target: a RigExecJoint (or any
+        RigExecXformable) whose LOCAL rotation -- its pose relative to its own
+        rest, in its parent's frame -- is what every pose is measured against.
+
+        LOCAL, not world, and relative to rest rather than absolute: the rest
+        orientation is the joint orient the authored data removes from
+        poseRotation, so a driver sitting at its rest measures as identity and
+        the neutral pose reads 1.000 with the rig standing still."""
+    )
+    uniform token rigExec:kernel = "gaussian" (
+        allowedTokens = ["gaussian", "linear"]
+        doc = """How a pose's weight falls away with distance. The conventional tool's
+        interpolation attribute: 0 is linear, 1 is gaussian. On the shipped biped 16 interpolators
+        are gaussian and 53 linear.
+
+        Gaussian never quite reaches zero, so a little of every pose survives
+        everywhere -- a soft blend. Linear reaches zero AT the radius and has
+        compact support, so past the radius a pose is not nearly off, it is
+        off, which is what makes the coverage floor in rbf.h worth
+        measuring."""
+    )
+    bool rigExec:enableRotation = true (
+        doc = """enableRotation: measure the driver's rotation.
+
+        Honoured rather than assumed. On the shipped biped the two channels
+        are mutually exclusive -- 39 interpolators rotation, 28 translation --
+        and reading a translation interpolator as a rotation makes every one
+        of its poses identity, so it solves degenerate and drives nothing."""
+    )
+    bool rigExec:enableTranslation = false (
+        doc = """enableTranslation: measure the driver's translation as
+        well, in the driver's own frame. Radians and centimetres cannot be
+        added, so each channel is divided by its own radius first and the two
+        are combined as a right-angled triangle (rbf.h RigExecRbfCombine)."""
+    )
+    bool rigExec:allowNegativeWeights = true (
+        doc = """allowNegativeWeights. A negative weight is not an
+        error: it falls out of the matrix inverse and means lean AWAY from
+        this pose. Clamping them is what produces the soft, muddy blend that
+        makes a pose fail to reach its own shape, so the default keeps them.
+        The clamp this selects is max(0, w) applied AFTER normalization, never
+        before and never inside the solve."""
+    )
+    bool rigExec:normalize = true (
+        doc = """Divide the weights by their SUM, so they stay a partition of
+        unity. By their sum and not by the sum of magnitudes, because a
+        negative weight is a real instruction. Where the sum is smaller than
+        1e-6 there is nothing to divide by and the weights are left alone,
+        which is what falling away to nothing outside the poses should look
+        like (rbf.py:964-987)."""
+    )
+    float rigExec:regularization = 0 (
+        doc = """regularization, added to the matrix diagonal before
+        inverting. Trades exactness at the poses for a calmer result between
+        them, and rescues a solve whose poses sit so close together that the
+        matrix is singular. Zero on every interpolator of the shipped
+        biped."""
+    )
+    uniform token rigExec:twistAxis = "X" (
+        allowedTokens = ["X", "Y", "Z"]
+        doc = """The axis a twist pose spins about, in the DRIVER's own frame.
+        driverTwistAxis (0 X, 1 Y, 2 Z), and X on every body
+        interpolator of the shipped biped because the bind skeleton aims +X
+        down the bone.
+
+        Read only by poses whose rigExec:poseType is swing or twist; a whole
+        pose measures the entire rotation and never splits it."""
+    )
+    bool inputs:enabled = true (
+        doc = """Shape-preserving enable. A disabled interpolator publishes
+        zero on every pose rather than holding its last value: a corrective
+        that is off has to be off, not frozen."""
+    )
+}
+
+class RigExecPose "RigExecPose" (
+    inherits = </Typed>
+    customData = {
+        string className = "Pose"
+    }
+    doc = """One authored pose of a RigExecPoseInterpolator, and the float it
+    publishes.
+
+    A pose is a place the driver can be, plus how wide its influence reaches.
+    Its outputs:weight is what a RigExecBlendInput's inputs:weight connects
+    to; the weight is 1 when the driver stands exactly on this pose and
+    (after normalization) shares the rig with its neighbours elsewhere.
+
+    Poses are children of their interpolator rather than a parallel array on
+    it so that each one composes independently -- a layer can retune one
+    pose's radius, or disable it, without restating the other seven. That is
+    the same reason RigExecBlendSample is a prim and not an array entry."""
+)
+{
+    uniform token rigExec:poseType = "swing" (
+        allowedTokens = ["swing", "twist", "whole"]
+        doc = """poseType (1 swing, 2 twist, 0 whole): WHICH PART of
+        the driver's rotation this pose is measured against.
+
+        The metric belongs to the pose and not to the interpolator because one
+        driver usually carries both at once and they mean different things: a
+        neck that has twisted has not bent, and its bend shapes should stay at
+        zero. Measuring the whole rotation instead leaks about 0.05 of every
+        swing pose into a pure twist on the shipped biped
+        (rbf.py:1030-1038)."""
+    )
+    quatf rigExec:rotation = (1, 0, 0, 0) (
+        doc = """Where the driver stands in this pose: its LOCAL rotation
+        relative to its own rest, in the driver's parent frame.
+
+        REBASED. The authored poseRotation is measured from whatever
+        configuration the rig happened to be in when the poses were captured,
+        which on this character is 3 to 10 degrees off the bind pose -- a
+        wrist FK control reading 10 degrees, an elbow 4.7. This port's drivers
+        DO read identity at bind, so the neutral quaternion is taken out of
+        every pose (neutral^-1 * pose) before it is authored here. It is a rigid rotation applied to all
+        of them, so every pairwise distance and therefore the whole solve is
+        unchanged; only the point the poses are measured FROM moves, which is
+        the thing that was wrong. Skipping it moved the skin about two
+        millimetres.
+
+        Measured against this port's own drivers it lands at 0.00 degrees on
+        the elbow, the knee and the toe and 1.64 on the shoulder;
+        tools/biped/verify_psd.py prints the angle per pose, which is the
+        fidelity number."""
+    )
+    float3 rigExec:translation = (0, 0, 0) (
+        doc = """The driver's translation in this pose, in CENTIMETRES, in the
+        driver's own frame. Read only when the interpolator has
+        rigExec:enableTranslation on; an interpolator with no authored
+        translations has nothing to say about translation, and saying every
+        pose is equally close would peg its weights at 1/n
+        (rbf.py:431-436)."""
+    )
+    float rigExec:rotationRadius = 0 (
+        doc = """How far in RADIANS the driver may stray before this pose's
+        kernel has fallen away -- one falloff width, this pose's own.
+
+        FITTED, NOT EXPORTED. the conventional tool does not write out the width it solves
+        with: it writes rigExec:falloff, which its own documentation calls a
+        share relative to the closest other pose, and a poseRotationFalloff it
+        ignores for every non-independent pose -- which is all of them on this
+        rig. So the shape of the rule is preserved and the size is not
+        recoverable, and one scale for the whole rig does not work because the
+        pose layouts are not alike: the thigh has poses 25 to 150 degrees
+        apart, the shoulder eight with pairs 45 apart, the index three in a
+        line. Narrow enough for the shoulder leaves the thigh with a hole in
+        the middle of every swing; wide enough for the thigh sends the
+        shoulder's weights to 9.
+
+        RigExecRbfFitWidth therefore fits it per interpolator to two
+        requirements, in order: no dead zone (the kernels sum to at least 0.5
+        everywhere between the poses), then the least overshoot among the
+        widths that manage it. A painted rigExec:falloff other than the default 0.3
+        default is applied on top as falloff/0.3.
+
+        Zero means measure one from the poses, and is what an editor should
+        author when it wants the fit back rather than a number it invented."""
+    )
+    float rigExec:translationRadius = 0 (
+        doc = """The same width for the translation channel, in CENTIMETRES.
+
+        It is NOT the rotation radius and must not be borrowed from it: a
+        brow's poses sit millimetres apart and a rotation width would swallow
+        every one of them. Fitted by the same swept scale, because the metric
+        already divides each channel by its own width -- the shape of the pose
+        space is fixed by the RATIO of the two and only its overall size is
+        free (rbf.py:223-352)."""
+    )
+    float rigExec:falloff = 0.3 (
+        doc = """poseFalloff, kept as provenance and as the editable
+        dial: the share the artist painted on top of the fitted width, where
+        0.3 is the default and means just reach the closest other pose. 0.3
+        on every pose of the shipped biped except the clavicles, which are
+        0.5.
+
+        The radii above already carry it (falloff/0.3, floored at 0.05), so it
+        is not applied a second time at runtime. It is here so that an editor
+        changing it can re-derive them, and so that a rig whose radii were
+        hand-tuned still says what it started from."""
+    )
+    rel rigExec:poseControls (
+        doc = """The exact control PROPERTIES that put the rig into this pose
+        -- </Rig/Controls/arm_l_fk_shoulder_l_bind.avars:ry> and the like --
+        parallel to rigExec:poseControlValues. Properties rather than prims
+        because a control carries nine channels and a pose usually sets one.
+
+        The same thing is carried per pose, and it is what lets
+        a shape editor jump the rig to a pose to sculpt against it. It is
+        authoring data: nothing in evaluation reads it, and a pose with none
+        is still a valid pose."""
+    )
+    double[] rigExec:poseControlValues = [] (
+        doc = """The value for each target of rigExec:poseControls, in OUR
+        units and from OUR zero: degrees for a rotation avar, centimetres for
+        a translation one, measured from the rig's rest rather than from
+        the authored data's.
+
+        The authored numbers are absolute and in radians, and their zero is the
+        configuration the poses were captured in rather than the bind pose.
+        Measured: driving this rig with those absolute values reaches the
+        authored quaternion to 45.4 degrees on the shoulder and 10.0 on the
+        wrist; driving it with (pose - neutral) reaches 1.64 and 0.00. So the
+        subtraction happens once, in tools/biped/build_psd.py, and what is
+        stored is what an editor can set directly."""
+    )
+    bool inputs:enabled = true (
+        doc = """Shape-preserving enable. A disabled pose publishes zero and
+        is left out of the solve entirely rather than solved and then
+        silenced: leaving it in would keep it in every other pose's matrix
+        row, so switching one pose off would quietly change all the others."""
+    )
+    float outputs:weight = 0 (
+        doc = """How much this pose counts, for wherever the driver is now.
+        The output a RigExecBlendInput's inputs:weight connects to.
+
+        1 with the driver standing on this pose, and elsewhere a share of the
+        interpolator's normalized total -- which may be negative when
+        rigExec:allowNegativeWeights is on, and should be: that is the
+        instruction to lean away from a pose, and clamping it is what makes a
+        blend muddy."""
     )
 }
 
@@ -1999,3 +2320,316 @@ class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
 # session layer under __RigExecGenerated; they are not authorable
 # geometry schemas. Their attributes use only stock Sdf value types.
 ################################################################
+
+
+################################################################
+# Control picker (spec section 12). Scene data, not a sidecar: the
+# picker is part of the rig deliverable, so it composes, it layers,
+# and an animator overrides one button with an `over` instead of
+# re-authoring a file. Nothing here is imageable -- these prims
+# describe a 2D panel, and the renderer never sees them.
+################################################################
+
+class RigExecPicker "RigExecPicker" (
+    inherits = </Typed>
+    customData = {
+        string className = "Picker"
+    }
+    doc = """A character's control picker: one tab in the picker panel,
+    holding one RigExecPickerPanel per sub-tab.
+
+    Discovery is by TYPE, never by path. The panel traverses the stage for
+    RigExecPicker prims and builds a tab for each, so a stage carrying two
+    characters gets two tabs with no code and no configuration. Order
+    within the panel follows ui:order, then the prim's namespace order.
+
+    A picker names the rig it drives through rigExec:picker:rig. Left
+    unauthored, buttons resolve against the whole stage, which is right
+    for the single-character case and wrong the moment there are two."""
+)
+{
+    uniform string ui:label = "" (
+        doc = """Tab label. Empty means use the prim name, which is the
+        usual case: a prim called `Uman` needs no second opinion about
+        what to call its tab."""
+    )
+    uniform int ui:order = 0 (
+        doc = "Sort key among sibling pickers. Ties break on prim order."
+    )
+    rel rigExec:picker:rig (
+        doc = """The RigExecRoot this picker drives. Buttons resolve their
+        control targets inside it. Unauthored means the whole stage."""
+    )
+}
+
+class RigExecPickerPanel "RigExecPickerPanel" (
+    inherits = </Typed>
+    customData = {
+        string className = "PickerPanel"
+    }
+    doc = """One sub-tab of a RigExecPicker: Body, Face, and so on. Holds
+    RigExecPickerButton children in a 2D coordinate space whose origin is
+    the top left, y increasing downward, matching every picker authoring
+    tool and the Qt widget this is drawn into."""
+)
+{
+    uniform string ui:label = "" (
+        doc = "Sub-tab label; empty means use the prim name."
+    )
+    uniform int ui:order = 0 (
+        doc = "Sort key among sibling panels."
+    )
+    uniform float2 ui:size = (400, 600) (
+        doc = "Panel extent in picker units, before the view's fit scale."
+    )
+    uniform color4f ui:background = (0.16, 0.16, 0.16, 1) (
+        doc = "Panel fill behind every button."
+    )
+}
+
+class RigExecPickerButton "RigExecPickerButton" (
+    inherits = </Typed>
+    customData = {
+        string className = "PickerButton"
+    }
+    doc = """One button. Selects the prims in rigExec:picker:controls, or
+    edits the attribute in rigExec:picker:attribute, or neither -- a
+    button with no target of either kind is a decoration: the body
+    silhouette, a backdrop, a label.
+
+    LIVENESS is the resolve result, not a flag. A relationship whose
+    targets have all gone is an empty target list, and the panel draws
+    that button as unavailable. USD remaps the targets through renames
+    and reparents on its own, which a path string in a sidecar file
+    cannot do, so a control that MOVES keeps its button and only a
+    control that is DELETED loses one."""
+)
+{
+    uniform float2 ui:position = (0, 0) (
+        doc = "Top-left corner in panel units."
+    )
+    uniform float2 ui:size = (10, 10) (
+        doc = "Width and height in panel units."
+    )
+    uniform float ui:depth = 0 (
+        doc = "Painter's-algorithm order; higher draws later, on top."
+    )
+    uniform float ui:rotation = 0 (
+        doc = "Degrees clockwise about the button's own centre."
+    )
+    uniform token ui:shape = "rectangle" (
+        allowedTokens = ["rectangle", "roundedRectangle", "circle",
+                         "ellipse", "hexagon", "triangle", "trapezoid",
+                         "polygon", "bezier", "widgetControl", "slider"]
+        doc = """Outline. `polygon` reads ui:polygon, `bezier` reads
+        ui:bezier, and every other token is generated from ui:size."""
+    )
+    uniform float ui:roundness = 0 (
+        doc = "Corner radius fraction for roundedRectangle, 0 to 1."
+    )
+    uniform float2[] ui:polygon = [] (
+        doc = "Outline vertices for ui:shape = polygon, panel units."
+    )
+    uniform float2[] ui:bezier = [] (
+        doc = """Cubic control points for ui:shape = bezier, THREE per
+        knot -- on-curve point, out-tangent, in-tangent -- flattened,
+        with each span completed by the following knot's in-tangent."""
+    )
+    uniform color4f ui:fill = (0.5, 0.5, 0.5, 1) (
+        doc = "Interior colour, linear, alpha premultiplied by the view."
+    )
+    uniform color4f ui:stroke = (0, 0, 0, 0.8) (
+        doc = "Outline colour."
+    )
+    uniform float ui:strokeWidth = 1 (
+        doc = "Outline width in panel units."
+    )
+    uniform string ui:text = "" (
+        doc = "Label drawn inside the button."
+    )
+    uniform float ui:fontSize = 8 (
+        doc = "Label size in panel units."
+    )
+    uniform bool ui:bold = false (
+        doc = "Label weight."
+    )
+    uniform token ui:textAlign = "center" (
+        allowedTokens = ["left", "center", "right"]
+        doc = "Horizontal label alignment inside the button."
+    )
+    uniform color4f ui:textColor = (0, 0, 0, 1) (
+        doc = "Label colour."
+    )
+    uniform color4f ui:valueColor = (0, 0, 0, 1) (
+        doc = """Colour of the VALUE a switch or dial displays, as
+        distinct from its label: `Foot` is drawn in ui:textColor and the
+        `IK` beside it in this."""
+    )
+    uniform token ui:direction = "top" (
+        allowedTokens = ["top", "bottom", "left", "right"]
+        doc = "Which edge a trapezoid or triangle points at."
+    )
+    uniform float ui:slopeLeft = 0 (
+        doc = "Trapezoid left-edge inset, as a fraction of ui:size width."
+    )
+    uniform float ui:slopeRight = 0 (
+        doc = "Trapezoid right-edge inset, as a fraction of ui:size width."
+    )
+    uniform bool ui:alternate = false (
+        doc = """This button shares a slot with another and is the one
+        hidden at rest. Where rigExec:picker:mode is authored that is the
+        authority and this is ignored: a stacked IK/FK pair is a mode
+        pair, not an alternate."""
+    )
+    uniform token rigExec:picker:command = "" (
+        doc = """A named action this button runs, instead of selecting or
+        editing. The panel implements a fixed set and ignores the rest, so
+        a picker may carry actions a given host cannot perform without
+        those buttons pretending to work."""
+    )
+    rel rigExec:picker:controls (
+        doc = """The prims this button selects, in order. Targets may be
+        RigExecControls or directly-posed RigExecJoints; the picker treats
+        both as selectable because the avar editor edits both."""
+    )
+    rel rigExec:picker:attribute (
+        doc = """The single attribute this button edits, for a switch or a
+        dial. Mutually exclusive with rigExec:picker:controls."""
+    )
+    uniform token[] rigExec:picker:attributeLabels = [] (
+        doc = """Labels for the values rigExec:picker:attribute cycles
+        through, low to high, e.g. ["IK", "FK"]. The button shows the
+        label matching the attribute's CURRENT value; it never caches the
+        value it was authored with."""
+    )
+    uniform token rigExec:picker:mode = "" (
+        allowedTokens = ["", "ik", "fk"]
+        doc = """Show this button only while its limb is in this mode.
+        Empty means always shown, which is right for anything that is not
+        half of an IK/FK pair."""
+    )
+    rel rigExec:picker:modeDial (
+        doc = """The attribute rigExec:picker:mode is tested against. Only
+        meaningful when that token is authored."""
+    )
+}
+
+
+################################################################
+# TouchPose regions (spec section 13). Named face sets on a mesh,
+# each naming the control that poses them, so a click on the model
+# selects the control that drives that part of it.
+#
+# These are NOT GeomSubsets. hdSt collects every face GeomSubset
+# under a mesh whatever its familyName, so a touch set collided with
+# the materialBind subset owning the same face: 16,739 warnings on
+# open, and the renderer doing work for data that is not for it.
+# They live in their own scope instead, found by type.
+################################################################
+
+class RigExecTouchRegions "RigExecTouchRegions" (
+    inherits = </Scope>
+    customData = {
+        string className = "TouchRegions"
+    }
+    doc = """A mesh's touch regions: the shared palette, and one
+    RigExecTouchRegion child per named set.
+
+    A SCOPE rather than a bare Typed prim: it is a grouping of
+    annotations on drawable geometry, and an imageable container costs
+    nothing and keeps the door open for anything drawable parented under
+    it later.
+
+    THE HIGHLIGHT OVERLAY IS NOT HERE, and that is measured rather than
+    chosen. It is a real rprim, and a prim inside the asset is inside the
+    rig's read roots: authoring the hover array there cost 184.89 ms per
+    region crossing against 3.99 ms at the stage root, with a 16.7 ms
+    frame. It also cannot carry its own schema type -- a concrete type
+    with no UsdImaging adapter never becomes an rprim at all. So the
+    overlay is a plain Mesh at the stage root, named for its asset so a
+    shot full of characters does not share one.
+
+    Found BY TYPE, so the regions may be parented anywhere -- beside the
+    geometry they annotate, or inside the RigExecRoot for a studio that
+    ships one prim holding the whole rig deliverable. The mesh is named
+    by relationship rather than by position, which is what makes that
+    placement free."""
+)
+{
+    rel rigExec:touch:mesh (
+        doc = "The UsdGeomMesh whose faces these regions index."
+    )
+    uniform color3f[] rigExec:touch:palette = [] (
+        doc = """One ramp shared by every region, indexed by the
+        region's own order. On the scope rather than per region: the
+        overlay needs the whole ramp in a single read."""
+    )
+    uniform float rigExec:touch:alpha = 1 (
+        doc = "Opacity the overlay draws the regions at."
+    )
+}
+
+class RigExecTouchOverlay "RigExecTouchOverlay" (
+    inherits = </Mesh>
+    customData = {
+        string className = "TouchOverlay"
+    }
+    doc = """The surface TouchPose lights the hovered region on.
+
+    SHIPPED WITH THE ASSET, one per RigExecTouchRegions scope. The
+    alternative was a single prim at the stage root, which is a global:
+    two characters in a shot author into the same prim and fight over
+    it. An asset that carries its own overlay works beside any number of
+    others, and a shot gains no prims it did not open with.
+
+    A Mesh, because Hydra has to draw it, and unbound on purpose -- an
+    unbound mesh gets the fallback material, which is the only surface
+    that reads displayColor and displayOpacity. Those two arrays are the
+    whole mechanism: a face is lit in the hover, lead, selected or edit
+    colour, or its opacity is zero and it is not lit at all.
+
+    INHERITING Mesh IS NOT ENOUGH TO DRAW IT. UsdImaging binds adapters
+    by concrete type name, so this type needs one of its own;
+    rigExecImaging registers it (touchOverlayAdapter.cpp) and without
+    that registration the prim composes perfectly and changes zero
+    pixels.
+
+    It ships EMPTY and invisible. The points are the mesh's own deformed
+    points for the painted faces, which do not exist until a rig has
+    been evaluated, so the runtime fills them in a session layer and
+    nothing about a hover is ever saved into the asset. What ships is
+    the declaration: the prim, its type, and where it sits."""
+)
+{
+    token visibility = "invisible" (
+        doc = """Hidden until TouchPose lights it. An asset opened by
+        anything else sees an empty invisible mesh and draws nothing."""
+    )
+}
+
+class RigExecTouchRegion "RigExecTouchRegion" (
+    inherits = </Typed>
+    customData = {
+        string className = "TouchRegion"
+    }
+    doc = """One named touch set: the faces it owns and the control a
+    click inside it selects."""
+)
+{
+    uniform int[] rigExec:touch:faces = [] (
+        doc = """Face indices on the mesh named by the parent's
+        rigExec:touch:mesh. Face indices, not vertex indices: a pick
+        resolves to a face and this is the set it is looked up in."""
+    )
+    uniform token rigExec:touch:elementType = "face" (
+        allowedTokens = ["face"]
+        doc = """What rigExec:touch:faces indexes. Only `face` today;
+        the token is here so a point or edge set does not need a second
+        attribute when one is wanted."""
+    )
+    rel rigExec:touch:control (
+        doc = """The control a click in this region selects. Unauthored
+        means the region is drawn but drives nothing, which is how an
+        unfinished paint reads."""
+    )
+}

@@ -84,6 +84,26 @@ RigExecPointFrameArray RigExecSolveTwistDistribution(
     const std::vector<double> &weights,
     double twistTurns);
 
+/// The rotation part of a published point frame, as a quaternion; false for
+/// a frame that is invalid, degenerate or singular.
+///
+/// Translation dropped and the axes orthonormalized first, which is what
+/// makes the result a rotation and not merely the rotation-ish upper 3x3 of
+/// a frame carried through a dozen multiplies. The same three steps
+/// tools/biped/build_psd.py:_rotation takes, in the same order, so the
+/// engine's driver delta and the gate's are the same arithmetic.
+///
+/// ROW-VECTOR, like the rest of this codebase: p' = p * M, GfMatrix4d
+/// SetRotate(q) builds M with p*M == q.Transform(p), and therefore the
+/// quaternion product (q1 * q2) corresponds to M(q2) * M(q1). That is why a
+/// pose interpolator's `parent^-1 * world` IS the local rotation and not its
+/// reverse.
+///
+/// ONE definition, called by the dynamic pose-interpolator phase and by the
+/// baked PoseInterpolator step: the delta both measure is compared against
+/// the same authored poses, so two spellings of it would be two rigs.
+bool RigExecFrameRotation(const RigExecPointFrame &frame, GfQuatd *out);
+
 }  // namespace rigExec
 
 #endif  // RIGEXEC_SOLVER_KERNELS_H

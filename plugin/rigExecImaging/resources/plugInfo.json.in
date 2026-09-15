@@ -3,6 +3,13 @@
         {
             "Info": {
                 "Types": {
+                    "RigExecTouchOverlayAdapter": {
+                        "bases": [
+                            "UsdImagingMeshAdapter"
+                        ],
+                        "displayName": "RigExec TouchPose highlight overlay",
+                        "primTypeName": "RigExecTouchOverlay"
+                    },
                     "RigExecUsdImagingSceneIndexPlugin": {
                         "bases": [
                             "UsdImagingSceneIndexPlugin"

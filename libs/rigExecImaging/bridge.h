@@ -112,6 +112,10 @@ public:
     /// (the registry republishes at the current time right after).
     void SetWeightOverlay(const SdfPath &weightPrimPath) {
         _weightOverlay = weightPrimPath;
+        // Resolving the per-point influence field is the overlay's whole
+        // cost, and this bridge is its only consumer: pay it only while an
+        // overlay is actually selected.
+        _evaluator->SetPublishWeightFields(!_weightOverlay.IsEmpty());
     }
 
     const SdfPath &GetWeightOverlay() const { return _weightOverlay; }

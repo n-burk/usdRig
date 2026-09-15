@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace rigExec {
 
@@ -220,6 +221,18 @@ RigExecImagingRegistry::_EvaluateSessions(
             session.epoch->publishedPrims.end());
         combined->xformResetPaths.insert(rigSnapshot->xformResetPaths.begin(),
                                         rigSnapshot->xformResetPaths.end());
+
+        // Carried across for the same reason xformResetPaths is: the
+        // combined snapshot is BUILT here, field by field, so anything
+        // not named is silently dropped. That is how this one was lost
+        // the first time -- the bridge recorded every pose weight, the
+        // store published them, and the merge quietly left them behind,
+        // so RigExecImaging_GetMovedFloats found 0 of 121 with no error
+        // anywhere. Two rigs cannot publish the same property path (the
+        // prim check below already rejects a shared prim), so a plain
+        // insert is right.
+        combined->movedFloats.insert(rigSnapshot->movedFloats.begin(),
+                                     rigSnapshot->movedFloats.end());
 
         if (firstRoot) {
             commonAssetRoot = session.assetRoot;
@@ -417,6 +430,30 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     std::lock_guard<std::mutex> lock(_mutex);
     if (_sessions.empty() || !_stage) {
         return false;
+    }
+    // A publish still dirties every prim in the generation through
+    // _Broadcast, even when it republishes content nothing changed -- so a
+    // redundant SetTime cost a full Hydra redraw for nothing. In usdview the
+    // generation was observed advancing by 2 per frame change while the
+    // plugin's Python _OnFrameChanged fired once, which means a second
+    // SetTime arrives from somewhere else (UpdatePreview/EndPreview,
+    // SetWeightOverlay and _OnObjectsChanged all republish at _lastTime).
+    // Rather than chase which, make the redundant one free: nothing dirty
+    // plus the same stage/time already published means there is nothing to
+    // say. Headless, generation advanced by exactly 1 per SetTime, so this
+    // guard is what closes the gap the usdview session showed.
+    if (!_readRootsDirty && _publishedEpochId != 0) {
+        bool anyDirty = false;
+        for (const RigSession &session : _sessions) {
+            anyDirty = anyDirty || session.dirty || session.readRootsDirty;
+        }
+        if (!anyDirty) {
+            const RigExecImagingSnapshotConstPtr current = _store->Get();
+            if (current && current->Describes(UsdStageWeakPtr(_stage), time)) {
+                _lastTime = time;
+                return true;
+            }
+        }
     }
     if (_readRootsDirty) {
         _RefreshReadRoots();
@@ -1535,8 +1572,8 @@ _WriteBounds(const PXR_NS::GfRange3d &range, double outMinMax[6])
 // transform provider (spec §10.3 extension, host-durability redesign).
 //
 // This is what makes framing a control work in EVERY host rather than in
-// the one whose Python we could reach. UsdGeomBBoxCache is what usdview,
-// Solaris, and mayaUsd all consult, and it asks a Boundable for its extent;
+// the one whose Python we could reach. UsdGeomBBoxCache is what usdview
+// and Solaris both consult, and it asks a Boundable for its extent;
 // before this, RigExec types were not Boundable and reported nothing, so a
 // rig had no bounds anywhere and framing a control moved the camera not at
 // all. The usdview adapter used to monkeypatch computeWorldBound to paper
@@ -1765,6 +1802,48 @@ RigExecImaging_GetGeneration()
     const rigExec::RigExecImagingSnapshotConstPtr snapshot =
         RigExecImagingRegistry::GetInstance().GetStore()->Get();
     return snapshot ? static_cast<long long>(snapshot->generation) : 0;
+}
+
+int
+RigExecImaging_GetMovedFloats(
+    const char *packedPaths, float *out, int count)
+{
+    if (!packedPaths || !out || count <= 0) {
+        return 0;
+    }
+    const rigExec::RigExecImagingSnapshotConstPtr snapshot =
+        RigExecImagingRegistry::GetInstance().GetStore()->Get();
+    if (!snapshot) {
+        return 0;
+    }
+    // Every slot is cleared first: a caller that reads past the return
+    // value gets zeros rather than whatever was in its buffer.
+    for (int i = 0; i < count; ++i) {
+        out[i] = 0.0f;
+    }
+    int found = 0;
+    int index = 0;
+    const char *cursor = packedPaths;
+    while (*cursor && index < count) {
+        const char *end = std::strchr(cursor, '\n');
+        const std::string text(cursor, end ? end - cursor
+                                           : std::strlen(cursor));
+        // An arbitrary caller-supplied string reaches SdfPath here, whose
+        // constructor is loud about a malformed one. Ask first.
+        if (!text.empty() && PXR_NS::SdfPath::IsValidPathString(text)) {
+            const auto it = snapshot->movedFloats.find(PXR_NS::SdfPath(text));
+            if (it != snapshot->movedFloats.end()) {
+                out[index] = it->second;
+                ++found;
+            }
+        }
+        ++index;
+        if (!end) {
+            break;
+        }
+        cursor = end + 1;
+    }
+    return found;
 }
 
 int

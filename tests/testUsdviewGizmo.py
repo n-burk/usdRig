@@ -34,7 +34,7 @@ def _Mouse(QtCore, QtGui, view, kind, x, y, button=None, buttons=None,
     HandleScreenPositions() reports and what Qt delivers.
 
     `button` is separate from `buttons` because the controller reads
-    event.button() to tell a left grab from Maya's middle-drag-repeats-
+    event.button() to tell a left grab from the conventional middle-drag-repeats-
     the-selected-handle; a helper that hard-codes LeftButton can send a
     "middle" press the controller will never recognise as one.
     """
@@ -168,6 +168,31 @@ class _Driver(object):
         self.Pump()
         return prim
 
+    def SelectMany(self, paths):
+        """
+        Several prims, in pick order, the way the viewport does it.
+
+        Through dataModel.selection rather than the UsdviewApi pair:
+        ClearPrimSelection() followed by AddPrimToSelection() leaves the
+        PSEUDO-ROOT in the selection and focused (measured -- a four-
+        control script selection reads back as ['/', ...] with `/` as
+        api.prim), and a test that only ever exercised that path would
+        not notice the gizmo mis-reading the lead. setPrim + addPrim is
+        what a shift-click and the Control Picker both do.
+        """
+        selection = self.app._dataModel.selection
+        prims = []
+        for index, path in enumerate(paths):
+            prim = self.api.stage.GetPrimAtPath(path)
+            _Check(prim, "the stage has a prim at %s" % path)
+            if index == 0:
+                selection.setPrim(prim)
+            else:
+                selection.addPrim(prim)
+            prims.append(prim)
+        self.Pump()
+        return prims
+
     def HandleAt(self, point):
         """The handle a left click at `point` would grab, by name."""
         import gizmoScreen
@@ -265,6 +290,240 @@ def _Changed(before, after, tolerance=1e-6):
     return [i for i in range(len(before))
             if abs((before[i] or 0.0) - (after[i] or 0.0)) > tolerance]
 
+
+GROUP = ["/Shot/HeroArm/Rig/Controls/ShoulderFK",
+         "/Shot/HeroArm/Rig/Controls/ElbowFK",
+         "/Shot/HeroArm/Rig/Controls/WristFK"]
+SOLVED_JOINT = "/Shot/HeroArm/Rig/Joints/Shoulder"
+
+
+def _TestGroupSelection(d, controller, stage, session, frame):
+    """
+    SEVERAL controls, one manipulator, through the real application.
+
+    The headless tests assert the maths; this asserts the wiring the
+    maths hangs off, which is where two reported bugs actually lived:
+
+      * usdview's focus prim is getPrimPaths()[0] -- the FIRST prim in
+        the selection, not the last (selectionDataModel.py:623-627). The
+        group took its lead from the focus prim, so the FIRST control
+        picked was orienting the gizmo and answering to the Last
+        Selected pivot. Measured in a live usdview: shift-picking
+        shoulder, elbow, wrist reported api.prim == ShoulderFK.
+      * Individual Origins applied the carried-member filter, which is
+        right for the rigid pivots and wrong for this one. Every FK
+        chain in a RigExec rig is a namespace chain
+        (controlSpace="parentRelative"), so on Biped.usda a three-
+        control finger, arm or leg selection had every member but the
+        topmost dropped: measured, a delta reached 1 of 3 in all three
+        modes, which is indistinguishable from the mode doing nothing.
+
+    The controls here are SIBLINGS, which is what makes the pivot modes
+    separable in one drag: with nobody carrying anybody, Centre orbits
+    all three about their centroid and Individual leaves every one of
+    them exactly where it was.
+    """
+    import gizmoMath
+    import gizmoSettings
+    import gizmoUI
+
+    def Posed(path):
+        # The RIG's frame, not UsdGeomXformCache's: a control's world
+        # transform is composed by the evaluator from the avars above
+        # it, and the USD xform cache knows nothing about that. _World
+        # above is for the plain xform cases.
+        frames = gizmoMath.ComputeRigFrames(
+            stage, stage.GetPrimAtPath(path), frame)
+        return frames.posed * frames.assetToWorld
+
+    def Origin(path):
+        return Gf.Vec3d(Posed(path).ExtractTranslation())
+
+    def Turned(path, before):
+        return (before.GetInverse()
+                * Posed(path).GetOrthonormalized(False)
+                ).ExtractRotation().GetAngle()
+
+    def Authored(path):
+        return [session.GetAttributeAtPath(Sdf.Path(path + "." + n))
+                is not None for n in gizmoMath.AVAR_R]
+
+    def Centroid(points):
+        return (points[0] + points[1] + points[2]) / 3.0
+
+    # -- the selection, and which end of it leads ----------------------
+    d.SelectMany(GROUP)
+    controller.SetTool(gizmoUI.TOOL_ROTATE)
+    d.Pump()
+    target = controller.Target()
+    _Check(target is not None and target.kind == "group",
+           "three selected controls give one group gizmo: %s"
+           % controller.Reason())
+    _Check(target.label == "3 controls", "label: %r" % target.label)
+    _Check([m.prim.GetPath() for m in target.members]
+           == [Sdf.Path(p) for p in GROUP],
+           "in selection order: %s" % [m.label for m in target.members])
+    _Check(target.lead.prim.GetPath() == Sdf.Path(GROUP[-1]),
+           "the LAST-selected control leads, not usdview's focus prim "
+           "(which is the first): lead is %r" % target.lead.label)
+    d.SelectMany(list(reversed(GROUP)))
+    d.Pump()
+    _Check(controller.Target().lead.prim.GetPath() == Sdf.Path(GROUP[0]),
+           "and it follows the order the artist picked in")
+
+    # -- a real ring drag, in each pivot mode --------------------------
+    results = {}
+    for mode in gizmoMath.GROUP_PIVOT_MODES:
+        d.SelectMany(GROUP)
+        controller.SetTool(gizmoUI.TOOL_ROTATE)
+        controller.SetGroupPivot(mode)
+        d.Pump()
+        target = controller.Target()
+        _Check(target.pivotMode == mode,
+               "the toolbar setting reached the target: %r"
+               % target.pivotMode)
+        before = [Origin(p) for p in GROUP]
+        beforeWorld = [Posed(p).GetOrthonormalized(False)
+                       for p in GROUP]
+        undoDepth = controller.undoStack.CanUndo()
+        d.DragRing("z")
+        d.Pump()
+        after = [Origin(p) for p in GROUP]
+        turns = [Turned(p, w) for p, w in zip(GROUP, beforeWorld)]
+        results[mode] = (before, after, turns)
+        _Check(min(turns) > 1.0,
+               "%s: every member turned (%s)" % (mode, turns))
+        _Check(max(turns) - min(turns) < 1e-6,
+               "%s: by the SAME angle (%s)" % (mode, turns))
+        for path in GROUP:
+            _Check(any(Authored(path)),
+                   "%s: %s got its own avars:r" % (mode, path))
+        # ONE undo entry for the whole group, not one per control.
+        _Check(controller.undoStack.CanUndo() and not undoDepth
+               or controller.undoStack.CanUndo(),
+               "%s: the drag pushed an undo entry" % mode)
+        _Check(controller.undoStack.UndoText().endswith("3 controls"),
+               "%s: labelled for the group: %r"
+               % (mode, controller.undoStack.UndoText()))
+        controller.Undo()
+        d.Pump()
+        for path, start in zip(GROUP, before):
+            _Check((Origin(path) - start).GetLength() < 1e-6,
+                   "%s: one Undo put %s back" % (mode, path))
+
+    # -- and the modes differ in the way they are supposed to ----------
+    before, after, _turns = results[gizmoMath.GROUP_PIVOT_CENTER]
+    drift = Centroid(after) - Centroid(before)
+    _Check(drift.GetLength() < 1e-6,
+           "Centre: the centroid does not move (%s)" % (drift,))
+    _Check(max((a - b).GetLength() for a, b in zip(after, before)) > 1e-3,
+           "Centre: but the controls orbit it")
+    before, after, _turns = results[gizmoMath.GROUP_PIVOT_INDIVIDUAL]
+    _Check(max((a - b).GetLength() for a, b in zip(after, before)) < 1e-6,
+           "Individual Origins: nobody moves; each turns in place")
+    before, after, _turns = results[gizmoMath.GROUP_PIVOT_LEAD]
+    _Check((after[-1] - before[-1]).GetLength() < 1e-6,
+           "Last Selected: the lead stays put")
+    _Check((after[0] - before[0]).GetLength() > 1e-3,
+           "Last Selected: the others swing about it")
+
+    # -- a control the rig writes is skipped, not dragged --------------
+    d.SelectMany(GROUP[:2] + [SOLVED_JOINT])
+    controller.SetTool(gizmoUI.TOOL_ROTATE)
+    d.Pump()
+    target = controller.Target()
+    _Check(target is not None and target.kind == "group",
+           "a mixed selection still gives a group: %s" % controller.Reason())
+    _Check([m.prim.GetPath() for m in target.members]
+           == [Sdf.Path(p) for p in GROUP[:2]],
+           "the solver-posed joint is not a member: %s"
+           % [m.label for m in target.members])
+    _Check("solver" in target.Advisory(),
+           "and the status says why: %r" % target.Advisory())
+    jointBefore = Origin(SOLVED_JOINT)
+    d.DragRing("z")
+    d.Pump()
+    _Check((Origin(SOLVED_JOINT) - jointBefore).GetLength() < 1e-9,
+           "the refused prim did not move")
+    for name in gizmoMath.AVAR_R + gizmoMath.AVAR_T:
+        _Check(session.GetAttributeAtPath(
+            Sdf.Path(SOLVED_JOINT + "." + name)) is None,
+            "and nothing was authored onto its %s" % name)
+    controller.Undo()
+    d.Pump()
+
+    # -- the toolbar button is the same setting, and cycles ------------
+    bar = controller.toolbar
+    controller.SetTool(gizmoUI.TOOL_ROTATE)
+    controller.SetGroupPivot(gizmoMath.GROUP_PIVOT_CENTER)
+    d.Pump()
+    _Check(bar._groupAction.isEnabled(),
+           "Rotate offers a group pivot")
+    _Check(not bar._groupAction.isChecked(),
+           "the default is not highlighted")
+    bar._groupAction.trigger()
+    d.Pump()
+    _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_LEAD
+           and bar._groupAction.isChecked(),
+           "one click cycles to %r" % controller.GroupPivot())
+    _Check(controller.Target().pivotMode == gizmoMath.GROUP_PIVOT_LEAD,
+           "and reaches the live target")
+    bar._groupAction.trigger()
+    bar._groupAction.trigger()
+    d.Pump()
+    _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_CENTER,
+           "three clicks wrap: %r" % controller.GroupPivot())
+    d.Key(d.QtCore.Qt.Key_P)
+    _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_LEAD,
+           "P is the keyboard twin: %r" % controller.GroupPivot())
+    controller.SetGroupPivot(gizmoMath.GROUP_PIVOT_CENTER)
+    controller.SetTool(gizmoUI.TOOL_TRANSLATE)
+    d.Pump()
+    _Check(not bar._groupAction.isEnabled(),
+           "Move offers none -- a world delta is the same motion whatever "
+           "it is measured about")
+
+    # -- Global / Local, the other toolbar toggle ----------------------
+    controller.SetTool(gizmoUI.TOOL_ROTATE)
+    d.SelectMany(GROUP)
+    d.Pump()
+    # Turn the LEAD off axis first. Global and Local name different
+    # frames, but on a control whose posed frame happens to be axis-
+    # aligned they name the same AXES, and an assertion that the drawn
+    # ring changed would be vacuous -- or fail -- for a reason that has
+    # nothing to do with the toggle.
+    leadPath = Sdf.Path(GROUP[-1])
+    stage.GetPrimAtPath(leadPath).GetAttribute("avars:ry").Set(40.0)
+    d.Pump()
+    controller.SetOrientation(gizmoSettings.ORIENT_WORLD)
+    d.Pump()
+    _Check(bar._orientAction.text() == "Global"
+           and not bar._orientAction.isChecked(),
+           "the button names the mode in force: %r"
+           % bar._orientAction.text())
+    worldRing = controller._Handle("z").worldAxis
+    d.Key(d.QtCore.Qt.Key_L)
+    _Check(controller.Orientation() == gizmoSettings.ORIENT_OBJECT,
+           "L switches to Local")
+    d.Pump()
+    _Check(bar._orientAction.text() == "Local"
+           and bar._orientAction.isChecked(),
+           "and the button follows: %r" % bar._orientAction.text())
+    localRing = controller._Handle("z").worldAxis
+    _Check((Gf.Vec3d(worldRing) - Gf.Vec3d(localRing)).GetLength() > 1e-3,
+           "and the DRAWN ring axis actually changed: %s -> %s"
+           % (worldRing, localRing))
+    leadZ = Posed(GROUP[-1]).GetOrthonormalized(False).TransformDir(
+        Gf.Vec3d(0, 0, 1))
+    _Check((Gf.Vec3d(localRing) - leadZ).GetLength() < 1e-6,
+           "Local rings ARE the lead control's own axes: %s vs %s"
+           % (localRing, leadZ))
+    controller.SetOrientation(gizmoSettings.ORIENT_WORLD)
+    spec = session.GetAttributeAtPath(
+        leadPath.AppendProperty("avars:ry"))
+    if spec is not None:
+        spec.owner.RemoveProperty(spec)
+    d.Pump()
 
 def _TestPreviewThenCommit(d, controller, stage, session, frame):
     """
@@ -609,7 +868,7 @@ def testUsdviewInputFunction(appController):
         Sdf.Path(XFORM + ".xformOp:translate")) is None,
         "the undo removed the xformOp spec the drag created")
 
-    # --- 6b. Maya parity: planar handle, middle-drag, step snap, view
+    # --- 6b. manipulator parity: planar handle, middle-drag, step snap, view
     #         ring, gimbal, free rotate, scale ratio, hotkeys ------------
     prim = d.Select(CONTROL)
     controller.SetChannels(gizmoMath.CHANNELS_POSE)
@@ -618,7 +877,7 @@ def testUsdviewInputFunction(appController):
     d.Pump()
     positions = controller.HandleScreenPositions()
     _Check({"xy", "yz", "xz", "center"} <= set(positions),
-           "the move manipulator has Maya's three planar handles and a "
+           "the move manipulator has the conventional three planar handles and a "
            "centre: %s" % sorted(positions))
     corners = positions["xy"]
     _Check(len(corners) == 4, "a planar handle reports its four corners")
@@ -635,7 +894,7 @@ def testUsdviewInputFunction(appController):
            "the dragged handle is the selected (yellow) one: %r"
            % controller.SelectedHandleName())
 
-    # Maya's middle-drag anywhere repeats the selected handle.
+    # the conventional middle-drag anywhere repeats the selected handle.
     mid = (positions["center"][0][0] + 150,
            positions["center"][0][1] + 120)
     _Check(d.HandleAt(mid) is None,
@@ -654,7 +913,7 @@ def testUsdviewInputFunction(appController):
     d.Pump()
 
     # Ctrl + an axis drag moves in the plane PERPENDICULAR to that axis
-    # (Maya). The modifier is applied to the MOVES, not the press: Qt
+    # (the conventional tool). The modifier is applied to the MOVES, not the press: Qt
     # turns Ctrl+left-click into a right-button press on macOS, so "grab
     # the axis, then hold Ctrl" is the gesture that works everywhere.
     # Run twice on identical geometry, plain then Ctrl, so the assertion
@@ -724,7 +983,7 @@ def testUsdviewInputFunction(appController):
     d.Pump()
     positions = controller.HandleScreenPositions()
     _Check({"x", "y", "z", "view", "free"} <= set(positions),
-           "the rotate manipulator has Maya's three rings, the view ring "
+           "the rotate manipulator has the conventional three rings, the view ring "
            "and the free-rotate ball: %s" % sorted(positions))
     rBefore = _Values(prim, gizmoMath.AVAR_R, frame)
     ring = positions["view"]
@@ -766,14 +1025,14 @@ def testUsdviewInputFunction(appController):
     controller.Undo()
     d.Pump()
 
-    # Scale: Maya's ratio rule, then Prevent Negative Scale.
+    # Scale: the conventional ratio rule, then Prevent Negative Scale.
     controller.SetTool(gizmoUI.TOOL_SCALE)
     d.Pump()
     a, b = d.AxisPoints("x")
     d.Drag(_Lerp(a, b, 0.5), b)
     _Check(abs(sx.Get(frame) - 2.0) < 1e-3,
            "dragging the X handle from half length to the tip doubles "
-           "avars:sx (Maya's distance-ratio rule): %s" % sx.Get(frame))
+           "avars:sx (the conventional distance-ratio rule): %s" % sx.Get(frame))
     controller.Undo()
     d.Pump()
     controller.settings.For(gizmoUI.TOOL_SCALE).preventNegativeScale = True
@@ -842,7 +1101,7 @@ def testUsdviewInputFunction(appController):
     _Check(not controller.undoStack.CanUndo(),
            "an aborted drag pushed nothing onto the undo stack")
 
-    # Redo aliases: Shift+Z (Maya) and Ctrl+Y both redo.
+    # Redo aliases: Shift+Z (the conventional tool) and Ctrl+Y both redo.
     d.DragAxis("x")
     v1 = tx.Get(frame)
     d.Key(d.QtCore.Qt.Key_Z, d.QtCore.Qt.ControlModifier)
@@ -1317,6 +1576,9 @@ def testUsdviewInputFunction(appController):
     # --- preview then commit ---------------------------------------------
     _TestPreviewThenCommit(d, controller, stage, session, frame)
 
+    # --- several controls at once ----------------------------------------
+    _TestGroupSelection(d, controller, stage, session, frame)
+
     shot = os.environ.get("RIGEXEC_GIZMO_SHOT")
     if shot:
         d.Select(CONTROL)
@@ -1325,4 +1587,5 @@ def testUsdviewInputFunction(appController):
         d.view.window().grab().save(shot)
 
     print("RIGEXEC_GIZMO_OK translate/rotate/scale, undo/redo, default, "
-          "pivot, xform, maya parity, snapping, preview then commit")
+          "pivot, xform, conventional parity, snapping, preview then commit, "
+          "multi-selection groups")

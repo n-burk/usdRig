@@ -326,12 +326,24 @@ public:
         // cache -- but only after the in-memory value for this exact property
         // has been ruled out, because a property chain result outranks the
         // authored value the cache holds.
-        if (_cache && attribute && !_values.count(attribute.GetPath())) {
-            bool handled = false;
-            const bool got = _cache->Read(
-                attribute, attribute.GetPath(), time, out, &handled);
-            if (handled) {
-                return got;
+        if (attribute && !_values.count(attribute.GetPath())) {
+            if (_cache) {
+                bool handled = false;
+                const bool got = _cache->Read(
+                    attribute, attribute.GetPath(), time, out, &handled);
+                if (handled) {
+                    return got;
+                }
+            }
+            // The cache refused it: a connection to follow, or a value that
+            // varies with time -- which is every avar, so the refused reads
+            // are exactly the ones that recur every frame. MEASURED
+            // 2026-09-13, biped: ~11 600 scalar reads per frame, and an
+            // unconnected one still reaches the walk below, which allocates
+            // a std::set and a std::vector to discover there is no single
+            // connection to follow. Same answer, no allocation.
+            if (!attribute.HasAuthoredConnections()) {
+                return attribute.Get(out, time);
             }
         }
         std::set<SdfPath> visiting;
@@ -448,8 +460,15 @@ struct RigExecBlendSampleBinding {
     SdfPath sample;
     SdfPath points;
     RigExecReadPhase phase;
+    /// The UsdSkelBlendShape prim named by rigExec:blendShape, when the
+    /// sample carries its shape sparsely instead of as a full points array.
+    /// Empty and `points` set is the dense form; set and `points` empty is
+    /// the sparse one. Never both: the compiler rejects a sample that
+    /// authors both relationships rather than picking a winner.
+    SdfPath blendShape;
     bool operator==(const RigExecBlendSampleBinding &o) const {
-        return sample == o.sample && points == o.points && phase == o.phase;
+        return sample == o.sample && points == o.points &&
+               phase == o.phase && blendShape == o.blendShape;
     }
 };
 
@@ -619,6 +638,65 @@ std::shared_ptr<const RigExecSkinTopology> RigExecResolveSkinTopology(
     UsdTimeCode time,
     const RigExecResolvedInputs *resolved,
     RigExecSkinTopologyCache *cache);
+/// Per-epoch blend sample shapes, keyed by the sample prim that owns them.
+///
+/// Peer of RigExecSkinTopologyCache, and there for the same reason, but the
+/// arithmetic is starker here. A dense blend sample's full points array is
+/// read and copied off the stage once per sample per frame whether its
+/// channel sits at 0 or at 1 -- measured at 0.37-0.38 ms per sample per frame
+/// on a 26,276-point body, so 169 correctives cost ~65 ms/frame with the rig
+/// standing at REST (tools/biped/spikes/blend_cost.py). Resolving the shape
+/// once per epoch and sharing it by pointer is what removes that, and the
+/// sparse layout is what makes the resolved shape small: the real correctives
+/// move 1,279 points on average, 4.87% of the mesh.
+///
+/// Owned by the evaluator, never a static: a cache that outlives the
+/// evaluator outlives the stage it read, and a sculpt edit has to be able to
+/// throw it away. Clear() is what a change notice calls.
+///
+/// Resolve() is safe to call from several chain tasks at once. The lock
+/// decides nothing -- a layout is a pure function of the sample's authored
+/// arrays, so whichever task builds it builds the same one.
+class RigExecBlendSampleCache
+{
+public:
+    /// The shape for \p sample, calling \p build on a miss.
+    ///
+    /// \p build returns false to REFUSE the cache for this sample: the shape
+    /// can move within the epoch after all, and the caller must read it per
+    /// frame instead. The refusal is remembered exactly as a shape is, so the
+    /// question costs one answer per notice and not one per frame; a refused
+    /// sample answers null until the next Clear().
+    std::shared_ptr<const RigExecBlendSampleLayout> Resolve(
+        const SdfPath &sample,
+        const std::function<bool(RigExecBlendSampleLayout *)> &build);
+
+    void Clear() {
+        std::lock_guard<std::mutex> lock(_mutex);
+        // Dropped as ANSWERS, kept as candidates -- see
+        // RigExecSkinTopologyCache::Clear for why handing back a fresh
+        // pointer for arrays that compare equal is worse than one array
+        // compare per notice.
+        for (auto &[sample, layout] : _entries) {
+            if (layout) {
+                _candidates[sample] = std::move(layout);
+            }
+        }
+        _entries.clear();
+    }
+    size_t GetSize() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _entries.size();
+    }
+
+private:
+    mutable std::mutex _mutex;
+    /// A present entry holding null is a remembered refusal.
+    std::map<SdfPath, std::shared_ptr<const RigExecBlendSampleLayout>> _entries;
+    /// The last shape each sample had, from before the most recent Clear().
+    std::map<SdfPath, std::shared_ptr<const RigExecBlendSampleLayout>>
+        _candidates;
+};
 
 /// Resolves a mover's side-input bindings from the authored stage.
 ///

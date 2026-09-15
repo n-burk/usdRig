@@ -709,6 +709,52 @@ no rig to compare against is a second rig.
   `TestAnInterveningXformMovesTheMeshAndNotTheJointMatrix`, which fails if the dynamic path's
   asymmetry ever changes.
 
+### The biped merge: pose interpolators and sparse blend samples
+
+Two features the biped branch built beside the program are inside it now, which is what
+"single graph" means for them: nothing a frame publishes is computed by a second system.
+
+* **`PoseInterpolator` step, `PoseWeight` domain.** A `RigExecPoseInterpolator` reads the FINAL
+  pose of its driver and writes floats the geometry chains consume, so on the dynamic path it is
+  a phase of its own between the walk and the chains (`_EvaluatePoseInterpolators`). Here it is
+  one step per interpolator, appended after the `ProviderMatrix` steps: it reads the last
+  `PoseFin` version of its driver's slot and of the parent slot the driver's local rotation is
+  measured against, and writes one contiguous range of `PoseWeight` slots (disabled poses
+  included, as hard zeros). `inputs:enabled` is a bound input the prologue reads, so a dragged or
+  animated enable dirties the step through the ordinary override and varying-input machinery. A
+  blend channel whose `inputs:weight` connects to `<pose>.outputs:weight` reads the slot instead
+  of the resolved inputs -- the same walk `RigExecResolvedInputs::GetAttribute` makes, ended at
+  a property the program publishes -- and its `RevisionStatic` declares the read, which is the
+  edge that makes a drag that cannot reach the driver leave the corrective alone. The epilogue
+  publishes the weights into `movedProperties` and the generation's resolved inputs, where the
+  dynamic phase publishes them, and replays the step's lines after the joint block, where the
+  phase emits them. The solved RBF table is copied from the evaluator's compiled record, since it
+  is a constant of the epoch and the program is dropped with the epoch. The cone verifier shadows
+  `poseWeights`. `RigExecFrameRotation` (solverKernels) is the one definition of the frame ->
+  rotation read both paths measure the delta with.
+
+* **Sparse blend samples.** A `RigExecBlendSample` naming a `UsdSkelBlendShape` through
+  `rigExec:blendShape` carries its shape as an epoch-resolved `RigExecBlendSampleLayout` rather
+  than a full moved-points array. The program resolves those in the geometry PROLOGUE, through
+  the evaluator's `RigExecBlendSampleCache` -- the same cache the dynamic assembly resolves
+  through, so both paths hold the same pointer for a shape that did not move, and no step body
+  takes the cache's lock. A shape the cache refuses (a connected `offsets`) is read per frame,
+  in the prologue too. `RigExecSumBlendChannels` takes the layout by pointer, which is what makes
+  an unchanged corrective one pointer compare instead of a 26,276-element array compare.
+  `SetInteractiveOverrides` drops the shapes only for an override that can reach one
+  (`_OverridesReachBlendShapes`: `offsets`, `pointIndices`, or a computation override), the
+  same rule as the skin layouts.
+
+* **What the dynamic-path sparse modes became.** The biped branch's `Sparse` and
+  `SparseWithParityCheck` modes gated the dynamic constraint walk and solver batches on a dirty
+  set of their own. They are gone: §7's cone closure is that dirty set, derived from the
+  declarations rather than from a second forward map, and `tests/python/test_rigexec_baked_cone.py`
+  holds it to the same three questions the sparse suite asked (parity at zero across a drag,
+  bit-exactness against a rig that never saw one, and a leaf drag closing over less than the
+  root). `test_rigexec_skin_layout_overrides.py` holds the layout-invalidation contract on the
+  cache's own occupancy, and `test_rigexec_baked_psd.py` holds the stacked biped -- rig,
+  interpolators and sparse shapes -- to parity through the program.
+
 ### What holds it to account
 
 * `tests/testRigExecBakedSchedule` -- every edge forward, every read written or sourced, no two

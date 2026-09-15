@@ -1,7 +1,7 @@
 """A follower of solved joints is not a cycle; a solver reading its own
 follower is -- and the compiler has to say WHICH.
 
-The shape under test is Maya's per-limb param node: a control under
+The shape under test is the conventional per-limb param node: a control under
 <rig>/Controls, parent-constrained from the limb's end joint, whose scalar
 `avars:ikfk` is what the limb's blend solver reads through
 `inputs:weight.connect`. Authored on the biped it was rejected with a
@@ -131,7 +131,7 @@ def _build(rigexec, Usd, Sdf, follower_on_top, effector_constrained):
         foot_chain.add_parent_constraint("foot_from_ankle", effector,
                                          [ankle])
 
-    # Maya's param node: a control under Controls, parent-constrained from
+    # the conventional param node: a control under Controls, parent-constrained from
     # the end joint, carrying the dial the blend reads as a SCALAR.
     params = builder.add_control("Params")
     dial = stage.GetPrimAtPath(params.path).CreateAttribute(

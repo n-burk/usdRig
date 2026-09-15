@@ -1711,6 +1711,33 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         }
     }
 
+    // ---- the pose interpolators ---------------------------------------------
+    //
+    // After the matrices and before the store's record, which is where the
+    // dynamic path's phase sits: it reads the FINAL pose, every constraint
+    // included, and writes what the geometry chains consume. One step per
+    // interpolator, reading the last version of its driver's slot and of the
+    // parent's, writing its own range of weights.
+    for (size_t k = 0; k < B.poseInterpolators.size(); ++k) {
+        const RigExecBakedProgramImpl::PoseInterpolator &interpolator =
+            B.poseInterpolators[k];
+        RigExecBakedStep &step =
+            AddStep(&B, RigExecBakedStepKind::PoseInterpolator, int(k));
+        // One line, and terminal: a driver without a usable frame, or a
+        // solve of the wrong size, zeroes the weights and says so.
+        step.maxDiagnostics = 1;
+        step.reads.push_back(RigExecBakedOne(RigExecBakedSlotDomain::PoseFin,
+                                             interpolator.driverSlot));
+        if (interpolator.parentSlot >= 0) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::PoseFin, interpolator.parentSlot));
+        }
+        step.writes.push_back(RigExecBakedRange(
+            RigExecBakedSlotDomain::PoseWeight, interpolator.weightBegin,
+            interpolator.weightEnd));
+        RigExecBakedNoteInput(interpolator.enabled, &step);
+    }
+
     // The store's other pose-half record: every provider's rest -> final
     // matrix, which is what a `final` phase on a provider resolves to. Only
     // a rig that declares a phase can look one up, so only such a rig pays
@@ -2001,6 +2028,12 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
                     : binding.input.constant;
         }
         B.avarsDisturbed = B.anyOverridden;
+    }
+    // The pose interpolators' enables, read here so their step reads no USD.
+    for (RigExecBakedProgramImpl::PoseInterpolator &interpolator :
+             B.poseInterpolators) {
+        interpolator.enabledValue =
+            RigExecBakedRead(interpolator.enabled, R, time, &B.overridden);
     }
 }
 
@@ -3189,6 +3222,79 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         return;
     }
 
+    case RigExecBakedStepKind::PoseInterpolator: {
+        RigExecBakedProgramImpl::PoseInterpolator &interpolator =
+            B.poseInterpolators[size_t(step->object)];
+        // Every slot the step owns starts at zero: a disabled pose was left
+        // out of the solve and has no weight to be told, and a disabled
+        // interpolator -- a shape-preserving enable -- is off, not frozen at
+        // its last value.
+        for (int slot = interpolator.weightBegin; slot < interpolator.weightEnd;
+             ++slot) {
+            B.poseWeights[size_t(slot)] = 0.0f;
+        }
+        if (!interpolator.enabledValue || interpolator.poseSlots.empty()) {
+            return;
+        }
+        // The driver's LOCAL rotation relative to its own REST, which is what
+        // every authored pose is measured from and why a rig standing still
+        // reads its neutral at 1.000000:
+        //
+        //   local = parent^-1 * world       (row-vector; RigExecFrameRotation)
+        //   delta = restLocal^-1 * local
+        //
+        // The LAST version of the driver's slot, because this step runs after
+        // the whole walk -- the driver constraints in particular, whose
+        // parent subtracts the twist back out so the local rotation is the
+        // swing alone. The rest is the program's own asset-space rest frame,
+        // the same one the matrices are measured against.
+        const size_t d = size_t(interpolator.driverSlot);
+        GfQuatd driverFinal(1.0), driverRest(1.0);
+        GfQuatd parentFinal(1.0), parentRest(1.0);
+        bool usable =
+            RigExecFrameRotation(B.fin[size_t(B.finLast[d])], &driverFinal) &&
+            RigExecFrameRotation(B.restFrames[d], &driverRest);
+        if (usable && interpolator.parentSlot >= 0) {
+            const size_t p = size_t(interpolator.parentSlot);
+            usable = RigExecFrameRotation(B.fin[size_t(B.finLast[p])],
+                                          &parentFinal) &&
+                     RigExecFrameRotation(B.restFrames[p], &parentRest);
+        }
+        if (!usable) {
+            step->diagnostics.push_back(
+                "pose interpolator " + interpolator.path.GetString() +
+                " has no usable frame for its driver " +
+                B.paths[d].GetString() +
+                " after the pose walk; its weights are zero this generation");
+            return;
+        }
+        const GfQuatd local = parentFinal.GetInverse() * driverFinal;
+        const GfQuatd restLocal = parentRest.GetInverse() * driverRest;
+        const GfQuatd delta = (restLocal.GetInverse() * local).GetNormalized();
+        // Through the euler, as the dynamic phase goes: the gate's expected
+        // weights take that route, and the same route is the same
+        // floating-point values and not merely the same rotation.
+        interpolator.solver.Evaluate(RigExecRbfEulerFromQuaternion(delta),
+                                     nullptr, &interpolator.scratch,
+                                     interpolator.allowNegativeWeights);
+        if (interpolator.scratch.size() != interpolator.poseSlots.size()) {
+            step->diagnostics.push_back(
+                "pose interpolator " + interpolator.path.GetString() +
+                " solved " + std::to_string(interpolator.scratch.size()) +
+                " weights for " +
+                std::to_string(interpolator.poseSlots.size()) + " poses");
+            return;
+        }
+        for (size_t i = 0; i < interpolator.poseSlots.size(); ++i) {
+            // float, and that is load-bearing: a consumer reads inputs:weight
+            // as a float, and the published property has to hold the type
+            // the dynamic phase publishes.
+            B.poseWeights[size_t(interpolator.poseSlots[i])] =
+                static_cast<float>(interpolator.scratch[i]);
+        }
+        return;
+    }
+
     default:
         return;
     }
@@ -3204,7 +3310,10 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     // the generation and the order is program order rather than completion
     // order.
     for (const RigExecBakedStep &step : B.steps) {
-        if (RigExecBakedIsGeometryStep(step.kind)) {
+        // The pose interpolators' lines come AFTER the joint block, where the
+        // dynamic path's phase emits them; replayed below.
+        if (RigExecBakedIsGeometryStep(step.kind) ||
+            step.kind == RigExecBakedStepKind::PoseInterpolator) {
             continue;
         }
         for (const std::string &diagnostic : step.diagnostics) {
@@ -3344,6 +3453,18 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         }
     }
 
+    // The pose-interpolator phase's lines: after the joint and control
+    // publication and the guides, before the geometry, which is where
+    // _EvaluateDynamic's step 3c emits them.
+    for (const RigExecBakedStep &step : B.steps) {
+        if (step.kind != RigExecBakedStepKind::PoseInterpolator) {
+            continue;
+        }
+        for (const std::string &diagnostic : step.diagnostics) {
+            pose->diagnostics.push_back(diagnostic);
+        }
+    }
+
     // NO published domain is left empty by a standing refusal any more, and
     // that is new as of the Phase 3 merge -- this block used to be a list of
     // four. A volume weight object bakes, so weightFrames is published from
@@ -3371,6 +3492,16 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
     for (const auto &[target, value] : B.propertyResults) {
         pose->movedProperties.emplace_hint(pose->movedProperties.end(),
                                            target, value);
+    }
+    // The pose weights, published into BOTH places the dynamic phase
+    // publishes into: movedProperties is what makes the number observable to
+    // a host, a test and the picker, and the generation's resolved inputs
+    // are what a consumer outside the program -- the standalone reader of a
+    // blend input's connection -- resolves through after the frame.
+    for (size_t k = 0; k < B.poseWeightPaths.size(); ++k) {
+        const VtValue value(B.poseWeights[k]);
+        pose->movedProperties[B.poseWeightPaths[k]] = value;
+        B.resolvedInputs->SetProperty(B.poseWeightPaths[k], value);
     }
     return true;
 }

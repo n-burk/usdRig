@@ -29,7 +29,7 @@
 // decomposition (the closest rotation in the Frobenius sense, computed by
 // the library's standard RigExecPointsToParams SVD path) and the
 // translation, and DROPS the stretch and any reflection. This is the same
-// limitation Maya's dual-quaternion skinning has (joint scale is ignored by
+// limitation the conventional dual-quaternion skinning has (joint scale is ignored by
 // the DQ branch of skinCluster); dropping it with an explicit report is more
 // useful to a rig than failing, because the alternative for a kernel is to
 // fall back to linear blending for those joints, which needs to be a caller
@@ -185,10 +185,10 @@ GfVec3d RigExecDualQuatTransformPoint(
 // weighted mean, independent of how much the influences rotate relative to
 // each other.
 //
-// DIFFERENCE FROM MAYA: Maya's skinCluster in dual-quaternion mode ignores
+// A DELIBERATE DIFFERENCE: the classical dual-quaternion skinCluster ignores
 // joint scale and shear entirely (only the rigid motion of each joint
 // reaches the skin). This path does NOT ignore them. A non-uniformly scaled
-// joint therefore deforms the skin here and does not in Maya; that is the
+// joint therefore deforms the skin here and does not in the conventional tool; that is the
 // intended behaviour, not a bug.
 //
 // Reflection and singular input: a reflected influence comes back from the

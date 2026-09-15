@@ -1,9 +1,9 @@
 //
 // RigExec spline-IK spine kernel.
 //
-// A control-driven counterpart of Maya's ikSplineSolver as the squarebit
-// biped uses it for the spine and neck (core/maya/rig/spline.py driven by
-// rig_bits.nxt:/spine and /neck). Three control frames (root, mid, end)
+// A control-driven counterpart of the conventional ikSplineSolver as the
+// squarebit biped uses it for the spine and neck. Three control frames
+// (root, mid, end)
 // shape an open degree-2 B-spline with four CVs; the joint chain is laid
 // out along that curve by arc length; each joint aims +X along the curve
 // with an up vector carried from its rest frame by the minimal rotation; a
@@ -30,7 +30,7 @@
 //     Y and Z handles. Every input and output frame is in one common space
 //     (in practice the chain parent's space; see the rigid-motion note in
 //     RigExecSolveSplineIk).
-//   * The curve is the open degree-2 B-spline with four CVs P0..P3 and Maya
+//   * The curve is the open degree-2 B-spline with four CVs P0..P3 and the conventional tool
 //     knots [0,0,1,2,2] (full clamped vector [0,0,0,1,2,2,2]), parameter
 //     u in [0,2], two spans. Inserting the knot u=1 to multiplicity two
 //     adds the point (P1+P2)/2 (alpha = (1-0)/(2-0) = 1/2), so each span is
@@ -41,7 +41,7 @@
 //     P2, which is why the interior joints of a chain whose rest CVs are
 //     joint positions do not land exactly on their rest origins (the
 //     rest-residual the tests measure; a caller absorbs it with a
-//     maintained offset the way Maya's mo=1 constraints do).
+//     maintained offset the way the conventional mo=1 constraints do).
 //   * Arc length is integrated with 8-point Gauss-Legendre quadrature on 32
 //     sub-intervals per span (the speed |C'(u)| of a quadratic is smooth,
 //     so this is accurate to roughly 1e-14 relative); the inverse (param at
@@ -49,13 +49,13 @@
 //   * Angles are radians; a positive twist is a right-handed rotation about
 //     the joint's +X aim axis.
 //
-// The Maya spec, as implemented:
+// The conventional spec, as implemented:
 //   Curve.  Rest CVs are the rest origins of joints [0], [1], [N-2], [N-1].
 //     cv0 and cv1 are carried by the root control's rest->pose map, cv2 and
 //     cv3 by the end control's; cv1 and cv2 additionally receive the mid
 //     control's translation offset relative to its follow point, which is
 //     the mid control's rest origin carried by the root and end controls
-//     and blended with RigExecSplineIkParams::midFollowWeight (a Maya
+//     and blended with RigExecSplineIkParams::midFollowWeight (a conventional
 //     parentConstraint with maintainOffset on both parents). At rest the
 //     offset is zero.
 //   Placement.  ratio = arcLength / restArcLength. Joint 0 sits at the
@@ -75,7 +75,7 @@
 //   Twist.  roll is the root control's twist about the rest chain axis
 //     (cv3 - cv0 at rest) relative to its rest frame, by swing-twist
 //     decomposition of the rest->pose rotation; twist is the end control's
-//     twist about the same axis minus roll. Maya's linear twistType.
+//     twist about the same axis minus roll. the conventional linear twistType.
 //   Squash.  s_x = 1, s_y = s_z = 1 - w_i * preserveVolume * (ratio - 1).
 //     Linear thinning, exactly as specified, no clamp: ratio < 1 thickens.
 //     Reference weights: spine [0.1429, 0.2857, 0.4286, 0.5, 0.3571,
@@ -166,7 +166,7 @@ struct RigExecSplineIkRest {
     std::vector<RigExecPointFrame> joints;
 
     /// segmentLengths[k] is the rest arc spacing between joints k and k+1
-    /// (Maya's rest tx of joint k+1); size joints.size() - 1.
+    /// (the conventional rest tx of joint k+1); size joints.size() - 1.
     std::vector<double> segmentLengths;
 
     /// The reference length for ratio = arcLength / restArcLength. Must be
@@ -195,7 +195,7 @@ struct RigExecSplineIkParams {
     double midFollowWeight = 0.5;
 
     /// Additive roll and twist (radians) on top of what the controls
-    /// contribute: the Maya ikHandle roll / twist attributes.
+    /// contribute: the conventional ikHandle roll / twist attributes.
     double roll = 0.0;
     double twist = 0.0;
 
@@ -210,16 +210,16 @@ struct RigExecSplineIkParams {
     /// other once the floor exceeds their sum over the chord), and the
     /// mid control's follow point, the twist and the volume ratio are
     /// unaffected because they read the control frames, not the CVs.
-    /// Maya's ikSpline has no floor at all; this is the requested
+    /// The conventional ikSpline has no floor at all; this is the requested
     /// departure. Not clamped to [0, 1].
     double minLengthRatio = 0.0;
 
     /// Aim the root tangent: cv1 is turned about cv0 by the minimal
     /// rotation taking the root control's posed chain axis to the
     /// direction cv0 -> cv3 (after the length floor), so the curve leaves
-    /// the root pointing at the end. Maya's neck does exactly this with
-    /// cluster[1] under a joint at the neck control aimed at the head
-    /// (rig_bits.nxt /neck/head_pivot_connect); done here it uses the
+    /// the root pointing at the end. The conventional neck does exactly this with
+    /// cluster[1] under a joint at the neck control aimed at the head;
+    /// done here it uses the
     /// floored end and adds no twist (the rotation axis is perpendicular
     /// to the chain). The mid offset is applied on top. Off by default.
     bool aimRootTangent = false;

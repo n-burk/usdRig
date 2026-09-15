@@ -1,0 +1,21 @@
+#usda 1.0
+(
+    doc = """The rig with pose-space deformation live: correctives that fire
+    from the joints' own rotations.
+
+    THREE LAYERS, and the order is load-bearing. `Biped_psd.usda` is the rig
+    plus the RigExecPoseInterpolator prims that compute each corrective's
+    weight; `Biped_shapes.usdc` carries the 161 UsdSkelBlendShape targets and
+    the RigExecBlendShapeMover that applies them. Neither is useful alone --
+    the interpolators publish weights nothing reads, and the shapes wait for
+    weights nobody writes. Opened together, posing the rig fires the
+    correctives."""
+    defaultPrim = "Biped"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    subLayers = [
+        @./Biped_psd.usda@,
+        @./Biped_shapes.usdc@,
+        @./Biped.usda@
+    ]
+)

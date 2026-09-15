@@ -61,6 +61,7 @@ RigExecBakedSlotDomainName(RigExecBakedSlotDomain domain)
     case RigExecBakedSlotDomain::DerivedOut: return "DerivedOut";
     case RigExecBakedSlotDomain::WeightPacket: return "WeightPacket";
     case RigExecBakedSlotDomain::WeightFrames: return "WeightFrames";
+    case RigExecBakedSlotDomain::PoseWeight: return "PoseWeight";
     case RigExecBakedSlotDomain::Snapshots: return "Snapshots";
     }
     return "unknown";
@@ -79,6 +80,7 @@ RigExecBakedStepKindName(RigExecBakedStepKind kind)
     case RigExecBakedStepKind::CommitApply: return "CommitApply";
     case RigExecBakedStepKind::ProviderMatrix: return "ProviderMatrix";
     case RigExecBakedStepKind::SnapshotFinals: return "SnapshotFinals";
+    case RigExecBakedStepKind::PoseInterpolator: return "PoseInterpolator";
     case RigExecBakedStepKind::VolumePlacements: return "VolumePlacements";
     case RigExecBakedStepKind::WeightPacket: return "WeightPacket";
     case RigExecBakedStepKind::InfluenceFold: return "InfluenceFold";
@@ -196,6 +198,7 @@ constexpr StepCostConstants kStepCosts[] = {
     {0.0000, 0.004088},   // CommitApply       2
     {0.0000, 0.051952},   // ProviderMatrix  252
     {0.0000, 0.077140},   // SnapshotFinals    1 -- 13_ReadPhases
+    {0.2000, 0.020000},   // PoseInterpolator  unfitted -- see below
     {0.0000, 0.143880},   // VolumePlacements  1 -- 11_VolumeWeights
     {0.0000, 0.066481},   // WeightPacket      5 -- 11_VolumeWeights
     {0.0000, 0.003781},   // InfluenceFold     1
@@ -210,6 +213,10 @@ static_assert(sizeof(kStepCosts) / sizeof(kStepCosts[0]) == kStepKindCount,
 
 // Four rows are worth reading twice before they are trusted:
 //
+//  * PoseInterpolator is a GUESS, not a fit: two quaternion extractions, a
+//    quaternion delta and one RBF kernel row per pose. No calibration run
+//    has covered a rig with interpolators yet; the first one to do so should
+//    replace the row the way the three below were replaced.
 //  * SnapshotFinals, VolumePlacements and WeightPacket were guesses until
 //    Phase 3 made the rigs that exercise them bake; each is now the MEDIAN of
 //    NINE calibration runs of the one rig that has it, at
@@ -399,6 +406,10 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
         return 1;
     case RigExecBakedStepKind::SnapshotFinals:
         return double(B.paths.size());
+    case RigExecBakedStepKind::PoseInterpolator:
+        // One kernel row per pose in the solve.
+        return double(std::max<size_t>(
+            B.poseInterpolators[object].poseSlots.size(), 1));
     case RigExecBakedStepKind::VolumePlacements:
         // One decomposition per volume, and there are never many.
         return WrittenSlots(step, RigExecBakedSlotDomain::WeightFrames) *
@@ -2080,6 +2091,8 @@ StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step)
                (step.part ? " final" : " base");
     case RigExecBakedStepKind::SnapshotFinals:
         return "every provider";
+    case RigExecBakedStepKind::PoseInterpolator:
+        return B.poseInterpolators[size_t(step.object)].path.GetString();
     case RigExecBakedStepKind::VolumePlacements:
         return "every volume weight";
     case RigExecBakedStepKind::WeightPacket:

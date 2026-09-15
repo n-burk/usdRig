@@ -72,6 +72,7 @@ add_library(rigExecMath STATIC
     libs/rigExecMath/profileMover.cpp
     libs/rigExecMath/dualQuat.cpp
     libs/rigExecMath/splineIk.cpp
+    libs/rigExecMath/rbf.cpp
 )
 target_include_directories(rigExecMath PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -107,7 +108,9 @@ target_include_directories(rigExec PUBLIC
     $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
 target_link_libraries(rigExec PUBLIC
     rigExecMath
-    plug sdf usd usdGeom work
+    # usdSkel is here for UsdSkelBlendShape only: a sparse blend sample names
+    # one, and its offsets + pointIndices ARE the sample's shape.
+    plug sdf usd usdGeom usdSkel work
     exec execUsd ef vdf
 )
 
@@ -146,6 +149,7 @@ add_library(rigExecImaging SHARED
     libs/rigExecImaging/bridge.cpp
     libs/rigExecImaging/registry.cpp
     libs/rigExecImaging/sceneIndexPlugin.cpp
+    libs/rigExecImaging/touchOverlayAdapter.cpp
 )
 target_include_directories(rigExecImaging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -210,6 +214,18 @@ add_test(NAME testRigExecDualQuat COMMAND testRigExecDualQuat)
 add_executable(testRigExecSplineIk tests/testRigExecSplineIk.cpp)
 target_link_libraries(testRigExecSplineIk PRIVATE rigExecMath)
 add_test(NAME testRigExecSplineIk COMMAND testRigExecSplineIk)
+
+# The RBF pose solver against an independent reference implementation,
+# which stays the oracle as a CHECKED-IN FIXTURE rather than a live
+# import: the reference ran once and every answer it gave is in
+# tests/fixtures/psd_parity.json. The fixture path is compiled in so `ctest`
+# works from any working directory; argv[1] still overrides it, which is what
+# a regenerated fixture is checked with before it is copied over.
+add_executable(testRigExecRbf tests/testRigExecRbf.cpp)
+target_link_libraries(testRigExecRbf PRIVATE rigExecMath)
+target_compile_definitions(testRigExecRbf PRIVATE
+    RIGEXEC_RBF_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/psd_parity.json")
+add_test(NAME testRigExecRbf COMMAND testRigExecRbf)
 
 add_executable(testRigExecConstraints tests/testRigExecConstraints.cpp)
 target_link_libraries(testRigExecConstraints PRIVATE rigExec)
@@ -643,6 +659,17 @@ add_test(NAME testRigExecStaticInputCache COMMAND testRigExecStaticInputCache)
 # When the epoch may hold the rests once, and what has to put them back on
 # the per-frame path: animated, connected and chain-written rest channels,
 # before and after Compile, and a drag standing on one.
+# The pose-interpolator phase, evaluated: the weights, the LOCAL delta, the
+# connection that carries a weight into a blend channel, the two enables and
+# parity with the solver driven directly. Self-contained -- it builds its own
+# stage -- so it needs no examples directory.
+add_executable(testRigExecPoseInterpolator
+    tests/testRigExecPoseInterpolator.cpp)
+target_link_libraries(testRigExecPoseInterpolator PRIVATE rigExec rigExecMath)
+target_compile_definitions(testRigExecPoseInterpolator PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecPoseInterpolator COMMAND testRigExecPoseInterpolator)
+
 add_executable(testRigExecEpochRests tests/testRigExecEpochRests.cpp)
 target_link_libraries(testRigExecEpochRests PRIVATE rigExec)
 target_compile_definitions(testRigExecEpochRests PRIVATE
@@ -871,6 +898,10 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_fk_control_space.py"
             "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecFkStartFramePython
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_fk_start_frame.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecPoseCyclePython
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_pose_cycle.py"
@@ -880,6 +911,28 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecInverse COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_inverse.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # Holds the interactive-override invalidation contract in both
+    # directions: a layout an avar drag cannot reach must survive it and stay
+    # bit-identical, and one a layout-naming override CAN reach must still be
+    # dropped. Runs against the shipped biped, which is the only example with
+    # a skinned mesh large enough for the difference to be observable.
+    add_test(NAME testRigExecSkinLayoutOverrides COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_skin_layout_overrides.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # Cone re-execution on the biped, from Python: parity at zero across a
+    # drag, bit-exactness against a rig that never saw one, and -- the half
+    # that matters -- that a leaf drag runs FEWER clusters than the root,
+    # which genuinely reaches every step through its propagation sets.
+    add_test(NAME testRigExecBakedCone COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_cone.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # The stacked biped -- rig, pose interpolators and sparse blend shapes
+    # composed together -- through the program, at parity: the interpolator
+    # is a step and a sparse sample's shape is a prologue-resolved layout, and
+    # this is the only rig at scale that exercises both.
+    add_test(NAME testRigExecBakedPsd COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_psd.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRestLocal COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rest_local.py"
@@ -952,6 +1005,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testViewCubeMath
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_viewcube_math.py")
+    add_test(NAME testGizmoMarquee
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_marquee.py")
 
     # set_tests_properties takes exactly ONE value per property, so extra
     # assignments go through APPEND; ctest then splits the resulting list on

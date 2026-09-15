@@ -128,7 +128,7 @@ DeBoor(const std::array<GfVec3d, 4> &cvs, double u)
     return d[p];
 }
 
-// The real biped rest data (world cm) from joint_positions.data.
+// The real biped rest data, in world centimetres.
 static const std::array<GfVec3d, 4> kSpineCvs = {
     GfVec3d(0.0, 94.6565, -3.4684), GfVec3d(0.0, 102.3655, -2.4877),
     GfVec3d(0.0, 128.2558, -3.3208), GfVec3d(0.0, 129.0082, -3.3208)};
@@ -146,7 +146,7 @@ static const std::vector<double> kNeckWeights = {0.16, 0.32, 0.4, 0.24, 0.08};
 // circular arc whose chord is |b - a| and whose consecutive chord lengths
 // are `segments` (so the polyline is longer than the chord and bows toward
 // `bulge`). Only the CV joints of the real chains are recorded in
-// joint_positions.data; the interior rest origins are synthesised this
+// the source data; the interior rest origins are synthesised this
 // way, which is enough for the rest-residual measurement.
 static std::vector<GfVec3d>
 ArcInterior(

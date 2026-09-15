@@ -1227,6 +1227,33 @@ RigExecSkinTopologyCache::Resolve(
     return _entries.emplace(mover, std::move(built)).first->second;
 }
 
+std::shared_ptr<const RigExecBlendSampleLayout>
+RigExecBlendSampleCache::Resolve(
+    const SdfPath &sample,
+    const std::function<bool(RigExecBlendSampleLayout *)> &build)
+{
+    // Held across the build as well as the lookup, exactly as the skin
+    // topology cache does: concurrent chain tasks would otherwise insert
+    // into the same map at once.
+    std::lock_guard<std::mutex> lock(_mutex);
+    const auto found = _entries.find(sample);
+    if (found != _entries.end()) {
+        // Including a remembered refusal, which is a null entry.
+        return found->second;
+    }
+    auto built = std::make_shared<RigExecBlendSampleLayout>();
+    if (!build(built.get())) {
+        _entries.emplace(sample, nullptr);
+        return nullptr;
+    }
+    const auto candidate = _candidates.find(sample);
+    if (candidate != _candidates.end() && candidate->second &&
+        *candidate->second == *built) {
+        return _entries.emplace(sample, candidate->second).first->second;
+    }
+    return _entries.emplace(sample, std::move(built)).first->second;
+}
+
 RigExecRevisionBinding
 RigExecResolveRevisionBinding(
     const UsdPrim &moverPrim,
@@ -1302,13 +1329,28 @@ RigExecResolveRevisionBinding(
             for (const SdfPath &samplePath : _Targets(channel, "rigExec:samples")) {
                 const UsdPrim sample = moverPrim.GetStage()->GetPrimAtPath(samplePath);
                 const SdfPathVector points = _Targets(sample, "rigExec:targetPoints");
-                if (points.size() != 1) continue; // compile validates cardinality
+                const SdfPathVector shapes = _Targets(sample, "rigExec:blendShape");
+                // Exactly one of the two. Both authored is not a precedence
+                // question: two shapes that disagree with a silent winner is
+                // the worst of the three outcomes, so the sample is dropped
+                // here and compile reports it.
+                if (points.size() + shapes.size() != 1) continue;
                 RigExecReadPhase phase;
                 std::string error;
+                if (shapes.size() == 1) {
+                    // A sparse sample has no phased points property to read:
+                    // its offsets are authored data on a UsdSkelBlendShape,
+                    // not a chain result, so there is no "preceding" or
+                    // "final" revision of them to select.
+                    binding.blendSamples[input].push_back(
+                        {samplePath, SdfPath(), phase, shapes[0]});
+                    continue;
+                }
                 RigExecResolveReadPhase(
                     sample.GetRelationship(TfToken("rigExec:targetPoints")),
                     "rigExec:pointsReadPhase", &phase, &error);
-                binding.blendSamples[input].push_back({samplePath, _PointsOf(points[0]), phase});
+                binding.blendSamples[input].push_back(
+                    {samplePath, _PointsOf(points[0]), phase, SdfPath()});
             }
         }
         binding.base = target;
@@ -1733,6 +1775,38 @@ RigExecAssembleSkinParameters(
     return params;
 }
 
+// Adds `scale` times one sample's delta into `deltas`.
+//
+// The point of the sparse form: a real corrective moves 1,279 of 26,276
+// points, so the indexed loop touches 4.87% of what the dense one does. The
+// dense branch here exists for a sample that carries a layout with empty
+// indices (offsets parallel to the base points), which is what an authored
+// UsdSkelBlendShape with no pointIndices means, and for the dense-points
+// endpoint of a mixed pair.
+static void
+_AccumulateBlendSample(const RigExecBlendSampleData &sample,
+                       const std::vector<GfVec3f> &base,
+                       float scale,
+                       std::vector<GfVec3f> *deltas)
+{
+    if (sample.layout) {
+        const RigExecBlendSampleLayout &layout = *sample.layout;
+        if (layout.indices.empty()) {
+            for (size_t i = 0; i < layout.offsets.size(); ++i) {
+                (*deltas)[i] += layout.offsets[i] * scale;
+            }
+            return;
+        }
+        for (size_t k = 0; k < layout.indices.size(); ++k) {
+            (*deltas)[size_t(layout.indices[k])] += layout.offsets[k] * scale;
+        }
+        return;
+    }
+    for (size_t i = 0; i < base.size(); ++i) {
+        (*deltas)[i] += (sample.points[i] - base[i]) * scale;
+    }
+}
+
 bool
 RigExecSumBlendChannels(
     const std::vector<RigExecBlendChannel> &channels,
@@ -1750,9 +1824,17 @@ RigExecSumBlendChannels(
         }
         for (size_t k = 0; k < channel.samples.size(); ++k) {
             const RigExecBlendSampleData &sample = channel.samples[k];
+            // A sample carries its shape one of two ways, and exactly one:
+            // dense moved points, or an epoch-resolved sparse layout. Both
+            // have to describe THIS mesh.
+            const bool shapeOk =
+                sample.layout
+                    ? (sample.layout->valid &&
+                       sample.layout->pointCount == base.size() &&
+                       sample.points.empty())
+                    : sample.points.size() == base.size();
             if (!std::isfinite(sample.activation) ||
-                sample.activation <= 0 ||
-                sample.points.size() != base.size() ||
+                sample.activation <= 0 || !shapeOk ||
                 (k > 0 && sample.activation ==
                               channel.samples[k - 1].activation)) {
                 return false;
@@ -1776,14 +1858,40 @@ RigExecSumBlendChannels(
         const float aHi = channel.samples[hi].activation;
         const float aLo = hi > 0 ? channel.samples[hi - 1].activation : 0.0f;
         const float t = aHi > aLo ? (w - aLo) / (aHi - aLo) : 1.0f;
-        const std::vector<GfVec3f> *lo =
-            hi > 0 ? &channel.samples[hi - 1].points : nullptr;
-        const std::vector<GfVec3f> &hiPts = channel.samples[hi].points;
-        for (size_t i = 0; i < base.size(); ++i) {
-            const GfVec3f dHi = hiPts[i] - base[i];
-            const GfVec3f dLo = lo ? (*lo)[i] - base[i] : GfVec3f(0);
-            (*deltas)[i] += dLo + (dHi - dLo) * t;
+        const RigExecBlendSampleData *loSample =
+            hi > 0 ? &channel.samples[hi - 1] : nullptr;
+        const RigExecBlendSampleData &hiSample = channel.samples[hi];
+
+        if (!hiSample.layout && (!loSample || !loSample->layout)) {
+            // The all-dense case, kept letter for letter as it was. The
+            // sparse branch below is algebraically the same lerp but not
+            // BIT-identical -- `dLo*(1-t) + dHi*t` and `dLo + (dHi-dLo)*t`
+            // round differently in the last place -- and examples/
+            // 04_BlendShapeFace.usda plus testRigExecArm's blend tests are
+            // gates on this path's exact output. Nothing that only ever
+            // authored targetPoints should move by even an ulp.
+            const std::vector<GfVec3f> *lo =
+                loSample ? &loSample->points : nullptr;
+            const std::vector<GfVec3f> &hiPts = hiSample.points;
+            for (size_t i = 0; i < base.size(); ++i) {
+                const GfVec3f dHi = hiPts[i] - base[i];
+                const GfVec3f dLo = lo ? (*lo)[i] - base[i] : GfVec3f(0);
+                (*deltas)[i] += dLo + (dHi - dLo) * t;
+            }
+            continue;
         }
+
+        // At least one endpoint is sparse. Written as the equivalent
+        // `dLo*(1-t) + dHi*t` so each sample is visited over ITS OWN indices
+        // and the union of the two index sets never has to be formed -- a
+        // point only one endpoint moves simply gets one of the two terms.
+        // Mixed dense/sparse endpoints fall out of this for free, which
+        // matters because an in-between and its full target need not have
+        // been authored the same way.
+        if (loSample) {
+            _AccumulateBlendSample(*loSample, base, 1.0f - t, deltas);
+        }
+        _AccumulateBlendSample(hiSample, base, t, deltas);
     }
     return true;
 }

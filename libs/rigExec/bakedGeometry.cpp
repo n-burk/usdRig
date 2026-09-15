@@ -235,6 +235,32 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                 input.AppendProperty(TfToken("inputs:weight"));
             B.named.insert(weightPath);
             channel.weight = B.stage->GetAttributeAtPath(weightPath);
+            channel.weightPath = weightPath;
+            // A weight connected to a pose interpolator's output reads the
+            // interpolator's slot. The walk is the one RigExecResolvedInputs::
+            // GetAttribute makes -- single authored connections, followed
+            // until one lands on a property the program publishes -- so the
+            // slot answers exactly where the dynamic walk's in-memory lookup
+            // would have.
+            {
+                std::set<SdfPath> visiting;
+                UsdAttribute a = channel.weight;
+                while (a && visiting.insert(a.GetPath()).second) {
+                    const auto found = B.poseWeightIndex.find(a.GetPath());
+                    if (found != B.poseWeightIndex.end()) {
+                        channel.poseWeight = found->second;
+                        break;
+                    }
+                    SdfPathVector connections;
+                    if (a.HasAuthoredConnections()) {
+                        a.GetConnections(&connections);
+                    }
+                    if (connections.size() != 1) {
+                        break;
+                    }
+                    a = B.stage->GetAttributeAtPath(connections[0]);
+                }
+            }
             const auto samples = r.binding.blendSamples.find(input);
             if (samples != r.binding.blendSamples.end()) {
                 for (const RigExecBlendSampleBinding &binding :
@@ -248,11 +274,22 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                     B.named.insert(activationPath);
                     sample.activation =
                         B.stage->GetAttributeAtPath(activationPath);
+                    sample.samplePath = binding.sample;
                     sample.pointsPath = binding.points;
                     sample.phase = binding.phase;
-                    name(binding.points);
-                    sample.points =
-                        B.stage->GetAttributeAtPath(binding.points);
+                    sample.blendShape = binding.blendShape;
+                    if (binding.blendShape.IsEmpty()) {
+                        name(binding.points);
+                        sample.points =
+                            B.stage->GetAttributeAtPath(binding.points);
+                    } else {
+                        // A sparse sample's shape is resolved in the
+                        // prologue, through the evaluator's cache; what is
+                        // named here is the shape prim, so a resync under it
+                        // rebuilds. A value edit to its offsets is caught by
+                        // the cache, which every notice clears.
+                        B.prims.insert(binding.blendShape.GetPrimPath());
+                    }
                     channel.samples.push_back(std::move(sample));
                 }
             }
@@ -939,6 +976,17 @@ RigExecBakedBuildGeometrySteps(RigExecBakedProgramImpl *program)
                         RigExecBakedOne(RigExecBakedSlotDomain::Aggregate,
                                         revision.driverFramesSolver));
                 }
+                // A channel driven by a pose interpolator waits for the
+                // interpolator's step, which is the edge that makes a drag
+                // that cannot reach the driver leave this revision alone.
+                for (const RigExecBakedProgramImpl::GeomBlendChannel &channel :
+                         revision.blendChannels) {
+                    if (channel.poseWeight >= 0) {
+                        assemble.reads.push_back(RigExecBakedOne(
+                            RigExecBakedSlotDomain::PoseWeight,
+                            channel.poseWeight));
+                    }
+                }
                 // readsSnapshots and not `!binding.phases.empty()`: a
                 // blend sample's phase is looked up directly by the channel
                 // gather rather than through the revision's input overlay,
@@ -1579,11 +1627,27 @@ AssembleRevision(RigExecBakedProgramImpl &B,
         for (const RigExecBakedProgramImpl::GeomBlendChannel &bound :
                  revision->blendChannels) {
             RigExecBlendChannel channel;
-            R.GetAttribute(bound.weight, time, &channel.weight);
+            // A pose-driven weight is this run's slot -- unless an override
+            // stands on the weight itself, which the dynamic walk's lookup
+            // finds before it follows the connection and which the resolved
+            // inputs therefore answer here too.
+            if (bound.poseWeight >= 0 && !R.Find(bound.weightPath)) {
+                channel.weight = B.poseWeights[size_t(bound.poseWeight)];
+            } else {
+                R.GetAttribute(bound.weight, time, &channel.weight);
+            }
             for (const auto &boundSample : bound.samples) {
                 RigExecBlendSampleData sample;
                 R.GetAttribute(boundSample.activation, time,
                                &sample.activation);
+                if (!boundSample.blendShape.IsEmpty()) {
+                    // Sparse: the shape the prologue resolved, shared by
+                    // pointer. The packet compares layouts by pointer, so an
+                    // unchanged sample costs one compare and not an array.
+                    sample.layout = boundSample.layout;
+                    channel.samples.push_back(std::move(sample));
+                    continue;
+                }
                 VtVec3fArray points;
                 const VtValue *phased = B.runSnapshots.Lookup(
                     boundSample.pointsPath, boundSample.phase,
@@ -1745,6 +1809,38 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
         revision->curvenetBind = bound.curvenetBinding;
         revision->curvenetBindResolved = true;
     };
+    // A sparse blend sample's shape, resolved HERE and never in a step: the
+    // cache takes a lock, and a refusal means the shape is read off the stage
+    // per frame. Both are the prologue's. The dynamic walk resolves through
+    // the same cache at its own assembly, so the two paths hold the same
+    // pointer for a shape that did not move.
+    const auto resolveBlendLayouts =
+        [&B](RigExecBakedProgramImpl::GeomRevision *revision,
+             size_t pointCount) {
+        for (RigExecBakedProgramImpl::GeomBlendChannel &channel :
+                 revision->blendChannels) {
+            for (RigExecBakedProgramImpl::GeomBlendChannel::Sample &sample :
+                     channel.samples) {
+                if (sample.blendShape.IsEmpty()) {
+                    continue;
+                }
+                sample.layout = B.blendSampleShapes->Resolve(
+                    sample.samplePath,
+                    [&](RigExecBlendSampleLayout *layout) {
+                        return B.resolveBlendSample(sample.blendShape,
+                                                    pointCount, layout);
+                    });
+                if (!sample.layout) {
+                    // Refused the cache: something about the shape can move
+                    // inside this epoch, so it is read per frame instead.
+                    auto perFrame = std::make_shared<RigExecBlendSampleLayout>();
+                    B.resolveBlendSample(sample.blendShape, pointCount,
+                                         perFrame.get());
+                    sample.layout = perFrame;
+                }
+            }
+        }
+    };
     for (RigExecBakedProgramImpl::GeomChain &chain : B.chains) {
         VtVec3fArray basePoints;
         chain.haveBase =
@@ -1792,6 +1888,7 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
         for (RigExecBakedProgramImpl::GeomRevision &revision :
                  chain.revisions) {
             resolveTopology(&revision);
+            resolveBlendLayouts(&revision, basePoints.size());
             resolveCurvenetBind(chain, &revision);
         }
         for (RigExecBakedProgramImpl::GeomChain::Derived &derived :
