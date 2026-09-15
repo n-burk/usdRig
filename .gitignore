@@ -76,19 +76,27 @@ Thumbs.db
 desktop.ini
 .DS_Store
 
-# Built biped rigs. `tools/biped/build_biped_rigexec.py` regenerates these
-# from the Maya data in ~40 seconds; 39 of them were sitting in the repo
-# root at 72 MB total.
+# Built biped rigs. The generator regenerates these from its source data
+# in about 40 seconds; 39 of them were sitting in the repo root at 72 MB
+# total.
 /biped*.usda
 
-# The mesh the skin deforms. 2.4 MB of derived data. To rebuild the rig
-# that is already in examples/, read
-# body_geo's points, faceVertexCounts and faceVertexIndices straight off
-# examples/biped/Biped.usda. NOTE THE UNITS: the manifest is in METRES, because
-# `add_rigexec_skinning` multiplies by 100 on the way in. Handing it
-# centimetres builds a 100x mesh that looks right at rest and explodes to
-# 4452 cm on a 25-degree clavicle rotate.
-/tools/biped/mesh_manifest.json
+# ---------------------------------------------------------------------------
+# What this repository ships, and what it does not.
+#
+# In git: everything needed to BUILD and RUN the rig -- the engine, the
+# usdview plugins, the launchers, the example stages, and the tests that
+# prove the engine does what it claims.
+#
+# Not in git: the apparatus that PRODUCED those stages. The converters read
+# source data this repository does not contain and cannot run without it, so
+# committing them would ship tools nobody outside can execute, against
+# formats that are not ours to publish. The stages they emit are checked in;
+# the machinery that emitted them is not.
+# ---------------------------------------------------------------------------
+
+# Conversion and verification tooling.
+/tools/biped/
 
 # TouchPose's importer and development probes. The importer converts source
 # region data this repository does not ship; the probes are one-off
