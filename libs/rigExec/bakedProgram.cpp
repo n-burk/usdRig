@@ -27,12 +27,14 @@
 #include "bakedSchedule.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
+#include "parallel.h"
 #include "rigEvaluator.h"
 #include "types.h"
 
 #include "rigExecMath/pointFrame.h"
 
 #include "pxr/base/gf/math.h"
+#include "pxr/base/work/loops.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/attributeQuery.h"
@@ -296,12 +298,12 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     // program's own table.
     for (const RigExecRigEvaluator::_PoseInterpolator &record :
              E._poseInterpolators) {
-        if (!E._poseSeedFrames.count(record.driver)) {
+        if (!E._firstFramePoseFrames.count(record.driver)) {
             say("pose interpolator driver is not a pose provider",
                 record.driver);
         }
         if (!record.driverParent.IsEmpty() &&
-            !E._poseSeedFrames.count(record.driverParent)) {
+            !E._firstFramePoseFrames.count(record.driverParent)) {
             say("pose interpolator driver parent is not a pose provider",
                 record.driverParent);
         }
@@ -318,7 +320,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
     for (const auto &[target, revisions] : E._propertyChains) {
         chainTargets.insert(target);
     }
-    for (const auto &[path, tap] : E._poseSeedFrames) {
+    for (const auto &[path, tap] : E._firstFramePoseFrames) {
         const UsdPrim prim = E._stage->GetPrimAtPath(path);
         if (!prim) {
             say("pose provider has no prim", path);
@@ -417,12 +419,12 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         (void)probe;
     }
     for (const SdfPath &joint : E._jointPaths) {
-        if (!E._poseSeedFrames.count(joint)) {
+        if (!E._firstFramePoseFrames.count(joint)) {
             say("joint is not a seeded pose provider", joint);
         }
     }
     for (const SdfPath &control : E._controlPaths) {
-        if (!E._poseSeedFrames.count(control)) {
+        if (!E._firstFramePoseFrames.count(control)) {
             say("control is not a seeded pose provider", control);
         }
     }
@@ -540,11 +542,11 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         // its whole chain atomically, and the dynamic walk records every
         // target of every constraint whatever it revises.
         for (const SdfPath &target : constraint.targets) {
-            if (!E._poseSeedFrames.count(target) &&
+            if (!E._firstFramePoseFrames.count(target) &&
                 !E._xformDerivedProviders.count(target)) {
                 say("constraint target is not a seeded pose provider",
                     target);
-            } else if (E._poseSeedFrames.count(target) &&
+            } else if (E._firstFramePoseFrames.count(target) &&
                        E._xformDerivedProviders.count(target)) {
                 // The two families are documented as disjoint, and they are
                 // for every provider but one: a VOLUME WEIGHT is exec-seeded
@@ -633,7 +635,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                 }
             }
             for (const SdfPath &influence : r.binding.influences) {
-                if (!E._poseSeedFrames.count(influence)) {
+                if (!E._firstFramePoseFrames.count(influence)) {
                     say("skin influence is not a seeded pose provider",
                         influence);
                 }
@@ -1232,6 +1234,11 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.skinTopologies = &E._skinTopologies;
     B.blendSampleShapes = &E._blendSampleShapes;
     B.profiler = &E._profiler;
+    // Where Build spends its time, part by part. The parts run one
+    // after another in this block rather than nested, so they are
+    // marked rather than scoped; see RigExecProfilePhases.
+    RigExecProfilePhases phases(&E._profiler, "compile");
+    phases.Next("Bake.entry");
     B.interactiveOverrides = &E._interactiveOverrides;
     B.jointSolverBinding = &E._jointSolverBinding;
     B.guideTaps = &E._guideTaps;
@@ -1328,6 +1335,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // once at the head of Build.
     B.assetRoot = B.stage->GetPrimAtPath(B.assetRootPath);
 
+    phases.Next("Bake.dense_provider_slots");
     // ---- dense provider slots ---------------------------------------------
     //
     // The ordered union of the two families, which is the set the dynamic
@@ -1336,12 +1344,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // merging them through one ordered map keeps namespace DFS pre-order and
     // with it the "a parent has a lower slot" invariant the compose relies
     // on. The two sets are disjoint by construction (only what isFrameProvider
-    // accepts is seeded); PoseSeed wins a collision, because that is the kind
+    // accepts is seeded); FirstFramePose wins a collision, because that is the kind
     // the compose can actually write.
     {
         std::map<SdfPath, RigExecBakedSlotKind> ordered;
-        for (const auto &[path, tap] : E._poseSeedFrames) {
-            ordered.emplace(path, RigExecBakedSlotKind::PoseSeed);
+        for (const auto &[path, tap] : E._firstFramePoseFrames) {
+            ordered.emplace(path, RigExecBakedSlotKind::FirstFramePose);
         }
         for (const SdfPath &path : E._xformDerivedProviders) {
             ordered.emplace(path, RigExecBakedSlotKind::XformDerived);
@@ -1378,7 +1386,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                 B.propParent[i] = it->second;
             }
             if (B.slotKind[size_t(it->second)] ==
-                RigExecBakedSlotKind::PoseSeed) {
+                RigExecBakedSlotKind::FirstFramePose) {
                 B.parent[i] = it->second;
                 break;
             }
@@ -1389,6 +1397,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
     }
 
+    phases.Next("Bake.the_rest_chain_and_the_default-space_ladder");
     // ---- the rest chain and the default-space ladder -----------------------
     //
     // computations.cpp resolves both per provider per evaluation through
@@ -1411,7 +1420,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.defaultRoundTrip.assign(N, GfMatrix4d(1.0));
     B.ladders.resize(size_t(N));
     for (int i = 0; i < N; ++i) {
-        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
             // An xform-derived slot has no rest chain and no default-space
             // ladder: the dynamic path gives it the identity rest frame
             // outright and reads its pose off the stage.
@@ -1481,7 +1490,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
     };
     for (int i = 0; i < N; ++i) {
-        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
             continue;
         }
         const RigExecBakedProgramImpl::Ladder &ladder = B.ladders[size_t(i)];
@@ -1500,7 +1509,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // so one forward pass settles it.
     B.restChainVaries.assign(size_t(N), 0);
     for (int i = 0; i < N; ++i) {
-        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
             continue;
         }
         const RigExecBakedProgramImpl::Ladder &ladder = B.ladders[size_t(i)];
@@ -1543,31 +1552,64 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.xformBase.assign(B.xformSlots.size(), GfMatrix4d(1.0));
     B.lastXformBase.assign(B.xformSlots.size(), GfMatrix4d(1.0));
 
+    phases.Next("Bake.the_input_binding_table");
     // ---- the input binding table -------------------------------------------
     B.avarConstants.assign(size_t(N) * 11, 0.0);
+    // Eleven channels on every provider, each an independent read of the
+    // composed stage, and on a character this is one of the two loops Build
+    // spends most of its time in. Resolved across threads and committed on
+    // this one: the commit is what hands out override indices, so doing it
+    // here in slot-then-channel order is what keeps the program a parallel
+    // Build produces identical to a serial one. See ResolveBind/CommitBind.
+    struct _AvarResolution {
+        UsdPrim prim;
+        RigExecBakedInput<double> input;
+        SdfPathVector walk;
+    };
+    std::vector<_AvarResolution> resolved(size_t(N) * 11);
+    const auto resolveSlots = [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            // An xform-derived slot binds no avars -- its pose is the
+            // stage's -- so the bound/varying counts and the overridable set
+            // stay exactly what the RigExec providers alone make them.
+            if (B.slotKind[i] != RigExecBakedSlotKind::FirstFramePose) {
+                continue;
+            }
+            const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
+            for (int c = 0; c < 11; ++c) {
+                _AvarResolution &out = resolved[i * 11 + size_t(c)];
+                out.prim = prim;
+                out.input = ctx.ResolveBind(prim, RigExecBakedAvarNames[c],
+                                            RigExecBakedAvarDefaults[c],
+                                            &out.walk);
+            }
+        }
+    };
+    if (RigExecParallelEvaluationEnabled() && N > 1) {
+        WorkParallelForN(size_t(N), resolveSlots);
+    } else {
+        resolveSlots(0, size_t(N));
+    }
     for (int i = 0; i < N; ++i) {
-        // An xform-derived slot binds no avars -- its pose is the stage's --
-        // so the bound/varying counts and the overridable set stay exactly
-        // what the RigExec providers alone make them.
-        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+        if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
             continue;
         }
-        const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
         for (int c = 0; c < 11; ++c) {
             const size_t slot = size_t(i) * 11 + size_t(c);
-            RigExecBakedInput<double> input =
-                bind(prim, RigExecBakedAvarNames[c],
-                     RigExecBakedAvarDefaults[c]);
-            B.avarConstants[slot] = input.constant;
-            if (input.varying) {
-                B.avarBindings.push_back({slot, std::move(input)});
-            } else if (input.overrideIndex >= 0) {
-                B.avarConstantBindings.push_back({slot, std::move(input)});
+            _AvarResolution &out = resolved[slot];
+            ctx.CommitBind(out.prim, RigExecBakedAvarNames[c], &out.input,
+                           out.walk);
+            B.avarConstants[slot] = out.input.constant;
+            if (out.input.varying) {
+                B.avarBindings.push_back({slot, std::move(out.input)});
+            } else if (out.input.overrideIndex >= 0) {
+                B.avarConstantBindings.push_back({slot, std::move(out.input)});
             }
         }
     }
     B.avars = B.avarConstants;
 
+    phases.Next("Bake.the_walk");
     // ---- the walk ------------------------------------------------------------
     //
     // Restated as plain records, because _PoseStep, _SolverBatch and
@@ -1693,6 +1735,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.nativeFrameOk.assign(B.nativeSources.size(), 0);
     B.lastNativeFrameOk = B.nativeFrameOk;
 
+    phases.Next("Bake.publication");
     // ---- publication ---------------------------------------------------------
     for (const SdfPath &joint : E._jointPaths) {
         B.jointSlots.push_back(slotOf(joint));
@@ -1753,10 +1796,12 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // Sized at Build so the epilogue's two passes allocate nothing.
     B.jointMatrixPublished.assign(B.jointPaths.size(), 0);
 
+    phases.Next("Bake.geometry");
     // ---- geometry ------------------------------------------------------------
     //
     // Restated for the same reason the walk was: _GraphRevision is private to
     // the evaluator.
+    phases.Next("Bake.pose_interpolators");
     // ---- pose interpolators -------------------------------------------------
     //
     // Before the geometry, which looks the weights up by property path to
@@ -1841,6 +1886,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     }
     RigExecBakedBuildGeometry(&ctx, chainSpecs);
 
+    phases.Next("Bake.the_rest_of_the_invalidation_index");
     // ---- the rest of the invalidation index ---------------------------------
     //
     // Property chains run INSIDE the program, off the authored stage through
@@ -1884,6 +1930,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         return nullptr;
     }
 
+    phases.Next("Bake.the_step_graph");
     // ---- the step graph -----------------------------------------------------
     //
     // Last, because it is derived from everything above: the steps are the

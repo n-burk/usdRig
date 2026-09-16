@@ -1543,10 +1543,10 @@ Prerequisites the operator groups share; all live in bakedProgram, so they land 
 worktrees from colliding. None may change a published value OR a diagnostic on the three rigs that
 bake today (diagnostics are compared) [P29]:
 
-* slot-kind table: `paths` = ordered union of `_poseSeedFrames` and `_xformDerivedProviders` with
+* slot-kind table: `paths` = ordered union of `_firstFramePoseFrames` and `_xformDerivedProviders` with
   `slotKind`, `parent[]` (nearest compose ancestor, used by compose) and `propParent[]` (nearest
   ancestor of any kind, used for the `closest` climb). The DESCENDANT role in `buildPropagation` is
-  filtered to `slotKind == PoseSeed`, matching the dynamic `hierarchicalProviders` filter
+  filtered to `slotKind == FirstFramePose`, matching the dynamic `hierarchicalProviders` filter
   (rigEvaluator.cpp:8580-8585, :8674); `ownedBySolver` stays keyed on path. Land this alone and diff
   the biped dump before anything else [P28].
 * `_Solver::degenerate` (guard placed after the aggregate clear [P25]); the jointElements resolution

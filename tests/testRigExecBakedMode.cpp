@@ -1295,7 +1295,7 @@ TestAnUnplaceableOverrideFallsBack(const std::string &examplesDir)
     CHECK(before.valid);
     CHECK(rig.GetBakedGenerationCount() == 1);
 
-    // A prim computation the pose-seed request actually carries, so the
+    // A prim computation the first-frame-pose request actually carries, so the
     // dynamic path it falls back to has something to hold the override
     // against; the program has no exec and cannot hold it at all.
     RigExecPointFrame frame = JointFrame(before, joint.GetPath());
@@ -2099,7 +2099,7 @@ _SweepFrames(const UsdStageRefPtr &stage)
 // negative, and like the first it is a property of the rig rather than a gap
 // in the bake.
 //
-// A RigExecSphereWeight is exec-seeded like a joint, so it has a pose seed
+// A RigExecSphereWeight is exec-seeded like a joint, so it has a first-frame pose
 // frame and an avar composition. It is also not a RigExecControl and not a
 // RigExecJoint, so the moment a constraint targets it the compiler
 // catalogues it as a plain UsdGeomXformable as well -- and the two families

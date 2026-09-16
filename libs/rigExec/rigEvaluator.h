@@ -514,7 +514,7 @@ public:
     bool cpuParityMode = false;
 
     /// When set, Compile and Evaluate record scoped phase timings (property
-    /// chains, pose seed, each solver batch and constraint, the exec
+    /// chains, first-frame pose, each solver batch and constraint, the exec
     /// snapshot, each geometry chain, derived maintenance, parity) into the
     /// profiler. Disabled by default; enabling it does not change any
     /// evaluated value.
@@ -689,6 +689,36 @@ private:
 
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
+    /// Whether the requests only the DYNAMIC path pulls were left
+    /// unprepared by Compile, to be prepared at first use instead.
+    ///
+    /// A baked session never pulls them: every runtime TapSet::Evaluate is
+    /// inside _EvaluateDynamic, and a baked frame reaches none of them --
+    /// so preparing them at Compile builds an exec network the session then
+    /// never asks a question of. Set only when the session asked for the
+    /// program outright (Baked); Dynamic needs them on the next frame and
+    /// Parity pulls both paths every frame, so both keep preparing eagerly.
+    ///
+    /// What this moves, and what it does not: the three requests below are
+    /// deferred, and only those. The rest request is not -- the program's
+    /// own epoch rest frames come from it. Nor are the guide and
+    /// connected-pose requests, whose FAILURE is load-bearing at compile:
+    /// a guide request that will not prepare retires the guide taps, which
+    /// the baked frame path reads, and a connected-pose provider is one of
+    /// the things that refuses the bake.
+    ///
+    /// The cost of a failure moves with the work. Today a request that
+    /// cannot be prepared fails the compile; deferred, it fails the first
+    /// dynamic generation instead, with a diagnostic on the pose. A rig
+    /// that bakes never reaches either.
+    bool _execPrepDeferred = false;
+    /// Prepares what _execPrepDeferred left, once. False, with \p pose told
+    /// why, when a request will not prepare.
+    bool _RealizeDeferredExecPrep(RigExecRigPose *pose);
+    /// What this session's evaluation mode will be, asked without changing
+    /// it: _RefreshAttributeEvaluationMode runs at the tail of Compile, and
+    /// the deferral decision is made well before that.
+    RigExecEvaluationMode _PeekEvaluationMode() const;
     std::unique_ptr<RigExecTapSet> _taps;
     /// Observational solver-guide taps in their own prepared request: a
     /// failing or unused aggregate solver degrades guide drawing with a
@@ -763,16 +793,16 @@ private:
     std::vector<_PoseStep> _poseSteps;
     /// Seed only transform providers before solving; geometry/aggregate taps
     /// are evaluated after the complete pose dependency schedule.
-    std::unique_ptr<RigExecTapSet> _poseSeedTaps;
-    std::vector<RigExecValueOverride> _poseSeedInputs;
-    UsdTimeCode _poseSeedTime = UsdTimeCode::Default();
-    RigExecSnapshot _poseSeedSnapshot;
-    bool _poseSeedDirty = true;
-    std::map<SdfPath, RigExecTapId> _poseSeedFrames;
+    std::unique_ptr<RigExecTapSet> _firstFramePoseTaps;
+    std::vector<RigExecValueOverride> _firstFramePoseInputs;
+    UsdTimeCode _firstFramePoseTime = UsdTimeCode::Default();
+    RigExecSnapshot _firstFramePoseSnapshot;
+    bool _firstFramePoseDirty = true;
+    std::map<SdfPath, RigExecTapId> _firstFramePoseFrames;
     /// Per-frame rest taps, used only when some provider's rest inputs can
     /// vary with time; otherwise the rests are evaluated once per epoch into
     /// _epochRestFrames and this is empty (see _restTaps).
-    std::map<SdfPath, RigExecTapId> _poseSeedRests;
+    std::map<SdfPath, RigExecTapId> _firstFramePoseRests;
     /// A provider's rest frame is a function of its rest channels and its
     /// ancestors', none of which move with time on a rig whose rests are not
     /// animated. Asking exec for all of them on every frame recomputes a
@@ -781,7 +811,7 @@ private:
     std::unique_ptr<RigExecTapSet> _restTaps;
     std::map<SdfPath, RigExecTapId> _restTapIds;
     std::map<SdfPath, RigExecPointFrame> _epochRestFrames;
-    /// The time the epoch's rests were pulled at, and the time the pose-seed
+    /// The time the epoch's rests were pulled at, and the time the first-frame-pose
     /// request is warmed at: the stage's start time code, always a real
     /// frame rather than Default (see Compile).
     UsdTimeCode _restTime = UsdTimeCode(0.0);

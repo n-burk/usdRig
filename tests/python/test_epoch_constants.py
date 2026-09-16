@@ -14,7 +14,7 @@ still re-read on every frame.
     edit to such an input must reach the very next evaluate, and an input
     that IS connected or time-sampled must never be held at all.
 
-  * the pose-seed request's warm compute, moved into Compile. It happens at
+  * the first-frame-pose request's warm compute, moved into Compile. It happens at
     the stage's start time code, and the frame asked for first can be any
     other frame, which must still get its own values.
 
@@ -192,7 +192,7 @@ def TestRestEditOnTheOtherEye():
 def TestFirstFrameIsNotTheWarmedFrame():
     """The frame asked for first gets its own values, not the warm's.
 
-    Compile warms the pose-seed request so the first evaluate does not pay
+    Compile warms the first-frame-pose request so the first evaluate does not pay
     for the whole network; that warm happens at the stage's start time, and
     the first evaluate can be any other frame. Asking for a frame once right
     after the compile and again after another frame has to give one answer:

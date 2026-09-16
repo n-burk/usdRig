@@ -738,6 +738,11 @@ add_executable(testRigExecProfiler tests/testRigExecProfiler.cpp)
 target_link_libraries(testRigExecProfiler PRIVATE rigExec)
 add_test(NAME testRigExecProfiler COMMAND testRigExecProfiler)
 
+# Measures what the compile's path bookkeeping costs; asserts nothing, so it
+# is built but deliberately NOT registered with ctest.
+add_executable(benchPathLookup tests/benchPathLookup.cpp)
+target_link_libraries(benchPathLookup PRIVATE rigExec)
+
 add_executable(testRigExecInteractive tests/testRigExecInteractive.cpp)
 target_link_libraries(testRigExecInteractive PRIVATE rigExec)
 target_compile_definitions(testRigExecInteractive PRIVATE

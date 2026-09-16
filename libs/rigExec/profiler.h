@@ -375,6 +375,66 @@ private:
     std::map<std::string, std::string> _args;
 };
 
+/// A scope that moves: closes the interval it is holding and opens the next.
+///
+/// For a pass whose parts run one after another in a single block rather than
+/// nested -- which is what every phase of Compile looks like. A scope per part
+/// would need a brace per part, so timing them would mean re-indenting the
+/// body and burying the change in whitespace; worse, a part that is a loop
+/// over the same code as its neighbour cannot be braced apart at all.
+///
+/// `Next` names the part that STARTS there, so the marks read in the order the
+/// code runs. The last part closes at destruction, and `Close` ends the run
+/// early where a pass returns from the middle.
+///
+/// Disarmed by a null or disabled profiler, like RigExecProfileScope, so an
+/// unprofiled compile pays one branch per mark.
+class RigExecProfilePhases {
+public:
+    RigExecProfilePhases(RigExecProfiler *profiler, std::string category)
+        : _profiler(profiler && profiler->IsEnabled() ? profiler : nullptr),
+          _category(std::move(category))
+    {
+    }
+
+    ~RigExecProfilePhases() { Close(); }
+
+    RigExecProfilePhases(const RigExecProfilePhases &) = delete;
+    RigExecProfilePhases &operator=(const RigExecProfilePhases &) = delete;
+
+    /// Closes the open part, if any, and opens one called \p name.
+    void Next(std::string name)
+    {
+        if (!_profiler) {
+            return;
+        }
+        const uint64_t now = RigExecProfiler::NowUs();
+        if (!_name.empty()) {
+            _profiler->Record(std::move(_name), _category, _startUs, now);
+        }
+        _name = std::move(name);
+        _startUs = now;
+    }
+
+    /// Closes the open part. Idempotent, so an early return and the
+    /// destructor cannot record the same interval twice.
+    void Close()
+    {
+        if (!_profiler || _name.empty()) {
+            return;
+        }
+        _profiler->Record(std::move(_name), _category, _startUs,
+                          RigExecProfiler::NowUs());
+        _name.clear();
+    }
+
+private:
+    RigExecProfiler *_profiler = nullptr;
+    std::string _category;
+    std::string _name;
+    uint64_t _startUs = 0;
+};
+
 #define RIGEXEC_PROFILE_CONCAT_IMPL(a, b) a##b
 #define RIGEXEC_PROFILE_CONCAT(a, b) RIGEXEC_PROFILE_CONCAT_IMPL(a, b)
 

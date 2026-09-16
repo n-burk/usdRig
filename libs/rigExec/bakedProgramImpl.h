@@ -391,13 +391,13 @@ RigExecBakedOpName(RigExecRevisionOp op)
 /// walk may do with it.
 ///
 /// The dynamic path keeps one frame map covering both families and tells them
-/// apart by asking whether the path is in _poseSeedFrames -- its
+/// apart by asking whether the path is in _firstFramePoseFrames -- its
 /// `hierarchicalProviders` set. The program answers the same question off a
 /// dense table instead, because it asks it once per descendant per commit.
 enum class RigExecBakedSlotKind {
     /// An exec-seeded RigExec provider: composed from avars, propagated to as
     /// a descendant, and the only kind a solver or the compose writes.
-    PoseSeed,
+    FirstFramePose,
     /// A plain Xformable a constraint targets. The dynamic walk seeds it from
     /// the stage and revises it like any other target, but deliberately keeps
     /// it out of hierarchicalProviders, so it is never propagated TO -- while
@@ -428,7 +428,7 @@ enum class RigExecBakedSlotKind {
 ///
 /// The specification calls this a slot KIND. That word is already spent in
 /// this header on RigExecBakedSlotKind, which says what a PROVIDER slot is
-/// (PoseSeed or XformDerived), and two similarly named enums in one header is
+/// (FirstFramePose or XformDerived), and two similarly named enums in one header is
 /// how the wrong one gets declared -- so the step graph's is a slot's DOMAIN,
 /// the table it indexes, and the provider one keeps its name.
 enum class RigExecBakedSlotDomain : uint8_t {
@@ -1147,14 +1147,14 @@ struct RigExecBakedProgramImpl {
     // ---- dense provider slots, namespace DFS order ------------------------
     // The slot table is the ordered UNION of the two provider families the
     // dynamic walk holds in one frame map: the RigExec providers exec seeds
-    // (_poseSeedFrames) and the plain Xformables a constraint targets
+    // (_firstFramePoseFrames) and the plain Xformables a constraint targets
     // (_xformDerivedProviders). Both are keyed by SdfPath, whose order IS
     // namespace DFS pre-order, so a provider's parent always has a lower slot
     // than it does and one forward pass composes the whole hierarchy.
     std::vector<SdfPath> paths;
     std::map<SdfPath, int> index;
     std::vector<RigExecBakedSlotKind> slotKind;
-    /// Nearest COMPOSE ancestor -- the nearest PoseSeed slot above this one.
+    /// Nearest COMPOSE ancestor -- the nearest FirstFramePose slot above this one.
     /// The compose ladder inherits from it, because exec's NamespaceAncestor
     /// resolves only RigExec provider types and skips anything else.
     std::vector<int> parent;
@@ -2623,10 +2623,43 @@ struct RigExecBakedBuildContext {
     /// not a pose provider", and there is no longer a refusal standing
     /// between the two meanings. A caller that means "publishes
     /// computeRestFrame" or "is composed from avars" must test
-    /// slotKind[slot] == PoseSeed itself, as the solver rest binding does.
+    /// slotKind[slot] == FirstFramePose itself, as the solver rest binding does.
     int SlotOf(const SdfPath &path) const;
+    /// The RESOLVING half of Bind: reads the stage and decides what the
+    /// channel is, recording nothing.
+    ///
+    /// Every call is a read of the composed stage and of `chainTargets`, so
+    /// calls for distinct channels are independent and may run concurrently
+    /// -- which is the point: a rig's providers carry about twenty channels
+    /// each and resolving them is most of what Build costs. The compile-time
+    /// structure digest already reads this stage from its own thread, so
+    /// concurrent readers are not a new assumption here.
+    ///
+    /// The caller must pass every result to CommitBind afterwards, ON ONE
+    /// THREAD and in program order. Skipping that leaves the input
+    /// unregistered -- no override index, nothing in the invalidation index
+    /// -- which is a silently wrong program rather than a failure.
+    template <class T>
+    RigExecBakedInput<T> ResolveBind(const UsdPrim &prim, const char *name,
+                                     T fallback, SdfPathVector *walk) const;
+
+    /// The RECORDING half: the counters, the invalidation index and the
+    /// override index.
+    ///
+    /// Order-bearing, and that is why it is separate rather than locked.
+    /// Register hands out `overrideIndex` from a running counter, so the
+    /// order these are committed in IS the numbering a program carries. Call
+    /// it in the same order the bindings appear in the program and a
+    /// parallel resolve produces a bake identical to a serial one, byte for
+    /// byte; call it in completion order and the program still works while
+    /// no two builds of one rig agree.
+    template <class T>
+    void CommitBind(const UsdPrim &prim, const char *name,
+                    RigExecBakedInput<T> *input, const SdfPathVector &walk);
+
     /// Binds \p name as a per-frame input, registering it for overrides and
-    /// for invalidation.
+    /// for invalidation. Resolve and commit together, for the call sites
+    /// that have no reason to separate them.
     template <class T>
     RigExecBakedInput<T> Bind(const UsdPrim &prim, const char *name,
                               T fallback);
@@ -2637,11 +2670,20 @@ RigExecBakedInput<T>
 RigExecBakedBuildContext::Bind(const UsdPrim &prim, const char *name,
                                T fallback)
 {
-    RigExecBakedProgramImpl &B = *program;
     SdfPathVector walk;
+    RigExecBakedInput<T> input = ResolveBind(prim, name, fallback, &walk);
+    CommitBind(prim, name, &input, walk);
+    return input;
+}
+
+template <class T>
+RigExecBakedInput<T>
+RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
+                                      T fallback, SdfPathVector *walk) const
+{
     RigExecBakedInput<T> input =
         RigExecBakedBindInput(prim, name, fallback, capture, chainTargets,
-                              &walk);
+                              walk);
     // A selection that moves with the time code is read the long way,
     // through this generation's resolved inputs, rather than through a
     // query pinned to the wrong attribute.
@@ -2684,9 +2726,19 @@ RigExecBakedBuildContext::Bind(const UsdPrim &prim, const char *name,
         input.query = UsdAttributeQuery();
         input.resolvedAttr = prim.GetAttribute(TfToken(name));
     }
+    return input;
+}
+
+template <class T>
+void
+RigExecBakedBuildContext::CommitBind(const UsdPrim &prim, const char *name,
+                                     RigExecBakedInput<T> *input,
+                                     const SdfPathVector &walk)
+{
+    RigExecBakedProgramImpl &B = *program;
     if (prim && prim.GetAttribute(TfToken(name))) {
         ++B.boundInputs;
-        if (input.varying) ++B.varyingInputs;
+        if (input->varying) ++B.varyingInputs;
     }
     if (prim) {
         B.prims.insert(prim.GetPath());
@@ -2695,8 +2747,7 @@ RigExecBakedBuildContext::Bind(const UsdPrim &prim, const char *name,
         // not find.
         B.named.insert(prim.GetPath().AppendProperty(TfToken(name)));
     }
-    B.Register(&input, walk);
-    return input;
+    B.Register(input, walk);
 }
 
 // ---------------------------------------------------------------------------

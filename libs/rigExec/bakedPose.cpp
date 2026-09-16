@@ -86,7 +86,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
     auto providerSlot = [&](const SdfPath &path) {
         const int slot = slotOf(path);
         return slot >= 0 && B.slotKind[size_t(slot)] ==
-                                RigExecBakedSlotKind::PoseSeed
+                                RigExecBakedSlotKind::FirstFramePose
                    ? slot
                    : -1;
     };
@@ -130,7 +130,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             // relationship's target count instead would remap by the wrong
             // index, and would keep remapping where exec gives up.
             //
-            // A PoseSeed slot is what "publishes computeRestFrame" means: an
+            // A FirstFramePose slot is what "publishes computeRestFrame" means: an
             // xform-derived slot exists in the table so a constraint can name
             // it, but exec seeds it from the stage and it declares no rest
             // computation, so it contributes no input here either.
@@ -138,7 +138,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             for (const SdfPath &joint : joints) {
                 const int slot = slotOf(joint);
                 if (slot >= 0 && B.slotKind[size_t(slot)] ==
-                                     RigExecBakedSlotKind::PoseSeed) {
+                                     RigExecBakedSlotKind::FirstFramePose) {
                     restSlots.push_back(slot);
                 }
             }
@@ -844,7 +844,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 // never propagated TO, only seeded and revised. It still
                 // takes a slot, so the scan passes over it rather than
                 // stopping at it.
-                if (B.slotKind[size_t(j)] != RigExecBakedSlotKind::PoseSeed) {
+                if (B.slotKind[size_t(j)] != RigExecBakedSlotKind::FirstFramePose) {
                     continue;
                 }
                 if (candidateSet.count(j) || !covered.insert(j).second) {
@@ -1899,7 +1899,7 @@ RigExecBakedComposeLadder(RigExecBakedProgramImpl *program, UsdTimeCode time,
     };
     for (int i = 0; i < N; ++i) {
         const size_t slot = size_t(i);
-        if (B.slotKind[slot] != RigExecBakedSlotKind::PoseSeed) {
+        if (B.slotKind[slot] != RigExecBakedSlotKind::FirstFramePose) {
             // An xform-derived slot has no rest chain and no default-space
             // ladder: the dynamic path gives it the identity rest frame
             // outright and reads its pose off the stage. Build set both and
@@ -2400,7 +2400,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         const RigExecBakedComposeGroup &group =
             B.composeGroups[size_t(step->object)];
         for (int i = group.begin; i < group.end; ++i) {
-            if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::PoseSeed) {
+            if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
                 // An xform-derived slot is not composed from avars: the
                 // dynamic path seeds it from the stage, and until the program
                 // does the same nothing writes it.

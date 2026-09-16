@@ -1593,7 +1593,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // rest attribute, a weight, a goal transform) still changes what they
     // compute. Any stage edit therefore retires their cached snapshots, the
     // same way it retires the affected solver batches below.
-    _poseSeedDirty = true;
+    _firstFramePoseDirty = true;
     _guideDirty = true;
     _connectedPoseCache.clear();
     for (auto &[target, derived] : _derivedCache) {
@@ -2844,6 +2844,13 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // Sequential region stamps: Compile is flat code with early returns,
     // so RAII scopes cannot span its phases; each stamp closes the
     // previous region and opens the next. One branch when disabled.
+    // Whether to leave the dynamic-only requests unprepared; see
+    // _execPrepDeferred for which three those are and why the others are
+    // not among them. Read once, here, so that every site below agrees --
+    // half a deferred epoch would be a request nothing prepares and nothing
+    // knows to.
+    const bool deferExecPrep =
+        _PeekEvaluationMode() == RigExecEvaluationMode::Baked;
     const bool profileCompile = _profiler.IsEnabled();
     uint64_t compileRegionStart =
         profileCompile ? RigExecProfiler::NowUs() : 0;
@@ -2855,12 +2862,22 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         _profiler.Record(name, "compile", compileRegionStart, now);
         compileRegionStart = now;
     };
+    // The parts WITHIN those regions, for the same reason and on the same
+    // clock: a phase that takes a fifth of the compile says nothing about
+    // which of its passes to go and look at. Strictly nested inside the
+    // stamps above, so the trace shows them as children rather than as a
+    // second, competing set of rows. Closed at each phase boundary so no
+    // block spans two phases, and on destruction so an early return
+    // cannot leave one open.
+    RigExecProfilePhases compileBlocks(&_profiler, "compile");
+
     auto reportError = [errors](const std::string &message) {
         if (errors) {
             errors->push_back(message);
         }
     };
 
+    compileBlocks.Next("DiscoverValidate.Validate");
     // Same channel, different verdict: a notice is reported to the author and
     // the compile CONTINUES. It exists so that "this is not wired up" can be
     // said out loud without being fatal -- an incomplete mover is inert, not a
@@ -3079,6 +3096,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 
     std::vector<SdfPath> solverArrayPaths;
     std::map<SdfPath, SdfPath> newRibbonDriverPoints;
+    compileBlocks.Next("DiscoverValidate.AggregateProviders");
     // Every aggregate frame provider, wherever the author placed it: their
     // computePointFrameArray results are published (and drawn as guides by
     // the imaging chain, like OpenExec's IrJointScope guides).
@@ -3105,10 +3123,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("DiscoverValidate.WarmupDispatch");
     // Warm the shared exec network, off the critical path.
     //
     // Every request this compile prepares -- fourteen solver batches, the
-    // pose seed, the main epoch request, the guides -- compiles into the SAME
+    // first-frame pose, the main epoch request, the guides -- compiles into the SAME
     // exec network for this stage, and whichever request asks for a provider
     // first pays to compile it. Asking for all of them at once, here, builds
     // that shared network in one wide parallel round rather than in a series
@@ -3151,6 +3170,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         prepareWarmupTaps();
     }
 
+    compileBlocks.Next("DiscoverValidate.MoverDiscovery");
     // Mover discovery: reverse-sibling post-order walk of the composed Movers
     // namespace. Descendants run before their mover parent; sibling branches
     // run bottom-to-top in usdview (reverse composed child order, spec §4.2).
@@ -4038,6 +4058,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("DiscoverValidate.OutputCheck");
     // A rig has to publish SOMETHING (the check the joint requirement used
     // to stand in for).
     //
@@ -4140,6 +4161,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("DiscoverValidate.SolverJointBinding");
     // View-free solver->joint binding validation. This
     // runs in Phase A, BEFORE any epoch teardown, so an invalid binding
     // rejects the compile while the previous epoch stays publishable (the
@@ -4559,6 +4581,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("DiscoverValidate.SolverDag");
     // Compile the solver DAG, including frame inputs carried by a posed
     // namespace ancestor. Rest inputs are independent of posed outputs and
     // therefore never introduce a feedback edge (IK -> blend is legal).
@@ -4644,6 +4667,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Close();
     stampCompileRegion("Compile.DiscoverValidate");
     // The structure digest is a pure read of the composed stage that boils it
     // down to one number, and that number is not consulted until the epoch is
@@ -4667,6 +4691,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     }
     stampCompileRegion("Compile.StructureDigest");
 
+    compileBlocks.Next("SolverSchedule.ReplacementRequests");
     // Prepare replacement requests while retaining the previous requests and
     // their shared compiler context. The stock network handles changed USD
     // bindings incrementally; no whole execution-system replacement is needed.
@@ -4690,6 +4715,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     std::vector<RigExecTapId> newJointFinalMatrixTaps;
     std::map<SdfPath, RigExecTapId> newSolverArrayTaps;
 
+    compileBlocks.Next("SolverSchedule.VolumeWeights");
     // Volumetric weight epoch state (spec §4.1 volumetric extension).
     std::vector<RigExecValueOverride> newFalloffLutOverrides;
     std::set<SdfPath> newCurrentPhaseWeights;
@@ -4875,6 +4901,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     }
 
 
+    compileBlocks.Next("SolverSchedule.PoseConstraints");
     // Pose-domain constraints, compiled to in-memory structural wiring. Aim,
     // Position, Rotation, Scale, and Parent revise one transform provider;
     // SingleChainIK revises its inferred joint chain atomically. Values stay
@@ -5162,6 +5189,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 jointPath, TfToken("computeMatrix"), finalPhase)));
     }
 
+    compileBlocks.Next("SolverSchedule.ControlFrames");
     // Control frames, base phase only: a control is an input, so nothing in
     // the pose domain revises it and its base frame IS its posed frame.
     // Same request as the joints -- a control that cannot produce a frame
@@ -5173,6 +5201,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             controlPath, _computePointFrame, basePhase)));
     }
 
+    compileBlocks.Next("SolverSchedule.PropertyChains");
     // Property-domain chains, from the same mover execution walk.
     //
     // Nothing to bind and nothing to tap: a math mover's inputs are all
@@ -5308,6 +5337,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("SolverSchedule.PointGraph");
     // Bind the persistent point graph from the composed execution walk.
     // Geometry constraints contribute solved matrix packets to this same
     // chain. Compilation resolves bindings without authoring scene data.
@@ -5424,6 +5454,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("SolverSchedule.SampleReads");
     // Resolve sample-relative preceding reads against the global mover walk.
     // Samples can belong to a different chain, or multiple blend applications;
     // each application gets its own checkpoint, independent of sample identity.
@@ -5451,6 +5482,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("SolverSchedule.DerivedMaintenance");
     // Derived maintenance (spec §7.6 revised), mirroring Pass 3: for every
     // moved points target whose gprim authors normals or extent, synthesize
     // the recompute revision. There is no authored mover, so the gprim itself
@@ -5515,6 +5547,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
+    compileBlocks.Next("SolverSchedule.PoseDag");
     // Compile one pose DAG. Constraints retain authored preceding order;
     // solvers read the final constrained state of each declared frame input.
     // Bound joints replace their namespace callback, cutting ancestor edges.
@@ -5631,6 +5664,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         newSolverJoints[binding.first].emplace_back(joint, binding.second);
         requiredSolvers.insert(binding.first);
     }
+    compileBlocks.Next("SolverSchedule.AggregateConsumers");
     // Geometry aggregate consumers are authoritative even without joints.
     for (const auto &[target, revisions] : newGraphChains) {
         for (const _GraphRevision &revision : revisions) {
@@ -5721,7 +5755,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             batch.dependencies.insert(dependencies.begin(), dependencies.end());
             const auto &frames = solverFrameInputs[path];
             batch.frameInputs.insert(frames.begin(), frames.end());
-            const bool batchPrepared = [&]() {
+            const bool batchPrepared = deferExecPrep ? true : [&]() {
                 RIGEXEC_PROFILE_SCOPE_CAT(
                     _profiler, "TapPrepare solverBatch", "compile");
                 return batch.taps->Prepare();
@@ -5868,17 +5902,19 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         return false;
     }
 
+    compileBlocks.Close();
     stampCompileRegion("Compile.SolverSchedule");
-    auto newPoseSeedTaps = std::make_unique<RigExecTapSet>(_stage);
-    std::map<SdfPath, RigExecTapId> newPoseSeedFrames, newPoseSeedRests;
+    auto newFirstFramePoseTaps = std::make_unique<RigExecTapSet>(_stage);
+    std::map<SdfPath, RigExecTapId> newFirstFramePoseFrames, newFirstFramePoseRests;
+    compileBlocks.Next("PrepareRequests.ProviderTaps");
     // The rest taps are added below, once the provider set is closed, because
     // whether they belong in the per-frame request or in the epoch request
     // depends on the whole set (see newRestsMightVary).
     auto seedProvider = [&](SdfPath path) {
         for (; !path.IsEmpty() && path != SdfPath::AbsoluteRootPath();
              path = path.GetParentPath()) {
-            if (!isFrameProvider(path) || newPoseSeedFrames.count(path)) continue;
-            newPoseSeedFrames[path] = newPoseSeedTaps->Add(
+            if (!isFrameProvider(path) || newFirstFramePoseFrames.count(path)) continue;
+            newFirstFramePoseFrames[path] = newFirstFramePoseTaps->Add(
                 RigExecValueAddress::Prim(path, _computePointFrame));
         }
     };
@@ -5896,7 +5932,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         for (const auto &pole : constraint.poleObjects) seedProvider(pole.sourcePath);
     }
     std::vector<SdfPath> seedPaths;
-    for (const auto &[provider, tap] : newPoseSeedFrames) seedPaths.push_back(provider);
+    for (const auto &[provider, tap] : newFirstFramePoseFrames) seedPaths.push_back(provider);
     for (const SdfPath &provider : seedPaths) poseProviderClosure(provider);
     std::map<SdfPath, std::set<SdfPath>> newPoseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> newConnectedPoseTaps;
@@ -5919,6 +5955,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             newConnectedPoseTaps[provider] = std::move(taps);
         }
     }
+    compileBlocks.Next("PrepareRequests.RestTaps");
     // Rest frames: one request for the whole epoch, or per-frame taps when
     // some provider's rest channels can move with time.
     //
@@ -5943,30 +5980,31 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         for (const auto &[target, revisions] : newPropertyChains) {
             chainTargets.insert(target);
         }
-        for (const auto &[provider, tap] : newPoseSeedFrames) {
+        for (const auto &[provider, tap] : newFirstFramePoseFrames) {
             if (_ProviderRestMightVary(_stage, provider, chainTargets)) {
                 newRestsMightVary = true;
                 break;
             }
         }
     }
-    for (const auto &[provider, tap] : newPoseSeedFrames) {
+    for (const auto &[provider, tap] : newFirstFramePoseFrames) {
         const RigExecValueAddress address =
             RigExecValueAddress::Prim(provider, TfToken("computeRestFrame"));
         if (newRestsMightVary) {
-            newPoseSeedRests[provider] = newPoseSeedTaps->Add(address);
+            newFirstFramePoseRests[provider] = newFirstFramePoseTaps->Add(address);
         } else {
             newRestTapIds[provider] = newRestTaps->Add(address);
         }
     }
 
-    if (newPoseSeedFrames.empty()) {
-        newPoseSeedTaps.reset();
+    compileBlocks.Next("PrepareRequests.ExecPrepare");
+    if (newFirstFramePoseFrames.empty()) {
+        newFirstFramePoseTaps.reset();
     } else {
-        const bool seedPrepared = [&]() {
+        const bool seedPrepared = deferExecPrep ? true : [&]() {
             RIGEXEC_PROFILE_SCOPE_CAT(
-                _profiler, "TapPrepare poseSeed", "compile");
-            return newPoseSeedTaps->Prepare();
+                _profiler, "TapPrepare firstFramePose", "compile");
+            return newFirstFramePoseTaps->Prepare();
         }();
         if (!seedPrepared) {
             reportError("failed to prepare pose provider inputs");
@@ -5975,7 +6013,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
     }
 
-    const bool mainPrepared = [&]() {
+    const bool mainPrepared = deferExecPrep ? true : [&]() {
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "TapPrepare main", "compile");
         return newTaps->Prepare();
@@ -5987,6 +6025,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         return false;
     }
 
+    compileBlocks.Next("PrepareRequests.GuideTaps");
     // Observational solver-guide taps prepare separately so a failing or
     // unused aggregate solver never gates the authoritative rig request;
     // preparation failure simply drops solver guide drawing.
@@ -6005,6 +6044,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         newGuideTaps.reset();
         newSolverArrayTaps.clear();
     }
+    compileBlocks.Next("PrepareRequests.RestPull");
     // The epoch's rest frames, pulled once, at the stage's start time -- the
     // frame a session opens on, and, with no time-varying rest channel in
     // the epoch, the same frames every other time code would give.
@@ -6018,10 +6058,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     const UsdTimeCode restTime =
         UsdTimeCode(_stage ? _stage->GetStartTimeCode() : 0.0);
 
+    compileBlocks.Next("PrepareRequests.WarmCompute");
     // Pay the first frame's warm compute here.
     //
     // Every Evaluate warms the shared executor before its override-bearing
-    // pull (see PoseSeed), and the first warm of a session computes the whole
+    // pull (see FirstFramePose), and the first warm of a session computes the whole
     // seed network from an empty cache -- which is most of what makes the
     // first frame cost several times the frames after it. None of that work
     // depends on which frame is asked for first, so it is done once here, at
@@ -6031,9 +6072,14 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // Before the rest pull below, not after: a provider's rest frame is an
     // input to its point frame, so the warm computes the rests too and the
     // pull becomes a copy-out of values that are already there.
-    if (newPoseSeedTaps) {
-        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.WarmPoseSeed", "compile");
-        newPoseSeedTaps->Warm(restTime);
+    // Skipped with the preparations it belongs to. Warm() PREPARES a request
+    // it finds unprepared, so leaving this in a deferred epoch would do the
+    // deferred work here under another name -- which is exactly what the
+    // first attempt at this did, and the trace said so: the warm went from
+    // 6.8 ms to 22.5 ms and the compile barely moved.
+    if (newFirstFramePoseTaps && !deferExecPrep) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.WarmFirstFramePose", "compile");
+        newFirstFramePoseTaps->Warm(restTime);
     }
 
     std::map<SdfPath, RigExecPointFrame> newEpochRestFrames;
@@ -6067,6 +6113,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // construction is here.
     warmupTaps.reset();
 
+    compileBlocks.Close();
     stampCompileRegion("Compile.PrepareRequests");
     // Commit the new epoch atomically with respect to evaluator state.
     _movers = std::move(newMovers);
@@ -6104,6 +6151,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         digestDispatcher.Wait();
     }
     _structureDigest = newDigest;
+    // Set with the requests it describes, and only once they are the
+    // evaluator's: a compile that turned back before here left the previous
+    // epoch standing, and its flag with it.
+    _execPrepDeferred = deferExecPrep;
     _taps = std::move(newTaps);
     _guideTaps = std::move(newGuideTaps);
     _guideInputs.clear();
@@ -6118,13 +6169,13 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _connectedPoseTaps = std::move(newConnectedPoseTaps);
     _connectedPoseCache.clear();
     _poseSteps = std::move(newPoseSteps);
-    _poseSeedTaps = std::move(newPoseSeedTaps);
-    _poseSeedInputs.clear();
-    _poseSeedTime = UsdTimeCode::Default();
-    _poseSeedSnapshot = RigExecSnapshot();
-    _poseSeedDirty = true;
-    _poseSeedFrames = std::move(newPoseSeedFrames);
-    _poseSeedRests = std::move(newPoseSeedRests);
+    _firstFramePoseTaps = std::move(newFirstFramePoseTaps);
+    _firstFramePoseInputs.clear();
+    _firstFramePoseTime = UsdTimeCode::Default();
+    _firstFramePoseSnapshot = RigExecSnapshot();
+    _firstFramePoseDirty = true;
+    _firstFramePoseFrames = std::move(newFirstFramePoseFrames);
+    _firstFramePoseRests = std::move(newFirstFramePoseRests);
     _restTaps = std::move(newRestTaps);
     _restTapIds = std::move(newRestTapIds);
     _epochRestFrames = std::move(newEpochRestFrames);
@@ -6137,13 +6188,13 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _interveningXformProviders.clear();
     {
         const SdfPath assetRootPath = _rigPath.GetParentPath();
-        for (const auto &[provider, tap] : _poseSeedFrames) {
+        for (const auto &[provider, tap] : _firstFramePoseFrames) {
             SdfPath anchorPath;
             for (SdfPath walk = provider.GetParentPath();
                  !walk.IsEmpty() && !walk.IsAbsoluteRootPath() &&
                      walk != assetRootPath;
                  walk = walk.GetParentPath()) {
-                if (_poseSeedFrames.count(walk)) {
+                if (_firstFramePoseFrames.count(walk)) {
                     anchorPath = walk;
                     break;
                 }
@@ -8746,7 +8797,7 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
     std::map<SdfPath, GfMatrix4d> intervening;
     const std::map<SdfPath, SdfPath> &anchorOf = _poseProviderAnchors;
     bool anyIntervening = false;
-    for (const auto &[provider, tap] : _poseSeedFrames) {
+    for (const auto &[provider, tap] : _firstFramePoseFrames) {
         intervening[provider] = GfMatrix4d(1.0);
     }
     for (const SdfPath &provider : _interveningXformProviders) {
@@ -9555,6 +9606,38 @@ RigExecRigEvaluator::_WantsBakeRefusalReasons() const
         _evaluationModeSource == RigExecEvaluationModeSource::Attribute;
 }
 
+RigExecEvaluationMode
+RigExecRigEvaluator::_PeekEvaluationMode() const
+{
+    // The same three-way precedence _RefreshAttributeEvaluationMode applies,
+    // read-only. Compile has to decide whether to defer the dynamic-only
+    // preparations in its PrepareRequests phase, and the refresh runs at the
+    // TAIL of Compile on purpose -- rigExec:baked is composed, so a
+    // reference swap can change it with nothing else moving, and the rebuild
+    // wants the latest answer. Asking here rather than moving that call
+    // keeps the documented ordering.
+    //
+    // If the two ever disagreed -- composition changing mid-compile -- the
+    // cost is a dynamic session whose first frame prepares its own requests.
+    // Slower once, never wrong.
+    if (_evaluationModeSource == RigExecEvaluationModeSource::Explicit ||
+        _evaluationModeSource == RigExecEvaluationModeSource::Environment) {
+        return _evaluationMode;
+    }
+    if (_stage) {
+        if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
+            const UsdAttribute attribute =
+                rig.GetAttribute(_BakedAttributeName());
+            bool baked = false;
+            if (attribute && attribute.HasAuthoredValue() &&
+                attribute.Get(&baked) && baked) {
+                return RigExecEvaluationMode::Baked;
+            }
+        }
+    }
+    return RigExecEvaluationMode::Dynamic;
+}
+
 bool
 RigExecRigEvaluator::_RefreshAttributeEvaluationMode()
 {
@@ -9745,7 +9828,7 @@ RigExecRigEvaluator::_SettleEpoch(std::vector<std::string> *diagnostics)
         // per-frame ones, and the digest is blind to that as well, so the
         // classification is re-asked here and answered by recompiling. This
         // is the only place the rest taps can be moved back into the
-        // per-frame pose-seed request, which is what the fallback is.
+        // per-frame first-frame-pose request, which is what the fallback is.
         if (!_restTapIds.empty() && _EpochRestsMightVary()) {
             if (!Compile(diagnostics)) {
                 diagnostics->push_back("structural recompilation failed");
@@ -9767,6 +9850,53 @@ RigExecRigEvaluator::_SettleEpoch(std::vector<std::string> *diagnostics)
     return true;
 }
 
+bool
+RigExecRigEvaluator::_RealizeDeferredExecPrep(RigExecRigPose *pose)
+{
+    RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "DeferredExecPrep", "compile");
+    // DROP THE GIL, for the reason Compile states at length and with the
+    // same measurement behind it: the first ExecUsdSystem::PrepareRequest
+    // in a process lazily loads the exec definition plugins through
+    // TfScriptModuleLoader, which needs the GIL, and a Python caller holds
+    // it across this call. Deferring the preparation is precisely what
+    // moves that first PrepareRequest OUT of Compile's guarded scope, so
+    // the guard has to come with it -- without this, a deferred epoch
+    // reintroduces the hang Compile was given its guard to fix, and does it
+    // only when a Python caller races a worker to the registry.
+    TF_PY_ALLOW_THREADS_IN_SCOPE();
+    // Cleared first, and whatever happens: a request that will not prepare
+    // will not prepare on the next frame either, and retrying it every
+    // generation would turn one compile's cost into every frame's.
+    _execPrepDeferred = false;
+
+    if (_firstFramePoseTaps && !_firstFramePoseTaps->Prepare()) {
+        pose->diagnostics.push_back(
+            "failed to prepare pose provider inputs");
+        return false;
+    }
+    if (_taps && !_taps->Prepare()) {
+        pose->diagnostics.push_back(
+            "failed to build a valid prepared request for the epoch");
+        return false;
+    }
+    for (_SolverBatch &batch : _solverBatches) {
+        if (batch.taps && !batch.taps->Prepare()) {
+            pose->diagnostics.push_back(
+                "failed to prepare solver dependency level");
+            return false;
+        }
+    }
+    // The warm Compile does for an eagerly prepared epoch, done here for a
+    // deferred one: the first override-bearing pull would otherwise compute
+    // the whole seed network from an empty cache behind every override.
+    if (_firstFramePoseTaps) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "DeferredExecPrep.Warm",
+                                  "compile");
+        _firstFramePoseTaps->Warm(_restTime);
+    }
+    return true;
+}
+
 RigExecRigPose
 RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                       std::vector<std::string> diagnostics)
@@ -9775,6 +9905,14 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     pose.time = time;
     pose.diagnostics = std::move(diagnostics);
     if (!_SettleEpoch(&pose.diagnostics)) {
+        return pose;
+    }
+    // This is the one path that pulls the deferred requests, and the first
+    // line of it that could: everything below reads a snapshot from one of
+    // them. After _SettleEpoch, because settling may compile a new epoch --
+    // and it is that epoch's requests, not the retired one's, that are owed
+    // preparing.
+    if (_execPrepDeferred && !_RealizeDeferredExecPrep(&pose)) {
         return pose;
     }
 
@@ -9897,15 +10035,15 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     std::set<SdfPath> fallbackJoints;
     std::map<SdfPath, RigExecPointFrameArray> solvedAggregates;
     RigExecSnapshot seedSnapshot;
-    if (_poseSeedTaps) {
-        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PoseSeed", "pose");
-        _poseSeedDirty = _poseSeedTaps->ConsumeDirty() || _poseSeedDirty;
+    if (_firstFramePoseTaps) {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "FirstFramePose", "pose");
+        _firstFramePoseDirty = _firstFramePoseTaps->ConsumeDirty() || _firstFramePoseDirty;
         const bool sameSeedInputs =
-            !_poseSeedDirty && _poseSeedTime == time &&
-            _poseSeedSnapshot.IsValid() && _poseSeedSnapshot.IsComplete() &&
-            baseOverrides.size() == _poseSeedInputs.size() &&
+            !_firstFramePoseDirty && _firstFramePoseTime == time &&
+            _firstFramePoseSnapshot.IsValid() && _firstFramePoseSnapshot.IsComplete() &&
+            baseOverrides.size() == _firstFramePoseInputs.size() &&
             std::equal(baseOverrides.begin(), baseOverrides.end(),
-                       _poseSeedInputs.begin(),
+                       _firstFramePoseInputs.begin(),
                        [](const RigExecValueOverride &a,
                           const RigExecValueOverride &b) {
                            return a.prim == b.prim &&
@@ -9914,24 +10052,24 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                   a.value == b.value;
                        });
         if (sameSeedInputs) {
-            seedSnapshot = _poseSeedSnapshot;
+            seedSnapshot = _firstFramePoseSnapshot;
         } else {
             // Warm the shared executor before the override-bearing pull, so
             // the sub-executor that serves the overrides inherits a populated
             // cache instead of recomputing the whole network behind every
             // override.
-            _poseSeedTaps->Warm(time);
-            seedSnapshot = _poseSeedTaps->Evaluate(time, baseOverrides);
+            _firstFramePoseTaps->Warm(time);
+            seedSnapshot = _firstFramePoseTaps->Evaluate(time, baseOverrides);
             if (!seedSnapshot.IsValid() || !seedSnapshot.IsComplete()) {
-                _poseSeedDirty = true;
+                _firstFramePoseDirty = true;
                 pose.diagnostics.push_back("pose provider input evaluation incomplete");
                 return pose;
             }
-            _poseSeedSnapshot = seedSnapshot;
-            _poseSeedInputs = baseOverrides;
-            _poseSeedTime = time;
-            _poseSeedDirty = false;
-            _poseSeedTaps->ConsumeDirty();
+            _firstFramePoseSnapshot = seedSnapshot;
+            _firstFramePoseInputs = baseOverrides;
+            _firstFramePoseTime = time;
+            _firstFramePoseDirty = false;
+            _firstFramePoseTaps->ConsumeDirty();
         }
     }
 
@@ -9963,13 +10101,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
 
     // Seed every reachable RigExec frame provider before any pose operation.
     // Solvers will replace their owned joint frames when their inputs are ready.
-    // The three maps are empty here and _poseSeedFrames hands its keys over
+    // The three maps are empty here and _firstFramePoseFrames hands its keys over
     // already ordered, so each insertion goes straight to the end instead of
     // searching the tree it is building.
     // The rests are the epoch's, pulled once at Compile -- unless this epoch
     // has a rest channel that can move with time, in which case they rode in
     // on the seed snapshot with the frames.
-    if (_poseSeedRests.empty()) {
+    if (_firstFramePoseRests.empty()) {
         // ... or unless a drag is standing on a rest channel. An interactive
         // override is a value that stands in for an authored one, so it has
         // to move a rest frame exactly as authoring it would: the drag and
@@ -10020,14 +10158,14 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // walk calls are declared in the middle of it, and a block would scope
     // them out.
     regionStart = profileRegions ? RigExecProfiler::NowUs() : 0;
-    for (const auto &[provider, tap] : _poseSeedFrames) {
+    for (const auto &[provider, tap] : _firstFramePoseFrames) {
         const RigExecPointFrame frame = seedSnapshot.Get<RigExecPointFrame>(tap);
         baseFrames.emplace_hint(baseFrames.end(), provider, frame);
         finalFrames.emplace_hint(finalFrames.end(), provider, frame);
-        if (!_poseSeedRests.empty()) {
+        if (!_firstFramePoseRests.empty()) {
             restFrames.emplace_hint(restFrames.end(), provider,
                 seedSnapshot.Get<RigExecPointFrame>(
-                    _poseSeedRests.at(provider)));
+                    _firstFramePoseRests.at(provider)));
         }
     }
     // Compose the transform of any plain Xformable lying between the asset
@@ -10182,7 +10320,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     const std::set<SdfPath> hierarchicalProviders(
         [&]() {
             std::set<SdfPath> result;
-            for (const auto &[path, tap] : _poseSeedFrames) result.insert(path);
+            for (const auto &[path, tap] : _firstFramePoseFrames) result.insert(path);
             return result;
         }());
 
@@ -11040,7 +11178,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
     }
 
-    for (const auto &[provider, tap] : _poseSeedFrames) {
+    for (const auto &[provider, tap] : _firstFramePoseFrames) {
         if (!refreshPoseProvider(provider)) return pose;
     }
 
@@ -11051,7 +11189,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         jointOverrides.push_back({solver, _computePointFrameArray, TfToken(),
                                   VtValue(aggregate)});
     }
-    for (const auto &[provider, tap] : _poseSeedFrames) {
+    for (const auto &[provider, tap] : _firstFramePoseFrames) {
         jointOverrides.push_back({provider, _computePointFrame, TfToken(),
                                   VtValue(baseFrames.at(provider))});
     }
@@ -11221,7 +11359,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             guideOverrides.push_back({solver, _computePointFrameArray, TfToken(),
                                       VtValue(aggregate)});
         }
-        for (const auto &[provider, tap] : _poseSeedFrames) {
+        for (const auto &[provider, tap] : _firstFramePoseFrames) {
             guideOverrides.push_back({provider, _computePointFrame, TfToken(),
                                       VtValue(finalFrames.at(provider))});
         }
