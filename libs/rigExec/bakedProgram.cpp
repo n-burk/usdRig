@@ -36,6 +36,7 @@
 #include "pxr/base/gf/math.h"
 #include "pxr/base/work/loops.h"
 #include "pxr/base/gf/rotation.h"
+#include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/attributeQuery.h"
 #include "pxr/usd/usd/prim.h"
@@ -1098,6 +1099,175 @@ RigExecBakedProgram::BumpProgramStamp()
     ++_impl->programStamp;
 }
 
+namespace {
+
+// One captured avar, moved to a new constant.
+//
+// Three copies of the value exist and all three move: the binding (what a
+// drag's release writes back from), the constant table (what a rebuild would
+// have captured), and the working table the frame reads. The working slot is
+// left alone while an override stands on it -- the drag owns that slot, and
+// the constant pass that runs when it is released writes this new constant
+// back, which is exactly the value an authored edit under a drag should land
+// on. Nothing is marked dirty: the frame path compares every avar slot with
+// last run's by VALUE, which is the whole of what the cone needs.
+//
+// \p animated moves the binding the other way instead: the avar has become a
+// function of time (Animation mode keys a released drag as a spline knot),
+// so from now on the frame reads it the long way, exactly as a rebuild would
+// have bound it. And an animated binding that is given a plain value again
+// (the undo of that key) comes back to being a constant here.
+void
+RigExecProgramAvarPatch(RigExecBakedProgramImpl *B, size_t bindingIndex,
+                        double value, bool animated)
+{
+    RigExecBakedProgramImpl::AvarBinding &binding =
+        B->avarConstantBindings[bindingIndex];
+    const auto promoted = std::find(B->promotedAvars.begin(),
+                                    B->promotedAvars.end(), bindingIndex);
+    if (animated) {
+        if (promoted == B->promotedAvars.end()) {
+            binding.input.varying = true;
+            binding.input.query = UsdAttributeQuery();
+            binding.input.resolvedAttr = binding.input.head;
+            B->promotedAvars.push_back(bindingIndex);
+            ++B->varyingInputs;
+        }
+        // The frame's read decides the working value; it compares by value
+        // against the last run like any other avar.
+        return;
+    }
+    if (promoted != B->promotedAvars.end()) {
+        binding.input.varying = false;
+        binding.input.resolvedAttr = UsdAttribute();
+        B->promotedAvars.erase(promoted);
+        --B->varyingInputs;
+    }
+    binding.input.constant = value;
+    B->avarConstants[binding.slot] = value;
+    const int overrideIndex = binding.input.overrideIndex;
+    const bool dragged = overrideIndex >= 0 &&
+                         size_t(overrideIndex) < B->overridden.size() &&
+                         B->overridden[size_t(overrideIndex)];
+    if (!dragged) {
+        B->avars[binding.slot] = value;
+    }
+}
+
+}  // namespace
+
+bool
+RigExecBakedProgram::ApplyAvarValueEdits(
+    const UsdNotice::ObjectsChanged &notice)
+{
+    RigExecBakedProgramImpl &B = *_impl;
+    if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
+        return false;
+    }
+    static const TfToken kDefault("default");
+    static const TfToken kTypeName("typeName");
+    static const TfToken kSpline("spline");
+
+    // Decide EVERYTHING before writing anything: a notice this cannot fully
+    // absorb must leave the table exactly as the rebuild path expects it.
+    struct _Patch {
+        size_t binding;
+        double value;
+        bool animated;
+    };
+    std::vector<_Patch> patches;
+    // A property resync is a spec appearing or going away under a value:
+    // the first value a layer authors for an avar, and the undo that
+    // removes it. Only the property itself may resync (a prim resync is
+    // structure), and it may name only its type besides the value. What the
+    // attribute composes to afterwards is checked below exactly as for a
+    // plain value edit, so a spec that brings a connection or a spline, or
+    // takes the last value away, still declines.
+    std::vector<std::pair<SdfPath, bool>> edited;
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        if (!path.IsPropertyPath()) {
+            return false;
+        }
+        edited.emplace_back(path, true);
+    }
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        edited.emplace_back(path, false);
+    }
+    for (const auto &[path, resynced] : edited) {
+        const bool captured = B.rebuild.count(path) ||
+                              (path.IsPropertyPath() &&
+                               B.xformPrims.count(path.GetPrimPath()));
+        if (!captured) {
+            // Prim-level info arrives for the ancestors of an edit (an
+            // `over` being touched above it). It moves no value the frame
+            // reads, and IsInvalidatedBy ignores it for the same reason.
+            if (path.IsPrimPath()) {
+                continue;
+            }
+            // A PROPERTY the bake did not fold: a value the frame path
+            // re-reads, or something on a prim it never looked at. That
+            // still owes the program a stamp bump, which this entry point
+            // promises the caller it does not need -- so it is declined.
+            return false;
+        }
+        const auto found = B.patchableAvars.find(path);
+        if (found == B.patchableAvars.end()) {
+            return false;
+        }
+        for (const TfToken &field : notice.GetChangedFields(path)) {
+            if (field != kDefault && field != kSpline &&
+                !(resynced && field == kTypeName)) {
+                return false;  // time samples, a connection...
+            }
+        }
+        const RigExecBakedProgramImpl::AvarBinding &binding =
+            B.avarConstantBindings[found->second];
+        const UsdAttribute attribute = binding.input.head;
+        if (!attribute) {
+            return false;
+        }
+        // A new spec can restate the type, and the slot holds a double.
+        if (attribute.GetTypeName() != SdfValueTypeNames->Double) {
+            return false;
+        }
+        // A connection makes the value come from somewhere else, which only
+        // a rebuild can walk to.
+        SdfPathVector connections;
+        if (attribute.HasAuthoredConnections() &&
+            attribute.GetConnections(&connections) && !connections.empty()) {
+            return false;
+        }
+        // Animated by a spline: promoted to a per-frame read. Time SAMPLES
+        // still rebuild, because the bake reads their count for more than
+        // this slot (a SingleChainIK's autoDetect mode is decided by whether
+        // its chain's translates are keyed that way, and splines do not
+        // count there).
+        if (attribute.GetNumTimeSamples() > 0) {
+            return false;
+        }
+        if (attribute.HasSpline()) {
+            patches.push_back({found->second, 0.0, true});
+            continue;
+        }
+        if (attribute.ValueMightBeTimeVarying()) {
+            return false;  // varies some way this does not know
+        }
+        // Cleared back to nothing reads as the channel's default, which is
+        // the fallback the bake captures for an attribute with no value.
+        double value = RigExecBakedAvarDefaults[binding.slot % 11];
+        attribute.Get(&value, UsdTimeCode::Default());
+        patches.push_back({found->second, value, false});
+    }
+    if (patches.empty()) {
+        return false;
+    }
+    for (const _Patch &patch : patches) {
+        RigExecProgramAvarPatch(&B, patch.binding, patch.value,
+                                patch.animated);
+    }
+    return true;
+}
+
 bool
 RigExecBakedProgram::SetOverrides(
     const std::vector<RigExecValueOverride> &overrides)
@@ -1692,6 +1862,17 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             if (out.input.varying) {
                 B.avarBindings.push_back({slot, std::move(out.input)});
             } else if (out.input.overrideIndex >= 0) {
+                // Patchable only when the value came from the attribute
+                // itself. A walk longer than one captured it upstream,
+                // through a connection, and an edit on the head would not be
+                // the value the slot holds.
+                const SdfPath property = out.prim.GetPath().AppendProperty(
+                    TfToken(RigExecBakedAvarNames[c]));
+                if (out.walk.size() <= 1 && out.input.head &&
+                    out.input.head.GetPath() == property) {
+                    B.patchableAvars[property] =
+                        B.avarConstantBindings.size();
+                }
                 B.avarConstantBindings.push_back({slot, std::move(out.input)});
             }
         }

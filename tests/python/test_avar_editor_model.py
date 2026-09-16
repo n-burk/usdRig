@@ -127,6 +127,28 @@ def TestDiscovery(stage):
            "the range widens to hold the value")
     _Check(by["avars:rotationOrder"].SliderRange(stage) is None,
            "no slider for a token")
+    # An attribute that states its own range wins over the per-kind guess:
+    # a foot roll dial in degrees is not a 0..1 weight.
+    # A throwaway dial, removed again so later tests see the fixture as it
+    # was built.
+    dialAttr = prim.CreateAttribute("avars:limitsProbe",
+                                    Sdf.ValueTypeNames.Float)
+    dial = model.Channel(prim, dialAttr, stage)
+    _Check(dial.SliderRange(stage) == (0.0, 1.0),
+           "a bare float with no limits is a 0..1 dial")
+    dialAttr.SetCustomDataByKey("limits", {
+        "soft": {"minimum": -120.0, "maximum": 120.0},
+        "hard": {"minimum": -180.0, "maximum": 180.0}})
+    _Check(dial.SliderRange(stage) == (-120.0, 120.0),
+           "authored soft limits set the slider: %s"
+           % (dial.SliderRange(stage),))
+    dialAttr.SetCustomDataByKey("limits", {
+        "hard": {"minimum": -90.0, "maximum": 90.0}})
+    _Check(dial.SliderRange(stage) == (-90.0, 90.0),
+           "hard limits stand in when there are no soft ones")
+    _Check(dial.SliderRange(stage, 95.0) == (-90.0, 95.0),
+           "and a value past them still widens the slider")
+    prim.RemoveProperty("avars:limitsProbe")
     # A unit scale factor changes the translate label.
     prim.GetAttribute("avars:unitScaleFactor").Set(2.5)
     rebuilt, _ = model.DiscoverChannels(prim, stage)

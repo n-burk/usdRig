@@ -1518,35 +1518,126 @@ void
 RigExecRigEvaluator::_OnObjectsChanged(
     const UsdNotice::ObjectsChanged &notice, const UsdStageWeakPtr &)
 {
+    ++_stageEditSerial;
     // Never evaluate in a notice callback: ExecUsd must finish invalidating
     // its own caches before the next pull. External inputs can live anywhere
     // on the stage, so retain conservative structural checks after edits.
-    _structureDirty = true;
+    //
+    // EXCEPT for a notice that is provably nothing but new VALUES on the
+    // numeric avar channels: an Avar Editor slider tick, a typed value, a
+    // key moved, a released gizmo. The structure digest never reads an
+    // avar's value (only rigExec:* attributes, and the time-sample COUNT of
+    // a handful of those), and the rest frames the epoch refresh on an edit
+    // are rest:*, not avars -- so re-deriving both answered "nothing
+    // changed" at ~115 ms per slider tick on the biped. Anything else in the
+    // notice -- a resync, a non-avar property, a field other than a value --
+    // keeps the conservative path.
+    //
+    // A RESYNC on one of those channels still qualifies when it is on the
+    // property alone. The first value a layer holds for an avar creates its
+    // property spec, which USD reports as a property resync carrying only
+    // typeName, and undoing it removes the spec, a resync carrying nothing.
+    // Every released gizmo drag and its undo is exactly that pair, and
+    // treating it as structure rebaked the program for ~250 ms per release.
+    // A prim resync is never a value edit and keeps the conservative path.
+    const bool avarValuesOnly = [&notice]() {
+        if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
+            return false;
+        }
+        static const TfToken kDefault("default");
+        static const TfToken kTimeSamples("timeSamples");
+        static const TfToken kSpline("spline");
+        static const TfToken kTypeName("typeName");
+        // The numeric channels only. avars:defaultSpace and
+        // avars:rotationOrder are tokens that choose how a frame is
+        // composed, which is structure, so they are not in this list.
+        static const TfToken kChannels[] = {
+            TfToken("avars:tx"), TfToken("avars:ty"), TfToken("avars:tz"),
+            TfToken("avars:sx"), TfToken("avars:sy"), TfToken("avars:sz"),
+            TfToken("avars:rx"), TfToken("avars:ry"), TfToken("avars:rz"),
+            TfToken("avars:rspin"), TfToken("avars:unitScaleFactor")};
+        const auto isChannel = [](const TfToken &name) {
+            for (const TfToken &avar : kChannels) {
+                if (name == avar) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        bool sawAvar = false;
+        for (const SdfPath &path : notice.GetResyncedPaths()) {
+            if (!path.IsPropertyPath() || !isChannel(path.GetNameToken())) {
+                return false;
+            }
+            for (const TfToken &field : notice.GetChangedFields(path)) {
+                if (field != kTypeName && field != kDefault &&
+                    field != kTimeSamples && field != kSpline) {
+                    return false;
+                }
+            }
+            sawAvar = true;
+        }
+        for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+            if (path.IsPrimPath()) {
+                continue;  // ancestor info around the edit
+            }
+            if (!isChannel(path.GetNameToken())) {
+                return false;
+            }
+            for (const TfToken &field : notice.GetChangedFields(path)) {
+                if (field != kDefault && field != kTimeSamples &&
+                    field != kSpline) {
+                    return false;
+                }
+            }
+            sawAvar = true;
+        }
+        return sawAvar;
+    }();
+    if (!avarValuesOnly) {
+        _structureDirty = true;
+    }
     // Authored values may have moved anywhere on the stage, and the static
     // cache holds authored values: the whole of it is dropped, on every
     // notice, for the same reason the structure is re-checked on every one.
+    //
+    // This one is dropped even for an avar-only notice: the cache holds the
+    // edited avar's OLD authored value, and it is the one cache below that
+    // can.
     _staticInputs.Clear();
-    // The property chains' pinned queries are the same kind of thing one
-    // step further in: a query holds where a value comes FROM, which only a
-    // stage edit can move, and the prims and relationship targets beside
-    // them are structure. Dropped whole, on every notice, and rebound by the
-    // next frame -- the conservative answer, and the only one that cannot be
-    // wrong.
-    _propertyChainBindings.reset();
-    // Epoch-scoped geometry caches. A weight-paint edit and a points edit are
-    // both VALUE edits: the digest does not change, so no new epoch begins,
-    // and nothing else here would ever let go of the arrays they replaced.
-    // Dropping them on every notice is the conservative answer, and the only
-    // one that cannot be wrong -- rebuilding costs one read per skinned mesh.
-    _skinTopologies.Clear();
-    _blendSampleShapes.Clear();
-    // Which properties can REACH a layout is read off the same stage as the
-    // layouts themselves -- a connection authored on rigExec:jointWeights
-    // moves no epoch digest and recompiles nothing -- so the answer is
-    // dropped exactly where the layouts are.
-    _skinLayoutInputsValid = false;
-    for (auto &[target, live] : _liveGraphs) {
-        if (live) live->basePointsPushed = false;
+    // Everything else below is skipped for a notice that is only avar
+    // VALUES, because none of it can hold one. Measured on the biped, the
+    // re-reads they force cost ~15 ms of a ~23 ms Avar Editor tick:
+    //   * property chains are float-typed with type-strict connections
+    //     (_ValidateScalarConnection), so no binding can reach a double avar;
+    //   * skin layouts, blend sample shapes and the base points a live graph
+    //     pushes are jointIndices/weights, shape offsets and mesh points --
+    //     none of them avars, and a notice that named any of them would not
+    //     be avar-only.
+    if (!avarValuesOnly) {
+        // The property chains' pinned queries are the same kind of thing one
+        // step further in: a query holds where a value comes FROM, which only
+        // a stage edit can move, and the prims and relationship targets beside
+        // them are structure. Dropped whole, on every notice, and rebound by
+        // the next frame -- the conservative answer, and the only one that
+        // cannot be wrong.
+        _propertyChainBindings.reset();
+        // Epoch-scoped geometry caches. A weight-paint edit and a points edit
+        // are both VALUE edits: the digest does not change, so no new epoch
+        // begins, and nothing else here would ever let go of the arrays they
+        // replaced. Dropping them on every notice is the conservative answer,
+        // and the only one that cannot be wrong -- rebuilding costs one read
+        // per skinned mesh.
+        _skinTopologies.Clear();
+        _blendSampleShapes.Clear();
+        // Which properties can REACH a layout is read off the same stage as
+        // the layouts themselves -- a connection authored on
+        // rigExec:jointWeights moves no epoch digest and recompiles nothing --
+        // so the answer is dropped exactly where the layouts are.
+        _skinLayoutInputsValid = false;
+        for (auto &[target, live] : _liveGraphs) {
+            if (live) live->basePointsPushed = false;
+        }
     }
     // The baked program captured values, and the epoch digest is deliberately
     // blind to values, so the digest cannot say whether one of them moved.
@@ -1556,7 +1647,13 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // the program standing, which is what keeps an edit elsewhere in the
     // scene from degrading the rig to the dynamic path.
     if (_bakedProgram) {
-        if (_bakedProgram->IsInvalidatedBy(notice)) {
+        if (avarValuesOnly && _bakedProgram->ApplyAvarValueEdits(notice)) {
+            // Patched in place: the program's avar table already holds the
+            // new constants, and its by-value slot comparison re-runs only
+            // their cone. No rebuild, and no stamp bump -- the bump would
+            // mark the whole program dirty for one run to find what the
+            // comparison already finds.
+        } else if (_bakedProgram->IsInvalidatedBy(notice)) {
             _bakedProgramStale = true;
             // The rebuild is allowed to refuse where the standing program did
             // not, and a refusal remembered from before this notice would
@@ -2041,41 +2138,59 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
     // evaluator members -- a member cache would have to be invalidated by
     // _OnObjectsChanged, and the whole point of the digest is to be the
     // thing that does not trust incremental invalidation.
-    std::unordered_map<SdfPath, _PoseInputInfo, SdfPath::Hash> poseInfoCache;
     std::unordered_map<SdfPath, std::string, SdfPath::Hash> solverInputTokens;
     // One attribute can sit in many blocks (every joint's parent:space chain
     // republishes its ancestors' attributes), so resolve each path's
     // "path:type->sources|" text once too.
     std::unordered_map<SdfPath, std::string, SdfPath::Hash> connectionText;
+    // Each provider's transitive pose-input closure, as one token, shared by
+    // every closure that reaches it.
+    std::unordered_map<SdfPath, std::string, SdfPath::Hash>
+        providerClosureTokens;
+    struct _DigestHop {
+        std::vector<SdfPath> own;     // this prim's attributes, sorted
+        std::set<SdfPath> depends;    // prims this one reads
+    };
+    std::unordered_map<SdfPath, _DigestHop, SdfPath::Hash> digestHops;
     const auto appendSolverInputConnections =
-        [this, &digest, &poseInfoCache, &solverInputTokens,
-         &connectionText](const UsdPrim &prim) {
+        [this, &digest, &solverInputTokens, &connectionText,
+         &providerClosureTokens, &digestHops](const UsdPrim &prim) {
         const SdfPath primPath = prim ? prim.GetPath() : SdfPath();
         const auto cached = solverInputTokens.find(primPath);
         if (cached != solverInputTokens.end()) {
             digest += cached->second;
             return;
         }
-        std::set<SdfPath> paths = _CollectAttributeConnectionInputs(prim);
-        std::set<SdfPath> visitedProviders;
-        std::vector<UsdPrim> pending{prim};
-        while (!pending.empty()) {
-            const UsdPrim provider = pending.back();
-            pending.pop_back();
-            if (!provider || !visitedProviders.insert(provider.GetPath()).second) continue;
-            auto info = poseInfoCache.find(provider.GetPath());
-            if (info == poseInfoCache.end()) {
-                info = poseInfoCache.emplace(
-                    provider.GetPath(), _CollectPoseInputInfo(provider)).first;
-            }
-            paths.insert(info->second.attributes.begin(),
-                         info->second.attributes.end());
-            for (const SdfPath &input : info->second.providers) {
-                pending.push_back(_stage->GetPrimAtPath(input));
-            }
-        }
-        std::string block;
-        for (const SdfPath &path : paths) {
+        // THE TRANSITIVE POSE-INPUT CLOSURE, AS A MERKLE TOKEN.
+        //
+        // This used to flatten a prim's whole provider closure into one set
+        // of attribute paths and hash the text of all of them -- rebuilt
+        // from scratch per prim, because every prim's closure is a
+        // different set and so the per-prim cache below could not share
+        // anything between them. On a nested chain a prim at depth d reads
+        // d providers, so its block was O(d) entries of O(d)-long paths,
+        // and the digest over N such prims was CUBIC. Measured on one
+        // RigExecFkChain over a nested chain: 2.0 s at 100 joints, 191 s at
+        // 400, all of it in Digest.Solvers.
+        //
+        // Now each provider's closure is a token computed once: the text of
+        // its OWN attributes plus the tokens of the providers it reads, in
+        // path order. A provider is shared by every closure that reaches
+        // it, so the work is linear in providers. Identity is at least as
+        // strong as the flattened set: any change to any attribute, type or
+        // connection anywhere in a closure changes that provider's token
+        // and therefore every token that folds it in -- and it also
+        // distinguishes WHICH provider an attribute arrived through, which
+        // the flat set merged.
+        //
+        // Iterative post-order, not recursion: closures run hundreds deep.
+        // A cycle cannot be closed over, so the edge that closes one
+        // contributes a marker naming the path instead; Compile reports the
+        // cycle itself, and the marker still makes introducing or removing
+        // one change the digest.
+        const auto attributeText = [this, &connectionText](
+                                       const SdfPath &path)
+            -> const std::string & {
             auto text = connectionText.find(path);
             if (text == connectionText.end()) {
                 const UsdAttribute attribute = _stage->GetAttributeAtPath(path);
@@ -2092,8 +2207,136 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                 entry += '|';
                 text = connectionText.emplace(path, std::move(entry)).first;
             }
-            block += text->second;
+            return text->second;
+        };
+        // ONE HOP of a prim's pose inputs: every attribute it owns, and the
+        // prims those attributes lead to. The same rules as
+        // _CollectPoseInputInfo -- connections, parent:space to the
+        // namespace frame provider, the default-space fallback -- but it
+        // stops at the first foreign prim instead of following it, because
+        // that prim's own token already covers everything past it.
+        //
+        // _CollectPoseInputInfo follows the default-space fallback to the
+        // root, so a prim at depth d returns ~13 attributes per ancestor in
+        // a std::set whose SdfPath comparisons also walk depth. Built for
+        // every prim, that stayed super-quadratic after the token work
+        // above (10.4 s of 11 at 400 joints). The pose schedule still uses
+        // it, unchanged; only the digest reads this instead.
+        const auto hopFor =[this, &digestHops](const UsdPrim &provider)
+            -> const _DigestHop & {
+            const SdfPath key = provider.GetPath();
+            auto found = digestHops.find(key);
+            if (found != digestHops.end()) {
+                return found->second;
+            }
+            _DigestHop hop;
+            const TfToken type = provider.GetTypeName();
+            const bool isProvider = type == "RigExecJoint" ||
+                                    type == "RigExecControl" ||
+                                    _IsVolumeWeightType(type);
+            const UsdPrim frameParent =
+                isProvider ? _NamespaceFrameProvider(provider) : UsdPrim();
+            for (const UsdAttribute &attribute : provider.GetAttributes()) {
+                hop.own.push_back(attribute.GetPath());
+                for (const SdfPath &source : _AuthoredConnections(attribute)) {
+                    if (source.GetPrimPath() != key) {
+                        hop.depends.insert(source.GetPrimPath());
+                    }
+                }
+                if (!isProvider || !frameParent) {
+                    continue;
+                }
+                // The fallback rules that leave this prim: each of them
+                // reads the namespace frame provider, whose token carries
+                // its own continuation of the chain.
+                const TfToken &name = attribute.GetName();
+                if (name == "parent:space" || name == "parent:defaultSpace" ||
+                    name == "default:space") {
+                    hop.depends.insert(frameParent.GetPath());
+                }
+            }
+            std::sort(hop.own.begin(), hop.own.end());
+            return digestHops.emplace(key, std::move(hop)).first->second;
+        };
+        const auto tokenOf = [](const std::string &kind,
+                                const std::string &text) {
+            return kind + "#" + std::to_string(std::hash<std::string>{}(text)) +
+                   ":" + std::to_string(text.size()) + "|";
+        };
+
+        std::string providerToken;
+        if (prim) {
+            // 1 = on the walk, 2 = token ready (in providerClosureTokens).
+            std::unordered_map<SdfPath, int, SdfPath::Hash> state;
+            std::vector<std::pair<SdfPath, bool>> walk{{prim.GetPath(), false}};
+            while (!walk.empty()) {
+                const auto [path, expanded] = walk.back();
+                walk.pop_back();
+                if (providerClosureTokens.count(path)) {
+                    continue;
+                }
+                const UsdPrim provider = _stage->GetPrimAtPath(path);
+                if (!provider) {
+                    providerClosureTokens.emplace(
+                        path, "missingProvider:" + path.GetString() + "|");
+                    continue;
+                }
+                const _DigestHop &hop = hopFor(provider);
+                // WHAT THIS TOKEN FOLDS IN: this prim's own attributes by
+                // text, and every prim it reads one hop away by token. A
+                // foreign attribute is never written out here -- its owner's
+                // token already hashes all of that owner's own attributes,
+                // so any edit to it changes this token too. That is at least
+                // as strong an identity as the flattened set this replaced,
+                // and marginally stronger: a structural edit to another
+                // attribute of a connection-source prim now also re-epochs,
+                // which is a recompile, never a missed one.
+                const std::set<SdfPath> &depends = hop.depends;
+                if (!expanded) {
+                    if (state[path] == 1) {
+                        continue;  // already scheduled on this walk
+                    }
+                    state[path] = 1;
+                    walk.push_back({path, true});
+                    for (const SdfPath &input : depends) {
+                        if (!providerClosureTokens.count(input) &&
+                            state[input] != 1) {
+                            walk.push_back({input, false});
+                        }
+                    }
+                    continue;
+                }
+                // std::sets: already in path order and unique, which is
+                // what makes the token independent of the order anything
+                // was discovered in.
+                std::string text = path.GetString();
+                text += '{';
+                for (const SdfPath &attribute : hop.own) {
+                    text += attributeText(attribute);
+                }
+                for (const SdfPath &input : depends) {
+                    const auto ready = providerClosureTokens.find(input);
+                    if (ready != providerClosureTokens.end()) {
+                        text += ready->second;
+                    } else {
+                        // Still on the walk: this edge closes a cycle.
+                        text += "cycle@" + input.GetString() + "|";
+                    }
+                }
+                text += '}';
+                state[path] = 2;
+                providerClosureTokens.emplace(path, tokenOf("provider", text));
+            }
+            providerToken = providerClosureTokens[prim.GetPath()];
         }
+
+        // The prim's own authored connection inputs sit beside its provider
+        // closure, exactly as the flattened set used to add them.
+        std::string block;
+        for (const SdfPath &path : _CollectAttributeConnectionInputs(prim)) {
+            block += attributeText(path);
+        }
+        block += providerToken;
         // What lands in the digest is a TOKEN for this prim's closure, not
         // the closure text. The same prim's block is emitted once per
         // ancestor per target per relationship per solver, so appending the
@@ -2111,6 +2354,72 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             std::to_string(block.size()) + "|";
         digest += token;
         solverInputTokens.emplace(primPath, std::move(token));
+    };
+    // THE ANCESTOR CHAIN OF A RELATIONSHIP TARGET, AS ONE TOKEN PER PATH.
+    //
+    // Every aggregate-solver target contributes its whole ancestor chain --
+    // each ancestor's path, type and input closure -- because a rewire
+    // anywhere above a joint changes the frame it resolves against. That
+    // used to be emitted inline: per target, walk every ancestor and append
+    // its full path string. On a nested chain that is N targets x N
+    // ancestors x a path N components long, and it was cubic. Measured on
+    // one RigExecFkChain over a nested chain: 287 ms at 50 joints, 2.0 s at
+    // 100, 188 s at 400 -- and 224 of the biped's 372 ms compile, the
+    // largest single cost left after the pose-schedule work.
+    //
+    // Siblings share every ancestor above them, and a chain's joints share
+    // all of theirs, so each path's chain is computed once and folds in its
+    // parent's token. The identity is the same kind the closure tokens above
+    // already use: a hash of the exact text plus its length, so any change
+    // to any ancestor's path, type or closure still changes every token
+    // below it. Function-local for the same reason as the caches above.
+    //
+    // Iterative, not recursive: a chain can be hundreds of joints deep.
+    std::unordered_map<SdfPath, std::string, SdfPath::Hash> ancestorChainTokens;
+    const auto ancestorChainToken =
+        [this, &digest, &ancestorChainTokens,
+         &appendSolverInputConnections](const SdfPath &start)
+            -> const std::string & {
+        static const std::string kRoot;
+        // Walk up to the first path already known (or the root), noting the
+        // ones that are not; then build them top-down so each finds its
+        // parent's token ready.
+        std::vector<SdfPath> missing;
+        for (SdfPath path = start;
+             !path.IsEmpty() && path != SdfPath::AbsoluteRootPath();
+             path = path.GetParentPath()) {
+            if (ancestorChainTokens.count(path)) {
+                break;
+            }
+            missing.push_back(path);
+        }
+        for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+            const SdfPath &path = *it;
+            const UsdPrim ancestor = _stage->GetPrimAtPath(path);
+            std::string block = path.GetString();
+            block += ':';
+            block += ancestor ? ancestor.GetTypeName().GetString()
+                              : std::string("missing");
+            block += ',';
+            // The input closure's token, captured rather than appended: the
+            // helper writes into the digest, and here it belongs inside this
+            // path's block instead.
+            const size_t mark = digest.size();
+            appendSolverInputConnections(ancestor);
+            block.append(digest, mark, std::string::npos);
+            digest.resize(mark);
+            const SdfPath parent = path.GetParentPath();
+            const auto above = ancestorChainTokens.find(parent);
+            if (above != ancestorChainTokens.end()) {
+                block += above->second;
+            }
+            ancestorChainTokens.emplace(
+                path, "chain#" +
+                    std::to_string(std::hash<std::string>{}(block)) + ":" +
+                    std::to_string(block.size()) + "|");
+        }
+        const auto found = ancestorChainTokens.find(start);
+        return found != ancestorChainTokens.end() ? found->second : kRoot;
     };
     if (const UsdPrim rig = _stage->GetPrimAtPath(_rigPath)) {
         // Recursive over the composed rig subtree (not GetChildren):
@@ -2147,16 +2456,7 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
                         appendRelTargets(solver, name.c_str(), false);
                     appendFrameBindingIdentity(solver, name.c_str());
                     for (const SdfPath &target : targets) {
-                        for (SdfPath path = target.GetPrimPath();
-                             !path.IsEmpty() &&
-                             path != SdfPath::AbsoluteRootPath();
-                             path = path.GetParentPath()) {
-                            const UsdPrim ancestor = _stage->GetPrimAtPath(path);
-                            digest += path.GetString() + ":" +
-                                (ancestor ? ancestor.GetTypeName().GetString()
-                                          : std::string("missing")) + ",";
-                            appendSolverInputConnections(ancestor);
-                        }
+                        digest += ancestorChainToken(target.GetPrimPath());
                     }
                 }
             }
@@ -9256,14 +9556,25 @@ RigExecRigEvaluator::SetInteractiveOverrides(
         _OverridesReachBlendShapes(_interactiveOverrides) ||
         _OverridesReachBlendShapes(overrides);
     _interactiveOverrides = std::move(overrides);
-    // Defence in depth, not a correctness requirement: every attribute
-    // override is written into the resolved inputs before anything reads
-    // one, and GetAttribute consults the cache only where the resolved map
-    // has no entry, so an overridden attribute never reaches the cache at
-    // all. Dropping it anyway costs one map clear per drag start and takes
-    // the whole question off the table; ClearInteractiveOverrides does the
-    // same so the two halves of a drag cannot be asymmetric.
-    _staticInputs.Clear();
+    // The static-input cache is NOT dropped here. It used to be, as defence
+    // in depth, on the reasoning that this "costs one map clear per drag
+    // start" -- but a manipulator calls this on EVERY MOUSE SAMPLE, not once
+    // per drag, so every drag frame began with a cold cache and re-read
+    // every static input from the stage. Measured on the biped, a brow drag
+    // spent 0.94 ms re-reading 161 blend-sample activations that are
+    // authored constants, the largest single item in its frame.
+    //
+    // It was never a correctness requirement, and the three ways it could
+    // matter are each closed by construction:
+    //   * an overridden attribute is written into the resolved inputs before
+    //     anything reads, and GetAttribute consults the resolved map FIRST,
+    //     so an override never reaches the cache -- and is never put in it;
+    //   * an override on a connection SOURCE cannot leave a stale reader,
+    //     because the cache refuses any attribute with an authored
+    //     connection and that reader goes the long way every time;
+    //   * lifting an override is safe, because the cache only ever holds the
+    //     authored value it read from the stage.
+    // Authored edits still clear it: every notice does.
     // _propertyChainBindings is NOT dropped here, and the asymmetry with the
     // cache above is deliberate. It folds constants for the same class of
     // attribute, but _PinnedRead consults the resolved inputs FIRST -- and
@@ -9311,12 +9622,10 @@ RigExecRigEvaluator::ClearInteractiveOverrides()
     const bool touchesShapes =
         _OverridesReachBlendShapes(_interactiveOverrides);
     _interactiveOverrides.clear();
-    // Both halves of a drag invalidate the same two caches. See
-    // SetInteractiveOverrides: the static-input clear is defence in depth
-    // rather than a correctness requirement, and an invalidation that runs
-    // on the way in and not on the way out is the shape of bug that is only
-    // ever found the hard way.
-    _staticInputs.Clear();
+    // Both halves of a drag treat the caches the same way. The static-input
+    // cache is kept on the way out for the same reasons it is kept on the
+    // way in (see SetInteractiveOverrides): it never holds an override, so
+    // there is nothing of the drag's in it to forget.
     if (touchesLayout) {
         _skinTopologies.Clear();
     }
@@ -9687,7 +9996,12 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     // still compiles to the same one is choosing it blind, and it is also
     // what would otherwise make the first frame of every session dynamic.
     std::vector<std::string> settled;
-    if (!_SettleEpoch(&settled)) {
+    bool settledOk = false;
+    {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Evaluate.Settle", "evaluate");
+        settledOk = _SettleEpoch(&settled);
+    }
+    if (!settledOk) {
         RigExecRigPose failed;
         failed.time = time;
         failed.diagnostics = std::move(settled);
@@ -9718,8 +10032,12 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     }
     // An override the program cannot place would make it answer a question
     // nobody asked; that generation runs dynamically instead.
-    const bool overridesPlaceable =
-        !_bakedProgram || _bakedProgram->SetOverrides(_interactiveOverrides);
+    bool overridesPlaceable = true;
+    {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Evaluate.PlaceOverrides", "evaluate");
+        overridesPlaceable = !_bakedProgram ||
+            _bakedProgram->SetOverrides(_interactiveOverrides);
+    }
     // cpuParityMode publishes an independent scalar oracle for the geometry
     // chains. The program is not that oracle -- it shares the kernels -- so
     // asking for the oracle asks for the dynamic path.
@@ -9750,7 +10068,12 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
     RigExecRigPose baked;
     baked.time = time;
     baked.diagnostics = settled;
-    if (!_bakedProgram->Run(time, &baked)) {
+    bool ranBaked = false;
+    {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Evaluate.Run", "evaluate");
+        ranBaked = _bakedProgram->Run(time, &baked);
+    }
+    if (!ranBaked) {
         // The program handed the generation back mid-flight, so its per-frame
         // caches no longer describe a completed frame. Drop it rather than
         // reuse it, and answer from the path that cannot decline.

@@ -72,6 +72,9 @@ class ChannelRow(QtCore.QObject):
         self.name = channel.name
         self._updating = False
         self._scope = None
+        self._dragging = False
+        self._dragValue = None
+        self._previewing = False
 
         self.label = QtWidgets.QLabel(channel.shortName)
         self.label.setToolTip("%s  (%s)" % (
@@ -223,16 +226,18 @@ class ChannelRow(QtCore.QObject):
 
     # -- writing ---------------------------------------------------------
 
-    def _Write(self, value, bracket=True):
+    def _Write(self, value, bracket=True, verb="Set"):
         """
         The one path every widget goes through. `bracket` False means a
-        slider drag already opened the undo scope.
+        slider drag already opened the undo scope; `verb` names the undo
+        entry ("Drag" for a slider drag committed on release).
         """
         if self._updating:
             return
         if bracket:
             with self.panel.EditScope([self.channel],
-                                      "Set %s" % self.channel.shortName):
+                                      "%s %s" % (verb,
+                                                 self.channel.shortName)):
                 warning = self.panel.WriteChannel(self.channel, value)
         else:
             warning = self.panel.WriteChannel(self.channel, value)
@@ -257,26 +262,126 @@ class ChannelRow(QtCore.QObject):
             return
         self._Write(value, bracket=self._scope is None)
 
+    # -- slider drags: Hydra while dragging, the stage once on release -----
+    #
+    # Authoring to the stage is the expensive half of an edit: a layer spec
+    # write, a change notice every observer processes, and a rig that has to
+    # hear about it. None of that belongs in a drag. While the slider is held
+    # the value goes to the viewport through the same preview channel the
+    # viewport manipulators use (gizmoPreview: uncommitted values placed on
+    # the evaluator and published to Hydra, nothing authored), and the stage
+    # is written exactly once, when the slider is let go, as one undo entry.
+    # A session with no preview channel (headless, or RigExec inactive) falls
+    # back to authoring each value, which is what it always did.
+
     def _OnSliderPressed(self):
-        if self._updating or self._scope is not None:
+        if self._updating or self._dragging:
             return
-        self._scope = self.panel.EditScope(
-            [self.channel], "Drag %s" % self.channel.shortName)
-        self._scope.__enter__()
+        self._dragging = True
+        self._dragValue = None
+        self._previewing = False
 
     def _OnSlider(self, position):
         if self._updating:
             return
         value = self._SliderToValue(position)
-        # Inside a drag the scope is open and the write is bare; a
-        # keyboard or wheel change on an undragged slider is its own edit.
-        self._Write(value, bracket=self._scope is None)
+        if not self._dragging:
+            # A keyboard or wheel change on an undragged slider is its own
+            # edit.
+            self._Write(value, bracket=self._scope is None)
+            return
+        self._dragValue = value
+        if self._Preview(value):
+            self._previewing = True
+            self._ShowValue(value)
+            return
+        # No preview channel: author the value as before, inside one scope
+        # for the whole drag.
+        if self._scope is None:
+            self._scope = self.panel.EditScope(
+                [self.channel], "Drag %s" % self.channel.shortName)
+            self._scope.__enter__()
+        self._Write(value, bracket=False)
 
     def _OnSliderReleased(self):
+        dragging, self._dragging = self._dragging, False
         scope = self._scope
         self._scope = None
         if scope is not None:
             scope.__exit__(None, None, None)
+            return
+        if not dragging or not self._previewing:
+            return
+        self._previewing = False
+        value = self._dragValue
+        # Commit, THEN drop the preview, as the manipulators do: the other
+        # order shows the pre-drag pose for a frame before the authored one.
+        if value is not None:
+            self._Write(value, verb="Drag")
+        _EndPreview()
+
+    def _Preview(self, value):
+        """Place `value` on the viewport without authoring. True if taken."""
+        preview = _PreviewModule()
+        if preview is None or not preview.HasSink():
+            return False
+        attr = self.channel.attr
+        if not attr:
+            return False
+        path = attr.GetPath()
+        gizmoMath = _GizmoMathModule()
+        if gizmoMath is not None:
+            # The manipulators read uncommitted values from here, so a
+            # control's gizmo follows the slider too.
+            values = gizmoMath.PreviewValues()
+            values[path] = value
+            gizmoMath.SetPreviewValues(values)
+        taken = bool(preview.Push({path: value}))
+        if taken:
+            _FollowPreviewInViewport(path.GetPrimPath())
+        return taken
+
+    def _ShowValue(self, value):
+        """Show `value` in the spin box without writing it."""
+        if self.spin is None:
+            return
+        self._updating = True
+        try:
+            self.spin.setValue(value)
+        finally:
+            self._updating = False
+
+    def Rebind(self, channel):
+        """
+        Point this row at `channel`, a channel of the SAME layout (name,
+        value family, kind, allowed tokens) on another prim, keeping every
+        widget. The panel does this on a selection change when the new
+        prim's channels line up with the old ones, which is nearly every
+        switch between controls: rebuilding the widgets instead cost about
+        100 ms per selection on the biped.
+        """
+        self.AbortDrag()
+        if self._scope is not None:
+            scope, self._scope = self._scope, None
+            scope.__exit__(None, None, None)
+        self.channel = channel
+        self.name = channel.name
+        tip = "%s  (%s)" % (channel.attr.GetPath(), channel.attr.GetTypeName())
+        if channel.custom:
+            tip += "\ncustom avar"
+        self.label.setToolTip(tip)
+        self.unit.setText(channel.unit)
+        if self.spin is not None:
+            self._sliderLow, self._sliderHigh = channel.SliderRange(
+                self.panel.Stage(), None)
+
+    def AbortDrag(self):
+        """Drop an uncommitted slider drag without authoring it."""
+        if self._previewing:
+            self._previewing = False
+            _EndPreview()
+        self._dragging = False
+        self._dragValue = None
 
     def _OnCombo(self, index):
         if self._updating:
@@ -292,6 +397,56 @@ class ChannelRow(QtCore.QObject):
         if self._updating:
             return
         self._Write(self.edit.text())
+
+
+def _PreviewModule():
+    try:
+        import gizmoPreview
+        return gizmoPreview
+    except ImportError:
+        return None
+
+
+def _GizmoMathModule():
+    try:
+        import gizmoMath
+        return gizmoMath
+    except ImportError:
+        return None
+
+
+def _FollowPreviewInViewport(primPath=None):
+    """
+    Redraw the viewport manipulators against the values being previewed.
+
+    The gizmo refreshes itself on stage edits, and a preview is not one: it
+    places values on the evaluator and Hydra without touching the stage, so
+    without this the handles would sit at the pre-drag pose until release.
+    """
+    try:
+        import gizmoUI
+    except ImportError:
+        return
+    controller = gizmoUI.GetController()
+    if controller is not None:
+        controller.FollowExternalPreview(primPath)
+        return
+    # No viewport tools at all: the preview still moved the rig, so ask the
+    # viewport to repaint.
+    for api in (getattr(AvarEditorPanel._instance, "_api", None),):
+        update = getattr(api, "UpdateViewport", None)
+        if update is not None:
+            try:
+                update()
+            except Exception:
+                pass
+
+
+def _EndPreview():
+    preview = _PreviewModule()
+    if preview is not None:
+        preview.End()
+    _FollowPreviewInViewport()
 
 
 class AvarEditorPanel(QtWidgets.QDialog):
@@ -332,6 +487,11 @@ class AvarEditorPanel(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         self._header = QtWidgets.QLabel("")
+        # Never let the header widen the window; long text is elided by
+        # the name-only form above, and the path lives in the tooltip.
+        self._header.setMinimumWidth(1)
+        self._header.setSizePolicy(QtWidgets.QSizePolicy.Ignored,
+                                   QtWidgets.QSizePolicy.Preferred)
         self._header.setTextInteractionFlags(
             QtCore.Qt.TextSelectableByMouse)
         font = self._header.font()
@@ -471,6 +631,7 @@ class AvarEditorPanel(QtWidgets.QDialog):
 
     def _Clear(self):
         for row in self._rows:
+            row.AbortDrag()
             row.setParent(None)
         self._rows = []
         while self._grid.count():
@@ -480,12 +641,22 @@ class AvarEditorPanel(QtWidgets.QDialog):
                 widget.setParent(None)
                 widget.deleteLater()
 
+    @staticmethod
+    def _LayoutOf(channels):
+        """What decides the row widgets: a rebind is only safe when equal."""
+        return [(c.name, c.family, c.kind, tuple(c.allowedTokens or ()),
+                 c.custom) for c in channels]
+
     def Rebuild(self, *args):
-        self._Clear()
         stage = self.Stage()
         prim, others = (None, 0)
         if stage:
             prim, others = model.FocusPrim(self._api)
+        if (prim is not None and self._rows
+                and self._TryRebind(prim, others, stage)):
+            return
+        self._Clear()
+        self._layout = None
         self._prim = prim
         self._others = others
         self._warning = ""
@@ -497,7 +668,16 @@ class AvarEditorPanel(QtWidgets.QDialog):
             self._resetAll.setEnabled(False)
             self._SetStatus()
             return
-        self._header.setText(str(prim.GetPath()))
+        # The NAME, with the parent above it, and the full path as the
+        # tooltip. The whole path of a deeply nested control (a brow under
+        # the skull, the face and its pivots) is over 1200 px of unwrapped
+        # text, and a label that long sets the window's minimum width.
+        path = prim.GetPath()
+        parent = path.GetParentPath()
+        self._header.setText(
+            "%s   (in %s)" % (path.name, parent.name)
+            if parent and parent.name else path.name)
+        self._header.setToolTip(str(path))
         channels, hidden = model.DiscoverChannels(prim, stage)
         notes = []
         if others:
@@ -536,7 +716,39 @@ class AvarEditorPanel(QtWidgets.QDialog):
             self._grid.addWidget(row.resetButton, rowIndex, 5)
             rowIndex += 1
         self._grid.setRowStretch(rowIndex, 1)
+        self._layout = self._LayoutOf(channels)
         self.RefreshValues()
+
+    def _TryRebind(self, prim, others, stage):
+        """
+        Reuse the current rows for `prim` when its channels have the same
+        layout. Returns False (and changes nothing) when they do not.
+        """
+        channels, hidden = model.DiscoverChannels(prim, stage)
+        if not channels or self._LayoutOf(channels) != getattr(
+                self, "_layout", None):
+            return False
+        self._prim = prim
+        self._others = others
+        self._warning = ""
+        path = prim.GetPath()
+        parent = path.GetParentPath()
+        self._header.setText(
+            "%s   (in %s)" % (path.name, parent.name)
+            if parent and parent.name else path.name)
+        self._header.setToolTip(str(path))
+        notes = []
+        if others:
+            notes.append("%d more selected; editing the focus prim only."
+                         % others)
+        if hidden:
+            notes.append("not shown: %s" % ", ".join(hidden))
+        self._note.setText("  ".join(notes))
+        self._resetAll.setEnabled(True)
+        for row, channel in zip(self._rows, channels):
+            row.Rebind(channel)
+        self.RefreshValues()
+        return True
 
     def RefreshValues(self):
         if self._prim is not None and not self._prim.IsValid():

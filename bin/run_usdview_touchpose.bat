@@ -27,9 +27,9 @@ rem APPENDING to the canonical value _env.bat sets rather than replacing
 rem it (pointing it at the SOURCE schema resources instead of the
 rem generated ones fails with a duplicate-plugin registration error).
 rem
-rem DELIBERATELY NO `cmake --build`: TouchPose adds no C++, and an
-rem already-open usdview holds a lock on build\rigExec.dll that would
-rem fail the link.
+rem DELIBERATELY NO `cmake --build`: an already-open usdview holds a lock
+rem on build\rigExec.dll that would fail the link. TouchPose's native half
+rem lives in rigExecImaging (touchPose*.cpp); build first when it changed.
 setlocal EnableDelayedExpansion
 call "%~dp0_env.bat"
 call "%~dp0_require_python.bat"

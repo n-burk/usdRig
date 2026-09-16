@@ -213,6 +213,15 @@ class RigExecControl "RigExecControl" (
     double guide:scaleZ = 1.0 (
         doc = "Per-axis draw scale along the local Z axis; see guide:scaleX."
     )
+    double3 guide:offset = (0, 0, 0) (
+        doc = """Where the guide shape is drawn, in the control's LOCAL frame,
+        relative to the control's origin. The control still pivots, rotates
+        and scales about its origin; only the drawn shape moves. It is what
+        lets a control whose pivot is buried inside a character (the upper
+        face turns about the base of the skull) be drawn somewhere it can
+        be seen and picked. Scaled by the evaluated control-frame scale, so
+        a scaled control carries its shape with it."""
+    )
     color3f guide:displayColor = (1.0, 0.85, 0.2) (
         doc = """Constant colour of the synthesized guide. May be CONNECTED
         to another color3f attribute, in which case the first connection

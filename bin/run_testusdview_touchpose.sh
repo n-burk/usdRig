@@ -23,8 +23,9 @@
 # Usage: bin/run_testusdview_touchpose.sh [stage.usda] [rendererDisplayName]
 # Set TOUCHPOSE_SHOT=/path.png to keep a frame grab of the highlight.
 #
-# Deliberately no build step: TouchPose adds no C++, and an open usdview
-# holds a lock on the imaging library that would fail the link.
+# Deliberately no build step: an open usdview holds a lock on the imaging
+# library that would fail the link. TouchPose's native half lives in
+# rigExecImaging (touchPose*.cpp) -- build first when that has changed.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/_env.sh"
 

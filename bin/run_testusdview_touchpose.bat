@@ -8,11 +8,13 @@ rem
 rem Why it exists: three of TouchPose's claims cannot be checked from a
 rem script, and all three have been wrong before.
 rem
-rem   * The HIGHLIGHT has to be seen. `displayColor` on `body_geo` is
-rem     perfectly correct at the terminal scene index and moves ZERO
-rem     pixels, because the mesh is bound to UsdPreviewSurface and Storm
-rem     shades from diffuseColor (spike R2). Only a frame grab can tell
-rem     the working design from that one, so the test counts pixels.
+rem   * The HIGHLIGHT has to be seen. It is a Storm shader tint driven by
+rem     primvars a Hydra scene index adds (rigExecImaging,
+rem     touchPoseHighlight.h), so a wrong shader or a filtered primvar is
+rem     perfectly correct in every data structure and moves ZERO pixels.
+rem     Only a frame grab can tell, so the test counts pixels -- and
+rem     asserts the session layer is byte-identical, since nothing may be
+rem     authored.
 rem   * The PICK has to follow the DEFORMED mesh. The posed points live
 rem     in Hydra, not on the stage, so a test that never runs Hydra
 rem     cannot tell a correct pick from one against the rest mesh.
@@ -35,8 +37,9 @@ rem Set TOUCHPOSE_SHOT=path.png to keep a frame grab of the highlight.
 rem
 rem DELIBERATELY NO `cmake --build`, unlike run_testusdview_picker.bat: an
 rem open usdview holds a lock on build\rigExec.dll and the build fails on
-rem the link step, taking the test with it. TouchPose adds no C++, so
-rem there is nothing here that needs building.
+rem the link step, taking the test with it. TouchPose's native half lives
+rem in rigExecImaging (touchPose*.cpp), so build first with
+rem build_rigexec.bat --no-test when that has changed.
 setlocal EnableDelayedExpansion
 call "%~dp0_env.bat"
 call "%~dp0_require_python.bat"

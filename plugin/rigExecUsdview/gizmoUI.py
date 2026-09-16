@@ -774,9 +774,27 @@ class ViewportToolbar(QtWidgets.QToolBar):
             self._GROUP_GLYPHS.get(mode, "groupCentre")))
         if not choices:
             self._groupAction.setToolTip(
-                "Group Pivot (P): where several selected controls turn "
-                "about. Rotate and Scale only -- a Move is the same "
-                "motion whatever it is measured about.")
+                "Group Pivot (P): where several selected controls move, "
+                "turn and scale about. Not used by Select.")
+            return
+        if tool == TOOL_TRANSLATE:
+            meaning = {
+                gizmoMath.GROUP_PIVOT_CENTER:
+                    "move together by the same distance in the same "
+                    "direction",
+                gizmoMath.GROUP_PIVOT_INDIVIDUAL:
+                    "each move the same distance along its OWN axes",
+            }.get(mode, "move together")
+            target = controller.Target()
+            count = (len(self._controller._TargetPrimPaths(target))
+                     if target is not None else 0)
+            active = ("Acting on %d controls." % count if count > 1
+                      else "Inert until more than one control is "
+                      "selected.")
+            self._groupAction.setToolTip(
+                "Group Pivot: %s, several selected controls %s. %s "
+                "Click or press P for the next one."
+                % (gizmoSettings.GroupPivotLabel(mode), meaning, active))
             return
         meaning = {
             gizmoMath.GROUP_PIVOT_CENTER:
@@ -1879,7 +1897,11 @@ class GizmoController(QtCore.QObject):
         setter = getattr(target, "SetPivotMode", None)
         if setter is None:
             return
-        setter(self.settings.For(self._tool).groupPivot)
+        settings = self.settings.For(self._tool)
+        setter(settings.groupPivot)
+        orient = getattr(target, "SetAxisOrientation", None)
+        if orient is not None:
+            orient(settings.orientation)
 
     def _Orientation(self, target):
         """
@@ -1915,13 +1937,17 @@ class GizmoController(QtCore.QObject):
         return False
 
     def _RebuildHandles(self):
-        # A rotate drag keeps the handles it started with. The rings
-        # turn with the object in Object orientation, and a manipulator
-        # that spins away under a held cursor is unusable -- the conventional tool
-        # freezes it for the same reason. Translate and scale must keep
-        # following the object, so they rebuild every event.
-        if self._drag is not None and self._drag.tool == TOOL_ROTATE:
-            return
+        # EVERY tool rebuilds its handles live during a drag, rotate
+        # included. Rotate used to keep the handles it started with, on the
+        # reasoning that a ring that turns under a held cursor makes the
+        # manipulator chase itself -- but the drag never reads these
+        # handles: gizmoDrag.DragState holds its OWN frozen copy of the
+        # grabbed handle and turns about that axis for the whole drag. So the
+        # freeze only froze the DRAWING, and the rotate gizmo sat at the
+        # pre-drag orientation until release while the control turned.
+        # Rotating about an axis leaves that axis's own ring where it is;
+        # the others follow the object, which is what the artist expects.
+        #
         # resolveCamera() can emit signalFrustumChanged, whose handler
         # lands back here; without the guard the first paint after a
         # camera move recurses until the stack runs out.
@@ -2320,6 +2346,43 @@ class GizmoController(QtCore.QObject):
             return False
         self._AfterUndoRedo()
         return True
+
+    def FollowExternalPreview(self, primPath=None):
+        """
+        Redraw the handles against values another panel is previewing.
+
+        The Avar Editor previews a slider drag through the same Hydra
+        channel a drag here uses, and puts the same values in
+        gizmoMath's preview map, but nothing on the stage changes, so the
+        stage-notice refresh never fires. The panel calls this per sample
+        instead. The cheap per-sample refresh is used for the target the
+        slider is moving (its parent frames cannot change); anything else
+        re-reads in full. Ignored while a manipulator drag of our own is
+        in flight, which already refreshes on every mouse move.
+        """
+        if self._drag is not None:
+            return
+        if self._target is None:
+            # Nothing to redraw here, but the viewport still has to repaint:
+            # a dial on a control with no manipulator (a limb's params node)
+            # moves the rig all the same.
+            self.usdviewApi.UpdateViewport()
+            return
+        own = getattr(self._target, "prim", None)
+        cheap = (primPath is not None and own is not None
+                 and own.GetPath() == primPath)
+        try:
+            if cheap:
+                self._target.RefreshDuringDrag()
+            else:
+                self._target.Refresh()
+        except Exception:
+            try:
+                self._target.Refresh()
+            except Exception:
+                self.RefreshTarget()
+        self._RebuildHandles()
+        self.usdviewApi.UpdateViewport()
 
     def _AfterUndoRedo(self):
         # Restoring layer specs does not schedule a repaint by itself:
@@ -3794,7 +3857,7 @@ class GizmoController(QtCore.QObject):
             # pre-drag pose while the geometry moved (gizmoPreview.Push sets
             # both in the right order).
             gizmoPreview.Push(drag.target.writer.Pending())
-            drag.target.Refresh()
+            drag.target.RefreshDuringDrag()
         except Exception as error:
             Tf.Warn("rigExecUsdview: gizmo drag failed: %s" % error)
         self._RebuildHandles()

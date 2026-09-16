@@ -158,6 +158,26 @@ public:
     /// than dropping the program on every notice.
     bool IsInvalidatedBy(const UsdNotice::ObjectsChanged &notice) const;
 
+    /// Absorbs \p notice without a rebuild when it is nothing but new
+    /// DEFAULT VALUES on avars the bake captured as constants, and says
+    /// whether it did.
+    ///
+    /// This is what an Avar Editor slider, a typed value and a released
+    /// gizmo in Default mode all author, one value at a time. Before this
+    /// each of them rebuilt the whole program (~120 ms on the biped) because
+    /// a captured constant is in the rebuild index -- to change one double
+    /// in a dense table. Here the new value is written straight into that
+    /// table's slot; the frame path already compares every avar slot against
+    /// last run's by value, so the next generation re-runs exactly the cone
+    /// of what moved and nothing else.
+    ///
+    /// All-or-nothing: returns false, having changed NOTHING, the moment any
+    /// part of the notice is something else -- a resync, a field other than
+    /// the default, a non-avar property the bake read, an avar reached
+    /// through a connection, or one that has just become animated. The
+    /// caller then takes the rebuild path exactly as before.
+    bool ApplyAvarValueEdits(const UsdNotice::ObjectsChanged &notice);
+
     /// Tells the program that a notice it was NOT invalidated by still
     /// reached the stage.
     ///

@@ -1917,6 +1917,31 @@ TestStandaloneControlGuide()
     CHECK(published->second.controlGuideDrawMode == TfToken("wire"));
     CHECK(published->second.controlGuideScale == GfVec3d(1.0));
 
+    // guide:offset moves the drawn shape in the control's local frame and
+    // leaves the control itself where it is.
+    {
+        const GfMatrix4d placement = published->second.controlGuideFrame;
+        const GfMatrix4d pivot = published->second.controlFrame;
+        const GfVec3d offset(1.0, 2.0, 3.0);
+        UsdAttribute attr = controlPrim.CreateAttribute(
+            TfToken("guide:offset"), SdfValueTypeNames->Double3);
+        CHECK(attr && attr.Set(offset));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        const RigExecImagingSnapshotConstPtr moved = bridge.GetStore()->Get();
+        const auto m = moved ? moved->prims.find(control)
+                             : snapshot->prims.end();
+        CHECK(moved && m != moved->prims.end());
+        if (moved && m != moved->prims.end()) {
+            const GfMatrix4d want =
+                GfMatrix4d(1.0).SetTranslate(offset) * placement;
+            CHECK(GfIsClose(m->second.controlGuideFrame, want, 1e-9));
+            CHECK(!GfIsClose(m->second.controlGuideFrame, placement, 1e-6));
+            CHECK(GfIsClose(m->second.controlFrame, pivot, 1e-12));
+        }
+        CHECK(attr.Clear());
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+    }
+
     // The live guide gets its size from the evaluated frame, not a second raw
     // read of the avars. Authored guide scale remains a positive shape-size
     // multiplier. A negative transform scale mirrors deformation but keeps

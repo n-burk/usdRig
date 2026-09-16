@@ -130,9 +130,11 @@ def TestEndStopsPreviewing():
         _Check(gizmoMath.PreviewValues() == {},
                "the frame maths is reading the stage again")
         # Idempotent: an abort and a commit both arrive here, and neither knows
-        # what the other did.
-        gizmoPreview.End()
-        _Check(sink.ends == 2, "End is safe to repeat")
+        # what the other did. A second End has nothing begun to drop, so it
+        # does not reach the host at all -- the host's End republishes the
+        # rig, and every selection change aborts a drag.
+        _Check(gizmoPreview.End(), "End is safe to repeat")
+        _Check(sink.ends == 1, "and a repeat does not call the host again")
         # The NEXT drag declares again rather than assuming the old slots.
         gizmoPreview.Push({path: 2.0})
         _Check(len(sink.declarations) == 2,

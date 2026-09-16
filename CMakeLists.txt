@@ -150,6 +150,10 @@ add_library(rigExecImaging SHARED
     libs/rigExecImaging/registry.cpp
     libs/rigExecImaging/sceneIndexPlugin.cpp
     libs/rigExecImaging/touchOverlayAdapter.cpp
+    # TouchPose: posed-mesh picking and the Storm shader highlight.
+    libs/rigExecImaging/touchPoseMesh.cpp
+    libs/rigExecImaging/touchPoseHighlight.cpp
+    libs/rigExecImaging/touchPoseApi.cpp
 )
 target_include_directories(rigExecImaging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -159,6 +163,11 @@ target_link_libraries(rigExecImaging PUBLIC
     hd
     usdImaging
     usdUtils
+    # TouchPose: the wrapped terminal shader is generated through Sdr from
+    # the base terminal's glslfx, and the BVH refit runs on work.
+    hio
+    sdr
+    work
 )
 # Selects dllexport over dllimport in registry.h's C surface while building
 # this library; consumers including the installed header get dllimport.
@@ -607,6 +616,10 @@ target_compile_definitions(testRigExecImaging PRIVATE ${_rigexec_schema_resource
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
+add_executable(testRigExecTouchPose tests/testRigExecTouchPose.cpp)
+target_link_libraries(testRigExecTouchPose PRIVATE rigExecImaging)
+add_test(NAME testRigExecTouchPose COMMAND testRigExecTouchPose)
+
 add_executable(testRigExecVolumeWeights tests/testRigExecVolumeWeights.cpp)
 target_link_libraries(testRigExecVolumeWeights PRIVATE rigExec)
 target_compile_definitions(testRigExecVolumeWeights PRIVATE ${_rigexec_schema_resource_define})
@@ -951,6 +964,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRigExecEpochConstants COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_epoch_constants.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecBakedAvarPatch COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_baked_avar_patch.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     # The schema half of rigExec:baked (the registry's own answer for its
     # type, variability and fallback -- which is what a stale
     # generatedSchema.usda would get wrong) and the path usdview takes to it.
@@ -1026,6 +1042,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecBake testRigExecInverse
                          testRestLocal testRestMigration
                          testInterveningXform testRigExecEpochConstants
+                         testRigExecBakedAvarPatch
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testLayerOpinionsModel testCompositionArcsModel
                          testAvarEditorModel

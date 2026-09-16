@@ -1,0 +1,1029 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = "The face, as one layer over the rig it belongs to: controls for the jaw group, the mid-face and the nose, the pivots that carry the jaw compression and the nose's space blend, and the eye look-ats. Adds prims and overrides nothing, so dropping this sublayer leaves the character exactly as it was."
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        over "Controls"
+        {
+            over "hips_ctl"
+            {
+                over "torso_ctl"
+                {
+                    over "spine_end_pivot"
+                    {
+                        over "spine_end_ctl"
+                        {
+                            over "neck_root_ctl"
+                            {
+                                over "neck_end_pivot"
+                                {
+                                    over "neck_end_ctl"
+                                    {
+                                        def RigExecJoint "skull_follow"
+                                        {
+                                            double guide:radius = 0
+                                            uniform token purpose = "default"
+                                            matrix4d rest:space = ( (0.9999999999999996, 4.281036747322273e-9, 4.417407717394315e-9, 0), (4.280991630634111e-9, 1.0000000000000004, -7.262958567891476e-10, 0), (4.417415988555716e-9, -7.262965784349264e-10, 1.0000000000000007, 0), (2.842170943040401e-14, -8.881784197001252e-16, 3.1554436208840472e-30, 1) )
+
+                                            def RigExecControl "skull_ctl" (
+                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                            )
+                                            {
+                                                color3f guide:displayColor = (0, 1, 0)
+                                                double3 guide:offset = (9.209549980346068, 3.619456931891832e-8, 5.820475301732131e-8)
+                                                double guide:scaleX = 11.104650019653931
+                                                double guide:scaleY = 0.15
+                                                double guide:scaleZ = 10.5208
+                                                uniform token guide:shape = "cube"
+                                                uniform token purpose = "default"
+                                                matrix4d rest:space = ( (1.0000000000000004, -1.474515285452531e-17, -2.0748987501150087e-24, 0), (-8.271806125530277e-25, 1, 2.0679515313825692e-25, 0), (-7.771905794189738e-25, -1.0339757656912846e-25, 1, 0), (-2.842170943040401e-14, -8.881784197001252e-16, 1.0587911840678754e-22, 1) )
+
+                                                def RigExecControl "face_upper_ctl" (
+                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                )
+                                                {
+                                                    color3f guide:displayColor = (1, 0, 0)
+                                                    double3 guide:offset = (-1.0972001011738528, 19.961049928241003, 17.894199915341538)
+                                                    double guide:scaleX = 6.943800004525922
+                                                    double guide:scaleY = 1.0245500306735966
+                                                    double guide:scaleZ = 0.15
+                                                    uniform token guide:shape = "cube"
+                                                    uniform token purpose = "default"
+                                                    matrix4d rest:space = ( (-5.6843418854080615e-14, -1.7763565960023552e-15, -1, 0), (1.0000000000000282, 2.677545562747471e-15, -2.2204456866874155e-16, 0), (-1.1368683773071502e-13, -0.9999999999999978, 1.3255569316162268e-22, 0), (-3.632700000000483, -1.250200000000004, 2.117582368135751e-22, 1) )
+
+                                                    def RigExecControl "eyeSocket_l_ctl" (
+                                                        prepend apiSchemas = ["RigExecControlAPI"]
+                                                    )
+                                                    {
+                                                        color3f guide:displayColor = (1, 0, 0)
+                                                        double guide:scaleX = 0.6839999988354717
+                                                        double guide:scaleY = 0.7983499999891894
+                                                        double guide:scaleZ = 0.05
+                                                        uniform token guide:shape = "sphere"
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (1.0000000000000047, 5.684341887712592e-14, -8.881781727867124e-16, 0), (-4.995999433975546e-16, 1.0000000000000284, 9.168014786492926e-16, 0), (1.0547110658588257e-15, 8.525125051002165e-14, 1.0000000000000007, 0), (3.384200000000003, 8.508400000000563, 5.818400000000014, 1) )
+
+                                                        def RigExecJoint "eye_l_follow"
+                                                        {
+                                                            double guide:radius = 0
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (0.9999999999999942, 4.41741576962012e-9, 7.262954871230255e-10, 0), (4.417408220103563e-9, 0.9999999999999429, 4.281038624031733e-9, 0), (7.262950430337011e-10, 4.2810199852953486e-9, 1.0000000000000009, 0), (-8.881784197001252e-16, -2.842170943040401e-14, -4.440892098500626e-16, 1) )
+
+                                                            def RigExecControl "eye_l_ctl" (
+                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                            )
+                                                            {
+                                                                color3f guide:displayColor = (0, 0, 1)
+                                                                double guide:scaleX = 1.22725
+                                                                double guide:scaleY = 1.3067
+                                                                double guide:scaleZ = 0.052268
+                                                                uniform token guide:shape = "sphere"
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (1, 8.271806865087377e-25, -2.0679502987874052e-25, 0), (-1.232595164377339e-31, 1.0000000000000002, -1.4745149545802913e-17, 0), (-2.067952024420635e-25, 1.387778780781441e-17, 1, 0), (0, 0, 1.1102230246251565e-15, 1) )
+                                                            }
+                                                        }
+                                                    }
+
+                                                    def RigExecControl "eyeSocket_r_ctl" (
+                                                        prepend apiSchemas = ["RigExecControlAPI"]
+                                                    )
+                                                    {
+                                                        color3f guide:displayColor = (1, 0, 0)
+                                                        double guide:scaleX = 0.6840000017381931
+                                                        double guide:scaleY = 0.7983500000108104
+                                                        double guide:scaleZ = 0.05
+                                                        uniform token guide:shape = "sphere"
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (-0.9999999999999971, 5.684341887662673e-14, 6.661340600341455e-16, 0), (-5.551073338622182e-17, 1.0000000000000284, 1.1388460844015045e-15, 0), (7.216464012681121e-16, 5.685729664944301e-14, -1.0000000000000007, 0), (-3.384200000000001, 8.50840000000062, 5.81840000000002, 1) )
+
+                                                        def RigExecJoint "eye_r_follow"
+                                                        {
+                                                            double guide:radius = 0
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (-1.0000000000000018, 4.417529456457979e-9, -7.262952650789116e-10, 0), (-4.417407776014396e-9, 0.9999999999999433, -4.281038401987129e-9, 0), (-7.262968193911718e-10, 4.281162094709954e-9, -1.0000000000000009, 0), (-8.881784197001252e-16, -2.842170943040401e-14, 2.4424906541753444e-15, 1) )
+
+                                                            def RigExecControl "eye_r_ctl" (
+                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                            )
+                                                            {
+                                                                color3f guide:displayColor = (0, 0, 1)
+                                                                double guide:scaleX = 1.22725
+                                                                double guide:scaleY = 1.3067
+                                                                double guide:scaleZ = 0.052268
+                                                                uniform token guide:shape = "sphere"
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (1, -1.6543611264984422e-24, -1.0339742865770871e-25, 0), (-1.6543612990617652e-24, 1, -1.474514954580291e-17, 0), (-2.0679520244206354e-25, 1.3877787807814407e-17, 1, 0), (0, 2.842170943040401e-14, 1.3322676295501878e-15, 1) )
+                                                            }
+                                                        }
+                                                    }
+
+                                                    def RigExecControl "head_tip_ctl" (
+                                                        prepend apiSchemas = ["RigExecControlAPI"]
+                                                    )
+                                                    {
+                                                        color3f guide:displayColor = (1, 0, 0)
+                                                        double3 guide:offset = (-0.4545000517871731, 9.26394993797195, 14.957999960670946)
+                                                        double guide:scaleX = 4.348700003330112
+                                                        double guide:scaleY = 0.7538500192099811
+                                                        double guide:scaleZ = 0.15
+                                                        uniform token guide:shape = "cube"
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (1.0000000000000004, -2.7072449617155712e-24, -8.881784192865349e-16, 0), (2.1318805448122187e-22, 1.0000000000000284, 1.8049798991765984e-15, 0), (3.0533304360863634e-22, 8.52512505125032e-14, 1.0000000000000022, 0), (1.376428539288238e-21, 8.83090000000064, 1.6570000000000125, 1) )
+
+                                                        def RigExecControl "brow_main_l_ctl" (
+                                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                                        )
+                                                        {
+                                                            color3f guide:displayColor = (1, 1, 0.388)
+                                                            double guide:scaleX = 2.389900001541206
+                                                            double guide:scaleY = 0.594500006195432
+                                                            double guide:scaleZ = 0.09559600006164826
+                                                            uniform token guide:shape = "sphere"
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (0.9375694251374788, -0.027597119358495143, -0.3467015604962036, 0), (-0.00674821331312064, 0.9952158651568983, -0.09746713988391403, 0), (0.34773270577337734, 0.09372182639689405, 0.9328977353345589, 0), (3.998800000000001, 2.5947999999996227, 7.077899999999984, 1) )
+
+                                                            def RigExecControl "brow_inner_l_ctl" (
+                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                            )
+                                                            {
+                                                                color3f guide:displayColor = (1, 1, 0.388)
+                                                                double guide:scaleX = 0.5291500019522648
+                                                                double guide:scaleY = 0.6802000015187601
+                                                                double guide:scaleZ = 0.05
+                                                                uniform token guide:shape = "sphere"
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (0.9986218455281016, -0.00015345782529774948, 0.05248224542384633, 0), (0.0004116631138371338, 0.9999878656344718, -0.004909085216487238, 0), (-0.052480855247537206, 0.004923924743375815, 0.9986097910583555, 0), (-2.58029569543533, -0.40209954530041614, 0.03592672803506147, 1) )
+
+                                                                def RigExecControl "brow_peak_l_drag_twin" (
+                                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                                )
+                                                                {
+                                                                    double guide:scaleX = 0
+                                                                    double guide:scaleY = 0
+                                                                    double guide:scaleZ = 0
+                                                                    uniform token purpose = "default"
+                                                                    matrix4d rest:space = ( (0.9221257007554788, 0.017393941727741218, -0.3864992144848317, 0), (-0.0144851357628153, 0.9998406078854922, 0.010437416568074398, 0), (0.3866191573734405, -0.004026116473000413, 0.9222306747977806, 0), (4.165793243502485, 0.5330152612150982, -0.6649601745222995, 1) )
+                                                                }
+                                                            }
+
+                                                            def RigExecJoint "brow_peak_l_drag"
+                                                            {
+                                                                double guide:radius = 0
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (0.941145838870209, 0.015349130213108048, -0.33765206082442306, 0), (-0.014601340058272124, 0.9998820913652161, 0.004754391181117729, 0), (0.33768522450023974, 0.0004555970849964841, 0.9412589875191089, 0), (1.6148735428662506, 0.12699576068413876, -0.41209544685526467, 1) )
+
+                                                                def RigExecControl "brow_peak_l_ctl" (
+                                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                                )
+                                                                {
+                                                                    color3f guide:displayColor = (1, 0, 0)
+                                                                    double guide:scaleX = 0.50725
+                                                                    double guide:scaleY = 0.6762000000509898
+                                                                    double guide:scaleZ = 0.05
+                                                                    uniform token guide:shape = "sphere"
+                                                                    uniform token purpose = "default"
+                                                                    matrix4d rest:space = ( (1.0000000000000002, 1.3877787807814457e-17, 1.1102230246251565e-16, 0), (0, 1.0000000000000002, 0, 0), (2.220446049250313e-16, 1.3877787807814457e-17, 1, 0), (7.105427357601002e-15, 0, -3.552713678800501e-15, 1) )
+                                                                }
+                                                            }
+                                                        }
+
+                                                        def RigExecControl "brow_main_r_ctl" (
+                                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                                        )
+                                                        {
+                                                            color3f guide:displayColor = (1, 1, 0.388)
+                                                            double guide:scaleX = 2.3899000032837967
+                                                            double guide:scaleY = 0.5945000132008218
+                                                            double guide:scaleZ = 0.09559600013135187
+                                                            uniform token guide:shape = "sphere"
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (-0.9375694251374699, -0.027597119358476127, -0.3467015604962081, 0), (0.006748213313120293, 0.9952158651570033, -0.09746713988392068, 0), (0.3477327057733751, -0.09372182639693932, -0.9328977353345539, 0), (-3.9988000000000015, 2.594799999999566, 7.077899999999989, 1) )
+
+                                                            def RigExecControl "brow_inner_r_ctl" (
+                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                            )
+                                                            {
+                                                                color3f guide:displayColor = (1, 1, 0.388)
+                                                                double guide:scaleX = 0.5291500036609031
+                                                                double guide:scaleY = 0.680200002847826
+                                                                double guide:scaleZ = 0.05
+                                                                uniform token guide:shape = "sphere"
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (0.9986218455281075, -0.00015345782529005425, -0.052482245423847496, 0), (0.00041166311383577375, 0.9999878656344329, 0.0049090852164866555, 0), (0.052480855247526936, -0.004923924743119021, 0.9986097910583323, 0), (-2.580295695435346, -0.4020995453003309, -0.03592672803504371, 1) )
+
+                                                                def RigExecControl "brow_peak_r_drag_twin" (
+                                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                                )
+                                                                {
+                                                                    double guide:scaleX = 0
+                                                                    double guide:scaleY = 0
+                                                                    double guide:scaleZ = 0
+                                                                    uniform token purpose = "default"
+                                                                    matrix4d rest:space = ( (0.9221257007554878, 0.01739394172761939, 0.3864992144848348, 0), (-0.014485135762812597, 0.9998406078855712, -0.010437416568084293, 0), (-0.3866191573734321, 0.004026116472921407, 0.9222306747977944, 0), (4.165793243502485, 0.5330152612147572, 0.6649601745223102, 1) )
+                                                                }
+                                                            }
+
+                                                            def RigExecJoint "brow_peak_r_drag"
+                                                            {
+                                                                double guide:radius = 0
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (0.9411458388702196, 0.015349130213091887, 0.3376520608244151, 0), (-0.014601340058271225, 0.999882091365253, -0.0047543911811276235, 0), (-0.3376852245002425, -0.00045559708484187167, 0.9412589875191009, 0), (1.6148735428662535, 0.12699576068408192, 0.4120954468552718, 1) )
+
+                                                                def RigExecControl "brow_peak_r_ctl" (
+                                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                                )
+                                                                {
+                                                                    color3f guide:displayColor = (1, 0, 0)
+                                                                    double guide:scaleX = 0.5072500000000003
+                                                                    double guide:scaleY = 0.6762000005120989
+                                                                    double guide:scaleZ = 0.05
+                                                                    uniform token guide:shape = "sphere"
+                                                                    uniform token purpose = "default"
+                                                                    matrix4d rest:space = ( (0.9999999999999998, -2.0816681711721685e-17, 0, 0), (-4.163336342344337e-17, 1.0000000000000002, -2.7755575615628914e-17, 0), (-1.6653345369377348e-16, -2.7755575615628914e-17, 0.9999999999999998, 0), (5.329070518200751e-15, -8.526512829121202e-14, 0, 1) )
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    def RigExecJoint "nose_bridge_follow"
+                                                    {
+                                                        double guide:radius = 0
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (1.0000000000000002, 5.684341886107598e-14, 2.4360469039686665e-22, 0), (-5.637149636187887e-16, 0.9949898287562972, -0.09997620052796498, 0), (-5.664183330274815e-17, 0.09997620052801119, 0.9949898287560501, 0), (-1.9820123097079767e-15, 8.58180000000084, 8.901200000000024, 1) )
+
+                                                        def RigExecJoint "nose_bridge_compress"
+                                                        {
+                                                            double guide:radius = 0
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (1, 1.331243798327529e-24, 3.101927297073854e-25, 0), (-1.4475660719677984e-24, 0.9999999999999998, -4.163336342344337e-17, 0), (-5.169878828456423e-25, 5.551115123125783e-17, 0.9999999999999996, 0), (-2.117582368135751e-22, 2.842170943040401e-14, -3.552713678800501e-15, 1) )
+
+                                                            def RigExecControl "nose_bridge_ctl" (
+                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                            )
+                                                            {
+                                                                color3f guide:displayColor = (1, 0, 0)
+                                                                double guide:scaleX = 0.7566
+                                                                double guide:scaleY = 0.6516499991657387
+                                                                double guide:scaleZ = 0.05
+                                                                uniform token guide:shape = "sphere"
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (1, -1.0856745539758488e-24, -2.0679515313825692e-25, 0), (1.550963648536927e-25, 1, 1.3877787807814457e-17, 0), (1.0339757656912846e-25, -1.3877787807814457e-17, 1, 0), (1.0587911840678754e-22, -2.842170943040401e-14, 3.552713678800501e-15, 1) )
+                                                            }
+                                                        }
+
+                                                        def RigExecControl "nose_bridge_compress_twin" (
+                                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                                        )
+                                                        {
+                                                            double avars:rx = -6.47464
+                                                            double avars:sy = 0.7538
+                                                            double avars:ty = 0.16416
+                                                            double avars:tz = 0.00369
+                                                            double guide:scaleX = 0
+                                                            double guide:scaleY = 0
+                                                            double guide:scaleZ = 0
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (1, 1.331243798327529e-24, 3.101927297073854e-25, 0), (-1.4475660719677984e-24, 0.9999999999999998, -4.163336342344337e-17, 0), (-5.169878828456423e-25, 5.551115123125783e-17, 0.9999999999999996, 0), (-2.117582368135751e-22, 2.842170943040401e-14, -3.552713678800501e-15, 1) )
+                                                        }
+                                                    }
+
+                                                    def RigExecJoint "nose_follow"
+                                                    {
+                                                        double guide:radius = 0
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (1, 5.684341886785357e-14, 1.7763570829015433e-15, 0), (-5.665043675385402e-16, 0.9999127209159173, 0.013211758054132767, 0), (7.485358161086045e-18, -0.013211758054016342, 0.9999127209157457, 0), (8.737523898172004e-16, 3.5412108515597254, 9.23893104183763, 1) )
+
+                                                        def RigExecJoint "nose_compress"
+                                                        {
+                                                            double guide:radius = 0
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (1, -1.8417693326376007e-25, -3.101927297073854e-25, 0), (-1.4734154661100805e-24, 0.9999999999999999, -2.7755575615628914e-17, 0), (-2.0679515313825692e-25, -1.0408340855860843e-17, 0.9999999999999999, 0), (-1.0587911840678754e-22, -2.842170943040401e-14, -1.7763568394002505e-15, 1) )
+
+                                                            def RigExecControl "nose_ctl" (
+                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                            )
+                                                            {
+                                                                color3f guide:displayColor = (1, 0, 0)
+                                                                double guide:scaleX = 0.6217
+                                                                double guide:scaleY = 0.6216999999984425
+                                                                double guide:scaleZ = 0.05
+                                                                uniform token guide:shape = "sphere"
+                                                                uniform token purpose = "default"
+                                                                matrix4d rest:space = ( (1, -1.9710163033490113e-25, 0, 0), (1.0129731329506804e-24, 1, -1.734723475976807e-18, 0), (1.0339757656912846e-25, 6.938893903907228e-18, 1.0000000000000002, 0), (1.0587911840678754e-22, 0, -1.7763568394002505e-15, 1) )
+                                                            }
+                                                        }
+
+                                                        def RigExecControl "nose_compress_twin" (
+                                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                                        )
+                                                        {
+                                                            double avars:rx = -7.04047
+                                                            double avars:ty = 0.4573
+                                                            double avars:tz = 0.01654
+                                                            double guide:scaleX = 0
+                                                            double guide:scaleY = 0
+                                                            double guide:scaleZ = 0
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (1, -1.8417693326376007e-25, -3.101927297073854e-25, 0), (-1.4734154661100805e-24, 0.9999999999999999, -2.7755575615628914e-17, 0), (-2.0679515313825692e-25, -1.0408340855860843e-17, 0.9999999999999999, 0), (-1.0587911840678754e-22, -2.842170943040401e-14, -1.7763568394002505e-15, 1) )
+                                                        }
+                                                    }
+
+                                                    def RigExecJoint "lookRot_aim"
+                                                    {
+                                                        double guide:radius = 0
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (0.9999999999999989, 4.417472613039186e-9, 7.262945989448573e-10, 0), (4.417407720503647e-9, 0.9999999999999717, 4.281039554710999e-9, 0), (7.262960977447681e-10, 4.281105237413385e-9, 1.0000000000000016, 0), (9.717766540667436e-16, 8.508400000000591, 5.8184000000000164, 1) )
+
+                                                        def RigExecControl "lookRot_ctl" (
+                                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                                        )
+                                                        {
+                                                            color3f guide:displayColor = (0, 1, 0)
+                                                            double guide:scaleX = 1.1895
+                                                            double guide:scaleY = 1.2306
+                                                            double guide:scaleZ = 1.0580999999999996
+                                                            uniform token guide:shape = "diamond"
+                                                            uniform token purpose = "default"
+                                                            matrix4d rest:space = ( (1, -8.271805385973178e-25, -2.0679502987874045e-25, 0), (-1.6543612990617652e-24, 1, -2.8622937353617366e-17, 0), (-1.0339762587293506e-25, 1.3877787807814407e-17, 1, 0), (-1.3234889800848443e-22, 0, -4.440892098500626e-16, 1) )
+                                                        }
+                                                    }
+                                                }
+
+                                                def RigExecControl "face_lower_ctl" (
+                                                    prepend apiSchemas = ["RigExecControlAPI"]
+                                                )
+                                                {
+                                                    custom float face:noseFollow = 1 (
+                                                        doc = "How much of the lower face the nose and its bridge follow, 0 to 1. 1 is the rig's default; at 0 both stay with the skull."
+                                                    )
+                                                    color3f guide:displayColor = (1, 0, 0)
+                                                    double3 guide:offset = (-0.008150073480767794, -18.389400045746353, -10.677400078718424)
+                                                    double guide:scaleX = 4.003350002605459
+                                                    double guide:scaleY = 0.5898000176844285
+                                                    double guide:scaleZ = 0.15
+                                                    uniform token guide:shape = "cube"
+                                                    uniform token purpose = "default"
+                                                    matrix4d rest:space = ( (1.136868377228268e-13, 8.881779322839493e-16, 0.9999999999999991, 0), (1.0000000000001135, 9.011883585605705e-16, 2.2204439090979565e-16, 0), (-2.8421709409724492e-14, 0.9999999999999951, -4.280659669961918e-23, 0), (4.604700000000207, -2.6305999999999896, -1.0587911840678754e-22, 1) )
+
+                                                    def RigExecControl "jaw_ctl" (
+                                                        prepend apiSchemas = ["RigExecControlAPI"]
+                                                    )
+                                                    {
+                                                        custom float face:jawCompression = 0 (
+                                                            doc = "Jaw compression, 0 to 1: how hard the jaw is pressed up into the middle of the face. Rolls the mid-face back and tips and shortens the nose, in fixed proportions."
+                                                        )
+                                                        color3f guide:displayColor = (1, 1, 0.388)
+                                                        double guide:scaleX = 4.9366
+                                                        double guide:scaleY = 1.1952500182316559
+                                                        double guide:scaleZ = 1.8795000070275298
+                                                        uniform token guide:shape = "cube"
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (1.0000000000000016, -5.684341888602627e-14, 4.440892343139292e-15, 0), (2.3027953371783893e-22, 1.0000000000000282, 3.5379684084863286e-15, 0), (1.5757790669135177e-22, -5.682954110195152e-14, 1.0000000000000069, 0), (-1.0587911840678754e-21, -5.7296999999995535, 1.9374000000000011, 1) )
+                                                    }
+
+                                                    def RigExecJoint "face_mid_compress"
+                                                    {
+                                                        double guide:radius = 0
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (1.0000000000000024, -5.684341886734862e-14, -8.88178174337676e-16, 0), (2.0371097387225885e-22, 1.0000000000000566, -1.474539273690295e-17, 0), (2.0917329739934687e-22, -5.6829541094506896e-14, 1.000000000000005, 0), (-9.529120656610879e-22, -5.704099999999642, 1.9374000000000047, 1) )
+                                                    }
+
+                                                    def RigExecControl "face_mid_compress_twin" (
+                                                        prepend apiSchemas = ["RigExecControlAPI"]
+                                                    )
+                                                    {
+                                                        double avars:rx = 6.34963
+                                                        double avars:tz = -0.24404
+                                                        double guide:scaleX = 0
+                                                        double guide:scaleY = 0
+                                                        double guide:scaleZ = 0
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (1.0000000000000024, -5.684341886734862e-14, -8.88178174337676e-16, 0), (2.0371097387225885e-22, 1.0000000000000566, -1.474539273690295e-17, 0), (2.0917329739934687e-22, -5.6829541094506896e-14, 1.000000000000005, 0), (-9.529120656610879e-22, -5.704099999999642, 1.9374000000000047, 1) )
+                                                    }
+
+                                                    def RigExecControl "nose_bridge_follow_twin" (
+                                                        prepend apiSchemas = ["RigExecControlAPI"]
+                                                    )
+                                                    {
+                                                        double guide:scaleX = 0
+                                                        double guide:scaleY = 0
+                                                        double guide:scaleZ = 0
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (-1.000000000000001, 1.1368683772997089e-13, -8.881789073230963e-16, 0), (1.2185095851256019e-16, 0.9949898287562263, 0.09997620052796703, 0), (1.2243595934379435e-17, 0.09997620052786124, -0.9949898287560526, 0), (-4.235164736271502e-22, 0.3443999999991263, -7.5208000000000315, 1) )
+                                                    }
+
+                                                    def RigExecControl "nose_follow_twin" (
+                                                        prepend apiSchemas = ["RigExecControlAPI"]
+                                                    )
+                                                    {
+                                                        double guide:scaleX = 0
+                                                        double guide:scaleY = 0
+                                                        double guide:scaleZ = 0
+                                                        uniform token purpose = "default"
+                                                        matrix4d rest:space = ( (-1.0000000000000009, 1.1368683773674822e-13, -2.6645357466199492e-15, 0), (1.2245417033244047e-16, 0.99991272091583, -0.013211758054131011, 0), (-1.6180726048382009e-18, -0.01321175805415731, -0.9999127209157483, 0), (-6.172952714649503e-16, -4.6961891484416185, -7.858531041837648, 1) )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            def RigExecControl "lookAt_ctl" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                custom float face:lookAt = 1 (
+                    doc = "How much the eyes follow the look target, 0 to 1. At 0 they simply ride their sockets and can be posed by hand."
+                )
+                color3f guide:displayColor = (0, 1, 0)
+                double guide:scaleX = 7.3778
+                double guide:scaleY = 2.4111
+                double guide:scaleZ = 0.295112
+                uniform token guide:shape = "sphere"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2.667186316251957e-8, 164.30101943965934, 41.628471446087374, 1) )
+            }
+        }
+
+        over "Movers"
+        {
+            reorder nameChildren = ["param_follow", "skin_body_geo", "shapes_body_geo", "pose_drivers", "twist_aims", "face_eyes", "face_brow_joints", "face_inner_joints", "nose_bridge_compress_scale_w", "face_brow_pivots", "face_pivots", "nose_compress_w", "nose_follow_w", "nose_bridge_compress_w", "nose_bridge_follow_w", "face_mid_compress_w", "face_outer_joints", "neck_to_bind", "girdles", "spine_to_bind", "hips_follow", "ball_l_bind_scAim", "ankle_l_bind_scAim", "ballRoll_l_down_rc", "ballRoll_l_down_w", "ballRoll_l_up_rc", "ballRoll_l_up_w", "toe_l_roll_rc", "toe_l_roll_w", "heel_l_roll_rc", "heel_l_roll_w", "bankOut_l_pivot_rc", "bankOut_l_pivot_w", "bankIn_l_pivot_rc", "bankIn_l_pivot_w", "ball_r_bind_scAim", "ankle_r_bind_scAim", "ballRoll_r_down_rc", "ballRoll_r_down_w", "ballRoll_r_up_rc", "ballRoll_r_up_w", "toe_r_roll_rc", "toe_r_roll_w", "heel_r_roll_rc", "heel_r_roll_w", "bankOut_r_pivot_rc", "bankOut_r_pivot_w", "bankIn_r_pivot_rc", "bankIn_r_pivot_w", "hand_l_follow", "hand_r_follow", "spine_mid_follow"]
+            def Scope "face_eyes"
+            {
+                def RigExecParentConstraint "eye_l_ctl_drives_eye_l_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(4.440892098500626e-16, 0, -6.661338147750939e-16)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>
+                }
+
+                def RigExecParentConstraint "eye_r_ctl_drives_eye_r_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(179.99999999999648, 3.246114675013523e-14, 179.9999999999965)]
+                    double3[] inputs:translationOffsets = [(0, 0, -4.440892098500626e-16)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>
+                }
+
+                def RigExecRotationConstraint "eye_l_follow_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim/lookRot_ctl>
+                }
+
+                def RigExecRotationConstraint "eye_r_follow_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim/lookRot_ctl>
+                }
+
+                def RigExecAimConstraint "lookRot_aim_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3 inputs:aimVector = (0, 0, 1)
+                    float inputs:defaultWeight.connect = </Biped/Rig/Controls/lookAt_ctl.face:lookAt>
+                    double3 inputs:upVector = (0, 1, 0)
+                    double3 inputs:worldUpVector = (0, 1, 0)
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim>
+                    rel rigExec:sources = </Biped/Rig/Controls/lookAt_ctl>
+                    rel rigExec:worldUpObject = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl>
+                    uniform token rigExec:worldUpType = "objectRotationUp"
+                }
+            }
+
+            def Scope "face_brow_joints"
+            {
+                def RigExecParentConstraint "brow_peak_r_ctl_drives_brow_peak_r_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(0, 5.684341886080802e-14, 3.552713678800501e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_peak_r_drag/brow_peak_r_ctl>
+                }
+
+                def RigExecParentConstraint "brow_inner_r_ctl_drives_brow_inner_r_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(8.881784197001252e-16, 2.842170943040401e-14, 7.105427357601002e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_inner_r_ctl>
+                }
+
+                def RigExecParentConstraint "brow_main_r_ctl_drives_brow_main_r_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(0, -5.684341886080802e-14, -3.552713678800501e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl>
+                }
+
+                def RigExecParentConstraint "brow_peak_l_ctl_drives_brow_peak_l_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-4.440892098500626e-15, 0, -3.552713678800501e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_l_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_peak_l_drag/brow_peak_l_ctl>
+                }
+
+                def RigExecParentConstraint "brow_inner_l_ctl_drives_brow_inner_l_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(3.552713678800501e-15, 0, -1.4210854715202004e-14)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_l_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_inner_l_ctl>
+                }
+
+                def RigExecParentConstraint "brow_main_l_ctl_drives_brow_main_l_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-3.552713678800501e-15, -2.842170943040401e-14, 7.105427357601002e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_l_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl>
+                }
+            }
+
+            def Scope "face_inner_joints"
+            {
+                def RigExecScaleConstraint "nose_own_scale" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind/nose_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow/nose_compress/nose_ctl>
+                }
+
+                def RigExecParentConstraint "nose_ctl_drives_nose_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-2.117582368135751e-22, 0, 2.220446049250313e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind/nose_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow/nose_compress/nose_ctl>
+                }
+
+                def RigExecScaleConstraint "nose_bridge_compress_scale" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 0
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow/nose_bridge_compress_twin>
+                }
+
+                def RigExecParentConstraint "nose_bridge_ctl_drives_nose_bridge_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(0, 0, 0)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow/nose_bridge_compress/nose_bridge_ctl>
+                }
+
+                def RigExecParentConstraint "face_mid_compress_drives_face_mid_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-1.0587911840678754e-22, 0, 1.7763568394002505e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/face_mid_compress>
+                }
+            }
+
+            def Scope "nose_bridge_compress_scale_w"
+            {
+                def RigExecFloatMathMover "nose_bridge_compress_scale_w_3_clamp" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:max = 1
+                    float inputs:min = 0
+                    float inputs:value = 0
+                    rel rigExec:moves = </Biped/Rig/Movers/face_inner_joints/nose_bridge_compress_scale.inputs:defaultWeight>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_compress_scale_w_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 1.1111112
+                    rel rigExec:moves = </Biped/Rig/Movers/face_inner_joints/nose_bridge_compress_scale.inputs:defaultWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_compress_scale_w_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = -0.1
+                    rel rigExec:moves = </Biped/Rig/Movers/face_inner_joints/nose_bridge_compress_scale.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_compress_scale_w_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl.face:jawCompression>
+                    rel rigExec:moves = </Biped/Rig/Movers/face_inner_joints/nose_bridge_compress_scale.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            def Scope "face_brow_pivots"
+            {
+                def RigExecPositionConstraint "brow_peak_l_drag_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:affectTranslationY = 0
+                    bool inputs:affectTranslationZ = 0
+                    float inputs:defaultWeight = 0.4
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_peak_l_drag>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_inner_l_ctl/brow_peak_l_drag_twin>
+                }
+
+                def RigExecPositionConstraint "brow_peak_r_drag_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:affectTranslationY = 0
+                    bool inputs:affectTranslationZ = 0
+                    float inputs:defaultWeight = 0.4
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_peak_r_drag>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_inner_r_ctl/brow_peak_r_drag_twin>
+                }
+            }
+
+            def Scope "face_pivots"
+            {
+                def RigExecParentConstraint "nose_compress_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 0
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow/nose_compress>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow/nose_compress_twin>
+                }
+
+                def RigExecParentConstraint "nose_follow_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 0
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/nose_follow_twin>
+                }
+
+                def RigExecParentConstraint "nose_bridge_compress_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 0
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow/nose_bridge_compress>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow/nose_bridge_compress_twin>
+                }
+
+                def RigExecParentConstraint "nose_bridge_follow_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 0
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/nose_bridge_follow_twin>
+                }
+
+                def RigExecParentConstraint "face_mid_compress_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 0
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/face_mid_compress>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/face_mid_compress_twin>
+                }
+            }
+
+            def Scope "nose_compress_w"
+            {
+                def RigExecFloatMathMover "nose_compress_w_3_clamp" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:max = 1
+                    float inputs:min = 0
+                    float inputs:value = 0
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "nose_compress_w_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 1.7391304
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "nose_compress_w_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = -0.2
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "nose_compress_w_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl.face:jawCompression>
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            def Scope "nose_follow_w"
+            {
+                def RigExecFloatMathMover "nose_follow_w_2_clamp" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:max = 1
+                    float inputs:min = 0
+                    float inputs:value = 0
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_follow_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "nose_follow_w_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0.18
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_follow_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "nose_follow_w_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl.face:noseFollow>
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_follow_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            def Scope "nose_bridge_compress_w"
+            {
+                def RigExecFloatMathMover "nose_bridge_compress_w_3_clamp" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:max = 1
+                    float inputs:min = 0
+                    float inputs:value = 0
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_compress_w_2_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 1.1111112
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_compress_w_1_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = -0.1
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_compress_w_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl.face:jawCompression>
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            def Scope "nose_bridge_follow_w"
+            {
+                def RigExecFloatMathMover "nose_bridge_follow_w_2_clamp" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:max = 1
+                    float inputs:min = 0
+                    float inputs:value = 0
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_follow_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_follow_w_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0.6
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_follow_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "nose_bridge_follow_w_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl.face:noseFollow>
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/nose_bridge_follow_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            def Scope "face_mid_compress_w"
+            {
+                def RigExecFloatMathMover "face_mid_compress_w_2_clamp" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:max = 1
+                    float inputs:min = 0
+                    float inputs:value = 0
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/face_mid_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "clamp"
+                }
+
+                def RigExecFloatMathMover "face_mid_compress_w_1_multiply" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 1.4719952
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/face_mid_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "multiply"
+                }
+
+                def RigExecFloatMathMover "face_mid_compress_w_0_add" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:value = 0
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl.face:jawCompression>
+                    rel rigExec:moves = </Biped/Rig/Movers/face_pivots/face_mid_compress_pose.inputs:defaultWeight>
+                    uniform token rigExec:operation = "add"
+                }
+            }
+
+            def Scope "face_outer_joints"
+            {
+                def RigExecParentConstraint "jaw_ctl_drives_jaw_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(1.0587911840678754e-22, -2.842170943040401e-14, 0)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/jaw_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl>
+                }
+
+                def RigExecParentConstraint "face_lower_ctl_drives_face_lower_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-2.117582368135751e-22, 0, -4.440892098500626e-16)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl>
+                }
+
+                def RigExecParentConstraint "head_tip_ctl_drives_head_tip_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-3.1763735522036263e-22, -2.842170943040401e-14, -4.440892098500626e-16)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl>
+                }
+
+                def RigExecParentConstraint "eyeSocket_r_ctl_drives_eyeSocket_r_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-4.440892098500626e-16, -2.842170943040401e-14, 2.4424906541753444e-15)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl>
+                }
+
+                def RigExecParentConstraint "eyeSocket_l_ctl_drives_eyeSocket_l_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(-4.440892098500626e-16, -2.842170943040401e-14, -2.220446049250313e-16)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl>
+                }
+
+                def RigExecParentConstraint "face_upper_ctl_drives_face_upper_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(1.0587911840678754e-22, 2.842170943040401e-14, 8.881784197001252e-16)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl>
+                }
+
+                def RigExecParentConstraint "skull_ctl_drives_skull_bind" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3[] inputs:rotationOffsets = [(0, -0, 0)]
+                    double3[] inputs:translationOffsets = [(0, 0, 0)]
+                    rel rigExec:moves = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind>
+                    rel rigExec:sources = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl>
+                }
+
+                def RigExecParentConstraint "skull_follow_pose" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow>
+                    rel rigExec:sources = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind>
+                }
+            }
+        }
+    }
+}
+

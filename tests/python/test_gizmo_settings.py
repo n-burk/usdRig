@@ -268,17 +268,21 @@ def TestGroupPivotDefaultsToTheCentre():
     for tool in gset.TOOLS:
         _Check(settings.For(tool).groupPivot == gset.GROUP_PIVOT_CENTER,
                "%s defaults to the selection centre" % tool)
-    # Rotate and Scale offer the row; Move does not, because a world
-    # delta is the same motion whatever it is measured about.
+    # Rotate and Scale offer all three. Move offers the centre and
+    # Individual Origins (each along its own axes); Last Selected would move
+    # a selection exactly as the centre does.
     for tool in (gset.TOOL_ROTATE, gset.TOOL_SCALE):
         choices = gset.GroupPivotChoices(tool)
         _Check(choices and choices[0] == gset.GROUP_PIVOT_CENTER,
                "%s offers the centre first: %s" % (tool, (choices,)))
         _Check(set(choices) == set(gset.GROUP_PIVOT_MODES),
                "%s offers all three: %s" % (tool, (choices,)))
-    for tool in (gset.TOOL_SELECT, gset.TOOL_TRANSLATE):
-        _Check(gset.GroupPivotChoices(tool) == (),
-               "%s has no pivot row" % tool)
+    _Check(gset.GroupPivotChoices(gset.TOOL_TRANSLATE)
+           == (gset.GROUP_PIVOT_CENTER, gset.GROUP_PIVOT_INDIVIDUAL),
+           "Move offers the centre and individual origins: %s"
+           % (gset.GroupPivotChoices(gset.TOOL_TRANSLATE),))
+    _Check(gset.GroupPivotChoices(gset.TOOL_SELECT) == (),
+           "Select has no pivot row")
     _Check(gset.GroupPivotLabel(gset.GROUP_PIVOT_LEAD) == "Last Selected",
            "the lead mode is named for what it is")
     # It resets with the tool, like every other per-tool field.

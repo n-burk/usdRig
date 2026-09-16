@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """
 Headless test for plugin/touchPose/touchPoseModel.py and the importer's
-skip rule: reading touch regions off a stage, the exact ray cast, the
-face -> region lookup, the pick following DEFORMED points rather than the
-rest mesh, the overlay patch the highlight is made of, and the pixel ->
-ray arithmetic the viewport hands the cast.
+skip rule: reading touch regions off a stage, the native ray cast (and
+its agreement with brute force), the face -> region lookup, the pick
+following DEFORMED points and the mesh's world transform, the highlight's
+per-region colour table, and the pixel -> ray arithmetic the viewport
+hands the cast. Needs rigExecImaging built: the geometry is native.
 
 Everything runs on an in-memory six-face cube -- no Qt, no usdview, no
 GL. That is the point of the model/UI split: the only things the app has
@@ -187,10 +188,11 @@ def TestCast():
 def TestFollowsTheDeformedMesh():
     """The pick must follow the POSED points, not the authored ones.
 
-    This is the whole reason the points come out of Hydra instead of off
-    the stage. Simulated here by translating the cube by hand: a ray that
-    hit the rest cube must miss once it moves away, and a ray aimed where
-    it moved TO must hit.
+    In the app the points come from the RigExec snapshot the viewport
+    draws; here the cube is moved by hand. A ray that hit the rest cube
+    must miss once it moves away, and a ray aimed where it moved TO must
+    hit -- which also proves the native BVH refits rather than answering
+    from the pose it was built on.
     """
     stage = _Stage()
     model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
@@ -210,65 +212,166 @@ def TestFollowsTheDeformedMesh():
            % face)
     _Check(model.RegionOfFace(face).name == "front_touch",
            "resolving to the same region it did at rest")
-
-    # The offset the highlight uses scales with the geometry, so it must
-    # be recomputed from the new points rather than frozen at load.
-    _Check(model.min_offset > 0.0, "the overlay offset floor is positive")
-    _Check(model.OffsetFor(model.RegionOfFace(0)) > 0.0,
-           "and a region's own lift is positive")
+    _Check(numpy.allclose(model.points, posed),
+           "the model reports the posed points back")
+    centroid = model.FaceCentroid(0)
+    _Check(numpy.allclose(centroid, (0.0, 12.0, 1.0)),
+           "and face centroids follow the pose: %s" % (centroid,))
     print("  deformation: a rest-aimed ray misses a posed mesh and a "
           "pose-aimed ray hits the same region")
 
 
-def TestOverlayGeometry():
+def TestFollowsTheMeshTransform():
+    """The ray is in WORLD space; the points are the mesh's LOCAL space.
+
+    The numpy cast ignored the difference, so a character placed anywhere
+    but the origin picked the wrong face or nothing. The native mesh reads
+    the mesh's local-to-world off the stage on every pose sync.
+    """
+    stage = _Stage()
+    UsdGeom.Xformable(stage.GetPrimAtPath("/Body")).AddTranslateOp().Set(
+        Gf.Vec3d(100.0, 0.0, 0.0))
+    model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
+    model.SyncPose(force=True)
+    _Check(model.Cast((0.0, 0.0, 10.0), (0.0, 0.0, -1.0))[0] == -1,
+           "a ray at the local origin misses a mesh moved +100 in X")
+    face, t = model.Cast((100.0, 0.0, 10.0), (0.0, 0.0, -1.0))
+    _Check(face == 0 and abs(t - 9.0) < 1e-4,
+           "and one at its world position hits face 0 at t=9: %d %.4f"
+           % (face, t))
+    _Check(numpy.allclose(model.FaceCentroid(0), (100.0, 0.0, 1.0)),
+           "centroids are world space too: %s" % (model.FaceCentroid(0),))
+
+    # The transform is re-read when the time moves.
+    UsdGeom.Xformable(stage.GetPrimAtPath("/Body")).GetOrderedXformOps()[0] \
+        .Set(Gf.Vec3d(-50.0, 0.0, 0.0), 5.0)
+    _Check(model.SyncPose(Usd.TimeCode(5.0)),
+           "a new frame with a new transform reports that the mesh moved")
+    _Check(model.Cast((-50.0, 0.0, 10.0), (0.0, 0.0, -1.0))[0] == 0,
+           "and the pick follows it to frame 5")
+    print("  transform: the pick lands on the mesh where it is in the "
+          "world, and follows an animated transform")
+
+
+def TestBvhAgreesWithBruteForce():
+    """The BVH answer is the exhaustive answer, on a mesh big enough to
+    have a real tree, at rest and after a pose that only refits."""
+    rings, segments = 40, 64
+    points = [(0.0, 1.0, 0.0)]
+    for r in range(1, rings):
+        phi = numpy.pi * r / rings
+        for k in range(segments):
+            theta = 2.0 * numpy.pi * k / segments
+            radius = 1.0 + 0.1 * numpy.sin(7 * theta) * numpy.sin(5 * phi)
+            points.append((radius * numpy.sin(phi) * numpy.cos(theta),
+                           radius * numpy.cos(phi),
+                           radius * numpy.sin(phi) * numpy.sin(theta)))
+    points.append((0.0, -1.0, 0.0))
+    south = len(points) - 1
+
+    def ring(r, k):
+        return 1 + (r - 1) * segments + (k % segments)
+
+    counts, indices = [], []
+    for k in range(segments):
+        counts.append(3)
+        indices += [0, ring(1, k + 1), ring(1, k)]
+    for r in range(1, rings - 1):
+        for k in range(segments):
+            counts.append(4)
+            indices += [ring(r, k), ring(r, k + 1), ring(r + 1, k + 1),
+                        ring(r + 1, k)]
+    for k in range(segments):
+        counts.append(3)
+        indices += [south, ring(rings - 1, k), ring(rings - 1, k + 1)]
+
+    points = numpy.asarray(points, dtype=numpy.float32)
+    model = touchPoseModel.TouchModel(counts, indices, [], points=points)
+    rng = numpy.random.RandomState(3)
+    for label, pose in (("rest", points),
+                        ("posed", points + numpy.float32(0.05) *
+                         numpy.sin(points * 3.0).astype(numpy.float32))):
+        model.SetPoints(pose)
+        disagreements = hits = 0
+        for _ in range(300):
+            direction = rng.normal(size=3)
+            direction /= numpy.linalg.norm(direction)
+            origin = direction * 5.0
+            target = rng.uniform(-0.5, 0.5, size=3)
+            ray = (tuple(origin), tuple(target - origin))
+            fast = model.native.Cast(*ray)
+            slow = model.native.Cast(*ray, brute_force=True)
+            hits += slow[0] >= 0
+            if fast[0] != slow[0] and abs(fast[1] - slow[1]) > 1e-6:
+                disagreements += 1
+        _Check(hits > 100, "%s: enough rays hit (%d)" % (label, hits))
+        _Check(disagreements == 0,
+               "%s: BVH and brute force agree on every ray (%d did not)"
+               % (label, disagreements))
+    print("  bvh: %d faces, 300 random rays agree with brute force at rest "
+          "and posed" % model.face_count)
+
+
+def TestHighlightTable():
+    """The highlight is a per-region colour table, composed natively.
+
+    The order is the contract: paint mode's every-region colours under
+    the selection, the selection under the lead, the lead under the
+    hover -- so the region under the cursor always shows what a click
+    would do. And a state that is already drawn changes nothing, which is
+    what makes a mouse move inside one region free.
+    """
     stage = _Stage()
     model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
-    region = model.RegionOfFace(0)
-
-    points, counts, indices = model.OverlayGeometry(region)
-    counts, indices = counts.tolist(), indices.tolist()
-    _Check(counts == [4], "one quad, got %s" % counts)
-    _Check(len(points) == 4,
-           "compacted to the 4 corners it uses, not the cube's 8: %d"
-           % len(points))
-    _Check(sorted(indices) == [0, 1, 2, 3],
-           "indices renumbered into the compact points: %s" % indices)
-
-    # The patch must sit OFF the surface by the offset, along +Z here,
-    # or it z-fights with the body it is lying on.
-    lift = model.OffsetFor(region)
-    _Check(abs(float(points[:, 2].min()) - (1.0 + lift)) < 1e-4,
-           "lifted by the offset (%.5f) along the face normal: z = %.5f"
-           % (lift, float(points[:, 2].min())))
-    _Check(abs(float(points[:, 2].max()) - (1.0 + lift)) < 1e-4,
-           "all four corners, evenly")
-
-    # The two-face region: shared corners must be shared in the output.
+    front = model.RegionOfFace(0)
     sides = model.RegionOfFace(2)
-    points, counts, indices = model.OverlayGeometry(sides)
-    counts, indices = counts.tolist(), indices.tolist()
-    _Check(counts == [4, 4], "two quads, got %s" % counts)
-    _Check(len(points) == 8,
-           "+X and -X share no corner on a cube, so 8 points: %d"
-           % len(points))
-    _Check(len(indices) == 8, "eight corners referenced: %d" % len(indices))
+    native = model.native
+    colors = model.StateColors()
+    table = native.HighlightTable()
+    _Check(table.shape == (3, 4),
+           "one row per region plus the unlit row 0: %s" % (table.shape,))
 
-    # ...and a region sharing an edge really does weld.
-    welded = touchPoseModel.Region(0, "welded_touch", "/Rig/front_ctl",
-                                   (1, 1, 1), 0,
-                                   numpy.asarray([0, 2], numpy.int32))
-    points, counts, _i = model.OverlayGeometry(welded)
-    counts = counts.tolist()
-    _Check(counts == [4, 4] and len(points) == 6,
-           "+Z and +X share an edge, so 6 points not 8: %d" % len(points))
+    changed = native.SetHighlightState(front.index, None, [], False, 0.85,
+                                       colors["lead"], colors["selected"])
+    table = native.HighlightTable()
+    _Check(changed, "lighting a hover changes the table")
+    _Check(numpy.allclose(table[front.index + 1][:3], model.HoverColor(front))
+           and abs(table[front.index + 1][3] - 0.85) < 1e-6,
+           "the hovered region is its hover colour at the opacity: %s"
+           % table[front.index + 1])
+    _Check(table[sides.index + 1][3] == 0.0 and table[0][3] == 0.0,
+           "everything else, and row 0, is unlit")
+    _Check(not native.SetHighlightState(front.index, None, [], False, 0.85,
+                                        colors["lead"], colors["selected"]),
+           "the SAME state again changes nothing")
 
-    empty = touchPoseModel.Region(0, "empty_touch", None, (1, 1, 1), 0,
-                                  numpy.asarray([], numpy.int32))
-    points, counts, indices = model.OverlayGeometry(empty)
-    _Check(len(points) == 0 and len(counts) == 0 and len(indices) == 0,
-           "an empty region makes an empty patch rather than raising")
-    print("  overlay: compact points, welded shared edges, lifted %.5f "
-          "off the skin" % lift)
+    native.SetHighlightState(front.index, front.index, [sides.index], False,
+                             0.5, colors["lead"], colors["selected"])
+    table = native.HighlightTable()
+    _Check(numpy.allclose(table[front.index + 1][:3], model.HoverColor(front)),
+           "hover wins over lead on the same region")
+    _Check(numpy.allclose(table[sides.index + 1][:3], colors["selected"]),
+           "a selected region is the selected colour: %s"
+           % table[sides.index + 1])
+    native.SetHighlightState(None, front.index, [sides.index], False, 0.5,
+                             colors["lead"], colors["selected"])
+    table = native.HighlightTable()
+    _Check(numpy.allclose(table[front.index + 1][:3], colors["lead"]),
+           "without the hover the lead shows: %s" % table[front.index + 1])
+
+    native.SetHighlightState(sides.index, None, [], True, 0.5,
+                             colors["lead"], colors["selected"])
+    table = native.HighlightTable()
+    _Check(numpy.allclose(table[front.index + 1][:3], model.EditColor(front)),
+           "paint mode lights every region in its EDIT colour")
+    _Check(numpy.allclose(table[sides.index + 1][:3], model.EditColor(sides)),
+           "including the hovered one, so it reads as the same thing lit")
+
+    # The stage is untouched by any of it.
+    _Check(stage.GetSessionLayer().ExportToString().strip() == "#usda 1.0",
+           "the highlight authored nothing into the session layer")
+    print("  highlight: table composed edit < selected < lead < hover, "
+          "repeat states free, nothing authored")
 
 
 def TestStateColors():
@@ -341,8 +444,8 @@ def TestStateColors():
               tuple(round(c, 3) for c in selected)))
 
 
-def TestMergedOverlay():
-    """Several regions draw as ONE patch, not one prim each."""
+def TestRegionUnions():
+    """Several regions as one face set, and control -> regions."""
     stage = _Stage()
     model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
     front = model.RegionOfFace(0)
@@ -351,18 +454,10 @@ def TestMergedOverlay():
     faces = model.FacesOf([front, sides])
     _Check(sorted(faces.tolist()) == [0, 2, 3],
            "the union of the two regions' faces: %s" % faces.tolist())
-
-    points, counts, indices = model.OverlayGeometry(faces)
-    _Check(counts.tolist() == [4, 4, 4],
-           "three quads in one patch, got %s" % counts.tolist())
-
-    # The same region twice must not double up -- two selected regions
-    # can name the same control.
     _Check(model.FacesOf([front, front]).tolist() == [0],
            "a repeated region contributes its faces once")
     _Check(len(model.FacesOf([])) == 0, "no regions, no faces")
 
-    # And the path the selection layer actually takes: control -> regions.
     control = front.control
     got = model.RegionsFor([control])
     _Check(sorted(r.name for r in got) == ["front_touch", "sides_touch"],
@@ -370,8 +465,7 @@ def TestMergedOverlay():
            % [r.name for r in got])
     _Check(model.RegionsFor(["/nothing/here"]) == [],
            "an unselected path lights nothing")
-    print("  merged overlay: 2 regions -> 3 quads in one patch, "
-          "duplicates collapsed")
+    print("  unions: 2 regions -> 3 faces, duplicates collapsed")
 
 
 def TestRayThroughPixel():
@@ -414,10 +508,9 @@ def TestRayThroughPixel():
 def TestMarqueeMath():
     """Screen rect -> regions, with no viewport involved.
 
-    The band is the one part of the selection path that is pure
-    arithmetic, so it is checked here rather than only in the app: a
-    camera looking down -Z at the cube, a rect over one half of the
-    frame, and the regions that should fall in it.
+    A camera looking down -Z at the cube, a rect over the frame, and the
+    regions that should fall in it -- front-facing only, because a band
+    over the front of a body must not catch its back.
     """
     stage = _Stage()
     model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
@@ -428,45 +521,37 @@ def TestMarqueeMath():
     frustum.SetProjectionType(Gf.Frustum.Perspective)
     frustum.SetPerspective(60.0, 1.0, 1.0, 100.0)
     matrix = frustum.ComputeViewMatrix() * frustum.ComputeProjectionMatrix()
-    rows = [[matrix[r][c] for c in range(4)] for r in range(4)]
+    eye = (0.0, 0.0, 10.0)
 
-    pixels, valid = model.FacePixels(rows, 200, 200)
-    _Check(len(pixels) == 6 and valid.all(),
-           "six faces projected, all in front of the eye: %s" % valid)
-    # The +Z face is dead centre; the +Y face is above centre, which in
-    # Qt's downward y means a SMALLER pixel y.
-    _Check(abs(pixels[0][0] - 99.5) < 1.0 and abs(pixels[0][1] - 99.5) < 1.0,
-           "the front face lands in the middle: %s" % (pixels[0],))
-    _Check(pixels[4][1] < pixels[0][1],
-           "the +Y face is higher up the screen: %.1f vs %.1f"
-           % (pixels[4][1], pixels[0][1]))
-
-    front = model.FrontFacing((0.0, 0.0, 10.0))
-    _Check(front[0] and not front[1],
-           "the +Z face faces the eye and the -Z one does not: %s" % front)
-
-    caught = model.RegionsInRect(pixels, front, 0, 0, 200, 200)
+    caught = model.RegionsInRect(matrix, 200, 200, eye, 0, 0, 200, 200)
     names = sorted(r.name for r in caught)
-    _Check("front_touch" in names,
-           "a band over the whole frame catches the front region: %s"
-           % names)
-    _Check(len(model.RegionsInRect(pixels, front, 0, 0, 5, 5)) == 0,
+    _Check(names == ["front_touch"],
+           "a band over the whole frame catches the front region and not "
+           "the edge-on sides: %s" % names)
+    _Check(model.RegionsInRect(matrix, 200, 200, eye, 0, 0, 5, 5) == [],
            "a band in the corner catches nothing")
-
-    # Reversed drags are the same rect -- an animator drags both ways.
-    _Check([r.name for r in model.RegionsInRect(pixels, front,
+    _Check([r.name for r in model.RegionsInRect(matrix, 200, 200, eye,
                                                 200, 200, 0, 0)] ==
            [r.name for r in caught],
            "a band dragged up-left is the same band")
+    # The front centroid projects to the middle pixel: a 4-px band there.
+    _Check([r.name for r in model.RegionsInRect(matrix, 200, 200, eye,
+                                                97, 97, 102, 102)] ==
+           ["front_touch"], "the centroid lands in the centre pixel")
 
-    # The back face is excluded by the mask, not by the rect: without the
-    # facing test a band over the front of a body also catches the back.
-    everything = numpy.ones(model.face_count, dtype=bool)
-    _Check(len(model.RegionsInRect(pixels, everything, 0, 0, 200, 200))
-           >= len(caught),
-           "with no facing mask the same band catches at least as much")
-    print("  marquee: projection, facing mask and rect test agree on a "
-          "cube from a known camera")
+    # From behind, the front face faces away and is not caught.
+    behind = Gf.Frustum()
+    behind.SetPositionAndRotationFromMatrix(
+        Gf.Matrix4d(1.0).SetRotate(Gf.Rotation(Gf.Vec3d(0, 1, 0), 180))
+        * Gf.Matrix4d(1.0).SetTranslate(Gf.Vec3d(0, 0, -10)))
+    behind.SetProjectionType(Gf.Frustum.Perspective)
+    behind.SetPerspective(60.0, 1.0, 1.0, 100.0)
+    matrix = behind.ComputeViewMatrix() * behind.ComputeProjectionMatrix()
+    _Check(model.RegionsInRect(matrix, 200, 200, (0.0, 0.0, -10.0),
+                               0, 0, 200, 200) == [],
+           "from behind, the front region faces away and is not caught")
+    print("  marquee: projection, facing test and rect test agree on a "
+          "cube from a known camera, front and back")
 
 
 def TestPainting():
@@ -773,62 +858,17 @@ def TestColorSets():
           "the edit patch, %d faces coloured in one array" % len(colors))
 
 
-def TestOffsetScalesWithTheRegion():
-    """The lift is the REGION's size, not the body's, with a floor.
-
-    Spike R6 measured the z-fight gone by 0.005 cm on a 224 cm biped and
-    flat from there to the 0.34 cm that shipped, so the lift can follow
-    the region instead of the body. What is asserted here is that it
-    DOES follow it -- a big patch lifts further than a small one -- and
-    that the floor catches a patch small enough to fall through.
-    """
-    stage = _Stage()
-    model = touchPoseModel.TouchModel.FromStage(stage, "/Body")
-
-    big = model.RegionOfFace(2)         # two faces, opposite sides
-    small = model.RegionOfFace(0)       # one face
-    _Check(model.OffsetFor(big) > model.OffsetFor(small),
-           "a bigger region lifts further: %.5f vs %.5f"
-           % (model.OffsetFor(big), model.OffsetFor(small)))
-    _Check(model.OffsetFor(small) >= model.min_offset,
-           "and nothing lifts less than the floor: %.5f vs %.5f"
-           % (model.OffsetFor(small), model.min_offset))
-
-    # The floor has to bite on a region small enough to need it. A single
-    # face of the cube spans 2.0, so shrink the constant instead of
-    # building a second fixture.
-    saved = touchPoseModel.OFFSET_FRACTION
-    try:
-        touchPoseModel.OFFSET_FRACTION = 1e-9
-        _Check(abs(model.OffsetFor(small) - model.min_offset) < 1e-12,
-               "with a vanishing fraction the floor is what is used: "
-               "%.8f" % model.OffsetFor(small))
-    finally:
-        touchPoseModel.OFFSET_FRACTION = saved
-
-    # And the patch is actually built at that lift, not at some other
-    # number computed elsewhere.
-    points, _counts, _indices = model.OverlayGeometry(small)
-    _Check(abs(float(points[:, 2].min()) - (1.0 + model.OffsetFor(small)))
-           < 1e-4,
-           "OverlayGeometry lifts by exactly OffsetFor: z = %.5f, "
-           "expected %.5f" % (float(points[:, 2].min()),
-                              1.0 + model.OffsetFor(small)))
-    print("  offset: %.5f for a 1-face region, %.5f for a 2-face one, "
-          "floor %.5f" % (model.OffsetFor(small), model.OffsetFor(big),
-                          model.min_offset))
-
-
 def main():
     print("touchPoseModel:")
     TestReading()
     TestCast()
     TestFollowsTheDeformedMesh()
-    TestOverlayGeometry()
-    TestOffsetScalesWithTheRegion()
+    TestFollowsTheMeshTransform()
+    TestBvhAgreesWithBruteForce()
+    TestHighlightTable()
     TestStateColors()
     TestColorSets()
-    TestMergedOverlay()
+    TestRegionUnions()
     TestRayThroughPixel()
     TestMarqueeMath()
     TestPainting()

@@ -21,13 +21,13 @@ if [ ${#TESTS[@]} -eq 0 ]; then
            test_graph_screen test_layer_opinions_model
            test_composition_arcs_model test_gizmo_preview
            test_touchpose_model test_gizmo_marquee
-           test_picker_scene)
+           test_picker_scene test_picker_layout)
 fi
 
 # Only the tests listed here read argv[1], to Plug-register the generated
 # schema. The rest never touch sys.argv -- they need neither a schema nor
 # a build -- so handing them $SCHEMA would tell a reader otherwise.
-SCHEMA_TESTS=" test_rigexec_undo test_gizmo_math test_rigexec_stage_edits test_graph_model test_picker_scene "
+SCHEMA_TESTS=" test_rigexec_undo test_gizmo_math test_rigexec_stage_edits test_graph_model test_picker_scene test_picker_layout "
 for t in "${TESTS[@]}"; do
     echo "== $t"
     case "$SCHEMA_TESTS" in

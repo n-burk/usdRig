@@ -70,8 +70,8 @@ class RigExecRoot "RigExecRoot" (
     )
     uniform bool rigExec:baked = 0 (
         customData = {
-            string userDocBrief = """Asks the evaluator to answer this rig through its BAKED
-        PROGRAM -- the flattened, epoch-constant form of the rig -- instead
+            string userDocBrief = """Asks the evaluator to answer this rig through its BAKED\r
+        PROGRAM -- the flattened, epoch-constant form of the rig -- instead\r
         of through OpenExec and the in-memory pose walk."""
         }
     )
@@ -173,6 +173,12 @@ class RigExecControl "RigExecControl" (
         customData = {
             string userDocBrief = """wire draws the guide as curves, widthed by\r
         guide:wireWidth."""
+        }
+    )
+    double3 guide:offset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """Where the guide shape is drawn, in the control's LOCAL frame,\r
+        relative to the control's origin."""
         }
     )
     double guide:scaleX = 1 (
@@ -3482,6 +3488,12 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
         customData = {
             string userDocBrief = """wire draws the guide as curves, widthed by\r
         guide:wireWidth."""
+        }
+    )
+    double3 guide:offset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """Where the guide shape is drawn, in the control's LOCAL frame,\r
+        relative to the control's origin."""
         }
     )
     double guide:scaleX = 1 (

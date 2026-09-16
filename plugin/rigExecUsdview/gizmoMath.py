@@ -1698,6 +1698,17 @@ class Target(object):
         """
         return ""
 
+    def RefreshDuringDrag(self):
+        """
+        Re-read what a drag sample can have moved, as cheaply as is exact.
+
+        A drag sample changes only the previewed values of THIS target's own
+        channels, so for most targets nothing but its posed frame can have
+        moved. The default is the full Refresh; subclasses that can prove a
+        narrower answer override it.
+        """
+        self.Refresh()
+
     def Refresh(self, frameCache=None):
         """
         Re-read the stage; call after a frame change or an undo.
@@ -1856,6 +1867,34 @@ class _RigTarget(Target):
         self.frames = ComputeRigFrames(self.stage, self.prim, self.time,
                                        posed, frameCache)
 
+    def RefreshDuringDrag(self):
+        """
+        The posed frame only, for a pose drag on this one control.
+
+        Measured on the biped: a full Refresh per mouse move recomputed every
+        ancestor's frame in Python -- ~18 ms per sample for a brow control
+        twenty levels deep, more than the rig's own evaluation. During a pose
+        drag of a single control, only ITS avars are previewed, so everything
+        the recursion produces is unchanged except `posed`:
+
+          P, Q, rest, Qrest, default   depend on the parent and on rest/default
+                                       channels, none of which a pose drag
+                                       writes
+          posed                        = AvarsMatrix * P, exactly the line
+                                       _ComputeRigFrames uses
+
+        Anything that breaks that argument takes the full Refresh: a frame
+        the rig published (a solver-posed control, whose pose is not its
+        avars), a refused target, or no frames yet.
+        """
+        frames = self.frames
+        if (frames is None or frames.rigRoot is None or frames.published or
+                frames.reason):
+            self.Refresh()
+            return
+        frames.posed = AvarsMatrix(self.prim, self.time,
+                                   _Context(None, self.time)) * frames.P
+
     def RigRootPath(self):
         root = self.frames.rigRoot if self.frames is not None else None
         return root.GetPath() if root else None
@@ -1944,6 +1983,12 @@ class RigPivotTarget(_RigTarget):
     """Edits rest:t/r relative to Q (see RigFrames); no scale."""
 
     kind = "rig-pivot"
+
+    def RefreshDuringDrag(self):
+        # A pivot drag previews REST channels, which move rest, Qrest and
+        # everything composed from them -- the posed-only shortcut does not
+        # hold here, so every sample takes the full walk.
+        self.Refresh()
     supportsScale = False
     # Rest offsets are parent-relative, so a pivot drag carries the whole
     # subtree with it. Preserve Children is therefore meaningful here in a
@@ -2800,6 +2845,32 @@ class GroupTarget(Target):
         self._pivot = Gf.Vec3d(0.0, 0.0, 0.0)
         self._frame = Gf.Matrix4d(1.0)
         self._notes = []
+        self.axisOrientation = "object"
+        self._axes = Gf.Matrix4d(1.0)
+        self._memberAxes = []
+
+    def SetAxisOrientation(self, orientation):
+        """
+        Which frame the handles are laid out on: "world", "object",
+        "parent" or "gimbal" (gizmoSettings.ORIENT_*, restated as plain
+        strings so this module stays free of gizmoSettings).
+
+        Only Individual Origins reads it. A drag along the group's X handle
+        then moves or scales every member along ITS OWN matching axis, and
+        "its own matching axis" is that member's frame of the same kind:
+        its object frame when the handles are on the lead's object frame,
+        its parent frame for Parent, and the world for World. Gimbal has
+        no group form (RotationState is None) and reads as Object.
+        """
+        self.axisOrientation = orientation or "object"
+
+    def _AxesOf(self, target):
+        """The rotation `target`'s handles would use for axisOrientation."""
+        if self.axisOrientation == "world":
+            return Gf.Matrix4d(1.0)
+        if self.axisOrientation == "parent":
+            return _RotationOnly(target.ChannelFrame())
+        return _RotationOnly(target.GizmoMatrix())
 
     def SetPivotMode(self, mode):
         """
@@ -2915,6 +2986,8 @@ class GroupTarget(Target):
         self._origins = self.Origins()
         self._pivot = Gf.Vec3d(self.Pivot())
         self._frame = _RotationOnly(self.lead.GizmoMatrix())
+        self._axes = self._AxesOf(self.lead)
+        self._memberAxes = [self._AxesOf(m) for m in self.members]
         self._order, self._ancestor = self._Hierarchy()
         self._notes = []
 
@@ -3067,6 +3140,10 @@ class GroupTarget(Target):
         pair.
         """
         delta = Gf.Vec3d(worldDelta)
+        if (self.pivotMode == GROUP_PIVOT_INDIVIDUAL
+                and len(self.members) > 1):
+            self._TranslateIndividually(delta, snapStep)
+            return
         if snapStep and len(self.members) > 1:
             base = [self._pivot[i] for i in range(3)]
             landed = _SnapTranslation(base, [delta[i] for i in range(3)],
@@ -3081,6 +3158,35 @@ class GroupTarget(Target):
             return
         move = Gf.Matrix4d(1.0).SetTranslate(delta)
         for entry in self._Solve(lambda *args: move):
+            self._Author(*entry)
+
+    def _TranslateIndividually(self, delta, snapStep):
+        """
+        Individual Origins for a move: every member moves the same amount
+        along its OWN axes.
+
+        The drag's world delta is read back as amounts along the handle
+        frame (the lead's, for Object), and those same amounts are laid
+        along each member's frame of the same kind. Dragging the X arrow
+        of three fingers therefore slides each finger along its own X,
+        rather than all three along the lead's. A member under a selected
+        ancestor rides the ancestor's move and adds its own on top, as a
+        rotation does in this mode.
+
+        Step Snap quantises the amounts once, here, so every member lands
+        on the same step.
+        """
+        local = self._axes.GetInverse().TransformDir(delta)
+        if snapStep:
+            local = Gf.Vec3d(*[round(local[i] / snapStep) * snapStep
+                               for i in range(3)])
+        moves = [Gf.Matrix4d(1.0).SetTranslate(axes.TransformDir(local))
+                 for axes in self._memberAxes]
+
+        def intended(index, origin, inherited, inheritedOrigin):
+            return inherited * moves[index]
+
+        for entry in self._Solve(intended):
             self._Author(*entry)
 
     def ApplyRotate(self, worldAxis, degrees, *, snapStep=None):
@@ -3153,7 +3259,10 @@ class GroupTarget(Target):
 
         def intended(index, origin, inherited, inheritedOrigin):
             if self.pivotMode == GROUP_PIVOT_INDIVIDUAL:
-                return inherited * self._About(aligned, inheritedOrigin)
+                # Along the member's OWN axes, about its own origin.
+                own = self._memberAxes[index] if self._memberAxes else frame
+                along = own.GetInverse() * scale * own
+                return inherited * self._About(along, inheritedOrigin)
             return self._About(aligned, self._pivot)
 
         for (member, remainder, inheritedLinear, inheritedOrigin,

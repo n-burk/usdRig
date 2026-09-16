@@ -544,6 +544,15 @@ public:
         return _solverGuidesEnabled;
     }
 
+    /// Advances once for every stage notice this evaluator receives.
+    ///
+    /// For a consumer that caches values read off the same stage across
+    /// generations (the imaging bridge's guide styling): comparing the
+    /// serial with the one it cached under is the whole invalidation, and it
+    /// cannot miss an edit, because it is bumped by the very notice handler
+    /// the evaluator's own caches are dropped from.
+    uint64_t GetStageEditSerial() const { return _stageEditSerial; }
+
     /// The timing harness. Events accumulate across evaluations until
     /// ClearProfile, so one trace can hold a whole multi-frame scrub.
     const RigExecProfiler &GetProfiler() const
@@ -1392,6 +1401,8 @@ private:
         RigExecEvaluationModeSource::Default;
 
     size_t _structureDigest = 0;
+    /// See GetStageEditSerial.
+    uint64_t _stageEditSerial = 0;
     TfNotice::Key _noticeKey;
     bool _structureDirty = true;
     bool _compiled = false;

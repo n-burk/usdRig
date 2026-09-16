@@ -92,6 +92,10 @@ public:
     /// Evaluates and republishes. Authors nothing.
     bool UpdatePreview(const double *values, size_t count);
 
+    /// Writes every active rig's recorded profile totals to \p path and
+    /// clears them. See RigExecImaging_WriteProfileSummary.
+    bool WriteProfileSummary(const std::string &path);
+
     /// Ends the manipulation: drops every override and delta and republishes
     /// the authored rig. The application authors the committed values itself,
     /// before or after this call -- the two are independent, which is why an
@@ -235,6 +239,9 @@ extern "C" {
 RIGEXEC_IMAGING_C_API int RigExecImaging_Activate(
     long long stageCacheId, const char *rigPath, double initialFrame);
 RIGEXEC_IMAGING_C_API int RigExecImaging_SetTime(double frame);
+/// Per-phase viewport profile totals to a text file, then cleared. Needs
+/// RIGEXEC_IMAGING_PROFILE set when the rig was activated.
+RIGEXEC_IMAGING_C_API int RigExecImaging_WriteProfileSummary(const char *path);
 RIGEXEC_IMAGING_C_API void RigExecImaging_Deactivate();
 /// Current published snapshot generation (0 before first publication).
 RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGeneration();

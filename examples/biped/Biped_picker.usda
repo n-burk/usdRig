@@ -14,7 +14,7 @@ over "Biped"
             def RigExecPickerPanel "Facial"
             {
                 uniform color4f ui:background = (0.26666668, 0.26666668, 0.26666668, 1)
-                uniform string ui:label = "Facial"
+                uniform string ui:label = "Face"
                 uniform int ui:order = 0
                 uniform float2 ui:size = (400, 600)
 
@@ -56,7 +56,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_M_UpFace"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl>
                     uniform float2[] ui:bezier = [(9.95929, 52.6428), (9.95929, 52.6428), (9.95929, 52.6428), (11.6576, 58.1344), (11.6576, 58.1344), (11.6576, 58.1344), (1.08668, 58.3861), (1.08668, 58.3861), (1.08668, 58.3861), (26.5072, 1.00121), (53.0167, 0.696591), (-1.85302, 1.32709), (48.9074, 58.1344), (48.9074, 58.1344), (48.9074, 58.1344), (37.3298, 58.3861), (37.3298, 58.3861), (37.3298, 58.3861), (39.6315, 52.6944), (39.6315, 52.6944), (39.6315, 52.6944), (24.8496, 53.7169), (16.8435, 53.7169), (32.8557, 53.7169)]
                     uniform float ui:depth = -0.0021
                     uniform color4f ui:fill = (0.47843137, 0.77254903, 0.76862746, 1)
@@ -214,7 +214,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_Eye"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>
                     uniform float ui:depth = 0.0302
                     uniform color4f ui:fill = (0.36862746, 0.23921569, 0.42352942, 1)
                     uniform float2 ui:position = (670, 179)
@@ -226,7 +226,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_Eye"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>
                     uniform float ui:depth = 0.0302
                     uniform color4f ui:fill = (0.36862746, 0.23921569, 0.42352942, 1)
                     uniform float2 ui:position = (532, 179)
@@ -264,7 +264,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_Brow"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl>
                     uniform float ui:depth = 0.0443
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (525, 96)
@@ -277,7 +277,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_Brow"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl>
                     uniform float ui:depth = 0.0443
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (652, 96)
@@ -290,7 +290,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_EyeSocket"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl>
                     uniform float2[] ui:bezier = [(1, 1.61933), (1, 1.47543), (1, 1.76322), (25.6059, 15.5771), (37.2613, 27.8081), (13.9505, 3.34606), (40.1392, 46.8021), (40.1392, 46.8021), (40.1392, 46.8021), (31.3617, 10.3969), (17.5478, -2.6975), (45.1755, 23.4912)]
                     uniform float ui:depth = 0.0445
                     uniform color4f ui:fill = (0.6, 1, 0.4, 1)
@@ -303,7 +303,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_EyeSocket"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl>
                     uniform float2[] ui:bezier = [(40, 1.61933), (40, 1.47543), (40, 1.76322), (15.3941, 15.5771), (3.73868, 27.8081), (27.0495, 3.34606), (0.860795, 46.8021), (0.860795, 46.8021), (0.860795, 46.8021), (9.63834, 10.3969), (23.4522, -2.6975), (-4.1755, 23.4912)]
                     uniform float ui:depth = 0.0445
                     uniform color4f ui:fill = (0.6, 1, 0.4, 1)
@@ -316,7 +316,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_M_Nose"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind/nose_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow/nose_compress/nose_ctl>
                     uniform float2[] ui:bezier = [(14.9608, 18.14), (14.9608, 18.14), (14.9608, 18.14), (21.0839, 13.1802), (25.6619, 11.0064), (17.0667, 15.0878), (29.1573, 12.0744), (29.1573, 12.0744), (29.1573, 12.0744), (15.6612, 1.0057), (4.68958, 0.714417), (26.6328, 1.29698), (1, 11.6861), (1, 11.6861), (1, 11.6861), (8.67044, 13.0454), (12.9426, 15.0843), (4.39829, 11.0064)]
                     uniform float ui:depth = 0.0448
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
@@ -329,7 +329,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_M_LoFace"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl>
                     uniform float2[] ui:bezier = [(1, 2.00675), (1, 1.75506), (1, 2.25844), (12.0743, 2.00675), (12.0743, 2.00675), (12.0743, 2.00675), (24.9104, 10.3125), (33.4678, 10.5642), (16.353, 10.0608), (37.7465, 1.25169), (37.7465, 1.25169), (37.7465, 1.25169), (49.5758, 1), (49.5758, 1), (49.5758, 1), (25.1375, 29.4966), (3.40278, 29.082), (46.58, 29.9056)]
                     uniform float ui:depth = 0.0449
                     uniform color4f ui:fill = (0.30980393, 0.6901961, 0.6745098, 1)
@@ -342,7 +342,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_M_NoseBridge"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow/nose_bridge_compress/nose_bridge_ctl>
                     uniform float ui:depth = 0.0449
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2[] ui:polygon = [(17.7776, 10.7577), (17.214, 3.22975), (11.2341, 1.20809), (9.24414, 1), (7.92342, 1.16647), (1.4205, 3.11154), (1, 10.6809), (9.38628, 10.8346)]
@@ -356,7 +356,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_M_Jaw"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/jaw_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl>
                     uniform float2[] ui:bezier = [(1, 1), (1, 1), (1, 1), (39.6424, 26.1684), (75.7426, 26.6769), (3.54226, 25.66), (79.3017, 1.76268), (79.3017, 1.76268), (79.3017, 1.76268)]
                     uniform float ui:depth = 0.045
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
@@ -369,7 +369,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_InBrow"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_inner_r_ctl>
                     uniform float ui:depth = 0.0461
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (574, 96)
@@ -382,7 +382,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_InBrow"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_inner_l_ctl>
                     uniform float ui:depth = 0.0461
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (635, 96)
@@ -395,7 +395,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_MidBrow"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_peak_r_drag/brow_peak_r_ctl>
                     uniform float ui:depth = 0.0463
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2[] ui:polygon = [(34.8366, 1), (35, 13.9118), (23.3426, 13.8506), (-0.551374, 16.3301), (20.6253, 1.05313)]
@@ -409,7 +409,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_MidBrow"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_peak_l_drag/brow_peak_l_ctl>
                     uniform float ui:depth = 0.0463
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2[] ui:polygon = [(1.16344, 1), (1, 13.9118), (12.6574, 13.8506), (36.5514, 16.3301), (15.3747, 1.05313)]
@@ -421,15 +421,40 @@ over "Biped"
                     uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
                 }
 
+                def RigExecPickerButton "b_M_LookRot"
+                {
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim/lookRot_ctl>
+                    uniform float ui:depth = 0.0473
+                    uniform color4f ui:fill = (0.03137255, 0.6666667, 0.98039216, 1)
+                    uniform float2 ui:position = (606, 186)
+                    uniform token ui:shape = "circle"
+                    uniform float2 ui:size = (15, 15)
+                    uniform color4f ui:stroke = (0, 0, 0, 0.5019608)
+                    uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
+                }
+
+                def RigExecPickerButton "b_M_Look"
+                {
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/lookAt_ctl>
+                    uniform float ui:depth = 0.0473
+                    uniform color4f ui:fill = (0.6, 1, 0.4, 1)
+                    uniform float2 ui:position = (609, 171)
+                    uniform float ui:roundness = 2
+                    uniform token ui:shape = "rectangle"
+                    uniform float2 ui:size = (9, 8)
+                    uniform color4f ui:stroke = (0, 0, 0, 0.5019608)
+                    uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
+                }
+
                 def RigExecPickerButton "b_L_Brow_x20"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_r_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_peak_l_drag/brow_peak_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_peak_r_drag/brow_peak_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_inner_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_inner_r_ctl>,
                     ]
                     uniform float ui:depth = 0.0502
                     uniform color4f ui:fill = (0.4, 0.4, 0.4, 1)
@@ -463,8 +488,8 @@ over "Biped"
                 def RigExecPickerButton "b_L_UpLid_x60"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl>,
                     ]
                     uniform float ui:depth = 0.0503
                     uniform color4f ui:fill = (0.4, 0.4, 0.4, 1)
@@ -482,8 +507,10 @@ over "Biped"
                 def RigExecPickerButton "b_M_Look_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>,
+                        </Biped/Rig/Controls/lookAt_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim/lookRot_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>,
                     ]
                     uniform float ui:depth = 0.0504
                     uniform color4f ui:fill = (0.4, 0.4, 0.4, 1)
@@ -503,7 +530,7 @@ over "Biped"
                     rel rigExec:picker:controls = [
                         </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/teeth_upper_bind>,
                         </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/jaw_bind/teeth_lower_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/jaw_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl>,
                     ]
                     uniform float ui:depth = 0.0505
                     uniform color4f ui:fill = (0.4, 0.4, 0.4, 1)
@@ -521,9 +548,9 @@ over "Biped"
                 def RigExecPickerButton "b_R_Mouth_x63"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind/nose_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/jaw_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow/nose_compress/nose_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow/nose_bridge_compress/nose_bridge_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl>,
                         </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/jaw_bind/teeth_lower_bind>,
                         </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/teeth_upper_bind>,
                     ]
@@ -543,16 +570,18 @@ over "Biped"
                 def RigExecPickerButton "b_R_Eye_x96"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_r_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim/lookRot_ctl>,
+                        </Biped/Rig/Controls/lookAt_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_peak_r_drag/brow_peak_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_peak_l_drag/brow_peak_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_inner_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_inner_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl>,
                     ]
                     uniform float ui:depth = 0.0505
                     uniform color4f ui:fill = (0.6, 0.6, 0.6, 1)
@@ -569,7 +598,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_Eye_2"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>
                     uniform float ui:depth = 0.0532
                     uniform color4f ui:fill = (0, 0, 0, 1)
                     uniform float2 ui:position = (675, 184)
@@ -581,7 +610,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_Eye_2"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>
                     uniform float ui:depth = 0.0533
                     uniform color4f ui:fill = (0, 0, 0, 1)
                     uniform float2 ui:position = (537, 184)
@@ -604,7 +633,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_Eye_3"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>
                     uniform float ui:depth = 0.0536
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
                     uniform float2 ui:position = (627, 513)
@@ -628,7 +657,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_Eye_3"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>
                     uniform float ui:depth = 0.0536
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
                     uniform float2 ui:position = (608, 513)
@@ -641,8 +670,8 @@ over "Biped"
                 def RigExecPickerButton "b_R_Eye_x30"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl>,
                     ]
                     uniform float ui:depth = 0.054
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
@@ -658,8 +687,8 @@ over "Biped"
                 def RigExecPickerButton "b_L_Eye_x30"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl>,
                     ]
                     uniform float ui:depth = 0.054
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
@@ -698,9 +727,9 @@ over "Biped"
                 def RigExecPickerButton "b_L_BrowTense_x10"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_l_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_l_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_peak_l_drag/brow_peak_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_inner_l_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl>,
                     ]
                     uniform float ui:depth = 0.0543
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
@@ -716,9 +745,9 @@ over "Biped"
                 def RigExecPickerButton "b_R_BrowTense_x10"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_r_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_peak_r_drag/brow_peak_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_inner_r_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl>,
                     ]
                     uniform float ui:depth = 0.0543
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
@@ -837,6 +866,18 @@ over "Biped"
                     uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
                 }
 
+                def RigExecPickerButton "b_M_Look"
+                {
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/lookAt_ctl>
+                    uniform float ui:depth = -0.0006
+                    uniform color4f ui:fill = (0.6, 1, 0.4, 1)
+                    uniform float2 ui:position = (174, 63)
+                    uniform token ui:shape = "roundedRectangle"
+                    uniform float2 ui:size = (68, 26)
+                    uniform color4f ui:stroke = (0.09803922, 0.09803922, 0.09803922, 0.4509804)
+                    uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
+                }
+
                 def RigExecPickerButton "b_M_HeadGimbal"
                 {
                     rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl>
@@ -850,10 +891,10 @@ over "Biped"
 
                 def RigExecPickerButton "b_M_Skull"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl>
                     uniform float ui:depth = 0.0001
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
-                    uniform float2 ui:position = (146, 259)
+                    uniform float2 ui:position = (171, 45)
                     uniform token ui:shape = "circle"
                     uniform float2 ui:size = (73, 12)
                     uniform color4f ui:stroke = (0.12156863, 0.12156863, 0.12156863, 1)
@@ -878,7 +919,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_ThumbBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind/thumb_001_l_bind>
                     uniform float ui:depth = 0.0018
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (320, 187)
@@ -891,7 +932,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_ThumbBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk/thumb_001_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind/thumb_001_r_bind>
                     uniform float ui:depth = 0.0018
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (85, 187)
@@ -904,7 +945,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_ThumbMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind>
                     uniform float ui:depth = 0.0019
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (77, 175)
@@ -916,7 +957,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_ThumbMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk/thumb_001_r_bind_fk/thumb_002_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind/thumb_001_r_bind/thumb_002_r_bind>
                     uniform float ui:depth = 0.0019
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (85, 200)
@@ -929,7 +970,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_ThumbMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk/thumb_002_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind/thumb_001_l_bind/thumb_002_l_bind>
                     uniform float ui:depth = 0.0019
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (320, 200)
@@ -942,7 +983,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_ThumbMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind>
                     uniform float ui:depth = 0.0019
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (332, 175)
@@ -954,7 +995,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_ThumbTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk/thumb_002_l_bind_fk/thumb_003_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind/thumb_001_l_bind/thumb_002_l_bind/thumb_003_l_bind>
                     uniform float ui:depth = 0.002
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (320, 214)
@@ -967,7 +1008,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_ThumbTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk/thumb_001_r_bind_fk/thumb_002_r_bind_fk/thumb_003_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind/thumb_001_r_bind/thumb_002_r_bind/thumb_003_r_bind>
                     uniform float ui:depth = 0.002
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (85, 214)
@@ -980,7 +1021,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_PinkyMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind>
                     uniform float ui:depth = 0.0022
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (377, 199)
@@ -993,7 +1034,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_PinkyMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind>
                     uniform float ui:depth = 0.0022
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (28, 199)
@@ -1006,7 +1047,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_PinkyBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind>
                     uniform float ui:depth = 0.0023
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (377, 210)
@@ -1019,7 +1060,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_PinkyCup"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind>
                     uniform float ui:depth = 0.0023
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (360, 180)
@@ -1031,7 +1072,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_PinkyBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind>
                     uniform float ui:depth = 0.0023
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (28, 210)
@@ -1044,7 +1085,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_RingMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind>
                     uniform float ui:depth = 0.0023
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (364, 199)
@@ -1057,7 +1098,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_RingMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind>
                     uniform float ui:depth = 0.0023
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (41, 199)
@@ -1070,7 +1111,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_PinkyCup"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind>
                     uniform float ui:depth = 0.0023
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (49, 180)
@@ -1082,7 +1123,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_RingBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind>
                     uniform float ui:depth = 0.0024
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (41, 210)
@@ -1095,7 +1136,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_PinkyMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk/pinky_003_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind/pinky_003_r_bind>
                     uniform float ui:depth = 0.0024
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (28, 221)
@@ -1108,7 +1149,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_PinkyMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk/pinky_003_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind/pinky_003_l_bind>
                     uniform float ui:depth = 0.0024
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (377, 221)
@@ -1121,7 +1162,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_RingBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind>
                     uniform float ui:depth = 0.0024
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (364, 210)
@@ -1134,7 +1175,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_RingMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk/ring_003_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind/ring_003_r_bind>
                     uniform float ui:depth = 0.0025
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (41, 221)
@@ -1147,7 +1188,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_RingMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk/ring_003_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind/ring_003_l_bind>
                     uniform float ui:depth = 0.0025
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (364, 221)
@@ -1160,7 +1201,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_PinkyTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk/pinky_003_l_bind_fk/pinky_004_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind/pinky_003_l_bind/pinky_004_l_bind>
                     uniform float ui:depth = 0.0025
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (377, 232)
@@ -1173,7 +1214,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_PinkyTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk/pinky_003_r_bind_fk/pinky_004_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind/pinky_003_r_bind/pinky_004_r_bind>
                     uniform float ui:depth = 0.0025
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (28, 232)
@@ -1186,7 +1227,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_RingTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk/ring_003_r_bind_fk/ring_004_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind/ring_003_r_bind/ring_004_r_bind>
                     uniform float ui:depth = 0.0026
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (41, 232)
@@ -1199,7 +1240,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_RingTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk/ring_003_l_bind_fk/ring_004_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind/ring_003_l_bind/ring_004_l_bind>
                     uniform float ui:depth = 0.0026
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (364, 232)
@@ -1472,7 +1513,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_MiddleMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind>
                     uniform float ui:depth = 0.003
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (351, 199)
@@ -1485,7 +1526,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_MiddleMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind>
                     uniform float ui:depth = 0.003
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (54, 199)
@@ -1602,7 +1643,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_MiddleBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind>
                     uniform float ui:depth = 0.0031
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (351, 210)
@@ -1615,7 +1656,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_MiddleBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind>
                     uniform float ui:depth = 0.0031
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (54, 210)
@@ -1732,7 +1773,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_MiddleMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk/middle_003_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind/middle_003_l_bind>
                     uniform float ui:depth = 0.0032
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (351, 221)
@@ -1745,7 +1786,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_MiddleMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk/middle_003_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind/middle_003_r_bind>
                     uniform float ui:depth = 0.0032
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (54, 221)
@@ -1810,7 +1851,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_MiddleTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk/middle_003_l_bind_fk/middle_004_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind/middle_003_l_bind/middle_004_l_bind>
                     uniform float ui:depth = 0.0033
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (351, 232)
@@ -1823,7 +1864,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_MiddleTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk/middle_003_r_bind_fk/middle_004_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind/middle_003_r_bind/middle_004_r_bind>
                     uniform float ui:depth = 0.0033
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (54, 232)
@@ -1837,10 +1878,10 @@ over "Biped"
                 def RigExecPickerButton "b_L_IndexMeta_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind>,
                     ]
                     uniform float ui:depth = 0.0034
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -1854,7 +1895,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_IndexMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind>
                     uniform float ui:depth = 0.0034
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (338, 199)
@@ -1868,10 +1909,10 @@ over "Biped"
                 def RigExecPickerButton "b_R_IndexMeta_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind>,
                     ]
                     uniform float ui:depth = 0.0034
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -1885,7 +1926,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_IndexMeta"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind>
                     uniform float ui:depth = 0.0034
                     uniform color4f ui:fill = (0.60784316, 0.7176471, 0.8392157, 1)
                     uniform float2 ui:position = (67, 199)
@@ -1899,10 +1940,10 @@ over "Biped"
                 def RigExecPickerButton "b_R_IndexBase_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind>,
                     ]
                     uniform float ui:depth = 0.0035
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -1916,7 +1957,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_IndexBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind>
                     uniform float ui:depth = 0.0035
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (67, 210)
@@ -1929,7 +1970,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_IndexBase"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind>
                     uniform float ui:depth = 0.0035
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (338, 210)
@@ -1943,10 +1984,10 @@ over "Biped"
                 def RigExecPickerButton "b_L_IndexBase_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind>,
                     ]
                     uniform float ui:depth = 0.0035
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -1960,7 +2001,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_IndexMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk/index_003_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind/index_003_l_bind>
                     uniform float ui:depth = 0.0036
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (338, 221)
@@ -1974,10 +2015,10 @@ over "Biped"
                 def RigExecPickerButton "b_L_IndexMid_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk/index_003_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk/middle_003_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk/ring_003_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk/pinky_003_l_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind/index_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind/middle_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind/ring_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind/pinky_003_l_bind>,
                     ]
                     uniform float ui:depth = 0.0036
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -1992,10 +2033,10 @@ over "Biped"
                 def RigExecPickerButton "b_R_IndexMid_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk/index_003_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk/middle_003_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk/ring_003_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk/pinky_003_r_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind/index_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind/middle_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind/ring_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind/pinky_003_r_bind>,
                     ]
                     uniform float ui:depth = 0.0036
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -2009,7 +2050,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_IndexMid"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk/index_003_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind/index_003_r_bind>
                     uniform float ui:depth = 0.0036
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (67, 221)
@@ -2023,10 +2064,10 @@ over "Biped"
                 def RigExecPickerButton "b_L_IndexTip_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk/index_003_l_bind_fk/index_004_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk/middle_003_l_bind_fk/middle_004_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk/ring_003_l_bind_fk/ring_004_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk/pinky_003_l_bind_fk/pinky_004_l_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind/index_003_l_bind/index_004_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind/middle_003_l_bind/middle_004_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind/ring_003_l_bind/ring_004_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind/pinky_003_l_bind/pinky_004_l_bind>,
                     ]
                     uniform float ui:depth = 0.0037
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -2040,7 +2081,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_IndexTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk/index_003_l_bind_fk/index_004_l_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind/index_003_l_bind/index_004_l_bind>
                     uniform float ui:depth = 0.0037
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (338, 232)
@@ -2054,10 +2095,10 @@ over "Biped"
                 def RigExecPickerButton "b_R_IndexTip_x4"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk/index_003_r_bind_fk/index_004_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk/middle_003_r_bind_fk/middle_004_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk/ring_003_r_bind_fk/ring_004_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk/pinky_003_r_bind_fk/pinky_004_r_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind/index_003_r_bind/index_004_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind/middle_003_r_bind/middle_004_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind/ring_003_r_bind/ring_004_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind/pinky_003_r_bind/pinky_004_r_bind>,
                     ]
                     uniform float ui:depth = 0.0037
                     uniform color4f ui:fill = (0.69803923, 0.69803923, 0.69803923, 0.24705882)
@@ -2071,7 +2112,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_IndexTip"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk/index_003_r_bind_fk/index_004_r_bind_fk>
+                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind/index_003_r_bind/index_004_r_bind>
                     uniform float ui:depth = 0.0037
                     uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
                     uniform float2 ui:position = (67, 232)
@@ -2250,7 +2291,7 @@ over "Biped"
 
                 def RigExecPickerButton "b_L_Eye"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>
                     uniform float ui:depth = 0.0302
                     uniform color4f ui:fill = (0.36862746, 0.23921569, 0.42352942, 1)
                     uniform float2 ui:position = (223, 70)
@@ -2262,12 +2303,24 @@ over "Biped"
 
                 def RigExecPickerButton "b_R_Eye"
                 {
-                    rel rigExec:picker:controls = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>
                     uniform float ui:depth = 0.0302
                     uniform color4f ui:fill = (0.36862746, 0.23921569, 0.42352942, 1)
                     uniform float2 ui:position = (182, 70)
                     uniform token ui:shape = "circle"
                     uniform float2 ui:size = (12, 12)
+                    uniform color4f ui:stroke = (0.12156863, 0.12156863, 0.12156863, 1)
+                    uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
+                }
+
+                def RigExecPickerButton "b_M_LookRot"
+                {
+                    rel rigExec:picker:controls = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim/lookRot_ctl>
+                    uniform float ui:depth = 0.0303
+                    uniform color4f ui:fill = (0.28235295, 0.5921569, 0.88235295, 1)
+                    uniform float2 ui:position = (196, 64)
+                    uniform token ui:shape = "circle"
+                    uniform float2 ui:size = (24, 24)
                     uniform color4f ui:stroke = (0.12156863, 0.12156863, 0.12156863, 1)
                     uniform color4f ui:valueColor = (0.92156863, 0.92156863, 0.92156863, 1)
                 }
@@ -2782,27 +2835,27 @@ over "Biped"
                 def RigExecPickerButton "b_L_IndexTip_x21"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk/index_003_l_bind_fk/index_004_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk/middle_003_l_bind_fk/middle_004_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk/ring_003_l_bind_fk/ring_004_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk/pinky_003_l_bind_fk/pinky_004_l_bind_fk>,
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk/index_003_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk/middle_003_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk/ring_003_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk/pinky_003_l_bind_fk>,
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk/pinky_002_l_bind_fk>,
-                        </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk/thumb_002_l_bind_fk/thumb_003_l_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk/thumb_002_l_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind/index_003_l_bind/index_004_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind/middle_003_l_bind/middle_004_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind/ring_003_l_bind/ring_004_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind/pinky_003_l_bind/pinky_004_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind/index_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind/middle_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind/ring_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind/pinky_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind/index_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind/middle_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind/ring_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind/pinky_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/index_001_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/middle_001_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/ring_001_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind/pinky_001_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/pinkyCup_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind/thumb_001_l_bind/thumb_002_l_bind/thumb_003_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind/thumb_001_l_bind/thumb_002_l_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_l_bind/shoulder_l_bind/elbow_l_bind/wrist_l_bind/thumbCup_l_bind/thumb_001_l_bind>,
                     ]
                     uniform float ui:depth = 0.0539
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
@@ -2818,27 +2871,27 @@ over "Biped"
                 def RigExecPickerButton "b_R_IndexTip_x21"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk/index_003_r_bind_fk/index_004_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk/middle_003_r_bind_fk/middle_004_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk/ring_003_r_bind_fk/ring_004_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk/pinky_003_r_bind_fk/pinky_004_r_bind_fk>,
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk/index_003_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk/middle_003_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk/ring_003_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk/pinky_003_r_bind_fk>,
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk/pinky_002_r_bind_fk>,
-                        </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk>,
-                        </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk>,
-                        </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk>,
-                        </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk/thumb_001_r_bind_fk/thumb_002_r_bind_fk/thumb_003_r_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk/thumb_001_r_bind_fk/thumb_002_r_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk>,
-                        </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk/thumb_001_r_bind_fk>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind/index_003_r_bind/index_004_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind/middle_003_r_bind/middle_004_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind/ring_003_r_bind/ring_004_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind/pinky_003_r_bind/pinky_004_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind/index_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind/middle_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind/ring_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind/pinky_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind/index_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind/middle_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind/ring_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind/pinky_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/index_001_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/middle_001_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/ring_001_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind/pinky_001_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/pinkyCup_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind/thumb_001_r_bind/thumb_002_r_bind/thumb_003_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind/thumb_001_r_bind/thumb_002_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind>,
+                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/clavicle_r_bind/shoulder_r_bind/elbow_r_bind/wrist_r_bind/thumbCup_r_bind/thumb_001_r_bind>,
                     ]
                     uniform float ui:depth = 0.0539
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
@@ -2968,7 +3021,7 @@ over "Biped"
                 def RigExecPickerButton "b_M_Skull_x22"
                 {
                     rel rigExec:picker:controls = [
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl>,
                         </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot>,
                         </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl>,
                         </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl>,
@@ -2978,13 +3031,15 @@ over "Biped"
                         </Biped/Rig/Controls/hips_ctl>,
                         </Biped/Rig/Controls/hips_ctl/spine_root_pivot/spine_root_ctl>,
                         </Biped/Rig/Controls/hips_ctl/spine_root_pivot>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind/eye_r_bind>,
-                        </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind/eye_l_bind>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl/eye_r_follow/eye_r_ctl>,
+                        </Biped/Rig/Controls/lookAt_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/lookRot_aim/lookRot_ctl>,
+                        </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl/eye_l_follow/eye_l_ctl>,
                     ]
                     uniform float ui:depth = 0.0539
                     uniform color4f ui:fill = (0.8980392, 0.8980392, 0.8980392, 1)
                     uniform float2[] ui:polygon = [(4.55047, 1), (4.55047, 4.43508), (1, 4.43508), (1, 8.66902), (4.49129, 8.66902), (4.49129, 12.6366), (9.16607, 12.5834), (9.17187, 8.77552), (12.8645, 8.66902), (12.8645, 4.46171), (9.42827, 4.35519), (9.52113, 1.02663)]
-                    uniform float2 ui:position = (146, 259)
+                    uniform float2 ui:position = (167, 259)
                     uniform token ui:shape = "polygon"
                     uniform float2 ui:size = (12, 12)
                     uniform color4f ui:stroke = (0.12156863, 0.12156863, 0.12156863, 1)

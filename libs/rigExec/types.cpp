@@ -79,13 +79,59 @@ RigExecWeightPacket::ResolveAll(
     } else {
         return false;
     }
-    std::vector<float> valuesOut(count);
-    for (size_t i = 0; i < count; ++i) {
-        const float value = Resolve(i, count);
-        if (!std::isfinite(value) || value < 0.0f || value > 1.0f) {
+    // PER REPRESENTATION, not per element. The shape was settled by the
+    // checks above and cannot change inside the loop, so asking Resolve()
+    // which representation this is once per point re-decides a question
+    // already answered -- 26,276 times for one body mesh, every generation,
+    // and for `sparse` it was worse than redundant: Resolve() binary-searches
+    // the index array per point, making a whole-array resolve O(n log m)
+    // where a scatter is O(n + m).
+    //
+    // Same values, same failure conditions, and the same atomicity: nothing
+    // is written into *resolved until the whole array has passed, because an
+    // in-place caller cannot roll back a partial write.
+    const auto usable = [](float v) {
+        return std::isfinite(v) && v >= 0.0f && v <= 1.0f;
+    };
+
+    if (representation == "constant") {
+        if (!usable(defaultWeight)) {
             return false;
         }
-        valuesOut[i] = value;
+        resolved->assign(count, defaultWeight);
+        return true;
+    }
+
+    if (representation == "dense") {
+        for (size_t i = 0; i < count; ++i) {
+            if (!usable(values[i])) {
+                return false;
+            }
+        }
+        resolved->assign(values.begin(), values.begin() + count);
+        return true;
+    }
+
+    // sparse: the default everywhere, then the authored entries scattered
+    // over it. The indices were range-checked and proved strictly ascending
+    // above, so each one lands exactly once and in bounds.
+    //
+    // The default is only checked when some point can actually read it. A
+    // sparse packet that happens to name every point never resolves to its
+    // default, and the per-point loop this replaces would never have seen
+    // it -- so rejecting an unusable one here would fail a packet that used
+    // to succeed.
+    if (indices.size() < count && !usable(defaultWeight)) {
+        return false;
+    }
+    for (const float value : values) {
+        if (!usable(value)) {
+            return false;
+        }
+    }
+    std::vector<float> valuesOut(count, defaultWeight);
+    for (size_t i = 0; i < indices.size(); ++i) {
+        valuesOut[static_cast<size_t>(indices[i])] = values[i];
     }
     resolved->swap(valuesOut);
     return true;

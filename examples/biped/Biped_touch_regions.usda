@@ -264,7 +264,7 @@ over "Biped"
 
             def RigExecTouchRegion "jaw_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/jaw_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl/jaw_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [923, 928, 1150, 1151, 1152, 1153, 1177, 1178, 1179, 1237, 1238, 1239, 3289, 3290, 3291, 3547, 3548, 3966, 13171, 13176, 13398, 13399, 13400, 13401, 13425, 13426, 13427, 13485, 13486, 13487, 15537, 15538, 15539, 15795, 15796, 16214, 24773, 24774, 24775, 24782, 24785, 24786, 24787, 24789, 24790, 24791, 24792, 24793, 24794, 24800, 24801, 24802, 24816, 24817, 24818, 24819, 24820, 24827, 24828, 24829, 24830, 24831, 24832, 24833, 24850, 24855, 24856, 24857, 24858, 24859, 24864, 24865, 24867, 24868, 24871, 24872, 24873, 24878, 24879, 24880, 24889, 24897, 24898, 24900, 24901, 24902, 24903, 24904, 24905, 24906, 24907, 24908, 24909, 24910, 24911, 24912, 24913, 24914, 24920, 24921, 24922, 24923, 24924, 24925, 24926, 24927, 24928, 24934, 24935, 24936, 24937, 24938, 24939, 24940, 24941, 24942, 24943, 24944, 24945, 24946, 24947, 24948, 24949, 24950, 24951, 24952, 24953, 24954, 24955, 24956, 24957, 24958, 24959, 24960, 24961, 24962, 24963, 24964, 24965, 24966, 24967, 24968, 24971, 24972, 24973, 24974, 24975, 24976, 24977, 24978, 24979, 24980, 24981, 24982, 24983, 24984, 24985, 24986, 24987, 24988, 24989, 24990, 24991, 24992, 24993, 24994, 24995, 24996, 24997, 24998, 24999, 25000, 25001, 25003, 25008, 25009, 25010, 25011, 25012, 25013, 25014, 25015, 25016, 25017, 25018, 25019, 25020, 25417, 25418, 25419, 25423, 25424, 25427, 25428, 25429, 25433, 25434, 25435, 25436, 25437, 25458, 25461, 25462, 25463, 25464, 25465, 25466, 25467, 25468, 25469, 25470, 25471, 25479, 25480, 25481, 25482, 25483, 25484, 25485, 25486, 25487, 25488, 25489, 25490, 25491, 25492, 25493, 25494, 25495, 25496, 25497, 25498, 25499, 25500, 25501, 25502, 25503, 25504, 25505, 25506, 25507, 25508, 25538, 25539, 25540, 25547, 25550, 25551, 25552, 25554, 25555, 25556, 25557, 25558, 25559, 25565, 25566, 25567, 25581, 25582, 25583, 25584, 25585, 25592, 25593, 25594, 25595, 25596, 25597, 25598, 25615, 25620, 25621, 25622, 25623, 25624, 25629, 25630, 25632, 25633, 25636, 25637, 25638, 25643, 25644, 25645, 25654, 25662, 25663, 25665, 25666, 25667, 25668, 25669, 25670, 25671, 25672, 25673, 25674, 25675, 25676, 25677, 25678, 25679, 25685, 25686, 25687, 25688, 25689, 25690, 25691, 25692, 25693, 25699, 25700, 25701, 25702, 25703, 25704, 25705, 25706, 25707, 25708, 25709, 25710, 25711, 25712, 25713, 25714, 25715, 25716, 25717, 25718, 25719, 25720, 25721, 25722, 25723, 25724, 25725, 25726, 25727, 25728, 25729, 25730, 25731, 25732, 25733, 25736, 25737, 25738, 25739, 25740, 25741, 25742, 25743, 25744, 25745, 25746, 25747, 25748, 25749, 25750, 25751, 25752, 25753, 25754, 25755, 25756, 25757, 25758, 25759, 25760, 25761, 25762, 25763, 25764, 25765, 25766, 25768, 25773, 25774, 25775, 25776, 25777, 25778, 25779, 25780, 25781, 25782, 25783, 25784, 25785, 26182, 26183, 26184, 26188, 26189, 26192, 26193, 26194, 26198, 26199, 26200, 26201, 26202, 26223, 26226, 26227, 26228, 26229, 26230, 26231, 26232, 26233, 26234, 26235, 26236, 26244, 26245, 26246, 26247, 26248, 26249, 26250, 26251, 26252, 26253, 26254, 26255, 26256, 26257, 26258, 26259, 26260, 26261, 26262, 26263, 26264, 26265, 26266, 26267, 26268, 26269, 26270, 26271, 26272, 26273]
                 custom color3f touchpose:color = (0.20359838, 0.41044518, 0.06066423)
@@ -320,7 +320,7 @@ over "Biped"
 
             def RigExecTouchRegion "face_lower_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_lower_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [924, 926, 929, 930, 946, 947, 997, 998, 999, 1063, 1064, 1065, 1066, 1087, 1088, 1089, 1090, 1110, 1111, 1112, 1113, 1131, 1132, 1133, 1134, 1154, 1155, 1156, 1157, 1180, 1181, 1182, 1183, 1233, 1234, 1235, 1236, 3223, 3252, 3253, 3254, 3255, 3256, 3257, 3258, 3285, 3286, 3287, 3288, 3292, 3293, 3294, 3295, 3296, 3297, 3298, 3566, 3567, 3568, 4014, 13172, 13174, 13177, 13178, 13194, 13195, 13245, 13246, 13247, 13311, 13312, 13313, 13314, 13335, 13336, 13337, 13338, 13358, 13359, 13360, 13361, 13379, 13380, 13381, 13382, 13402, 13403, 13404, 13405, 13428, 13429, 13430, 13431, 13481, 13482, 13483, 13484, 15471, 15500, 15501, 15502, 15503, 15504, 15505, 15506, 15533, 15534, 15535, 15536, 15540, 15541, 15542, 15543, 15544, 15545, 15546, 15814, 15815, 15816, 16262, 24783, 24784, 24798, 24799, 24869, 24870, 24885, 24886, 24887, 24888, 24890, 24891, 24892, 24893, 24894, 24895, 24896, 24899, 24915, 24916, 24917, 24918, 24919, 24929, 24930, 24931, 24932, 24933, 24969, 24970, 25420, 25421, 25422, 25430, 25431, 25432, 25548, 25549, 25563, 25564, 25634, 25635, 25650, 25651, 25652, 25653, 25655, 25656, 25657, 25658, 25659, 25660, 25661, 25664, 25680, 25681, 25682, 25683, 25684, 25694, 25695, 25696, 25697, 25698, 25734, 25735, 26185, 26186, 26187, 26195, 26196, 26197]
                 custom color3f touchpose:color = (0.7089205, 0.6294152, 0.8744333)
@@ -390,7 +390,7 @@ over "Biped"
 
             def RigExecTouchRegion "brow_main_l_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_l_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [755, 756, 950, 951, 1434, 1435, 3234, 3235, 3236, 3314, 3315, 3316]
                 custom color3f touchpose:color = (0.4546662, 0.055048943, 0.26035735)
@@ -404,7 +404,7 @@ over "Biped"
 
             def RigExecTouchRegion "nose_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind/nose_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_follow/nose_compress/nose_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [528, 543, 646, 647, 648, 2946, 2947, 2948, 2953, 2954, 2955, 2975, 2976, 2977, 2978, 2979, 2980, 3042, 3043, 3044, 3045, 3046, 3047, 3102, 3103, 3104, 3105, 4140, 4141, 4142, 4143, 4144, 4145, 4146, 12275, 12776, 12791, 12894, 12895, 12896, 15194, 15195, 15196, 15201, 15202, 15203, 15223, 15224, 15225, 15226, 15227, 15228, 15290, 15291, 15292, 15293, 15294, 15295, 15350, 15351, 15352, 15353, 16388, 16389, 16390, 16391, 16392, 16393, 16394, 24523]
                 custom color3f touchpose:color = (0.63085765, 0.38193762, 0.6866433)
@@ -432,7 +432,7 @@ over "Biped"
 
             def RigExecTouchRegion "face_upper_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [781, 791, 874, 875, 876, 877, 879, 880, 917, 918, 921, 922, 925, 932, 933, 934, 940, 941, 942, 943, 944, 945, 956, 957, 958, 959, 1158, 1159, 1160, 1161, 1162, 1163, 1164, 1165, 1166, 1167, 1168, 1169, 1170, 1171, 1172, 1173, 1174, 1175, 1176, 1184, 1185, 1186, 1187, 1188, 1189, 1190, 1214, 1215, 1216, 1217, 1218, 1219, 1220, 1221, 1222, 1223, 1224, 1225, 1226, 1227, 1228, 1229, 1230, 1231, 1232, 1355, 1356, 1365, 1366, 1367, 1368, 1430, 1431, 1452, 1453, 2162, 2163, 2164, 2165, 2166, 2167, 2168, 2209, 2210, 2211, 2212, 2213, 2214, 2215, 2919, 2920, 3016, 3017, 3134, 3135, 3243, 3244, 3245, 3246, 3247, 3248, 3249, 3250, 3251, 3276, 3277, 3278, 3279, 3280, 3281, 3282, 3283, 3284, 3299, 3300, 3301, 3302, 3303, 3304, 3305, 3306, 3307, 3560, 3561, 3562, 3563, 3564, 3565, 3604, 3654, 3935, 3967, 4111, 4112, 13029, 13039, 13122, 13123, 13124, 13125, 13127, 13128, 13165, 13166, 13169, 13170, 13173, 13180, 13181, 13182, 13188, 13189, 13190, 13191, 13192, 13193, 13204, 13205, 13206, 13207, 13406, 13407, 13408, 13409, 13410, 13411, 13412, 13413, 13414, 13415, 13416, 13417, 13418, 13419, 13420, 13421, 13422, 13423, 13424, 13432, 13433, 13434, 13435, 13436, 13437, 13438, 13462, 13463, 13464, 13465, 13466, 13467, 13468, 13469, 13470, 13471, 13472, 13473, 13474, 13475, 13476, 13477, 13478, 13479, 13480, 13603, 13604, 13613, 13614, 13615, 13616, 13678, 13679, 13700, 13701, 14410, 14411, 14412, 14413, 14414, 14415, 14416, 14457, 14458, 14459, 14460, 14461, 14462, 14463, 15167, 15168, 15264, 15265, 15382, 15383, 15491, 15492, 15493, 15494, 15495, 15496, 15497, 15498, 15499, 15524, 15525, 15526, 15527, 15528, 15529, 15530, 15531, 15532, 15547, 15548, 15549, 15550, 15551, 15552, 15553, 15554, 15555, 15808, 15809, 15810, 15811, 15812, 15813, 15852, 15902, 16183, 16215, 16359, 16360]
                 custom color3f touchpose:color = (0.52015036, 0.36558047, 0.48114374)
@@ -460,7 +460,7 @@ over "Biped"
 
             def RigExecTouchRegion "brow_peak_r_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_r_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_peak_r_drag/brow_peak_r_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [13005, 13006, 13200, 13201, 15485, 15486, 15560, 15561]
                 custom color3f touchpose:color = (0.88901293, 0.5644392, 0.8103801)
@@ -544,7 +544,7 @@ over "Biped"
 
             def RigExecTouchRegion "eyeSocket_r_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_r_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_r_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [13788, 13813, 13814, 13815, 13816, 13849, 13850, 13851, 13852, 13853, 13881, 13882, 13883, 13884, 13885, 13944, 13945, 13946, 13947, 13948, 13976, 13977, 13978, 13979, 13980, 14464, 14465, 14466, 14467, 14468]
                 custom color3f touchpose:color = (0.09018428, 0.16974322, 0.96683854)
@@ -558,7 +558,7 @@ over "Biped"
 
             def RigExecTouchRegion "eyeSocket_l_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/eyeSocket_l_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/eyeSocket_l_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [1540, 1565, 1566, 1567, 1568, 1601, 1602, 1603, 1604, 1605, 1633, 1634, 1635, 1636, 1637, 1696, 1697, 1698, 1699, 1700, 1728, 1729, 1730, 1731, 1732, 2216, 2217, 2218, 2219, 2220]
                 custom color3f touchpose:color = (0.35848576, 0.99888563, 0.052700046)
@@ -600,7 +600,7 @@ over "Biped"
 
             def RigExecTouchRegion "brow_inner_l_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_l_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_inner_l_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [752, 753, 754, 763, 847, 848, 948, 949, 1456, 1457, 3020, 3021, 3226, 3227, 3228, 3229, 3230, 3231, 3319, 3320, 3321, 3322, 3323, 3324, 4116, 4117, 4118, 4119]
                 custom color3f touchpose:color = (0.7374552, 0.5394217, 0.09782098)
@@ -684,7 +684,7 @@ over "Biped"
 
             def RigExecTouchRegion "brow_inner_r_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_inner_r_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl/brow_inner_r_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [13000, 13001, 13002, 13011, 13095, 13096, 13196, 13197, 13704, 13705, 15268, 15269, 15474, 15475, 15476, 15477, 15478, 15479, 15567, 15568, 15569, 15570, 15571, 15572, 16364, 16365, 16366, 16367]
                 custom color3f touchpose:color = (0.8624481, 0.44537547, 0.7128077)
@@ -936,7 +936,7 @@ over "Biped"
 
             def RigExecTouchRegion "head_tip_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [750, 751, 764, 765, 766, 767, 768, 769, 770, 771, 849, 861, 867, 954, 955, 1191, 1192, 1193, 1194, 1195, 1196, 1197, 1198, 1199, 1200, 1201, 1202, 1432, 1433, 1454, 1455, 2917, 2918, 3018, 3019, 3136, 3137, 3138, 3239, 3240, 3241, 3242, 3259, 3260, 3261, 3262, 3263, 3264, 3265, 3266, 3267, 3268, 3269, 3270, 3271, 3272, 3273, 3274, 3275, 3308, 3309, 3310, 3311, 4113, 4114, 4115, 12998, 12999, 13012, 13013, 13014, 13015, 13016, 13017, 13018, 13019, 13097, 13109, 13115, 13202, 13203, 13439, 13440, 13441, 13442, 13443, 13444, 13445, 13446, 13447, 13448, 13449, 13450, 13680, 13681, 13702, 13703, 15165, 15166, 15266, 15267, 15384, 15385, 15386, 15487, 15488, 15489, 15490, 15507, 15508, 15509, 15510, 15511, 15512, 15513, 15514, 15515, 15516, 15517, 15518, 15519, 15520, 15521, 15522, 15523, 15556, 15557, 15558, 15559, 16361, 16362, 16363]
                 custom color3f touchpose:color = (0.5800426, 0.65223086, 0.321129)
@@ -1258,7 +1258,7 @@ over "Biped"
 
             def RigExecTouchRegion "nose_bridge_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_lower_bind/face_mid_bind/nose_bridge_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/nose_bridge_follow/nose_bridge_compress/nose_bridge_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [516, 521, 522, 523, 524, 544, 617, 618, 619, 620, 621, 622, 623, 1004, 1005, 1006, 1007, 1008, 1009, 1034, 1035, 1036, 1037, 1038, 1039, 1040, 1041, 1042, 1043, 1044, 2148, 2796, 2797, 2798, 2799, 2800, 2801, 2848, 2849, 2850, 2851, 2852, 2853, 3031, 3032, 3033, 3034, 3035, 3036, 4129, 4130, 4131, 4132, 4133, 4134, 12273, 12295, 12297, 12298, 12322, 12764, 12769, 12770, 12771, 12772, 12792, 12865, 12866, 12867, 12868, 12869, 12870, 12871, 13252, 13253, 13254, 13255, 13256, 13257, 13282, 13283, 13284, 13285, 13286, 13287, 13288, 13289, 13290, 13291, 13292, 14396, 15044, 15045, 15046, 15047, 15048, 15049, 15096, 15097, 15098, 15099, 15100, 15101, 15279, 15280, 15281, 15282, 15283, 15284, 16377, 16378, 16379, 16380, 16381, 16382, 24521, 24543, 24545, 24546, 24570]
                 custom color3f touchpose:color = (0.7040535, 0.8580522, 0.7442409)
@@ -1300,7 +1300,7 @@ over "Biped"
 
             def RigExecTouchRegion "brow_peak_l_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_peak_l_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_ctl/brow_peak_l_drag/brow_peak_l_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [757, 758, 952, 953, 3237, 3238, 3312, 3313]
                 custom color3f touchpose:color = (0.3581065, 0.23599827, 0.1361642)
@@ -1384,7 +1384,7 @@ over "Biped"
 
             def RigExecTouchRegion "brow_main_r_touch"
             {
-                rel rigExec:touch:control = </Biped/Rig/Joints/hips_bind/spine_0_bind/spine_1_bind/spine_2_bind/spine_3_bind/spine_4_bind/spine_5_bind/chest_bind/neck_base_bind/neck_0_bind/neck_1_bind/neck_2_bind/neck_3_bind/skull_bind/face_upper_bind/head_tip_bind/brow_main_r_bind>
+                rel rigExec:touch:control = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_ctl>
                 uniform token rigExec:touch:elementType = "face"
                 uniform int[] rigExec:touch:faces = [13003, 13004, 13198, 13199, 13682, 13683, 15482, 15483, 15484, 15562, 15563, 15564]
                 custom color3f touchpose:color = (0.43153313, 0.08522202, 0.47312456)

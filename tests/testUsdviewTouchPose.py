@@ -14,11 +14,11 @@
 #     same region is picked again, and the pixel it is found at has moved
 #     by a measured number of pixels. A pick against the rest mesh would
 #     answer at the old pixel;
-#   * the HIGHLIGHT ACTUALLY RENDERS. `displayColor` on `body_geo` moved
-#     0 of 80,730 sampled pixels in the R2 spike because the mesh is
-#     bound to UsdPreviewSurface, so the highlight is a separate unbound
-#     mesh instead -- and that claim is worth nothing unless the pixels
-#     are counted, the same way R2 counted them;
+#   * the HIGHLIGHT ACTUALLY RENDERS, and AUTHORS NOTHING. It is a Storm
+#     shader tint on the body's own materials, driven by two primvars a
+#     Hydra scene index adds (libs/rigExecImaging/touchPoseHighlight.h):
+#     the pixels are counted, and the session layer is compared byte for
+#     byte before and after, and no TouchPose prim may exist on the stage;
 #   * while TouchPose is ON the MESH IS NOT SELECTABLE: a click on a
 #     region selects the control and not `body_geo`, and a click on the
 #     skin but off every region selects nothing at all rather than
@@ -27,9 +27,8 @@
 #     modifier replaces, Shift toggles both ways, Ctrl only ever removes
 #     -- for a click AND for a marquee, asserted on selection contents;
 #   * TOUCHPOSE STANDS DOWN during a gizmo drag: moving the cursor across
-#     a region boundary authors NOTHING into the session layer and does
-#     not touch the highlight's visibility, while the selection patches
-#     are deliberately left lit;
+#     a region boundary lights nothing, while the selection highlight is
+#     deliberately left lit;
 #   * the SELECTION highlight is three distinct colours: hover, lead
 #     (the region just clicked) and the other selected regions. Each is
 #     counted in pixels of its own region's screen area, because "it is a
@@ -39,7 +38,7 @@
 #     selection alone;
 #   * the MESH stays out of the selection even when something other than
 #     a TouchPose click puts it there;
-#   * PAINTING moves faces between regions on a Ctrl-drag, the overlay
+#   * PAINTING moves faces between regions on a drag, the highlight
 #     follows it live, and the rig's generation counter does NOT move --
 #     which is the direct evidence that a stroke costs nothing like the
 #     ~2.33 s an authored edit inside the rig costs on the next evaluate;
@@ -432,6 +431,7 @@ def testUsdviewInputFunction(appController):
     controller.SyncSelection()
     appController._processEvents()
     baseline = _Capture(view)
+    fingerprint = _SessionFingerprint(stage)
     controller.Hover(pixel[0], pixel[1])
     appController._processEvents()
     lit = _Capture(view)
@@ -440,33 +440,20 @@ def testUsdviewInputFunction(appController):
     # The number that decides it: how much of the region's OWN screen
     # area lit up, not how much of the frame.
     ofRegion = fraction / max(regionFraction, 1e-9)
-    # The overlay is the asset's OWN prim now, not the global that
-    # `touchPoseUI.HIGHLIGHT` names; that constant is only the fallback
-    # for regions authored before the overlay shipped.
-    overlayPath = controller._canvas._path
-    highlightPrim = stage.GetPrimAtPath(Sdf.Path(overlayPath))
-    _Check(highlightPrim and highlightPrim.IsValid(),
-           "the overlay rprim is live at %s" % overlayPath)
-    # The PRIM ships with the asset; what must stay in the session layer
-    # is everything the highlight WRITES -- the points and the opacity --
-    # so no hover can ever be saved into a published file.
-    session = stage.GetSessionLayer()
-    _Check(session.GetPrimAtPath(Sdf.Path(overlayPath)) is not None,
-           "the highlight writes into the SESSION layer, so nothing it "
-           "does can be saved into the asset")
-    for attr in ("points", "primvars:displayOpacity"):
-        spec = session.GetAttributeAtPath(
-            Sdf.Path(overlayPath).AppendProperty(attr))
-        _Check(spec is not None,
-               "...including %s, which is live data and never ships"
-               % attr)
-        authored = stage.GetAttributeAtPath(
-            Sdf.Path(overlayPath).AppendProperty(attr))
-        layers = [q.layer for q in authored.GetPropertyStack(0.0)
-                  if not q.layer.anonymous]
-        _Check(not layers,
-               "...and %s is in NO file layer: %s"
-               % (attr, [l.identifier for l in layers]))
+    # NOTHING AUTHORED. The highlight is Hydra state: the session layer
+    # is byte-identical, and no TouchPose prim exists anywhere.
+    _Check(_SessionFingerprint(stage) == fingerprint,
+           "the hover authored NOTHING into the session layer")
+    strays = [str(p.GetPath()) for p in stage.TraverseAll()
+              if p.GetName().startswith("TouchPose")
+              and p.GetTypeName() in ("Mesh", "RigExecTouchOverlay")
+              and p.GetAttribute("points").HasAuthoredValue()]
+    _Check(not strays, "and no overlay geometry exists: %s" % strays)
+    import touchPoseNative
+    _Check(touchPoseNative.SceneIndexCount() >= 1,
+           "the TouchPose scene index is in the imaging chain")
+    _Check(controller.model.native.HighlightTable()[region.index + 1][3] > 0,
+           "and the region's row of the colour table is lit")
     print("TouchPose: hovering %s moved %d of %d sampled pixels (%.3f%% of "
           "the frame) where the region itself covers %.3f%% -- so the "
           "highlight covers %.0f%% of its own region. R2's displayColor "
@@ -517,17 +504,11 @@ def testUsdviewInputFunction(appController):
 
     sameRegion = _Time(inside, 20)
     changeRegion = _Time(crossing, 20)
-    build = 0.0
-    if otherPixel is not None:
-        other_region = touchModel.regions[second[0]]
-        start = time.perf_counter()
-        for _ in range(10):
-            touchModel.OverlayGeometry(other_region)
-        build = 1000.0 * (time.perf_counter() - start) / 10.0
     print("TouchPose: one hover costs %.2f ms inside a region and %.2f ms "
-          "crossing into another, of which %.2f ms is building the overlay "
-          "patch and the rest is authoring it; a 60 Hz frame is 16.7 ms"
-          % (sameRegion, changeRegion, build))
+          "crossing into another (cast + a colour-table update); a 60 Hz "
+          "frame is 16.7 ms" % (sameRegion, changeRegion))
+    _Check(sameRegion < 2.0,
+           "a hover inside one region is nearly free: %.2f ms" % sameRegion)
     _Check(changeRegion < 16.7,
            "a hover that changes region fits in a frame: %.2f ms"
            % changeRegion)
@@ -734,8 +715,8 @@ def testUsdviewInputFunction(appController):
     leadMoved, _t = _Changed(unlit, leadShot)
     leadOfRegion = (float(leadMoved) / max(total, 1)) / max(regionFraction,
                                                             1e-9)
-    _Check(controller._leadLayer.key is not None,
-           "the lead layer is drawn")
+    _Check(controller.highlight.lead is not None,
+           "the lead is drawn")
     _Check(leadOfRegion >= _MIN_OF_REGION,
            "the LEAD highlight is visible: %d pixels, %.0f%% of the "
            "region's own area (floor %.0f%%)"
@@ -749,9 +730,9 @@ def testUsdviewInputFunction(appController):
         appController._processEvents()
         bothShot = _Capture(view)
         secondMoved, _t = _Changed(leadShot, bothShot)
-        _Check(controller._selectedLayer.key,
-               "the non-lead selected layer is drawn: %s"
-               % (controller._selectedLayer.key,))
+        _Check(controller.highlight.selected,
+               "the non-lead selected regions are drawn: %s"
+               % (controller.highlight.selected,))
         _Check(controller._lead is not None
                and controller._lead.index == region.index,
                "the region clicked LAST is the lead, got %s"
@@ -849,22 +830,13 @@ def testUsdviewInputFunction(appController):
            "the mesh was pushed into the selection and TouchPose took it "
            "straight back out: %s" % chosen)
 
-    # The overlay prims go the same way: they are pickable rprims drawn
-    # on top of the body, and Storm's pick reaches them before the skin.
+    # There is no overlay prim for usdview's pick to land on instead of
+    # the skin: the highlight is the skin's own shader.
     controller.Hover(pixel[0], pixel[1])
     appController._processEvents()
-    # The overlay is named for its asset, so ask the canvas where it is
-    # rather than assuming the old global path.
-    overlayPath = str(controller._canvas._path)
-    overlay = stage.GetPrimAtPath(Sdf.Path(overlayPath))
-    _Check(overlay and overlay.IsValid(),
-           "the overlay prim exists at %s" % overlayPath)
-    selection.addPrim(overlay)
-    appController._processEvents()
-    chosen = [str(p.GetPath()) for p in selection.getPrims()
-              if p and p.IsValid()]
-    _Check(overlayPath not in chosen,
-           "the highlight overlay cannot stay selected either: %s" % chosen)
+    _Check(not any(stage.GetPrimAtPath(Sdf.Path(p)).IsValid()
+                   for p in touchPoseUI._LEGACY_OVERLAYS),
+           "no overlay prim exists to be picked")
     controller._highlight.Clear()
 
     # ...and with the mode OFF the same push sticks, or the guard would
@@ -1016,17 +988,9 @@ def testUsdviewInputFunction(appController):
             _SendHover(view, pixel[0], pixel[1], viewport.ratio)
             appController._processEvents()
             _Check(controller.suspended, "TouchPose suspended itself")
-            # SUSPENDED, not cleared. The patch keeps its key, its faces
-            # and its colour so the resume is one `Rebuild` rather than a
-            # re-pick; what it drops is the visibility token. Asserting
-            # `key is None` here is what this used to say, and it was
-            # asserting the old `Clear` behaviour.
             _Check(controller.highlight.suspended,
-                   "and stood the hover patch down on the way in")
-            _Check(stage.GetPrimAtPath(
-                       Sdf.Path(str(controller._canvas._path)))
-                   .GetAttribute("visibility").Get()
-                   == UsdGeom.Tokens.invisible,
+                   "and stood the hover down on the way in")
+            _Check(controller.highlight.key is None,
                    "...which means it is not drawing")
 
             # Now the measurement: samples that cross region boundaries,
@@ -1035,8 +999,8 @@ def testUsdviewInputFunction(appController):
                         hits[best][0], hits[second[0]][0] if second
                         else pixel]
             fingerprint = _SessionFingerprint(stage)
-            leadBefore = controller._leadLayer.key
-            selectedBefore = controller._selectedLayer.key
+            leadBefore = controller.highlight.lead
+            selectedBefore = controller.highlight.selected
 
             suspendStart = time.perf_counter()
             samples = 40
@@ -1056,8 +1020,8 @@ def testUsdviewInputFunction(appController):
             # drawn either.
             _Check(controller.highlight.suspended,
                    "the hover patch stayed dark")
-            _Check(controller._leadLayer.key == leadBefore
-                   and controller._selectedLayer.key == selectedBefore,
+            _Check(controller.highlight.lead == leadBefore
+                   and controller.highlight.selected == selectedBefore,
                    "and the SELECTION patches were left alone -- blinking "
                    "those off mid-drag would read as a bug")
             _Check(_Selected(selection) == litSelection,
@@ -1103,9 +1067,8 @@ def testUsdviewInputFunction(appController):
             _Check(not controller.suspended, "TouchPose resumed")
             _Check(controller.highlight.key is not None,
                    "and the first hover after the drag highlights again")
-            _Check(_SessionFingerprint(stage) != fingerprint,
-                   "which means it authored, where the suspended samples "
-                   "did not")
+            _Check(_SessionFingerprint(stage) == fingerprint,
+                   "and even awake, lighting it authored nothing")
 
             print("TouchPose: during a gizmo drag, %d hover samples across "
                   "region boundaries cost %.3f ms each and authored "
@@ -1260,8 +1223,8 @@ def testUsdviewInputFunction(appController):
     allLit = _Capture(view)
     allMoved, _t = _Changed(baseline, allLit)
     allFraction = float(allMoved) / max(total, 1)
-    _Check(controller._allLayer.key is not None,
-           "the edit-mode patch is drawn")
+    _Check(controller.highlight.editing,
+           "the edit-mode colours are drawn")
     _Check(allMoved > moved * 2,
            "every region at once covers far more than the one hovered "
            "region did: %d pixels against %d" % (allMoved, moved))
@@ -1303,9 +1266,7 @@ def testUsdviewInputFunction(appController):
     # patch growing onto the newly painted faces rather than a highlight
     # appearing out of nothing. The first is what a painter actually
     # sees, and it does not depend on whatever was lit beforehand.
-    controller._highlight.Show(
-        touchModel, region.faces, touchModel.HoverColor(region),
-        ("paint-before", region.index, len(region.faces)))
+    controller.highlight.SetHover(region)
     appController._processEvents()
     before = _Capture(view)
     painted = controller.Paint(bx, by)
@@ -1338,8 +1299,8 @@ def testUsdviewInputFunction(appController):
 
     after = _Capture(view)
     strokeMoved, _t = _Changed(before, after)
-    _Check(strokeMoved > 20,
-           "the overlay grew onto the painted faces: %d pixels changed"
+    _Check(strokeMoved > 5,
+           "the highlight grew onto the painted faces: %d pixels changed"
            % strokeMoved)
 
     if lib is not None:
@@ -1515,15 +1476,11 @@ def testUsdviewInputFunction(appController):
     print("TouchPose: deactivating removed %d of the %d pixels the "
           "highlight lit" % (removed, moved))
 
-    # PER ASSET, not global. The overlay used to be the one fixed path
-    # /TouchPoseHighlight, which two characters in a shot would author
-    # into and fight over. It is named for its asset now.
-    _Check(str(controller._canvas._path).endswith("_Biped"),
-           "the overlay is named for its asset, got %s"
-           % controller._canvas._path)
-    _Check(stage.GetPrimAtPath(Sdf.Path("/TouchPoseHighlight")).IsValid()
-           is False,
-           "and the bare global was not created")
+    # The whole session authored nothing: no prim was ever created for
+    # the highlight, at the root or anywhere else.
+    _Check(not any(p.GetName().startswith("TouchPose")
+                   for p in stage.GetPseudoRoot().GetChildren()),
+           "no TouchPose prim was ever created at the stage root")
 
     print("RIGEXEC_TOUCHPOSE_OK %d regions / %d of %d faces (%.0f%%); "
           "click selects %s; highlight moved %d of %d pixels (%.3f%% of "

@@ -320,3 +320,30 @@ def live_control_paths(stage):
         return set()
     return set(str(p.GetPath()) for p in stage.Traverse()
                if str(p.GetTypeName()) in ("RigExecControl", "RigExecJoint"))
+
+
+def content_box(picker, panel, margin=12.0):
+    """The box a panel is drawn in: its buttons, not its declared ui:size.
+
+    A panel's declared size is what the authoring tool wrote, and on a
+    picker SPLIT OUT OF ONE CANVAS it is the same default on every panel
+    while the buttons keep their original absolute coordinates from the
+    shared layout. Measured on the shipped biped: the body's buttons sit at
+    x=[13..404], inside its declared 400, and the face's at x=[339..803] --
+    so drawing the face against its declaration put two thirds of it off
+    the canvas, which is a tab that opens to mostly nothing.
+
+    The buttons ARE the layout. Lives here rather than in the view because
+    the view's paint transform and its mouse transform both have to use
+    it, and a third copy in a test is how those drift apart.
+
+    Returns ((origin x, y), (width, height)) in panel units.
+    """
+    boxes = [b for b in picker.buttons if b.parent == panel.id]
+    if not boxes:
+        return (0.0, 0.0), (max(panel.w, 1.0), max(panel.h, 1.0))
+    ox = min(b.x for b in boxes) - margin
+    oy = min(b.y for b in boxes) - margin
+    return ((ox, oy),
+            (max(max(b.x + b.w for b in boxes) + margin - ox, 1.0),
+             max(max(b.y + b.h for b in boxes) + margin - oy, 1.0)))

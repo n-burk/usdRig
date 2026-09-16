@@ -20,7 +20,7 @@
 import os
 
 
-SCOPE = "/Biped/TouchPose"
+SCOPE = "/Biped/Rig/TouchPose"
 CONTROL_REL = "touchpose:control"
 
 

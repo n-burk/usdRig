@@ -10,6 +10,12 @@
                         "displayName": "RigExec TouchPose highlight overlay",
                         "primTypeName": "RigExecTouchOverlay"
                     },
+                    "RigExecTouchPoseSceneIndexPlugin": {
+                        "bases": [
+                            "UsdImagingSceneIndexPlugin"
+                        ],
+                        "displayName": "RigExec TouchPose shader highlight"
+                    },
                     "RigExecUsdImagingSceneIndexPlugin": {
                         "bases": [
                             "UsdImagingSceneIndexPlugin"

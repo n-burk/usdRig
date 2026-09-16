@@ -143,17 +143,31 @@ def _DragSlider(appController, row, fraction):
     valueChanged -- the same signals a mouse produces, minus the pixel
     arithmetic that would make the test depend on the widget's width.
     """
+    import gizmoPreview
     slider = row.slider
+    attr = row.channel.attr
+    frame = appController._usdviewApi.frame
+    before = attr.Get(frame)
     slider.setSliderDown(True)
-    _Check(row._scope is not None, "the press opened an undo scope")
+    _Check(row._dragging, "the press started a drag")
     target = int(round(slider.maximum() * fraction))
     start = slider.value()
     for i in range(1, 5):
         slider.setSliderPosition(int(start + (target - start) * i / 4.0))
         appController._processEvents()
+    if gizmoPreview.HasSink():
+        # While the slider is held the value goes to Hydra through the
+        # preview channel and the stage is not written at all.
+        _Check(row._previewing and row._scope is None,
+               "the drag previews instead of authoring")
+        _Check(attr.Get(frame) == before,
+               "nothing was authored during the drag: %s -> %s"
+               % (before, attr.Get(frame)))
     slider.setSliderDown(False)
     appController._processEvents()
-    _Check(row._scope is None, "the release closed the undo scope")
+    _Check(row._scope is None and not row._dragging
+           and not gizmoPreview.IsPreviewing(),
+           "the release committed once and ended the preview")
 
 
 def _UndoDepth(stack):
@@ -206,8 +220,8 @@ def testUsdviewInputFunction(appController):
     panel = avarEditorUI.AvarEditorPanel._instance
     _Check(panel is not None, "triggering the menu item opened the panel")
     _Check(panel.isVisible(), "the panel it opened is visible")
-    _Check(panel._header.text() == FK_SHOULDER,
-           "it built on the current selection: %r" % panel._header.text())
+    _Check(panel._header.toolTip() == FK_SHOULDER,
+           "it built on the current selection: %r" % panel._header.toolTip())
     container = rigExecUsdview._container
     undo = container._UndoStack()
     _Check(panel._undo is undo,
@@ -323,7 +337,7 @@ def testUsdviewInputFunction(appController):
 
     # --- 7. the custom ikfk dial drives the blend, from a slider --------
     _Select(appController, ARM_R_ROOT)
-    _Check(panel._header.text() == ARM_R_ROOT,
+    _Check(panel._header.toolTip() == ARM_R_ROOT,
            "the panel followed the selection")
     ikfk = panel.Row("ikfk")
     _Check(ikfk is not None, "the custom avars:ikfk is discovered by prefix")
@@ -441,15 +455,15 @@ def testUsdviewInputFunction(appController):
 
     # --- 10. multi-selection edits the focus prim and says so -----------
     _Select(appController, ARM_L_IK, ARM_R_IK)
-    _Check(panel._header.text() == ARM_L_IK,
+    _Check(panel._header.toolTip() == ARM_L_IK,
            "with two prims selected the focus prim is edited: %r"
-           % panel._header.text())
+           % panel._header.toolTip())
     _Check("1 more selected" in panel._note.text(),
            "and the panel says so: %r" % panel._note.text())
 
     # --- 11. a joint's avars are editable too ----------------------------
     _Select(appController, ELBOW_L)
-    _Check(panel._header.text() == ELBOW_L and panel.Row("rz") is not None,
+    _Check(panel._header.toolTip() == ELBOW_L and panel.Row("rz") is not None,
            "a RigExecJoint lists its avars: %s"
            % [r.name for r in panel.Rows()])
 

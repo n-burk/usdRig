@@ -914,10 +914,26 @@ PYBIND11_MODULE(_rigexec, m) {
                          throw py::type_error(
                              "interactive override values must be numeric");
                      }
+                     // Typed like the attribute, as the viewport's preview
+                     // channel types it: a float dial overridden with a
+                     // double VtValue is a different value to every reader
+                     // that asks for a float.
+                     const SdfPath primPath(std::get<0>(entry));
+                     const TfToken attrName(std::get<1>(entry));
+                     VtValue typed(value.cast<double>());
+                     if (const UsdStageRefPtr &s =
+                             r.evaluator->GetEvaluationStage()) {
+                         const UsdAttribute a = s->GetAttributeAtPath(
+                             primPath.AppendProperty(attrName));
+                         if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
+                             typed = VtValue(static_cast<float>(value.cast<double>()));
+                         } else if (a && a.GetTypeName() ==
+                                             SdfValueTypeNames->Int) {
+                             typed = VtValue(static_cast<int>(value.cast<double>()));
+                         }
+                     }
                      overrides.push_back(rigExec::RigExecValueOverride{
-                         SdfPath(std::get<0>(entry)), TfToken(),
-                         TfToken(std::get<1>(entry)),
-                         VtValue(value.cast<double>())});
+                         primPath, TfToken(), attrName, typed});
                  }
                  r.evaluator->SetInteractiveOverrides(std::move(overrides));
              },
@@ -1014,7 +1030,27 @@ PYBIND11_MODULE(_rigexec, m) {
                 out.push_back(d);
             }
             return out;
-        }, "Per-phase timing totals, sorted by total cost descending.");
+        }, "Per-phase timing totals, sorted by total cost descending.")
+        .def("profile_events", [](const _Rig &r) {
+            // WHICH THREAD RAN WHAT, which the summary aggregates away and
+            // is the only direct evidence that a parallel region actually
+            // ran in parallel rather than merely being allowed to. The
+            // Chrome trace carries it too, but reading a trace file is not
+            // something a report can do in line.
+            std::vector<py::dict> out;
+            for (const rigExec::RigExecProfileEvent &event :
+                 r.evaluator->GetProfiler().GetEvents()) {
+                py::dict d;
+                d["name"] = event.name;
+                d["category"] = event.category;
+                d["start_us"] = event.startUs;
+                d["duration_us"] = event.durationUs;
+                d["thread"] = event.threadIndex;
+                out.push_back(d);
+            }
+            return out;
+        }, "Every recorded scope in completion order, with the index of the\n"
+           "thread that ran it. Use profile_summary for totals.");
 
     // ---- Pose ---------------------------------------------------------------
 

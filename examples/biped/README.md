@@ -5,11 +5,10 @@ skinned mesh and materials, composed from three side layers. It is
 self-contained -- clone the repo and open it, nothing else to build or
 fetch.
 
-**No the conventional tool and no template data are needed to open it.** The mesh points,
-the skin weights, the materials and every rest transform are authored
-directly into these files; the only asset paths in the whole stack are the
-three relative sublayers below. The the conventional tool data is where this was *derived*
-from, and you only need it to regenerate.
+**Nothing else is needed to open it.** The mesh points, the skin weights,
+the materials and every rest transform are authored directly into these
+files; the only asset paths in the whole stack are the relative sublayers
+below.
 
     bin\launch_usdview.bat examples\biped\Biped_layered.usda
 
@@ -19,6 +18,7 @@ from, and you only need it to regenerate.
 | `Biped_layered_center.usda` | spine, neck, hips, chest, the mesh and the materials |
 | `Biped_layered_left.usda` | everything on the left side |
 | `Biped_layered_right.usda` | the right side, as references onto the left layer plus the ~336 attributes that genuinely differ |
+| `Biped_face.usda` | the face, as one additive layer over the rig: sublayered by `Biped_stack.usda`, `Biped_all.usda` and `Biped_everything.usda`, and NOT by `Biped_layered.usda` |
 | `Biped.usda` | the same rig flat, in one file, if you want to read it |
 | `Biped_anim.usda` | an 8-frame animated overlay on `Biped.usda`, for timing and for testing the animated evaluate path |
 
@@ -31,8 +31,7 @@ correctly; that is what this overlay is for:
 
 The layered and flat forms evaluate identically -- 576 prims, 110 movers in
 the same order, and all 252 joint frames matching to 0.000e+00 cm at rest
-and under a test pose. `tools/biped/verify_layers.py` re-proves that on
-demand.
+and under a test pose.
 
 ## What is in it
 
@@ -43,6 +42,12 @@ five materials over 26,274 faces), and a rig: spline-IK spine and neck,
 two-bone IK/FK limbs with a per-limb switch, reverse foot, FK finger
 controls that follow the arm in IK as well as FK, twist helpers, and
 `hips_ctl` as the master body control.
+
+The face arrives as its own sublayer: the jaw group, the jaw compression
+that couples the mid-face and the nose to it, the nose's blend between
+upper and lower face, and the eye look-ats. Open `Biped_stack.usda`,
+`Biped_all.usda` or `Biped_everything.usda` to get it; `Biped_layered.usda`
+is the body rig alone.
 
 ## Driving it
 
@@ -63,6 +68,18 @@ starting with:
   siblings, nested one under the next. They drive their own joint and
   everything below it, and the whole hand rides the wrist in either IK or
   FK
+- `skull_ctl` on the head, carrying the face. `jaw_ctl` at the jaw, with
+  `face_upper_ctl` / `face_lower_ctl` above it and `nose_bridge_ctl` and
+  `nose_ctl` in between. The brows sit on `head_tip_ctl`, and each
+  `brow_main_?_ctl` carries its inner brow and its peak. Three
+  dials carry the automatic parts: `face:jawCompression` on `jaw_ctl`
+  (0 to 1, the jaw pressing up into the middle of the face),
+  `face:noseFollow` on `face_lower_ctl` (how much of the lower face the
+  nose carries, 1 by default) and `face:lookAt` on `lookAt_ctl`
+- `lookAt_ctl`, the wide plate in front of the eyes. It is top-level,
+  beside `hips_ctl`, so a gaze holds while the head turns. `lookRot_ctl`
+  sits between the eyes and turns both together; `eye_l_ctl` and
+  `eye_r_ctl` sit on the eyes and turn one each
 
 **RigExec → Viewport Tools** gives move/rotate/scale gizmos that write
 avars directly, if you would rather drag than type.
@@ -92,8 +109,8 @@ straight away.
 
 Three colours, three states, all taken from the authored
 `touch_sets.touch`: the region under the **cursor** in its own painted
-colour, the region you clicked **last** in `leadColor` (a green, as the conventional tool's
-kLeadSelected is), and anything **else selected** in `selectedColor` (a
+colour, the region you clicked **last** in `leadColor` (a green), and
+anything **else selected** in `selectedColor` (a
 neutral). Selecting a control anywhere -- the Control Picker, the outliner -- lights its region here too.
 
 ### Selecting
@@ -116,11 +133,21 @@ With the panel focused: **T** toggles TouchPose, **P** toggles Paint,
 **Ctrl+A** selects every region, **Ctrl+Shift+A** clears, **Ctrl+I**
 inverts, **Ctrl+S** saves.
 
-While you are dragging a gizmo handle, TouchPose **stands down entirely** -- no cast, no highlight, no authoring -- and picks up again on the first
-mouse move after you let go. The selection highlight stays lit throughout;
-only the hover one goes. Measured at **0.06 ms per mouse move instead of
-10.7 ms**, which is what you would otherwise be paying on top of the
-manipulation you are actually watching.
+While you are dragging a gizmo handle, TouchPose **stands down** -- no
+cast, no hover highlight -- and picks up again on the first mouse move after
+you let go. The selection highlight stays lit throughout and follows the
+pose being dragged, because it is drawn by the body's own shader.
+
+The highlight **authors nothing**. It is a Storm shader tint: a Hydra scene
+index in `rigExecImaging` gives the body a per-face region id and a small
+per-region colour table, and wraps its materials so the lit colour is mixed
+with `table[region]`. A hover changes one constant primvar; no prim is
+created, shown or hidden, and the stage never sees an edit. Picking runs in
+C++ against the posed mesh (a BVH refit per pose). Measured on this
+character: a hover costs about **0.3 ms** where it cost 4-8 ms, a region
+crossing reaches the screen in about **15 ms** where it took 60-90 ms, and
+TouchPose adds almost nothing to a selection change where it added
+~200 ms (`bin\run_testusdview_touchpose_bench.bat`).
 
 While the box is ticked the **mesh is not selectable**: a click on the skin
 belongs to TouchPose, and on unpainted skin it selects nothing rather than
@@ -143,10 +170,10 @@ rig.
 
 That last part is not just tidiness. An authored edit on any prim inside
 the rig's read roots makes OpenExec uncompile and recompile the network,
-which costs about 2.3 s on the next evaluate. Both the highlight overlay
-and the paint buffer live outside the rig for that reason, and the
-headless test asserts the rig's generation counter does not move across a
-stroke.
+which costs about 2.3 s on the next evaluate. The paint buffer lives
+outside the rig for that reason (and the highlight is not on the stage at
+all), and the headless test asserts the rig's generation counter does not
+move across a stroke.
 
 ### The files
 
@@ -169,14 +196,6 @@ for them: hdSt collects every face subset whatever family it declares, so
 98 of them collided with `body_geo`'s five `materialBind` subsets and cost
 16,739 warnings every time the stage opened. On their own scope, with the
 faces in a plain `int[]`, the renderer never sees them.
-
-To re-import after a repaint in the conventional tool:
-
-    bin\run_touchpose.bat import_touch examples\biped\Biped.usda
-
-That writes both files and verifies what it wrote. `--list` reports the
-resolution without writing, and `--keep-unbound` authors the skipped sets
-anyway.
 
 ## The whole stack
 
@@ -271,47 +290,3 @@ warnings on open, and the renderer doing work for data it never draws.
 A save writes back to the scope it was read from rather than to a path
 derived from the mesh, so moving the regions does not leave a stage with
 two scopes and a reader picking whichever it met first.
-
-## Rebuilding it
-
-These files are generated, and checked in so the character can just be
-opened. To regenerate:
-
-    bin\run_biped.bat build_biped_rigexec examples\biped\Biped.usda ^
-        --spine --twist --fk-follow-parent --materials ^
-        --skin-rigexec <path-to>\mesh_manifest.json
-    bin\run_biped.bat params examples\biped\Biped.usda --place controls
-    bin\run_biped.bat split_layers examples\biped\Biped.usda ^
-        examples\biped\Biped_layered.usda
-    bin\run_biped.bat picker_xml --export %TEMP%\picker.json ^
-        --stage examples\biped\Biped.usda
-    bin\run_biped.bat picker_usd %TEMP%\picker.json ^
-        examples\biped\Biped_picker.usda ^
-        --rig /Biped/Rig --root /Biped/Rig --name Uman
-    bin\run_touchpose.bat import_touch examples\biped\Biped.usda
-
-The `params` and `split_layers` steps come after the build, in that order -- `params` adds the IK/FK switches and the opacity wiring, and the split has
-to see them.
-
-Note `--layered` is deliberately NOT in that command even though the flag
-exists. It writes the layered form DURING the build, which is before
-`params` runs, so the layer stack would be stale the moment the IK/FK
-switches were added -- and `verify_layers` then fails by 45.8 cm comparing
-two stages that hold different poses. Run `split_layers` explicitly, last
-but one, and the flag is redundant. The picker export comes last and needs the built stage: it
-resolves each button onto the prim it selects, so a control that does not
-exist yet leaves its button with nothing to point at and the export drops
-it. The JSON in the middle is a temporary: the deliverable is
-`Biped_picker.usda`, and nothing at runtime reads the JSON. `import_touch` is last
-for the same reason and resolves through the same tables
-(`tools/biped/rig_names.py`), from the other end: the picker starts from a
-delivery name, TouchPose from a build name. The mesh manifest is derived from the mesh already in
-`examples/biped/Biped.usda`.
-
-`rigExec:baked` survives a rebuild: the build step stamps it on the rig root
-beside `rigExec:restFrameVersion`, and `split_layers` copies it into
-`Biped_layered_center.usda` with the rest of that prim's own opinions. The
-prose comment above it in the checked-in files is a hand annotation, and is
-the one thing regeneration drops.
-
-Full guide, including what is not finished: [`docs/biped-rig.md`](../../docs/biped-rig.md).

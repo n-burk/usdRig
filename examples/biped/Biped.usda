@@ -9,16 +9,8 @@ def "Biped"
 {
     def RigExecRoot "Rig"
     {
+        uniform bool rigExec:baked = 1
         custom uniform int rigExec:restFrameVersion = 2
-        # This asset asks to be evaluated through the BAKED PROGRAM: the
-        # flattened, epoch-constant form of the rig, which answers a frame
-        # without going back through OpenExec and the pose walk. It is a
-        # request and not an assertion -- every value published is the same
-        # either way, and a generation the program cannot answer falls back
-        # to the dynamic path and says so -- so what it changes is how fast
-        # the biped poses, not how it poses. An explicit --mode, or
-        # RIGEXEC_EVALUATION_MODE in the environment, outranks it.
-        uniform bool rigExec:baked = true
 
         def Scope "Joints"
         {
@@ -5782,7 +5774,20 @@ def "Biped"
                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
             )
             {
-                custom float avars:ikfk = 0
+                custom float avars:ikfk = 0 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                            dictionary soft = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                        }
+                    }
+                )
                 color3f guide:displayColor = (1, 0.85, 0.1)
                 double guide:scaleX = 3
                 double guide:scaleY = 3
@@ -5795,7 +5800,20 @@ def "Biped"
                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
             )
             {
-                custom float avars:ikfk = 0
+                custom float avars:ikfk = 0 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                            dictionary soft = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                        }
+                    }
+                )
                 color3f guide:displayColor = (1, 0.85, 0.1)
                 double guide:scaleX = 3
                 double guide:scaleY = 3
@@ -5809,13 +5827,62 @@ def "Biped"
             )
             {
                 custom float avars:footRock = 0 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 90
+                                double minimum = -90
+                            }
+                            dictionary soft = {
+                                double maximum = 90
+                                double minimum = -90
+                            }
+                        }
+                    }
                     doc = "Foot rock in degrees: positive tips the foot onto its outer edge, negative onto the inner (the conventional tool leg_?.footRock, whose +-90 reaches 80.9 deg through the bank remap)."
                 )
                 custom float avars:footRoll = 0 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 120
+                                double minimum = -120
+                            }
+                            dictionary soft = {
+                                double maximum = 120
+                                double minimum = -120
+                            }
+                        }
+                    }
                     doc = "Foot roll in degrees: negative rocks onto the heel, positive rolls over the ball and, past avars:toePlantAngle, onto the toe tip (the conventional tool leg_?.footRoll)."
                 )
-                custom float avars:ikfk = 1
+                custom float avars:ikfk = 1 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                            dictionary soft = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                        }
+                    }
+                )
                 custom float avars:toePlantAngle = 60 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 120
+                                double minimum = 0
+                            }
+                            dictionary soft = {
+                                double maximum = 120
+                                double minimum = 0
+                            }
+                        }
+                    }
                     doc = "Roll angle at which the ball stops and the toe takes over (the conventional tool leg_?.toePlantAngle)."
                 )
                 color3f guide:displayColor = (1, 0.85, 0.1)
@@ -5831,13 +5898,62 @@ def "Biped"
             )
             {
                 custom float avars:footRock = 0 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 90
+                                double minimum = -90
+                            }
+                            dictionary soft = {
+                                double maximum = 90
+                                double minimum = -90
+                            }
+                        }
+                    }
                     doc = "Foot rock in degrees: positive tips the foot onto its outer edge, negative onto the inner (the conventional tool leg_?.footRock, whose +-90 reaches 80.9 deg through the bank remap)."
                 )
                 custom float avars:footRoll = 0 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 120
+                                double minimum = -120
+                            }
+                            dictionary soft = {
+                                double maximum = 120
+                                double minimum = -120
+                            }
+                        }
+                    }
                     doc = "Foot roll in degrees: negative rocks onto the heel, positive rolls over the ball and, past avars:toePlantAngle, onto the toe tip (the conventional tool leg_?.footRoll)."
                 )
-                custom float avars:ikfk = 1
+                custom float avars:ikfk = 1 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                            dictionary soft = {
+                                double maximum = 1
+                                double minimum = 0
+                            }
+                        }
+                    }
+                )
                 custom float avars:toePlantAngle = 60 (
+                    customData = {
+                        dictionary limits = {
+                            dictionary hard = {
+                                double maximum = 120
+                                double minimum = 0
+                            }
+                            dictionary soft = {
+                                double maximum = 120
+                                double minimum = 0
+                            }
+                        }
+                    }
                     doc = "Roll angle at which the ball stops and the toe takes over (the conventional tool leg_?.toePlantAngle)."
                 )
                 color3f guide:displayColor = (1, 0.85, 0.1)

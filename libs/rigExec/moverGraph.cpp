@@ -36,6 +36,7 @@
 #include "pxr/exec/vdf/tokens.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <iterator>
 #include <vector>
@@ -547,18 +548,65 @@ RigExecApplySkinKernelWithTransforms(
                                         transforms.transformCount)) {
         return false;
     }
-    if (p.skinningMethod == "classicLinear" &&
+
+    // BOTH methods split, not just the linear one. A point range is an
+    // independent sub-problem under either kernel -- the indices and weights
+    // of point i live at i * elementSize and no point reads another's result
+    // -- so which method is running says nothing about whether the work can
+    // be divided. Only the linear path was split, which left every
+    // dualQuaternion character skinning its whole mesh on one thread;
+    // measured on a 26,276-point body, that was the single largest cost in
+    // a drag.
+    const bool splittable =
         RigExecParallelEvaluationEnabled() &&
-        count >= RigExecGeometryParallelThreshold) {
-        WorkParallelForN(
-            count,
-            [&p, &transforms, pts](size_t begin, size_t end) {
-                RigExecApplySkinKernelRange(p, transforms, begin, end, pts);
-            },
-            RigExecGeometryGrainSize);
-        return true;
+        count >= RigExecGeometryParallelThreshold &&
+        (p.skinningMethod == "classicLinear" ||
+         p.skinningMethod == "dualQuaternion");
+    if (!splittable) {
+        return RigExecApplySkinKernelRange(p, transforms, 0, count, pts);
     }
-    return RigExecApplySkinKernelRange(p, transforms, 0, count, pts);
+
+    // THE PER-MATRIX TABLES ARE DERIVED ONCE HERE AND HANDED TO EVERY CHUNK.
+    // Both kernels build their own when handed none -- the SIMD path narrows
+    // the rows to float, the dual-quaternion path splits each matrix into a
+    // stretch and a unit dual quaternion -- and both are pure functions of
+    // the influence table, so a chunk that derives its own gets the same
+    // table every other chunk derived. Identical, and paid for once per task
+    // instead of once: with 137 influences and a grain of 512 points that is
+    // fifty-odd redundant derivations of the same thing. The linear path has
+    // been splitting without hoisting since it gained the split.
+    RigExecSkinTransformsView shared = transforms;
+    const RigExecSkinLayout layout =
+        RigExecSkinLayoutForPacket(p, transforms, count);
+    std::vector<float> rows;
+    std::vector<RigExecScaledDualQuat> palette;
+    if (p.skinningMethod == "classicLinear" && !shared.rows &&
+        layout.transforms) {
+        rows.resize(layout.transformCount * RigExecSkinRowStride);
+        for (size_t t = 0; t < layout.transformCount; ++t) {
+            RigExecNarrowSkinRows(layout.transforms[t],
+                                  &rows[t * RigExecSkinRowStride]);
+        }
+        shared.rows = rows.data();
+    } else if (p.skinningMethod == "dualQuaternion" && !shared.palette) {
+        palette = RigExecSkinDualQuatPalette(layout);
+        shared.palette = palette.data();
+        shared.paletteSize = palette.size();
+    }
+
+    // A degenerate blend fails one range, and the answer for the operation is
+    // that it failed. Relaxed ordering is enough: nothing is published
+    // through this flag, and WorkParallelForN joins before it is read.
+    std::atomic<bool> ok(true);
+    WorkParallelForN(
+        count,
+        [&p, &shared, pts, &ok](size_t begin, size_t end) {
+            if (!RigExecApplySkinKernelRange(p, shared, begin, end, pts)) {
+                ok.store(false, std::memory_order_relaxed);
+            }
+        },
+        RigExecGeometryGrainSize);
+    return ok.load(std::memory_order_relaxed);
 }
 
 bool
@@ -604,11 +652,38 @@ RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
         deltas = &transported;
     }
 
-    for (size_t i = 0; i < count; ++i) {
-        const GfVec3f preceding = (*pts)[i];
-        (*pts)[i] = RigExecBlendEnvelope(
-            preceding, preceding + (*deltas)[i], envelope[i]);
+    // Per point, reading two arrays and writing a third at the same index --
+    // the same independent sub-problem RigExecBlendEnvelopeAll already
+    // splits, and for the same reason: dividing the range changes nothing
+    // about the arithmetic, only who performs it. Everything above stays on
+    // this thread, because the envelope resolve and the surface transport
+    // are statements about the WHOLE array and fail it atomically.
+    //
+    // WORTH KNOWING WHAT THIS DID NOT FIX. On a 26,276-point body with 161
+    // corrective targets the blend-shape revision is the largest deformer
+    // cost left in an interactive drag once the skin kernel learned to
+    // split -- about 2 ms against the skin's 0.5 -- and splitting this loop
+    // moved it 1.07x. So the loop is not where that time goes: it is in
+    // assembling the channels (bakedGeometry.cpp, the per-sample
+    // GetAttribute reads), which is an epoch-caching problem and not a
+    // parallelism one. The split is kept because it is correct, free and
+    // matches every other point kernel, not because it paid here.
+    GfVec3f *const points = pts->data();
+    const GfVec3f *const delta = deltas->data();
+    const float *const weight = envelope.data();
+    const auto blendRange = [points, delta, weight](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            const GfVec3f preceding = points[i];
+            points[i] = RigExecBlendEnvelope(
+                preceding, preceding + delta[i], weight[i]);
+        }
+    };
+    if (RigExecParallelEvaluationEnabled() &&
+        count >= RigExecGeometryParallelThreshold) {
+        WorkParallelForN(count, blendRange, RigExecGeometryGrainSize);
+        return true;
     }
+    blendRange(0, count);
     return true;
 }
 

@@ -197,12 +197,19 @@ def NextGroupPivot(mode, tool):
 def GroupPivotChoices(tool):
     """
     The pivot points offered for `tool`, default first. Empty for
-    Select, and for Move -- moving a selection by a world delta is the
-    same motion whatever it is measured about, so offering the row there
-    would be a control that does nothing.
+    Select.
+
+    Move offers two, not three. Centre moves every selected control by
+    the same world delta; Individual Origins moves each one the same
+    DISTANCE along its OWN axis, the axis of its own frame that matches
+    the handle dragged -- the way Rotate turns each about itself. Last
+    Selected would be the same motion as Centre for a move, so it is not
+    offered.
     """
     if tool in (TOOL_ROTATE, TOOL_SCALE):
         return GROUP_PIVOT_MODES
+    if tool == TOOL_TRANSLATE:
+        return (GROUP_PIVOT_CENTER, GROUP_PIVOT_INDIVIDUAL)
     return ()
 
 

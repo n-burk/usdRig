@@ -2611,6 +2611,49 @@ def TestGroupPivotModes():
            "a carried control still rides on the driver it hangs from")
 
 
+def TestGroupIndividualMoveAlongOwnAxes():
+    """
+    Individual Origins on a MOVE: dragging the X handle moves every
+    selected control the same distance along ITS OWN X, not along the
+    lead's. Centre, the default, still moves them all by one world delta.
+    Mid and Side are turned differently, so the two answers differ.
+    """
+    time = Usd.TimeCode.Default()
+    distance = 3.0
+
+    def run(mode):
+        stage, _root, mid, _tip, side, _driven = _GroupStage()
+        prims = [mid, side]
+        world = [_GroupWorld(stage, p, time) for p in prims]
+        before = [Gf.Vec3d(_GroupOrigin(stage, p, time)) for p in prims]
+        group, writer = _Group(stage, prims, time)
+        group.SetPivotMode(mode)
+        group.SetAxisOrientation("object")
+        group.BeginDrag()
+        leadX = Gf.Vec3d(world[1][0][0], world[1][0][1], world[1][0][2])
+        group.ApplyTranslate(leadX.GetNormalized() * distance)
+        writer.CommitToStage()
+        after = [Gf.Vec3d(_GroupOrigin(stage, p, time)) for p in prims]
+        return world, before, after, leadX.GetNormalized() * distance
+
+    world, before, after, delta = run(gizmoMath.GROUP_PIVOT_INDIVIDUAL)
+    for i, name in enumerate(("Mid", "Side")):
+        ownX = Gf.Vec3d(world[i][0][0], world[i][0][1],
+                        world[i][0][2]).GetNormalized()
+        want = before[i] + ownX * distance
+        _Check((after[i] - want).GetLength() < 1e-6,
+               "%s moved %s along its own X, want %s"
+               % (name, after[i] - before[i], ownX * distance))
+    _Check(((after[0] - before[0]) - delta).GetLength() > 0.5,
+           "and Mid did NOT just take the lead's world delta")
+
+    world, before, after, delta = run(gizmoMath.GROUP_PIVOT_CENTER)
+    for i, name in enumerate(("Mid", "Side")):
+        _Check(((after[i] - before[i]) - delta).GetLength() < 1e-6,
+               "Centre moves %s by the one world delta: %s vs %s"
+               % (name, after[i] - before[i], delta))
+
+
 def TestGroupPivotModeFallsBackToTheCentre():
     """A stale or unknown setting must not be able to break a drag."""
     stage, _root, mid, _tip, side, _driven = _GroupStage()
@@ -3035,6 +3078,8 @@ def main():
         ("group translate does not double",
          TestGroupTranslateCarriesWithoutDoubling),
         ("group pivot modes", TestGroupPivotModes),
+        ("group individual move along own axes",
+         TestGroupIndividualMoveAlongOwnAxes),
         ("group pivot mode fallback",
          TestGroupPivotModeFallsBackToTheCentre),
         ("group rotate turns everyone",

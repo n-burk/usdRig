@@ -141,14 +141,15 @@ class PickerView(QtWidgets.QWidget):
         self._selected = set()
         self._hover = None
         self.setMouseTracking(True)
-        self.setMinimumSize(int(panel.w), int(panel.h))
+        (self._ox, self._oy), (self._cw, self._ch) =             pickerModel.content_box(picker, panel)
+        self.setMinimumSize(int(self._cw), int(self._ch))
         self._font = _load_font()
 
     # -- painting --------------------------------------------------------
 
     def _scale(self):
-        return min(self.width() / self._panel.w,
-                   self.height() / self._panel.h) or 1.0
+        return min(self.width() / self._cw,
+                   self.height() / self._ch) or 1.0
 
     def paintEvent(self, event):
         painter = QtGui.QPainter(self)
@@ -156,9 +157,17 @@ class PickerView(QtWidgets.QWidget):
         painter.fillRect(self.rect(), QtGui.QColor(42, 42, 42))
         scale = self._scale()
         painter.scale(scale, scale)
+        # Into the panel's own coordinates: the buttons carry absolute
+        # positions from the canvas they were authored on, so the view
+        # slides that canvas until this panel's content starts at the
+        # corner. Every screen-to-panel mapping below undoes the same
+        # shift -- if one of them forgot, clicks would land on whichever
+        # button happened to be under the offset instead.
+        painter.translate(-self._ox, -self._oy)
         painter.setBrush(QtGui.QBrush(QtGui.QColor(*self._panel.fill)))
         painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 200)))
-        painter.drawRect(QtCore.QRectF(0, 0, self._panel.w, self._panel.h))
+        painter.drawRect(QtCore.QRectF(self._ox, self._oy,
+                                       self._cw, self._ch))
 
         for button in self._picker.visible(
                 self._panel.id,
@@ -270,8 +279,10 @@ class PickerView(QtWidgets.QWidget):
     def _at(self, event):
         scale = self._scale()
         pos = event.position() if hasattr(event, "position") else event.pos()
-        return self._picker.hits(self._panel.id, pos.x() / scale,
-                                 pos.y() / scale, self._modes, self._edit)
+        return self._picker.hits(self._panel.id,
+                                 pos.x() / scale + self._ox,
+                                 pos.y() / scale + self._oy,
+                                 self._modes, self._edit)
 
     @staticmethod
     def ModeFor(modifiers):
@@ -292,7 +303,7 @@ class PickerView(QtWidgets.QWidget):
     def _PanelPos(self, event):
         scale = self._scale()
         pos = event.position() if hasattr(event, "position") else event.pos()
-        return pos.x() / scale, pos.y() / scale
+        return pos.x() / scale + self._ox, pos.y() / scale + self._oy
 
     def mousePressEvent(self, event):
         if event.button() != QtCore.Qt.LeftButton:
@@ -635,13 +646,18 @@ class PickerPanel(QtWidgets.QDialog):
         for picker in self._pickers:
             inner = QtWidgets.QTabWidget()
             for panel in picker.panels:
-                # ONLY THE BODY. The facial panel's controls are not
-                # ported, so every one of its buttons is dead; a tab of
-                # things that cannot be clicked is worse than no tab. It
-                # comes back when the face rig does, and the layout is
-                # still in the layer either way.
-                if (panel.label or panel.id).rsplit("/", 1)[-1] in (
-                        "Facial", "Face", "panel4"):
+                # A TAB OF THINGS THAT CANNOT BE CLICKED IS WORSE THAN NO
+                # TAB -- but which panel that is, is a question for the
+                # stage and not for a list of names in here. This used to
+                # skip "Facial" by name, because the face rig was not
+                # built and every one of that panel's buttons was dead;
+                # when the face arrived the tab stayed hidden, and the
+                # name was the only reason. So the test is the condition
+                # itself: a panel with something live on it gets a tab.
+                live = sum(1 for button in picker.buttons
+                           if button.parent == panel.id
+                           and button.live and not button.decoration)
+                if not live:
                     continue
                 view = PickerView(picker, panel)
                 view.picked.connect(self._OnPicked)

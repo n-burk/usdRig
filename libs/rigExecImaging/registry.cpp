@@ -1,6 +1,7 @@
 //
 // RigExec imaging registry and C activation surface.
 //
+#include <fstream>
 #include "registry.h"
 
 #include "rigExecMath/avarScale.h"
@@ -485,7 +486,22 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
         return false;
     }
     _lastTime = time;
-    _Broadcast(_Publish(std::move(snapshot), epoch));
+    // Recorded into the first rig's profiler, so one summary holds the whole
+    // update: the rig (Imaging.EvaluateAndPublish, per session, inside
+    // _EvaluateSessions above) and then the COMBINED generation's publish
+    // and the dirty notices that drive Hydra's sync.
+    RigExecProfiler *const profiler =
+        _sessions.empty() ? nullptr : _sessions.front().bridge->MutableProfiler();
+    RigExecImagingBridge::PublishResult published;
+    {
+        RigExecProfileScope scope(profiler, "Imaging.CombinedPublish",
+                                  "imaging");
+        published = _Publish(std::move(snapshot), epoch);
+    }
+    {
+        RigExecProfileScope scope(profiler, "Imaging.Broadcast", "imaging");
+        _Broadcast(published);
+    }
     return true;
 }
 
@@ -868,6 +884,36 @@ RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
 }
 
 bool
+RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\tmode\n";
+    for (const RigSession &session : _sessions) {
+        const RigExecRigEvaluator &evaluator = session.bridge->GetEvaluator();
+        // The mode ASKED for. Whether the baked program actually answered is
+        // in the rows themselves: a generation it served records `Baked`.
+        const RigExecEvaluationMode requested = evaluator.GetEvaluationMode();
+        const std::string mode =
+            requested == RigExecEvaluationMode::Dynamic ? "dynamic"
+            : requested == RigExecEvaluationMode::Baked ? "baked"
+                                                        : "parity";
+        for (const RigExecProfileSummaryRow &row :
+             session.bridge->GetProfiler().Summarize()) {
+            out << session.rigPath.GetString() << '\t' << row.name << '\t'
+                << row.category << '\t' << row.count << '\t'
+                << (row.totalUs / 1000.0) << '\t' << (row.maxUs / 1000.0)
+                << '\t' << mode << '\n';
+        }
+        session.bridge->MutableProfiler()->Clear();
+    }
+    return true;
+}
+
+bool
 RigExecImagingRegistry::EndPreview()
 {
     UsdTimeCode time;
@@ -941,8 +987,41 @@ RigExecImagingRegistry::_OnObjectsChanged(
             // A value-only edit keeps the cached dependency regions. Resyncs
             // and connection/relationship edits may introduce a new external
             // input even when the evaluator's binding epoch stays unchanged.
-            _readRootsDirty = _readRootsDirty ||
-                !notice.GetResyncedPaths().empty();
+            //
+            // A property resync that names only a value (a spec created by
+            // its first authored value, or removed by the undo of it) is a
+            // value edit here too: a new connection or target would arrive
+            // as its own field, and a removed one leaves the cached regions
+            // a superset of what is read, which is safe. The one input a
+            // removal can reveal is a weaker layer's connection the removed
+            // spec was hiding, so a property still connected afterwards
+            // counts as structure.
+            for (const SdfPath &path : notice.GetResyncedPaths()) {
+                if (_readRootsDirty) {
+                    break;
+                }
+                if (!path.IsPropertyPath()) {
+                    _readRootsDirty = true;
+                    break;
+                }
+                const UsdAttribute attribute =
+                    _stage ? _stage->GetAttributeAtPath(path) : UsdAttribute();
+                const UsdRelationship relationship =
+                    _stage ? _stage->GetRelationshipAtPath(path)
+                           : UsdRelationship();
+                if ((attribute && attribute.HasAuthoredConnections()) ||
+                    (relationship && relationship.HasAuthoredTargets())) {
+                    _readRootsDirty = true;
+                    break;
+                }
+                for (const TfToken &field : notice.GetChangedFields(path)) {
+                    if (field != "typeName" && field != "default" &&
+                        field != "timeSamples" && field != "spline") {
+                        _readRootsDirty = true;
+                        break;
+                    }
+                }
+            }
             for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
                 for (const TfToken &field : notice.GetChangedFields(path)) {
                     if (field == "connectionPaths" || field == "targetPaths") {
@@ -966,6 +1045,10 @@ RigExecImagingRegistry::_OnObjectsChanged(
                 if (affected) {
                     session.dirty = true;
                     session.readRootsDirty = session.readRootsDirty || _readRootsDirty;
+                    // The bridge caches authored guide styling (shape, scale,
+                    // colour, purpose...) across generations; an edit that
+                    // reaches the rig is the only thing that can move it.
+                    session.bridge->InvalidateGuideCaches();
                 }
             }
             time = _lastTime;
@@ -1892,6 +1975,18 @@ RigExecImaging_GetGuideBoundsAssetSpace(
     }
     _WriteBounds(range, outMinMax);
     return 1;
+}
+
+// Viewport profiling. With RIGEXEC_IMAGING_PROFILE set, every active rig's
+// evaluator records its own phases and the imaging layer's publish phases;
+// this writes the per-phase totals as tab-separated text and clears them,
+// so a caller can bracket exactly the interaction it wants to measure.
+int
+RigExecImaging_WriteProfileSummary(const char *path)
+{
+    return RigExecImagingRegistry::GetInstance().WriteProfileSummary(
+               path ? std::string(path) : std::string())
+        ? 0 : 1;
 }
 
 int

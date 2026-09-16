@@ -1372,6 +1372,17 @@ struct RigExecBakedProgramImpl {
     /// The rest, kept only so a drag can reach one. Walked per frame while an
     /// interactive override stands and never otherwise.
     std::vector<AvarBinding> avarConstantBindings;
+    /// Avar property path -> its index in avarConstantBindings, for the
+    /// constants a value edit can PATCH rather than rebuild: resolved from
+    /// the attribute itself (a walk of one, no connection upstream), so the
+    /// value a notice names is exactly the value the slot holds. See
+    /// RigExecBakedProgram::ApplyAvarValueEdits.
+    std::map<SdfPath, size_t> patchableAvars;
+    /// Indices into avarConstantBindings of the patchable avars an edit has
+    /// since animated (a spline key on a released drag). Read per frame the
+    /// long way, like a varying binding, until an edit makes them constant
+    /// again. Kept apart from avarBindings so the patch map's indices hold.
+    std::vector<size_t> promotedAvars;
     size_t boundInputs = 0;
     size_t varyingInputs = 0;
 

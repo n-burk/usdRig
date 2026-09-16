@@ -479,9 +479,21 @@ def _TestGroupSelection(d, controller, stage, session, frame):
     controller.SetGroupPivot(gizmoMath.GROUP_PIVOT_CENTER)
     controller.SetTool(gizmoUI.TOOL_TRANSLATE)
     d.Pump()
-    _Check(not bar._groupAction.isEnabled(),
-           "Move offers none -- a world delta is the same motion whatever "
-           "it is measured about")
+    # Move offers Centre and Individual Origins (each control along its own
+    # axes); Last Selected is left out because it moves a selection exactly
+    # as the centre does, so the cycle has two stops.
+    _Check(bar._groupAction.isEnabled(),
+           "Move offers a group pivot: centre or individual origins")
+    bar._groupAction.trigger()
+    d.Pump()
+    _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_INDIVIDUAL,
+           "Move cycles from the centre to individual origins: %r"
+           % controller.GroupPivot())
+    bar._groupAction.trigger()
+    d.Pump()
+    _Check(controller.GroupPivot() == gizmoMath.GROUP_PIVOT_CENTER,
+           "and back to the centre, skipping Last Selected: %r"
+           % controller.GroupPivot())
 
     # -- Global / Local, the other toolbar toggle ----------------------
     controller.SetTool(gizmoUI.TOOL_ROTATE)

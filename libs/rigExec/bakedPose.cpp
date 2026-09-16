@@ -2013,6 +2013,11 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
         B.avars[binding.slot] =
             RigExecBakedRead(binding.input, R, time, &B.overridden);
     }
+    for (const size_t index : B.promotedAvars) {
+        const auto &binding = B.avarConstantBindings[index];
+        B.avars[binding.slot] =
+            RigExecBakedRead(binding.input, R, time, &B.overridden);
+    }
     // A drag lands on avars the bake captured as constants -- that is what
     // dragging a control on a still rig IS -- so the varying list above is not
     // the whole table while one stands. The constant slots are walked while a
@@ -2022,8 +2027,11 @@ RigExecBakedRunInputs(RigExecBakedProgramImpl *program, UsdTimeCode time)
     // not a step's, so no arrangement of the graph can perform them twice.
     if (B.anyOverridden || B.avarsDisturbed) {
         for (const auto &binding : B.avarConstantBindings) {
+            // A promoted binding is varying, and RigExecBakedRead answers
+            // it the long way whether or not a drag stands on it.
             B.avars[binding.slot] =
-                B.overridden[size_t(binding.input.overrideIndex)]
+                (B.overridden[size_t(binding.input.overrideIndex)] ||
+                 binding.input.varying)
                     ? RigExecBakedRead(binding.input, R, time, &B.overridden)
                     : binding.input.constant;
         }

@@ -217,6 +217,14 @@ class RigExecUsdviewContainer(PluginContainer):
             "View Cube",
             lambda api: self._ToggleViewCube())
 
+        # The profiler: where the open rig's time goes, how deep its
+        # schedule is, and how many threads any of it actually ran on.
+        # Same lazy-import reasoning as the panels above.
+        self._profiler = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.profiler",
+            "Profiler",
+            lambda api: self._OpenProfilerPanel(api))
+
         dataModel = self._api.dataModel
         # Plugins load before the stage opens: bind stage observation on
         # replacement, discover roots added later by authoring, and
@@ -239,6 +247,7 @@ class RigExecUsdviewContainer(PluginContainer):
         menu.addItem(self._picker)
         menu.addItem(self._viewportToolsCommand)
         menu.addItem(self._viewCubeCommand)
+        menu.addItem(self._profiler)
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring
@@ -324,6 +333,20 @@ class RigExecUsdviewContainer(PluginContainer):
         return layerOpinionsUI.OpenLayerOpinionsPanel(
             usdviewApi or self._api, self._UndoStack())
 
+    def _OpenProfilerPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenExecStackPanel: profilerUI
+        # pulls in Qt, and this container must stay importable headless.
+        # profilerModel beside it does not, which is what lets the CLI
+        # run the same measurement with no Qt at all.
+        try:
+            import profilerUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import profilerUI
+
+        return profilerUI.OpenProfilerPanel(usdviewApi or self._api)
+
     def _OpenExecStackPanel(self, usdviewApi=None):
         # Same lazy sibling import as _OpenVolumeWeightPanel: execStackUI
         # pulls in Qt, and this container must stay importable headless.
@@ -348,6 +371,10 @@ class RigExecUsdviewContainer(PluginContainer):
                 0, os.path.dirname(os.path.abspath(__file__)))
             import avarEditorUI
 
+        # A slider drag previews through the viewport tools' Hydra channel
+        # and authors once on release; that channel is installed with the
+        # tools, so make sure they exist even if the toolbar was never shown.
+        self._EnsureViewportTools()
         return avarEditorUI.OpenAvarEditorPanel(
             usdviewApi or self._api, self._UndoStack())
 

@@ -276,8 +276,18 @@ class Channel(object):
         (low, high) for a slider over this channel, or None when a slider
         makes no sense (tokens, strings, non-scalars). Widened to hold
         `value` so a typed number never lands outside the slider.
+
+        An attribute that says its own range wins: `limits` in its
+        customData, the soft range first and the hard one otherwise
+        (AuthoredLimits). That is how a rig dial states that it is degrees
+        from -120 to 120 rather than a 0-1 weight; the per-kind guesses
+        below are only for channels that say nothing.
         """
-        if self.family == VALUE_FLOAT:
+        authored = AuthoredLimits(self.attr) if self.family in (
+            VALUE_FLOAT, VALUE_INT) else None
+        if authored is not None:
+            low, high = authored
+        elif self.family == VALUE_FLOAT:
             if self.kind == KIND_TRANSLATE:
                 span = TRANSLATE_SLIDER_METERS * UnitsPerMeter(stage)
                 low, high = -span, span
@@ -356,6 +366,44 @@ def HasAvars(prim):
         return False
     return any(RigPrefixOf(a.GetName()) is not None
                for a in prim.GetAttributes())
+
+
+def AuthoredLimits(attr):
+    """
+    (low, high) from the attribute's `limits` customData, or None.
+
+    The common USD convention for a value's range:
+
+        customData = {
+            dictionary limits = {
+                dictionary soft = { double minimum = -120  double maximum = 120 }
+                dictionary hard = { ... }
+            }
+        }
+
+    `soft` is the range an animator works in, `hard` what the rig can
+    take; a slider wants the soft one and falls back to the hard one.
+    """
+    if not attr:
+        return None
+    try:
+        limits = attr.GetCustomDataByKey("limits")
+    except Exception:
+        return None
+    if not isinstance(limits, dict):
+        return None
+    for which in ("soft", "hard"):
+        entry = limits.get(which)
+        if not isinstance(entry, dict):
+            continue
+        try:
+            low = float(entry["minimum"])
+            high = float(entry["maximum"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(low) and math.isfinite(high) and high > low:
+            return (low, high)
+    return None
 
 
 def DiscoverChannels(prim, stage=None):

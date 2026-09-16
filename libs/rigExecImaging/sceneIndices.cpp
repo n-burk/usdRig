@@ -2247,6 +2247,7 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
     HdSceneIndexObserver::DirtiedPrimEntries entries;
     HdSceneIndexObserver::AddedPrimEntries addedGuides;
     HdSceneIndexObserver::RemovedPrimEntries removedGuides;
+    std::vector<SdfPath> xformRoots;
     entries.reserve(dirtied.size());
     for (const RigExecPublishedDirty &entry : dirtied) {
         if (entry.changes & RigExecChangeStructural) {
@@ -2504,12 +2505,9 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
             // container handles needs the rebuilt chain invalidated, not just
             // the leaf (HdContainerDataSourceEditor::ComputeDirtyLocators).
             _RefreshDrivenXform(entry.path);
-            static const HdDataSourceLocatorSet xformSubtree =
-                HdContainerDataSourceEditor::ComputeDirtyLocators(
-                    HdDataSourceLocatorSet{
-                        HdDataSourceLocator(HdXformSchemaTokens->xform,
-                                            HdXformSchemaTokens->matrix)});
-            _DirtySubtree(entry.path, xformSubtree, &entries);
+            // Walked once, after the loop, from the topmost roots only: see
+            // `xformRoots` below.
+            xformRoots.push_back(entry.path);
         }
         if (entry.changes & RigExecChangePoints) {
             leaves.insert(HdDataSourceLocator(
@@ -2549,6 +2547,36 @@ RigExecResultsSceneIndex::NotifyGenerationPublished(
         entries.emplace_back(
             entry.path,
             HdContainerDataSourceEditor::ComputeDirtyLocators(leaves));
+    }
+    // THE DRIVEN-TRANSFORM SUBTREES, topmost roots only, once each.
+    //
+    // Walking each driven Xform's subtree as it was met re-walked every
+    // nested one again for every driven ancestor above it -- a rig whose
+    // whole control and joint hierarchy moves with its root (dragging the
+    // hips) dirtied the same prims over and over and asked the upstream
+    // scene index for their children each time: 33 ms of every hips drag
+    // sample on the biped. A root nested under another root in this batch
+    // is already inside that walk, and it dirties exactly the same locator
+    // set, so it is skipped. Every prim still gets the same locators.
+    if (!xformRoots.empty()) {
+        static const HdDataSourceLocatorSet xformSubtree =
+            HdContainerDataSourceEditor::ComputeDirtyLocators(
+                HdDataSourceLocatorSet{
+                    HdDataSourceLocator(HdXformSchemaTokens->xform,
+                                        HdXformSchemaTokens->matrix)});
+        std::sort(xformRoots.begin(), xformRoots.end());
+        xformRoots.erase(std::unique(xformRoots.begin(), xformRoots.end()),
+                         xformRoots.end());
+        SdfPath walked;
+        for (const SdfPath &root : xformRoots) {
+            // Sorted, so a descendant always follows its nearest walked
+            // ancestor directly or after that ancestor's other descendants.
+            if (!walked.IsEmpty() && root.HasPrefix(walked)) {
+                continue;
+            }
+            _DirtySubtree(root, xformSubtree, &entries);
+            walked = root;
+        }
     }
     if (!removedGuides.empty()) {
         _SendPrimsRemoved(removedGuides);

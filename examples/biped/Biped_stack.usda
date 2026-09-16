@@ -25,6 +25,15 @@
                                 each reading joint poses and publishing
                                 a weight.
 
+      Biped_face.usda           the face: controls for the jaw group,
+                                the mid-face and the nose, the pivots
+                                that carry the jaw compression and the
+                                nose's space blend, and the eye
+                                look-ats. Additive -- it defines its own
+                                prims and states nothing about the rig
+                                below it, so dropping it leaves the
+                                character exactly as it was.
+
       Biped_shapes.usdc         the blend shapes those weights drive --
                                 UsdSkelBlendShape targets and the mover
                                 that applies them. Crate, because it is
@@ -56,6 +65,7 @@
         @./Biped_picker.usda@,
         @./Biped_touch_regions.usda@,
         @./Biped_psd.usda@,
+        @./Biped_face.usda@,
         @./Biped_shapes.usdc@,
         @./Biped_layered.usda@
     ]
