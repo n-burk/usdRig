@@ -9763,7 +9763,7 @@ class GraphView(QGLWidget):
         if newNodeId in self.nodes:
             self.nodes[newNodeId].selected = True
             self._selectedNodes.add(newNodeId)
-            self._syncSelectionToPrimtree()
+            self._afterUsdviewRefresh(self._syncSelectionToPrimtree)
 
         gv = self
         _push_undo_command(
@@ -9774,6 +9774,33 @@ class GraphView(QGLWidget):
 
         self._showPopupMessage(f"Renamed {oldName} to {newName}")
         self.update()
+
+    def _afterUsdviewRefresh(self, callback):
+        """Run *callback* once usdview has rebuilt its prim browser.
+
+        A namespace edit makes usdview schedule a full prim-browser rebuild on
+        a zero-interval QTimer (AppController.updateGUI). Selecting the new
+        path before that runs makes usdview look it up in a prim-to-item map
+        that still describes the old namespace; its updateSelection then fails
+        on the missing item with an AttributeError inside usdview's own slot,
+        and the prim browser does not follow the rename.
+
+        Another zero-interval QTimer started now fires after usdview's, because
+        timers with equal timeouts fire in the order they were started, so the
+        callback sees the rebuilt tree. QTimer.singleShot(0) is not the same:
+        it posts an event, and some event dispatchers deliver posted events
+        before pending timers.
+        """
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(0)
+
+        def fire():
+            timer.deleteLater()
+            callback()
+
+        timer.timeout.connect(fire)
+        timer.start()
 
     def _paintNodeRename(self):
         """Draw the inline editor over the node being renamed."""

@@ -62,19 +62,19 @@ if exist "%RIG%\build\CMakeCache.txt" (
 
 rem Register the usdNoodles node-graph editor the build staged under
 rem build\python\UsdNoodles -- after building, so a first build has produced
-rem it. Skipped when this USD install ships its own pxr.UsdNoodles (an OpenUSD
-rem built from PR #4156 with noodles): the two register the same usdview
-rem command names, and usdview answers a duplicate name by loading no plugins
-rem at all. rigexec_register_usdnoodles in _env.sh is the POSIX twin.
-set "USD_NOODLES="
-if exist "%USD%\Lib\site-packages\pxr\UsdNoodles" set "USD_NOODLES=%USD%\Lib\site-packages\pxr\UsdNoodles"
-if exist "%USD%\lib\python\pxr\UsdNoodles" set "USD_NOODLES=%USD%\lib\python\pxr\UsdNoodles"
-if defined USD_NOODLES (
-    >&2 echo usdNoodles: %USD_NOODLES% is loaded instead of the in-repo copy;
-    >&2 echo             registering both stops usdview loading any plugin.
-    >&2 echo             Build OpenUSD without noodles to use plugin\usdNoodles.
-) else if exist "%RIG%\build\python\UsdNoodles\plugInfo.json" (
+rem it. An OpenUSD built from PR #4156 with noodles also installs the older
+rem editor as pxr.UsdNoodles; the in-repo copy takes its place when both are
+rem present (UsdNoodles\__init__.py, _supersedeInstalledCopy), so registering
+rem it is always right. rigexec_register_usdnoodles in _env.sh is the POSIX
+rem twin.
+if exist "%RIG%\build\python\UsdNoodles\plugInfo.json" (
     set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\build\python\UsdNoodles"
+    set "USD_NOODLES="
+    if exist "%USD%\Lib\site-packages\pxr\UsdNoodles" set "USD_NOODLES=%USD%\Lib\site-packages\pxr\UsdNoodles"
+    if exist "%USD%\lib\python\pxr\UsdNoodles" set "USD_NOODLES=%USD%\lib\python\pxr\UsdNoodles"
+    if defined USD_NOODLES (
+        >&2 echo usdNoodles: plugin\usdNoodles supersedes !USD_NOODLES!
+    )
 )
 
 rem A leading non-flag argument is the stage; otherwise open a blank one.

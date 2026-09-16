@@ -1,0 +1,16 @@
+#usda 1.0
+(
+    """
+    Fixture for tests/testUsdviewNoodlesRename.py: one root prim for the
+    Noodles Editor to show as a node, and a child so the rename has
+    something to carry along.
+    """
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Cube "Box"
+    {
+    }
+}

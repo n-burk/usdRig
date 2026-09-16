@@ -1,0 +1,71 @@
+#usda 1.0
+(
+    """
+    Probe C3a (part 2): MoverAPI inputs:defaultWeight (float) CONNECTED to a
+    control's double avars:tx (= 0.5). A float math mover adds 4 to a dial of
+    10: with the avar read as the envelope the dial would publish 12; with the
+    own authored defaultWeight 1 it would publish 14.
+    """
+    defaultPrim = "Asset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Ctl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0.5
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/Ctl>
+                rel rigExec:joints = </Asset/Rig/Joints/Root>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Channels"
+        {
+            def Scope "Dials"
+            {
+                float rigExec:dial = 10
+                float rigExec:envSource = 0.5
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecFloatMathMover "AddEnvelopeFromTx" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float inputs:value = 4
+                float inputs:defaultWeight = 1
+                float inputs:defaultWeight.connect = </Asset/Rig/Channels/Dials.rigExec:envSource>
+                rel rigExec:moves = </Asset/Rig/Channels/Dials.rigExec:dial>
+            }
+        }
+    }
+}

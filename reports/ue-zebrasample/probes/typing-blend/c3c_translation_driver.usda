@@ -1,0 +1,148 @@
+#usda 1.0
+(
+    """
+    Probe C3c-2: TRANSLATION interpolator (enableRotation false,
+    enableTranslation true) driven by the same control. Poses: neutral t=0,
+    Right t=(5,0,0) cm, translationRadius 5. At frames 3 and 4 the driver sits
+    at tx=5 (exactly on Right): if translation were measured Right would read 1.
+    """
+    defaultPrim = "Asset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 5
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Shoulder" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecControl "Driver" (
+                    prepend apiSchemas = ["RigExecControlAPI"]
+                )
+                {
+                    # frame:  1   2   3   4   5
+                    # rz:     0  45   0  45  22.5
+                    # tx:     0   0   5   5   0
+                    double avars:rz.timeSamples = { 1: 0, 1.999: 0, 2: 45, 2.999: 45, 3: 0, 3.999: 0, 4: 45, 4.999: 45, 5: 22.5 }
+                    double avars:tx.timeSamples = { 1: 0, 2.999: 0, 3: 5, 4.999: 5, 5: 0 }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )
+                }
+            }
+        }
+
+        def Scope "PoseInterpolators"
+        {
+            def RigExecPoseInterpolator "PI"
+            {
+                rel rigExec:driver = </Asset/Rig/Controls/Shoulder/Driver>
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:enableRotation = false
+                bool rigExec:enableTranslation = true
+                def RigExecPose "neutral"
+                {
+                    uniform token rigExec:poseType = "whole"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:rotationRadius = 0
+                    float rigExec:translationRadius = 5
+                }
+                def RigExecPose "Right"
+                {
+                    uniform token rigExec:poseType = "whole"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float3 rigExec:translation = (5, 0, 0)
+                    float rigExec:rotationRadius = 0
+                    float rigExec:translationRadius = 5
+                }
+            }
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "In_neutral"
+            {
+                float inputs:weight = 0
+                float inputs:weight.connect = </Asset/Rig/PoseInterpolators/PI/neutral.outputs:weight>
+                rel rigExec:samples = </Asset/Rig/BlendInputs/In_neutral/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Targets/T.points>
+                }
+            }
+
+            def RigExecBlendInput "In_Right"
+            {
+                float inputs:weight = 0
+                float inputs:weight.connect = </Asset/Rig/PoseInterpolators/PI/Right.outputs:weight>
+                rel rigExec:samples = </Asset/Rig/BlendInputs/In_Right/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Targets/T.points>
+                }
+            }
+
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecBlendShapeMover "BS_neutral" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/In_neutral>
+                rel rigExec:moves = </Asset/Geom/M_neutral.points>
+            }
+
+            def RigExecBlendShapeMover "BS_Right" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/In_Right>
+                rel rigExec:moves = </Asset/Geom/M_Right.points>
+            }
+
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "M_neutral"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+        def Mesh "M_Right"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+    }
+
+    def Scope "Targets"
+    {
+        def Points "T"
+        {
+            point3f[] points = [(0, 0, 10), (1, 0, 10)]
+            token visibility = "invisible"
+        }
+    }
+}

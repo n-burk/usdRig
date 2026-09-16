@@ -247,20 +247,18 @@ rigexec_require_usd() {
 # they are asserting against. Call it after building, so a first build has
 # already produced the plugInfo.json it looks for.
 #
-# Skipped when this USD install ships its own pxr.UsdNoodles -- an OpenUSD
-# built from PR #4156 with noodles, which is where this copy came from. The
-# two register the same usdview command names, and usdview answers a
-# duplicate name by loading no plugins at all, RigExec's own included.
+# An OpenUSD built from PR #4156 with noodles -- where this copy came from --
+# also installs the older editor as pxr.UsdNoodles. Registering both used to
+# stop usdview loading any plugin (the two register the same command names);
+# the in-repo copy now takes the installed one's place instead
+# (UsdNoodles/__init__.py, _supersedeInstalledCopy), so it is always
+# registered.
 rigexec_register_usdnoodles() {
-    if [ -n "$PY_SITE" ] && [ -d "$PY_SITE/pxr/UsdNoodles" ]; then
-        echo "usdNoodles: $PY_SITE/pxr/UsdNoodles is loaded instead of the" >&2
-        echo "            in-repo copy; registering both stops usdview loading" >&2
-        echo "            any plugin. Build OpenUSD without noodles to use" >&2
-        echo "            plugin/usdNoodles." >&2
-        return 0
-    fi
     if [ -f "$RIG/build/python/UsdNoodles/plugInfo.json" ]; then
         export PXR_PLUGINPATH_NAME="$PXR_PLUGINPATH_NAME:$RIG/build/python/UsdNoodles"
+        if [ -n "$PY_SITE" ] && [ -d "$PY_SITE/pxr/UsdNoodles" ]; then
+            echo "usdNoodles: plugin/usdNoodles supersedes $PY_SITE/pxr/UsdNoodles" >&2
+        fi
     fi
 }
 

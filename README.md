@@ -424,9 +424,13 @@ a copy under `NOODLES_ROOT` (default: the USD install, where
 commit is fetched and built at configure time. Its unittest suite runs as the
 `testUsdNoodles` CTest entry. The package imports as the top-level `UsdNoodles`,
 not `pxr.UsdNoodles`, because nothing outside the USD install can add to `pxr`.
-`bin/launch.sh` and `bin/usdview.sh` register it, except against a USD install
-that ships its own `pxr.UsdNoodles`: the two register the same usdview
-commands, and usdview then loads no plugins at all.
+`bin/launch.sh`, `bin/usdview.sh` and `bin\launch_usdview.bat` register it. A
+USD install built with `--build-noodles` also ships the older editor as
+`pxr.UsdNoodles`; the in-repo copy takes that one's place when both are
+present, because the two register the same usdview commands and usdview
+answers a duplicate by loading no plugins at all. Without that, usdview would
+keep running the installed editor, which lacks this copy's additions (such as
+renaming a prim by double-clicking its node).
 
 The Qt-free plugin tests also run on their own, with no build and no display,
 which is the quick loop while editing a panel:
