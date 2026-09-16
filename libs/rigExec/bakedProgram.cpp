@@ -1217,10 +1217,21 @@ std::unique_ptr<RigExecBakedProgram>
 RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                            std::vector<std::string> *reasons)
 {
-    if (!evaluator || !IsBakeable(*evaluator, reasons)) {
+    if (!evaluator) {
         return nullptr;
     }
     RigExecRigEvaluator &E = *evaluator;
+    // Bound here, ahead of IsBakeable, so the profiler exists before the
+    // refusal walk runs. A rig that refuses still costs whatever
+    // IsBakeable spends deciding why, and with `phases` opened only after
+    // that call the cost had nowhere to attribute to -- it showed up as a
+    // gap between Compile.Bake opening and the first Bake.* mark. Marking
+    // it here costs the one branch per mark every other phase already pays.
+    RigExecProfilePhases phases(&E._profiler, "compile");
+    phases.Next("Bake.IsBakeable");
+    if (!IsBakeable(E, reasons)) {
+        return nullptr;
+    }
     auto impl = std::make_unique<RigExecBakedProgramImpl>();
     RigExecBakedProgramImpl &B = *impl;
     B.evaluator = evaluator;
@@ -1237,7 +1248,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // Where Build spends its time, part by part. The parts run one
     // after another in this block rather than nested, so they are
     // marked rather than scoped; see RigExecProfilePhases.
-    RigExecProfilePhases phases(&E._profiler, "compile");
     phases.Next("Bake.entry");
     B.interactiveOverrides = &E._interactiveOverrides;
     B.jointSolverBinding = &E._jointSolverBinding;
@@ -1318,9 +1328,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     };
     auto fold = [&](const UsdPrim &prim, const char *name) {
         ctx.Fold(prim, name);
-    };
-    auto bind = [&](const UsdPrim &prim, const char *name, auto fallback) {
-        return ctx.Bind(prim, name, fallback);
     };
     auto slotOf = [&](const SdfPath &path) { return ctx.SlotOf(path); };
 
@@ -1419,6 +1426,75 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.restRoundTrip.assign(N, GfMatrix4d(1.0));
     B.defaultRoundTrip.assign(N, GfMatrix4d(1.0));
     B.ladders.resize(size_t(N));
+    static const char *const kRestAvars[6] = {
+        "rest:tx", "rest:ty", "rest:tz",
+        "rest:rx", "rest:ry", "rest:rz"};
+    static const char *const kDefaultAvars[6] = {
+        "default:tx", "default:ty", "default:tz",
+        "default:rx", "default:ry", "default:rz"};
+    // Fifteen composed-stage resolutions per provider slot, and on a
+    // character this loop is the other of the two places Build spends most
+    // of its time -- see the input binding table below, which is the same
+    // shape of problem at eleven channels instead of fifteen and was split
+    // the same way. ResolveBind only READS the stage and `chainTargets`, so
+    // the fifteen calls for one slot don't depend on any other slot's, and
+    // the resolve half moves to a parallel pass. The three space bindings
+    // are matrices, the rotation order a token and the twelve avars
+    // doubles, so ResolveBind's typed result is kept typed rather than
+    // forced into one array -- each paired with the walk CommitBind needs,
+    // same as _AvarResolution.
+    struct _LadderResolution {
+        UsdPrim prim;
+        RigExecBakedInput<GfMatrix4d> posedSpace;
+        SdfPathVector posedSpaceWalk;
+        RigExecBakedInput<GfMatrix4d> restSpace;
+        SdfPathVector restSpaceWalk;
+        RigExecBakedInput<GfMatrix4d> defaultSpace;
+        SdfPathVector defaultSpaceWalk;
+        RigExecBakedInput<TfToken> rotationOrder;
+        SdfPathVector rotationOrderWalk;
+        RigExecBakedInput<double> restAvars[6];
+        SdfPathVector restAvarWalks[6];
+        RigExecBakedInput<double> defaultAvars[6];
+        SdfPathVector defaultAvarWalks[6];
+    };
+    std::vector<_LadderResolution> ladderResolved(static_cast<size_t>(N));
+    const auto resolveLadderSlots = [&](size_t begin, size_t end) {
+        for (size_t i = begin; i < end; ++i) {
+            // An xform-derived slot binds no ladder -- its rest frame is
+            // the identity outright, below -- so there is nothing here for
+            // it to resolve.
+            if (B.slotKind[i] != RigExecBakedSlotKind::FirstFramePose) {
+                continue;
+            }
+            const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
+            _LadderResolution &out = ladderResolved[i];
+            out.prim = prim;
+            out.posedSpace = ctx.ResolveBind(prim, "posed:space",
+                                             GfMatrix4d(1.0),
+                                             &out.posedSpaceWalk);
+            out.restSpace = ctx.ResolveBind(prim, "rest:space",
+                                            GfMatrix4d(1.0),
+                                            &out.restSpaceWalk);
+            out.defaultSpace = ctx.ResolveBind(prim, "default:space",
+                                               GfMatrix4d(1.0),
+                                               &out.defaultSpaceWalk);
+            out.rotationOrder = ctx.ResolveBind(prim, "avars:rotationOrder",
+                                                TfToken("XYZ"),
+                                                &out.rotationOrderWalk);
+            for (int c = 0; c < 6; ++c) {
+                out.restAvars[c] = ctx.ResolveBind(
+                    prim, kRestAvars[c], 0.0, &out.restAvarWalks[c]);
+                out.defaultAvars[c] = ctx.ResolveBind(
+                    prim, kDefaultAvars[c], 0.0, &out.defaultAvarWalks[c]);
+            }
+        }
+    };
+    if (RigExecParallelEvaluationEnabled() && N > 1) {
+        WorkParallelForN(size_t(N), resolveLadderSlots);
+    } else {
+        resolveLadderSlots(0, size_t(N));
+    }
     for (int i = 0; i < N; ++i) {
         if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
             // An xform-derived slot has no rest chain and no default-space
@@ -1447,33 +1523,46 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             }
             continue;
         }
-        const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
+        _LadderResolution &out = ladderResolved[size_t(i)];
+        const UsdPrim &prim = out.prim;
         B.prims.insert(B.paths[i]);
         // The space EXPRESSIONS stay FOLDED. Bakeability accepted them
         // because they are unauthored and unconnected, which is a statement
         // about the SHAPE of the compose -- authoring one replaces the
         // ladder rather than moving a value in it -- so an edit to one must
-        // rebuild the program and a drag on one must fall back.
+        // rebuild the program and a drag on one must fall back. Fold
+        // mutates `program->rebuild`/`folded`/`named`/`prims`, so it stays
+        // here, serial, rather than moving into the resolve pass above.
         for (const char *name : {"parent:space", "parent:defaultSpace",
                                  "avars:defaultSpace",
                                  "posed:defaultSpace"}) {
             fold(prim, name);
         }
         RigExecBakedProgramImpl::Ladder &ladder = B.ladders[size_t(i)];
-        ladder.posedSpace = bind(prim, "posed:space", GfMatrix4d(1.0));
-        ladder.restSpace = bind(prim, "rest:space", GfMatrix4d(1.0));
-        ladder.defaultSpace = bind(prim, "default:space", GfMatrix4d(1.0));
-        ladder.rotationOrder =
-            bind(prim, "avars:rotationOrder", TfToken("XYZ"));
-        static const char *const kRestAvars[6] = {
-            "rest:tx", "rest:ty", "rest:tz",
-            "rest:rx", "rest:ry", "rest:rz"};
-        static const char *const kDefaultAvars[6] = {
-            "default:tx", "default:ty", "default:tz",
-            "default:rx", "default:ry", "default:rz"};
+        // Committing in slot order, and within a slot in the same
+        // posedSpace/restSpace/defaultSpace/rotationOrder/avar sequence the
+        // un-parallelized loop bound them in, is what makes a parallel
+        // Build hand out the same override indices a serial one would --
+        // CommitBind is where Register numbers them, see ResolveBind
+        // /CommitBind above.
+        ctx.CommitBind(prim, "posed:space", &out.posedSpace,
+                       out.posedSpaceWalk);
+        ladder.posedSpace = out.posedSpace;
+        ctx.CommitBind(prim, "rest:space", &out.restSpace, out.restSpaceWalk);
+        ladder.restSpace = out.restSpace;
+        ctx.CommitBind(prim, "default:space", &out.defaultSpace,
+                       out.defaultSpaceWalk);
+        ladder.defaultSpace = out.defaultSpace;
+        ctx.CommitBind(prim, "avars:rotationOrder", &out.rotationOrder,
+                       out.rotationOrderWalk);
+        ladder.rotationOrder = out.rotationOrder;
         for (int c = 0; c < 6; ++c) {
-            ladder.restAvars[c] = bind(prim, kRestAvars[c], 0.0);
-            ladder.defaultAvars[c] = bind(prim, kDefaultAvars[c], 0.0);
+            ctx.CommitBind(prim, kRestAvars[c], &out.restAvars[c],
+                           out.restAvarWalks[c]);
+            ladder.restAvars[c] = out.restAvars[c];
+            ctx.CommitBind(prim, kDefaultAvars[c], &out.defaultAvars[c],
+                           out.defaultAvarWalks[c]);
+            ladder.defaultAvars[c] = out.defaultAvars[c];
         }
     }
     // What a frame may have to re-resolve, and where a drag on one lands.

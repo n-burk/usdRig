@@ -20,6 +20,7 @@
 #include "pxr/base/gf/dualQuatd.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/work/dispatcher.h"
+#include "pxr/base/work/loops.h"
 #include "pxr/base/work/withScopedParallelism.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/diagnostic.h"
@@ -2826,6 +2827,27 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // libs/rigExec calls no Python at all, and the macro compiles to
     // nothing when Python is not initialized.
     TF_PY_ALLOW_THREADS_IN_SCOPE();
+    // Sequential region stamps: Compile is flat code with early returns,
+    // so RAII scopes cannot span its phases; each stamp closes the
+    // previous region and opens the next. One branch when disabled.
+    //
+    // The clock starts on the FIRST line of the body rather than beside the
+    // first stamped phase, where it used to start. Everything above that
+    // point could only ever measure as zero, and the trace had 6.1 ms sitting
+    // between the Compile scope opening and DiscoverValidate.Validate
+    // starting that no row claimed. Starting here hands that gap to
+    // Compile.Prologue below instead of losing it in the parent scope.
+    const bool profileCompile = _profiler.IsEnabled();
+    uint64_t compileRegionStart =
+        profileCompile ? RigExecProfiler::NowUs() : 0;
+    auto stampCompileRegion = [&](const char *name) {
+        if (!profileCompile) {
+            return;
+        }
+        const uint64_t now = RigExecProfiler::NowUs();
+        _profiler.Record(name, "compile", compileRegionStart, now);
+        compileRegionStart = now;
+    };
     // The program describes the epoch this call is about to replace, so it
     // stops being the rig's program here: a Compile that fails and restores
     // the previous epoch returns before the rebuild at the tail, this local
@@ -2841,9 +2863,55 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // nothing about this one.
     _bakeRefused = false;
     _bakeRefusalReasons.clear();
-    // Sequential region stamps: Compile is flat code with early returns,
-    // so RAII scopes cannot span its phases; each stamp closes the
-    // previous region and opens the next. One branch when disabled.
+    stampCompileRegion("Compile.Prologue");
+
+    // The structure digest is a pure read of the composed stage that boils it
+    // down to one number, and that number is not consulted until the epoch is
+    // committed far below: nothing in between reads it, and compile authors
+    // nothing to the stage for it to miss. So it runs beside the WHOLE of
+    // compile rather than beside only its tail.
+    //
+    // MEASURED (biped_stack_anim, 201.3 ms compile): dispatched at the old
+    // site -- after DiscoverValidate, at t=35.7 ms -- the digest's 107 ms
+    // landed at t=143.1 ms, while the main thread reached the join below at
+    // t=122.3 ms and then sat idle for 23.4 ms. Compile was paying for the
+    // digest after all, in waiting rather than in work. Dispatched here it
+    // lands around t=107 ms, comfortably ahead of the join.
+    //
+    // Safe to hoist past DiscoverValidate because that phase AUTHORS NOTHING:
+    // it reads the composed stage and reports, so there is no edit for the
+    // digest to race. And a rig malformed enough for DiscoverValidate to
+    // reject is still one _ComputeStructureDigest reads without complaint --
+    // every lookup in it goes through GetPrimAtPath/GetAttribute/Get, which
+    // hand back invalid objects that the code already tests for, rather than
+    // throwing. The single precondition it cannot survive is a null _stage,
+    // which the old site sat downstream of; hence the guard in the lambda.
+    // The 0 that guard leaves behind is never read -- Compile returns false
+    // on a null stage long before the commit below.
+    //
+    // newDigest is declared before the dispatcher so it outlives it, and
+    // WorkDispatcher's destructor waits -- which is what covers the early
+    // returns between here and the join, now the whole of compile rather
+    // than just its tail. Declared AFTER retiringBakedProgram so it is still
+    // destroyed first: the digest thread is joined before the retired
+    // program is torn down underneath it.
+    size_t newDigest = 0;
+    WorkDispatcher digestDispatcher;
+    const auto computeDigest = [this, &newDigest]() {
+        newDigest = _stage ? _ComputeStructureDigest() : 0;
+    };
+    if (RigExecParallelEvaluationEnabled()) {
+        digestDispatcher.Run(computeDigest);
+    } else {
+        computeDigest();
+    }
+    // Zero-width when the digest is dispatched, which is the point: it marks
+    // WHERE the digest was launched so the trace can be read against the
+    // worker row. With RIGEXEC_ENABLE_PARALLEL_EVAL=0 the call above ran
+    // inline and this stamp measures the whole of it, exactly as it did at
+    // the old site.
+    stampCompileRegion("Compile.StructureDigest");
+
     // Whether to leave the dynamic-only requests unprepared; see
     // _execPrepDeferred for which three those are and why the others are
     // not among them. Read once, here, so that every site below agrees --
@@ -2851,17 +2919,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // knows to.
     const bool deferExecPrep =
         _PeekEvaluationMode() == RigExecEvaluationMode::Baked;
-    const bool profileCompile = _profiler.IsEnabled();
-    uint64_t compileRegionStart =
-        profileCompile ? RigExecProfiler::NowUs() : 0;
-    auto stampCompileRegion = [&](const char *name) {
-        if (!profileCompile) {
-            return;
-        }
-        const uint64_t now = RigExecProfiler::NowUs();
-        _profiler.Record(name, "compile", compileRegionStart, now);
-        compileRegionStart = now;
-    };
     // The parts WITHIN those regions, for the same reason and on the same
     // clock: a phase that takes a fifth of the compile says nothing about
     // which of its passes to go and look at. Strictly nested inside the
@@ -4669,27 +4726,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 
     compileBlocks.Close();
     stampCompileRegion("Compile.DiscoverValidate");
-    // The structure digest is a pure read of the composed stage that boils it
-    // down to one number, and that number is not consulted until the epoch is
-    // committed far below: nothing in between reads it, and compile authors
-    // nothing to the stage for it to miss. So it runs beside the schedule and
-    // request passes instead of ahead of them, and its cost disappears into
-    // theirs.
-    //
-    // newDigest is declared before the dispatcher so it outlives it, and
-    // WorkDispatcher's destructor waits -- which is what covers the early
-    // returns between here and the join below.
-    size_t newDigest = 0;
-    WorkDispatcher digestDispatcher;
-    const auto computeDigest = [this, &newDigest]() {
-        newDigest = _ComputeStructureDigest();
-    };
-    if (RigExecParallelEvaluationEnabled()) {
-        digestDispatcher.Run(computeDigest);
-    } else {
-        computeDigest();
-    }
-    stampCompileRegion("Compile.StructureDigest");
 
     compileBlocks.Next("SolverSchedule.ReplacementRequests");
     // Prepare replacement requests while retaining the previous requests and
@@ -5573,6 +5609,21 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         attributeInputCache;
     std::unordered_map<SdfPath, std::set<SdfPath>, SdfPath::Hash>
         poseClosureCache;
+    // The per-prim half of the pose closure, read ahead of the walks that
+    // need it and off this thread. _CollectPoseInputInfo is a pure read of
+    // the composed stage -- a free function over one UsdPrim, local state
+    // only -- so a prim's answer does not depend on when or where it is
+    // computed, which is what lets the walk below take one out of here
+    // instead of paying for it in line.
+    //
+    // Deliberately NOT newPoseInputInfo itself. That map is iterated as a
+    // RESULT further down (the connected-pose taps, newPoseProviderInputs),
+    // so it has to hold exactly the prims a closure walk actually reached
+    // and nothing more. This one is free to overshoot -- a prefetched prim
+    // no walk asks about costs a worker's time and nothing else -- which is
+    // what makes seeding it generously safe.
+    std::unordered_map<SdfPath, _PoseInputInfo, SdfPath::Hash>
+        poseInfoPrefetch;
     auto collectAttributeInputs =
         [&](const SdfPath &path) -> const std::set<SdfPath> & {
         auto it = attributeInputCache.find(path);
@@ -5597,8 +5648,22 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             }
             auto it = newPoseInputInfo.find(path);
             if (it == newPoseInputInfo.end()) {
+                // Same value either way: the prefetch ran the same function
+                // on the same prim of the same stage. Only newPoseInputInfo
+                // records that this path was REACHED.
+                // MOVED out, not copied: a path lands in newPoseInputInfo
+                // at most once (this branch is the find() miss), so nothing
+                // reads the prefetch entry again, and leaving the sets
+                // behind would hold every closure's inputs on the heap
+                // TWICE for the rest of compile -- which measured as ~13 ms
+                // added to the batch pass that runs after it, purely in
+                // allocator and locality cost.
+                const auto warm = poseInfoPrefetch.find(path);
                 it = newPoseInputInfo.emplace(path,
-                    _CollectPoseInputInfo(_stage->GetPrimAtPath(path))).first;
+                    warm != poseInfoPrefetch.end()
+                        ? std::move(warm->second)
+                        : _CollectPoseInputInfo(
+                              _stage->GetPrimAtPath(path))).first;
             }
             pending.insert(pending.end(), it->second.providers.begin(),
                            it->second.providers.end());
@@ -5618,17 +5683,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         }
         return it->second;
     };
-    auto inheritsFrame = [&](const SdfPath &input, const SdfPath &target) {
-        if (!input.HasPrefix(target)) {
-            return false;
-        }
-        for (SdfPath path = input; path != target; path = path.GetParentPath()) {
-            if (newJointBinding.count(path)) {
-                return false;
-            }
-        }
-        return true;
-    };
     std::map<SdfPath, std::set<SdfPath>> solverFrameInputs;
     for (const auto &[solver, dependencies] : newSolverDependencies) {
         const UsdPrim prim = _stage->GetPrimAtPath(solver);
@@ -5642,6 +5696,98 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                 if (isFrameProvider(target.GetPrimPath())) {
                     solverFrameInputs[solver].insert(target.GetPrimPath());
                 }
+            }
+        }
+    }
+    // MEASURED (biped_stack_anim): the pose closure was the largest single
+    // cost left on this thread -- 13.0 ms inside the constraint pass and
+    // 21.9 ms again in PrepareRequests.ProviderClosure, both of them one
+    // prim's _CollectPoseInputInfo at a time. The walk that spends it is
+    // inherently serial (each prim's answer says which prim to ask about
+    // next), but the ASKING is not: a level of the frontier is a set of
+    // independent stage reads.
+    //
+    // So the closure is walked breadth-first here, one level at a time, with
+    // each level's reads spread across the pool and merged in on this thread
+    // after. The walks below then find their prims already read and do set
+    // arithmetic only. Concurrent reads of a UsdStage are what the digest
+    // thread, the tap warm-up and the two bake bind loops already do.
+    //
+    // Seeded with every path a closure will be asked for -- the solvers'
+    // frame inputs, every constraint's inputs, and the joints and controls
+    // that PrepareRequests seeds providers from -- plus each one's
+    // frame-provider ancestors, because those are what newFirstFramePoseFrames
+    // holds by the time ProviderClosure asks. Overshooting is free; missing a
+    // prim only means the walk reads it in line, exactly as it used to.
+    {
+        RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PoseInfoPrefetch", "compile");
+        std::vector<SdfPath> frontier;
+        const auto seed = [&](const SdfPath &path) {
+            if (path.IsEmpty()) return;
+            frontier.push_back(path);
+            // Only the FRAME-PROVIDER ancestors, because those are the ones
+            // seedProvider puts in newFirstFramePoseFrames and ProviderClosure
+            // then asks about. Pushing the whole namespace chain instead
+            // reads a large part of the stage that no walk ever asks for,
+            // and the allocation that costs lands on every pass after it.
+            for (SdfPath a = path.GetParentPath();
+                 !a.IsEmpty() && a != SdfPath::AbsoluteRootPath();
+                 a = a.GetParentPath()) {
+                if (isFrameProvider(a)) frontier.push_back(a);
+            }
+        };
+        for (const auto &[solver, inputs] : solverFrameInputs) {
+            for (const SdfPath &input : inputs) seed(input);
+        }
+        for (const _FrameConstraint &constraint : newFrameConstraints) {
+            for (const SdfPath &target : constraint.targets) seed(target);
+            for (const auto &source : constraint.sources) {
+                seed(source.sourcePath);
+            }
+            seed(constraint.worldUpObject.sourcePath);
+            seed(constraint.effector.sourcePath);
+            seed(constraint.weightObject);
+            for (const auto &pole : constraint.poleObjects) {
+                seed(pole.sourcePath);
+            }
+        }
+        for (const SdfPath &path : newJointPaths) seed(path);
+        for (const SdfPath &path : newControlPaths) seed(path);
+
+        std::set<SdfPath> queued;
+        while (!frontier.empty()) {
+            // A joint-bound path stops the real walk without being read, so
+            // it is not worth reading here either.
+            std::vector<SdfPath> level;
+            for (const SdfPath &path : frontier) {
+                if (path.IsEmpty() || newJointBinding.count(path)) continue;
+                if (!queued.insert(path).second) continue;
+                level.push_back(path);
+            }
+            frontier.clear();
+            if (level.empty()) break;
+            std::vector<_PoseInputInfo> infos(level.size());
+            std::vector<SdfPath> parents(level.size());
+            const auto readLevel = [&](size_t begin, size_t end) {
+                for (size_t i = begin; i < end; ++i) {
+                    const UsdPrim prim = _stage->GetPrimAtPath(level[i]);
+                    infos[i] = _CollectPoseInputInfo(prim);
+                    if (!isFrameProvider(level[i])) {
+                        const UsdPrim parent = _NamespaceFrameProvider(prim);
+                        if (parent) parents[i] = parent.GetPath();
+                    }
+                }
+            };
+            if (RigExecParallelEvaluationEnabled() && level.size() > 1) {
+                WorkParallelForN(level.size(), readLevel);
+            } else {
+                readLevel(0, level.size());
+            }
+            for (size_t i = 0; i < level.size(); ++i) {
+                frontier.insert(frontier.end(), infos[i].providers.begin(),
+                                infos[i].providers.end());
+                if (!parents[i].IsEmpty()) frontier.push_back(parents[i]);
+                poseInfoPrefetch.emplace(level[i], std::move(infos[i]));
             }
         }
     }
@@ -5664,7 +5810,16 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         newSolverJoints[binding.first].emplace_back(joint, binding.second);
         requiredSolvers.insert(binding.first);
     }
-    compileBlocks.Next("SolverSchedule.AggregateConsumers");
+    // What used to be one SolverSchedule.AggregateConsumers block, and the
+    // largest single region left on the main thread. Split five ways because
+    // a guess about which of its passes held the time was already wrong once:
+    // the cross product the walk below replaces was predicted to be 20 of
+    // those milliseconds and measured, after inversion, to be worth none of
+    // them. The passes are quite different work -- set closure, constraint
+    // reads through the pose closure, an ancestor walk, a counting pass, and
+    // the batch BFS that talks to exec -- so they are timed apart before
+    // anything else here is touched.
+    compileBlocks.Next("SolverSchedule.RequiredSolvers");
     // Geometry aggregate consumers are authoritative even without joints.
     for (const auto &[target, revisions] : newGraphChains) {
         for (const _GraphRevision &revision : revisions) {
@@ -5688,6 +5843,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     for (const SdfPath &solver : requiredSolvers) {
         poseDependencies[solver] = newSolverDependencies[solver];
     }
+    compileBlocks.Next("SolverSchedule.ConstraintDeps");
+    // Collected in the constraint loop, consumed by the upward walk just
+    // below it. See the comment there for why the cross product this
+    // replaces had to be turned inside out.
+    std::map<SdfPath, std::vector<SdfPath>> constraintsByTarget;
     for (size_t i = 0; i < newFrameConstraints.size(); ++i) {
         const _FrameConstraint &constraint = newFrameConstraints[i];
         const SdfPath &path = constraint.moverPath;
@@ -5710,19 +5870,78 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         dependOnFrame(constraint.effector.sourcePath);
         dependOnFrame(constraint.weightObject);
         for (const auto &pole : constraint.poleObjects) dependOnFrame(pole.sourcePath);
+        // A geometry-domain constraint revises points, not the frame a solver
+        // reads, so no solver can inherit one: this `continue` is the same
+        // exclusion the cross product below used to get from skipping the
+        // block it guarded, and it has to stay exactly that strict.
         if (!constraint.pointsTarget.IsEmpty()) {
             continue;
         }
+        for (const SdfPath &target : constraint.targets) {
+            constraintsByTarget[target].push_back(path);
+        }
+    }
+    compileBlocks.Next("SolverSchedule.FrameInheritance");
+    // Which solvers must wait on which frame constraints. Asked the other way
+    // round: for every pose a solver reads, walk UP to the rig root and pick
+    // up the constraints that target each ancestor on the way.
+    //
+    // This used to be the cross product -- constraints x requiredSolvers x
+    // that solver's pose reads x that constraint's targets, with a call to an
+    // `inheritsFrame` predicate per tuple, each call re-walking an ancestor
+    // chain. That shape was PREDICTED to be 20 of the 23.4 ms this region
+    // cost, and the prediction was wrong: inverted, the region measured
+    // 25.7 -> 26.4 ms across four runs a side, which is inside the noise.
+    // The time is somewhere else in the five blocks this one is now split
+    // into. The inversion is kept because it is the better code -- linear in
+    // the ancestor chain rather than quartic in the cross product, so it
+    // cannot become the problem later -- not because it bought anything.
+    // Inverted, each (solver, input) chain
+    // is walked ONCE for all constraints instead of once per constraint,
+    // because the map lookup answers "which constraints target this ancestor"
+    // in one step. The predicate is gone with its only caller.
+    //
+    // The walk reproduces that predicate exactly, half-open range included.
+    // inheritsFrame(input, target) was `input.HasPrefix(target)` AND no
+    // newJointBinding entry on any path in [input, target) -- its loop ran
+    // `for (path = input; path != target; ...)`, so the TARGET ITSELF was
+    // never tested for a binding, and input == target was vacuously true with
+    // no test at all. Hence the binding check below comes AFTER recording p's
+    // own constraints and not before: a joint binding sitting ON a constraint
+    // target does not disqualify that target, only bindings strictly below
+    // it do. Reversing those two statements silently drops dependencies and
+    // the schedule runs a solver before the constraint it reads.
+    //
+    // Targets are prim paths (see _FrameConstraint::targets), so "ancestor
+    // chain" and HasPrefix agree; a target that is somehow not on the chain
+    // is simply never found, which is what the predicate answered for it too.
+    //
+    // poseDependencies[solver] is a std::set, so the different insertion
+    // ORDER this produces cannot change its contents, and the contents are
+    // all pendingPose/poseConsumers below are built from -- same sets, same
+    // schedule. The `empty()` guard keeps even the default-insertion
+    // behaviour of solverPoseReads[solver] identical to the old code, which
+    // only reached that operator[] when at least one constraint survived the
+    // pointsTarget test.
+    if (!constraintsByTarget.empty()) {
         for (const SdfPath &solver : requiredSolvers) {
             for (const SdfPath &input : solverPoseReads[solver]) {
-                for (const SdfPath &target : constraint.targets) {
-                    if (inheritsFrame(input, target)) {
-                        poseDependencies[solver].insert(path);
+                for (SdfPath p = input;
+                     !p.IsEmpty() && p != SdfPath::AbsoluteRootPath();
+                     p = p.GetParentPath()) {
+                    const auto it = constraintsByTarget.find(p);
+                    if (it != constraintsByTarget.end()) {
+                        poseDependencies[solver].insert(
+                            it->second.begin(), it->second.end());
+                    }
+                    if (newJointBinding.count(p)) {
+                        break;
                     }
                 }
             }
         }
     }
+    compileBlocks.Next("SolverSchedule.PoseReady");
     std::vector<_PoseStep> newPoseSteps;
     std::vector<_SolverBatch> newSolverBatches;
     std::map<SdfPath, std::set<size_t>> newSolverInputBatches;
@@ -5736,6 +5955,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             poseConsumers[dependency].push_back(path);
         }
     }
+    compileBlocks.Next("SolverSchedule.SolverBatches");
     {
         // Join the warm-up: everything below this point talks to exec.
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Compile.WarmupJoin", "compile");
@@ -5906,14 +6126,38 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     stampCompileRegion("Compile.SolverSchedule");
     auto newFirstFramePoseTaps = std::make_unique<RigExecTapSet>(_stage);
     std::map<SdfPath, RigExecTapId> newFirstFramePoseFrames, newFirstFramePoseRests;
-    compileBlocks.Next("PrepareRequests.ProviderTaps");
+    // What used to be one PrepareRequests.ProviderTaps block, 22.5 ms with
+    // nothing inside it to say which of its three quite different passes was
+    // spending them: the seed sweep over joints, controls, volume weights,
+    // solver frame inputs and constraints; the pose-provider closure warmed
+    // over the seeded set; and the per-provider connected-tap prepare. Split
+    // here rather than nested one level deeper, because these run one after
+    // another in a single block -- the case RigExecProfilePhases exists for --
+    // and because a nested scope could not span the early return in the third
+    // pass, whereas compileBlocks closes itself on destruction.
+    compileBlocks.Next("PrepareRequests.ProviderSeed");
     // The rest taps are added below, once the provider set is closed, because
     // whether they belong in the per-frame request or in the epoch request
     // depends on the whole set (see newRestsMightVary).
+    //
+    // Already-seeded is a STOP, not a skip. A path only gets into
+    // newFirstFramePoseFrames by way of this loop, which has no early exit of
+    // its own and climbs from wherever it started all the way to the root --
+    // so by the time any call returns, every frame-provider ancestor of every
+    // path it seeded is in the map too, and nothing in this pass ever erases
+    // from it. Meeting a seeded path therefore means the whole chain above it
+    // is already done, and continuing merely re-runs isFrameProvider on
+    // ancestors to reach a conclusion already reached. A non-provider still
+    // has to `continue`: it says nothing about its ancestors, which may be
+    // providers that no earlier call reached.
+    //
+    // (Within a single call the guard cannot fire on a path this call itself
+    // seeded: the chain strictly ascends, so no path is visited twice.)
     auto seedProvider = [&](SdfPath path) {
         for (; !path.IsEmpty() && path != SdfPath::AbsoluteRootPath();
              path = path.GetParentPath()) {
-            if (!isFrameProvider(path) || newFirstFramePoseFrames.count(path)) continue;
+            if (newFirstFramePoseFrames.count(path)) break;
+            if (!isFrameProvider(path)) continue;
             newFirstFramePoseFrames[path] = newFirstFramePoseTaps->Add(
                 RigExecValueAddress::Prim(path, _computePointFrame));
         }
@@ -5931,9 +6175,14 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         seedProvider(constraint.effector.sourcePath);
         for (const auto &pole : constraint.poleObjects) seedProvider(pole.sourcePath);
     }
+    compileBlocks.Next("PrepareRequests.ProviderClosure");
+    // Warming the closure over the seeded set is what grows newPoseInputInfo,
+    // which the pass after this one iterates -- so the two are timed apart:
+    // this one is stage walking, that one is exec prepares.
     std::vector<SdfPath> seedPaths;
     for (const auto &[provider, tap] : newFirstFramePoseFrames) seedPaths.push_back(provider);
     for (const SdfPath &provider : seedPaths) poseProviderClosure(provider);
+    compileBlocks.Next("PrepareRequests.ConnectedPoseTaps");
     std::map<SdfPath, std::set<SdfPath>> newPoseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> newConnectedPoseTaps;
     for (const auto &[provider, info] : newPoseInputInfo) {
