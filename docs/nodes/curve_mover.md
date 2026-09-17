@@ -126,12 +126,15 @@ Valid values: `base`, `preceding`, `final`.
 
 Three controls stacked up Y are the only animation, and an FK chain
 that claims no joints turns them into a three-element frame array. One
-curve mover spreads a 27-point streamer across the whole u range so it
-curls and twists between the frames, a second pins all four corners of
-each small card to a single u so the cards ride rigidly at 0.15, 0.5 and
-0.85, and a third in `emitGuidePoints` mode draws the same three frame
-origins as a gold guide curve. There is no ribbon, no joint and no driver
-curve in the file.
+curve mover spreads a 45-point streamer -- five columns across, nine rows
+up -- over the whole u range so it curls and twists between the frames, a
+second pins all four corners of each card to a single u so the cards ride
+rigidly at 0.15, 0.5 and 0.85, and a third in `emitGuidePoints` mode
+writes the same three frame origins out as a gold guide curve. The
+streamer sits wholly at negative x and the cards at positive x, so the
+gold line up the middle is the third mover's output on its own -- the
+frame origins themselves, one point per element. There is no ribbon, no
+joint and no driver curve in the file.
 
 Open it live with:
 

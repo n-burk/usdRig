@@ -116,12 +116,17 @@ Valid values: `base`, `preceding`, `final`.
 
 ## Example
 
-A 6x6 quad sheet hinges up about one edge and back under one
-`avars:rx` control, and three sticker patches sharing one mesh ride it.
-`FollowSheet` carries the patches roughly along with the same joint
-through a per-point weight, and `DrapeStickers` then projects them onto
-the sheet read at `final`, which is why the drape stays smooth: every
-sticker point starts within a facet of the surface. `FollowSheet` is nested inside `DrapeStickers` and
+A 6x6 quad sheet hinges up about its camera-right edge and back under
+one `avars:rz` control, and two sticker patches sharing one mesh ride it,
+floating 1.4 above the sheet at rest. `FollowSheet` carries the patches
+roughly along with the same joint through a per-point weight, and
+`DrapeStickers` then projects them onto the sheet read at `final`, which
+is why the drape stays smooth: every sticker point starts within a facet
+of the surface. The 0.75 envelope stops each patch a steady distance
+above the sheet rather than landing it coplanar, which is what keeps it
+out of a z-fight with the surface it landed on — and what you see moving
+is that standoff staying parallel to the sheet as the sheet bends away
+underneath it. `FollowSheet` is nested inside `DrapeStickers` and
 `BendSheet` is authored last, because movers run in reverse composed
 namespace order with descendants ahead of their parent.
 

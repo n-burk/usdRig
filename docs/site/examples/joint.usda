@@ -59,7 +59,7 @@ def Xform "JointAsset"
                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
             )
             {
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (7.5, 0, 0, 1) )
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 2.2, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
             }
         }
@@ -241,25 +241,25 @@ def Xform "JointAsset"
         def Mesh "Hand"
         {
             color3f[] primvars:displayColor = [(0.3, 0.55, 0.95)]
-            float3[] extent = [(4, -0.5, 0), (5.2, 0.5, 0)]
+            float3[] extent = [(4, -0.35, 0), (6, 0.35, 0)]
             int[] faceVertexCounts = [4, 4, 4, 4]
             int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
             normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
                 interpolation = "vertex"
             )
-            point3f[] points = [(4, -0.5, 0), (4.6, -0.5, 0), (5.2, -0.5, 0), (4, 0, 0), (4.6, 0, 0), (5.2, 0, 0), (4, 0.5, 0), (4.6, 0.5, 0), (5.2, 0.5, 0)]
+            point3f[] points = [(4, -0.35, 0), (5, -0.35, 0), (6, -0.35, 0), (4, 0, 0), (5, 0, 0), (6, 0, 0), (4, 0.35, 0), (5, 0.35, 0), (6, 0.35, 0)]
             uniform token subdivisionScheme = "none"
         }
     }
 
     def Camera "MainCam"
     {
-        float2 clippingRange = (0.1483, 127.3)
+        float2 clippingRange = (0.1264, 109.9)
         float focalLength = 35
         float horizontalAperture = 20.95
         float verticalAperture = 11.79
         double3 xformOp:rotateXYZ = (-20, 32, 0)
-        double3 xformOp:translate = (11.01, 5.693, 11.62)
+        double3 xformOp:translate = (9.337, 5.197, 10.14)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

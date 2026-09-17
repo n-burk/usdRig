@@ -267,10 +267,16 @@ no guides at all.
 
 A three-joint arm whose wrist is written twice. The FK chain poses
 shoulder, elbow, and wrist from three controls as the elbow control curls 70
-degrees, then an aim constraint re-aims the wrist at a fixed anchor in the
-pose phase. Each panel is skinned rigidly to its own joint and reads the
-`final` phase, so the hand keeps pointing at the anchor while the forearm
-swings out from under it.
+degrees, then an aim constraint re-aims the wrist at a fixed anchor above and
+beyond the hand in the pose phase. Each panel is skinned rigidly to its own
+joint (Upper to Shoulder, Fore to Elbow, Hand to Wrist) and reads the `final`
+phase, so the long hand panel keeps pointing at the anchor while the forearm
+swings out from under it. In the GIF the pale spheres at the shoulder, elbow
+and wrist are the joints themselves and the tapered wire between each pair is
+the bone that the namespace nesting creates; the dashed line from the wrist to
+`Anchor` is the pose-phase aim revision, not a control link. `ShoulderCtl` is
+deliberately left unanimated, so the Upper panel sits on its own rest ghost
+for the whole loop and the only motion in frame comes from the one driver.
 
 Open it live with:
 

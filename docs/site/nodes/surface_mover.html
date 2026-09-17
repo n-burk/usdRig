@@ -250,12 +250,17 @@ every application of the atomic mover.</p>
 </div>
 <p class="label">surface_mover.usda</p>
 <div class="content">
-<p class="summary">A 6x6 quad sheet hinges up about one edge and back under one
-<code>avars:rx</code> control, and three sticker patches sharing one mesh ride it.
-<code>FollowSheet</code> carries the patches roughly along with the same joint
-through a per-point weight, and <code>DrapeStickers</code> then projects them onto
-the sheet read at <code>final</code>, which is why the drape stays smooth: every
-sticker point starts within a facet of the surface. <code>FollowSheet</code> is nested inside <code>DrapeStickers</code> and
+<p class="summary">A 6x6 quad sheet hinges up about its camera-right edge and back under
+one <code>avars:rz</code> control, and two sticker patches sharing one mesh ride it,
+floating 1.4 above the sheet at rest. <code>FollowSheet</code> carries the patches
+roughly along with the same joint through a per-point weight, and
+<code>DrapeStickers</code> then projects them onto the sheet read at <code>final</code>, which
+is why the drape stays smooth: every sticker point starts within a facet
+of the surface. The 0.75 envelope stops each patch a steady distance
+above the sheet rather than landing it coplanar, which is what keeps it
+out of a z-fight with the surface it landed on — and what you see moving
+is that standoff staying parallel to the sheet as the sheet bends away
+underneath it. <code>FollowSheet</code> is nested inside <code>DrapeStickers</code> and
 <code>BendSheet</code> is authored last, because movers run in reverse composed
 namespace order with descendants ahead of their parent.</p>
 <p>Open it live with:</p>

@@ -1,6 +1,6 @@
 # ![Parent Constraint](../../icons/parent_constraint.png) Parent Constraint
 
-*Carries a target with its sources — position and rotation together — under a per-source offset.*
+*Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.*
 
 | | |
 |---|---|
@@ -234,7 +234,7 @@ Per-source Euler rotation offsets parallel to rigExec:sources.
 ## Example
 
 A Prop joint is parented to the Hand control with a
-`(1.6, 0, 0)` translation offset and a 25-degree Z rotation offset, and a blue
+`(1.6, 0, 0)` translation offset and a 25-degree Z rotation offset, and a flat
 card is skinned rigidly to that joint, so the card rides out and rotates with
 the hand while holding that exact distance and tilt.
 Mid-shot `inputs:defaultWeight` fades 1 → 0 and the card slides back to its

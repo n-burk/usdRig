@@ -483,14 +483,21 @@ the opacity is not connected.</p>
 </div>
 <p class="label">control.usda</p>
 <div class="content">
-<p class="summary">Twelve controls in a 6x2 grid draw every <code>guide:shape</code> — sphere,
-circle, box, cube, diamond, pyramid — in every <code>guide:drawMode</code>: wire on
-the top row, geometry on the bottom. Each one swings <code>avars:ry</code> from 0 to
-90 degrees and back over 1001-1024, and each wire control also feeds an FK
-chain that poses a joint resting at the control, with a matrix mover
-skinning the card below it. The two circles and the shaded sphere look
-still because they are symmetric about the axis they turn on; the card
-under the wire circle is the proof that the frame really moved.</p>
+<p class="summary">Twelve controls in a 6x2 grid draw every <code>guide:shape</code> in every
+<code>guide:drawMode</code>. Left to right in both rows: sphere, circle, box, cube,
+diamond, pyramid — <code>box</code> is the planar square lying flat in XZ, <code>cube</code> the
+solid six-sided one. The top row is <code>wire</code> (the guide is drawn as curves),
+the bottom row <code>geometry</code> (the same shape drawn as a solid). All twelve
+carry the same animation — <code>avars:ry</code> 0 → 90°, <code>avars:rz</code> 0 → 22° and
+<code>avars:ty</code> 0 → 0.25 over 1001-1024 — and all twelve do real work: each
+feeds an FK chain that poses a joint resting at the control, and a matrix
+mover carries the grey card a unit below it. Watch either row against the
+blue rest outline the cards leave behind: <code>ry</code> spins the card about the
+handle's own origin, <code>rz</code> tips it out of the ground plane, and <code>ty</code> lifts
+it clear of the outline. The rotation is what the round shapes could not
+show on their own — a sphere or a circle turned about its symmetry axis
+looks identical — so the card is where the frame's motion becomes
+visible.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\control.usda</code></pre>
 <p>Re-render the GIF above with:</p>

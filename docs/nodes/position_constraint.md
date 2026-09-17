@@ -204,13 +204,15 @@ have exactly one entry per source.
 ## Example
 
 Two posts stand at different heights and a plate hangs between them.
-The joint's rest sits exactly at the posts' midpoint, so an even blend with
-no offset would leave it where it is and every bit of motion you see is the
-blend; `inputs:sourceWeights` sweeps (1, 0) → (0, 1) → (1, 0) and the plate
-slides from post to post and back, with nothing else in the rig animated.
-`inputs:translationOffset` of (0, 0.9, 0) keeps it riding above the line the
-two posts define, which is the whole of "maintain offset" here — there is no
-such switch.
+The joint's rest sits exactly at the posts' midpoint, so an even blend leaves
+it there and every bit of motion you see is the blend: `inputs:sourceWeights`
+starts even at (1, 1) — the blue ghost is that even-blend frame, the plate
+parked over the midpoint — then swings to (1, 0), to (0, 1), and back to even,
+so the plate departs from its rest in both directions with nothing else in the
+rig animated. The pale line between the two post tops is the segment the source
+origins define; `inputs:translationOffset` of (0, 0.9, 0) is the visible gap
+between that line and the joint, which is the whole of "maintain offset" here
+— there is no such switch.
 
 Open it live with:
 

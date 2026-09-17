@@ -148,13 +148,16 @@ Valid values: `bezier`, `catmullRom`.
 ## Example
 
 A flat slab is crossed by a curvenet: one rail down its length and
-two profile curves meeting the rail at shared knots. Eight knot values
-are painted — a ramp from 0 at the root to 1 at the tip, deliberately
-lopsided across the width — and the solve turns them into a field over
-all 39 slab vertices, which a matrix mover uses as its envelope. The
-single `avars:rz` rotation therefore lands as a graded bend that twists,
-and the net stays at rest because the field reads the authored pool, not
-a mover's output.
+two profile curves meeting the rail at shared knots. The green splines are
+that curvenet itself — it holds the numbers and stays at rest while the slab
+bends, because the parametrization reads the authored pool, not a mover's
+output. Eight knot values are painted and the solve turns them into a field
+over all 65 slab vertices, which a matrix mover uses as its envelope: grey at
+the Lift end, saturating to red at the far end, and the far edge stays paler
+than the near edge, so the single `avars:rz` rotation lands as a graded bend
+that also twists. Re-meshing the slab from three rows to five changed nothing
+on the net — the same eight numbers re-solve onto whatever vertices are
+there.
 
 Open it live with:
 

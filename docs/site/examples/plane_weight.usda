@@ -3,7 +3,7 @@
     """
     Docs example: RigExecPlaneWeight.
 
-    The hinge never changes: the Bend control holds a constant 35 degrees
+    The hinge never changes: the Bend control holds a constant 28 degrees
     and an FK chain poses one joint at the strip's root from it. The only
     animation in the file is the PlaneSlide control's avars:tx, and the
     plane weight's own avars:tx is connected to it -- a volume weight is a
@@ -46,7 +46,7 @@ def Xform "PlaneWeightAsset"
                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
             )
             {
-                double avars:rz = 35
+                double avars:rz = 28
                 uniform token guide:shape = "circle"
                 double guide:scaleX = 0.7
                 double guide:scaleY = 0.7
@@ -62,12 +62,12 @@ def Xform "PlaneWeightAsset"
                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
             )
             {
-                double avars:tx = 0.6
+                double avars:tx = 3
                 double avars:tx.spline = {
                     bezier,
-                    1001: 0.6; post curve (6, 0),
-                    1012: 4.2; pre (5, 0); post curve (5, 0),
-                    1024: 0.6; pre (6, 0); post held,
+                    1001: 3; post curve (6, 0),
+                    1012: 5.4; pre (5, 0); post curve (5, 0),
+                    1024: 3; pre (6, 0); post held,
                 }
                 uniform token guide:shape = "diamond"
                 double guide:scaleX = 0.35
@@ -128,7 +128,10 @@ def Xform "PlaneWeightAsset"
                 rel rigExec:weightTarget = </PlaneWeightAsset/Geom/Strip.points>
                 uniform token rigExec:representation = "dense"
                 uniform token rigExec:rangePolicy = "clamp"
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                # Lifted 0.8 in y so the two drawn rectangles clear the floor
+                # and stay inside frame. planeAxis is x, so a y translation
+                # cannot change the signed local x: the field is unchanged.
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0.8, 0, 1) )
                 double avars:tx.connect = </PlaneWeightAsset/Rig/Controls/PlaneSlide.avars:tx>
                 uniform token rigExec:planeAxis = "x"
                 uniform token rigExec:planeBounds = "unbounded"
@@ -138,9 +141,10 @@ def Xform "PlaneWeightAsset"
                 float inputs:falloffMax = -1.5
                 float inputs:invert = 0
                 float inputs:strength = 1
-                float inputs:extentU = 1.2
+                float inputs:extentU = 0.9
                 float inputs:extentV = 1
-                uniform token guide:drawMode = "wire"
+                uniform token guide:drawMode = "geometry"
+                float guide:displayOpacity = 0.35
                 color3f guide:displayColor = (1, 0.2, 0.2)
                 uniform asset ui:nodegraph:node:icon = @../../icons/plane_weight.png@
             }
@@ -166,30 +170,42 @@ def Xform "PlaneWeightAsset"
 
     def Scope "Geom"
     {
-        # 13 columns x 3 rows, 24 quads: dense enough along x that the
-        # fold the plane draws across it is a curve, not a crease.
+        # 13 columns x 5 rows, 48 quads: dense enough along x that the
+        # fold the plane draws across it is a curve, not a crease, and wide
+        # enough across z that the ramp has area on screen.
         def Mesh "Strip"
         {
             color3f[] primvars:displayColor = [(0.62, 0.66, 0.72)]
-            float3[] extent = [(0, -0.1, -0.7), (6, 4, 0.7)]
-            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            float3[] extent = [(0, -0.1, -1.4), (6, 4, 1.4)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
             int[] faceVertexIndices = [
                 0, 13, 14, 1, 1, 14, 15, 2, 2, 15, 16, 3, 3, 16, 17, 4,
                 4, 17, 18, 5, 5, 18, 19, 6, 6, 19, 20, 7, 7, 20, 21, 8,
                 8, 21, 22, 9, 9, 22, 23, 10, 10, 23, 24, 11, 11, 24, 25, 12,
                 13, 26, 27, 14, 14, 27, 28, 15, 15, 28, 29, 16, 16, 29, 30, 17,
                 17, 30, 31, 18, 18, 31, 32, 19, 19, 32, 33, 20, 20, 33, 34, 21,
-                21, 34, 35, 22, 22, 35, 36, 23, 23, 36, 37, 24, 24, 37, 38, 25
+                21, 34, 35, 22, 22, 35, 36, 23, 23, 36, 37, 24, 24, 37, 38, 25,
+                26, 39, 40, 27, 27, 40, 41, 28, 28, 41, 42, 29, 29, 42, 43, 30,
+                30, 43, 44, 31, 31, 44, 45, 32, 32, 45, 46, 33, 33, 46, 47, 34,
+                34, 47, 48, 35, 35, 48, 49, 36, 36, 49, 50, 37, 37, 50, 51, 38,
+                39, 52, 53, 40, 40, 53, 54, 41, 41, 54, 55, 42, 42, 55, 56, 43,
+                43, 56, 57, 44, 44, 57, 58, 45, 45, 58, 59, 46, 46, 59, 60, 47,
+                47, 60, 61, 48, 48, 61, 62, 49, 49, 62, 63, 50, 50, 63, 64, 51
             ]
             point3f[] points = [
-                (0, 0, -0.7), (0.5, 0, -0.7), (1, 0, -0.7), (1.5, 0, -0.7), (2, 0, -0.7),
-                (2.5, 0, -0.7), (3, 0, -0.7), (3.5, 0, -0.7), (4, 0, -0.7), (4.5, 0, -0.7),
-                (5, 0, -0.7), (5.5, 0, -0.7), (6, 0, -0.7), (0, 0, 0), (0.5, 0, 0),
-                (1, 0, 0), (1.5, 0, 0), (2, 0, 0), (2.5, 0, 0), (3, 0, 0),
-                (3.5, 0, 0), (4, 0, 0), (4.5, 0, 0), (5, 0, 0), (5.5, 0, 0),
-                (6, 0, 0), (0, 0, 0.7), (0.5, 0, 0.7), (1, 0, 0.7), (1.5, 0, 0.7),
-                (2, 0, 0.7), (2.5, 0, 0.7), (3, 0, 0.7), (3.5, 0, 0.7), (4, 0, 0.7),
-                (4.5, 0, 0.7), (5, 0, 0.7), (5.5, 0, 0.7), (6, 0, 0.7)
+                (0, 0, -1.4), (0.5, 0, -1.4), (1, 0, -1.4), (1.5, 0, -1.4), (2, 0, -1.4),
+                (2.5, 0, -1.4), (3, 0, -1.4), (3.5, 0, -1.4), (4, 0, -1.4), (4.5, 0, -1.4),
+                (5, 0, -1.4), (5.5, 0, -1.4), (6, 0, -1.4), (0, 0, -0.7), (0.5, 0, -0.7),
+                (1, 0, -0.7), (1.5, 0, -0.7), (2, 0, -0.7), (2.5, 0, -0.7), (3, 0, -0.7),
+                (3.5, 0, -0.7), (4, 0, -0.7), (4.5, 0, -0.7), (5, 0, -0.7), (5.5, 0, -0.7),
+                (6, 0, -0.7), (0, 0, 0), (0.5, 0, 0), (1, 0, 0), (1.5, 0, 0),
+                (2, 0, 0), (2.5, 0, 0), (3, 0, 0), (3.5, 0, 0), (4, 0, 0),
+                (4.5, 0, 0), (5, 0, 0), (5.5, 0, 0), (6, 0, 0), (0, 0, 0.7),
+                (0.5, 0, 0.7), (1, 0, 0.7), (1.5, 0, 0.7), (2, 0, 0.7), (2.5, 0, 0.7),
+                (3, 0, 0.7), (3.5, 0, 0.7), (4, 0, 0.7), (4.5, 0, 0.7), (5, 0, 0.7),
+                (5.5, 0, 0.7), (6, 0, 0.7), (0, 0, 1.4), (0.5, 0, 1.4), (1, 0, 1.4),
+                (1.5, 0, 1.4), (2, 0, 1.4), (2.5, 0, 1.4), (3, 0, 1.4), (3.5, 0, 1.4),
+                (4, 0, 1.4), (4.5, 0, 1.4), (5, 0, 1.4), (5.5, 0, 1.4), (6, 0, 1.4)
             ]
             uniform token subdivisionScheme = "none"
         }
@@ -197,12 +213,12 @@ def Xform "PlaneWeightAsset"
 
     def Camera "MainCam"
     {
-        float2 clippingRange = (0.1418, 122.9)
+        float2 clippingRange = (0.1408, 124.3)
         float focalLength = 35
         float horizontalAperture = 20.95
         float verticalAperture = 11.79
         double3 xformOp:rotateXYZ = (-20, 32, 0)
-        double3 xformOp:translate = (9.601, 6.131, 11.43)
+        double3 xformOp:translate = (9.804, 5.763, 11.33)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

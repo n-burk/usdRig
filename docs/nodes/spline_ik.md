@@ -246,9 +246,9 @@ display on for a small asset buried it in solver geometry.
 A six-joint chain rests straight along a 6-unit tube with controls at
 its root, middle and tip. The mid control lifts 2.4 units and comes back:
 the curve arches, the chain stretches from 1.2 to 1.6 units per segment
-to keep pace with the longer arc, and the volume weights thin the tube by
-about 16 percent at the crown. Nothing but that one control is
-keyed.
+to keep pace with the longer arc, and the volume weights pinch the tube
+by about 26 percent at the crown against the straight rest cage beneath
+it. Nothing but that one control is keyed.
 
 Open it live with:
 

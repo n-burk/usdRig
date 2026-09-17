@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Node type** | `RigExecCurvenetAdjusterMover` |
-| **Example** | [curvenet.usda](../examples/curvenet.usda) |
+| **Example** | [curvenet_adjuster_mover.usda](../examples/curvenet_adjuster_mover.usda) |
 
 On this page:
 
@@ -106,16 +106,22 @@ every application of the atomic mover.
 
 ## Example
 
-This page shares the Curvenet page's stage, so the same net, surface
-and frame range appear here. Read it from the net outward: the control-point
-pool is what the rig poses, the adjuster is the revision that adds a
-knot-local offset on top of whatever the preceding movers handed in, and the
-Profile Mover then carries the surface along.
+This page has its own stage, and the loop plays three beats, one
+motion at a time. First the rig is at rest and `RingPush` spends
+`avars:tx = 1.8` on pool knot 8: the knot leaves along world **+X** and the
+Profile Mover carries the surface with it. Then the push comes off and the
+`Bend` control alone swings the net 45 degrees — that bulge is the *Matrix
+Mover's* work, not the adjuster's. Then, inside the held bend, the same
+`avars:tx = 1.8` fires again: the knot travels the same 1.8 units, but now
+**along the bent net normal**, about 46 degrees off where it went the first
+time (knot 8 carries `NetBend` weight 1.0, so its frame rides the whole
+bend). Same dial, same number, a frame that moved — which is the sentence at
+the top of this page, on screen.
 
 Open it live with:
 
 ```bat
-bin\launch_usdview.bat docs\examples\curvenet.usda
+bin\launch_usdview.bat docs\examples\curvenet_adjuster_mover.usda
 ```
 
 Re-render the GIF above with:

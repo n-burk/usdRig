@@ -39,7 +39,7 @@ Storm viewport with the rig guides on.
 | ![Position Constraint](../icons/position_constraint.png) | [Position Constraint](nodes/position_constraint.md) | Moves one provider to the weighted average of its sources' origins. |
 | ![Rotation Constraint](../icons/rotation_constraint.png) | [Rotation Constraint](nodes/rotation_constraint.md) | Copies orientation from blended sources, leaving position alone. |
 | ![Scale Constraint](../icons/scale_constraint.png) | [Scale Constraint](nodes/scale_constraint.md) | Copies blended source scale onto one target, per axis. |
-| ![Parent Constraint](../icons/parent_constraint.png) | [Parent Constraint](nodes/parent_constraint.md) | Carries a target with its sources — position and rotation together — under a per-source offset. |
+| ![Parent Constraint](../icons/parent_constraint.png) | [Parent Constraint](nodes/parent_constraint.md) | Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases. |
 | ![Single-Chain IK Constraint](../icons/single_chain_ik_constraint.png) | [Single-Chain IK Constraint](nodes/single_chain_ik_constraint.md) | Re-poses an existing joint chain of any length onto an effector goal. |
 
 ## Geometry movers
@@ -60,7 +60,7 @@ Storm viewport with the rig guides on.
 | | Node | Does |
 |---|---|---|
 | ![Curvenet](../icons/curvenet.png) | [Curvenet](nodes/curvenet.md) | A net of cubic profile curves that articulates a surface independently of its tessellation. |
-| ![Curvenet Adjustment](../icons/curvenet_adjustment.png) | [Curvenet Adjustment](nodes/curvenet_adjustment.md) | An animator handle on one curvenet control point, posed relative to the incoming deformation. |
+| ![Curvenet Adjustment](../icons/curvenet_adjustment.png) | [Curvenet Adjustment](nodes/curvenet_adjustment.md) | A handle on one curvenet knot, posed in the deformed frame. |
 | ![Curvenet Adjuster Mover](../icons/curvenet_adjuster_mover.png) | [Curvenet Adjuster Mover](nodes/curvenet_adjuster_mover.md) | Applies knot and tangent controls in the frame of the already-deformed net. |
 | ![Curvenet Mover](../icons/curvenet_mover.png) | [Curvenet Mover](nodes/curvenet_mover.md) | The Profile Mover: propagates a posed curvenet onto a surface. |
 
@@ -83,7 +83,7 @@ Storm viewport with the rig guides on.
 | | Node | Does |
 |---|---|---|
 | ![Static Weight](../icons/static_weight.png) | [Static Weight](nodes/static_weight.md) | A painted, time-invariant weight field over moved points. |
-| ![Dynamic Weight](../icons/dynamic_weight.png) | [Dynamic Weight](nodes/dynamic_weight.md) | Modulates a painted field with an animated driver. |
+| ![Dynamic Weight](../icons/dynamic_weight.png) | [Dynamic Weight](nodes/dynamic_weight.md) | The joint is frozen; only the painted field is animated. |
 | ![Sphere Weight](../icons/sphere_weight.png) | [Sphere Weight](nodes/sphere_weight.md) | A ball of influence: radial falloff generated from a placed volume. |
 | ![Plane Weight](../icons/plane_weight.png) | [Plane Weight](nodes/plane_weight.md) | A half-space gradient: everything past the placed plane is weighted in. |
 | ![Curve Weight](../icons/curve_weight.png) | [Curve Weight](nodes/curve_weight.md) | A tube of influence around a curve's control polygon. |

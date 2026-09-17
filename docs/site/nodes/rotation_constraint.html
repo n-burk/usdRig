@@ -333,11 +333,14 @@ have exactly one entry per source.</p>
 </div>
 <p class="label">rotation_constraint.usda</p>
 <div class="content">
-<p class="summary">A Swing control both rolls about Z and slides to the right; a rotation
-constraint copies its orientation onto the Panel joint, and a matrix mover
-skins a twelve-quad card to that joint. The card turns about the post it
-sits on and never follows the control's translation, because the
-constraint writes the rotation channel only.</p>
+<p class="summary">A Swing control rolls about Z and, at the same time, slides up and to
+the right; a rotation constraint copies its orientation onto the Panel
+joint, and a matrix mover skins a twelve-quad card (<code>PanelCard</code>) to that
+joint. <code>inputs:rotationOffset</code> stays at zero and the
+<code>inputs:affectRotationX/Y/Z</code> masks stay at their all-on defaults here, so
+what you see is the unshaped copy — the source orientation and nothing
+else. Watch the handle slide up and to the right while the card's base
+never leaves the post — only the roll crosses the constraint.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\rotation_constraint.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -374,7 +377,7 @@ constraint writes the rotation channel only.</p>
 <li><img src="../icons/position_constraint.png" alt=""><a class="t" href="position_constraint.html">Position Constraint</a><p class="d">Moves one provider to the weighted average of its sources' origins.</p></li>
 <li class="current"><img src="../icons/rotation_constraint.png" alt=""><span class="t">Rotation Constraint</span><p class="d">Copies orientation from blended sources, leaving position alone.</p></li>
 <li><img src="../icons/scale_constraint.png" alt=""><a class="t" href="scale_constraint.html">Scale Constraint</a><p class="d">Copies blended source scale onto one target, per axis.</p></li>
-<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation together — under a per-source offset.</p></li>
+<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.</p></li>
 <li><img src="../icons/single_chain_ik_constraint.png" alt=""><a class="t" href="single_chain_ik_constraint.html">Single-Chain IK Constraint</a><p class="d">Re-poses an existing joint chain of any length onto an effector goal.</p></li>
 </ul>
 </div>

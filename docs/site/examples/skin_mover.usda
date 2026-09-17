@@ -3,19 +3,20 @@
     """
     Docs example: RigExecSkinMover.
 
-    A three-joint chain curls and twists a 12-quad strip through ONE skin
-    mover. rigExec:influences lists the three joints, and the UsdSkel-style
-    rigExec:jointIndices / rigExec:jointWeights arrays give every point two
-    influences whose weights ramp 1 -> 0 across each span, so the bend is
-    smooth across a joint instead of hinging at it.
-    rigExec:skinningMethod is dualQuaternion, so the roll on the last
-    segment keeps its volume instead of pinching the way a linear blend of
-    the same two matrices does.
+    Two identical 24-quad ribbons lie flat in the floor plane on either side
+    of one three-joint chain, and ONE skin mover deforms each. Both share the
+    same rigExec:influences and the same UsdSkel-style rigExec:jointIndices /
+    rigExec:jointWeights arrays -- two influence slots per point whose weights
+    ramp 1 -> 0 linearly across each span -- so the only difference between
+    them is rigExec:skinningMethod: StripLinear is classicLinear, StripDq is
+    dualQuaternion. When the wrist rolls the last span the linear ribbon
+    pinches narrow and the dual-quaternion ribbon keeps its width, side by
+    side in the same frame.
 
-    Contrast with fk_chain.usda, which drives the same kind of strip with
-    one RigExecMatrixMover per joint: there each influence is applied in
-    sequence over the preceding revision, which matches a skinCluster only
-    where a point has a single influence.
+    Contrast with fk_chain.usda, which drives one strip with one
+    RigExecMatrixMover per joint: there each influence is applied in sequence
+    over the preceding revision, which matches a skinCluster only where a
+    point has a single influence.
     """
     defaultPrim = "SkinAsset"
     endTimeCode = 1012
@@ -33,55 +34,55 @@ def Xform "SkinAsset"
 
         def Scope "Controls"
         {
-            def RigExecControl "Base" (
+            def RigExecControl "Shoulder" (
                 prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
             )
             {
                 double avars:rz = 0
                 double avars:rz.spline = {
                     1001: 0; pre (0, 0); post linear,
-                    1006: 12; post linear,
+                    1006: 10; post linear,
                     1012: 0; post linear,
                 }
                 uniform token guide:shape = "circle"
                 matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
-            }
 
-            def RigExecControl "Mid" (
-                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
-            )
-            {
-                double avars:rz = 0
-                double avars:rz.spline = {
-                    1001: 0; pre (0, 0); post linear,
-                    1006: 45; post linear,
-                    1012: 0; post linear,
-                }
-                uniform token guide:shape = "circle"
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
-                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
-            }
+                def RigExecControl "Elbow" (
+                    prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double avars:rz = 0
+                    double avars:rz.spline = {
+                        1001: 0; pre (0, 0); post linear,
+                        1006: 30; post linear,
+                        1012: 0; post linear,
+                    }
+                    uniform token guide:shape = "circle"
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
 
-            def RigExecControl "Tip" (
-                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
-            )
-            {
-                double avars:rx = 0
-                double avars:rx.spline = {
-                    1001: 0; pre (0, 0); post linear,
-                    1006: 70; post linear,
-                    1012: 0; post linear,
+                    def RigExecControl "Wrist" (
+                        prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        double avars:rx = 0
+                        double avars:rx.spline = {
+                            1001: 0; pre (0, 0); post linear,
+                            1006: 45; post linear,
+                            1012: 0; post linear,
+                        }
+                        double avars:rz = 0
+                        double avars:rz.spline = {
+                            1001: 0; pre (0, 0); post linear,
+                            1006: 25; post linear,
+                            1012: 0; post linear,
+                        }
+                        uniform token guide:shape = "circle"
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+                    }
                 }
-                double avars:rz = 0
-                double avars:rz.spline = {
-                    1001: 0; pre (0, 0); post linear,
-                    1006: 45; post linear,
-                    1012: 0; post linear,
-                }
-                uniform token guide:shape = "circle"
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
-                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
             }
         }
 
@@ -92,10 +93,11 @@ def Xform "SkinAsset"
             )
             {
                 rel rigExec:controls = [
-                    </SkinAsset/Rig/Controls/Base>,
-                    </SkinAsset/Rig/Controls/Mid>,
-                    </SkinAsset/Rig/Controls/Tip>,
+                    </SkinAsset/Rig/Controls/Shoulder>,
+                    </SkinAsset/Rig/Controls/Shoulder/Elbow>,
+                    </SkinAsset/Rig/Controls/Shoulder/Elbow/Wrist>,
                 ]
+                uniform token rigExec:controlSpace = "parentRelative"
                 rel rigExec:joints = [
                     </SkinAsset/Rig/Joints/Root>,
                     </SkinAsset/Rig/Joints/Root/Mid>,
@@ -136,7 +138,7 @@ def Xform "SkinAsset"
         {
             def Scope "Geometry"
             {
-                def RigExecSkinMover "StripSkin" (
+                def RigExecSkinMover "StripDqSkin" (
                     prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
                 )
                 {
@@ -147,20 +149,59 @@ def Xform "SkinAsset"
                         </SkinAsset/Rig/Joints/Root/Mid/Tip>,
                     ]
                     int[] rigExec:jointIndices = [
-                        0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2,
-                        1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 0, 1, 0, 1, 0, 1,
-                        0, 1, 0, 1, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2,
-                        1, 2, 1, 2,
+                        0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2,
+                        1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
+                        2, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2,
+                        1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
+                        2, 0, 2, 0,
                     ]
                     float[] rigExec:jointWeights = [
-                        1, 0, 0.75, 0.25, 0.5, 0.5, 0.25, 0.75, 0, 1, 0.75, 0.25,
-                        0.5, 0.5, 0.25, 0.75, 0, 1, 0, 1, 0, 1, 0, 1,
-                        0, 1, 1, 0, 0.75, 0.25, 0.5, 0.5, 0.25, 0.75, 0, 1,
-                        0.75, 0.25, 0.5, 0.5, 0.25, 0.75, 0, 1, 0, 1, 0, 1,
-                        0, 1, 0, 1,
+                        1, 0, 0.875, 0.125, 0.75, 0.25, 0.625, 0.375, 0.5, 0.5, 0.375, 0.625,
+                        0.25, 0.75, 0.125, 0.875, 0, 1, 0.875, 0.125, 0.75, 0.25, 0.625, 0.375,
+                        0.5, 0.5, 0.375, 0.625, 0.25, 0.75, 0.125, 0.875, 0, 1, 1, 0,
+                        1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+                        1, 0, 1, 0, 0.875, 0.125, 0.75, 0.25, 0.625, 0.375, 0.5, 0.5,
+                        0.375, 0.625, 0.25, 0.75, 0.125, 0.875, 0, 1, 0.875, 0.125, 0.75, 0.25,
+                        0.625, 0.375, 0.5, 0.5, 0.375, 0.625, 0.25, 0.75, 0.125, 0.875, 0, 1,
+                        1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+                        1, 0, 1, 0,
                     ]
-                    rel rigExec:moves = </SkinAsset/Geom/Strip.points>
+                    rel rigExec:moves = </SkinAsset/Geom/StripDq.points>
                     uniform token rigExec:skinningMethod = "dualQuaternion"
+                    uniform token rigExec:transformReadPhase = "final"
+                    uniform asset ui:nodegraph:node:icon = @../../icons/skin_mover.png@
+                }
+
+                def RigExecSkinMover "StripLinearSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    uniform int rigExec:elementSize = 2
+                    rel rigExec:influences = [
+                        </SkinAsset/Rig/Joints/Root>,
+                        </SkinAsset/Rig/Joints/Root/Mid>,
+                        </SkinAsset/Rig/Joints/Root/Mid/Tip>,
+                    ]
+                    int[] rigExec:jointIndices = [
+                        0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2, 1, 2,
+                        1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
+                        2, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 2, 1, 2,
+                        1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0,
+                        2, 0, 2, 0,
+                    ]
+                    float[] rigExec:jointWeights = [
+                        1, 0, 0.875, 0.125, 0.75, 0.25, 0.625, 0.375, 0.5, 0.5, 0.375, 0.625,
+                        0.25, 0.75, 0.125, 0.875, 0, 1, 0.875, 0.125, 0.75, 0.25, 0.625, 0.375,
+                        0.5, 0.5, 0.375, 0.625, 0.25, 0.75, 0.125, 0.875, 0, 1, 1, 0,
+                        1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+                        1, 0, 1, 0, 0.875, 0.125, 0.75, 0.25, 0.625, 0.375, 0.5, 0.5,
+                        0.375, 0.625, 0.25, 0.75, 0.125, 0.875, 0, 1, 0.875, 0.125, 0.75, 0.25,
+                        0.625, 0.375, 0.5, 0.5, 0.375, 0.625, 0.25, 0.75, 0.125, 0.875, 0, 1,
+                        1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+                        1, 0, 1, 0,
+                    ]
+                    rel rigExec:moves = </SkinAsset/Geom/StripLinear.points>
+                    uniform token rigExec:skinningMethod = "classicLinear"
                     uniform token rigExec:transformReadPhase = "final"
                     uniform asset ui:nodegraph:node:icon = @../../icons/skin_mover.png@
                 }
@@ -170,28 +211,41 @@ def Xform "SkinAsset"
 
     def Scope "Geom"
     {
-        def Mesh "Strip"
+        def Mesh "StripDq"
         {
-            color3f[] primvars:displayColor = [(0.45, 0.55, 0.7)]
-            float3[] extent = [(0, -0.5, -0.5), (6, 0.5, 0.5)]
-            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
-            int[] faceVertexIndices = [0, 1, 14, 13, 1, 2, 15, 14, 2, 3, 16, 15, 3, 4, 17, 16, 4, 5, 18, 17, 5, 6, 19, 18, 6, 7, 20, 19, 7, 8, 21, 20, 8, 9, 22, 21, 9, 10, 23, 22, 10, 11, 24, 23, 11, 12, 25, 24]
-            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
+            float3[] extent = [(0, -0.05, 0.25), (6, 0.05, 1.75)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 25, 26, 1, 1, 26, 27, 2, 2, 27, 28, 3, 3, 28, 29, 4, 4, 29, 30, 5, 5, 30, 31, 6, 6, 31, 32, 7, 7, 32, 33, 8, 8, 33, 34, 9, 9, 34, 35, 10, 10, 35, 36, 11, 11, 36, 37, 12, 12, 37, 38, 13, 13, 38, 39, 14, 14, 39, 40, 15, 15, 40, 41, 16, 16, 41, 42, 17, 17, 42, 43, 18, 18, 43, 44, 19, 19, 44, 45, 20, 20, 45, 46, 21, 21, 46, 47, 22, 22, 47, 48, 23, 23, 48, 49, 24]
+            normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
                 interpolation = "vertex"
             )
-            point3f[] points = [(0, -0.5, 0), (0.5, -0.5, 0), (1, -0.5, 0), (1.5, -0.5, 0), (2, -0.5, 0), (2.5, -0.5, 0), (3, -0.5, 0), (3.5, -0.5, 0), (4, -0.5, 0), (4.5, -0.5, 0), (5, -0.5, 0), (5.5, -0.5, 0), (6, -0.5, 0), (0, 0.5, 0), (0.5, 0.5, 0), (1, 0.5, 0), (1.5, 0.5, 0), (2, 0.5, 0), (2.5, 0.5, 0), (3, 0.5, 0), (3.5, 0.5, 0), (4, 0.5, 0), (4.5, 0.5, 0), (5, 0.5, 0), (5.5, 0.5, 0), (6, 0.5, 0)]
+            point3f[] points = [(0, 0, 0.25), (0.25, 0, 0.25), (0.5, 0, 0.25), (0.75, 0, 0.25), (1, 0, 0.25), (1.25, 0, 0.25), (1.5, 0, 0.25), (1.75, 0, 0.25), (2, 0, 0.25), (2.25, 0, 0.25), (2.5, 0, 0.25), (2.75, 0, 0.25), (3, 0, 0.25), (3.25, 0, 0.25), (3.5, 0, 0.25), (3.75, 0, 0.25), (4, 0, 0.25), (4.25, 0, 0.25), (4.5, 0, 0.25), (4.75, 0, 0.25), (5, 0, 0.25), (5.25, 0, 0.25), (5.5, 0, 0.25), (5.75, 0, 0.25), (6, 0, 0.25), (0, 0, 1.75), (0.25, 0, 1.75), (0.5, 0, 1.75), (0.75, 0, 1.75), (1, 0, 1.75), (1.25, 0, 1.75), (1.5, 0, 1.75), (1.75, 0, 1.75), (2, 0, 1.75), (2.25, 0, 1.75), (2.5, 0, 1.75), (2.75, 0, 1.75), (3, 0, 1.75), (3.25, 0, 1.75), (3.5, 0, 1.75), (3.75, 0, 1.75), (4, 0, 1.75), (4.25, 0, 1.75), (4.5, 0, 1.75), (4.75, 0, 1.75), (5, 0, 1.75), (5.25, 0, 1.75), (5.5, 0, 1.75), (5.75, 0, 1.75), (6, 0, 1.75)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "StripLinear"
+        {
+            color3f[] primvars:displayColor = [(0.45, 0.45, 0.45)]
+            float3[] extent = [(0, -0.05, -1.75), (6, 0.05, -0.25)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 25, 26, 1, 1, 26, 27, 2, 2, 27, 28, 3, 3, 28, 29, 4, 4, 29, 30, 5, 5, 30, 31, 6, 6, 31, 32, 7, 7, 32, 33, 8, 8, 33, 34, 9, 9, 34, 35, 10, 10, 35, 36, 11, 11, 36, 37, 12, 12, 37, 38, 13, 13, 38, 39, 14, 14, 39, 40, 15, 15, 40, 41, 16, 16, 41, 42, 17, 17, 42, 43, 18, 18, 43, 44, 19, 19, 44, 45, 20, 20, 45, 46, 21, 21, 46, 47, 22, 22, 47, 48, 23, 23, 48, 49, 24]
+            normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0, 0, -1.75), (0.25, 0, -1.75), (0.5, 0, -1.75), (0.75, 0, -1.75), (1, 0, -1.75), (1.25, 0, -1.75), (1.5, 0, -1.75), (1.75, 0, -1.75), (2, 0, -1.75), (2.25, 0, -1.75), (2.5, 0, -1.75), (2.75, 0, -1.75), (3, 0, -1.75), (3.25, 0, -1.75), (3.5, 0, -1.75), (3.75, 0, -1.75), (4, 0, -1.75), (4.25, 0, -1.75), (4.5, 0, -1.75), (4.75, 0, -1.75), (5, 0, -1.75), (5.25, 0, -1.75), (5.5, 0, -1.75), (5.75, 0, -1.75), (6, 0, -1.75), (0, 0, -0.25), (0.25, 0, -0.25), (0.5, 0, -0.25), (0.75, 0, -0.25), (1, 0, -0.25), (1.25, 0, -0.25), (1.5, 0, -0.25), (1.75, 0, -0.25), (2, 0, -0.25), (2.25, 0, -0.25), (2.5, 0, -0.25), (2.75, 0, -0.25), (3, 0, -0.25), (3.25, 0, -0.25), (3.5, 0, -0.25), (3.75, 0, -0.25), (4, 0, -0.25), (4.25, 0, -0.25), (4.5, 0, -0.25), (4.75, 0, -0.25), (5, 0, -0.25), (5.25, 0, -0.25), (5.5, 0, -0.25), (5.75, 0, -0.25), (6, 0, -0.25)]
             uniform token subdivisionScheme = "none"
         }
     }
 
     def Camera "MainCam"
     {
-        float2 clippingRange = (0.1811, 152.9)
+        float2 clippingRange = (0.1943, 167.7)
         float focalLength = 35
         float horizontalAperture = 20.95
         float verticalAperture = 11.79
         double3 xformOp:rotateXYZ = (-20, 32, 0)
-        double3 xformOp:translate = (11.65, 7.638, 14.17)
+        double3 xformOp:translate = (12.49, 8.116, 15.2)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

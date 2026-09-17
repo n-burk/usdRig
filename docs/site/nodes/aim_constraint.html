@@ -380,10 +380,12 @@ have exactly one entry per source.</p>
 <p class="summary">Two eye joints track a look-at control that sweeps across the front of
 the face. The control carries its own solid sphere guide, so the thing
 being aimed at is a visible orange ball rather than an implied point: it
-slides from one side to the other and each eye swings through about 100
-degrees end to end following it. Each eye is a white card with a dark
-pupil card in front, both skinned rigidly to the aimed joint, so the
-pupils swing with the target.</p>
+slides side to side and rises and falls, and each eye swings through
+about 70 degrees horizontally and another 20 vertically following it.
+Each eye is a small sphere with a bright iris cone on its front, both
+skinned rigidly to the aimed joint, so the iris points wherever the eye
+is aimed at every angle. Both eyes converge on the same target, so the
+closer the ball comes the more their lines of sight cross.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\aim_constraint.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -420,7 +422,7 @@ pupils swing with the target.</p>
 <li><img src="../icons/position_constraint.png" alt=""><a class="t" href="position_constraint.html">Position Constraint</a><p class="d">Moves one provider to the weighted average of its sources' origins.</p></li>
 <li><img src="../icons/rotation_constraint.png" alt=""><a class="t" href="rotation_constraint.html">Rotation Constraint</a><p class="d">Copies orientation from blended sources, leaving position alone.</p></li>
 <li><img src="../icons/scale_constraint.png" alt=""><a class="t" href="scale_constraint.html">Scale Constraint</a><p class="d">Copies blended source scale onto one target, per axis.</p></li>
-<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation together — under a per-source offset.</p></li>
+<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.</p></li>
 <li><img src="../icons/single_chain_ik_constraint.png" alt=""><a class="t" href="single_chain_ik_constraint.html">Single-Chain IK Constraint</a><p class="d">Re-poses an existing joint chain of any length onto an effector goal.</p></li>
 </ul>
 </div>

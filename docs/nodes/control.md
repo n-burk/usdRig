@@ -367,14 +367,21 @@ the opacity is not connected.
 
 ## Example
 
-Twelve controls in a 6x2 grid draw every `guide:shape` — sphere,
-circle, box, cube, diamond, pyramid — in every `guide:drawMode`: wire on
-the top row, geometry on the bottom. Each one swings `avars:ry` from 0 to
-90 degrees and back over 1001-1024, and each wire control also feeds an FK
-chain that poses a joint resting at the control, with a matrix mover
-skinning the card below it. The two circles and the shaded sphere look
-still because they are symmetric about the axis they turn on; the card
-under the wire circle is the proof that the frame really moved.
+Twelve controls in a 6x2 grid draw every `guide:shape` in every
+`guide:drawMode`. Left to right in both rows: sphere, circle, box, cube,
+diamond, pyramid — `box` is the planar square lying flat in XZ, `cube` the
+solid six-sided one. The top row is `wire` (the guide is drawn as curves),
+the bottom row `geometry` (the same shape drawn as a solid). All twelve
+carry the same animation — `avars:ry` 0 → 90°, `avars:rz` 0 → 22° and
+`avars:ty` 0 → 0.25 over 1001-1024 — and all twelve do real work: each
+feeds an FK chain that poses a joint resting at the control, and a matrix
+mover carries the grey card a unit below it. Watch either row against the
+blue rest outline the cards leave behind: `ry` spins the card about the
+handle's own origin, `rz` tips it out of the ground plane, and `ty` lifts
+it clear of the outline. The rotation is what the round shapes could not
+show on their own — a sphere or a circle turned about its symmetry axis
+looks identical — so the card is where the frame's motion becomes
+visible.
 
 Open it live with:
 

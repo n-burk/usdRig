@@ -213,7 +213,7 @@ this is the mover prim itself.</p>
 <div class="content selected" id="parms-node-parameters">
 <p class="tab-body-label">Node parameters</p>
 <div class="parameters sbs-group">
-<div class="parameter sbs-item" id="parm-rigexec-representation">
+<div class="parameter sbs-item" id="parm-rigexec-representation-2">
 <p class="label"><code class="pname">rigExec:representation</code><span class="sig">uniform token, default &quot;dense&quot;</span></p>
 <div class="content">
 <dl class="menu"><dt>Valid values</dt><dd><span class="chips"><span class="chip">dense</span></span></dd></dl>
@@ -271,11 +271,17 @@ who need a permutation-proof composition use a commutative mode.</p>
 </div>
 <p class="label">combine_weight.usda</p>
 <div class="content">
-<p class="summary">Two sphere volumes over one flat 24-quad panel, folded with <code>max</code>.
-A static joint holds a 1.6-unit lift, so the panel's height is literally
-the combined field; the Anchor volume sits still while the Slider volume
-rides an animated control from x = 1.8 in to -0.4 and back. Two separate
-domes merge into one wide ridge as the volumes overlap, then part again.</p>
+<p class="summary">Two sphere volumes over one flat 192-quad panel, folded with <code>max</code>.
+A static joint holds a 1.0-unit lift, so the panel's height is literally
+the combined field. The Anchor volume sits still at x = -1.2; the Slider
+volume rides an animated control from x = 4.8 — parked clear of the panel,
+where it contributes nothing, so the first frame is an honest picture of
+the Anchor field alone — in to x = -0.2, holds there, and leaves again.
+A second dome arrives, the two stand apart with a flat valley between
+them, then merge into one wide ridge. <code>max</code> is the union, so neither
+volume can ever dim the other; swap it for <code>min</code> and only the lens where
+both volumes agree is left standing, and <code>multiply</code> softens that same
+intersection.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\combine_weight.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -309,7 +315,7 @@ domes merge into one wide ridge as the volumes overlap, then part again.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li><img src="../icons/static_weight.png" alt=""><a class="t" href="static_weight.html">Static Weight</a><p class="d">A painted, time-invariant weight field over moved points.</p></li>
-<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">Modulates a painted field with an animated driver.</p></li>
+<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">The joint is frozen; only the painted field is animated.</p></li>
 <li><img src="../icons/sphere_weight.png" alt=""><a class="t" href="sphere_weight.html">Sphere Weight</a><p class="d">A ball of influence: radial falloff generated from a placed volume.</p></li>
 <li><img src="../icons/plane_weight.png" alt=""><a class="t" href="plane_weight.html">Plane Weight</a><p class="d">A half-space gradient: everything past the placed plane is weighted in.</p></li>
 <li><img src="../icons/curve_weight.png" alt=""><a class="t" href="curve_weight.html">Curve Weight</a><p class="d">A tube of influence around a curve's control polygon.</p></li>

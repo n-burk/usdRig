@@ -3,15 +3,17 @@
     """
     Docs example: RigExecPositionConstraint.
 
-    One plate hangs between two posts. The constraint blends the two post
-    origins by inputs:sourceWeights, lifts the blend by
+    One plate hangs between two posts of different heights. The constraint
+    blends the two post origins by inputs:sourceWeights, lifts the blend by
     inputs:translationOffset, and writes the result onto the Slide joint;
-    a matrix mover carries the plate. The weights sweep (1, 0) -> (0, 1)
-    -> (1, 0) over 1001-1024, so the plate slides from post to post and
-    back with nothing else in the rig animated.
+    a matrix mover carries the plate. The weights start EVEN at (1, 1) --
+    the blend sitting at the posts' midpoint, which is the joint's rest --
+    then swing to (1, 0), to (0, 1) and back to even over 1001-1023, so the
+    blue start-frame ghost is the rest blend and the plate departs from it
+    in both directions with nothing else in the rig animated.
     """
     defaultPrim = "PositionAsset"
-    endTimeCode = 1024
+    endTimeCode = 1023
     metersPerUnit = 0.01
     startTimeCode = 1001
     timeCodesPerSecond = 24
@@ -89,9 +91,10 @@ def Xform "PositionAsset"
                     # plate rides 0.9 units above the line between the posts.
                     double3 inputs:translationOffset = (0, 0.9, 0)
                     float[] inputs:sourceWeights.timeSamples = {
-                        1001: [1, 0],
-                        1012: [0, 1],
-                        1024: [1, 0],
+                        1001: [1, 1],
+                        1008: [1, 0],
+                        1016: [0, 1],
+                        1024: [1, 1],
                     }
                     rel rigExec:moves = </PositionAsset/Rig/Joints/Slide>
                     rel rigExec:sources = [
@@ -120,6 +123,60 @@ def Xform "PositionAsset"
 
     def Scope "Geom"
     {
+
+        # Set dressing, not rig: a vertical shaft under each control ring so
+        # the ring reads as the TOP of a post standing on the ground, and the
+        # 2 units of height between them reads as height and not as depth.
+        def Mesh "PostAShaft"
+        {
+            color3f[] primvars:displayColor = [(0.14, 0.14, 0.14)]
+            float3[] extent = [(-2.72, 0.0, -0.12), (-2.48, 0.6, 0.12)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                4, 5, 6, 7,
+                1, 0, 3, 2,
+                0, 4, 7, 3,
+                5, 1, 2, 6,
+                3, 7, 6, 2,
+                0, 1, 5, 4
+            ]
+            point3f[] points = [(-2.72, 0, -0.12), (-2.48, 0, -0.12), (-2.48, 0.6, -0.12), (-2.72, 0.6, -0.12), (-2.72, 0, 0.12), (-2.48, 0, 0.12), (-2.48, 0.6, 0.12), (-2.72, 0.6, 0.12)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        # Set dressing, not rig: a vertical shaft under each control ring so
+        # the ring reads as the TOP of a post standing on the ground, and the
+        # 2 units of height between them reads as height and not as depth.
+        def Mesh "PostBShaft"
+        {
+            color3f[] primvars:displayColor = [(0.14, 0.14, 0.14)]
+            float3[] extent = [(2.48, 0.0, -0.12), (2.72, 2.6, 0.12)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                4, 5, 6, 7,
+                1, 0, 3, 2,
+                0, 4, 7, 3,
+                5, 1, 2, 6,
+                3, 7, 6, 2,
+                0, 1, 5, 4
+            ]
+            point3f[] points = [(2.48, 0, -0.12), (2.72, 0, -0.12), (2.72, 2.6, -0.12), (2.48, 2.6, -0.12), (2.48, 0, 0.12), (2.72, 0, 0.12), (2.72, 2.6, 0.12), (2.48, 2.6, 0.12)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        # The line the two source origins define. The constrained joint never
+        # sits ON it: inputs:translationOffset lifts the blend 0.9 above it,
+        # and that gap is the whole of "maintain offset" here.
+        def BasisCurves "SourceSpan"
+        {
+            uniform token type = "linear"
+            int[] curveVertexCounts = [2]
+            point3f[] points = [(-2.6, 0.6, 0), (2.6, 2.6, 0)]
+            float[] widths = [0.06] (
+                interpolation = "constant"
+            )
+            color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
+        }
         def Mesh "Plate"
         {
             color3f[] primvars:displayColor = [(0.35, 0.6, 0.95)]
@@ -159,12 +216,12 @@ def Xform "PositionAsset"
 
     def Camera "MainCam"
     {
-        float2 clippingRange = (0.1283, 112.1)
+        float2 clippingRange = (0.1567, 135.1)
         float focalLength = 35
         float horizontalAperture = 20.95
         float verticalAperture = 11.79
         double3 xformOp:rotateXYZ = (-20, 32, 0)
-        double3 xformOp:translate = (6.332, 6.579, 10.31)
+        double3 xformOp:translate = (7.952, 7.096, 12.73)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

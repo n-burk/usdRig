@@ -293,13 +293,19 @@ spline's control polygon length to the surface's mean edge length.</p>
 </div>
 <p class="label">curvenet.usda</p>
 <div class="content">
-<p class="summary">Shares the Curvenet page's stage: a profile net drawn over a 96-quad
-tube, its knots posed by ordinary rig machinery — a matrix mover under an
-FK-driven joint, then a Curvenet Adjustment through the Adjuster Mover —
-and <code>ProfileMover</code> propagating that posed net onto <code>Tube.points</code> under a
-<code>RigExecCurvenetWeight</code> envelope. The net's 76 pooled control points are
-the only thing the rig names; the tube's 108 vertices appear in no
-relationship anywhere — the whole point of the representation.</p>
+<p class="summary">Shares the Curvenet page's stage: a profile net drawn over a
+144-quad capped tube, its knots posed by ordinary rig machinery — a matrix
+mover under an FK-driven joint, then a Curvenet Adjustment through the
+Adjuster Mover — and <code>ProfileMover</code> propagating that posed net onto
+<code>Tube.points</code> under a <code>RigExecCurvenetWeight</code> envelope. In the picture the
+<strong>green</strong> curves are the posed net, the <strong>cyan</strong> wireframe is the rest pose
+the whole thing departs from, and the small <strong>yellow diamond</strong> off the
+middle ring is the <code>RingPush</code> knot handle. The wide swing is the bend; the
+local lobe pushed out beside that diamond is <em>one</em> knot moved through the
+Adjuster, and the surface reproducing it — with the rest of the tube left
+alone — is the thing a skin cluster cannot do. The net's 76 pooled control
+points are the only thing the rig names; the tube's 168 vertices appear in
+no relationship anywhere — the whole point of the representation.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\curvenet.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -333,7 +339,7 @@ relationship anywhere — the whole point of the representation.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li><img src="../icons/curvenet.png" alt=""><a class="t" href="curvenet.html">Curvenet</a><p class="d">A net of cubic profile curves that articulates a surface independently of its tessellation.</p></li>
-<li><img src="../icons/curvenet_adjustment.png" alt=""><a class="t" href="curvenet_adjustment.html">Curvenet Adjustment</a><p class="d">An animator handle on one curvenet control point, posed relative to the incoming deformation.</p></li>
+<li><img src="../icons/curvenet_adjustment.png" alt=""><a class="t" href="curvenet_adjustment.html">Curvenet Adjustment</a><p class="d">A handle on one curvenet knot, posed in the deformed frame.</p></li>
 <li><img src="../icons/curvenet_adjuster_mover.png" alt=""><a class="t" href="curvenet_adjuster_mover.html">Curvenet Adjuster Mover</a><p class="d">Applies knot and tangent controls in the frame of the already-deformed net.</p></li>
 <li class="current"><img src="../icons/curvenet_mover.png" alt=""><span class="t">Curvenet Mover</span><p class="d">The Profile Mover: propagates a posed curvenet onto a surface.</p></li>
 </ul>

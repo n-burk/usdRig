@@ -260,10 +260,12 @@ Legacy component-preservation declaration retained for existing assets.
 Two eye joints track a look-at control that sweeps across the front of
 the face. The control carries its own solid sphere guide, so the thing
 being aimed at is a visible orange ball rather than an implied point: it
-slides from one side to the other and each eye swings through about 100
-degrees end to end following it. Each eye is a white card with a dark
-pupil card in front, both skinned rigidly to the aimed joint, so the
-pupils swing with the target.
+slides side to side and rises and falls, and each eye swings through
+about 70 degrees horizontally and another 20 vertically following it.
+Each eye is a small sphere with a bright iris cone on its front, both
+skinned rigidly to the aimed joint, so the iris points wherever the eye
+is aimed at every angle. Both eyes converge on the same target, so the
+closer the ball comes the more their lines of sight cross.
 
 Open it live with:
 

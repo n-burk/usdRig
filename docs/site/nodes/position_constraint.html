@@ -336,13 +336,15 @@ have exactly one entry per source.</p>
 <p class="label">position_constraint.usda</p>
 <div class="content">
 <p class="summary">Two posts stand at different heights and a plate hangs between them.
-The joint's rest sits exactly at the posts' midpoint, so an even blend with
-no offset would leave it where it is and every bit of motion you see is the
-blend; <code>inputs:sourceWeights</code> sweeps (1, 0) → (0, 1) → (1, 0) and the plate
-slides from post to post and back, with nothing else in the rig animated.
-<code>inputs:translationOffset</code> of (0, 0.9, 0) keeps it riding above the line the
-two posts define, which is the whole of "maintain offset" here — there is no
-such switch.</p>
+The joint's rest sits exactly at the posts' midpoint, so an even blend leaves
+it there and every bit of motion you see is the blend: <code>inputs:sourceWeights</code>
+starts even at (1, 1) — the blue ghost is that even-blend frame, the plate
+parked over the midpoint — then swings to (1, 0), to (0, 1), and back to even,
+so the plate departs from its rest in both directions with nothing else in the
+rig animated. The pale line between the two post tops is the segment the source
+origins define; <code>inputs:translationOffset</code> of (0, 0.9, 0) is the visible gap
+between that line and the joint, which is the whole of "maintain offset" here
+— there is no such switch.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\position_constraint.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -379,7 +381,7 @@ such switch.</p>
 <li class="current"><img src="../icons/position_constraint.png" alt=""><span class="t">Position Constraint</span><p class="d">Moves one provider to the weighted average of its sources' origins.</p></li>
 <li><img src="../icons/rotation_constraint.png" alt=""><a class="t" href="rotation_constraint.html">Rotation Constraint</a><p class="d">Copies orientation from blended sources, leaving position alone.</p></li>
 <li><img src="../icons/scale_constraint.png" alt=""><a class="t" href="scale_constraint.html">Scale Constraint</a><p class="d">Copies blended source scale onto one target, per axis.</p></li>
-<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation together — under a per-source offset.</p></li>
+<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.</p></li>
 <li><img src="../icons/single_chain_ik_constraint.png" alt=""><a class="t" href="single_chain_ik_constraint.html">Single-Chain IK Constraint</a><p class="d">Re-poses an existing joint chain of any length onto an effector goal.</p></li>
 </ul>
 </div>

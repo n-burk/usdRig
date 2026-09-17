@@ -181,13 +181,17 @@ display on for a small asset buried it in solver geometry.
 
 ## Example
 
-Three controls curl a six-quad strip. C2 is a namespace child of C1
+Three controls curl a ten-quad strip. C2 is a namespace child of C1
 and C3 of C2, each with the same local rest offset as its joint (2 units),
 so the rings sit on Seg1/Seg2/Seg3 at x = 0, 2, 4 and each one rides the
 one above it — the chain reads them with `rigExec:controlSpace =
-"parentRelative"`. One matrix mover per joint skins the strip, and the
-column between Seg2 and Seg3 is weighted 0.5 to each so the bend is shared
-instead of creasing at one joint.
+"parentRelative"`. One matrix mover per joint skins the strip through a
+linear weight ramp, so each joint hands its influence to the next across a
+two-unit span: the column on Seg2 is split 0.5 with Seg1, the midline
+between Seg2 and Seg3 is split 0.5 to each, and the column on Seg3 is split
+0.5 with Seg2. Both bends therefore draw as arcs rather than creases, and
+the same handover is happening at every joint — the strip ends at x = 5 so
+no part of it is a rigid slab hanging off the last one.
 
 Open it live with:
 

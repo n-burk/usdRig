@@ -171,12 +171,17 @@ Which revision of every influence's matrix is read.
 
 ## Example
 
-A three-joint chain curls and rolls a 12-quad strip through one skin
-mover. Every point carries two influence slots whose weights ramp 1 → 0
-across each span, so the strip bends as a curve rather than creasing at
-the joints; `rigExec:skinningMethod` is `dualQuaternion`, which holds
-the strip's cross-section at its rest width of 1.000 through the roll
-where `classicLinear` narrows it to 0.788.
+Two identical 24-quad ribbons lie flat in the floor on either side of
+one three-joint chain, and each is skinned by ONE skin mover. Both
+movers name the same `rigExec:influences` and carry the same
+`rigExec:jointIndices` / `rigExec:jointWeights` — two influence slots
+per point, ramping 1 → 0 linearly across each span, so the bend draws as
+a curve rather than a crease at the joints. The only difference between
+them is `rigExec:skinningMethod`: the bright ribbon is
+`dualQuaternion`, the dim one `classicLinear`. Where the wrist rolls 45°
+the linear ribbon's cross-section pinches from its rest width of 1.500
+to 1.386 and its tip falls short of the arc; the dual-quaternion ribbon
+holds 1.500 at every column.
 
 Open it live with:
 

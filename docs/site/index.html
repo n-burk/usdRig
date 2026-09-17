@@ -169,7 +169,7 @@
 <li><img src="icons/position_constraint.png" alt=""><a class="t" href="nodes/position_constraint.html">Position Constraint</a><p class="d">Moves one provider to the weighted average of its sources' origins.</p></li>
 <li><img src="icons/rotation_constraint.png" alt=""><a class="t" href="nodes/rotation_constraint.html">Rotation Constraint</a><p class="d">Copies orientation from blended sources, leaving position alone.</p></li>
 <li><img src="icons/scale_constraint.png" alt=""><a class="t" href="nodes/scale_constraint.html">Scale Constraint</a><p class="d">Copies blended source scale onto one target, per axis.</p></li>
-<li><img src="icons/parent_constraint.png" alt=""><a class="t" href="nodes/parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation together — under a per-source offset.</p></li>
+<li><img src="icons/parent_constraint.png" alt=""><a class="t" href="nodes/parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.</p></li>
 <li><img src="icons/single_chain_ik_constraint.png" alt=""><a class="t" href="nodes/single_chain_ik_constraint.html">Single-Chain IK Constraint</a><p class="d">Re-poses an existing joint chain of any length onto an effector goal.</p></li>
 </ul>
 </div>
@@ -194,7 +194,7 @@
 <div class="content" id="curvenet-body">
 <ul class="catlist">
 <li><img src="icons/curvenet.png" alt=""><a class="t" href="nodes/curvenet.html">Curvenet</a><p class="d">A net of cubic profile curves that articulates a surface independently of its tessellation.</p></li>
-<li><img src="icons/curvenet_adjustment.png" alt=""><a class="t" href="nodes/curvenet_adjustment.html">Curvenet Adjustment</a><p class="d">An animator handle on one curvenet control point, posed relative to the incoming deformation.</p></li>
+<li><img src="icons/curvenet_adjustment.png" alt=""><a class="t" href="nodes/curvenet_adjustment.html">Curvenet Adjustment</a><p class="d">A handle on one curvenet knot, posed in the deformed frame.</p></li>
 <li><img src="icons/curvenet_adjuster_mover.png" alt=""><a class="t" href="nodes/curvenet_adjuster_mover.html">Curvenet Adjuster Mover</a><p class="d">Applies knot and tangent controls in the frame of the already-deformed net.</p></li>
 <li><img src="icons/curvenet_mover.png" alt=""><a class="t" href="nodes/curvenet_mover.html">Curvenet Mover</a><p class="d">The Profile Mover: propagates a posed curvenet onto a surface.</p></li>
 </ul>
@@ -223,7 +223,7 @@
 <div class="content" id="weights-body">
 <ul class="catlist">
 <li><img src="icons/static_weight.png" alt=""><a class="t" href="nodes/static_weight.html">Static Weight</a><p class="d">A painted, time-invariant weight field over moved points.</p></li>
-<li><img src="icons/dynamic_weight.png" alt=""><a class="t" href="nodes/dynamic_weight.html">Dynamic Weight</a><p class="d">Modulates a painted field with an animated driver.</p></li>
+<li><img src="icons/dynamic_weight.png" alt=""><a class="t" href="nodes/dynamic_weight.html">Dynamic Weight</a><p class="d">The joint is frozen; only the painted field is animated.</p></li>
 <li><img src="icons/sphere_weight.png" alt=""><a class="t" href="nodes/sphere_weight.html">Sphere Weight</a><p class="d">A ball of influence: radial falloff generated from a placed volume.</p></li>
 <li><img src="icons/plane_weight.png" alt=""><a class="t" href="nodes/plane_weight.html">Plane Weight</a><p class="d">A half-space gradient: everything past the placed plane is weighted in.</p></li>
 <li><img src="icons/curve_weight.png" alt=""><a class="t" href="nodes/curve_weight.html">Curve Weight</a><p class="d">A tube of influence around a curve's control polygon.</p></li>

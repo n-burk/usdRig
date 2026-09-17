@@ -131,11 +131,17 @@ display on for a small asset buried it in solver geometry.
 
 ## Example
 
-Two FK chains hold opposite poses of one three-joint arm — FkA curls it
-up in the front lane, FkB curls it down in the back — and both stay on
-screen as joint guides. A third chain is the blend of the two, skinned to
-a ten-quad strip, and the weight sweeps 0 → 1 → 0 over 24 frames, so the
-strip leaves the FkA pose, arrives at the FkB pose, and comes back.
+Two FK chains hold very different poses of one three-joint arm, four
+units apart so neither hides the other. `FkUp` — the `UpCtl` rings in the
+near lane, posing `PoseUp1/2/3` — is input **A**, a tight upward curl;
+`FkDown` — the `DownCtl` rings in the far lane, posing `PoseDown1/2/3` —
+is input **B**, a long low hook. `PoseBlend` writes the mix into
+`Arm1/Arm2/Arm3`, and three matrix movers skin a 21×3 strip to those
+three joints, so the strip is the only thing in frame that shows what the
+blend produced. The weight sweeps 0 → 1 and back: at 0 the strip lies on
+the A chain, at 1 on the B chain, and every value between is the
+interpolation of the two *transforms* — a shape neither input has, and
+not the average of the two skeletons' joint positions.
 
 Open it live with:
 

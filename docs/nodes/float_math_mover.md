@@ -121,12 +121,21 @@ Valid values: `add`, `multiply`, `clamp`, `remap`, `blend`.
 ## Example
 
 A hinged panel curls open from a single blendshape. The incoming
-channel swings 0 → 4.8 → 0 in its own units on the blend input's
-`inputs:weight`; `Normalize` (remap, min 0 max 4) turns that into the
-0 → 1.2 → 0 a weight can use, and `Bound` (clamp, min 0 max 1) catches the
-overshoot so the panel dwells fully open instead of tearing past its
-target shape. The chip shows the raw number going in; the panel shows what
-came out.
+channel ramps straight up and back down, 0 → 4.8 → 0 in its own units, on
+the blend input's `inputs:weight`. Two movers sit on that one property:
+`Normalize` (remap, min 0 max 4) turns the raw number into a weight, and
+`Bound` (clamp, min 0 max 1) catches the overshoot. At the peak the chain
+reads **4.80 raw → 1.20 remapped → 1.00 bounded**, and 1.00 is all the
+blendshape ever sees.
+
+Watch for the stall. There is no hold anywhere in the animation, yet the
+panel stops dead for about half a second near the top: the chip climbs
+past 4.00 to 4.80 and back down to 4.00 while the geometry does not move a
+pixel. That stall is `Bound` — everything above raw 4.0 remaps past 1.0
+and is clamped back to it. The chip shows the raw number going in; the
+panel shows what came out. The wire sphere at the origin is the `Hinge`
+joint, a landmark on the line the panel curls about: nothing targets it
+and it drives nothing, the blendshape does all the work.
 
 Open it live with:
 

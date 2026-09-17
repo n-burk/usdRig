@@ -111,12 +111,18 @@ Valid values: `multiply`, `blend`.
 
 ## Example
 
-Two handles and one card, with no solver in between. The Spin dial
-and the Slide box each publish an animated `posed:space`; a `blend` mover
-takes the card Xform's authored identity to Spin's frame, then a
-`multiply` mover post-applies Slide's, so the card is drawn at
-Spin × Slide — turning in place with the dial while riding out along X
-with the box handle that sits at its centre.
+Two handles and one card, with no solver in between, and each
+handle is drawn as one of the two operands. The **diamond** swinging on a
+stalk above the card's rest centre is the Spin dial: it is the `blend`
+operand, and the `blend` mover takes the card Xform's authored identity
+straight to that frame (envelope 1 is a substitution, not a mix). The
+**box** riding the card's centre is the Slide handle, the `multiply`
+operand, post-applied afterwards. Because the multiply comes *after*, its
+translation acts in the spun frame's parent: the card turns about its own
+centre through 70° and *then* slides along the grid's X, not along its
+own tilted X — which is the whole difference between post- and
+pre-multiplication, visible in one picture. The blue wireframe card is
+the rest pose the pair departs from.
 
 Open it live with:
 

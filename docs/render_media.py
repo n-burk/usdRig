@@ -1,7 +1,12 @@
 #!/usr/bin/env python
 """Render the docs GIFs: one viewport-accurate loop per RigExec operator.
 
-Usage: python docs/render_media.py [example.usda ...] [--out DIR] [--sheet]
+Usage: python docs/render_media.py [example.usda ...] [--page KEY]
+                                  [--out DIR] [--samples N] [--sheet] [--list]
+
+A bare run renders one GIF per docs page that has one; `--page KEY` renders
+that page alone from whatever stage its OPERATORS entry names, and `--list`
+prints the `<key> <- <stage>` jobs without rendering.
 
 Each docs/examples stage is rendered LIVE -- no bake -- through an
 offscreen UsdImagingGL (Storm) engine, so what lands in the GIF is what
@@ -2259,8 +2264,15 @@ def compose(chrome, passes, state, scene, index, total):
     #    handle with a secret -- the IK pole control swings every frame and
     #    was never named.
     blockers = []
+    # A driver is skipped only if it actually receives a CHIP: a page can
+    # animate a dozen controls off one set of splines and only the first
+    # three are ever read out, so skipping every driver left nine
+    # silhouettes with no text on them at all -- on the one page whose
+    # whole subject is telling the shapes apart.
+    chipped = set(scene.driver_paths[:1] if scene.collapse_chips
+                  else scene.driver_paths[:3])
     for path in scene.controls:
-        if path in scene.driver_paths:
+        if path in chipped:
             continue
         point = state.controls.get(path)
         pixel = to_pixel(point) if point is not None else None
@@ -2277,15 +2289,26 @@ def compose(chrome, passes, state, scene, index, total):
         # Flip to the left of the ring rather than let the name run out of
         # the viewport and be cut in half by the clip.
         offset = 8 if x + 8 + span <= VIEW_W - 4 else -(span + 8)
+        # A row of handles puts one tag on top of the next, so a tag that
+        # lands on one already drawn steps down until it is clear.
+        top = y - 9
+        for _attempt in range(4):
+            box = (x + offset - 4, top, x + offset + span + 3, top + 15)
+            if not any(box[0] < other[2] + 2 and box[2] > other[0] - 2 and
+                       box[1] < other[3] + 2 and box[3] > other[1] - 2
+                       for other in blockers):
+                break
+            top += 16
+        top = min(top, VIEW_H - SAFE - 15)
         # The same plate the value chip carries. A name drawn as bare text
         # with a one-pixel shadow is the least readable thing in the
         # frame the moment it lands on a wireframe cage or on the mesh,
         # which is exactly where a control sits.
-        pen.rounded_rectangle([x + offset - 4, y - 9, x + offset + span + 3,
-                               y + 6], radius=3, fill=(16, 18, 22, 228))
-        pen.text((x + offset, y - 7), name, font=chrome.tag_font,
+        pen.rounded_rectangle([x + offset - 4, top, x + offset + span + 3,
+                               top + 15], radius=3, fill=(16, 18, 22, 228))
+        pen.text((x + offset, top + 2), name, font=chrome.tag_font,
                  fill=(203, 215, 227, 245))
-        blockers.append((x + offset - 4, y - 9, x + offset + span + 3, y + 6))
+        blockers.append((x + offset - 4, top, x + offset + span + 3, top + 15))
 
     # 4. the animated driver: ring, leader, and the authored value.
     #
@@ -2511,7 +2534,7 @@ def render_one(src, viewport, bridge, out_dir, sheet=False,
              if p.GetTypeName() == "RigExecRoot"]
 
     chrome = Chrome(scene, notes)
-    viewport.overlay = bool(scene.overlay_weight)
+    viewport.overlay = False
     viewport.new_engine()
     viewport.set_camera(scene.camera)
     viewport.select(scene.driver_paths)
@@ -2529,6 +2552,13 @@ def render_one(src, viewport, bridge, out_dir, sheet=False,
     # everything.
     grid = (viewport.render(scene.stage, scene.samples[0], guides=True,
                             root=grid_prim) if grid_prim else None)
+    # The flatter overlay lighting is for the ASSET, and it is armed after
+    # the floor is drawn: the grid is a piece of furniture, and lifting
+    # its ambient with everything else turns it into the brightest thing
+    # on the page under the field it is supposed to sit beneath.
+    if scene.overlay_weight:
+        viewport.overlay = True
+        viewport.set_camera(scene.camera)
     ghost = viewport.render(scene.stage, scene.samples[0], ghost=True)
     # Storm draws a one-pixel wireframe, which at the supersampled size is
     # half a pixel once reduced and vanishes over a dark gradient. The

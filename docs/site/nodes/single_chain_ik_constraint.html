@@ -378,13 +378,13 @@ the current T/S.</p>
 </div>
 <p class="label">single_chain_ik_constraint.usda</p>
 <div class="content">
-<p class="summary">A flat two-segment arm lies along +X with a shoulder, an elbow, and a
-wrist; the diamond effector control swings up and back over the frame range and
-the wrist tracks it exactly, folding the plank at the elbow. The pole control
-above the elbow is the pole-vector object, and it sits at z = 0 so the elbow
-always breaks upward in the XY plane. Two matrix movers skin the one mesh from
-the two bones through dense static weights that partition the points at the
-elbow column.</p>
+<p class="summary">A box arm — three joints, two segments — lies along +X; the diamond
+effector control swings up and back over the frame range and the wrist tracks
+it exactly, folding the arm at the elbow. The pyramid control above the elbow
+is the pole-vector object, and it swings through z: the bend plane follows it,
+so the elbow leaves the XY plane and comes back. Two matrix movers skin the one
+mesh from the two bones through dense static weights that partition the points
+at the elbow ring.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\single_chain_ik_constraint.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -399,6 +399,7 @@ elbow column.</p>
 <ul class="tips">
 <li><code>solverMode = "singleChain"</code> ignores the pole and <code>inputs:twistDegrees</code> entirely — the effector's orientation picks the bend plane — and the pole relationships are not even bound in that mode, so leftover pole wiring cannot break the compile.</li>
 <li>There is no stretch or softness dial: segment lengths are preserved exactly, and a goal past full reach returns the chain straightened down the root-to-goal ray. Reach for Two-Bone IK when you want stretch.</li>
+<li>The chain, the effector and the pole are named by their own relationships: this operator does not read the generic <code>rigExec:sources</code> list at all.</li>
 <li>Do not author the inherited <code>inputs:affect*</code> masks or the <code>inputs:translationOffset</code>/<code>rotationOffset</code>/<code>scaleOffset</code> values here, and do not author <code>rigExec:rotationOrder</code>: this operator honors no channel group, and any authored opinion — even one equal to the default — is a compile error.</li>
 </ul></div>
 </div>
@@ -421,7 +422,7 @@ elbow column.</p>
 <li><img src="../icons/position_constraint.png" alt=""><a class="t" href="position_constraint.html">Position Constraint</a><p class="d">Moves one provider to the weighted average of its sources' origins.</p></li>
 <li><img src="../icons/rotation_constraint.png" alt=""><a class="t" href="rotation_constraint.html">Rotation Constraint</a><p class="d">Copies orientation from blended sources, leaving position alone.</p></li>
 <li><img src="../icons/scale_constraint.png" alt=""><a class="t" href="scale_constraint.html">Scale Constraint</a><p class="d">Copies blended source scale onto one target, per axis.</p></li>
-<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation together — under a per-source offset.</p></li>
+<li><img src="../icons/parent_constraint.png" alt=""><a class="t" href="parent_constraint.html">Parent Constraint</a><p class="d">Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.</p></li>
 <li class="current"><img src="../icons/single_chain_ik_constraint.png" alt=""><span class="t">Single-Chain IK Constraint</span><p class="d">Re-poses an existing joint chain of any length onto an effector goal.</p></li>
 </ul>
 </div>

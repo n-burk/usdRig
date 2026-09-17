@@ -6,8 +6,9 @@
     Three nested controls curl a six-quad strip. C2 is a namespace child of
     C1 and C3 of C2, each carrying the same local rest offset as its joint,
     so every ring sits on its joint and rides its parent; the chain reads
-    them as `parentRelative`. One matrix mover per joint skins the strip,
-    and the span between joints Seg2 and Seg3 is weighted half to each.
+    them as `parentRelative`. One matrix mover per joint skins the ten-quad
+    strip through three linear weight ramps, so each joint's influence hands
+    over to the next across a two-unit span and both bends draw as arcs.
     """
     defaultPrim = "FkAsset"
     endTimeCode = 1012
@@ -125,7 +126,7 @@ def Xform "FkAsset"
                 uniform float rigExec:defaultWeight = 0
                 uniform token rigExec:rangePolicy = "strict"
                 uniform token rigExec:representation = "dense"
-                uniform float[] rigExec:values = [1, 1, 0.5, 0, 0, 0, 0, 1, 1, 0.5, 0, 0, 0, 0]
+                uniform float[] rigExec:values = [1, 1, 1, 0.75, 0.5, 0.25, 0, 0, 0, 0, 0, 1, 1, 1, 0.75, 0.5, 0.25, 0, 0, 0, 0, 0]
                 rel rigExec:weightTarget = </FkAsset/Geom/Strip.points>
                 uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
             }
@@ -137,7 +138,7 @@ def Xform "FkAsset"
                 uniform float rigExec:defaultWeight = 0
                 uniform token rigExec:rangePolicy = "strict"
                 uniform token rigExec:representation = "dense"
-                uniform float[] rigExec:values = [0, 0, 0.5, 0.5, 0, 0, 0, 0, 0, 0.5, 0.5, 0, 0, 0]
+                uniform float[] rigExec:values = [0, 0, 0, 0.25, 0.5, 0.5, 0.5, 0.25, 0, 0, 0, 0, 0, 0, 0.25, 0.5, 0.5, 0.5, 0.25, 0, 0, 0]
                 rel rigExec:weightTarget = </FkAsset/Geom/Strip.points>
                 uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
             }
@@ -149,7 +150,7 @@ def Xform "FkAsset"
                 uniform float rigExec:defaultWeight = 0
                 uniform token rigExec:rangePolicy = "strict"
                 uniform token rigExec:representation = "dense"
-                uniform float[] rigExec:values = [0, 0, 0, 0.5, 1, 1, 1, 0, 0, 0, 0.5, 1, 1, 1]
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1, 1, 0, 0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1, 1]
                 rel rigExec:weightTarget = </FkAsset/Geom/Strip.points>
                 uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
             }
@@ -200,25 +201,25 @@ def Xform "FkAsset"
         def Mesh "Strip"
         {
             color3f[] primvars:displayColor = [(0.65, 0.4, 1)]
-            float3[] extent = [(0, -0.5, 0), (6, 0.5, 0)]
-            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
-            int[] faceVertexIndices = [0, 1, 8, 7, 1, 2, 9, 8, 2, 3, 10, 9, 3, 4, 11, 10, 4, 5, 12, 11, 5, 6, 13, 12]
-            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            float3[] extent = [(0, -0.5, 0), (5, 0.5, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 12, 11, 1, 2, 13, 12, 2, 3, 14, 13, 3, 4, 15, 14, 4, 5, 16, 15, 5, 6, 17, 16, 6, 7, 18, 17, 7, 8, 19, 18, 8, 9, 20, 19, 9, 10, 21, 20]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
                 interpolation = "vertex"
             )
-            point3f[] points = [(0, -0.5, 0), (1, -0.5, 0), (2, -0.5, 0), (3, -0.5, 0), (4, -0.5, 0), (5, -0.5, 0), (6, -0.5, 0), (0, 0.5, 0), (1, 0.5, 0), (2, 0.5, 0), (3, 0.5, 0), (4, 0.5, 0), (5, 0.5, 0), (6, 0.5, 0)]
+            point3f[] points = [(0, -0.5, 0), (0.5, -0.5, 0), (1, -0.5, 0), (1.5, -0.5, 0), (2, -0.5, 0), (2.5, -0.5, 0), (3, -0.5, 0), (3.5, -0.5, 0), (4, -0.5, 0), (4.5, -0.5, 0), (5, -0.5, 0), (0, 0.5, 0), (0.5, 0.5, 0), (1, 0.5, 0), (1.5, 0.5, 0), (2, 0.5, 0), (2.5, 0.5, 0), (3, 0.5, 0), (3.5, 0.5, 0), (4, 0.5, 0), (4.5, 0.5, 0), (5, 0.5, 0)]
             uniform token subdivisionScheme = "none"
         }
     }
 
     def Camera "MainCam"
     {
-        float2 clippingRange = (0.1854, 156.2)
+        float2 clippingRange = (0.1463, 123.7)
         float focalLength = 35
         float horizontalAperture = 20.95
         float verticalAperture = 11.79
         double3 xformOp:rotateXYZ = (-20, 32, 0)
-        double3 xformOp:translate = (11.82, 7.841, 14.49)
+        double3 xformOp:translate = (9.505, 6.067, 11.49)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

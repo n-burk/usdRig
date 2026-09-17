@@ -139,12 +139,7 @@
 <em>Character Articulation through Profile Curves</em> (SIGGRAPH 2022): instead of
 painting influences per vertex, a rigger traces a handful of profile curves
 over the form — rings around a limb, rails along it, creases around a mouth —
-and articulates those. A curvenet is a <code>UsdGeomPoints</code>, so its <code>points</code> array
-is one shared pool of control points (knots <strong>and</strong> tangent handles) in the
-projection pose, and <code>rigExec:splineIndices</code> names four pool entries per cubic
-spline. Two splines meet because they name the <em>same</em> pool entry: index
-sharing is the entire connectivity model, and it is what detaches the rig from
-the mesh it drives.</p>
+and articulates those.</p>
 <p>A net of cubic splines profiling a surface, the rigging
 representation of de Goes, Sheffler and Fleischer, "Character
 Articulation through Profile Curves" (SIGGRAPH 2022), section 3.</p>
@@ -247,13 +242,18 @@ spline's control polygon length to the surface's mean edge length.</p>
 </div>
 <p class="label">curvenet.usda</p>
 <div class="content">
-<p class="summary">A 96-quad tube profiled by three rings and four rails — 28
-cubic splines over 76 pooled control points, none of which mentions a tube
-vertex. An FK-driven matrix mover bends the upper pool with a painted field, a
-Curvenet Adjustment pushes one bottom-ring knot straight out through the
-Adjuster Mover, and the Profile Mover carries both onto the surface under a
-<code>RigExecCurvenetWeight</code> envelope painted on the same 76 pool points, which
-pins the tube's base row.</p>
+<p class="summary">A tube of 120 vertices profiled by three rings and four
+rails — 28 cubic splines over 76 pooled control points, none of which mentions
+a tube vertex. An FK-driven matrix mover bends the upper pool with a painted
+field, a Curvenet Adjustment (<code>RingPush</code>, on pool knot 4) pushes one
+middle-ring knot straight out through the Adjuster Mover, and the Profile
+Mover carries both onto the surface under a <code>RigExecCurvenetWeight</code> envelope
+painted on the same 76 pool points, which pins the tube's base row.
+In the picture: the cyan wire cage is the rest pose, the green cables floating
+clear of it are the posed net, the orange ring is the Bend control you animate,
+and the small yellow diamond off to the side is <code>RingPush</code> on pool knot 4 —
+the bulge in the silhouette under it is the Adjuster Mover's output reaching
+the surface through the net.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\curvenet.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -287,7 +287,7 @@ pins the tube's base row.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li class="current"><img src="../icons/curvenet.png" alt=""><span class="t">Curvenet</span><p class="d">A net of cubic profile curves that articulates a surface independently of its tessellation.</p></li>
-<li><img src="../icons/curvenet_adjustment.png" alt=""><a class="t" href="curvenet_adjustment.html">Curvenet Adjustment</a><p class="d">An animator handle on one curvenet control point, posed relative to the incoming deformation.</p></li>
+<li><img src="../icons/curvenet_adjustment.png" alt=""><a class="t" href="curvenet_adjustment.html">Curvenet Adjustment</a><p class="d">A handle on one curvenet knot, posed in the deformed frame.</p></li>
 <li><img src="../icons/curvenet_adjuster_mover.png" alt=""><a class="t" href="curvenet_adjuster_mover.html">Curvenet Adjuster Mover</a><p class="d">Applies knot and tangent controls in the frame of the already-deformed net.</p></li>
 <li><img src="../icons/curvenet_mover.png" alt=""><a class="t" href="curvenet_mover.html">Curvenet Mover</a><p class="d">The Profile Mover: propagates a posed curvenet onto a surface.</p></li>
 </ul>

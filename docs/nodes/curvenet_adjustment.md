@@ -1,6 +1,6 @@
 # ![Curvenet Adjustment](../../icons/curvenet_adjustment.png) Curvenet Adjustment
 
-*An animator handle on one curvenet control point, posed relative to the incoming deformation.*
+*A handle on one curvenet knot, posed in the deformed frame.*
 
 | | |
 |---|---|
@@ -29,9 +29,7 @@ frame deduced from the curvenet's own deformed shape, so the same key reads
 as "lift this knot away from the surface" whether the head is at rest or
 mid-turn. Nothing places the control: there is no rest position to author
 and no offset to keep in sync with the net, because the frame is recomputed
-from the incoming points every evaluation. Tangent handles get their own
-adjustments, authored as namespace children of the knot control they belong
-to.
+from the incoming points every evaluation.
 
 An animation control on a curvenet knot. The Adjuster Mover
 transports this control's local avar frame with preceding deformation.
@@ -390,13 +388,19 @@ Valid values: `knot`, `tangent`.
 
 ## Example
 
-The shared curvenet stage profiles its surface with a small net and
-poses the net with ordinary rig machinery; the adjustment is the extra handle
-layered on top, bound to one knot of that net through `rigExec:curvenet` and
-`rigExec:knotIndex`. Its `avars:tx` swings out and back inside the frame range
-alongside the `avars:rz` of the control that bends the net, so the adjuster
-mover writes that one knot (and its incident handles) into the net's points and
-the Profile Mover carries the surface along.
+The shared curvenet stage profiles its tube with a small net and poses
+that net with ordinary rig machinery; `RingPush` is the extra handle layered on
+top, bound to one knot of the middle profile ring through `rigExec:curvenet`
+and `rigExec:knotIndex = 4`. Watch the **diamond** on the right of the net, not
+the ring on the tube: the chip in the corner names `Bend`, the FK control that
+swings the whole thing, while the knot the page is about is the one the diamond
+rides. The same key is authored twice with the same value — `avars:tx = 1.8` at
+frame 1005 and again at 1022 — first with the rig at rest, then under a bend
+held at 45 degrees from 1018 to 1030, and the knot leaves the surface the same
+way both times because the adjuster rebuilds its frame from the incoming net.
+Between the two pushes (1010-1018) only the bend moves, so the two deltas can be
+told apart. The adjuster mover writes that knot and its incident Bezier handles
+into the net's points, and the Profile Mover carries the tube along.
 
 Open it live with:
 

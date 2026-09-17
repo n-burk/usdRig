@@ -524,11 +524,19 @@ packet is invalid, rather than silently collapsing the volume.</p>
 </div>
 <p class="label">sphere_weight.usda</p>
 <div class="content">
-<p class="summary">A 12 x 3 quad plank is lifted by one matrix mover whose joint holds a
+<p class="summary">A 24 x 14 quad plank is lifted by one matrix mover whose joint holds a
 static one-unit rise — no animation on the deformation at all. The only
 spline in the file slides the Probe control along the plank, and the
 sphere authored inside the probe joint rides it, so the region the mover
-grabs travels and a bump walks out to the far end and back.</p>
+grabs travels and a bump walks back and forth. The plank is wider than
+the ball and the travel stops short of both ends, so the field never
+runs off an edge: it stays a complete red disc ringed by grey. The two
+concentric red wire rings are the band's own iso-surfaces — the inner
+one is <code>inputs:falloffMin</code> 0.6, where the field is fully on and the
+plank is lifted the whole unit, and the outer one is
+<code>inputs:falloffMax</code> 1.6, where it is fully off; <code>linear</code> between them
+so the ramp reads as an even slope rather than a plateau with an
+edge.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\sphere_weight.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -562,7 +570,7 @@ grabs travels and a bump walks out to the far end and back.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li><img src="../icons/static_weight.png" alt=""><a class="t" href="static_weight.html">Static Weight</a><p class="d">A painted, time-invariant weight field over moved points.</p></li>
-<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">Modulates a painted field with an animated driver.</p></li>
+<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">The joint is frozen; only the painted field is animated.</p></li>
 <li class="current"><img src="../icons/sphere_weight.png" alt=""><span class="t">Sphere Weight</span><p class="d">A ball of influence: radial falloff generated from a placed volume.</p></li>
 <li><img src="../icons/plane_weight.png" alt=""><a class="t" href="plane_weight.html">Plane Weight</a><p class="d">A half-space gradient: everything past the placed plane is weighted in.</p></li>
 <li><img src="../icons/curve_weight.png" alt=""><a class="t" href="curve_weight.html">Curve Weight</a><p class="d">A tube of influence around a curve's control polygon.</p></li>

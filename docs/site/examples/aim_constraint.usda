@@ -4,11 +4,15 @@
     Docs example: RigExecAimConstraint.
 
     Two eye joints track a look-at control that sweeps across the front of
-    the face. The control draws its own solid sphere guide, so the thing
-    being aimed at is visible in the viewport: the ball slides left to
-    right and the eyes swivel to follow it. Each eye is a white card with a
-    dark pupil card in front, both skinned rigidly to the aimed joint, so
-    the pupils visibly swing with the target.
+    the face. The control carries its own solid sphere guide, so the thing
+    being aimed at is a visible orange ball rather than an implied point:
+    it slides side to side and rises and falls, and each eye swings
+    through about 70 degrees horizontally and another 20 vertically
+    following it. Each eye is a small sphere with a bright iris cone on
+    its front, both skinned rigidly to the aimed joint, so the iris points
+    wherever the eye is aimed at every angle. Both eyes converge on the
+    same target, so the closer the ball comes the more their lines of
+    sight cross.
     """
     defaultPrim = "AimAsset"
     endTimeCode = 1017
@@ -32,9 +36,15 @@ def Xform "AimAsset"
             {
                 double avars:tx = 0
                 double avars:tx.spline = {
-                    1001: -3; pre (0, 0); post linear,
-                    1009: 3; post linear,
-                    1017: -3; post linear,
+                    1001: -2.2; pre (0, 0); post linear,
+                    1009: 2.2; post linear,
+                    1017: -2.2; post linear,
+                }
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1001: -0.45; pre (0, 0); post linear,
+                    1009: 0.7; post linear,
+                    1017: -0.45; post linear,
                 }
                 color3f guide:displayColor = (1, 0.45, 0.15)
                 uniform token guide:drawMode = "geometry"
@@ -42,7 +52,7 @@ def Xform "AimAsset"
                 double guide:scaleY = 0.35
                 double guide:scaleZ = 0.35
                 uniform token guide:shape = "sphere"
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 2.5, 1) )
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1.15, 3, 1) )
                 uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
             }
         }
@@ -53,7 +63,8 @@ def Xform "AimAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.7, 1, 0, 1) )
+                double guide:radius = 0.12
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.9, 1, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
             }
 
@@ -61,7 +72,8 @@ def Xform "AimAsset"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
-                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.7, 1, 0, 1) )
+                double guide:radius = 0.12
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.9, 1, 0, 1) )
                 uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
             }
         }
@@ -200,53 +212,53 @@ def Xform "AimAsset"
     {
         def Mesh "EyeL"
         {
-            color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
-            float3[] extent = [(-1.2, 0.5, 0), (-0.2, 1.5, 0)]
-            int[] faceVertexCounts = [4]
-            int[] faceVertexIndices = [0, 1, 2, 3]
-            point3f[] points = [(-1.2, 0.5, 0), (-0.2, 0.5, 0), (-0.2, 1.5, 0), (-1.2, 1.5, 0)]
+            color3f[] primvars:displayColor = [(0.36, 0.36, 0.4)]
+            float3[] extent = [(-1.35, 0.55, -0.45), (-0.45, 1.45, 0.45)]
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 0, 6, 5, 0, 7, 6, 0, 8, 7, 0, 1, 8, 1, 2, 10, 9, 2, 3, 11, 10, 3, 4, 12, 11, 4, 5, 13, 12, 5, 6, 14, 13, 6, 7, 15, 14, 7, 8, 16, 15, 8, 1, 9, 16, 9, 10, 18, 17, 10, 11, 19, 18, 11, 12, 20, 19, 12, 13, 21, 20, 13, 14, 22, 21, 14, 15, 23, 22, 15, 16, 24, 23, 16, 9, 17, 24, 25, 17, 18, 25, 18, 19, 25, 19, 20, 25, 20, 21, 25, 21, 22, 25, 22, 23, 25, 23, 24, 25, 24, 17]
+            point3f[] points = [(-0.9, 1.45, 0), (-0.5818, 1.3182, 0), (-0.675, 1.3182, 0.225), (-0.9, 1.3182, 0.3182), (-1.125, 1.3182, 0.225), (-1.2182, 1.3182, 0), (-1.125, 1.3182, -0.225), (-0.9, 1.3182, -0.3182), (-0.675, 1.3182, -0.225), (-0.45, 1, 0), (-0.5818, 1, 0.3182), (-0.9, 1, 0.45), (-1.2182, 1, 0.3182), (-1.35, 1, 0), (-1.2182, 1, -0.3182), (-0.9, 1, -0.45), (-0.5818, 1, -0.3182), (-0.5818, 0.6818, 0), (-0.675, 0.6818, 0.225), (-0.9, 0.6818, 0.3182), (-1.125, 0.6818, 0.225), (-1.2182, 0.6818, 0), (-1.125, 0.6818, -0.225), (-0.9, 0.6818, -0.3182), (-0.675, 0.6818, -0.225), (-0.9, 0.55, 0)]
             uniform token subdivisionScheme = "none"
         }
 
         def Mesh "PupilL"
         {
-            color3f[] primvars:displayColor = [(0.1, 0.1, 0.12)]
-            float3[] extent = [(-0.85, 0.85, 0.05), (-0.55, 1.15, 0.05)]
-            int[] faceVertexCounts = [4]
-            int[] faceVertexIndices = [0, 1, 2, 3]
-            point3f[] points = [(-0.85, 0.85, 0.05), (-0.55, 0.85, 0.05), (-0.55, 1.15, 0.05), (-0.85, 1.15, 0.05)]
+            color3f[] primvars:displayColor = [(1, 1, 1)]
+            float3[] extent = [(-1.2, 0.7147, 0.335), (-0.6, 1.2853, 0.62)]
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7, 0, 7, 8, 0, 8, 9, 0, 9, 10, 0, 10, 1]
+            point3f[] points = [(-0.9, 1, 0.62), (-0.6, 1, 0.335), (-0.6573, 1.1763, 0.335), (-0.8073, 1.2853, 0.335), (-0.9927, 1.2853, 0.335), (-1.1427, 1.1763, 0.335), (-1.2, 1, 0.335), (-1.1427, 0.8237, 0.335), (-0.9927, 0.7147, 0.335), (-0.8073, 0.7147, 0.335), (-0.6573, 0.8237, 0.335)]
             uniform token subdivisionScheme = "none"
         }
 
         def Mesh "EyeR"
         {
-            color3f[] primvars:displayColor = [(0.95, 0.95, 0.95)]
-            float3[] extent = [(0.2, 0.5, 0), (1.2, 1.5, 0)]
-            int[] faceVertexCounts = [4]
-            int[] faceVertexIndices = [0, 1, 2, 3]
-            point3f[] points = [(0.2, 0.5, 0), (1.2, 0.5, 0), (1.2, 1.5, 0), (0.2, 1.5, 0)]
+            color3f[] primvars:displayColor = [(0.36, 0.36, 0.4)]
+            float3[] extent = [(0.45, 0.55, -0.45), (1.35, 1.45, 0.45)]
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4, 0, 6, 5, 0, 7, 6, 0, 8, 7, 0, 1, 8, 1, 2, 10, 9, 2, 3, 11, 10, 3, 4, 12, 11, 4, 5, 13, 12, 5, 6, 14, 13, 6, 7, 15, 14, 7, 8, 16, 15, 8, 1, 9, 16, 9, 10, 18, 17, 10, 11, 19, 18, 11, 12, 20, 19, 12, 13, 21, 20, 13, 14, 22, 21, 14, 15, 23, 22, 15, 16, 24, 23, 16, 9, 17, 24, 25, 17, 18, 25, 18, 19, 25, 19, 20, 25, 20, 21, 25, 21, 22, 25, 22, 23, 25, 23, 24, 25, 24, 17]
+            point3f[] points = [(0.9, 1.45, 0), (1.2182, 1.3182, 0), (1.125, 1.3182, 0.225), (0.9, 1.3182, 0.3182), (0.675, 1.3182, 0.225), (0.5818, 1.3182, 0), (0.675, 1.3182, -0.225), (0.9, 1.3182, -0.3182), (1.125, 1.3182, -0.225), (1.35, 1, 0), (1.2182, 1, 0.3182), (0.9, 1, 0.45), (0.5818, 1, 0.3182), (0.45, 1, 0), (0.5818, 1, -0.3182), (0.9, 1, -0.45), (1.2182, 1, -0.3182), (1.2182, 0.6818, 0), (1.125, 0.6818, 0.225), (0.9, 0.6818, 0.3182), (0.675, 0.6818, 0.225), (0.5818, 0.6818, 0), (0.675, 0.6818, -0.225), (0.9, 0.6818, -0.3182), (1.125, 0.6818, -0.225), (0.9, 0.55, 0)]
             uniform token subdivisionScheme = "none"
         }
 
         def Mesh "PupilR"
         {
-            color3f[] primvars:displayColor = [(0.1, 0.1, 0.12)]
-            float3[] extent = [(0.55, 0.85, 0.05), (0.85, 1.15, 0.05)]
-            int[] faceVertexCounts = [4]
-            int[] faceVertexIndices = [0, 1, 2, 3]
-            point3f[] points = [(0.55, 0.85, 0.05), (0.85, 0.85, 0.05), (0.85, 1.15, 0.05), (0.55, 1.15, 0.05)]
+            color3f[] primvars:displayColor = [(1, 1, 1)]
+            float3[] extent = [(0.6, 0.7147, 0.335), (1.2, 1.2853, 0.62)]
+            int[] faceVertexCounts = [3, 3, 3, 3, 3, 3, 3, 3, 3, 3]
+            int[] faceVertexIndices = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 0, 5, 6, 0, 6, 7, 0, 7, 8, 0, 8, 9, 0, 9, 10, 0, 10, 1]
+            point3f[] points = [(0.9, 1, 0.62), (1.2, 1, 0.335), (1.1427, 1.1763, 0.335), (0.9927, 1.2853, 0.335), (0.8073, 1.2853, 0.335), (0.6573, 1.1763, 0.335), (0.6, 1, 0.335), (0.6573, 0.8237, 0.335), (0.8073, 0.7147, 0.335), (0.9927, 0.7147, 0.335), (1.1427, 0.8237, 0.335)]
             uniform token subdivisionScheme = "none"
         }
     }
 
     def Camera "MainCam"
     {
-        float2 clippingRange = (0.1326, 113.1)
+        float2 clippingRange = (0.1135, 98.84)
         float focalLength = 35
         float horizontalAperture = 20.95
         float verticalAperture = 11.79
         double3 xformOp:rotateXYZ = (-46, 26, 0)
-        double3 xformOp:translate = (3.593, 10.53, 9.866)
+        double3 xformOp:translate = (3.082, 9.587, 8.842)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

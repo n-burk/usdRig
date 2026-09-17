@@ -219,12 +219,12 @@ this is the mover prim itself.</p>
 <div class="content selected" id="parms-node-parameters">
 <p class="tab-body-label">Node parameters</p>
 <div class="parameters sbs-group">
-<div class="parameter sbs-item" id="parm-rigexec-representation">
+<div class="parameter sbs-item" id="parm-rigexec-representation-2">
 <p class="label"><code class="pname">rigExec:representation</code><span class="sig">uniform token, default &quot;dense&quot;</span></p>
 <div class="content">
 <dl class="menu"><dt>Valid values</dt><dd><span class="chips"><span class="chip">dense</span></span></dd></dl>
 </div></div>
-<div class="parameter sbs-item" id="parm-rigexec-rangepolicy">
+<div class="parameter sbs-item" id="parm-rigexec-rangepolicy-2">
 <p class="label"><code class="pname">rigExec:rangePolicy</code><span class="sig">uniform token, default &quot;clamp&quot;</span></p>
 <div class="content">
 <dl class="menu"><dt>Valid values</dt><dd><span class="chips"><span class="chip">strict</span><span class="chip">clamp</span></span></dd></dl>
@@ -282,13 +282,16 @@ this is the mover prim itself.</p>
 <p class="label">curvenet_weight.usda</p>
 <div class="content">
 <p class="summary">A flat slab is crossed by a curvenet: one rail down its length and
-two profile curves meeting the rail at shared knots. Eight knot values
-are painted — a ramp from 0 at the root to 1 at the tip, deliberately
-lopsided across the width — and the solve turns them into a field over
-all 39 slab vertices, which a matrix mover uses as its envelope. The
-single <code>avars:rz</code> rotation therefore lands as a graded bend that twists,
-and the net stays at rest because the field reads the authored pool, not
-a mover's output.</p>
+two profile curves meeting the rail at shared knots. The green splines are
+that curvenet itself — it holds the numbers and stays at rest while the slab
+bends, because the parametrization reads the authored pool, not a mover's
+output. Eight knot values are painted and the solve turns them into a field
+over all 65 slab vertices, which a matrix mover uses as its envelope: grey at
+the Lift end, saturating to red at the far end, and the far edge stays paler
+than the near edge, so the single <code>avars:rz</code> rotation lands as a graded bend
+that also twists. Re-meshing the slab from three rows to five changed nothing
+on the net — the same eight numbers re-solve onto whatever vertices are
+there.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\curvenet_weight.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -322,7 +325,7 @@ a mover's output.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li><img src="../icons/static_weight.png" alt=""><a class="t" href="static_weight.html">Static Weight</a><p class="d">A painted, time-invariant weight field over moved points.</p></li>
-<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">Modulates a painted field with an animated driver.</p></li>
+<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">The joint is frozen; only the painted field is animated.</p></li>
 <li><img src="../icons/sphere_weight.png" alt=""><a class="t" href="sphere_weight.html">Sphere Weight</a><p class="d">A ball of influence: radial falloff generated from a placed volume.</p></li>
 <li><img src="../icons/plane_weight.png" alt=""><a class="t" href="plane_weight.html">Plane Weight</a><p class="d">A half-space gradient: everything past the placed plane is weighted in.</p></li>
 <li><img src="../icons/curve_weight.png" alt=""><a class="t" href="curve_weight.html">Curve Weight</a><p class="d">A tube of influence around a curve's control polygon.</p></li>

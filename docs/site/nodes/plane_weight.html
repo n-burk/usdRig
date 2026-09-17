@@ -568,14 +568,18 @@ for the default planeAxis = y they are Z and X.</p>
 </div>
 <p class="label">plane_weight.usda</p>
 <div class="content">
-<p class="summary">A 13-column strip is moved by one matrix mover reading a joint at
-its root, and the
-Bend control holds a constant 35 degrees for the whole shot — the only
+<p class="summary">A 13-column, 5-row strip is moved by one matrix mover reading a
+joint at its root, and the
+Bend control holds a constant 28 degrees for the whole shot — the only
 animation in the file is the PlaneSlide control's <code>avars:tx</code>, which the
 plane weight's own <code>avars:tx</code> is connected to. <code>rigExec:planeAxis = "x"</code>
 with <code>falloffMin = 1.5</code> / <code>falloffMax = -1.5</code> hands the joint everything
-past the plane, so sliding the handle from x = 0.6 out to 4.2 and back
-walks the fold along the strip while the hinge angle never changes.</p>
+past the plane, so sliding the handle from x = 3.0 out to 5.4 and back
+walks the fold along the strip while the hinge angle never changes. The
+two drawn rectangles are the ends of that band: the one at <code>falloffMin</code>,
+1.5 units <em>past</em> the handle, is the fully-ON iso-surface, the one at
+<code>falloffMax</code>, 1.5 units <em>before</em> it, is fully OFF — grey on the strip is
+w = 0, red is w = 1, and the ramp between them is the fold.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\plane_weight.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -609,7 +613,7 @@ walks the fold along the strip while the hinge angle never changes.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li><img src="../icons/static_weight.png" alt=""><a class="t" href="static_weight.html">Static Weight</a><p class="d">A painted, time-invariant weight field over moved points.</p></li>
-<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">Modulates a painted field with an animated driver.</p></li>
+<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">The joint is frozen; only the painted field is animated.</p></li>
 <li><img src="../icons/sphere_weight.png" alt=""><a class="t" href="sphere_weight.html">Sphere Weight</a><p class="d">A ball of influence: radial falloff generated from a placed volume.</p></li>
 <li class="current"><img src="../icons/plane_weight.png" alt=""><span class="t">Plane Weight</span><p class="d">A half-space gradient: everything past the placed plane is weighted in.</p></li>
 <li><img src="../icons/curve_weight.png" alt=""><a class="t" href="curve_weight.html">Curve Weight</a><p class="d">A tube of influence around a curve's control polygon.</p></li>

@@ -121,7 +121,7 @@
 <p class="ancestors"><a href="../index.html">RigExec nodes</a><i class="pathsep">&rsaquo;</i><a href="../index.html#weights">Weights</a><i class="pathsep">&rsaquo;</i></p>
 <div class="pageicon"><img src="../icons/dynamic_weight.png" alt=""></div>
 <h1 class="title"><span class="nodename">Dynamic Weight</span><span class="subtitle"> rig node</span></h1>
-<p class="summary">Modulates a painted field with an animated driver.</p>
+<p class="summary">The joint is frozen; only the painted field is animated.</p>
 </div>
 </header>
 <div id="content">
@@ -243,15 +243,16 @@ this is the mover prim itself.</p>
 </div>
 <p class="label">dynamic_weight.usda</p>
 <div class="content">
-<p class="summary">A 16 × 4 strip is skinned to one joint that holds a fixed 50-degree
+<p class="summary">A 24 × 6 strip is skinned to one joint that holds a fixed 35-degree
 bend, and the only animation in the file is <code>inputs:driver</code> sweeping
-0 → 1 → 0. The base paint ramps over the outboard end only (the last
-seven of sixteen columns), and <code>inputs:scale = 2</code> under a <code>clamp</code> range
-policy overdrives it, so the fully-followed front marches in from the
-tip to the four-fifths mark and back out while the joint never moves.
-The docs renderer tints the
-strip by the field the mover actually consumed — grey at weight 0, red
-at weight 1 — so the red front and the curl that follows it are the same
+0.15 → 1 → 0.15. The base paint is a straight ramp from 0 at the
+one-sixth mark to 1 at the tip, and with <code>inputs:scale = 1</code> the driver
+simply scales that whole field at once: every painted point follows the
+same fraction of the bend at every moment, so the grey-to-red ramp
+brightens and dims — and the strip curls further and relaxes — while the
+control and the joint never move. The docs renderer tints the strip by
+the field the mover actually consumed — grey at weight 0, red at
+weight 1 — so the ramp and the curl that follows it are the same
 event.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\dynamic_weight.usda</code></pre>
@@ -265,7 +266,7 @@ event.</p>
 <div class="content" id="tips-body">
 <div class="notice tip"><p class="label">Tips</p>
 <ul class="tips">
-<li><code>rangePolicy: clamp</code> is what lets <code>inputs:scale</code> overdrive the paint: a result outside [0, 1] is clamped instead of failing the pose, so a 0–1 driver can sweep a fully-followed front across a painted ramp instead of merely fading it.</li>
+<li><code>rangePolicy: clamp</code> is what lets <code>inputs:scale</code> overdrive the paint: a result outside [0, 1] is clamped instead of failing the pose, so a driver can push part of a painted ramp to fully followed while the rest of it still fades.</li>
 <li>The influence overlay paints the field a mover consumed, so point it at the dynamic weight, not the base it wraps: an unbound base has no resolved field of its own to show.</li>
 <li>Drive the driver from another channel (a float math mover or a connection) to tie corrective strength to posing; each of driver, scale, and bias takes at most one float connection.</li>
 </ul></div>
@@ -286,7 +287,7 @@ event.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li><img src="../icons/static_weight.png" alt=""><a class="t" href="static_weight.html">Static Weight</a><p class="d">A painted, time-invariant weight field over moved points.</p></li>
-<li class="current"><img src="../icons/dynamic_weight.png" alt=""><span class="t">Dynamic Weight</span><p class="d">Modulates a painted field with an animated driver.</p></li>
+<li class="current"><img src="../icons/dynamic_weight.png" alt=""><span class="t">Dynamic Weight</span><p class="d">The joint is frozen; only the painted field is animated.</p></li>
 <li><img src="../icons/sphere_weight.png" alt=""><a class="t" href="sphere_weight.html">Sphere Weight</a><p class="d">A ball of influence: radial falloff generated from a placed volume.</p></li>
 <li><img src="../icons/plane_weight.png" alt=""><a class="t" href="plane_weight.html">Plane Weight</a><p class="d">A half-space gradient: everything past the placed plane is weighted in.</p></li>
 <li><img src="../icons/curve_weight.png" alt=""><a class="t" href="curve_weight.html">Curve Weight</a><p class="d">A tube of influence around a curve's control polygon.</p></li>

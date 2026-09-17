@@ -259,11 +259,17 @@ display on for a small asset buried it in solver geometry.</p>
 </div>
 <p class="label">blend_point_frames.usda</p>
 <div class="content">
-<p class="summary">Two FK chains hold opposite poses of one three-joint arm — FkA curls it
-up in the front lane, FkB curls it down in the back — and both stay on
-screen as joint guides. A third chain is the blend of the two, skinned to
-a ten-quad strip, and the weight sweeps 0 → 1 → 0 over 24 frames, so the
-strip leaves the FkA pose, arrives at the FkB pose, and comes back.</p>
+<p class="summary">Two FK chains hold very different poses of one three-joint arm, four
+units apart so neither hides the other. <code>FkUp</code> — the <code>UpCtl</code> rings in the
+near lane, posing <code>PoseUp1/2/3</code> — is input <strong>A</strong>, a tight upward curl;
+<code>FkDown</code> — the <code>DownCtl</code> rings in the far lane, posing <code>PoseDown1/2/3</code> —
+is input <strong>B</strong>, a long low hook. <code>PoseBlend</code> writes the mix into
+<code>Arm1/Arm2/Arm3</code>, and three matrix movers skin a 21×3 strip to those
+three joints, so the strip is the only thing in frame that shows what the
+blend produced. The weight sweeps 0 → 1 and back: at 0 the strip lies on
+the A chain, at 1 on the B chain, and every value between is the
+interpolation of the two <em>transforms</em> — a shape neither input has, and
+not the average of the two skeletons' joint positions.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\blend_point_frames.usda</code></pre>
 <p>Re-render the GIF above with:</p>

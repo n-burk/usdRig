@@ -985,8 +985,17 @@ def _sig(attr):
     return attr["type"]
 
 
-def _parm_html(attr):
+def _parm_html(attr, seen=None):
+    # A page can print the same attribute in two groups -- a weight page
+    # carries `rigExec:representation` under both `RigExecWeightObject`
+    # and its own node parameters -- and one id used twice is an invalid
+    # document whose anchor links resolve to whichever came first. The
+    # repeat is numbered instead.
     slug = "parm-" + _slug(attr["name"])
+    if seen is not None:
+        seen[slug] = seen.get(slug, 0) + 1
+        if seen[slug] > 1:
+            slug = "%s-%d" % (slug, seen[slug])
     chunks = ['<div class="parameter sbs-item" id="%s">' % slug,
               '<p class="label"><code class="pname">%s</code>'
               '<span class="sig">%s</span></p>'
@@ -1112,13 +1121,14 @@ def render_node(key, category, classes):
                             _slug(group_title), _esc(group_title)))
         heads.append("</div>")
     bodies = ['<div class="tab-bodies">']
+    seen_parms = {}
     for group_title, group_schema in groups:
         ident = "parms-" + _slug(group_title)
         bodies.append('<div class="content selected" id="%s">' % ident)
         bodies.append('<p class="tab-body-label">%s</p>' % _esc(group_title))
         bodies.append('<div class="parameters sbs-group">')
         for attr in classes[group_schema]["attrs"]:
-            bodies.append(_parm_html(attr))
+            bodies.append(_parm_html(attr, seen_parms))
         bodies.append("</div></div>")
     bodies.append("</div></div>")
     body.append(_section("parameters", "Parameters",

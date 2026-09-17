@@ -299,12 +299,17 @@ Finite and non-negative; not renormalized.</p>
 </div>
 <p class="label">skin_mover.usda</p>
 <div class="content">
-<p class="summary">A three-joint chain curls and rolls a 12-quad strip through one skin
-mover. Every point carries two influence slots whose weights ramp 1 → 0
-across each span, so the strip bends as a curve rather than creasing at
-the joints; <code>rigExec:skinningMethod</code> is <code>dualQuaternion</code>, which holds
-the strip's cross-section at its rest width of 1.000 through the roll
-where <code>classicLinear</code> narrows it to 0.788.</p>
+<p class="summary">Two identical 24-quad ribbons lie flat in the floor on either side of
+one three-joint chain, and each is skinned by ONE skin mover. Both
+movers name the same <code>rigExec:influences</code> and carry the same
+<code>rigExec:jointIndices</code> / <code>rigExec:jointWeights</code> — two influence slots
+per point, ramping 1 → 0 linearly across each span, so the bend draws as
+a curve rather than a crease at the joints. The only difference between
+them is <code>rigExec:skinningMethod</code>: the bright ribbon is
+<code>dualQuaternion</code>, the dim one <code>classicLinear</code>. Where the wrist rolls 45°
+the linear ribbon's cross-section pinches from its rest width of 1.500
+to 1.386 and its tip falls short of the arc; the dual-quaternion ribbon
+holds 1.500 at every column.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\skin_mover.usda</code></pre>
 <p>Re-render the GIF above with:</p>

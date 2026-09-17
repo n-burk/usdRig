@@ -160,13 +160,19 @@ Exactly one RigExecCurvenet supplying the posed control points.
 
 ## Example
 
-Shares the Curvenet page's stage: a profile net drawn over a 96-quad
-tube, its knots posed by ordinary rig machinery — a matrix mover under an
-FK-driven joint, then a Curvenet Adjustment through the Adjuster Mover —
-and `ProfileMover` propagating that posed net onto `Tube.points` under a
-`RigExecCurvenetWeight` envelope. The net's 76 pooled control points are
-the only thing the rig names; the tube's 108 vertices appear in no
-relationship anywhere — the whole point of the representation.
+Shares the Curvenet page's stage: a profile net drawn over a
+144-quad capped tube, its knots posed by ordinary rig machinery — a matrix
+mover under an FK-driven joint, then a Curvenet Adjustment through the
+Adjuster Mover — and `ProfileMover` propagating that posed net onto
+`Tube.points` under a `RigExecCurvenetWeight` envelope. In the picture the
+**green** curves are the posed net, the **cyan** wireframe is the rest pose
+the whole thing departs from, and the small **yellow diamond** off the
+middle ring is the `RingPush` knot handle. The wide swing is the bend; the
+local lobe pushed out beside that diamond is *one* knot moved through the
+Adjuster, and the surface reproducing it — with the rest of the tube left
+alone — is the thing a skin cluster cannot do. The net's 76 pooled control
+points are the only thing the rig names; the tube's 168 vertices appear in
+no relationship anywhere — the whole point of the representation.
 
 Open it live with:
 

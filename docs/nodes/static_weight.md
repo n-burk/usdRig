@@ -89,13 +89,15 @@ Valid values: `strict`, `clamp`.
 
 ## Example
 
-One joint rotates 0 → 50 → 0 degrees while a dense field over a
-16 × 4 strip holds the four root columns at 0 and ramps to 1 at the tip,
-so the bend grows along the strip and the root never leaves the ground —
-paint, not animation, shaping the deformation. The docs renderer tints
-the strip by the field the mover actually consumed, grey at weight 0 and
-red at weight 1, so the fixed ramp is visible while the pose swings
-through it.
+One joint yaws 0 → −32 → 0 degrees while a dense field over a
+24 × 4 strip holds the root columns at 0 and ramps to 1 at the tip, so
+the bend grows along the strip and the root never leaves its rest
+position — paint, not animation, shaping the deformation. The sweep
+stays in the ground plane, so the strip keeps its face to the camera and
+the ramp reads the same at the extreme as it does at rest. The docs
+renderer tints the strip by the field the mover actually consumed, grey
+at weight 0 and red at weight 1, so the fixed ramp is visible while the
+pose swings through it.
 
 Open it live with:
 

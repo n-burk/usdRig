@@ -227,13 +227,15 @@ this is the mover prim itself.</p>
 </div>
 <p class="label">static_weight.usda</p>
 <div class="content">
-<p class="summary">One joint rotates 0 → 50 → 0 degrees while a dense field over a
-16 × 4 strip holds the four root columns at 0 and ramps to 1 at the tip,
-so the bend grows along the strip and the root never leaves the ground —
-paint, not animation, shaping the deformation. The docs renderer tints
-the strip by the field the mover actually consumed, grey at weight 0 and
-red at weight 1, so the fixed ramp is visible while the pose swings
-through it.</p>
+<p class="summary">One joint yaws 0 → −32 → 0 degrees while a dense field over a
+24 × 4 strip holds the root columns at 0 and ramps to 1 at the tip, so
+the bend grows along the strip and the root never leaves its rest
+position — paint, not animation, shaping the deformation. The sweep
+stays in the ground plane, so the strip keeps its face to the camera and
+the ramp reads the same at the extreme as it does at rest. The docs
+renderer tints the strip by the field the mover actually consumed, grey
+at weight 0 and red at weight 1, so the fixed ramp is visible while the
+pose swings through it.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\static_weight.usda</code></pre>
 <p>Re-render the GIF above with:</p>
@@ -267,7 +269,7 @@ through it.</p>
 <div class="content" id="more-body">
 <ul class="catlist">
 <li class="current"><img src="../icons/static_weight.png" alt=""><span class="t">Static Weight</span><p class="d">A painted, time-invariant weight field over moved points.</p></li>
-<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">Modulates a painted field with an animated driver.</p></li>
+<li><img src="../icons/dynamic_weight.png" alt=""><a class="t" href="dynamic_weight.html">Dynamic Weight</a><p class="d">The joint is frozen; only the painted field is animated.</p></li>
 <li><img src="../icons/sphere_weight.png" alt=""><a class="t" href="sphere_weight.html">Sphere Weight</a><p class="d">A ball of influence: radial falloff generated from a placed volume.</p></li>
 <li><img src="../icons/plane_weight.png" alt=""><a class="t" href="plane_weight.html">Plane Weight</a><p class="d">A half-space gradient: everything past the placed plane is weighted in.</p></li>
 <li><img src="../icons/curve_weight.png" alt=""><a class="t" href="curve_weight.html">Curve Weight</a><p class="d">A tube of influence around a curve's control polygon.</p></li>

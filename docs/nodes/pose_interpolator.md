@@ -364,13 +364,18 @@ that is off has to be off, not frozen.
 
 ## Example
 
-An Elbow control bends a ten-quad strip 80 degrees about Z and opens it
-again, with two matrix movers skinning the strip to the Upper and Fore
-joints. The interpolator watches the Fore joint and carries two poses,
-`neutral` at identity and `bent` at 80 degrees, each 1.396 radians wide;
-`bent.outputs:weight` is connected to a blend channel's `inputs:weight`, so
-a blendshape mover swells the outside of the elbow exactly as far as the
-joint has closed — 1.000 at the bent pose, 0.000 at rest.
+An Elbow control closes a skinned 30-quad strip to 40 degrees, holds
+there, closes to 80, holds again and opens; two matrix movers skin the strip
+to the Upper and Fore joints. The interpolator watches the **Fore joint** —
+not the Elbow control the animator keys — and carries three poses, `neutral`
+at identity, `half` at 40 degrees and `bent` at 80, each 0.7 radians wide,
+which is the spacing between them. Watch the three floats trade: at rest
+`neutral` reads 1.000 and `half` and `bent` 0.000; a third of the way in they
+split 0.529 / 0.601 / 0.000; on the first hold `half` reads 1.000 alone; on
+the second `bent` reads 1.000 and the others 0.000. Only `bent.outputs:weight`
+is connected to the blend channel, so the corrective swells on the outside of
+the elbow exactly when that one float does — nothing at the `half` hold, full
+at the `bent` hold.
 
 Open it live with:
 
@@ -389,6 +394,7 @@ python docs/render_media.py --page pose_interpolator
 - Author a non-zero `rigExec:rotationRadius` on every pose, roughly the angle between neighbouring poses. A per-pose zero is used literally rather than fitted (`rbf.cpp:992-1001`, `rbf.cpp:407-413`), and an interpolator whose radii are all zero reads 1 only when the driver stands exactly on a pose and 0 everywhere else.
 - Drive from a joint whose parent already carries the motion you do not want measured: the phase measures the driver's rotation relative to its rest in its nearest frame-publishing ancestor's frame, so the parent subtracts its own share back out. Measuring against anything other than the immediate namespace parent is reported as a warning.
 - `rigExec:enableTranslation` is not measured by this phase — it warns and judges the poses on rotation alone (`rigEvaluator.cpp:2852-2862`). Disabling a whole interpolator publishes zeros, while disabling one pose drops it out of the solve entirely so the other poses' weights change.
+- A radius wider than the pose spacing makes the Gaussian rows overlap enough that the inverse pushes a far pose negative between two near ones. `rigExec:allowNegativeWeights = 0` clamps that lobe; leave it on only when a consumer wants the extrapolation.
 
 ## See also
 

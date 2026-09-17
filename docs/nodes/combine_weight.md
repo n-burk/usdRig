@@ -141,11 +141,17 @@ Reflects the folded field about 0.5; lerped, as elsewhere.
 
 ## Example
 
-Two sphere volumes over one flat 24-quad panel, folded with `max`.
-A static joint holds a 1.6-unit lift, so the panel's height is literally
-the combined field; the Anchor volume sits still while the Slider volume
-rides an animated control from x = 1.8 in to -0.4 and back. Two separate
-domes merge into one wide ridge as the volumes overlap, then part again.
+Two sphere volumes over one flat 192-quad panel, folded with `max`.
+A static joint holds a 1.0-unit lift, so the panel's height is literally
+the combined field. The Anchor volume sits still at x = -1.2; the Slider
+volume rides an animated control from x = 4.8 — parked clear of the panel,
+where it contributes nothing, so the first frame is an honest picture of
+the Anchor field alone — in to x = -0.2, holds there, and leaves again.
+A second dome arrives, the two stand apart with a flat valley between
+them, then merge into one wide ridge. `max` is the union, so neither
+volume can ever dim the other; swap it for `min` and only the lens where
+both volumes agree is left standing, and `multiply` softens that same
+intersection.
 
 Open it live with:
 

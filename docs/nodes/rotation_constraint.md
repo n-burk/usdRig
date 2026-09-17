@@ -201,11 +201,14 @@ have exactly one entry per source.
 
 ## Example
 
-A Swing control both rolls about Z and slides to the right; a rotation
-constraint copies its orientation onto the Panel joint, and a matrix mover
-skins a twelve-quad card to that joint. The card turns about the post it
-sits on and never follows the control's translation, because the
-constraint writes the rotation channel only.
+A Swing control rolls about Z and, at the same time, slides up and to
+the right; a rotation constraint copies its orientation onto the Panel
+joint, and a matrix mover skins a twelve-quad card (`PanelCard`) to that
+joint. `inputs:rotationOffset` stays at zero and the
+`inputs:affectRotationX/Y/Z` masks stay at their all-on defaults here, so
+what you see is the unshaped copy — the source orientation and nothing
+else. Watch the handle slide up and to the right while the card's base
+never leaves the post — only the roll crosses the constraint.
 
 Open it live with:
 

@@ -419,12 +419,18 @@ Per-axis divisor making the tube elliptical; see RigExecSphereWeight.
 
 ## Example
 
-A flat 5x7 sheet is weighted by a tube around a shallow V-shaped
-curve, and a matrix mover lifts the weighted points 1.3 units. Nothing in
-the rig animates — the Lift control holds `avars:ty` for the whole shot —
-but the curve's own points sweep across the sheet and back, so a curved
-ridge travels with it. What moves is not the transform but which points
-the field grabs.
+A flat 13x13 sheet is weighted by a tube around a shallow
+V-shaped curve, and a matrix mover lifts the weighted points 0.8 units.
+Nothing in the rig animates — the Lift control holds `avars:ty` for the
+whole shot — but the curve's own points sweep across the sheet and back,
+so a curved ridge travels with it. What moves is not the transform but
+which points the field grabs. Two different things are drawn: the amber
+wire tube is the pair of iso-surfaces at `inputs:falloffMin` and
+`inputs:falloffMax`, and the red band painted on the sheet is the field
+those two distances produce — the tube is the rule, the band is the
+result. The curve itself rides at `y = 0.3`, just clear of the sheet, so
+the control polygon the distance is measured to stays visible above the
+geometry it weights.
 
 Open it live with:
 

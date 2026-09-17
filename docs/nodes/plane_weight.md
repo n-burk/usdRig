@@ -472,14 +472,18 @@ for the default planeAxis = y they are Z and X.
 
 ## Example
 
-A 13-column strip is moved by one matrix mover reading a joint at
-its root, and the
-Bend control holds a constant 35 degrees for the whole shot — the only
+A 13-column, 5-row strip is moved by one matrix mover reading a
+joint at its root, and the
+Bend control holds a constant 28 degrees for the whole shot — the only
 animation in the file is the PlaneSlide control's `avars:tx`, which the
 plane weight's own `avars:tx` is connected to. `rigExec:planeAxis = "x"`
 with `falloffMin = 1.5` / `falloffMax = -1.5` hands the joint everything
-past the plane, so sliding the handle from x = 0.6 out to 4.2 and back
-walks the fold along the strip while the hinge angle never changes.
+past the plane, so sliding the handle from x = 3.0 out to 5.4 and back
+walks the fold along the strip while the hinge angle never changes. The
+two drawn rectangles are the ends of that band: the one at `falloffMin`,
+1.5 units *past* the handle, is the fully-ON iso-surface, the one at
+`falloffMax`, 1.5 units *before* it, is fully OFF — grey on the strip is
+w = 0, red is w = 1, and the ramp between them is the fold.
 
 Open it live with:
 

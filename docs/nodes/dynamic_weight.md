@@ -1,6 +1,6 @@
 # ![Dynamic Weight](../../icons/dynamic_weight.png) Dynamic Weight
 
-*Modulates a painted field with an animated driver.*
+*The joint is frozen; only the painted field is animated.*
 
 | | |
 |---|---|
@@ -106,15 +106,16 @@ Valid values: `multiply`.
 
 ## Example
 
-A 16 × 4 strip is skinned to one joint that holds a fixed 50-degree
+A 24 × 6 strip is skinned to one joint that holds a fixed 35-degree
 bend, and the only animation in the file is `inputs:driver` sweeping
-0 → 1 → 0. The base paint ramps over the outboard end only (the last
-seven of sixteen columns), and `inputs:scale = 2` under a `clamp` range
-policy overdrives it, so the fully-followed front marches in from the
-tip to the four-fifths mark and back out while the joint never moves.
-The docs renderer tints the
-strip by the field the mover actually consumed — grey at weight 0, red
-at weight 1 — so the red front and the curl that follows it are the same
+0.15 → 1 → 0.15. The base paint is a straight ramp from 0 at the
+one-sixth mark to 1 at the tip, and with `inputs:scale = 1` the driver
+simply scales that whole field at once: every painted point follows the
+same fraction of the bend at every moment, so the grey-to-red ramp
+brightens and dims — and the strip curls further and relaxes — while the
+control and the joint never move. The docs renderer tints the strip by
+the field the mover actually consumed — grey at weight 0, red at
+weight 1 — so the ramp and the curl that follows it are the same
 event.
 
 Open it live with:
@@ -131,7 +132,7 @@ python docs/render_media.py --page dynamic_weight
 
 ## Tips
 
-- `rangePolicy: clamp` is what lets `inputs:scale` overdrive the paint: a result outside [0, 1] is clamped instead of failing the pose, so a 0–1 driver can sweep a fully-followed front across a painted ramp instead of merely fading it.
+- `rangePolicy: clamp` is what lets `inputs:scale` overdrive the paint: a result outside [0, 1] is clamped instead of failing the pose, so a driver can push part of a painted ramp to fully followed while the rest of it still fades.
 - The influence overlay paints the field a mover consumed, so point it at the dynamic weight, not the base it wraps: an unbound base has no resolved field of its own to show.
 - Drive the driver from another channel (a float math mover or a connection) to tie corrective strength to posing; each of driver, scale, and bias takes at most one float connection.
 

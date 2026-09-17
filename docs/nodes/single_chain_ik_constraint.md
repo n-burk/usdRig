@@ -257,13 +257,13 @@ the current T/S.
 
 ## Example
 
-A flat two-segment arm lies along +X with a shoulder, an elbow, and a
-wrist; the diamond effector control swings up and back over the frame range and
-the wrist tracks it exactly, folding the plank at the elbow. The pole control
-above the elbow is the pole-vector object, and it sits at z = 0 so the elbow
-always breaks upward in the XY plane. Two matrix movers skin the one mesh from
-the two bones through dense static weights that partition the points at the
-elbow column.
+A box arm — three joints, two segments — lies along +X; the diamond
+effector control swings up and back over the frame range and the wrist tracks
+it exactly, folding the arm at the elbow. The pyramid control above the elbow
+is the pole-vector object, and it swings through z: the bend plane follows it,
+so the elbow leaves the XY plane and comes back. Two matrix movers skin the one
+mesh from the two bones through dense static weights that partition the points
+at the elbow ring.
 
 Open it live with:
 
@@ -281,6 +281,7 @@ python docs/render_media.py --page single_chain_ik_constraint
 
 - `solverMode = "singleChain"` ignores the pole and `inputs:twistDegrees` entirely — the effector's orientation picks the bend plane — and the pole relationships are not even bound in that mode, so leftover pole wiring cannot break the compile.
 - There is no stretch or softness dial: segment lengths are preserved exactly, and a goal past full reach returns the chain straightened down the root-to-goal ray. Reach for Two-Bone IK when you want stretch.
+- The chain, the effector and the pole are named by their own relationships: this operator does not read the generic `rigExec:sources` list at all.
 - Do not author the inherited `inputs:affect*` masks or the `inputs:translationOffset`/`rotationOffset`/`scaleOffset` values here, and do not author `rigExec:rotationOrder`: this operator honors no channel group, and any authored opinion — even one equal to the default — is a compile error.
 
 ## See also

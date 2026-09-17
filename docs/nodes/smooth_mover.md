@@ -96,12 +96,17 @@ every application of the atomic mover.
 
 ## Example
 
-A 12×8 sheet is authored crumpled: a fine egg-crate quilt riding on a
-broad swell. As the mover's `inputs:defaultWeight` spline ramps 0 → 1 → 0
-the single Laplacian step irons the quilt down to a fifth of its
-amplitude and then lets it crumple back, while the swell keeps 94% of
-its height — the frequency split made visible.
-The border ring creeps inward as it relaxes because boundary points have
+A 13×9 sheet is authored crumpled: an egg-crate quilt riding on a
+broad swell. The quilt's period is exactly four grid steps in both axes,
+which is the one frequency a uniform Laplacian annihilates — its
+eigenvalue is (cos π/2 + cos π/2)/2 = 0 — while the swell's is
+(cos π/12 + cos π/8)/2 = 0.9449. So as the mover's `inputs:defaultWeight`
+spline ramps 0 → 1 → 0 the single step irons the quilt away to
+*nothing* and lets it crumple back, while the swell keeps 94.5% of its
+height: the sheet's centre goes 0.610 → 0.425, which is 94.5% of the
+0.45 swell alone. The frequency split, made exact.
+The border ring lifts as it relaxes — its mid-edge point rises 0.16 →
+0.04 above the flat and pulls 0.17 inward — because boundary points have
 fewer neighbors to average.
 
 Open it live with:

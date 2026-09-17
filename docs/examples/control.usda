@@ -1017,12 +1017,12 @@ def Xform "ControlAsset"
 
     def Camera "MainCam"
     {
-        float2 clippingRange = (0.1936, 166.1)
+        float2 clippingRange = (0.1624, 137.4)
         float focalLength = 35
         float horizontalAperture = 20.95
         float verticalAperture = 11.79
-        double3 xformOp:rotateXYZ = (-20, 32, 0)
-        double3 xformOp:translate = (9.706, 7.466, 15.29)
+        double3 xformOp:rotateXYZ = (-20, 14, 0)
+        double3 xformOp:translate = (3.818, 6.421, 14.7)
         uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
     }
 }

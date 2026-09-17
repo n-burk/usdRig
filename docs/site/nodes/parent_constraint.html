@@ -121,7 +121,7 @@
 <p class="ancestors"><a href="../index.html">RigExec nodes</a><i class="pathsep">&rsaquo;</i><a href="../index.html#constraints">Constraints</a><i class="pathsep">&rsaquo;</i></p>
 <div class="pageicon"><img src="../icons/parent_constraint.png" alt=""></div>
 <h1 class="title"><span class="nodename">Parent Constraint</span><span class="subtitle"> rig node</span></h1>
-<p class="summary">Carries a target with its sources — position and rotation together — under a per-source offset.</p>
+<p class="summary">Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.</p>
 </div>
 </header>
 <div id="content">
@@ -327,15 +327,15 @@ have exactly one entry per source.</p>
 <div class="content selected" id="parms-node-parameters">
 <p class="tab-body-label">Node parameters</p>
 <div class="parameters sbs-group">
-<div class="parameter sbs-item" id="parm-inputs-affectscalex">
+<div class="parameter sbs-item" id="parm-inputs-affectscalex-2">
 <p class="label"><code class="pname">inputs:affectScaleX</code><span class="sig">bool, default false</span></p>
 <div class="content empty">
 </div></div>
-<div class="parameter sbs-item" id="parm-inputs-affectscaley">
+<div class="parameter sbs-item" id="parm-inputs-affectscaley-2">
 <p class="label"><code class="pname">inputs:affectScaleY</code><span class="sig">bool, default false</span></p>
 <div class="content empty">
 </div></div>
-<div class="parameter sbs-item" id="parm-inputs-affectscalez">
+<div class="parameter sbs-item" id="parm-inputs-affectscalez-2">
 <p class="label"><code class="pname">inputs:affectScaleZ</code><span class="sig">bool, default false</span></p>
 <div class="content empty">
 </div></div>
@@ -364,7 +364,7 @@ have exactly one entry per source.</p>
 <p class="label">parent_constraint.usda</p>
 <div class="content">
 <p class="summary">A Prop joint is parented to the Hand control with a
-<code>(1.6, 0, 0)</code> translation offset and a 25-degree Z rotation offset, and a blue
+<code>(1.6, 0, 0)</code> translation offset and a 25-degree Z rotation offset, and a flat
 card is skinned rigidly to that joint, so the card rides out and rotates with
 the hand while holding that exact distance and tilt.
 Mid-shot <code>inputs:defaultWeight</code> fades 1 → 0 and the card slides back to its
@@ -407,7 +407,7 @@ home.</p>
 <li><img src="../icons/position_constraint.png" alt=""><a class="t" href="position_constraint.html">Position Constraint</a><p class="d">Moves one provider to the weighted average of its sources' origins.</p></li>
 <li><img src="../icons/rotation_constraint.png" alt=""><a class="t" href="rotation_constraint.html">Rotation Constraint</a><p class="d">Copies orientation from blended sources, leaving position alone.</p></li>
 <li><img src="../icons/scale_constraint.png" alt=""><a class="t" href="scale_constraint.html">Scale Constraint</a><p class="d">Copies blended source scale onto one target, per axis.</p></li>
-<li class="current"><img src="../icons/parent_constraint.png" alt=""><span class="t">Parent Constraint</span><p class="d">Carries a target with its sources — position and rotation together — under a per-source offset.</p></li>
+<li class="current"><img src="../icons/parent_constraint.png" alt=""><span class="t">Parent Constraint</span><p class="d">Carries a target with its sources — position and rotation — under a per-source offset; weight attaches and releases.</p></li>
 <li><img src="../icons/single_chain_ik_constraint.png" alt=""><a class="t" href="single_chain_ik_constraint.html">Single-Chain IK Constraint</a><p class="d">Re-poses an existing joint chain of any length onto an effector goal.</p></li>
 </ul>
 </div>

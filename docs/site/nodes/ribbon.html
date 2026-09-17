@@ -291,16 +291,29 @@ display on for a small asset buried it in solver geometry.</p>
 </div>
 <p class="label">ribbon.usda</p>
 <div class="content">
-<p class="summary">A 24-quad strip stands seven units tall over an invisible
-four-CV B-spline driver, and the driver's control points swing on a
-staggered cycle: the strip curls up one side until its tip has travelled
-2.5 units across and dropped 1.7, sweeps back through upright around
-frame 1012, then whips 3.8 units out the other way and recovers, closing
-the loop exactly at frame 1024. <code>rigExec:sampleCount</code> is nine, a curve
-mover in <code>ribbon</code> mode rides the strip along the run through its
-<code>primvars:st</code> bind coordinates, and a nine-joint chain named on
-<code>rigExec:joints</code> takes the same nine samples so the run reads as a dense
-spine inside the bending ribbon.</p>
+<p class="summary">A 24-quad strip stands seven units tall beside an invisible
+four-CV B-spline driver — offset a half-width along the bind binormal, so
+the driver run and the nine joint guides on it sit clear of the mesh
+instead of inside it — and the driver's control points swing on a
+staggered cycle. The strip curls up one side until its tip has travelled
+2.2 units across, dropped 2.2 and swung 1.0 toward camera around frame
+1006; it sweeps back through upright near frame 1012, at its deepest
+point toward camera (2.8 units, frame 1013); then it whips 4.0 units out
+the other way by frame 1018 and recovers, closing the loop exactly at
+frame 1024. The out-of-plane half of that swing is the part worth
+watching: it is authored a quarter cycle out of phase with the sideways
+sweep, so the driver is never planar and the rotation-minimizing frames
+visibly roll as the strip travels — a planar driver would bend without
+ever twisting. Only the two upper control points carry that Z, and the
+upper one carries nearly all of it: the first tangent is set by CV0 and
+CV2, and the seed normal is the world axis least parallel to it, so a Z
+component there large enough to beat the X component would pick a
+different axis and roll the whole wrap 90 degrees.
+<code>rigExec:sampleCount</code> is nine, a curve mover in <code>ribbon</code> mode rides the
+strip along the run through its <code>primvars:st</code> bind coordinates, and a
+nine-joint chain named on <code>rigExec:joints</code> takes the same nine samples so
+the run reads as a dense spine running up the edge of the bending
+ribbon.</p>
 <p>Open it live with:</p>
 <pre><code>bin\launch_usdview.bat docs\examples\ribbon.usda</code></pre>
 <p>Re-render the GIF above with:</p>

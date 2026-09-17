@@ -416,11 +416,19 @@ packet is invalid, rather than silently collapsing the volume.
 
 ## Example
 
-A 12 x 3 quad plank is lifted by one matrix mover whose joint holds a
+A 24 x 14 quad plank is lifted by one matrix mover whose joint holds a
 static one-unit rise — no animation on the deformation at all. The only
 spline in the file slides the Probe control along the plank, and the
 sphere authored inside the probe joint rides it, so the region the mover
-grabs travels and a bump walks out to the far end and back.
+grabs travels and a bump walks back and forth. The plank is wider than
+the ball and the travel stops short of both ends, so the field never
+runs off an edge: it stays a complete red disc ringed by grey. The two
+concentric red wire rings are the band's own iso-surfaces — the inner
+one is `inputs:falloffMin` 0.6, where the field is fully on and the
+plank is lifted the whole unit, and the outer one is
+`inputs:falloffMax` 1.6, where it is fully off; `linear` between them
+so the ramp reads as an even slope rather than a plateau with an
+edge.
 
 Open it live with:
 

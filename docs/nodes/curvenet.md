@@ -25,12 +25,7 @@ The rigging primitive of de Goes, Sheffler & Fleischer,
 *Character Articulation through Profile Curves* (SIGGRAPH 2022): instead of
 painting influences per vertex, a rigger traces a handful of profile curves
 over the form — rings around a limb, rails along it, creases around a mouth —
-and articulates those. A curvenet is a `UsdGeomPoints`, so its `points` array
-is one shared pool of control points (knots **and** tangent handles) in the
-projection pose, and `rigExec:splineIndices` names four pool entries per cubic
-spline. Two splines meet because they name the *same* pool entry: index
-sharing is the entire connectivity model, and it is what detaches the rig from
-the mesh it drives.
+and articulates those.
 
 A net of cubic splines profiling a surface, the rigging
 representation of de Goes, Sheffler and Fleischer, "Character
@@ -119,13 +114,18 @@ spline's control polygon length to the surface's mean edge length.
 
 ## Example
 
-A 96-quad tube profiled by three rings and four rails — 28
-cubic splines over 76 pooled control points, none of which mentions a tube
-vertex. An FK-driven matrix mover bends the upper pool with a painted field, a
-Curvenet Adjustment pushes one bottom-ring knot straight out through the
-Adjuster Mover, and the Profile Mover carries both onto the surface under a
-`RigExecCurvenetWeight` envelope painted on the same 76 pool points, which
-pins the tube's base row.
+A tube of 120 vertices profiled by three rings and four
+rails — 28 cubic splines over 76 pooled control points, none of which mentions
+a tube vertex. An FK-driven matrix mover bends the upper pool with a painted
+field, a Curvenet Adjustment (`RingPush`, on pool knot 4) pushes one
+middle-ring knot straight out through the Adjuster Mover, and the Profile
+Mover carries both onto the surface under a `RigExecCurvenetWeight` envelope
+painted on the same 76 pool points, which pins the tube's base row.
+In the picture: the cyan wire cage is the rest pose, the green cables floating
+clear of it are the posed net, the orange ring is the Bend control you animate,
+and the small yellow diamond off to the side is `RingPush` on pool knot 4 —
+the bulge in the silhouette under it is the Adjuster Mover's output reaching
+the surface through the net.
 
 Open it live with:
 
