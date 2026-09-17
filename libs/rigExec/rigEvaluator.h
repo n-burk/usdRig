@@ -508,6 +508,20 @@ public:
         return levels;
     }
 
+    /// Transform provider -> the pose steps that write it, in the order the
+    /// pose walk runs them: the aggregate solvers that name it on
+    /// rigExec:joints and the frame constraints that move it, INTERLEAVED in
+    /// one hierarchical stack (spec §4.2). The last entry is the step whose
+    /// frame the pose publishes; a solver entry is also what an AtPrim read
+    /// phase naming that solver resolves against.
+    ///
+    /// Diagnostic access only -- evaluation order itself comes from the
+    /// interleaved pose steps, and this is read back from them.
+    const std::map<SdfPath, std::vector<SdfPath>> &GetFrameChains() const
+    {
+        return _frameChains;
+    }
+
     /// When set, Evaluate verifies geometry against the CPU reference and
     /// publishes that reference in RigExecRigPose::movedPropertiesCpu.
     /// Disabled for interactive use so every deformation runs only once.
@@ -752,17 +766,29 @@ private:
     std::vector<SdfPath> _controlPaths;
     /// Base computePointFrame per control, parallel to _controlPaths.
     std::vector<RigExecTapId> _controlFrameTaps;
-    /// Solver->joint binding, held in memory rather than authored.
+    /// Joint -> the ORDERED STACK of solvers that write it, each with the
+    /// element of that solver's aggregate the joint takes. Held in memory
+    /// rather than authored.
     ///
     /// This is what Pass 0 used to write onto each joint as
     /// rigExec:frameSource / rigExec:frameElement. It is a compile-time
-    /// choice -- which solver poses this joint, and which element of its
-    /// aggregate frame array is this joint's -- so it belongs to the
-    /// compiled graph, not to the scene. Compile() derives it from each
-    /// solver's ordered rigExec:joints, which the Phase A validation
-    /// already walks; Evaluate() indexes the solver's frame array with it
-    /// directly instead of going through the joint's computePointFrame.
-    std::map<SdfPath, std::pair<SdfPath, int>> _jointSolverBinding;
+    /// choice -- which solvers write this joint, in what order, and which
+    /// element of each one's aggregate frame array is this joint's -- so it
+    /// belongs to the compiled graph, not to the scene. Compile() derives it
+    /// from each solver's ordered rigExec:joints, which the Phase A
+    /// validation already walks; Evaluate() indexes each solver's frame
+    /// array with it directly instead of going through the joint's
+    /// computePointFrame.
+    ///
+    /// rigExec:joints is a WRITE, not an exclusive claim (spec §4.2,
+    /// "Solvers stack"): any number of aggregate solvers may name one
+    /// joint. The vector is in POSE-WALK order, so its LAST entry is the
+    /// writer that supplies the joint's base frame and every earlier entry
+    /// is a version a reader can still name. Almost every rig has exactly
+    /// one entry per joint, and a one-element stack has no order to get
+    /// wrong -- so every count() user of this map is unaffected by the
+    /// stack and must stay a membership test.
+    std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _jointSolverBinding;
     /// Each dependency level evaluates once. Earlier aggregate and joint
     /// outputs are supplied as overrides, so downstream requests reuse them.
     struct _SolverBatch {
@@ -770,6 +796,13 @@ private:
         std::map<SdfPath, RigExecTapId> solvers;
         std::set<SdfPath> dependencies;
         std::set<SdfPath> frameInputs;
+        /// The joints whose REST this batch's solver measures from, and the
+        /// pose step that wrote each one just before it -- empty where none
+        /// did, which means "pin the authored rest" (spec §4.2, "the incoming
+        /// frame replaces the authored rest"). EMPTY on every rig with no
+        /// pose step below a solver that writes one of its joints, and then
+        /// the batch pushes no computeRestFrame override at all.
+        std::map<SdfPath, SdfPath> restInputs;
         size_t level = 0;
         RigExecSnapshot snapshot;
         std::vector<RigExecValueOverride> inputs;
@@ -1085,6 +1118,12 @@ private:
         _FrameSourceBinding effector;
         std::vector<_FrameSourceBinding> poleObjects;
         std::vector<SdfPath> ikChain;
+        /// Parallel to ikChain: 1 where a pose step BELOW this constraint
+        /// wrote that joint, so the chain's rest reference for it is the
+        /// frame that step left rather than its authored rest (spec §4.2).
+        /// All zero on every rig with no step below the constraint, and the
+        /// rest-derived IK preparation is then what it always was.
+        std::vector<char> ikRestLive;
         /// Non-empty when the constraint writes the GEOMETRY domain: the
         /// <prim>.points property it revises. targets[0] stays the owning
         /// PRIM path either way, because every frame-domain map -- base and

@@ -769,10 +769,12 @@ MakeBlendRigWithLinearRotation()
 /// That is the computation's null pointer, and a null pointer passes the
 /// OTHER input through unchanged, rests and all.
 ///
-/// The IK goes with it: a solver nothing consumes claims the joints its
-/// rigExec:joints names, and two solvers claiming one joint does not
-/// compile. Leaving inputB empty has the same effect, so this shape is the
-/// only way to author the null.
+/// The IK goes with it, and that is now a CHOICE rather than a requirement:
+/// a solver nothing consumes writes the joints its rigExec:joints names, and
+/// two solvers writing one joint is a legal stack whose last writer wins. So
+/// leaving the IK in place would still compile -- it would just add a second
+/// writer to all three joints and change what this fixture measures. Removing
+/// it keeps the fixture about the null input and nothing else.
 UsdStageRefPtr
 MakeBlendRigWithANonSolverInput()
 {

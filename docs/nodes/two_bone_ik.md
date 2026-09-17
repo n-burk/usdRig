@@ -32,9 +32,10 @@ bend. Publishes computePointFrameArray of [root, mid, end] frames.
 
 ## How it works
 
-Each evaluation measures root-to-mid and mid-to-end from the rest
-frames (plus the length offsets), then solves the two-bone chain in the
-plane through the pole. `inputs:stretch` lets the chain elongate toward
+Each evaluation measures root-to-mid and mid-to-end from the
+frames the joints carry on entry to this solver — their `rest:space` rests
+unless a step below it in the pose stack already wrote them — plus the length
+offsets, then solves the two-bone chain in the plane through the pole. `inputs:stretch` lets the chain elongate toward
 out-of-reach goals under `rigExec:stretchPolicy`, and
 `rigExec:unreachablePolicy` with `inputs:softness` shapes the lock-up as
 the goal leaves reach.
@@ -46,7 +47,7 @@ the goal leaves reach.
 | `rigExec:effectorControl` | Control supplying the end-goal position. | yes |
 | `rigExec:poleControl` | Control defining the bend plane. | yes |
 | `rigExec:rootControl` | Control planting the chain root. | yes |
-| `rigExec:joints` | Three nested joints: root, mid, end. | yes |
+| `rigExec:joints` | Three nested joints: root, mid, end — the chain this solver measures and writes. It is an ordered write, not an exclusive claim: another step may write the same joints, and the last writer in the stack supplies their base frame. The solver measures the two bones from the frames the joints carry ON ENTRY, so a step BELOW it that moves one of them re-proportions the limb rather than only re-orienting it. | yes |
 
 ## Parameters
 

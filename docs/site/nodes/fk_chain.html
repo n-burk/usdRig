@@ -153,12 +153,18 @@ scalar frames (spec section 4.1).</p>
 <p>The solver runs in the pose phase: it reads each targeted control's
 <code>computePointFrame</code> and <code>computeRestFrame</code>, forms that control's
 rest-to-pose delta, and publishes one aggregate <code>computePointFrameArray</code>
-whose element N is claimed by <code>rigExec:joints</code>[N] — the two lists are
+whose element N is written to <code>rigExec:joints</code>[N] — the two lists are
 parallel, so control N poses joint N and joint N inherits the composed
 frames above it. <code>rigExec:controlSpace</code> decides how the deltas compose:
 <code>world</code> chains them (W_i = W_(i-1) . A_i) for sibling controls, while
 <code>parentRelative</code> takes each delta as-is because a nested control's frame
-already travels with its parent. Rest offsets between joints set the bone
+already travels with its parent. The chain MEASURES its deltas from its
+<em>controls'</em> rests, but the basis it composes them onto is the joint's rest
+reference — which the pose stack replaces with the frame the steps below the
+chain left (spec section 4.2). So a constraint below the chain moves the
+joint and the chain carries that displacement through its solve instead of
+replacing it; a joint no step below it wrote keeps its authored rest and the
+chain answers exactly as it always did. Rest offsets between joints set the bone
 lengths and pivots — nothing is measured in absolute numbers — but the
 solve itself is absolute: unless <code>rigExec:startFrame</code> names the provider
 the chain hangs from, the chain ignores whatever its joints sit under.
@@ -171,7 +177,7 @@ Skinning movers then read the posed joints at the <code>final</code> phase.</p>
 <div class="table-scroll"><table class="table">
 <tr><th>Relationship</th><th>Points to</th><th>Required</th></tr>
 <tr><td><code>rigExec:controls</code></td><td>Ordered animator controls, one per joint.</td><td>yes</td></tr>
-<tr><td><code>rigExec:joints</code></td><td>Ordered nested joints the chain poses; with none, the solver publishes frames nothing claims.</td><td>no</td></tr>
+<tr><td><code>rigExec:joints</code></td><td>Ordered nested joints the chain poses; with none, the solver publishes frames nothing reads.</td><td>no</td></tr>
 <tr><td><code>rigExec:controlSpace</code></td><td><code>parentRelative</code> when the controls are nested under each other; <code>world</code> for sibling controls.</td><td>no</td></tr>
 </table></div>
 </div>
@@ -327,7 +333,7 @@ no part of it is a rigid slab hanging off the last one.</p>
 <ul class="tips">
 <li>Nesting the controls only works with <code>rigExec:controlSpace = "parentRelative"</code>: a nested control's frame already carries its parent's motion, so the default <code>world</code> composes it in a second time. On this stage, dropping the token sends Seg3 to x = -0.45 at frame 1006 instead of x = 3.03.</li>
 <li>Point <code>rigExec:startFrame</code> at the joint the chain hangs from when that joint is posed by another solver; without it the chain is an absolute solve and the limb detaches from its parent.</li>
-<li>FK pairs well with IK through a Blend Point Frames node for switchable limbs.</li>
+<li>FK pairs well with IK: blend the two aggregates through a Blend Point Frames node, or stack both solvers on the same joints — <code>rigExec:joints</code> is an ordered write, so the later writer simply replaces the frames the earlier one committed.</li>
 </ul></div>
 </div>
 </section>

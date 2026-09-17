@@ -191,7 +191,7 @@ entry, which the bound joints extract view-free.</p>
 <tr><td><code>rigExec:rootControl</code></td><td>Provider carrying cv0 and cv1 and the root roll.</td><td>yes</td></tr>
 <tr><td><code>rigExec:midControl</code></td><td>Provider whose translation offset bends cv1 and cv2.</td><td>yes</td></tr>
 <tr><td><code>rigExec:endControl</code></td><td>Provider carrying cv2 and cv3 and the end twist.</td><td>yes</td></tr>
-<tr><td><code>rigExec:joints</code></td><td>Ordered chain, root to tip: the solve's cardinality and its rest CVs.</td><td>yes</td></tr>
+<tr><td><code>rigExec:joints</code></td><td>Ordered chain, root to tip: the solve's cardinality and its rest CVs. Naming a joint another step also writes stacks the two, and the last writer in that stack supplies the joint's base frame. The rest CVs and rest spacing come from the frames the joints carry ON ENTRY, so a step below this one that moves a joint changes the rest curve it solves against.</td><td>yes</td></tr>
 </table></div>
 </div>
 </section>

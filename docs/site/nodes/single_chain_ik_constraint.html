@@ -137,7 +137,8 @@
 <figure class="fig effect"><img src="../gifs/single_chain_ik_constraint.gif" width="640" height="360" alt="Single-Chain IK Constraint in motion"><figcaption>From <a href="../examples/single_chain_ik_constraint.usda">single_chain_ik_constraint.usda</a>, rendered live in an offscreen Storm viewport with the rig guides on.</figcaption></figure>
 <p>FBX-style single-chain IK, and the only IK in RigExec that is a
 <strong>constraint</strong> rather than a solver: it does not publish a frame array that
-joints extract from, it revises the joint frames that are already there.
+joints extract from, it revises the joint frames that are already there —
+whatever the last solver in each joint's stack committed.
 Name the two endpoints — <code>rigExec:firstJoint</code> and <code>rigExec:endJoint</code> — and the
 chain between them is inferred from namespace nesting, so the same node drives
 a two-joint chain or a ten-joint one. The first joint's origin stays planted,

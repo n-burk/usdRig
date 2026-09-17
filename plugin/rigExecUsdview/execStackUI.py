@@ -16,11 +16,14 @@ nothing in the prim browser hints at it.
 Two sections, because RigExec evaluates in two stages:
 
   POSE PHASE   aggregate solvers (FK chains, two-bone IK, blends, twist
-               distributions, ribbons, spline IK). They claim joints
-               through `rigExec:joints` and are scheduled by DEPENDENCY,
-               not in a line -- so they are grouped by type with what each
-               claims, rather than numbered. Numbering them would imply an
-               order that does not exist.
+               distributions, ribbons, spline IK). They WRITE joints
+               through `rigExec:joints` -- an ordered write, not an
+               exclusive claim, so two solvers may write one joint and
+               their writes stack, the last one supplying its base frame.
+               They are scheduled by DEPENDENCY rather than in one line, so
+               they are grouped by type with what each writes rather than
+               numbered; a single number per solver would imply one global
+               line that does not exist.
   EXECUTION    `Rig.mover_order`, which IS a strict order (reverse-sibling
                post-order, spec section 4.2). This is the list to read
                when something deforms wrongly.
@@ -200,8 +203,13 @@ class ExecStackPanel(QtWidgets.QDialog):
 
         root = self._rootBox.currentText() or roots[0]
 
-        # Solvers come off the stage: they are scheduled by dependency, so
-        # there is no order to read.
+        # Solvers come off the stage. rigExec:joints is an ordered WRITE,
+        # not an exclusive claim, so two solvers may name one joint and their
+        # writes stack: data flow orders any pair it reaches, and the reverse
+        # composed pre-order of the rig breaks every remaining tie. There IS
+        # an order to read -- it just is not a single line the way the mover
+        # stack is, so the panel lists the joints each solver writes and
+        # leaves the schedule to the compiled mover order below.
         for prim in stage.Traverse():
             t = prim.GetTypeName()
             if t not in _SOLVER_TYPES:
@@ -259,8 +267,8 @@ class ExecStackPanel(QtWidgets.QDialog):
         mono.setStyleHint(QtGui.QFont.Monospace)
 
         solverRoot = QtWidgets.QTreeWidgetItem(
-            ["", "POSE PHASE", "solvers", "scheduled by dependency, not "
-             "in a line"])
+            ["", "POSE PHASE", "solvers", "scheduled by dependency; two "
+             "writing one joint stack, last one wins"])
         self._tree.addTopLevelItem(solverRoot)
         shown_solvers = 0
         for t, name, path, claims in self._solvers:
@@ -268,7 +276,7 @@ class ExecStackPanel(QtWidgets.QDialog):
                 continue
             item = QtWidgets.QTreeWidgetItem(
                 ["", t.replace("RigExec", ""), name,
-                 "claims %d: %s" % (len(claims),
+                 "writes %d: %s" % (len(claims),
                                     ", ".join(_tail(c) for c in claims[:6]))])
             item.setData(0, QtCore.Qt.UserRole, path)
             solverRoot.addChild(item)

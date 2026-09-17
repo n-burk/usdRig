@@ -364,16 +364,22 @@ TestViewFreeValidation(const std::string &examplesDir)
         }
     }
 
-    // A joint posed by two solvers is rejected (the BLOCKER scenario: this
-    // must fail in Phase A, not inside compilation after teardown). Both
-    // claimants must be solvers nobody READS: a solver whose aggregate is
-    // consumed does not pose, so naming a joint its consumer writes to is
-    // a rest reference, exercised separately below.
+    // A joint written by two solvers STACKS. rigExec:joints is an ordered
+    // write, not an exclusive claim, so a second unconsumed chain over a
+    // shoulder the blend already writes is a legal two-writer stack: both
+    // solvers run, the last one in stack order supplies the joint's frame,
+    // and the compile is SILENT about it -- stacking is ordinary authoring
+    // under the unified pose stack (spec 4.2), not a shape worth a
+    // diagnostic. The order is read from the compiled chains.
+    //
+    // Both writers must be solvers nobody READS: a solver whose aggregate is
+    // consumed does not write at all, so naming a joint its consumer writes
+    // is a rest reference, exercised separately below.
     {
         UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmRig.usda");
         CHECK(stage);
         if (stage) {
-            // A second unconsumed chain claiming a joint IKFKBlend owns.
+            // A second unconsumed chain writing a joint IKFKBlend writes.
             UsdPrim rogue = stage->DefinePrim(
                 SdfPath("/ArmAsset/Rig/Solvers/Rogue"),
                 TfToken("RigExecFkChain"));
@@ -385,14 +391,38 @@ TestViewFreeValidation(const std::string &examplesDir)
             RigExecRigEvaluator eval(stage, rigPath);
             eval.cpuParityMode = true;
             std::vector<std::string> errors;
-            CHECK(!eval.Compile(&errors));
-            CHECK(!errors.empty());
+            CHECK(eval.Compile(&errors));
+            CHECK(errors.empty());
+            // Rogue is DEFINED last under /Solvers, and the stack is the
+            // reverse of the composed order, so Rogue writes FIRST and
+            // IKFKBlend -- the one nothing reads and everything downstream
+            // expects -- is still the last writer of the shoulder. Asserted
+            // INSIDE the shoulder's own chain: a search over every chain
+            // would pass on whichever one happened to carry that order.
+            const auto &chains = eval.GetFrameChains();
+            const auto shoulder =
+                chains.find(SdfPath("/ArmAsset/Rig/Joints/Shoulder"));
+            CHECK(shoulder != chains.end());
+            if (shoulder != chains.end()) {
+                const std::vector<SdfPath> &chain = shoulder->second;
+                CHECK(chain.size() == 2);
+                if (chain.size() == 2) {
+                    CHECK(chain[0] ==
+                          SdfPath("/ArmAsset/Rig/Solvers/Rogue"));
+                    CHECK(chain[1] ==
+                          SdfPath("/ArmAsset/Rig/Solvers/IKFKBlend"));
+                }
+            }
+            CHECK(eval.Evaluate(UsdTimeCode(1001)).valid);
         }
     }
 
-    // A CONSUMED solver naming joints its consumer poses is legal: that is
-    // how an IK feeding an IK/FK blend declares the chain whose rests give
-    // it its bone lengths. ArmRig's own IK does exactly this.
+    // A CONSUMED solver naming joints its consumer writes is a REST
+    // reference, not a second entry in that joint's stack: the relaxation
+    // that decides so is a disposition, not claim arbitration, and it is
+    // what keeps the IK/FK idiom a single-writer picture. That is how an IK
+    // feeding an IK/FK blend declares the chain whose rests give it its bone
+    // lengths. ArmRig's own IK does exactly this.
     {
         UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/ArmRig.usda");
         CHECK(stage);
@@ -2288,13 +2318,17 @@ TestMoverGraphParity(const std::string &examplesDir)
 
 // A solver cycle is rejected at compile with the offending path.
 //
-// Unique joint ownership does NOT make the solver graph acyclic: two solvers
-// can each uniquely pose their own joints while reading each other's. 05 is
-// already SpineFK -> SpineTwist (SpineTwist reads Root/Chest, which SpineFK
-// poses); pointing SpineFK's controls at TwistMid, which SpineTwist poses,
-// closes the loop. Evaluate resolves overrides by iterating to a fixed point
-// and a cycle has none, so this must fail in Compile rather than surface as a
-// non-converging generation.
+// 05 is already SpineFK -> SpineTwist (SpineTwist reads Root/Chest, which
+// SpineFK poses); pointing SpineFK's controls at TwistMid, which SpineTwist
+// poses, closes the loop.
+//
+// A frame read from BELOW its writer is positional under the unified pose
+// stack and orders nothing (spec 4.2) -- but only for a reader that HAS a
+// position. Both solvers here feed SpineRibbon, so both are PRODUCERS: they
+// carry no stack position, they are scheduled by data flow alone, and data
+// flow is what contradicts itself. Evaluate resolves overrides by iterating
+// to a fixed point and a cycle has none, so this must fail in Compile rather
+// than surface as a non-converging generation.
 static void
 TestSolverCycleRejected(const std::string &examplesDir)
 {

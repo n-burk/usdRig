@@ -46,10 +46,17 @@ namespace rigExec {
 /// program: the empty-aggregate guard IS the ribbon's error behavior, so two
 /// hand-copied versions of it could disagree about which rigs publish, and the
 /// only rigs that would show it are the malformed ones no fixture has.
+/// \p jointRests, when non-empty and one per sample, re-bases each sample:
+/// the rest->pose map the curve gives is applied to the joint's rest
+/// reference instead of to the rest curve's own sample, so a pose step below
+/// the ribbon is carried through it (spec 4.2). \p jointRestLive selects the
+/// samples that were really written; the others keep the rest curve.
 RigExecPointFrameArray RigExecSampleRibbonFrames(
     const std::vector<GfVec3f> &posed,
     const std::vector<GfVec3f> &rest,
-    int sampleCount);
+    int sampleCount,
+    const std::vector<std::array<GfVec3d, 4>> &jointRests = {},
+    const std::vector<bool> &jointRestLive = {});
 
 /// Resolves the sample positions of a RigExecTwistDistribution: leaves an
 /// authored \p weights alone, and fills an EMPTY one with \p count positions
@@ -82,7 +89,9 @@ RigExecPointFrameArray RigExecSolveTwistDistribution(
     const std::array<GfVec3d, 4> &startRest,
     const std::array<GfVec3d, 4> &endRest,
     const std::vector<double> &weights,
-    double twistTurns);
+    double twistTurns,
+    const std::vector<std::array<GfVec3d, 4>> &jointRests = {},
+    const std::vector<bool> &jointRestLive = {});
 
 /// The rotation part of a published point frame, as a quaternion; false for
 /// a frame that is invalid, degenerate or singular.

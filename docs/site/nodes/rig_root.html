@@ -163,9 +163,10 @@ that graph is rooted -- not a second place to restate it.</p>
 evaluator's compile phase, in the discover-and-validate pass. Compile walks the
 composed namespace beneath the root and collects controls, joints, pose
 interpolators, placed volume weights, and aggregate solvers by prim type
-anywhere under it, then walks <code>&lt;rig&gt;/Movers</code> in reverse-sibling post-order —
-descendants before their mover parent, and the <em>bottom</em> sibling branch in
-usdview first — to number the mover stack; the walk uses the standard
+anywhere under it, then walks the WHOLE RIG in reverse-sibling post-order —
+descendants before their parent, and the <em>bottom</em> sibling branch in usdview
+first — to number ONE pose stack of joint-writing solvers and frame
+constraints, of which the <code>&lt;rig&gt;/Movers</code> mover stack is a restriction; the walk uses the standard
 <code>UsdPrimRange</code> predicate, so a deactivated or unloaded branch is simply not
 part of the rig and changing that is a structural (epoch-rebuilding) edit
 rather than a value edit. A rig that finds no controls, joints, volume weights,
@@ -255,7 +256,7 @@ under <code>IkAsset</code> because that parent is what bounds the rig's write se
 <div class="notice tip"><p class="label">Tips</p>
 <ul class="tips">
 <li>Keep the deformed geometry inside the same asset prim as the rig: a mover whose target is outside the rig root's parent fails compile with "targets outside the rig asset".</li>
-<li>Order two movers that write the same target by arranging them in namespace — nesting, or <code>reorder nameChildren</code> on their parent. The bottom composed sibling executes first, and the compiler reads the final composed order and nothing about how it arose.</li>
+<li>Order two movers that write the same target — or a solver against a constraint, or two solvers against each other, which are all steps of ONE pose stack — by arranging them in namespace: nesting, or <code>reorder nameChildren</code> on their parent. The bottom composed sibling executes first, the compiler reads the final composed order and nothing about how it arose, and nothing else breaks a tie. Put <code>Solvers</code> at the bottom of the rig root for the classic "solve, then revise" shape.</li>
 <li><code>rigExec:baked</code> has to be <em>authored</em> to be heard (the check is <code>HasAuthoredValue</code>), it is only a request, and it is the weakest of the three ways the mode is chosen.</li>
 </ul></div>
 </div>

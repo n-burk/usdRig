@@ -179,6 +179,86 @@ MakeStackedChainStage()
     return stage;
 }
 
+/// A rig whose JOINT slots carry two solver commits each, which no example
+/// stage has: every shipped multi-solver rig resolves to one writer per joint
+/// through the rest-reference relaxation, so "two writes of one pose slot" is
+/// only ever a solver followed by a constraint there.
+///
+/// rigExec:joints is an ordered write, so an FK chain and a two-bone IK may
+/// both name the same three joints. That is two SolverCommit steps declaring
+/// one slot, which is the shape the SSA ladder was built for and the shape
+/// the storage rules below would be vacuous about otherwise.
+UsdStageRefPtr
+MakeStackedSolversStage()
+{
+    const auto rest = [](double x, double y, double z) {
+        GfMatrix4d m(1.0);
+        m.SetTranslateOnly(GfVec3d(x, y, z));
+        return m;
+    };
+    const auto define = [](const UsdStageRefPtr &stage, const char *path,
+                           const char *type) {
+        return stage->DefinePrim(SdfPath(path), TfToken(type));
+    };
+    const auto targets = [](const UsdPrim &prim, const char *name,
+                            const SdfPathVector &paths) {
+        UsdRelationship rel = prim.GetRelationship(TfToken(name));
+        if (!rel) rel = prim.CreateRelationship(TfToken(name));
+        rel.SetTargets(paths);
+    };
+
+    const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    define(stage, "/Asset", "Xform");
+    define(stage, "/Asset/Rig", "RigExecRoot");
+
+    const UsdPrim hipRoot =
+        define(stage, "/Asset/Rig/Controls/HipRoot", "RigExecControl");
+    hipRoot.GetAttribute(TfToken("rest:space")).Set(rest(0, 8, 0));
+    const UsdPrim footIk =
+        define(stage, "/Asset/Rig/Controls/FootIK", "RigExecControl");
+    footIk.GetAttribute(TfToken("avars:ty")).Set(0.8);
+    const UsdPrim kneePole =
+        define(stage, "/Asset/Rig/Controls/KneePole", "RigExecControl");
+    kneePole.GetAttribute(TfToken("rest:space")).Set(rest(0, 4, 3));
+
+    const UsdPrim fkHip =
+        define(stage, "/Asset/Rig/Controls/FkHip", "RigExecControl");
+    fkHip.GetAttribute(TfToken("rest:space")).Set(rest(0, 8, 0));
+    fkHip.GetAttribute(TfToken("avars:rz")).Set(20.0);
+    const UsdPrim fkKnee =
+        define(stage, "/Asset/Rig/Controls/FkHip/FkKnee", "RigExecControl");
+    fkKnee.GetAttribute(TfToken("rest:space")).Set(rest(4, 0, 0));
+    const UsdPrim fkAnkle = define(
+        stage, "/Asset/Rig/Controls/FkHip/FkKnee/FkAnkle", "RigExecControl");
+    fkAnkle.GetAttribute(TfToken("rest:space")).Set(rest(4, 0, 0));
+
+    const UsdPrim hip = define(stage, "/Asset/Rig/Joints/Hip",
+                               "RigExecJoint");
+    hip.GetAttribute(TfToken("rest:space")).Set(rest(0, 8, 0));
+    const UsdPrim knee =
+        define(stage, "/Asset/Rig/Joints/Hip/Knee", "RigExecJoint");
+    knee.GetAttribute(TfToken("rest:space")).Set(rest(4, 0, 0));
+    const UsdPrim ankle =
+        define(stage, "/Asset/Rig/Joints/Hip/Knee/Ankle", "RigExecJoint");
+    ankle.GetAttribute(TfToken("rest:space")).Set(rest(4, 0, 0));
+    const SdfPathVector chain{hip.GetPath(), knee.GetPath(),
+                              ankle.GetPath()};
+
+    const UsdPrim ik =
+        define(stage, "/Asset/Rig/Solvers/LegIK", "RigExecTwoBoneIk");
+    targets(ik, "rigExec:rootControl", {hipRoot.GetPath()});
+    targets(ik, "rigExec:effectorControl", {footIk.GetPath()});
+    targets(ik, "rigExec:poleControl", {kneePole.GetPath()});
+    targets(ik, "rigExec:joints", chain);
+
+    const UsdPrim fk =
+        define(stage, "/Asset/Rig/Solvers/LegFK", "RigExecFkChain");
+    targets(fk, "rigExec:controls",
+            {fkHip.GetPath(), fkKnee.GetPath(), fkAnkle.GetPath()});
+    targets(fk, "rigExec:joints", chain);
+    return stage;
+}
+
 /// A dense bitset over steps, for the reachability the write-conflict check
 /// needs: two steps that write the same slot must be ordered, and the edge
 /// that orders them is often two hops away because a third step wrote
@@ -320,15 +400,44 @@ TestTheGraphDescribesTheProgram(const BuiltProgram &built, const char *name)
                 for (const RigExecBakedSlotRange &read :
                          B.steps[later].reads) {
                     if (write.Overlaps(read)) {
-                        ++races;
+                        if (++races <= 4) {
+                            std::printf("FAIL %s: step %zu (%s) writes %s"
+                                        "[%u,%u) that unordered step %zu (%s) "
+                                        "reads\n", name, earlier,
+                                        B.steps[earlier].label.c_str(),
+                                        RigExecBakedSlotDomainName(write.domain),
+                                        write.begin, write.end, later,
+                                        B.steps[later].label.c_str());
+                        }
                     }
                 }
             }
             for (const RigExecBakedSlotRange &read : B.steps[earlier].reads) {
                 for (const RigExecBakedSlotRange &write :
                          B.steps[later].writes) {
+                    // WRITE AFTER READ in a VERSIONED pose domain is not a
+                    // race and is deliberately left unordered by
+                    // RigExecBakedBuildStepEdges: a writer there writes
+                    // storage of its OWN version, so a reader of an earlier
+                    // version and a later writer touch different memory. The
+                    // unified pose stack makes this shape ordinary rather
+                    // than theoretical -- a solver reads a joint the
+                    // constraint ABOVE it revises, which is exactly a read of
+                    // the earlier version -- so the check follows the edge
+                    // builder instead of being stricter than the program.
+                    if (RigExecBakedIsVersionedDomain(write.domain)) {
+                        continue;
+                    }
                     if (write.Overlaps(read)) {
-                        ++races;
+                        if (++races <= 4) {
+                            std::printf("FAIL %s: step %zu (%s) reads %s"
+                                        "[%u,%u) that unordered step %zu (%s) "
+                                        "writes\n", name, earlier,
+                                        B.steps[earlier].label.c_str(),
+                                        RigExecBakedSlotDomainName(write.domain),
+                                        write.begin, write.end, later,
+                                        B.steps[later].label.c_str());
+                        }
                     }
                 }
             }
@@ -2246,19 +2355,26 @@ main(int argc, char **argv)
     // Three revisions on one chain, which no example stage has and which
     // every rule about reading a chain's running value needs.
     const BuiltProgram stacked = BuildStage(MakeStackedChainStage());
+    // Two SOLVER commits on one pose slot, which no example stage has and
+    // which the storage rules below are otherwise vacuous about.
+    const BuiltProgram stackedSolvers = BuildStage(MakeStackedSolversStage());
     TestTheGraphDescribesTheProgram(biped, "Biped");
     TestTheGraphDescribesTheProgram(animated, "Biped_anim");
     TestTheGraphDescribesTheProgram(spider, "spider_legs");
     TestTheGraphDescribesTheProgram(stacked, "stacked_revisions");
+    TestTheGraphDescribesTheProgram(stackedSolvers, "stacked_solvers");
     TestTheClusteringIsSound(biped, "Biped");
     TestTheClusteringIsSound(spider, "spider_legs");
     TestTheClusteringIsSound(stacked, "stacked_revisions");
+    TestTheClusteringIsSound(stackedSolvers, "stacked_solvers");
     TestTheConeClosuresAreSound(biped, "Biped");
     TestTheConeClosuresAreSound(spider, "spider_legs");
     TestTheConeClosuresAreSound(stacked, "stacked_revisions");
+    TestTheConeClosuresAreSound(stackedSolvers, "stacked_solvers");
     TestEveryPoseWriteHasItsOwnStorage(biped, "Biped");
     TestEveryPoseWriteHasItsOwnStorage(spider, "spider_legs");
     TestEveryPoseWriteHasItsOwnStorage(stacked, "stacked_revisions");
+    TestEveryPoseWriteHasItsOwnStorage(stackedSolvers, "stacked_solvers");
     TestTheReportIsDeterministic(examplesDir + "/biped/Biped.usda");
     TestTheInfluenceValidityCheckRejectsWhatTheAssemblerRejects();
     TestTheRangeFormDeformsLikeTheWholeArray("classicLinear");

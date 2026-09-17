@@ -54,9 +54,10 @@ framing while the rig itself never adds a transform.""",
 evaluator's compile phase, in the discover-and-validate pass. Compile walks the
 composed namespace beneath the root and collects controls, joints, pose
 interpolators, placed volume weights, and aggregate solvers by prim type
-anywhere under it, then walks `<rig>/Movers` in reverse-sibling post-order —
-descendants before their mover parent, and the *bottom* sibling branch in
-usdview first — to number the mover stack; the walk uses the standard
+anywhere under it, then walks the WHOLE RIG in reverse-sibling post-order —
+descendants before their parent, and the *bottom* sibling branch in usdview
+first — to number ONE pose stack of joint-writing solvers and frame
+constraints, of which the `<rig>/Movers` mover stack is a restriction; the walk uses the standard
 `UsdPrimRange` predicate, so a deactivated or unloaded branch is simply not
 part of the rig and changing that is a structural (epoch-rebuilding) edit
 rather than a value edit. A rig that finds no controls, joints, volume weights,
@@ -97,10 +98,14 @@ under `IkAsset` because that parent is what bounds the rig's write set.""",
             "Keep the deformed geometry inside the same asset prim as the rig: a "
             "mover whose target is outside the rig root's parent fails compile "
             "with \"targets outside the rig asset\".",
-            "Order two movers that write the same target by arranging them in "
-            "namespace — nesting, or `reorder nameChildren` on their parent. The "
-            "bottom composed sibling executes first, and the compiler reads the "
-            "final composed order and nothing about how it arose.",
+            "Order two movers that write the same target — or a solver against a "
+            "constraint, or two solvers against each other, which are all steps "
+            "of ONE pose stack — by arranging them in namespace: nesting, or "
+            "`reorder nameChildren` on their parent. The bottom composed sibling "
+            "executes first, the compiler reads the final composed order and "
+            "nothing about how it arose, and nothing else breaks a tie. Put "
+            "`Solvers` at the bottom of the rig root for the classic \"solve, "
+            "then revise\" shape.",
             "`rigExec:baked` has to be *authored* to be heard (the check is "
             "`HasAuthoredValue`), it is only a request, and it is the weakest of "
             "the three ways the mode is chosen.",
@@ -190,29 +195,40 @@ visible.""",
         "title": "Joint",
         "schema": "RigExecJoint",
         "summary": "A posed output of the rig: solvers write it, movers read it.",
-        "description": """A joint is where solved posing becomes readable data. Exactly one
-solver may pose a joint through `rigExec:joints`, but that frame is not the
-last word: any number of pose-phase constraints may then revise the same
-joint through `rigExec:moves`, in stack order, before matrix movers read it
-to carry geometry. Joints nest in the namespace to form the hierarchy, and
+        "description": """A joint is where solved posing becomes readable data.
+`rigExec:joints` is an ordered write and not an exclusive claim: any number of
+aggregate solvers may name one joint, and any number of pose constraints may
+name it on `rigExec:moves`. All of them are steps of one kind in ONE
+hierarchical stack, ordered by the composed namespace of the whole rig — the
+bottom sibling first — and by nothing else. A constraint that sits BELOW a
+solver runs before it and feeds it: the frame it leaves becomes that solver's
+rest reference. A constraint ABOVE it revises the solver's output, which is the
+classic shape and the one you get by putting `Solvers` at the bottom of the
+rig. Joints nest in the namespace to form the hierarchy, and
 usdview draws each joint as a guide sphere with a cone to every nested
 child.""",
-        "how_it_works": """The compiler binds each joint to at most one aggregate solver;
-the pose phase evaluates that solver and extracts the joint's element from
-its frame array, then runs the authored constraint steps, each reading the
-frame the step before it left and writing a revised one over it. A joint
-nothing claims is still evaluated — it follows its namespace parent's posed
-space with its own rest offset and avars — and a joint that is both claimed
-and constrained ends the phase with the constraint's answer. A mover reads
-the base frame the solver wrote unless it asks for the `final` phase, which
-is the same frame with every pose revision folded in.""",
+        "how_it_works": """The compiler builds one chain per joint out of every step that
+writes it — the solvers that name it and the constraints that move it — in the
+rig's hierarchical order, and the pose phase runs that chain. A solver
+extracts the joint's element from its frame array and REPLACES whatever stood
+there, measuring the joint from the frame the preceding steps left; a
+constraint reads that same incoming frame and writes a revised one over it. A
+joint no solver names is still evaluated — it follows its namespace parent's
+posed space with its own rest offset and avars — and a joint with no step
+before a solver hands that solver its authored `rest:space` rest, which is why
+a rig whose constraints all sit above its solvers behaves exactly as it always
+did. A mover reads the `base` frame — the joint after the LAST SOLVER in the
+chain — unless it asks for `final`, which is the top of the chain, or names a
+prim, which is the joint as of when the walk finished with it.""",
         "wiring": [
-            # rigEvaluator.cpp:4925-4933 records one claiming solver per joint and
-            # fails the compile ("is posed by two solvers") on a second claim; a
-            # joint with no claimer at all is legal (every joint is tapped for a
+            # rigEvaluator.cpp records every solver that names a joint and
+            # serializes them into one ordered stack per joint (pose-graph
+            # dependency order first, the solver stack ordinal breaking ties); a
+            # joint no solver names at all is legal (every joint is tapped for a
             # frame regardless, rigEvaluator.cpp:5513), which is why this is "-".
-            ("(posed by)", "At most one solver's `rigExec:joints` names this joint "
-             "and supplies its frame; a second claim is a compile error.", "-"),
+            ("(posed by)", "Any number of solvers' `rigExec:joints` name this joint; "
+             "the writes stack in hierarchical order and the last one supplies "
+             "its base frame.", "-"),
             # rigEvaluator.cpp:5478 pushes each constraint onto a per-target LIST,
             # so the count is unbounded; in examples/biped/Biped.usda 27 of the
             # 252 joints carry more than one (22 with two, 5 with three).
@@ -220,7 +236,9 @@ is the same frame with every pose revision folded in.""",
             # _GetMoverExecutionOrder order, rigEvaluator.cpp:149-163 / 3543 /
             # 5290) and sequenced at rigEvaluator.cpp:6156-6158.
             ("(revised by)", "Any number of pose constraints name this joint on "
-             "`rigExec:moves` and revise its frame in stack order.", "-"),
+             "`rigExec:moves`. They occupy the SAME hierarchical stack as the "
+             "solvers: one above a solver revises its output, one below feeds "
+             "it.", "-"),
         ],
         "param_groups": [
             ("Transform provider", "RigExecXformable"),
@@ -245,12 +263,16 @@ for the whole loop and the only motion in frame comes from the one driver.""",
             "Nest joints (Elbow inside Shoulder) so hierarchy, guides, and FK "
             "composition all agree — and remember `rest:space` is measured from "
             "the parent joint's rest, not from the world.",
-            # One claim: rigEvaluator.cpp:4925-4933. Unlimited constraints per
-            # joint: rigEvaluator.cpp:5478, ordered by rigEvaluator.cpp:6157.
-            "Only one solver may pose a joint — a second `rigExec:joints` claim "
-            "fails the compile with \"is posed by two solvers\" — but constraints "
-            "are not solvers: as many as you like can revise that same joint "
-            "afterwards, each one reading what the previous step left.",
+            # The solver stack: the writer order is settled against the finished
+            # pose graph. Unlimited constraints per joint: rigEvaluator.cpp:5478,
+            # ordered by rigEvaluator.cpp:6157.
+            "Several solvers may pose one joint, and pose constraints are steps "
+            "of the same kind in the same stack: the order is the composed "
+            "namespace of the whole rig and nothing else, bottom sibling first. "
+            "Put `Solvers` at the bottom of the rig to get the classic \"solve, "
+            "then revise\" shape; a constraint that ends up BELOW a solver feeds "
+            "it instead — every solver kind composes over the frame the steps "
+            "below it left, so nothing is discarded either way.",
             # The consumed-solver relaxation: rigEvaluator.cpp:4915-4923, which is
             # how examples/biped/Biped.usda lets leg_l_twoBoneIk, leg_l_fkChain
             # and leg_l_ikfk all list ankle_l_bind.
@@ -278,12 +300,18 @@ declares.""",
         "how_it_works": """The solver runs in the pose phase: it reads each targeted control's
 `computePointFrame` and `computeRestFrame`, forms that control's
 rest-to-pose delta, and publishes one aggregate `computePointFrameArray`
-whose element N is claimed by `rigExec:joints`[N] — the two lists are
+whose element N is written to `rigExec:joints`[N] — the two lists are
 parallel, so control N poses joint N and joint N inherits the composed
 frames above it. `rigExec:controlSpace` decides how the deltas compose:
 `world` chains them (W_i = W_(i-1) . A_i) for sibling controls, while
 `parentRelative` takes each delta as-is because a nested control's frame
-already travels with its parent. Rest offsets between joints set the bone
+already travels with its parent. The chain MEASURES its deltas from its
+*controls'* rests, but the basis it composes them onto is the joint's rest
+reference — which the pose stack replaces with the frame the steps below the
+chain left (spec section 4.2). So a constraint below the chain moves the
+joint and the chain carries that displacement through its solve instead of
+replacing it; a joint no step below it wrote keeps its authored rest and the
+chain answers exactly as it always did. Rest offsets between joints set the bone
 lengths and pivots — nothing is measured in absolute numbers — but the
 solve itself is absolute: unless `rigExec:startFrame` names the provider
 the chain hangs from, the chain ignores whatever its joints sit under.
@@ -306,7 +334,7 @@ Skinning movers then read the posed joints at the `final` phase.""",
             # list IS the solver->joint binding:
             # libs/rigExec/rigEvaluator.cpp:2114-2118, schema.usda:509-515.
             ("`rigExec:joints`", "Ordered nested joints the chain poses; with "
-             "none, the solver publishes frames nothing claims.", "no"),
+             "none, the solver publishes frames nothing reads.", "no"),
             # Plain AttributeValue input, no .Required(), default "world":
             # libs/rigExec/computations.cpp:720 and schema.usda:454. It must be
             # "parentRelative" whenever the controls are nested, or the parent's
@@ -346,8 +374,10 @@ no part of it is a rigid slab hanging off the last one.""",
             "Point `rigExec:startFrame` at the joint the chain hangs from when "
             "that joint is posed by another solver; without it the chain is an "
             "absolute solve and the limb detaches from its parent.",
-            "FK pairs well with IK through a Blend Point Frames node for "
-            "switchable limbs.",
+            "FK pairs well with IK: blend the two aggregates through a Blend "
+            "Point Frames node, or stack both solvers on the same joints — "
+            "`rigExec:joints` is an ordered write, so the later writer simply "
+            "replaces the frames the earlier one committed.",
         ],
         "see_also": [
             ("two_bone_ik", "Two-Bone IK"),
@@ -364,9 +394,10 @@ stays planted on its control, the end joint reaches for the effector
 control, and the pole control picks which way the middle joint bends.
 Bone lengths are measured from the bound joints' rests on every
 evaluation — there is nothing absolute to author or keep in sync.""",
-        "how_it_works": """Each evaluation measures root-to-mid and mid-to-end from the rest
-frames (plus the length offsets), then solves the two-bone chain in the
-plane through the pole. `inputs:stretch` lets the chain elongate toward
+        "how_it_works": """Each evaluation measures root-to-mid and mid-to-end from the
+frames the joints carry on entry to this solver — their `rest:space` rests
+unless a step below it in the pose stack already wrote them — plus the length
+offsets, then solves the two-bone chain in the plane through the pole. `inputs:stretch` lets the chain elongate toward
 out-of-reach goals under `rigExec:stretchPolicy`, and
 `rigExec:unreachablePolicy` with `inputs:softness` shapes the lock-up as
 the goal leaves reach.""",
@@ -374,7 +405,13 @@ the goal leaves reach.""",
             ("`rigExec:effectorControl`", "Control supplying the end-goal position.", "yes"),
             ("`rigExec:poleControl`", "Control defining the bend plane.", "yes"),
             ("`rigExec:rootControl`", "Control planting the chain root.", "yes"),
-            ("`rigExec:joints`", "Three nested joints: root, mid, end.", "yes"),
+            ("`rigExec:joints`", "Three nested joints: root, mid, end — the chain "
+             "this solver measures and writes. It is an ordered write, not an "
+             "exclusive claim: another step may write the same joints, and the "
+             "last writer in the stack supplies their base frame. The solver "
+             "measures the two bones from the frames the joints carry ON ENTRY, "
+             "so a step BELOW it that moves one of them re-proportions the limb "
+             "rather than only re-orienting it.", "yes"),
         ],
         "example": """A two-card arm bends as its hand effector swings in and lifts. The
 effector rests just inside full reach so the arm holds a slight natural
@@ -428,7 +465,12 @@ entry, which the bound joints extract view-free.""",
             ("`rigExec:endControl`", "Provider carrying cv2 and cv3 and the end twist.", "yes"),
             # computations.cpp:1073 -- an empty list warns and produces no frames
             # (compile simply skips a solver with no joints, rigEvaluator.cpp:4726)
-            ("`rigExec:joints`", "Ordered chain, root to tip: the solve's cardinality and its rest CVs.", "yes"),
+            ("`rigExec:joints`", "Ordered chain, root to tip: the solve's cardinality "
+             "and its rest CVs. Naming a joint another step also writes stacks the "
+             "two, and the last writer in that stack supplies the joint's base "
+             "frame. The rest CVs and rest spacing come from the frames the joints "
+             "carry ON ENTRY, so a step below this one that moves a joint changes "
+             "the rest curve it solves against.", "yes"),
         ],
         # RigExecSplineIk inherits Boundable directly (schema.usda:797-798): no
         # RigExecXformable, RigExecConstraint or RigExecMoverAPI attributes apply,
@@ -472,7 +514,10 @@ skeleton, and the blend mixes their aggregates element by element under
 `inputs:weight`. At 0 the A pose wins, at 1 the B pose wins, and between
 them rotations take the shortest arc while scales blend logarithmically.
 The two inputs only have to agree on element count — what each of them
-poses, its own joints or nothing at all, is its own business.""",
+poses, its own joints or nothing at all, is its own business. Blending is how
+to *mix* two solvers on one skeleton; stacking them — naming the same joints
+on both `rigExec:joints` lists — is how to have the later writer replace the
+earlier one's frames outright.""",
         "how_it_works": """The blend runs in the pose phase, in a batch after both inputs (an
 `inputA`/`inputB` solver is a dependency, so the compiler's levels put it
 in an earlier batch), and writes one blended frame per joint listed in
@@ -482,7 +527,11 @@ against the A aggregate's rest landmarks — translation lerps, rotation
 slerps shortest-arc, scale follows `rigExec:scaleBlend` — so a mid-weight
 pose is the interpolation of the two transforms, not the midpoint of the
 two skeletons' joints, and an intermediate chain can sit a little off the
-average of the poses it is between.""",
+average of the poses it is between. The blend still MEASURES both inputs
+against the rests carried inside the A aggregate, but it APPLIES the blended
+map to the joint's own rest reference — the frame a pose step below the blend
+left there (spec section 4.2) — so a constrained joint carries its
+displacement through the blend rather than losing it.""",
         "wiring": [
             # Both are declared .Required() in the exec registration
             # (libs/rigExec/computations.cpp:950-959), but nothing enforces
@@ -1077,7 +1126,8 @@ home.""",
         "summary": "Re-poses an existing joint chain of any length onto an effector goal.",
         "description": """FBX-style single-chain IK, and the only IK in RigExec that is a
 **constraint** rather than a solver: it does not publish a frame array that
-joints extract from, it revises the joint frames that are already there.
+joints extract from, it revises the joint frames that are already there —
+whatever the last solver in each joint's stack committed.
 Name the two endpoints — `rigExec:firstJoint` and `rigExec:endJoint` — and the
 chain between them is inferred from namespace nesting, so the same node drives
 a two-joint chain or a ten-joint one. The first joint's origin stays planted,
@@ -1207,9 +1257,14 @@ stays at 1, so the follow is full strength over every point of the card.""",
             "The provider may be a control as readily as a joint: those are the "
             "only two types `rigExec:transform` accepts "
             "(rigEvaluator.cpp:7221-7231).",
-            "`final` binds the provider's frame-chain head, so a constraint that "
-            "revises the joint downstream is included; the default `base` binds "
-            "the provider itself (moverGraph.cpp:1366-1379, schema.usda:1685).",
+            "`final` binds the provider's frame-chain head, so every pose step "
+            "above it is included; the default `base` is the joint after the LAST "
+            "SOLVER wrote it, which is not the same as \"before every "
+            "constraint\" — a constraint that sits below the last solver is "
+            "folded into `base` through that solver. Name a prim if you want a "
+            "specific moment: the `Solvers` scope means \"after the last "
+            "solver\", the `Movers` scope \"after the last constraint\" "
+            "(moverGraph.cpp:1366-1379, schema.usda:1685).",
             "Same-target movers are an ordinary stack ordered by the composed "
             "namespace: reverse-sibling post-order, so descendants run before "
             "their parent and the bottom sibling before the top (spec section "
@@ -3400,6 +3455,6 @@ follow the deformation for free because they index faces, not points.""",
             ("control", "Control"),
             ("matrix_mover", "Matrix Mover"),
         ],
-        "example_key": "touch_regions",
+        "example_key": "touch_region",
     },
 }

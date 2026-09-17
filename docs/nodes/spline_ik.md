@@ -76,7 +76,7 @@ entry, which the bound joints extract view-free.
 | `rigExec:rootControl` | Provider carrying cv0 and cv1 and the root roll. | yes |
 | `rigExec:midControl` | Provider whose translation offset bends cv1 and cv2. | yes |
 | `rigExec:endControl` | Provider carrying cv2 and cv3 and the end twist. | yes |
-| `rigExec:joints` | Ordered chain, root to tip: the solve's cardinality and its rest CVs. | yes |
+| `rigExec:joints` | Ordered chain, root to tip: the solve's cardinality and its rest CVs. Naming a joint another step also writes stacks the two, and the last writer in that stack supplies the joint's base frame. The rest CVs and rest spacing come from the frames the joints carry ON ENTRY, so a step below this one that moves a joint changes the rest curve it solves against. | yes |
 
 ## Parameters
 

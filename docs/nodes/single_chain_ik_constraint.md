@@ -23,7 +23,8 @@ On this page:
 
 FBX-style single-chain IK, and the only IK in RigExec that is a
 **constraint** rather than a solver: it does not publish a frame array that
-joints extract from, it revises the joint frames that are already there.
+joints extract from, it revises the joint frames that are already there —
+whatever the last solver in each joint's stack committed.
 Name the two endpoints — `rigExec:firstJoint` and `rigExec:endJoint` — and the
 chain between them is inferred from namespace nesting, so the same node drives
 a two-joint chain or a ten-joint one. The first joint's origin stays planted,

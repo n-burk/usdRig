@@ -102,6 +102,9 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((restCagePointsAttr, "rigExec:restCagePoints"))
     ((divisionsAttr, "rigExec:divisions"))
     ((sampleCountAttr, "rigExec:sampleCount"))
+    ((joints, "rigExec:joints"))
+    (jointRests)
+    (computeRestFrame)
     ((modeAttr, "rigExec:mode"))
     ((strengthAttr, "inputs:strength"))
     (computePointFrameArray)
@@ -900,7 +903,23 @@ _ComputeRibbonFrames(const VdfContext &ctx)
         posedPtr ? posedPtr->points : std::vector<GfVec3f>();
     const std::vector<GfVec3f> rest =
         restPtr ? restPtr->points : std::vector<GfVec3f>();
-    return rigExec::RigExecSampleRibbonFrames(posed, rest, sampleCount);
+    // The joints' rest references, in rigExec:joints order, and which of
+    // them a pose step BELOW the ribbon wrote (RigExecPointFrameLiveRest).
+    // A live one re-bases its sample so the step's frame is carried through
+    // the ribbon instead of replaced (spec 4.2); every other sample keeps the
+    // rest curve, which is what leaves an unstacked ribbon untouched.
+    std::vector<std::array<GfVec3d, 4>> jointRests;
+    std::vector<bool> jointRestLive;
+    {
+        VdfReadIterator<RigExecPointFrame> it(ctx, _tokens->jointRests);
+        for (; !it.IsAtEnd(); ++it) {
+            jointRests.push_back((*it).points);
+            jointRestLive.push_back(
+                ((*it).flags & rigExec::RigExecPointFrameLiveRest) != 0);
+        }
+    }
+    return rigExec::RigExecSampleRibbonFrames(posed, rest, sampleCount,
+                                              jointRests, jointRestLive);
 }
 
 
@@ -1202,6 +1221,9 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecRibbon)
         // targets the curve prim, not its points attribute.
         .Inputs(
             AttributeValue<int>(_tokens->sampleCountAttr),
+            Relationship(_tokens->joints)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->jointRests),
             Computation<RigExecPointsPacket>(_tokens->computeRestDriverPoints)
                 .InputName(_tokens->restDriver),
             Computation<RigExecPointsPacket>(_tokens->computeDriverPoints)

@@ -48,9 +48,10 @@ Nothing on the root evaluates per frame; it is read during the
 evaluator's compile phase, in the discover-and-validate pass. Compile walks the
 composed namespace beneath the root and collects controls, joints, pose
 interpolators, placed volume weights, and aggregate solvers by prim type
-anywhere under it, then walks `<rig>/Movers` in reverse-sibling post-order —
-descendants before their mover parent, and the *bottom* sibling branch in
-usdview first — to number the mover stack; the walk uses the standard
+anywhere under it, then walks the WHOLE RIG in reverse-sibling post-order —
+descendants before their parent, and the *bottom* sibling branch in usdview
+first — to number ONE pose stack of joint-writing solvers and frame
+constraints, of which the `<rig>/Movers` mover stack is a restriction; the walk uses the standard
 `UsdPrimRange` predicate, so a deactivated or unloaded branch is simply not
 part of the rig and changing that is a structural (epoch-rebuilding) edit
 rather than a value edit. A rig that finds no controls, joints, volume weights,
@@ -122,7 +123,7 @@ bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 ## Tips
 
 - Keep the deformed geometry inside the same asset prim as the rig: a mover whose target is outside the rig root's parent fails compile with "targets outside the rig asset".
-- Order two movers that write the same target by arranging them in namespace — nesting, or `reorder nameChildren` on their parent. The bottom composed sibling executes first, and the compiler reads the final composed order and nothing about how it arose.
+- Order two movers that write the same target — or a solver against a constraint, or two solvers against each other, which are all steps of ONE pose stack — by arranging them in namespace: nesting, or `reorder nameChildren` on their parent. The bottom composed sibling executes first, the compiler reads the final composed order and nothing about how it arose, and nothing else breaks a tie. Put `Solvers` at the bottom of the rig root for the classic "solve, then revise" shape.
 - `rigExec:baked` has to be *authored* to be heard (the check is `HasAuthoredValue`), it is only a request, and it is the weakest of the three ways the mode is chosen.
 
 ## See also

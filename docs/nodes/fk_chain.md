@@ -38,12 +38,18 @@ scalar frames (spec section 4.1).
 The solver runs in the pose phase: it reads each targeted control's
 `computePointFrame` and `computeRestFrame`, forms that control's
 rest-to-pose delta, and publishes one aggregate `computePointFrameArray`
-whose element N is claimed by `rigExec:joints`[N] — the two lists are
+whose element N is written to `rigExec:joints`[N] — the two lists are
 parallel, so control N poses joint N and joint N inherits the composed
 frames above it. `rigExec:controlSpace` decides how the deltas compose:
 `world` chains them (W_i = W_(i-1) . A_i) for sibling controls, while
 `parentRelative` takes each delta as-is because a nested control's frame
-already travels with its parent. Rest offsets between joints set the bone
+already travels with its parent. The chain MEASURES its deltas from its
+*controls'* rests, but the basis it composes them onto is the joint's rest
+reference — which the pose stack replaces with the frame the steps below the
+chain left (spec section 4.2). So a constraint below the chain moves the
+joint and the chain carries that displacement through its solve instead of
+replacing it; a joint no step below it wrote keeps its authored rest and the
+chain answers exactly as it always did. Rest offsets between joints set the bone
 lengths and pivots — nothing is measured in absolute numbers — but the
 solve itself is absolute: unless `rigExec:startFrame` names the provider
 the chain hangs from, the chain ignores whatever its joints sit under.
@@ -54,7 +60,7 @@ Skinning movers then read the posed joints at the `final` phase.
 | Relationship | Points to | Required |
 |---|---|---|
 | `rigExec:controls` | Ordered animator controls, one per joint. | yes |
-| `rigExec:joints` | Ordered nested joints the chain poses; with none, the solver publishes frames nothing claims. | no |
+| `rigExec:joints` | Ordered nested joints the chain poses; with none, the solver publishes frames nothing reads. | no |
 | `rigExec:controlSpace` | `parentRelative` when the controls are nested under each other; `world` for sibling controls. | no |
 
 ## Parameters
@@ -209,7 +215,7 @@ python docs/render_media.py --page fk_chain
 
 - Nesting the controls only works with `rigExec:controlSpace = "parentRelative"`: a nested control's frame already carries its parent's motion, so the default `world` composes it in a second time. On this stage, dropping the token sends Seg3 to x = -0.45 at frame 1006 instead of x = 3.03.
 - Point `rigExec:startFrame` at the joint the chain hangs from when that joint is posed by another solver; without it the chain is an absolute solve and the limb detaches from its parent.
-- FK pairs well with IK through a Blend Point Frames node for switchable limbs.
+- FK pairs well with IK: blend the two aggregates through a Blend Point Frames node, or stack both solvers on the same joints — `rigExec:joints` is an ordered write, so the later writer simply replaces the frames the earlier one committed.
 
 ## See also
 

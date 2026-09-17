@@ -26,7 +26,10 @@ skeleton, and the blend mixes their aggregates element by element under
 `inputs:weight`. At 0 the A pose wins, at 1 the B pose wins, and between
 them rotations take the shortest arc while scales blend logarithmically.
 The two inputs only have to agree on element count — what each of them
-poses, its own joints or nothing at all, is its own business.
+poses, its own joints or nothing at all, is its own business. Blending is how
+to *mix* two solvers on one skeleton; stacking them — naming the same joints
+on both `rigExec:joints` lists — is how to have the later writer replace the
+earlier one's frames outright.
 
 IK/FK or general frame blend of two aggregate providers.
 Publishes computePointFrameArray. Weight 0 selects inputA; 1 selects
@@ -43,7 +46,11 @@ against the A aggregate's rest landmarks — translation lerps, rotation
 slerps shortest-arc, scale follows `rigExec:scaleBlend` — so a mid-weight
 pose is the interpolation of the two transforms, not the midpoint of the
 two skeletons' joints, and an intermediate chain can sit a little off the
-average of the poses it is between.
+average of the poses it is between. The blend still MEASURES both inputs
+against the rests carried inside the A aggregate, but it APPLIES the blended
+map to the joint's own rest reference — the frame a pose step below the blend
+left there (spec section 4.2) — so a constrained joint carries its
+displacement through the blend rather than losing it.
 
 ## Wiring
 

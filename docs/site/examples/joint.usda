@@ -22,6 +22,11 @@ def Xform "JointAsset"
     def RigExecRoot "Rig"
     {
         uniform token rigExec:partition = "JointAsset"
+        # Solvers LAST, so they sit at the bottom of the composed namespace.
+        # Aggregate solvers and pose constraints share ONE hierarchical stack
+        # (spec 4.2) whose bottom sibling runs first, so this is what makes
+        # WristAim below revise the FK chain rather than feed it.
+        reorder nameChildren = ["Controls", "Joints", "Weights", "Movers", "Solvers"]
 
         def Scope "Controls"
         {

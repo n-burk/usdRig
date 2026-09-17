@@ -611,6 +611,24 @@ RIGEXEC_REGISTER_XFORMABLE(
 // and every joint's element index unchanged.
 // ---------------------------------------------------------------------------
 
+// The joints' rest references, in rigExec:joints order, and which of them a
+// pose step BELOW this solver actually wrote (RigExecPointFrameLiveRest, set
+// by the evaluator on the override it pushes). Only a live one re-bases its
+// element; everything else keeps the basis the solver always had, which is
+// what makes the rule free on every rig that does not stack (spec 4.2).
+static void
+_ReadJointRests(const VdfContext &ctx,
+                std::vector<std::array<GfVec3d, 4>> *rests,
+                std::vector<bool> *live)
+{
+    VdfReadIterator<RigExecPointFrame> it(ctx, _tokens->jointRests);
+    for (; !it.IsAtEnd(); ++it) {
+        rests->push_back((*it).points);
+        live->push_back(
+            ((*it).flags & rigExec::RigExecPointFrameLiveRest) != 0);
+    }
+}
+
 static RigExecPointFrameArray
 _ComputeFkChain(const VdfContext &ctx)
 {
@@ -654,6 +672,31 @@ _ComputeFkChain(const VdfContext &ctx)
     }
     const bool hasStart = start && startRest;
 
+    // The joints' rest references, in rigExec:joints order. Under the
+    // unified pose stack each one is the frame the steps BELOW this solver
+    // left on that joint -- its authored rest when none did -- and it is the
+    // basis this chain composes its control deltas onto, so a constraint
+    // below the chain is carried through the solve instead of replaced.
+    //
+    // Used only when there is exactly one per control, which is the
+    // positional contract rigExec:joints[N] <- element N already has. A
+    // chain with no joints (a guide-only solver), or one whose targets do
+    // not all publish a rest, keeps the control's own rest as the basis and
+    // is bit-identical to what it was.
+    // A rest carrying RigExecPointFrameLiveRest is one a step BELOW this
+    // chain wrote; an ordinary authored rest is not, and the chain then keeps
+    // composing onto its control's own rest exactly as it always did. That
+    // gate is the bit-identity guarantee: it is not a performance trick, it
+    // is what stops the rule silently re-basing every FK rig whose controls
+    // do not sit exactly on their joints.
+    std::vector<std::array<GfVec3d, 4>> jointRests;
+    std::vector<bool> jointRestLive;
+    _ReadJointRests(ctx, &jointRests, &jointRestLive);
+    if (jointRests.size() != poseCount.ComputeSize()) {
+        jointRests.clear();
+        jointRestLive.clear();
+    }
+
     std::vector<rigExec::RigExecFkChainElement> elements;
     if (hasStart) {
         // Synthetic element 0: rest and pose of the start provider, so the
@@ -677,6 +720,10 @@ _ComputeFkChain(const VdfContext &ctx)
         rigExec::RigExecFkChainElement e;
         e.restPoints = (*restIt).points;
         e.posePoints = (*poseIt).points;
+        if (size_t(index) < jointRests.size() && jointRestLive[size_t(index)]) {
+            e.outRestPoints = jointRests[size_t(index)];
+            e.hasOutRest = true;
+        }
         e.parentIndex = parentRelative ? base - 1 : index + base - 1;
         elements.push_back(e);
         ++index;
@@ -691,7 +738,12 @@ _ComputeFkChain(const VdfContext &ctx)
     }
     result.rests.reserve(elements.size() - size_t(base));
     for (size_t i = size_t(base); i < elements.size(); ++i) {
-        result.rests.push_back(elements[i].restPoints);
+        // The published rest is the basis the frame was built on, so a
+        // consumer that re-solves against it (RigExecElementOutSpace, a
+        // blend) measures the same transform this kernel applied.
+        result.rests.push_back(elements[i].hasOutRest
+                                   ? elements[i].outRestPoints
+                                   : elements[i].restPoints);
     }
     return result;
 }
@@ -717,6 +769,12 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecFkChain)
             Relationship(_tokens->startFrameRel)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->startRest),
+            // The output basis, one per joint: the unified pose stack
+            // overrides it with the frame the steps below this solver left
+            // (spec 4.2). Optional -- a guide-only chain names no joints.
+            Relationship(_tokens->joints)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->jointRests),
             AttributeValue<TfToken>(_tokens->controlSpace));
 }
 
@@ -929,15 +987,26 @@ _ComputeBlendPointFrames(const VdfContext &ctx)
         return RigExecPointFrameArray();
     }
 
+    // The blend MEASURES both inputs against the A aggregate's rests and
+    // APPLIES the blended map to the joint's rest reference where a step
+    // below it wrote one -- so a constrained joint carries its displacement
+    // through the blend instead of losing it.
+    std::vector<std::array<GfVec3d, 4>> jointRests;
+    std::vector<bool> jointRestLive;
+    _ReadJointRests(ctx, &jointRests, &jointRestLive);
+
     RigExecPointFrameArray result;
     const size_t n = a->GetSize();
     result.frames.reserve(n);
     result.rests.reserve(n);
     for (size_t i = 0; i < n; ++i) {
         const std::array<GfVec3d, 4> &rest = a->rests[i];
+        const bool live = i < jointRests.size() && i < jointRestLive.size() &&
+                          jointRestLive[i];
         result.frames.push_back(rigExec::RigExecBlendFrames(
-            a->frames[i], b->frames[i], rest, w, rotationMode, scaleMode));
-        result.rests.push_back(rest);
+            a->frames[i], b->frames[i], rest, w, rotationMode, scaleMode,
+            live ? &jointRests[i] : nullptr));
+        result.rests.push_back(live ? jointRests[i] : rest);
     }
     return result;
 }
@@ -957,6 +1026,9 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendPointFrames)
                     _tokens->computePointFrameArray)
                 .InputName(_tokens->inputBFrames)
                 .Required(),
+            Relationship(_tokens->joints)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->jointRests),
             AttributeValue<float>(_tokens->inputsWeight),
             AttributeValue<TfToken>(_tokens->rotationBlend),
             AttributeValue<TfToken>(_tokens->scaleBlend));
@@ -996,8 +1068,12 @@ _ComputeTwistDistribution(const VdfContext &ctx)
     const int *count = ctx.GetInputValuePtr<int>(_tokens->count);
     rigExec::RigExecResolveTwistWeights(count ? *count : 1, &weights);
 
+    std::vector<std::array<GfVec3d, 4>> jointRests;
+    std::vector<bool> jointRestLive;
+    _ReadJointRests(ctx, &jointRests, &jointRestLive);
     return rigExec::RigExecSolveTwistDistribution(*start, *end, sRest, eRest,
-        weights, _ScalarInput(ctx, _tokens->twistTurns, 0));
+        weights, _ScalarInput(ctx, _tokens->twistTurns, 0), jointRests,
+        jointRestLive);
 }
 
 EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwistDistribution)
@@ -1019,6 +1095,9 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecTwistDistribution)
             Relationship(_tokens->endRel)
                 .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
                 .InputName(_tokens->endRest),
+            Relationship(_tokens->joints)
+                .TargetedObjects<RigExecPointFrame>(_tokens->computeRestFrame)
+                .InputName(_tokens->jointRests),
             AttributeValue<float>(_tokens->weights),
             AttributeValue<int>(_tokens->count),
             AttributeValue<double>(_tokens->twistTurns));

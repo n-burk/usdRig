@@ -78,6 +78,31 @@ MakeConstraint(const UsdStageRefPtr &stage, const char *name,
     return prim;
 }
 
+/// Author `reorder nameChildren` on the rig root putting Solvers LAST.
+///
+/// Aggregate solvers and pose constraints share ONE hierarchical stack whose
+/// BOTTOM sibling runs first (spec 4.2), so "solve, then revise" is authored
+/// by putting the Solvers scope at the bottom of the rig -- which is what
+/// every shipped rig does. The fixtures here define Solvers before Movers, so
+/// without this they would author the opposite shape: the constraints would
+/// FEED the solvers rather than revise them.
+static void
+SolversLast(const UsdStageRefPtr &stage,
+            const char *rig = "/Asset/Rig")
+{
+    const UsdPrim prim = stage->GetPrimAtPath(SdfPath(rig));
+    CHECK(prim);
+    if (!prim) return;
+    std::vector<TfToken> order;
+    for (const UsdPrim &child : prim.GetChildren()) {
+        if (child.GetName() != TfToken("Solvers")) {
+            order.push_back(child.GetName());
+        }
+    }
+    order.push_back(TfToken("Solvers"));
+    prim.SetChildrenReorder(order);
+}
+
 static bool
 HasProperty(const UsdPrimDefinition *definition, const char *name)
 {
@@ -2308,10 +2333,12 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     ik.CreateRelationship(TfToken("rigExec:poleControl"))
         .SetTargets({SdfPath("/Asset/Rig/Controls/Pole")});
     if (throughBlend) {
-        // Only the blend owns the output joints -- rigExec:joints is an
-        // exclusive output claim, so the IK cannot list them too. It finds
-        // their rests by following its own output edge to the consumer
-        // that does own them.
+        // Only the blend WRITES the output joints. rigExec:joints is an
+        // ordered write rather than an exclusive claim, so the IK listing
+        // them too would be legal -- but the IK's aggregate is consumed by
+        // the blend, and a consumed solver does not write: its rigExec:joints
+        // is a rest reference, which is how it finds the rests it measures
+        // its bone lengths from. One writer, so no stack and no note.
         const UsdPrim fk = stage->DefinePrim(
             SdfPath("/Asset/Rig/Solvers/FK"), TfToken("RigExecFkChain"));
         fk.CreateRelationship(TfToken("rigExec:controls"))
@@ -2329,10 +2356,10 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
         blend.CreateRelationship(TfToken("rigExec:joints"))
             .SetTargets({shoulder, elbow, wrist});
     }
-    // The IK names its chain either way. When the blend poses those
-    // joints this is a REST reference -- the claim check defers to the
-    // unconsumed blend -- and it is what gives the kernel the rests it
-    // measures its bone lengths from.
+    // The IK names its chain either way. When the blend writes those
+    // joints this is a REST reference -- the relaxation demotes a consumed
+    // solver rather than adding it to the joint's writer stack -- and it is
+    // what gives the kernel the rests it measures its bone lengths from.
     ik.CreateRelationship(TfToken("rigExec:joints"))
         .SetTargets({shoulder, elbow, wrist});
 
@@ -2636,6 +2663,19 @@ TestDeepSolverDependencySchedule()
         previousSolver = solverPath;
         finalSolver = solverPath;
     }
+    // S0 feeds S1 feeds S2 ... so S0 has to run FIRST, and the pose stack is
+    // the REVERSE of the composed child order (spec 4.2): the bottom sibling
+    // runs first. Definition order is S0..S95, so the scope is reordered
+    // S95..S0 to put S0 at the bottom. Without it the aggregate edge at every
+    // eighth solver contradicts the hierarchy and the compile says so by name.
+    {
+        std::vector<TfToken> order;
+        for (int i = depth - 1; i >= 0; --i) {
+            order.push_back(TfToken("S" + std::to_string(i)));
+        }
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers"))
+            .SetChildrenReorder(order);
+    }
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -2710,14 +2750,18 @@ TestDeepSolverDependencySchedule()
         .SetTargets({SdfPath("/Asset/Rig/Joints/J46/Input")});
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
 
-    // A cycle hidden through a control's namespace parent must be rejected
-    // at compilation, rather than discovered after many refinement rounds.
+    // A loop closed through a control's namespace PARENT is a FRAME read,
+    // and a frame read is positional under the unified pose stack (spec 4.2):
+    // S0 stands at the bottom, so it reads J95 as it was BEFORE S95 wrote it,
+    // and there is one well-defined order rather than two contradicting
+    // demands. It is no longer a cycle and no longer refused.
     const UsdPrim first = stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/S0"));
     first.GetRelationship(TfToken("rigExec:start"))
         .SetTargets({previousJoint.AppendChild(TfToken("Input"))});
-    const RigExecRigPose cyclic = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(!cyclic.valid);
-    CHECK(HasDiagnostic(cyclic, "solver dependency cycle"));
+    const RigExecRigPose positional = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(positional.valid);
+    CHECK(!HasDiagnostic(positional, "solver dependency cycle"));
+    CHECK(!HasDiagnostic(positional, "pose dependency cycle"));
 }
 
 static void
@@ -2834,9 +2878,15 @@ TestConstraintSolverDependencySchedule()
         prim.GetAttribute(TfToken("rest:tx")).Set(tx);
         return prim;
     };
+    // The solvers live in the SAME SCOPE as the constraints here, because
+    // that is the only way to interleave them under the unified pose stack
+    // (spec 4.2): solvers are discovered by type anywhere beneath the rig,
+    // the mover walk skips a non-mover prim as a grouping scope, and one
+    // `reorder nameChildren` over the scope then spells the exact order
+    // Source FK -> DriveGoal -> IK -> FollowEnd -> Final FK.
     const auto fk = [&](const char *name, const UsdPrim &input, const UsdPrim &output) {
         const UsdPrim prim = stage->DefinePrim(
-            SdfPath(std::string("/Asset/Rig/Solvers/") + name),
+            SdfPath(std::string("/Asset/Rig/Movers/") + name),
             TfToken("RigExecFkChain"));
         prim.GetRelationship(TfToken("rigExec:controls")).SetTargets({input.GetPath()});
         prim.GetRelationship(TfToken("rigExec:joints")).SetTargets({output.GetPath()});
@@ -2857,7 +2907,7 @@ TestConstraintSolverDependencySchedule()
     fk("Final", follow, finalJoint);
     fk("Independent", other, joint("Independent"));
     const UsdPrim ik = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+        SdfPath("/Asset/Rig/Movers/IK"), TfToken("RigExecTwoBoneIk"));
     ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
     ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
@@ -2873,6 +2923,11 @@ TestConstraintSolverDependencySchedule()
         stage, "DriveGoal", "RigExecPositionConstraint", {goal.GetPath()});
     driveConstraint.GetRelationship(TfToken("rigExec:sources"))
         .SetTargets({sourceJoint.GetPath()});
+    // Bottom sibling first, so this list is the execution order REVERSED.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+        .SetChildrenReorder({TfToken("Independent"), TfToken("Final"),
+                             TfToken("FollowEnd"), TfToken("IK"),
+                             TfToken("DriveGoal"), TfToken("Source")});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -2904,12 +2959,16 @@ TestConstraintSolverDependencySchedule()
     checkPose(8, 2);
     checkPose(8, 0);
 
-    // A final-frame feedback edge is a cycle, not a previous-generation read.
+    // Pointing DriveGoal at the joint the IK writes is a FRAME read from
+    // BELOW that writer, which the unified pose stack resolves positionally
+    // (spec 4.2): DriveGoal stands before the IK, so it reads the end joint
+    // as the steps before IT left it, and the IK is not fed its own output.
+    // That used to be a pose cycle; it is now an ordinary, ordered read.
     driveConstraint.GetRelationship(TfToken("rigExec:sources"))
         .SetTargets({endJoint.GetPath()});
     errors.clear();
-    CHECK(!evaluator.Compile(&errors));
-    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
+    CHECK(evaluator.Compile(&errors));
+    CHECK(!std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
         return error.find("pose dependency cycle") != std::string::npos;
     }));
     driveConstraint.GetRelationship(TfToken("rigExec:sources"))
@@ -3036,6 +3095,7 @@ TestSolverOwnedJointBlocksNamespacePropagation()
     const UsdPrim move = MakeConstraint(
         stage, "MoveGroup", "RigExecPositionConstraint", {group.GetPath()});
     move.GetRelationship(TfToken("rigExec:sources")).SetTargets({leadJoint.GetPath()});
+    SolversLast(stage);
 
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
@@ -3109,8 +3169,15 @@ TestConnectedParentSpaceSolverInputs()
     const UsdPrim source = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Source"), TfToken("RigExecJoint"));
     const UsdPrim altSource = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/AltSource"), TfToken("RigExecJoint"));
     for (const auto &binding : {std::make_pair(driver, source), std::make_pair(altDriver, altSource)}) {
+        // Every solver in this fixture lives in the SAME SCOPE as the
+        // constraints, because the IK has to read a control whose space
+        // resolves through a joint a CONSTRAINT revises -- and under the
+        // unified pose stack (spec 4.2) the only thing that can put the IK
+        // after that constraint is the composed namespace. Solvers are
+        // discovered by type anywhere beneath the rig, so one scope and one
+        // `reorder nameChildren` spells the whole order.
         const UsdPrim fk = stage->DefinePrim(
-            SdfPath("/Asset/Rig/Solvers").AppendChild(binding.first.GetName()), TfToken("RigExecFkChain"));
+            SdfPath("/Asset/Rig/Movers").AppendChild(binding.first.GetName()), TfToken("RigExecFkChain"));
         fk.GetRelationship(TfToken("rigExec:controls")).SetTargets({binding.first.GetPath()});
         fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({binding.second.GetPath()});
     }
@@ -3149,7 +3216,7 @@ TestConnectedParentSpaceSolverInputs()
     const UsdPrim ownerDriver = control("/Asset/Rig/Controls/OwnerDriver", 7);
     {
         const UsdPrim fk = stage->DefinePrim(
-            SdfPath("/Asset/Rig/Solvers/Owner"), TfToken("RigExecFkChain"));
+            SdfPath("/Asset/Rig/Movers/Owner"), TfToken("RigExecFkChain"));
         fk.GetRelationship(TfToken("rigExec:controls"))
             .SetTargets({ownerDriver.GetPath()});
         fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({owner.GetPath()});
@@ -3173,7 +3240,7 @@ TestConnectedParentSpaceSolverInputs()
             joints.push_back(path);
         }
     }
-    const UsdPrim ik = stage->DefinePrim(SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+    const UsdPrim ik = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/IK"), TfToken("RigExecTwoBoneIk"));
     ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
     ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
@@ -3182,6 +3249,13 @@ TestConnectedParentSpaceSolverInputs()
     moveJoint.GetRelationship(TfToken("rigExec:sources")).SetTargets({target.GetPath()});
     const UsdPrim moveDriver = MakeConstraint(stage, "MoveDriver", "RigExecPositionConstraint", {driver.GetPath()});
     moveDriver.GetRelationship(TfToken("rigExec:sources")).SetTargets({SdfPath("/Asset/DriverTarget")});
+    // Bottom sibling first, so this list is the execution order REVERSED:
+    // MoveDriver, Driver FK, AltDriver FK, MoveJoint, Owner FK, IK, MoveHeld.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+        .SetChildrenReorder({TfToken("MoveHeld"), TfToken("IK"),
+                             TfToken("Owner"), TfToken("MoveJoint"),
+                             TfToken("AltDriver"), TfToken("Driver"),
+                             TfToken("MoveDriver")});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -3236,15 +3310,20 @@ TestConnectedParentSpaceSolverInputs()
     check(6, 2, 4);
     altDriver.GetAttribute(TfToken("avars:tx")).Set(2.0);
     check(7, 2, 5);
-    // Connected space ancestry participates in cycle validation.
+    // Connected space ancestry participates in ordering, and pointing the
+    // FIRST constraint at the joint the LAST solver writes is now a
+    // positional frame read rather than a cycle (spec 4.2): MoveDriver
+    // stands at the bottom of the pose stack, so it reads the end joint as
+    // the steps before it left it and the IK still runs after it.
     bridge.GetAttribute(TfToken("default:space"))
         .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
     moveDriver.GetRelationship(TfToken("rigExec:sources")).SetTargets({joints[2]});
     errors.clear();
-    CHECK(!evaluator.Compile(&errors));
-    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
+    CHECK(evaluator.Compile(&errors));
+    CHECK(!std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
         return error.find("pose dependency cycle") != std::string::npos;
     }));
+    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
 }
 
 static void
@@ -3357,6 +3436,15 @@ TestSolverBatchLevelAudit()
     blend.GetRelationship(TfToken("rigExec:inputB")).SetTargets({solverC});
     blend.GetAttribute(TfToken("inputs:weight")).Set(0.5f);
     blend.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointD});
+    // A -> B, C -> D by aggregate, so D runs LAST -- and an AGGREGATE read
+    // that contradicts the hierarchy is a compile error under the unified
+    // pose stack (spec 4.2). Definition order A, B, C, D reversed would run D
+    // first, so the scope is reordered to put D at the TOP. (B and C write
+    // joints D does not name, so the consumed-solver relaxation leaves them
+    // as stack steps and the check is reachable here.)
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers"))
+        .SetChildrenReorder({TfToken("D"), TfToken("C"), TfToken("B"),
+                             TfToken("A")});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -4260,6 +4348,11 @@ TestAuthoredPosedSpaceBakesAndAnimatedOneFollows()
 int
 main()
 {
+    // Unbuffered, so that a fail-fast abort in the middle of the suite still
+    // leaves every FAIL line already printed in the log. Redirected stdout is
+    // fully buffered by default and a crash discards the whole buffer, which
+    // turns "this test crashed" into a report with no failures in it at all.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     const auto plugins = PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
     if (plugins.empty()) {

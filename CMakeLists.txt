@@ -601,6 +601,19 @@ add_test(NAME testRigExecSolverBake COMMAND testRigExecSolverBake
 rigexec_add_baked_parity_test(testRigExecSolverBake REQUIRE_BAKE CONE_VERIFY
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
+add_executable(testRigExecSolverStacking tests/testRigExecSolverStacking.cpp)
+target_link_libraries(testRigExecSolverStacking PRIVATE rigExec)
+target_compile_definitions(testRigExecSolverStacking
+    PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecSolverStacking COMMAND testRigExecSolverStacking
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# No REQUIRE_BAKE: the checkpoint case deliberately authors a read phase that
+# names a solver, which refuses the bake by design (there is no solver
+# equivalent of the baked phased-read store). Every other fixture bakes, so
+# parity and the cone verifier still run over two solver commits on one slot.
+rigexec_add_baked_parity_test(testRigExecSolverStacking CONE_VERIFY
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
 add_executable(testRigExecArm tests/testRigExecArm.cpp)
 target_link_libraries(testRigExecArm PRIVATE rigExec)
 target_compile_definitions(testRigExecArm PRIVATE ${_rigexec_schema_resource_define})

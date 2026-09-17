@@ -93,7 +93,8 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
 
     auto bakeSolver = [&](const SdfPath &solverPath,
                           const std::vector<std::pair<SdfPath, int>>
-                              &jointOutputs) {
+                              &jointOutputs,
+                          const SdfPathVector &liveRestJoints) {
         RigExecBakedProgramImpl::Solver s;
         // Every slot whose REST this description measures from. Recorded at
         // the point the rest is actually read, so the list is exactly what
@@ -162,6 +163,34 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                                       useRemap ? elements[k] : int(k));
             }
             s.restRefs = restRefs;
+            // The LIVE half (spec 4.2): a rest ref whose joint a pose step
+            // BELOW this solver already wrote is measured from the frame that
+            // step left, not from the authored rest. This is the baked mirror
+            // of the dynamic path computeRestFrame override, and it is bound
+            // to a version by bindSolverReads rather than captured here,
+            // because the frame is not known until the run reaches this
+            // place in the walk.
+            std::set<int> liveSlots;
+            for (const SdfPath &joint : liveRestJoints) {
+                const int slot = slotOf(joint);
+                if (slot >= 0) liveSlots.insert(slot);
+            }
+            s.restIsLive.assign(restRefs.size(), false);
+            for (size_t k = 0; k < restRefs.size(); ++k) {
+                if (liveSlots.count(restRefs[k].first)) {
+                    s.restIsLive[k] = true;
+                    s.hasLiveRest = true;
+                }
+            }
+            s.restReads.assign(restRefs.size(), 0u);
+            // The output basis, captured like every other rest description
+            // and rebuilt by RefreshSolverRests. Folded into restSlots so a
+            // ladder recompute -- or a drag on one of these rests -- dirties
+            // this solver exactly as a control rest does.
+            s.jointRests.reserve(restRefs.size());
+            for (const auto &[slot, element] : restRefs) {
+                s.jointRests.push_back(B.restPts[foldRest(slot)]);
+            }
         }
         for (const auto &[joint, element] : jointOutputs) {
             const int slot = slotOf(joint);
@@ -486,6 +515,10 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
         // dirties this solver rather than leaving it solving against the
         // authored rest the drag is standing in for.
         {
+            // A LIVE rest is by definition per-frame: it is this frame pose as
+            // an earlier step left it, so the description can never be
+            // concluded constant.
+            s.restsVary = s.restsVary || s.hasLiveRest;
             std::set<int> chain;
             for (const int named : s.restSlots) {
                 for (int slot = named; slot >= 0;
@@ -688,6 +721,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 evaluationMode == "alwaysTS" ||
                 (evaluationMode == "autoDetect" &&
                  fc.ikUsesAnimatedTs);
+            c.ikRestLive = fc.ikRestLive;
             for (const SdfPath &joint : fc.ikChain) {
                 const UsdPrim jointPrim = B.stage->GetPrimAtPath(joint);
                 for (const char *name : {"posed:space", "avars:tx",
@@ -879,7 +913,11 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
             std::vector<int> candidates;
             for (size_t k = 0; k < entry.batchSolvers.size(); ++k) {
                 const int slot =
-                    bakeSolver(entry.batchSolvers[k], entry.solverJoints[k]);
+                    bakeSolver(entry.batchSolvers[k],
+                               entry.solverJoints[k],
+                               k < entry.solverLiveRestJoints.size()
+                                   ? entry.solverLiveRestJoints[k]
+                                   : SdfPathVector());
                 st.batchSolvers.push_back(slot);
                 for (const auto &[providerSlot, element] :
                          B.solvers[slot].outputs) {
@@ -917,7 +955,7 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
     // frames. Baked here, in the dependency order Build resolved, and run as
     // ordinary Solve steps after the walk.
     for (const SdfPath &solverPath : ctx->guideOnlySolvers) {
-        B.guideSolvers.push_back(bakeSolver(solverPath, {}));
+        B.guideSolvers.push_back(bakeSolver(solverPath, {}, {}));
     }
     B.aggregates.resize(B.solvers.size());
 }
@@ -1024,6 +1062,18 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
         solver.midRead = readFin(solver.mid);
         solver.endRead = readFin(solver.end);
         solver.poleRead = readFin(solver.pole);
+        // The live joint rests, bound exactly like the control reads are: to
+        // the version standing where this batch begins, which is where the
+        // dynamic path reads finalFrames for the same override. That is what
+        // makes the two paths bit-identical on a live rest.
+        if (solver.hasLiveRest) {
+            solver.restReads.assign(solver.restRefs.size(), 0u);
+            for (size_t k = 0; k < solver.restRefs.size(); ++k) {
+                if (k < solver.restIsLive.size() && solver.restIsLive[k]) {
+                    solver.restReads[k] = readFin(solver.restRefs[k].first);
+                }
+            }
+        }
     };
 
     for (size_t w = 0; w < B.walkSteps.size(); ++w) {
@@ -1163,6 +1213,35 @@ constexpr size_t kPropagateChunkSize = 64;
 
 }  // namespace
 
+bool
+RigExecBakedRefuseBatchedStackWrites(RigExecBakedBuildContext *ctx)
+{
+    RigExecBakedProgramImpl &B = *ctx->program;
+    for (const RigExecBakedProgramImpl::WalkStep &walk : B.walkSteps) {
+        if (!walk.solverBatch || walk.batchSolvers.size() < 2) {
+            continue;
+        }
+        std::map<int, SdfPath> declaredBy;
+        for (const int si : walk.batchSolvers) {
+            const RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(si)];
+            for (const auto &[slot, element] : s.outputs) {
+                const auto already = declaredBy.emplace(slot, s.path);
+                if (!already.second) {
+                    ctx->Refuse(
+                        "two solvers of one batch write " +
+                            B.paths[size_t(slot)].GetString() +
+                            "; a stack must be one solver per commit (its "
+                            "other writer is " +
+                            already.first->second.GetString() + ")",
+                        s.path);
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void
 RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
 {
@@ -1269,6 +1348,15 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         if (walk.solverBatch) {
             levels.insert(walk.level);
             B.solverEvaluations += walk.batchSolvers.size();
+            // A solver STACK is two commits on one slot, never two producers
+            // inside one commit: the sort-and-unique below would fold them
+            // into one entry and the merge would keep only the last store,
+            // silently collapsing a stack -- and the dynamic path collapses
+            // identically (candidates[joint] = frame into a map), so the two
+            // would agree on the WRONG answer. One solver per batch makes it
+            // unreachable, and Build REFUSES the shape by name before it gets
+            // here (RigExecBakedRefuseBatchedStackWrites), so this loop may
+            // assume it.
             for (const int si : walk.batchSolvers) {
                 for (const auto &[slot, element] : B.solvers[size_t(si)]
                                                        .outputs) {
@@ -1346,6 +1434,22 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                     if (control >= 0) {
                         step.reads.push_back(RigExecBakedOne(
                             RigExecBakedSlotDomain::PoseFin, control));
+                    }
+                }
+                // The LIVE joint rests: a solver whose rest reference is the
+                // frame a pose step below it left READS that slot's PoseFin,
+                // and a read a step does not declare is a read the scheduler
+                // is free to run before the write (spec 4.2, live rests).
+                // Empty on every solver with no step below it.
+                if (solver.hasLiveRest) {
+                    for (size_t k = 0; k < solver.restRefs.size(); ++k) {
+                        if (k < solver.restIsLive.size() &&
+                            solver.restIsLive[k] &&
+                            solver.restRefs[k].first >= 0) {
+                            step.reads.push_back(RigExecBakedOne(
+                                RigExecBakedSlotDomain::PoseFin,
+                                solver.restRefs[k].first));
+                        }
                     }
                 }
                 // The ribbon's driver points, filled by the prologue.
@@ -2343,14 +2447,42 @@ RefreshSolverRests(RigExecBakedProgramImpl &B,
                    RigExecBakedProgramImpl::Solver *solver)
 {
     RigExecBakedProgramImpl::Solver &s = *solver;
+    // Where a rest ref is LIVE, the rest is the frame the pose step below this
+    // solver left -- read off the ladder by the version bindSolverReads bound
+    // -- and not the authored rest of the slot (spec 4.2). Every arithmetic
+    // line below is written against these two accessors and needs no other
+    // change.
+    const auto liveRest = [&s, &B](size_t k) {
+        return k < s.restIsLive.size() && s.restIsLive[k] &&
+               k < s.restReads.size() &&
+               size_t(s.restReads[k]) < B.fin.size();
+    };
+    const auto restPtsOf = [&s, &B, &liveRest](
+                               size_t k, int slot) -> const
+        std::array<GfVec3d, 4> & {
+        return liveRest(k) ? B.fin[size_t(s.restReads[k])].points
+                           : B.restPts[size_t(slot)];
+    };
+    const auto restFrameOf = [&s, &B, &liveRest](
+                                 size_t k, int slot) -> const
+        RigExecPointFrame & {
+        return liveRest(k) ? B.fin[size_t(s.restReads[k])]
+                           : B.restFrames[size_t(slot)];
+    };
+    for (size_t k = 0; k < s.restRefs.size() && k < s.jointRests.size();
+         ++k) {
+        s.jointRests[k] = restPtsOf(k, s.restRefs[k].first);
+    }
     if (s.type == "RigExecFkChain") {
         for (size_t k = 0; k < s.controls.size(); ++k) {
             s.controlRests[k] = B.restPts[size_t(s.controls[k])];
         }
     } else if (s.type == "RigExecTwoBoneIk") {
-        for (const auto &[slot, element] : s.restRefs) {
+        for (size_t k = 0; k < s.restRefs.size(); ++k) {
+            const int slot = s.restRefs[k].first;
+            const int element = s.restRefs[k].second;
             if (element >= 0 && element < 3) {
-                s.ikRests[size_t(element)] = B.restPts[size_t(slot)];
+                s.ikRests[size_t(element)] = restPtsOf(k, slot);
             }
         }
         s.upperLengthBase =
@@ -2364,11 +2496,12 @@ RefreshSolverRests(RigExecBakedProgramImpl &B,
         s.ikParams.lowerLength = s.lowerLengthBase + s.lowerOffset.constant;
     } else if (s.type == "RigExecSplineIk") {
         std::vector<RigExecPointFrame> restJoints(s.splineCount);
-        for (const auto &[slot, element] : s.restRefs) {
+        for (size_t k = 0; k < s.restRefs.size(); ++k) {
+            const int slot = s.restRefs[k].first;
+            const int element = s.restRefs[k].second;
             if (element >= 0 && size_t(element) < s.splineCount) {
-                restJoints[size_t(element)] = B.restFrames[size_t(slot)];
-                s.splineJointRests[size_t(element)] =
-                    B.restPts[size_t(slot)];
+                restJoints[size_t(element)] = restFrameOf(k, slot);
+                s.splineJointRests[size_t(element)] = restPtsOf(k, slot);
             }
         }
         s.splineRest = RigExecSplineIkMakeRest(
@@ -2468,11 +2601,27 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
 
     case RigExecBakedStepKind::Solve: {
         RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(step->object)];
+        // The dynamic path's RigExecPointFrameLiveRest, per element: which
+        // of this solver's joints a pose step BELOW it wrote, and what that
+        // step left there. Only a live one re-bases its element, which is
+        // what keeps every unstacked rig bit-identical (spec 4.2).
+        const std::vector<std::array<GfVec3d, 4>> &liveRests = s.jointRests;
+        std::vector<bool> liveFlags;
+        if (s.hasLiveRest) {
+            liveFlags.assign(s.jointRests.size(), false);
+            for (size_t k = 0;
+                 k < s.restIsLive.size() && k < liveFlags.size(); ++k) {
+                liveFlags[k] = s.restIsLive[k];
+            }
+        }
         // The rest description, where this run recomposed the rests it is
         // measured from. Pure arithmetic over the ladder the prologue left:
         // no lock, no USD read and no pose write, which is what lets it sit
         // in a step body at all.
-        if (B.ladderRecomputed && !s.restSlots.empty()) {
+        // A LIVE rest depends on THIS frame pose, so a solver carrying one
+        // refreshes on every evaluation and not only when the prologue
+        // recomposed the ladder.
+        if ((B.ladderRecomputed && !s.restSlots.empty()) || s.hasLiveRest) {
             RefreshSolverRests(B, &s);
         }
         RigExecPointFrameArray &aggregate = B.aggregates[size_t(step->object)];
@@ -2488,17 +2637,32 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
         // reports.
         if (s.degenerate) {
         } else if (s.type == "RigExecFkChain") {
+            // One joint rest per control is the positional contract
+            // rigExec:joints[N] <- element N already carries; anything else
+            // (a guide-only chain, a target publishing no rest) keeps the
+            // control's own rest as the basis, exactly as before.
+            const bool jointBasis =
+                s.jointRests.size() == s.controls.size();
+            aggregate.rests = s.controlRests;
             for (size_t k = 0; k < s.controls.size(); ++k) {
                 s.elements[k].restPoints = s.controlRests[k];
                 // Every entry is a provider: the bake filtered the list
                 // the way the computation's read iterator does.
                 s.elements[k].posePoints =
                     B.fin[size_t(s.controlReads[k])].points;
+                // The dynamic path's RigExecPointFrameLiveRest, per element:
+                // only a joint a step BELOW this chain wrote re-bases it.
+                const bool live = jointBasis && k < s.restIsLive.size() &&
+                                  s.restIsLive[k];
+                s.elements[k].hasOutRest = live;
+                if (live) {
+                    s.elements[k].outRestPoints = s.jointRests[k];
+                    aggregate.rests[k] = s.jointRests[k];
+                }
                 s.elements[k].parentIndex =
                     s.parentRelative ? -1 : int(k) - 1;
             }
             aggregate.frames = RigExecSolveFkChain(s.elements);
-            aggregate.rests = s.controlRests;
         } else if (s.type == "RigExecTwoBoneIk") {
             RigExecTwoBoneIkParams params = s.ikParams;
             if (live(s.bend) || live(s.stretch) || live(s.softness) ||
@@ -2540,10 +2704,15 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
                     aggregate.frames.reserve(n);
                     aggregate.rests.reserve(n);
                     for (size_t k = 0; k < n; ++k) {
+                        const bool live = k < liveFlags.size() &&
+                                          liveFlags[k] &&
+                                          k < liveRests.size();
                         aggregate.frames.push_back(RigExecBlendFrames(
                             a->frames[k], b->frames[k], a->rests[k], w,
-                            RigExecRotationBlend::ShortestArc, s.scaleMode));
-                        aggregate.rests.push_back(a->rests[k]);
+                            RigExecRotationBlend::ShortestArc, s.scaleMode,
+                            live ? &liveRests[k] : nullptr));
+                        aggregate.rests.push_back(live ? liveRests[k]
+                                                       : a->rests[k]);
                     }
                 }
             }
@@ -2551,7 +2720,7 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             aggregate = RigExecSolveTwistDistribution(
                 B.fin[size_t(s.rootRead)], B.fin[size_t(s.endRead)],
                 s.twistStartRest, s.twistEndRest, s.twistWeights,
-                rd(s.twistTurns));
+                rd(s.twistTurns), liveRests, liveFlags);
         } else if (s.type == "RigExecRibbon") {
             // Both curves go in as the dynamic path supplies them: the live
             // points the prologue read (or the folded constant, for a curve
@@ -2561,7 +2730,8 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             aggregate = RigExecSampleRibbonFrames(
                 s.ribbonPointsVarying ? s.ribbonPoints
                                       : s.ribbonConstantPoints,
-                s.ribbonRestPoints, rd(s.ribbonSampleCount));
+                s.ribbonRestPoints, rd(s.ribbonSampleCount), liveRests,
+                liveFlags);
         } else if (s.type == "RigExecSplineIk") {
             RigExecSplineIkParams params = s.splineParams;
             if (s.splineParamsVary || live(s.preserveVolume) ||
@@ -2878,8 +3048,13 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             const std::vector<RigExecPointFrame> *solveChain = &commit.ikChain;
             if (inputsValid && !c.useAnimatedTs) {
                 for (size_t k = 0; k < c.targetSlots.size(); ++k) {
+                    // The incoming frame IS the rest reference where a step
+                    // below this constraint wrote the joint.
                     commit.ikRest[k] =
-                        B.restFrames[size_t(c.targetSlots[k])];
+                        (k < c.ikRestLive.size() && c.ikRestLive[k] &&
+                         k < commit.ikChain.size())
+                            ? commit.ikChain[k]
+                            : B.restFrames[size_t(c.targetSlots[k])];
                 }
                 if (!RigExecPrepareRestDerivedIkChain(
                         commit.ikChain, commit.ikRest, &commit.ikPrepared)) {
@@ -3332,27 +3507,66 @@ RigExecBakedPublishPose(RigExecBakedProgramImpl *program, RigExecRigPose *pose)
         }
     }
 
-    // An incomplete solver is an authoring gap, not a silent one. Merged into
-    // one ordered set here rather than accumulated during the walk, because
-    // the set's ORDER is path order and a step must not hold a shared one.
-    std::set<SdfPath> fallbackJoints;
-    for (const RigExecBakedProgramImpl::Solver &solver : B.solvers) {
-        fallbackJoints.insert(solver.fallbackJoints.begin(),
-                              solver.fallbackJoints.end());
+    // An incomplete solver is an authoring gap, not a silent one. Merged
+    // here rather than accumulated during the walk, because the ORDER is a
+    // property of the whole run and a step must not hold a shared one.
+    //
+    // The dynamic walk's rule, expressed identically: one line per failing
+    // WRITER (a stacked joint may have several, and the one that failed is
+    // not necessarily the one a joint->solver lookup would name), collected
+    // in walk order, stable-sorted by joint path -- and the sentence says
+    // "fell back to its rest chain" only when NO writer published, because a
+    // joint another writer published keeps that writer's frame and fell back
+    // to nothing. The two streams are compared verbatim, so neither half of
+    // this may drift from the other.
+    //
+    // The element comes from jointSolverBinding rather than from
+    // Solver::fallbackJoints, which holds slot paths only: widening it would
+    // change a serialized, round-trip-verified field for a diagnostic.
+    std::vector<std::pair<SdfPath, std::pair<SdfPath, int>>> fallbackJoints;
+    std::map<SdfPath, SdfPath> lastPublishingWriter;
+    for (const RigExecBakedProgramImpl::WalkStep &walk : B.walkSteps) {
+        if (!walk.solverBatch) {
+            continue;
+        }
+        for (const int si : walk.batchSolvers) {
+            const RigExecBakedProgramImpl::Solver &s = B.solvers[size_t(si)];
+            for (size_t k = 0; k < s.outputs.size(); ++k) {
+                const SdfPath &jointPath = B.paths[size_t(s.outputs[k].first)];
+                if (k < s.outPresent.size() && s.outPresent[k]) {
+                    lastPublishingWriter[jointPath] = s.path;
+                    continue;
+                }
+                int element = -1;
+                const auto binding = (*B.jointSolverBinding).find(jointPath);
+                if (binding != (*B.jointSolverBinding).end()) {
+                    for (const auto &[writer, writerElement] :
+                         binding->second) {
+                        if (writer == s.path) {
+                            element = writerElement;
+                            break;
+                        }
+                    }
+                }
+                fallbackJoints.push_back({jointPath, {s.path, element}});
+            }
+        }
     }
-    for (const SdfPath &jointPath : fallbackJoints) {
-        const auto binding = (*B.jointSolverBinding).find(jointPath);
-        const std::string solver =
-            binding != (*B.jointSolverBinding).end()
-                ? binding->second.first.GetString()
-                : std::string("<unknown>");
-        const int element = binding != (*B.jointSolverBinding).end()
-                                ? binding->second.second
-                                : -1;
+    std::stable_sort(fallbackJoints.begin(), fallbackJoints.end(),
+                     [](const std::pair<SdfPath, std::pair<SdfPath, int>> &a,
+                        const std::pair<SdfPath, std::pair<SdfPath, int>> &b) {
+                         return a.first < b.first;
+                     });
+    for (const auto &[jointPath, writer] : fallbackJoints) {
+        const auto kept = lastPublishingWriter.find(jointPath);
         pose->diagnostics.push_back(
-            "solver " + solver + " published no element " +
-            std::to_string(element) + " for joint " + jointPath.GetString() +
-            "; joint fell back to its rest chain");
+            "solver " + writer.first.GetString() + " published no element " +
+            std::to_string(writer.second) + " for joint " +
+            jointPath.GetString() + "; " +
+            (kept == lastPublishingWriter.end()
+                 ? std::string("joint fell back to its rest chain")
+                 : "the joint keeps the frame " + kept->second.GetString() +
+                       " left"));
     }
 
     // The plain Xformables a constraint targets, in slot (== path) order.

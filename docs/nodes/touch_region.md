@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Node type** | `RigExecTouchRegion` |
-| **Example** | [touch_regions.usda](../examples/touch_regions.usda) |
+| **Example** | [touch_region.usda](../examples/touch_region.usda) |
 
 On this page:
 
@@ -123,7 +123,7 @@ follow the deformation for free because they index faces, not points.
 Open it live with:
 
 ```bat
-bin\launch_usdview.bat docs\examples\touch_regions.usda
+bin\launch_usdview.bat docs\examples\touch_region.usda
 ```
 
 ## Tips

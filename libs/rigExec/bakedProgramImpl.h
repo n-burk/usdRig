@@ -967,6 +967,13 @@ struct RigExecBakedComposeGroup {
 /// Which position each producer writes is decided at Build, so the merge is
 /// an indexed store rather than a map insertion, and "last writer wins on a
 /// duplicate slot" stays what it is today.
+///
+/// A solver STACK is two commits on one slot, never two producers inside one
+/// commit: each solver batch holds exactly one solver, so each write of a
+/// stacked joint gets its own SSA version. If a batch is ever widened to hold
+/// two solvers that write one slot, the merge below would silently collapse
+/// two stack entries into one -- so Build REFUSES that shape by name (see the
+/// duplicate-slot check in bakedPose.cpp's commit sizing).
 struct RigExecBakedCommit {
     /// One provider above a NATIVE Xformable source: the slot, and the
     /// versions of its base and final frames live where this commit runs.
@@ -1131,10 +1138,12 @@ struct RigExecBakedProgramImpl {
         resolveBlendSample;
     RigExecProfiler *profiler = nullptr;
     const std::vector<RigExecValueOverride> *interactiveOverrides = nullptr;
-    /// Joint -> (solver, element), which names the solver in the diagnostic a
-    /// joint gets when its solver published no element for it.
-    const std::map<SdfPath, std::pair<SdfPath, int>> *jointSolverBinding =
-        nullptr;
+    /// Joint -> the ordered stack of (solver, element) that write it, which
+    /// is where the epilogue recovers the ELEMENT a writer that published
+    /// nothing was bound to. rigExec:joints is an ordered write, so a joint
+    /// may carry several entries; the last one supplies its base frame.
+    const std::map<SdfPath, std::vector<std::pair<SdfPath, int>>>
+        *jointSolverBinding = nullptr;
     /// The observational guide request, which exists only while a consumer
     /// asked for one, and the runtime toggle beside it. Read per frame rather
     /// than folded: either can move without the epoch moving.
@@ -1486,6 +1495,26 @@ struct RigExecBakedProgramImpl {
         /// (slot, element) for the two computations that remap by element:
         /// TwoBoneIk and SplineIk.
         std::vector<std::pair<int, int>> restRefs;
+        /// Parallel to restRefs: true where a pose step BELOW this solver in
+        /// the rig hierarchical stack wrote that joint, so the rest is the
+        /// frame that step left rather than the authored one (spec 4.2).
+        std::vector<bool> restIsLive;
+        /// Parallel to restRefs: the `fin` version each LIVE rest reads, bound
+        /// by bindSolverReads to the version standing where this batch begins
+        /// -- the same moment the dynamic path reads finalFrames for its
+        /// computeRestFrame override.
+        std::vector<unsigned> restReads;
+        /// True when any rest ref is live, which makes the description
+        /// per-frame: it is refreshed on EVERY evaluation and can never be
+        /// concluded constant.
+        bool hasLiveRest = false;
+        /// One per rest ref, in element order: the basis a solver APPLIES its
+        /// solved map to. For RigExecFkChain that is the joint's rest
+        /// reference rather than the control's own rest, so a step below the
+        /// chain is carried through the solve instead of replaced (spec 4.2).
+        /// Empty when the solver's joints do not line up one-for-one with its
+        /// elements, and the solver then keeps its own basis.
+        std::vector<std::array<GfVec3d, 4>> jointRests;
         /// True when any slot's whole rest CHAIN can move with time.
         bool restsVary = false;
         /// Every override index a rest channel of that chain registered, so
@@ -1574,7 +1603,9 @@ struct RigExecBakedProgramImpl {
         //
         // The candidates this solver published, in `outputs` order and
         // nowhere else: the merge into the batch's table is the commit's
-        // job, so two solvers of one batch never write the same storage.
+        // job, so two solvers of one batch never write the same storage --
+        // an invariant Build now refuses to violate rather than assumes (the
+        // duplicate-slot check in bakedPose.cpp's commit sizing).
         std::vector<RigExecPointFrame> outFrames;
         std::vector<char> outPresent;
         /// Where each output lands in its commit's slot-ordered table.
@@ -1675,6 +1706,9 @@ struct RigExecBakedProgramImpl {
         /// epoch-structural state, so both are settled at Build.
         bool poleModeObject = false;
         bool useAnimatedTs = false;
+        /// Parallel to targetSlots: the compiled "a step below wrote this
+        /// joint" flags, so the rest reference is that step's frame.
+        std::vector<char> ikRestLive;
         /// The effector and the pole objects, as source references: a slot
         /// when the walk holds a frame, an entry in `nativeSources` when the
         /// stage does.
@@ -2535,6 +2569,9 @@ struct RigExecBakedConstraintSpec {
     /// SingleChainIK: the inferred joint chain, first joint through end, and
     /// the two bindings it resolves beside its sources.
     SdfPathVector ikChain;
+    /// Parallel to ikChain: 1 where a pose step BELOW this constraint wrote
+    /// that joint, so the chain measures from what that step left (spec 4.2).
+    std::vector<char> ikRestLive;
     SdfPath effector, effectorXform;
     SdfPathVector poleObjects, poleObjectXforms;
     /// _IkUsesAnimatedTs over the chain, answered where the evaluator's
@@ -2585,6 +2622,12 @@ struct RigExecBakedWalkEntry {
     size_t level = 0;
     SdfPathVector batchSolvers;
     std::vector<std::vector<std::pair<SdfPath, int>>> solverJoints;
+    /// Per solver, the joints whose REST is LIVE: a pose step below this
+    /// solver in the rig's hierarchical stack already wrote them, so the
+    /// solver measures from the frame that step left rather than from the
+    /// authored rest (spec 4.2). Empty on every rig with no pose step below a
+    /// solver that writes one of its joints, which is every shipped rig.
+    std::vector<SdfPathVector> solverLiveRestJoints;
     /// Constraints only.
     RigExecBakedConstraintSpec constraint;
 };
@@ -2782,6 +2825,16 @@ void RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
 void RigExecBakedBuildGeometry(
     RigExecBakedBuildContext *ctx,
     const std::vector<RigExecBakedChainSpec> &chains);
+
+/// Refuses a walk step whose batch holds two solvers writing one slot.
+///
+/// A solver stack is one commit per writer; two writers inside ONE commit
+/// would collapse into a single SSA version and keep only the last store --
+/// and the dynamic path collapses identically, so the two would agree on the
+/// wrong answer. One solver per batch makes it unreachable today; this is the
+/// guard that keeps a future batching optimization from changing results
+/// silently. Returns false having recorded the refusal.
+bool RigExecBakedRefuseBatchedStackWrites(RigExecBakedBuildContext *ctx);
 
 /// Appends the pose half of the program in program order: the compose
 /// subtrees, then one Solve and one commit per walk entry, then the

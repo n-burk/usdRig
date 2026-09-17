@@ -48,6 +48,7 @@
 #include <cmath>
 #include <optional>
 #include <functional>
+#include <limits>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -129,6 +130,10 @@ namespace {
 
 const TfToken _computePointFrame("computePointFrame");
 const TfToken _computePointFrameArray("computePointFrameArray");
+// The joint rest a solver measures from. Overridden per solver batch when an
+// earlier pose step wrote the joint (spec §4.2, "the incoming frame is the
+// solver's rest reference").
+const TfToken _computeRestFrame("computeRestFrame");
 const TfToken _movesRel("rigExec:moves");
 const TfToken _enabledAttr("inputs:enabled");
 const TfToken _restPointsAttr("rigExec:restPoints");
@@ -147,20 +152,31 @@ const TfToken _samplePhaseAttr("rigExec:samplePhase");
 // compilation. If those walks ever disagree, an order edit can retain the old
 // epoch digest while executing a different chain.
 std::vector<UsdPrim>
-_GetMoverExecutionOrder(const UsdPrim &movers)
+_GetPoseStackOrder(const UsdPrim &root)
 {
     std::vector<UsdPrim> ordered;
-    if (movers) {
+    if (root) {
         // Reversing an ordinary composed pre-order yields exactly the stack
         // walk: reversed sibling branches, recursively, with each parent
         // after its descendants. Using UsdPrimRange here also preserves its
         // standard traversal predicate and instance behavior.
-        for (const UsdPrim &prim : UsdPrimRange(movers)) {
+        for (const UsdPrim &prim : UsdPrimRange(root)) {
             ordered.push_back(prim);
         }
         std::reverse(ordered.begin(), ordered.end());
     }
     return ordered;
+}
+
+/// The same walk restricted to the Movers subtree, which is what numbers the
+/// mover stack. Taken over the RIG ROOT instead, the identical walk numbers
+/// the UNIFIED POSE STACK -- joint-writing aggregate solvers and pose-domain
+/// frame constraints in one order (spec §4.2) -- and the mover order is a
+/// restriction of it.
+std::vector<UsdPrim>
+_GetMoverExecutionOrder(const UsdPrim &movers)
+{
+    return _GetPoseStackOrder(movers);
 }
 
 /// True for the schema types that GENERATE a weight field from a placed
@@ -2437,6 +2453,16 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
         // solvers live wherever the author put them, so every scope's
         // wiring must contribute to epoch identity
         // (consistent with mover discovery and compile Pass 0).
+        //
+        // This walk's ORDER is now evaluation semantics, not only identity:
+        // the solver stack ordinal is the reverse of exactly this composed
+        // pre-order, so two solvers writing one joint commit in the order
+        // this loop visits them, reversed. Each segment leads with the
+        // solver's full path, so a sibling reorder (or a layer-strength
+        // change that composes a different order) changes the concatenation
+        // and starts a new epoch -- which is the only reason a reordered
+        // stack cannot keep a stale schedule. Do not "optimize" this into a
+        // sorted set or a path-keyed map.
         for (const UsdPrim &solver : UsdPrimRange(rig)) {
             SdfPathVector joints;
             if (const UsdRelationship rel =
@@ -4597,12 +4623,48 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     // and supply it as a value override, so the binding never has to be
     // authored anywhere (it used to become rigExec:frameSource /
     // rigExec:frameElement on the joint, in the derived layer).
-    std::map<SdfPath, std::pair<SdfPath, int>> newJointBinding;
+    //
+    // rigExec:joints is an ordered WRITE, not an exclusive claim (spec §4.2,
+    // "Solvers stack"), so the value is the ordered stack of writers rather
+    // than one owner. Index 0 writes first; the last entry supplies the
+    // joint's base frame. The order is settled below, once the POSE graph is
+    // complete -- which is later than the solver DAG, because a pair of
+    // writers can be ordered by a solver -> constraint -> solver path and by
+    // nothing else: data flow decides any pair it orders, and the solver
+    // stack ordinal breaks every remaining tie.
+    //
+    // The ordered solver walk is hoisted here because four passes need it --
+    // this validation, the consumed-solver relaxation, the solver DAG and the
+    // stack ordinal -- and it is a full UsdPrimRange over the rig each time
+    // (critique: "_DiscoverAggregateSolvers is already walked three times").
+    const std::vector<UsdPrim> orderedSolvers =
+        _DiscoverAggregateSolvers(_stage, _rigPath);
+    // Solver -> its position in the SOLVER STACK ORDINAL: the reverse of the
+    // composed pre-order of the whole rig, which is _GetMoverExecutionOrder's
+    // rule (see the comment at its definition) applied to the solver set
+    // instead of the Movers subtree. Bottom composed sibling first, a parent
+    // after its descendants -- so "the bottom one executes first" reads the
+    // same whichever kind of node a rigger is looking at, and a reorder in
+    // usdview reorders the stack.
+    //
+    // It is a pre-order of the WHOLE rig, not a sibling order: two solvers in
+    // different scopes are ordered by where their scopes sit, and a nested
+    // solver comes before its ancestor. This is deliberately the same walk
+    // the epoch digest uses (see the aggregate-solver segment of the digest
+    // below), so an order edit can never retain the old digest while
+    // executing a different stack.
+    std::map<SdfPath, int> solverStackOrdinal;
     {
-        std::map<SdfPath, SdfPath> jointClaim;  // joint -> claiming solver
+        int ordinal = 0;
+        for (auto it = orderedSolvers.rbegin(); it != orderedSolvers.rend();
+             ++it) {
+            solverStackOrdinal[it->GetPath()] = ordinal++;
+        }
+    }
+    std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> newJointBinding;
+    {
         {
-            const std::vector<UsdPrim> solvers =
-                _DiscoverAggregateSolvers(_stage, _rigPath);
+            const std::vector<UsdPrim> &solvers = orderedSolvers;
             // Cardinality attributes must be static (compile-time
             // structural) for EVERY aggregate solver under the rig, not
             // only joint-bearing ones: a non-joint Twist/Ribbon feeding a
@@ -4673,8 +4735,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             std::set<SdfPath> consumedSolvers;
             std::set<SdfPath> posedByUnconsumed;
             {
-                const std::vector<UsdPrim> allSolvers =
-                    _DiscoverAggregateSolvers(_stage, _rigPath);
+                const std::vector<UsdPrim> &allSolvers = orderedSolvers;
                 std::set<SdfPath> solverPaths;
                 for (const UsdPrim &solver : allSolvers) {
                     solverPaths.insert(solver.GetPath());
@@ -4688,9 +4749,18 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                         SdfPathVector targets;
                         rel.GetTargets(&targets);
                         for (const SdfPath &target : targets) {
-                            if (target != solver.GetPath() &&
-                                solverPaths.count(target)) {
-                                consumedSolvers.insert(target);
+                            // GetPrimPath(), not the raw target: the DAG pass
+                            // below resolves a property spelling
+                            // (</Rig/Solvers/IK.rigExec:aggregate>) to its
+                            // prim, and a read that creates a dependency edge
+                            // but does not mark the target consumed would
+                            // leave the IK writing as well as feeding the
+                            // blend -- a stack whose meaning then depended on
+                            // namespace order.
+                            const SdfPath targetPrim = target.GetPrimPath();
+                            if (targetPrim != solver.GetPath() &&
+                                solverPaths.count(targetPrim)) {
+                                consumedSolvers.insert(targetPrim);
                             }
                         }
                     }
@@ -4985,30 +5055,157 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                             posedByUnconsumed.count(jointPath)) {
                             continue;
                         }
-                        const auto claimed = jointClaim.find(jointPath);
-                        if (claimed != jointClaim.end()) {
-                            reportError("joint " + jointPath.GetString() +
-                                        " is posed by two solvers (" +
-                                        claimed->second.GetString() + " and " +
-                                        solver.GetPath().GetString() + ")");
-                            return false;
+                        // Two SOLVERS writing one joint is legal and stacks.
+                        // One solver naming one joint TWICE is not: the two
+                        // entries would collapse at runtime (candidates[] is
+                        // a map, and the baked commit's slots are uniqued),
+                        // and a stack edge between them would be a self-edge
+                        // that Kahn reports as an unexplained pose cycle. Say
+                        // what actually happened instead.
+                        std::vector<std::pair<SdfPath, int>> &writers =
+                            newJointBinding[jointPath];
+                        for (const auto &[writer, writerElement] : writers) {
+                            if (writer == solver.GetPath()) {
+                                reportError(
+                                    who + ": rigExec:joints names " +
+                                    jointPath.GetString() +
+                                    " more than once");
+                                return false;
+                            }
                         }
-                        jointClaim[jointPath] = solver.GetPath();
-                        newJointBinding[jointPath] = {solver.GetPath(), element};
+                        writers.emplace_back(solver.GetPath(), element);
                     }
                 }
             }
         }
     }
 
+    // The binding loop appends in UsdPrimRange pre-order, which is the exact
+    // REVERSE of the stack, so every writer list is put into stack-ordinal
+    // order here. This is the AUTHORED order, and it is not decoration: the
+    // "reads the version standing before its own commit" edges built while
+    // the solver DAG is assembled are read off these lists. The pass that
+    // settles the stack against the finished pose graph replaces the order
+    // with the one data flow and the schedule actually produce, and the two
+    // agree whenever nothing orders a pair.
+    for (auto &[joint, writers] : newJointBinding) {
+        if (writers.size() < 2) {
+            continue;  // a one-element stack has no order to get wrong
+        }
+        // find(), never operator[]: mutating a captured map from inside a
+        // sort comparator would insert a silent 0 for any writer the ordinal
+        // sweep did not see and make the comparator inconsistent. An unknown
+        // writer sorts last instead.
+        const auto ordinalOf = [&solverStackOrdinal](const SdfPath &path) {
+            const auto it = solverStackOrdinal.find(path);
+            return it == solverStackOrdinal.end()
+                       ? std::numeric_limits<int>::max()
+                       : it->second;
+        };
+        std::stable_sort(
+            writers.begin(), writers.end(),
+            [&ordinalOf](const std::pair<SdfPath, int> &a,
+                         const std::pair<SdfPath, int> &b) {
+                return ordinalOf(a.first) < ordinalOf(b.first);
+            });
+    }
+
     compileBlocks.Next("DiscoverValidate.SolverDag");
     // Compile the solver DAG, including frame inputs carried by a posed
     // namespace ancestor. Rest inputs are independent of posed outputs and
     // therefore never introduce a feedback edge (IK -> blend is legal).
-    std::map<SdfPath, std::set<SdfPath>> newSolverDependencies;
+    // PRODUCERS: the solvers with no position in the pose stack at all
+    // (spec §4.2). Two kinds, and both are scheduled by DATA FLOW alone:
+    //
+    //   * a solver whose AGGREGATE another solver reads. It is already
+    //     special -- the consumed-solver relaxation makes its rigExec:joints
+    //     a rest reference wherever the consumer claims the same joint -- and
+    //     its consumer cannot read an "earlier version" of an aggregate, so
+    //     the aggregate edge decides the pair and the namespace says nothing
+    //     about it. This is what keeps every IK/FK blend in the repo
+    //     schedulable: reversed sibling order puts the blend BEFORE the
+    //     solvers it blends, because a blend is authored last.
+    //
+    //     (The relaxation is per JOINT, not per solver, so a consumed solver
+    //     that also writes a joint its consumer does not name still writes --
+    //     `docs/examples/blend_point_frames.usda` is exactly that shape. It
+    //     is still a producer: what takes it out of the stack is being read,
+    //     not being joint-less.)
+    //
+    //   * a solver that writes no joint at all -- one whose aggregate only a
+    //     geometry mover reads.
+    //
+    // Every consumer of the ordinal map must therefore test membership rather
+    // than use operator[].
+    std::set<SdfPath> aggregateProducers;
     {
-        const std::vector<UsdPrim> solvers =
-            _DiscoverAggregateSolvers(_stage, _rigPath);
+        std::set<SdfPath> solverPaths;
+        for (const UsdPrim &solver : orderedSolvers) {
+            solverPaths.insert(solver.GetPath());
+        }
+        for (const UsdPrim &solver : orderedSolvers) {
+            for (const UsdRelationship &rel : solver.GetRelationships()) {
+                if (rel.GetName() == "rigExec:joints") continue;
+                SdfPathVector targets;
+                rel.GetTargets(&targets);
+                for (const SdfPath &target : targets) {
+                    const SdfPath prim = target.GetPrimPath();
+                    if (prim != solver.GetPath() && solverPaths.count(prim)) {
+                        aggregateProducers.insert(prim);
+                    }
+                }
+            }
+        }
+    }
+    std::set<SdfPath> jointWritingSolvers;
+    for (const auto &[joint, writers] : newJointBinding) {
+        for (const auto &[writer, element] : writers) {
+            if (aggregateProducers.count(writer)) continue;
+            jointWritingSolvers.insert(writer);
+        }
+    }
+    // Strictly before, in the stack restricted to solvers. solverStackOrdinal
+    // is the reverse composed pre-order of the whole rig, so its restriction
+    // to the solvers IS the unified pose stack restricted to them; the
+    // constraint half only interleaves between them and cannot reorder a
+    // solver pair.
+    //
+    // Only a READER that is itself a stack step consults it. A PRODUCER has no
+    // position for the comparison to be about, so it keeps the unconditional
+    // "wait for every writer of what I read" edge it always had -- which is
+    // its data-flow meaning, and which leaves a genuine loop among producers
+    // (two of them reading each other's joints) a cycle, reported as one.
+    const auto stackBefore = [&solverStackOrdinal](const SdfPath &a,
+                                                   const SdfPath &b) {
+        const auto ia = solverStackOrdinal.find(a);
+        const auto ib = solverStackOrdinal.find(b);
+        if (ia == solverStackOrdinal.end() ||
+            ib == solverStackOrdinal.end()) {
+            return false;
+        }
+        return ia->second < ib->second;
+    };
+    // "A writer waits on an EARLIER READER." The new edge class the unified
+    // pose stack needs (spec §4.2): a step that reads a provider from BELOW
+    // its writer reads the version standing before that write, and without an
+    // edge saying so Kahn may schedule the two either way round within a level
+    // and the version the reader sees becomes undefined -- a nondeterministic
+    // failure, which is the worst kind here. Collected wherever a read is
+    // resolved and applied once poseDependencies exists, because the two
+    // halves are found on opposite sides of the constraint pass.
+    //
+    // (waiter, waited-on): poseDependencies[first].insert(second).
+    std::vector<std::pair<SdfPath, SdfPath>> poseReverseEdges;
+    std::map<SdfPath, std::set<SdfPath>> newSolverDependencies;
+    // The AGGREGATE half of those edges, kept apart because the two classes
+    // answer to different rules under the unified pose stack (spec §4.2): a
+    // frame read is POSITIONAL -- it reads whatever stands at the reader's own
+    // place in the stack -- while an aggregate read is ABSOLUTE and a
+    // hierarchy that contradicts it is a compile error (checked below, once
+    // the ordinal is known).
+    std::map<SdfPath, std::set<SdfPath>> newSolverAggregateReads;
+    {
+        const std::vector<UsdPrim> &solvers = orderedSolvers;
         std::set<SdfPath> solverPaths;
         for (const UsdPrim &solver : solvers) {
             solverPaths.insert(solver.GetPath());
@@ -5025,6 +5222,8 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     const SdfPath targetPrim = target.GetPrimPath();
                     if (solverPaths.count(targetPrim)) {
                         newSolverDependencies[solver.GetPath()].insert(targetPrim);
+                        newSolverAggregateReads[solver.GetPath()].insert(
+                            targetPrim);
                         continue;
                     }
                     const UsdPrim provider = _stage->GetPrimAtPath(targetPrim);
@@ -5037,8 +5236,33 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                          path = frameProvider ? path.GetParentPath() : SdfPath()) {
                         const auto binding = newJointBinding.find(path);
                         if (binding != newJointBinding.end()) {
-                            newSolverDependencies[solver.GetPath()].insert(
-                                binding->second.first);
+                            // Every writer of this joint that precedes this
+                            // solver in the stack, and NEVER this solver
+                            // itself: a solver that reads a joint it also
+                            // writes reads the version standing before its
+                            // own commit, so it depends on the writers below
+                            // it and on nothing above. (Before stacking this
+                            // was a self-edge and died as a bogus "solver
+                            // dependency cycle".)
+                            for (const auto &[writer, writerElement] :
+                                 binding->second) {
+                                if (writer == solver.GetPath()) {
+                                    continue;
+                                }
+                                if (jointWritingSolvers.count(
+                                        solver.GetPath()) &&
+                                    stackBefore(solver.GetPath(), writer)) {
+                                    // The writer stands ABOVE this solver, so
+                                    // the solver reads the version before that
+                                    // write -- and the writer has to wait, or
+                                    // which version it read is undefined.
+                                    poseReverseEdges.emplace_back(
+                                        writer, solver.GetPath());
+                                    continue;
+                                }
+                                newSolverDependencies[solver.GetPath()].insert(
+                                    writer);
+                            }
                             // A solver override replaces the whole joint
                             // callback, so that joint never reads its own
                             // namespace-parent posed frame.
@@ -5541,6 +5765,77 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             newFrameChains[target].push_back(mover.moverPath);
         }
         newFrameConstraints.push_back(std::move(constraint));
+    }
+    // ---- the UNIFIED POSE STACK ORDINAL (spec §4.2) ----------------------
+    //
+    // One order over two kinds of step that used to live in two phases:
+    //
+    //   * an aggregate solver that WRITES at least one joint, and
+    //   * a pose-domain frame constraint (one that moves a transform provider
+    //     rather than points).
+    //
+    // The order is the reverse of the composed pre-order of the WHOLE RIG --
+    // the bottom composed sibling first, a parent after its descendants, the
+    // rule _GetMoverExecutionOrder already gives movers -- and NOTHING else
+    // breaks a tie. A constraint below a solver therefore runs BEFORE it and
+    // feeds it (the incoming frame becomes that solver's rest reference); a
+    // constraint above it revises its output, which is what every shipped rig
+    // authors and why they are unchanged.
+    //
+    // A PRODUCER is deliberately ABSENT from this map (see
+    // jointWritingSolvers above for what makes one), so every consumer of the
+    // map must test membership rather than use operator[].
+    std::map<SdfPath, int> poseStackOrdinal;
+    {
+        std::set<SdfPath> stackSteps = jointWritingSolvers;
+        for (const _FrameConstraint &constraint : newFrameConstraints) {
+            if (constraint.pointsTarget.IsEmpty()) {
+                stackSteps.insert(constraint.moverPath);
+            }
+        }
+        if (!stackSteps.empty()) {
+            int ordinal = 0;
+            for (const UsdPrim &prim :
+                 _GetPoseStackOrder(_stage->GetPrimAtPath(_rigPath))) {
+                if (stackSteps.count(prim.GetPath())) {
+                    poseStackOrdinal[prim.GetPath()] = ordinal++;
+                }
+            }
+        }
+    }
+    // Ordinal or "no position": a producer sorts before every stack step and
+    // is deterministic about it, which is all the emission order needs.
+    const auto stackOrdinalOf = [&poseStackOrdinal](const SdfPath &path) {
+        const auto it = poseStackOrdinal.find(path);
+        return it == poseStackOrdinal.end() ? -1 : it->second;
+    };
+    // An AGGREGATE read cannot be resolved positionally -- an aggregate is a
+    // dataflow value, not a stacked per-joint frame, so there is no "earlier
+    // version" of it to read and the consumer must run after the producer.
+    // When the hierarchy says otherwise and BOTH are stack steps, that is a
+    // contradiction the author has to resolve, and it is named rather than
+    // left to surface as a generic Kahn loop.
+    //
+    // Unreachable while the consumed-solver relaxation stands (a solver whose
+    // aggregate another solver reads writes no joint, so it is a producer and
+    // has no position). This is the forward guard for the day that changes.
+    for (const auto &[solver, dependencies] : newSolverAggregateReads) {
+        const auto consumer = poseStackOrdinal.find(solver);
+        if (consumer == poseStackOrdinal.end()) continue;
+        for (const SdfPath &producer : dependencies) {
+            const auto it = poseStackOrdinal.find(producer);
+            if (it == poseStackOrdinal.end() || it->second < consumer->second) {
+                continue;
+            }
+            reportError(
+                solver.GetString() + " reads the aggregate of " +
+                producer.GetString() + " but executes before it in the "
+                "composed hierarchy (the bottom sibling executes first). "
+                "Move " + producer.GetString() + " below it, or reorder "
+                "nameChildren on its parent (spec §4.2)");
+            restorePreviousEpoch();
+            return false;
+        }
     }
     // A provider carrying pose revisions that is not a joint needs a base
     // frame from somewhere. A Control has computePointFrame like a joint; a
@@ -6167,16 +6462,43 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             for (const SdfPath &provider : closure) {
                 const auto owner = newJointBinding.find(provider);
                 if (owner != newJointBinding.end()) {
-                    newSolverDependencies[solver].insert(owner->second.first);
+                    // Every writer BELOW this solver in the stack, never this
+                    // solver itself -- the same rule the direct relationship
+                    // walk applies above, and the edge class that catches an
+                    // indirect read (an IK control parented under a joint, a
+                    // startFrameObject reached through a namespace parent).
+                    // A writer ABOVE it gets the mirror edge instead: the
+                    // solver read the version standing before that write, so
+                    // the write has to wait.
+                    for (const auto &[writer, writerElement] :
+                         owner->second) {
+                        if (writer == solver) {
+                            continue;
+                        }
+                        if (jointWritingSolvers.count(solver) &&
+                            stackBefore(solver, writer)) {
+                            poseReverseEdges.emplace_back(writer, solver);
+                            continue;
+                        }
+                        newSolverDependencies[solver].insert(writer);
+                    }
                 }
             }
         }
     }
+    // The solver DAG is complete here, but the POSE graph is not: the
+    // constraint pass and the frame-inheritance walk below still add
+    // solver -> constraint -> solver edges, and a pair those order is a pair
+    // the stack must not order differently. So the stack order is settled
+    // ONCE, against the finished graph, just before the schedule is built --
+    // see "the stack order" block below SolverSchedule.FrameInheritance.
     std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> newSolverJoints;
     std::set<SdfPath> requiredSolvers;
-    for (const auto &[joint, binding] : newJointBinding) {
-        newSolverJoints[binding.first].emplace_back(joint, binding.second);
-        requiredSolvers.insert(binding.first);
+    for (const auto &[joint, writers] : newJointBinding) {
+        for (const auto &[solver, element] : writers) {
+            newSolverJoints[solver].emplace_back(joint, element);
+            requiredSolvers.insert(solver);
+        }
     }
     // What used to be one SolverSchedule.AggregateConsumers block, and the
     // largest single region left on the main thread. Split five ways because
@@ -6224,11 +6546,29 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         if (i > 0) {
             dependencies.insert(newFrameConstraints[i - 1].moverPath);
         }
+        // Every writer of the frame, not just the last one -- and now
+        // DIRECTIONALLY (spec §4.2). A frame read is POSITIONAL: the
+        // constraint reads the version standing at its own place in the
+        // unified pose stack. A writer BELOW it must therefore run first, and
+        // a writer ABOVE it must wait, or which version was read is undefined
+        // and the schedule decides it by accident. A missed edge here does not
+        // fail loudly; it silently reads the wrong version.
+        //
+        // A geometry-domain constraint carries no stack position, so it keeps
+        // the unconditional edge it always had.
+        const bool positional = poseStackOrdinal.count(path) > 0;
+        const int here = stackOrdinalOf(path);
         auto dependOnFrame = [&](const SdfPath &input) {
             for (const SdfPath &provider : poseProviderClosure(input)) {
                 const auto owner = newJointBinding.find(provider);
                 if (owner != newJointBinding.end()) {
-                    dependencies.insert(owner->second.first);
+                    for (const auto &[writer, element] : owner->second) {
+                        if (positional && stackOrdinalOf(writer) > here) {
+                            poseReverseEdges.emplace_back(writer, path);
+                            continue;
+                        }
+                        dependencies.insert(writer);
+                    }
                 }
             }
         };
@@ -6299,8 +6639,24 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                      p = p.GetParentPath()) {
                     const auto it = constraintsByTarget.find(p);
                     if (it != constraintsByTarget.end()) {
-                        poseDependencies[solver].insert(
-                            it->second.begin(), it->second.end());
+                        // Directional for the same reason dependOnFrame is:
+                        // a constraint ABOVE this solver revises what the
+                        // solver already read, so the solver must NOT wait
+                        // on it -- the constraint waits on the solver
+                        // instead. (Producers have no position and keep the
+                        // unconditional edge.)
+                        const bool positional =
+                            poseStackOrdinal.count(solver) > 0;
+                        const int here = stackOrdinalOf(solver);
+                        for (const SdfPath &constraint : it->second) {
+                            if (positional &&
+                                stackOrdinalOf(constraint) > here) {
+                                poseReverseEdges.emplace_back(constraint,
+                                                              solver);
+                                continue;
+                            }
+                            poseDependencies[solver].insert(constraint);
+                        }
                     }
                     if (newJointBinding.count(p)) {
                         break;
@@ -6309,6 +6665,146 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             }
         }
     }
+    // ---- the UNIFIED POSE STACK: one order over solvers and constraints ---
+    //
+    // poseDependencies is complete here and nowhere earlier: the solver DAG
+    // was finished above, but the constraint pass and the frame-inheritance
+    // walk just added the solver <-> constraint edges.
+    //
+    // The rule (spec §4.2) is now the NAMESPACE and nothing else. Every step
+    // of the pose phase -- a solver that writes a joint, a constraint that
+    // moves one -- carries a poseStackOrdinal taken from the reverse composed
+    // pre-order of the whole rig, and that ordinal IS the order. Data flow no
+    // longer bends it: a frame read below its writer reads the earlier
+    // version (the directional edges above), and an aggregate read that
+    // contradicts it was rejected by name at compile time.
+    //
+    // So this block does three things and no searching:
+    //
+    //   1. put every joint's writer list into ordinal order;
+    //   2. build that joint's INTERLEAVED writer chain -- its solvers and the
+    //      constraints that move it, in one ordinal order;
+    //   3. insert one edge per adjacent pair of that chain, so the schedule
+    //      runs them in it.
+    //
+    // A joint's chain is a restriction of one total order, so no two joints
+    // can order the same pair in opposite directions and no edge inserted
+    // here can close a loop.
+    //
+    // WIDTH. The hierarchical order is never turned into a global serial
+    // chain: an edge is only ever inserted between two steps that write the
+    // SAME joint, and the only other edges in poseDependencies are the real
+    // data-flow ones (a reader and a writer of what it reads) and the mover
+    // chain that has always serialized the constraints. Two limbs that share
+    // no joint and no data flow therefore share a Kahn level and evaluate
+    // concurrently, and the baked cone schedule -- built from this same graph
+    // -- keeps its width. testRigExecSolverStacking's
+    // TestUnrelatedLimbsShareALevel pins it, and the biped measures WIDER
+    // than before this change (24 solvers over 6 dependency levels rather
+    // than 17, because the frame-inheritance edges that used to make a solver
+    // wait on a constraint above it are now directional).
+    std::map<SdfPath, std::vector<SdfPath>> jointWriterChain;
+    /// solver -> (joint -> the step that wrote the joint just before it), the
+    /// compile-side half of "the incoming frame is the solver's rest".
+    std::map<SdfPath, std::map<SdfPath, SdfPath>> solverRestPredecessor;
+    {
+        for (auto &[joint, writers] : newJointBinding) {
+            if (writers.size() < 2) continue;
+            std::stable_sort(
+                writers.begin(), writers.end(),
+                [&stackOrdinalOf](const std::pair<SdfPath, int> &a,
+                                  const std::pair<SdfPath, int> &b) {
+                    return stackOrdinalOf(a.first) < stackOrdinalOf(b.first);
+                });
+        }
+        // Which pose-domain constraints move each provider. Geometry-domain
+        // constraints are excluded: they revise points, carry no stack
+        // position, and are not writers of a frame.
+        std::map<SdfPath, std::vector<SdfPath>> frameWritingConstraints;
+        for (const _FrameConstraint &constraint : newFrameConstraints) {
+            if (!constraint.pointsTarget.IsEmpty()) continue;
+            if (!poseStackOrdinal.count(constraint.moverPath)) continue;
+            for (const SdfPath &target : constraint.targets) {
+                frameWritingConstraints[target].push_back(
+                    constraint.moverPath);
+            }
+        }
+        std::set<SdfPath> written;
+        for (const auto &[joint, writers] : newJointBinding) {
+            written.insert(joint);
+        }
+        for (const auto &[target, constraints] : frameWritingConstraints) {
+            written.insert(target);
+        }
+        for (const SdfPath &joint : written) {
+            std::vector<std::pair<int, SdfPath>> chain;
+            const auto solvers = newJointBinding.find(joint);
+            if (solvers != newJointBinding.end()) {
+                for (const auto &[writer, element] : solvers->second) {
+                    chain.emplace_back(stackOrdinalOf(writer), writer);
+                }
+            }
+            const auto constraints = frameWritingConstraints.find(joint);
+            if (constraints != frameWritingConstraints.end()) {
+                for (const SdfPath &constraint : constraints->second) {
+                    chain.emplace_back(stackOrdinalOf(constraint), constraint);
+                }
+            }
+            std::sort(chain.begin(), chain.end());
+            std::vector<SdfPath> &ordered = jointWriterChain[joint];
+            for (const auto &[ordinal, step] : chain) {
+                ordered.push_back(step);
+            }
+            for (size_t i = 1; i < ordered.size(); ++i) {
+                if (ordered[i] == ordered[i - 1]) continue;
+                poseDependencies[ordered[i]].insert(ordered[i - 1]);
+            }
+            // "The incoming frame replaces the authored rest." For each
+            // solver in the chain, the step immediately before it that wrote
+            // this joint -- which is the frame that solver measures from.
+            for (size_t i = 1; i < ordered.size(); ++i) {
+                if (!jointWritingSolvers.count(ordered[i])) continue;
+                const auto owner = newJointBinding.find(joint);
+                bool writesIt = false;
+                if (owner != newJointBinding.end()) {
+                    for (const auto &[writer, element] : owner->second) {
+                        writesIt = writesIt || writer == ordered[i];
+                    }
+                }
+                if (!writesIt) continue;
+                solverRestPredecessor[ordered[i]][joint] = ordered[i - 1];
+            }
+        }
+    }
+    // The single-chain IK constraint is the one CONSTRAINT that measures
+    // from joint rests, so the same substitution reaches it: a joint a step
+    // below it wrote hands it that step's frame as the rest reference.
+    for (_FrameConstraint &constraint : newFrameConstraints) {
+        if (constraint.ikChain.empty()) continue;
+        constraint.ikRestLive.assign(constraint.ikChain.size(), 0);
+        for (size_t i = 0; i < constraint.ikChain.size(); ++i) {
+            const auto it = jointWriterChain.find(constraint.ikChain[i]);
+            if (it == jointWriterChain.end()) continue;
+            for (size_t k = 0; k < it->second.size(); ++k) {
+                if (it->second[k] == constraint.moverPath) {
+                    constraint.ikRestLive[i] = k > 0 ? 1 : 0;
+                    break;
+                }
+            }
+        }
+    }
+    // The reverse edges -- "a writer waits on a reader standing below it" --
+    // collected wherever a read was resolved. Applied here, once, because
+    // poseDependencies is only complete now and because an edge inserted into
+    // it earlier would have been read back as a dependency by the passes
+    // above.
+    for (const auto &[waiter, waitedOn] : poseReverseEdges) {
+        if (waiter == waitedOn) continue;
+        if (!poseDependencies.count(waiter)) continue;
+        if (!poseDependencies.count(waitedOn)) continue;
+        poseDependencies[waiter].insert(waitedOn);
+    }
+
     compileBlocks.Next("SolverSchedule.PoseReady");
     std::vector<_PoseStep> newPoseSteps;
     std::vector<_SolverBatch> newSolverBatches;
@@ -6332,7 +6828,27 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     size_t scheduledPose = 0;
     size_t poseLevel = 0;
     while (!readyPose.empty()) {
+        // THE INTERLEAVE (spec §4.2). A solver batch and a constraint are one
+        // kind of step in one stack, so a ready level is emitted in POSE STACK
+        // ORDINAL order rather than "every solver first, then every
+        // constraint". That is the whole structural difference between the two
+        // phases this change collapses, and it is this one sort.
+        //
+        // A producer carries no ordinal and sorts first: it publishes an
+        // aggregate and writes no joint, so nothing can observe where in the
+        // level it landed.
+        std::sort(readyPose.begin(), readyPose.end(),
+                  [&stackOrdinalOf](const SdfPath &a, const SdfPath &b) {
+                      const int oa = stackOrdinalOf(a);
+                      const int ob = stackOrdinalOf(b);
+                      return oa != ob ? oa < ob : a < b;
+                  });
         for (const SdfPath &path : readyPose) {
+            const auto constraintStep = constraintIndices.find(path);
+            if (constraintStep != constraintIndices.end()) {
+                newPoseSteps.push_back({false, constraintStep->second});
+                continue;
+            }
             if (!requiredSolvers.count(path)) continue;
             _SolverBatch batch;
             batch.level = poseLevel;
@@ -6343,6 +6859,55 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             batch.dependencies.insert(dependencies.begin(), dependencies.end());
             const auto &frames = solverFrameInputs[path];
             batch.frameInputs.insert(frames.begin(), frames.end());
+            // "The incoming frame replaces the authored rest" (spec §4.2).
+            // Where a step before this solver wrote one of the joints the
+            // solver names, the solver measures from THAT frame instead of
+            // the joint's authored rest; a joint with no earlier writer still
+            // hands it the authored rest, which is why a rig whose
+            // constraints all sit above its solvers is bit-identical to what
+            // it was before this rule existed.
+            //
+            // EVERY named joint is listed, not only the live ones, and that
+            // is not belt and braces: computeRestFrame reads its NAMESPACE
+            // ANCESTOR's computeRestFrame, so an override on the hip would
+            // otherwise shift the knee's and the ankle's rests too -- which
+            // the baked path, whose rests are per-slot, does not do. Pinning
+            // the authored value on the joints with no predecessor is what
+            // makes the two paths compute the same description.
+            //
+            // The map stays EMPTY unless at least one joint is live, so a rig
+            // with no constraint below a solver pushes no override at all and
+            // exec resolves computeRestFrame from the stage exactly as it
+            // always has. That is the parity guarantee, and it is structural
+            // rather than argued.
+            {
+                const auto predecessors = solverRestPredecessor.find(path);
+                if (predecessors != solverRestPredecessor.end() &&
+                    !predecessors->second.empty()) {
+                    // Every joint the solver NAMES, not only the ones it
+                    // writes: the relaxation can leave a named joint unwritten
+                    // (it is then a pure rest reference), and such a joint
+                    // still needs its authored rest pinned or it would inherit
+                    // an overridden ancestor's.
+                    const UsdPrim solverPrim = _stage->GetPrimAtPath(path);
+                    SdfPathVector named;
+                    if (solverPrim) {
+                        if (const UsdRelationship rel =
+                                solverPrim.GetRelationship(
+                                    TfToken("rigExec:joints"))) {
+                            rel.GetTargets(&named);
+                        }
+                    }
+                    for (const SdfPath &joint : named) {
+                        const auto prev =
+                            predecessors->second.find(joint.GetPrimPath());
+                        batch.restInputs[joint.GetPrimPath()] =
+                            prev == predecessors->second.end()
+                                ? SdfPath()
+                                : prev->second;
+                    }
+                }
+            }
             const bool batchPrepared = deferExecPrep ? true : [&]() {
                 RIGEXEC_PROFILE_SCOPE_CAT(
                     _profiler, "TapPrepare solverBatch", "compile");
@@ -6389,12 +6954,6 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             }
             newPoseSteps.push_back({true, batchIndex});
             newSolverBatches.push_back(std::move(batch));
-        }
-        for (const SdfPath &path : readyPose) {
-            const auto constraint = constraintIndices.find(path);
-            if (constraint != constraintIndices.end()) {
-                newPoseSteps.push_back({false, constraint->second});
-            }
         }
         scheduledPose += readyPose.size();
         std::vector<SdfPath> next;
@@ -6488,6 +7047,63 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         reportError(message);
         restorePreviousEpoch();
         return false;
+    }
+
+    // ---- the pose stack: the walk order and the per-joint chains ----------
+    //
+    // Everything above settles which steps exist and what must precede what;
+    // the SCHEDULE is what finally puts them in a line. Read that line back
+    // here, so that "the last writer supplies the joint's base frame" and
+    // "AtPrim resolves against the order that actually runs" are facts rather
+    // than hopes.
+    //
+    // The chain is INTERLEAVED -- solvers and the constraints that move the
+    // same joint, in one hierarchical order -- and it is built for every
+    // written joint, because the constraint half of a chain is not
+    // always-after.
+    //
+    // Nothing here is REPORTED. Stacking is ordinary authoring under the
+    // unified pose stack, not a shape worth a diagnostic, so the compile is
+    // silent about it and GetFrameChains() is what a tool or a test reads to
+    // see the order. Only real errors reach the caller's message vector.
+    if (!newJointBinding.empty()) {
+        std::map<SdfPath, std::vector<SdfPath>> walkChains;
+        std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> walkWriters;
+        for (const _PoseStep &step : newPoseSteps) {
+            if (step.solverBatch) {
+                for (const auto &[solver, tap] :
+                     newSolverBatches[step.index].solvers) {
+                    const auto joints = newSolverJoints.find(solver);
+                    if (joints == newSolverJoints.end()) {
+                        continue;
+                    }
+                    for (const auto &[joint, element] : joints->second) {
+                        walkChains[joint].push_back(solver);
+                        walkWriters[joint].emplace_back(solver, element);
+                    }
+                }
+                continue;
+            }
+            const _FrameConstraint &constraint =
+                newFrameConstraints[step.index];
+            if (!constraint.pointsTarget.IsEmpty()) {
+                continue;  // geometry domain: not a frame writer
+            }
+            for (const SdfPath &target : constraint.targets) {
+                // Only joints a solver also writes get a rebuilt chain; a
+                // provider only constraints revise already carries exactly
+                // this chain from the constraint pass, so leaving it alone
+                // keeps every rig without a solver bit-identical.
+                if (!newJointBinding.count(target)) continue;
+                walkChains[target].push_back(constraint.moverPath);
+            }
+        }
+        for (auto &[joint, writers] : walkWriters) {
+            newJointBinding[joint] = std::move(writers);
+        }
+        for (auto &[joint, chain] : walkChains) {
+            newFrameChains[joint] = chain;
+        }
     }
 
     compileBlocks.Close();
@@ -11097,7 +11713,17 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // solver: its required inputs are unwired, so the kernel returned an
     // empty aggregate). They keep their natural rest-chain frame below, so
     // a rig mid-edit stays visible instead of vanishing.
-    std::set<SdfPath> fallbackJoints;
+    //
+    // (joint, (solver, element)) in POSE-WALK order, because under a stack
+    // the joint is not enough: several solvers may write it and the one that
+    // failed is not necessarily the one a joint->solver lookup would name.
+    // The verdict beside it is the other half -- a joint another writer DID
+    // publish kept that writer's frame and fell back to nothing at all, so
+    // the rest-chain sentence would simply be false. The baked path builds
+    // both the same way, from the same walk order, and sorts them by the
+    // same key, because the two diagnostic streams are compared verbatim.
+    std::vector<std::pair<SdfPath, std::pair<SdfPath, int>>> fallbackJoints;
+    std::map<SdfPath, SdfPath> lastPublishingWriter;
     std::map<SdfPath, RigExecPointFrameArray> solvedAggregates;
     RigExecSnapshot seedSnapshot;
     if (_firstFramePoseTaps) {
@@ -11733,6 +12359,39 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                       VtValue(frame->second)});
                 }
             }
+            // "The incoming frame replaces the authored rest" (spec §4.2).
+            //
+            // The joint prim publishes computePointFrame AND computeRestFrame,
+            // and RigExecTwoBoneIk / RigExecSplineIk request the latter by
+            // name off rigExec:joints -- so the whole of the dynamic-side
+            // change is one more override loop on a DIFFERENT computation.
+            // rigExec:joints stays skipped in solverFrameInputs: overriding a
+            // solver's own output joints as computePointFrame would feed the
+            // solver back into itself, which is a different thing entirely.
+            //
+            // A live entry takes the frame the preceding step left; an entry
+            // with no predecessor pins the AUTHORED rest, because
+            // computeRestFrame reads its namespace ancestor's and an override
+            // on the hip would otherwise move the knee's rest too. The map is
+            // empty unless something is live, so a rig with no pose step below
+            // a solver pushes nothing here at all.
+            for (const auto &[joint, predecessor] : batch.restInputs) {
+                const bool live = !predecessor.IsEmpty();
+                const auto &source = live ? finalFrames : restFrames;
+                const auto frame = source.find(joint);
+                if (frame != source.end()) {
+                    RigExecPointFrame rest = frame->second;
+                    // A solver with a basis of its own -- an FK chain
+                    // composing control deltas -- switches to the joint's
+                    // rest reference only where this flag says a step below
+                    // it really wrote the joint. Everywhere else it keeps the
+                    // basis it always had, which is what makes the rule free
+                    // on every rig that does not stack.
+                    if (live) rest.flags |= RigExecPointFrameLiveRest;
+                    inputs.push_back({joint, _computeRestFrame, TfToken(),
+                                      VtValue(rest)});
+                }
+            }
             // USD invalidation is dependency-specific. Retain it locally until a
             // successful refresh, including when a previous evaluation failed.
             batch.dirty = batch.taps->ConsumeDirty() || batch.dirty;
@@ -11776,16 +12435,36 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 }
                 for (const auto &[joint, element] : joints->second) {
                     if (element < 0 || size_t(element) >= aggregate.GetSize()) {
-                        fallbackJoints.insert(joint);
+                        fallbackJoints.push_back({joint, {solver, element}});
                         continue;
                     }
                     const RigExecPointFrame frame =
                         RigExecExtractElementFrame(&aggregate, size_t(element));
                     candidates[joint] = frame;
+                    lastPublishingWriter[joint] = solver;
                 }
             }
             if (!candidates.empty()) {
                 commitConstraintFrames(SdfPath(), candidates, true);
+            }
+            if (!candidates.empty() && !_snapshotPoints.empty()) {
+                // A solver checkpoint: the joint as THIS writer left it, for
+                // a reader whose read phase names it. Skipped whole unless
+                // SOMETHING on the rig asked for a checkpoint -- recordFrame
+                // early-outs per pair anyway, but that is still two map
+                // lookups per bound joint per frame on a rig that never names
+                // a solver, which is every rig that does not stack.
+                for (const auto &[solver, tap] : batch.solvers) {
+                    const auto joints = _solverJoints.find(solver);
+                    if (joints == _solverJoints.end()) {
+                        continue;
+                    }
+                    for (const auto &[joint, element] : joints->second) {
+                        if (candidates.count(joint)) {
+                            recordFrame(joint, solver);
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -11976,7 +12655,16 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             if (inputsValid && !useAnimatedTs) {
                 std::vector<RigExecPointFrame> rest;
                 rest.reserve(constraint.ikChain.size());
-                for (const SdfPath &joint : constraint.ikChain) {
+                for (size_t i = 0; i < constraint.ikChain.size(); ++i) {
+                    const SdfPath &joint = constraint.ikChain[i];
+                    // The incoming frame IS the rest reference where a step
+                    // below this constraint wrote the joint; the authored
+                    // rest everywhere else.
+                    if (i < constraint.ikRestLive.size() &&
+                        constraint.ikRestLive[i] && i < chain.size()) {
+                        rest.push_back(chain[i]);
+                        continue;
+                    }
                     const auto frame = restFrames.find(joint);
                     if (frame == restFrames.end()) {
                         inputsValid = false;
@@ -12260,20 +12948,24 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
 
     // An incomplete solver is an authoring gap, not a silent one: name every
-    // joint that fell back so a rig mid-edit explains itself.
-    for (const SdfPath &jointPath : fallbackJoints) {
-        const auto binding = _jointSolverBinding.find(jointPath);
-        const std::string solver =
-            binding != _jointSolverBinding.end()
-                ? binding->second.first.GetString()
-                : std::string("<unknown>");
-        const int element =
-            binding != _jointSolverBinding.end() ? binding->second.second
-                                                 : -1;
+    // writer that published nothing so a rig mid-edit explains itself.
+    // Accumulated in walk order, stable-sorted by joint path, so the lines
+    // are in the same order the baked epilogue produces them in.
+    std::stable_sort(fallbackJoints.begin(), fallbackJoints.end(),
+                     [](const std::pair<SdfPath, std::pair<SdfPath, int>> &a,
+                        const std::pair<SdfPath, std::pair<SdfPath, int>> &b) {
+                         return a.first < b.first;
+                     });
+    for (const auto &[jointPath, writer] : fallbackJoints) {
+        const auto kept = lastPublishingWriter.find(jointPath);
         pose.diagnostics.push_back(
-            "solver " + solver + " published no element " +
-            std::to_string(element) + " for joint " + jointPath.GetString() +
-            "; joint fell back to its rest chain");
+            "solver " + writer.first.GetString() + " published no element " +
+            std::to_string(writer.second) + " for joint " +
+            jointPath.GetString() + "; " +
+            (kept == lastPublishingWriter.end()
+                 ? std::string("joint fell back to its rest chain")
+                 : "the joint keeps the frame " + kept->second.GetString() +
+                       " left"));
     }
 
     // Baked falloff tables ride along with the joint overrides. They are

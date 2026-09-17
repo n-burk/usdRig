@@ -35,7 +35,11 @@ RigExecSolveFkChain(const std::vector<RigExecFkChainElement> &elements)
             w = own * accumulated[e.parentIndex];
         }
         accumulated.push_back(w);
-        result.push_back(RigExecMatrixToPoints(e.restPoints, w));
+        // The map is MEASURED from the control's rest and APPLIED to the
+        // element's output basis: the joint's rest reference when one
+        // reached the solver, the control's own rest otherwise.
+        result.push_back(RigExecMatrixToPoints(
+            e.hasOutRest ? e.outRestPoints : e.restPoints, w));
     }
     return result;
 }
@@ -225,11 +229,27 @@ RigExecBlendFrames(
     const std::array<GfVec3d, 4> &restPoints,
     double weight,
     RigExecRotationBlend rotationBlend,
-    RigExecScaleBlend scaleBlend)
+    RigExecScaleBlend scaleBlend,
+    const std::array<GfVec3d, 4> *outRestPoints)
 {
     const double w = std::min(std::max(weight, 0.0), 1.0);
-    if (w <= 0.0) return a;
-    if (w >= 1.0) return b;
+    if (!outRestPoints) {
+        // The historical shortcut: at the ends the blend IS the input frame,
+        // bit for bit, with no SRT round trip.
+        if (w <= 0.0) return a;
+        if (w >= 1.0) return b;
+    } else if (w <= 0.0 || w >= 1.0) {
+        // Re-based, the end still has to be re-applied to the new basis, so
+        // it goes through the map rather than through the frame.
+        const RigExecPointFrame &pick = (w <= 0.0) ? a : b;
+        GfMatrix4d end;
+        if (!RigExecPointsToMatrix(restPoints, pick.points, &end)) {
+            RigExecPointFrame held = pick;
+            held.flags |= RigExecPointFrameDegenerate;
+            return held;
+        }
+        return RigExecMatrixToPoints(*outRestPoints, end);
+    }
 
     RigExecTransformParams pa, pb;
     if (!RigExecPointsToParams(restPoints, a.points, RigExecAxis::Z, &pa) ||
@@ -264,7 +284,8 @@ RigExecBlendFrames(
     }
 
     const GfMatrix4d m = RigExecParamsToMatrix(pr);
-    return RigExecMatrixToPoints(restPoints, m);
+    return RigExecMatrixToPoints(
+        outRestPoints ? *outRestPoints : restPoints, m);
 }
 
 namespace {

@@ -19,10 +19,40 @@ namespace rigExec {
 // baked program, which samples the same two curves with no VdfNetwork around
 // it. One definition, so a second caller cannot drift into publishing frames
 // where this one publishes nothing.
+
+namespace {
+
+// Re-bases one aggregate element onto a joint's rest reference.
+//
+// The element's own rest->pose map is measured from \p ownRest and applied to
+// \p jointRest instead, so the frame a pose step BELOW this solver left is
+// carried through the solve rather than replaced (spec 4.2). Used only where
+// such a step really wrote the joint, which is what keeps every other rig
+// bit-identical.
+bool
+_RebaseElement(const std::array<GfVec3d, 4> &ownRest,
+               const std::array<GfVec3d, 4> &jointRest,
+               RigExecPointFrame *frame)
+{
+    GfMatrix4d map;
+    if (!RigExecPointsToMatrix(ownRest, frame->points, &map)) {
+        return false;
+    }
+    const uint32_t flags = frame->flags;
+    *frame = RigExecMatrixToPoints(jointRest, map);
+    frame->flags = flags;
+    return true;
+}
+
+}  // namespace
+
 RigExecPointFrameArray
 RigExecSampleRibbonFrames(const std::vector<GfVec3f> &posed,
                           const std::vector<GfVec3f> &rest,
-                          int sampleCount)
+                          int sampleCount,
+                          const std::vector<std::array<GfVec3d, 4>>
+                              &jointRests,
+                          const std::vector<bool> &jointRestLive)
 {
     RigExecPointFrameArray result;
     if (posed.empty() || rest.empty() || sampleCount < 2) {
@@ -46,12 +76,21 @@ RigExecSampleRibbonFrames(const std::vector<GfVec3f> &posed,
             GfVec3d(posedSamples.positions[k] + posedSamples.normals[k]),
             GfVec3d(posedSamples.positions[k] + posedSamples.binormals[k])};
         frame.flags = RigExecPointFrameValid;
-        result.frames.push_back(frame);
-        result.rests.push_back({
+        std::array<GfVec3d, 4> restPoints = {
             GfVec3d(restSamples.positions[k]),
             GfVec3d(restSamples.positions[k] + restSamples.tangents[k]),
             GfVec3d(restSamples.positions[k] + restSamples.normals[k]),
-            GfVec3d(restSamples.positions[k] + restSamples.binormals[k])});
+            GfVec3d(restSamples.positions[k] + restSamples.binormals[k])};
+        // A sample a pose step below the ribbon already wrote is re-based
+        // onto what that step left; every other sample keeps the rest
+        // curve's own frame as its basis.
+        if (size_t(k) < jointRests.size() && size_t(k) < jointRestLive.size()
+            && jointRestLive[size_t(k)] &&
+            _RebaseElement(restPoints, jointRests[size_t(k)], &frame)) {
+            restPoints = jointRests[size_t(k)];
+        }
+        result.frames.push_back(frame);
+        result.rests.push_back(restPoints);
     }
     return result;
 }
@@ -81,12 +120,25 @@ RigExecSolveTwistDistribution(const RigExecPointFrame &start,
                               const std::array<GfVec3d, 4> &startRest,
                               const std::array<GfVec3d, 4> &endRest,
                               const std::vector<double> &weights,
-                              double twistTurns)
+                              double twistTurns,
+                              const std::vector<std::array<GfVec3d, 4>>
+                                  &jointRests,
+                              const std::vector<bool> &jointRestLive)
 {
     RigExecPointFrameArray result;
     result.frames = RigExecDistributeTwist(start, end, startRest, endRest,
         weights, twistTurns);
     result.rests.assign(result.frames.size(), startRest);
+    // Same rule, same helper: an element a step below this solver wrote is
+    // re-based onto what that step left, measured from the START landmarks
+    // every element of this aggregate is paired with.
+    for (size_t k = 0; k < result.frames.size(); ++k) {
+        if (k < jointRests.size() && k < jointRestLive.size() &&
+            jointRestLive[k] &&
+            _RebaseElement(startRest, jointRests[k], &result.frames[k])) {
+            result.rests[k] = jointRests[k];
+        }
+    }
     return result;
 }
 

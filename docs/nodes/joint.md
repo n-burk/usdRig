@@ -21,11 +21,16 @@ On this page:
 
 ![Joint effect](../gifs/joint.gif)
 
-A joint is where solved posing becomes readable data. Exactly one
-solver may pose a joint through `rigExec:joints`, but that frame is not the
-last word: any number of pose-phase constraints may then revise the same
-joint through `rigExec:moves`, in stack order, before matrix movers read it
-to carry geometry. Joints nest in the namespace to form the hierarchy, and
+A joint is where solved posing becomes readable data.
+`rigExec:joints` is an ordered write and not an exclusive claim: any number of
+aggregate solvers may name one joint, and any number of pose constraints may
+name it on `rigExec:moves`. All of them are steps of one kind in ONE
+hierarchical stack, ordered by the composed namespace of the whole rig — the
+bottom sibling first — and by nothing else. A constraint that sits BELOW a
+solver runs before it and feeds it: the frame it leaves becomes that solver's
+rest reference. A constraint ABOVE it revises the solver's output, which is the
+classic shape and the one you get by putting `Solvers` at the bottom of the
+rig. Joints nest in the namespace to form the hierarchy, and
 usdview draws each joint as a guide sphere with a cone to every nested
 child.
 
@@ -38,22 +43,26 @@ the evaluated parent and child origins.
 
 ## How it works
 
-The compiler binds each joint to at most one aggregate solver;
-the pose phase evaluates that solver and extracts the joint's element from
-its frame array, then runs the authored constraint steps, each reading the
-frame the step before it left and writing a revised one over it. A joint
-nothing claims is still evaluated — it follows its namespace parent's posed
-space with its own rest offset and avars — and a joint that is both claimed
-and constrained ends the phase with the constraint's answer. A mover reads
-the base frame the solver wrote unless it asks for the `final` phase, which
-is the same frame with every pose revision folded in.
+The compiler builds one chain per joint out of every step that
+writes it — the solvers that name it and the constraints that move it — in the
+rig's hierarchical order, and the pose phase runs that chain. A solver
+extracts the joint's element from its frame array and REPLACES whatever stood
+there, measuring the joint from the frame the preceding steps left; a
+constraint reads that same incoming frame and writes a revised one over it. A
+joint no solver names is still evaluated — it follows its namespace parent's
+posed space with its own rest offset and avars — and a joint with no step
+before a solver hands that solver its authored `rest:space` rest, which is why
+a rig whose constraints all sit above its solvers behaves exactly as it always
+did. A mover reads the `base` frame — the joint after the LAST SOLVER in the
+chain — unless it asks for `final`, which is the top of the chain, or names a
+prim, which is the joint as of when the walk finished with it.
 
 ## Wiring
 
 | Relationship | Points to | Required |
 |---|---|---|
-| (posed by) | At most one solver's `rigExec:joints` names this joint and supplies its frame; a second claim is a compile error. | - |
-| (revised by) | Any number of pose constraints name this joint on `rigExec:moves` and revise its frame in stack order. | - |
+| (posed by) | Any number of solvers' `rigExec:joints` name this joint; the writes stack in hierarchical order and the last one supplies its base frame. | - |
+| (revised by) | Any number of pose constraints name this joint on `rigExec:moves`. They occupy the SAME hierarchical stack as the solvers: one above a solver revises its output, one below feeds it. | - |
 
 ## Parameters
 
@@ -293,7 +302,7 @@ python docs/render_media.py --page joint
 ## Tips
 
 - Nest joints (Elbow inside Shoulder) so hierarchy, guides, and FK composition all agree — and remember `rest:space` is measured from the parent joint's rest, not from the world.
-- Only one solver may pose a joint — a second `rigExec:joints` claim fails the compile with "is posed by two solvers" — but constraints are not solvers: as many as you like can revise that same joint afterwards, each one reading what the previous step left.
+- Several solvers may pose one joint, and pose constraints are steps of the same kind in the same stack: the order is the composed namespace of the whole rig and nothing else, bottom sibling first. Put `Solvers` at the bottom of the rig to get the classic "solve, then revise" shape; a constraint that ends up BELOW a solver feeds it instead — every solver kind composes over the frame the steps below it left, so nothing is discarded either way.
 - A solver whose output another solver reads is naming joints for their rests, not claiming them, so an IK and an FK chain can both list the chain that their IK/FK blend actually poses.
 
 ## See also

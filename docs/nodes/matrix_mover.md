@@ -131,7 +131,7 @@ python docs/render_media.py --page matrix_mover
 ## Tips
 
 - The provider may be a control as readily as a joint: those are the only two types `rigExec:transform` accepts (rigEvaluator.cpp:7221-7231).
-- `final` binds the provider's frame-chain head, so a constraint that revises the joint downstream is included; the default `base` binds the provider itself (moverGraph.cpp:1366-1379, schema.usda:1685).
+- `final` binds the provider's frame-chain head, so every pose step above it is included; the default `base` is the joint after the LAST SOLVER wrote it, which is not the same as "before every constraint" — a constraint that sits below the last solver is folded into `base` through that solver. Name a prim if you want a specific moment: the `Solvers` scope means "after the last solver", the `Movers` scope "after the last constraint" (moverGraph.cpp:1366-1379, schema.usda:1685).
 - Same-target movers are an ordinary stack ordered by the composed namespace: reverse-sibling post-order, so descendants run before their parent and the bottom sibling before the top (spec section 4.2). Stacking is how you layer rigid follows, not how you blend influences on one point — use the Skin Mover for that (schema.usda:1700-1705).
 
 ## See also

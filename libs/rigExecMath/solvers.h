@@ -18,9 +18,17 @@ namespace rigExec {
 
 /// One FK chain element: a control's rest/pose landmark sets and the
 /// index of its parent within the chain (-1 for the chain root).
+///
+/// \p outRestPoints is the basis the element's accumulated rest->pose map is
+/// APPLIED to -- the joint's rest reference, which the unified pose stack
+/// replaces with the frame the steps below this solver left (spec 4.2). It
+/// defaults to the control's own rest, which is the basis the chain used
+/// before joint rests reached it, so an unset one changes nothing.
 struct RigExecFkChainElement {
     std::array<GfVec3d, 4> restPoints;
     std::array<GfVec3d, 4> posePoints;
+    std::array<GfVec3d, 4> outRestPoints;
+    bool hasOutRest = false;
     int parentIndex = -1;
 };
 
@@ -75,13 +83,19 @@ enum class RigExecScaleBlend {
 /// Blends two frames sharing one rest landmark set (RigExecBlendPointFrames).
 /// weight 0 returns a; weight 1 returns b. Translation lerps; rotation
 /// slerps shortest-arc; scale blends per the mode; shear lerps linearly.
+/// \p outRestPoints, when given, is the basis the blended map is APPLIED
+/// to -- the joint's rest reference as an earlier step of the pose stack left
+/// it (spec 4.2) -- while \p restPoints stays the basis the two inputs are
+/// MEASURED against. Null keeps both roles on \p restPoints, which is the
+/// blend as it was before joint rests reached it.
 RigExecPointFrame RigExecBlendFrames(
     const RigExecPointFrame &a,
     const RigExecPointFrame &b,
     const std::array<GfVec3d, 4> &restPoints,
     double weight,
     RigExecRotationBlend rotationBlend = RigExecRotationBlend::ShortestArc,
-    RigExecScaleBlend scaleBlend = RigExecScaleBlend::Log);
+    RigExecScaleBlend scaleBlend = RigExecScaleBlend::Log,
+    const std::array<GfVec3d, 4> *outRestPoints = nullptr);
 
 /// Distributes twist between two frames over N samples
 /// (RigExecTwistDistribution). weights[k] in [0,1] positions sample k

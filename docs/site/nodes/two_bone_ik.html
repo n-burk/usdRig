@@ -147,9 +147,10 @@ bend. Publishes computePointFrameArray of [root, mid, end] frames.</p>
 <section class="heading">
 <h2 class="label heading" id="how-it-works">How it works <span class="headerlink"><a href="#how-it-works" title="Link to this section">&para;</a></span></h2>
 <div class="content" id="how-it-works-body">
-<p>Each evaluation measures root-to-mid and mid-to-end from the rest
-frames (plus the length offsets), then solves the two-bone chain in the
-plane through the pole. <code>inputs:stretch</code> lets the chain elongate toward
+<p>Each evaluation measures root-to-mid and mid-to-end from the
+frames the joints carry on entry to this solver — their <code>rest:space</code> rests
+unless a step below it in the pose stack already wrote them — plus the length
+offsets, then solves the two-bone chain in the plane through the pole. <code>inputs:stretch</code> lets the chain elongate toward
 out-of-reach goals under <code>rigExec:stretchPolicy</code>, and
 <code>rigExec:unreachablePolicy</code> with <code>inputs:softness</code> shapes the lock-up as
 the goal leaves reach.</p>
@@ -163,7 +164,7 @@ the goal leaves reach.</p>
 <tr><td><code>rigExec:effectorControl</code></td><td>Control supplying the end-goal position.</td><td>yes</td></tr>
 <tr><td><code>rigExec:poleControl</code></td><td>Control defining the bend plane.</td><td>yes</td></tr>
 <tr><td><code>rigExec:rootControl</code></td><td>Control planting the chain root.</td><td>yes</td></tr>
-<tr><td><code>rigExec:joints</code></td><td>Three nested joints: root, mid, end.</td><td>yes</td></tr>
+<tr><td><code>rigExec:joints</code></td><td>Three nested joints: root, mid, end — the chain this solver measures and writes. It is an ordered write, not an exclusive claim: another step may write the same joints, and the last writer in the stack supplies their base frame. The solver measures the two bones from the frames the joints carry ON ENTRY, so a step BELOW it that moves one of them re-proportions the limb rather than only re-orienting it.</td><td>yes</td></tr>
 </table></div>
 </div>
 </section>

@@ -577,6 +577,46 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
         }
     }
 
+    // A read phase that names a SOLVER checkpoint -- the joint as one writer
+    // of its stack left it -- has no baked equivalent: the phased-read store
+    // is written by RecordFrame, which is per CONSTRAINT and keys off
+    // constraint.snapshotAfter / snapshotTargets. A solver-named phase would
+    // silently find no record and read a different value, which is exactly
+    // the divergence this program refuses to have.
+    //
+    // "Is an aggregate solver" is _solverDependencies membership: every
+    // discovered solver is seeded as a key there and every value is also a
+    // key, so the map's key set IS the solver set. (The evaluator's own
+    // type predicate has internal linkage and cannot be called from here.)
+    const auto isAggregateSolver = [&E](const SdfPath &path) {
+        return !path.IsEmpty() && E._solverDependencies.count(path) > 0;
+    };
+    for (const auto &[provider, movers] : E._snapshotPoints) {
+        for (const SdfPath &mover : movers) {
+            if (isAggregateSolver(mover)) {
+                say("read phase names a solver checkpoint, which is not "
+                    "baked",
+                    mover);
+            }
+        }
+    }
+    // The BINDING as well as the resolved point, because a skin mover's
+    // transformPhase never reaches _snapshotPoints (its binding.transform is
+    // empty and the compile-time phase validation only inspects that field --
+    // a pre-existing gap, filed separately). Keying on both means the day
+    // that gap is closed this refusal is already in place.
+    for (const auto &[target, revisions] : E._graphChains) {
+        for (const auto &revision : revisions) {
+            const RigExecReadPhase &phase = revision.binding.transformPhase;
+            if (phase.kind == RigExecReadPhaseKind::AtPrim &&
+                isAggregateSolver(phase.prim)) {
+                say("read phase names a solver checkpoint, which is not "
+                    "baked",
+                    phase.prim);
+            }
+        }
+    }
+
     // ---- geometry ----------------------------------------------------------
     auto checkRevision = [&](const RigExecRigEvaluator::_GraphRevision &r,
                              bool derived) {
@@ -1916,6 +1956,23 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
                     joints == E._solverJoints.end()
                         ? std::vector<std::pair<SdfPath, int>>()
                         : joints->second);
+                // The live-rest half of the same binding, carried across so
+                // the baked description measures from the same frames the
+                // dynamic path's computeRestFrame overrides do. A restInputs
+                // entry with an EMPTY predecessor is a joint whose authored
+                // rest was merely pinned, not a live one.
+                SdfPathVector live;
+                for (const auto &[joint, predecessor] : batch.restInputs) {
+                    if (predecessor.IsEmpty()) continue;
+                    bool named = false;
+                    if (joints != E._solverJoints.end()) {
+                        for (const auto &[named_, element] : joints->second) {
+                            named = named || named_ == joint;
+                        }
+                    }
+                    if (named) live.push_back(joint);
+                }
+                entry.solverLiveRestJoints.push_back(std::move(live));
             }
         } else {
             const RigExecRigEvaluator::_FrameConstraint &fc =
@@ -1929,6 +1986,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             }
             entry.constraint.pointsTarget = fc.pointsTarget;
             entry.constraint.ikChain = fc.ikChain;
+            entry.constraint.ikRestLive = fc.ikRestLive;
             entry.constraint.ikUsesAnimatedTs =
                 !fc.ikChain.empty() && E._IkUsesAnimatedTs(fc.ikChain);
             entry.constraint.effector = fc.effector.sourcePath;
@@ -2204,6 +2262,40 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.base.resize(N);
     B.fin.resize(N);
     if (!ctx.ok) {
+        return nullptr;
+    }
+
+    // The mirror of IsBakeable's solver-checkpoint refusal, so a forced bake
+    // cannot slip past it. Same condition, same sentence.
+    {
+        const auto isAggregateSolver = [&E](const SdfPath &path) {
+            return !path.IsEmpty() && E._solverDependencies.count(path) > 0;
+        };
+        for (const auto &[provider, movers] : E._snapshotPoints) {
+            for (const SdfPath &mover : movers) {
+                if (isAggregateSolver(mover)) {
+                    refuse("read phase names a solver checkpoint, which is "
+                           "not baked",
+                           mover);
+                }
+            }
+        }
+        for (const auto &[target, revisions] : E._graphChains) {
+            for (const auto &revision : revisions) {
+                const RigExecReadPhase &phase =
+                    revision.binding.transformPhase;
+                if (phase.kind == RigExecReadPhaseKind::AtPrim &&
+                    isAggregateSolver(phase.prim)) {
+                    refuse("read phase names a solver checkpoint, which is "
+                           "not baked",
+                           phase.prim);
+                }
+            }
+        }
+    }
+    // One solver per commit is what makes a stack expressible at all; refuse
+    // a batch that would collapse two writers of one slot into one.
+    if (!RigExecBakedRefuseBatchedStackWrites(&ctx) || !ctx.ok) {
         return nullptr;
     }
 
