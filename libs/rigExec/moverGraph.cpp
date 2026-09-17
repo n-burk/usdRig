@@ -76,7 +76,7 @@ TF_DEFINE_PRIVATE_TOKENS(
 // their bodies because TfToken(const char *) takes the token registry's spin
 // lock on every construction -- on the hit path as much as on the miss path --
 // and an assembler runs once per revision per frame, inside a baked step that
-// is not allowed to take a lock at all (docs/baked-step-graph.md §2). The
+// is not allowed to take a lock at all (docs/specs/baked-step-graph.md §2). The
 // bind-time readers below keep their inline tokens: they run once per
 // generation, off any step.
 TF_DEFINE_PRIVATE_TOKENS(

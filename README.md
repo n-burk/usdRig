@@ -62,14 +62,14 @@ stage's OpenExec requests before the stock adapter processes a missing prim;
 the point graphs and their unaffected cached results remain available.
 
 Default-space channels and translation units are evaluated and editable; see
-[space composition](docs/xformable-default-spaces.md). Twist distribution
+[space composition](docs/specs/xformable-default-spaces.md). Twist distribution
 supports animated fractional `inputs:twistTurns`. Blend samples support base,
 preceding, final, and named checkpoints, including independent target fan-out.
 Use `rigExec:deltaSpace = "surfaceFrame"` to transport sculpt detail with the
 preceding mesh deformation.
 
-[Curvenet authoring](docs/curvenet.md) includes adjustments, posed guides, and
-cached surface weight parametrization. [Bake and inverse APIs](docs/python-bake-inverse.md)
+[Curvenet authoring](docs/specs/curvenet.md) includes adjustments, posed guides, and
+cached surface weight parametrization. [Bake and inverse APIs](docs/specs/python-bake-inverse.md)
 provide standard USD export and a bounded numeric inverse solver.
 
 `RigExecRigPose` exposes per-evaluation graph creation, execution, and schedule
@@ -156,6 +156,25 @@ Developer Command Prompt is already initialized and is left alone. If the
 compiler is somewhere neither finds, point `RIGEXEC_VCVARS` at its
 `vcvars64.bat`, or configure manually as below.
 
+### Recording with usdrecord
+
+Stock `usdrecord` evaluates a rig live -- no bake step and no RigExec flags.
+Opening the stage activates its rigs, and every recorded frame evaluates at
+that frame. Run it with the build tree and the two plugin resources on the
+environment (the `_env` helper sets both):
+
+```sh
+USD/bin/usdrecord --renderer GL --camera /IkAsset/MainCam \
+  --frames 1001:1012 docs/examples/two_bone_ik.usda frame.###.png
+```
+
+Pass an explicit `--camera`: without one `usdrecord` frames the stage's
+authored bounds, which do not cover evaluated motion, so the recording can
+frame empty space. Every `docs/examples/*.usda` carries a `MainCam` under its
+asset root for exactly this. (`docs/render_media.py` no longer bakes: it
+renders the rig live through an offscreen Storm viewport with the rig guides
+shown.)
+
 ## Start with an example
 
 The examples are self-contained animated stages. These are the best entry
@@ -172,6 +191,15 @@ points:
 
 See the [complete example catalog](examples/README.md) for all 13 focused
 demos and their authoring notes.
+
+## Node reference
+
+One page per operator -- what it does, how to wire it, every parameter,
+and a minimal animated example, rendered live from its stage by
+`docs/render_media.py` in an offscreen Storm viewport with the rig guides on:
+
+[RigExec nodes](docs/index.md) -- per-operator stages in
+[`docs/examples/`](docs/examples/)
 
 ## How it works
 
@@ -522,14 +550,14 @@ and `rigExec::rigExecImaging`, plus `rigExec_PLUGINPATHS`, `rigExec_PYTHON_DIR`,
 - Curvenet adjustment frames are available to viewport gizmos. Using these
   point-graph outputs as earlier pose or MatrixMover inputs is rejected during
   compilation; authored scalar adjustment channels remain readable.
-- The experimental [standalone backend and rigpack](docs/standalone-pack.md)
+- The experimental [standalone backend and rigpack](docs/specs/standalone-pack.md)
   execute supported providers through Esf without a USD stage. Whole-rig mover
   lowering and imaging profiles remain outside that backend's current scope.
 - PRMan-class production render delegates have not been qualified.
 - This project is pinned to OpenUSD 26.08; newer OpenUSD releases require a
   separate compatibility pass.
 
-See the [September 2026 code review](docs/code-review-2026-09-05.md) for
+See the [September 2026 code review](docs/specs/code-review-2026-09-05.md) for
 verified fixes, regression coverage, and remaining scope limits.
 
 ## Repository map
@@ -550,18 +578,18 @@ verified fixes, regression coverage, and remaining scope limits.
 
 ## Further reading
 
-- [The biped rig](docs/biped-rig.md) -- building, opening and animating the
+- [The biped rig](docs/specs/biped-rig.md) -- building, opening and animating the
   ported character, including how its side layers compose. Start here
   if you want a real rig on screen rather than an example.
-- [Architecture and implementation specification](docs/spec.md)
-- [OpenUSD 26.08 capability validation](docs/spec-validation-2026-07-24.md)
-- [Hydra integration notes](docs/hydra-integration-notes.md)
-- [Control and solver guides](docs/control-guides.md)
-- [Curvenet design and authoring](docs/curvenet.md)
-- [Volumetric weights](docs/volume-weights.md)
-- [Viewport gizmos in usdview](docs/viewport-gizmos.md)
-- [Graph editor in usdview](docs/graph-editor.md)
-- [ViewCube in usdview](docs/view-cube.md)
-- [Guided composition arcs in usdview](docs/composition-arcs.md)
-- [OpenExec API notes](docs/exec-api-notes.md) and
-  [ExecUsd API notes](docs/execusd-api-notes.md)
+- [Architecture and implementation specification](docs/specs/spec.md)
+- [OpenUSD 26.08 capability validation](docs/specs/spec-validation-2026-07-24.md)
+- [Hydra integration notes](docs/specs/hydra-integration-notes.md)
+- [Control and solver guides](docs/specs/control-guides.md)
+- [Curvenet design and authoring](docs/specs/curvenet.md)
+- [Volumetric weights](docs/specs/volume-weights.md)
+- [Viewport gizmos in usdview](docs/specs/viewport-gizmos.md)
+- [Graph editor in usdview](docs/specs/graph-editor.md)
+- [ViewCube in usdview](docs/specs/view-cube.md)
+- [Guided composition arcs in usdview](docs/specs/composition-arcs.md)
+- [OpenExec API notes](docs/specs/exec-api-notes.md) and
+  [ExecUsd API notes](docs/specs/execusd-api-notes.md)

@@ -1,0 +1,245 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecCurveWeight.
+
+    A flat sheet is weighted by distance to a curve. The curve is a plain
+    UsdGeomBasisCurves whose points are animated: it sweeps across the
+    sheet and back. Everything in the rig is static -- the Lift control
+    holds avars:ty = 1.3 for the whole shot -- so the only thing that
+    changes is WHICH points the field grabs, and a ridge travels across
+    the sheet with the curve.
+
+    inputs:falloffMin is the distance at which the field is fully ON and
+    inputs:falloffMax where it is fully OFF, both measured to the nearest
+    point on the POLYLINE through the curve's control points. The tube
+    drawn at those two distances (Display -> Display Purposes -> Guide)
+    is therefore exactly the region the ridge covers.
+    """
+    defaultPrim = "CurveWeightAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "CurveWeightAsset"
+{
+    def Scope "Geom"
+    {
+        def Mesh "Sheet"
+        {
+            float3[] extent = [(-3.2, -0.2, -2.6), (3.2, 1.6, 2.6)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 1, 6, 5,
+                1, 2, 7, 6,
+                2, 3, 8, 7,
+                3, 4, 9, 8,
+                5, 6, 11, 10,
+                6, 7, 12, 11,
+                7, 8, 13, 12,
+                8, 9, 14, 13,
+                10, 11, 16, 15,
+                11, 12, 17, 16,
+                12, 13, 18, 17,
+                13, 14, 19, 18,
+                15, 16, 21, 20,
+                16, 17, 22, 21,
+                17, 18, 23, 22,
+                18, 19, 24, 23,
+                20, 21, 26, 25,
+                21, 22, 27, 26,
+                22, 23, 28, 27,
+                23, 24, 29, 28,
+                25, 26, 31, 30,
+                26, 27, 32, 31,
+                27, 28, 33, 32,
+                28, 29, 34, 33
+            ]
+            point3f[] points = [
+                (-3, 0, -2.4),
+                (-1.5, 0, -2.4),
+                (0, 0, -2.4),
+                (1.5, 0, -2.4),
+                (3, 0, -2.4),
+                (-3, 0, -1.6),
+                (-1.5, 0, -1.6),
+                (0, 0, -1.6),
+                (1.5, 0, -1.6),
+                (3, 0, -1.6),
+                (-3, 0, -0.8),
+                (-1.5, 0, -0.8),
+                (0, 0, -0.8),
+                (1.5, 0, -0.8),
+                (3, 0, -0.8),
+                (-3, 0, 0),
+                (-1.5, 0, 0),
+                (0, 0, 0),
+                (1.5, 0, 0),
+                (3, 0, 0),
+                (-3, 0, 0.8),
+                (-1.5, 0, 0.8),
+                (0, 0, 0.8),
+                (1.5, 0, 0.8),
+                (3, 0, 0.8),
+                (-3, 0, 1.6),
+                (-1.5, 0, 1.6),
+                (0, 0, 1.6),
+                (1.5, 0, 1.6),
+                (3, 0, 1.6),
+                (-3, 0, 2.4),
+                (-1.5, 0, 2.4),
+                (0, 0, 2.4),
+                (1.5, 0, 2.4),
+                (3, 0, 2.4)
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "Drivers"
+    {
+        # The curve the tube falloff measures against. A weight object never
+        # grows its own geometry: rigExec:curve names a native points source,
+        # and the field reads it in the same space as the weighted mesh.
+        def BasisCurves "SweepCurve"
+        {
+            int[] curveVertexCounts = [5]
+            point3f[] points = [(-3.4, 0, -0.9), (-1.7, 0, -1.6), (0, 0, -2), (1.7, 0, -1.6), (3.4, 0, -0.9)]
+            point3f[] points.timeSamples = {
+                1001: [(-3.4, 0, -0.9), (-1.7, 0, -1.6), (0, 0, -2), (1.7, 0, -1.6), (3.4, 0, -0.9)],
+                1002: [(-3.4, 0, -0.8462), (-1.7, 0, -1.5462), (0, 0, -1.9462), (1.7, 0, -1.5462), (3.4, 0, -0.8462)],
+                1003: [(-3.4, 0, -0.6889), (-1.7, 0, -1.3889), (0, 0, -1.7889), (1.7, 0, -1.3889), (3.4, 0, -0.6889)],
+                1004: [(-3.4, 0, -0.4397), (-1.7, 0, -1.1397), (0, 0, -1.5397), (1.7, 0, -1.1397), (3.4, 0, -0.4397)],
+                1005: [(-3.4, 0, -0.1171), (-1.7, 0, -0.8171), (0, 0, -1.2171), (1.7, 0, -0.8171), (3.4, 0, -0.1171)],
+                1006: [(-3.4, 0, 0.255), (-1.7, 0, -0.445), (0, 0, -0.845), (1.7, 0, -0.445), (3.4, 0, 0.255)],
+                1007: [(-3.4, 0, 0.649), (-1.7, 0, -0.051), (0, 0, -0.451), (1.7, 0, -0.051), (3.4, 0, 0.649)],
+                1008: [(-3.4, 0, 1.0356), (-1.7, 0, 0.3356), (0, 0, -0.0644), (1.7, 0, 0.3356), (3.4, 0, 1.0356)],
+                1009: [(-3.4, 0, 1.3862), (-1.7, 0, 0.6862), (0, 0, 0.2862), (1.7, 0, 0.6862), (3.4, 0, 1.3862)],
+                1010: [(-3.4, 0, 1.6748), (-1.7, 0, 0.9748), (0, 0, 0.5748), (1.7, 0, 0.9748), (3.4, 0, 1.6748)],
+                1011: [(-3.4, 0, 1.88), (-1.7, 0, 1.18), (0, 0, 0.78), (1.7, 0, 1.18), (3.4, 0, 1.88)],
+                1012: [(-3.4, 0, 1.9865), (-1.7, 0, 1.2865), (0, 0, 0.8865), (1.7, 0, 1.2865), (3.4, 0, 1.9865)],
+                1013: [(-3.4, 0, 1.9865), (-1.7, 0, 1.2865), (0, 0, 0.8865), (1.7, 0, 1.2865), (3.4, 0, 1.9865)],
+                1014: [(-3.4, 0, 1.88), (-1.7, 0, 1.18), (0, 0, 0.78), (1.7, 0, 1.18), (3.4, 0, 1.88)],
+                1015: [(-3.4, 0, 1.6748), (-1.7, 0, 0.9748), (0, 0, 0.5748), (1.7, 0, 0.9748), (3.4, 0, 1.6748)],
+                1016: [(-3.4, 0, 1.3862), (-1.7, 0, 0.6862), (0, 0, 0.2862), (1.7, 0, 0.6862), (3.4, 0, 1.3862)],
+                1017: [(-3.4, 0, 1.0356), (-1.7, 0, 0.3356), (0, 0, -0.0644), (1.7, 0, 0.3356), (3.4, 0, 1.0356)],
+                1018: [(-3.4, 0, 0.649), (-1.7, 0, -0.051), (0, 0, -0.451), (1.7, 0, -0.051), (3.4, 0, 0.649)],
+                1019: [(-3.4, 0, 0.255), (-1.7, 0, -0.445), (0, 0, -0.845), (1.7, 0, -0.445), (3.4, 0, 0.255)],
+                1020: [(-3.4, 0, -0.1171), (-1.7, 0, -0.8171), (0, 0, -1.2171), (1.7, 0, -0.8171), (3.4, 0, -0.1171)],
+                1021: [(-3.4, 0, -0.4397), (-1.7, 0, -1.1397), (0, 0, -1.5397), (1.7, 0, -1.1397), (3.4, 0, -0.4397)],
+                1022: [(-3.4, 0, -0.6889), (-1.7, 0, -1.3889), (0, 0, -1.7889), (1.7, 0, -1.3889), (3.4, 0, -0.6889)],
+                1023: [(-3.4, 0, -0.8462), (-1.7, 0, -1.5462), (0, 0, -1.9462), (1.7, 0, -1.5462), (3.4, 0, -0.8462)],
+                1024: [(-3.4, 0, -0.9), (-1.7, 0, -1.6), (0, 0, -2), (1.7, 0, -1.6), (3.4, 0, -0.9)],
+            }
+            uniform token type = "linear"
+            float[] widths = [0.06] (
+                interpolation = "constant"
+            )
+        }
+    }
+
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "CurveWeightAsset"
+
+        def Scope "Controls"
+        {
+            # Unanimated on purpose: the lift height is a constant, and the
+            # animation in this example lives entirely on the curve.
+            def RigExecControl "Lift" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ty = 1.3
+                uniform token guide:shape = "diamond"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </CurveWeightAsset/Rig/Controls/Lift>
+                rel rigExec:joints = </CurveWeightAsset/Rig/Joints/Jnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Jnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            # A tube about the curve's control polygon. The volume itself sits
+            # at the origin with an identity rest:space, so volume-local space
+            # is asset space and the band reads directly in scene units.
+            def RigExecCurveWeight "Tube" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:curve = </CurveWeightAsset/Drivers/SweepCurve.points>
+                rel rigExec:weightTarget = </CurveWeightAsset/Geom/Sheet.points>
+                float inputs:falloffMin = 0.3
+                float inputs:falloffMax = 1.5
+                float inputs:invert = 0
+                float inputs:strength = 1
+                float inputs:scaleX = 1
+                float inputs:scaleY = 1
+                float inputs:scaleZ = 1
+                uniform token rigExec:falloffProfile = "smooth"
+                uniform token rigExec:samplePhase = "reference"
+                uniform token rigExec:representation = "dense"
+                uniform token rigExec:rangePolicy = "clamp"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform token guide:drawMode = "wire"
+                double guide:wireWidth = 0.04
+                color3f guide:displayColor = (1, 0.25, 0.25)
+                float guide:displayOpacity = 0.35
+                uniform asset ui:nodegraph:node:icon = @../../icons/curve_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "Ridge" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </CurveWeightAsset/Geom/Sheet.points>
+                    rel rigExec:transform = </CurveWeightAsset/Rig/Joints/Jnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </CurveWeightAsset/Rig/Weights/Tube>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1811, 159.3)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (9.045, 6.671, 14.47)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

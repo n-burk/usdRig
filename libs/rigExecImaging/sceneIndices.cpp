@@ -3,6 +3,8 @@
 //
 #include "sceneIndices.h"
 
+#include "registry.h"
+
 #include "pxr/base/gf/range3d.h"
 #include "pxr/imaging/hd/basisCurvesSchema.h"
 #include "pxr/imaging/hd/basisCurvesTopologySchema.h"
@@ -31,6 +33,74 @@
 #include <tuple>
 
 namespace rigExec {
+
+const TfToken &
+RigExecTriggerContainerToken()
+{
+    static const TfToken container("rigExec");
+    return container;
+}
+
+const TfToken &
+RigExecTriggerLeafToken()
+{
+    static const TfToken leaf("time");
+    return leaf;
+}
+
+namespace {
+
+// A dirty that drives live evaluation: it touches the rigExec/time trigger
+// leaf on an ACTIVE rig root (rigAdapter.cpp). The root check is what keeps
+// this from re-entering: binding-epoch swaps dirty outputs universally, and
+// a universal locator intersects everything.
+bool
+_IsTimeTriggerDirty(
+    const HdSceneIndexObserver::DirtiedPrimEntries::value_type &entry)
+{
+    static const HdDataSourceLocator trigger(
+        RigExecTriggerContainerToken(), RigExecTriggerLeafToken());
+    return entry.dirtyLocators.Intersects(trigger) &&
+        RigExecImagingRegistry::GetInstance().IsActiveRigRoot(
+            entry.primPath);
+}
+
+// The frame the trigger leaf names, pulled from upstream. False when the
+// leaf is absent or unreadable, in which case the caller leaves the
+// published generation alone rather than evaluating at a guessed time.
+bool
+_TriggerTime(
+    const HdSceneIndexBaseRefPtr &input, const SdfPath &rigPath,
+    UsdTimeCode *time)
+{
+    const HdSceneIndexPrim prim = input->GetPrim(rigPath);
+    if (!prim.dataSource) {
+        return false;
+    }
+    const HdContainerDataSourceHandle rigExec =
+        HdContainerDataSource::Cast(
+            prim.dataSource->Get(RigExecTriggerContainerToken()));
+    if (!rigExec) {
+        return false;
+    }
+    const HdSampledDataSourceHandle leaf = HdSampledDataSource::Cast(
+        rigExec->Get(RigExecTriggerLeafToken()));
+    if (!leaf) {
+        return false;
+    }
+    const VtValue value = leaf->GetValue(0.0f);
+    if (value.IsHolding<UsdTimeCode>()) {
+        *time = value.UncheckedGet<UsdTimeCode>();
+        return true;
+    }
+    if (value.IsHolding<double>()) {
+        *time = UsdTimeCode(value.UncheckedGet<double>());
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // RigExecInternalPrimPruningSceneIndex
@@ -2610,6 +2680,31 @@ RigExecResultsSceneIndex::_PrimsAdded(
         return;
     }
     _SendPrimsAdded(entries);
+    // Eager activation for hosts with no explicit call (usdrecord): a noted
+    // rig root appearing here means populate sighted a rig nobody activated.
+    // Pulling its trigger leaf forces the adapter to build the rig's data --
+    // which flags the leaf time-varying and activates the rig through the
+    // adapter's EnsureActivated -- so the very first SetTime already finds
+    // its dirty and evaluates, instead of rendering one stale frame. The
+    // pull also keeps the compile on the populate thread rather than
+    // whichever render worker would otherwise pull first. Only noted roots
+    // pay for a pull; everything else passes through untouched. A resync
+    // re-add while active still pulls, but the activation it forces is a
+    // no-op inside EnsureActivated, so live authoring neither recompiles
+    // nor republishes here.
+    for (const auto &entry : entries) {
+        if (!RigExecImagingRegistry::GetInstance().IsNotedRigRoot(
+                entry.primPath)) {
+            continue;
+        }
+        UsdTimeCode time;
+        if (_TriggerTime(_GetInputSceneIndex(), entry.primPath, &time)) {
+            // The pull was the point, not the value: one readable trigger
+            // means the adapter ran and the rig is active.
+            (void)time;
+            break;
+        }
+    }
     // A re-added path may still be driven by the current generation, and
     // _PrimsRemoved pruned its history when it went away. Restore it, or a
     // later loss would find wasDriven == false and skip the subtree.
@@ -2764,6 +2859,25 @@ RigExecResultsSceneIndex::_PrimsDirtied(
 {
     if (!_IsObserved()) {
         return;
+    }
+    // Live evaluation for hosts with no RigExec timeline glue (usdrecord):
+    // the rig adapter flags rigExec/time time-varying on every RigExecRoot
+    // prim, so the host's SetTime dirties it here. Pull the frame and
+    // evaluate BEFORE forwarding, so everything downstream of this notice
+    // already sees the new generation. An explicit SetTime at the same frame
+    // (the usdview plugin's signal, or a second host) is a no-op inside the
+    // registry's redundant-call guard, so double-driving costs nothing.
+    for (const auto &entry : entries) {
+        if (!_IsTimeTriggerDirty(entry)) {
+            continue;
+        }
+        UsdTimeCode time;
+        if (_TriggerTime(_GetInputSceneIndex(), entry.primPath, &time)) {
+            // One SetTime evaluates every session: the first readable
+            // trigger names the frame for all of them.
+            RigExecImagingRegistry::GetInstance().SetTime(time);
+            break;
+        }
     }
     // A synthesized guide reads its visibility AND its parent's world
     // transform from that parent, so a parent whose either changed has to

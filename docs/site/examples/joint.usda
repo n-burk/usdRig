@@ -1,0 +1,265 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecJoint.
+
+    Three nested joints pose an arm, and the wrist is written twice: the FK
+    chain places it at the end of the curling forearm, then an aim
+    constraint re-aims it at a fixed anchor in the pose phase. Each panel is
+    skinned rigidly to its own joint and reads the final phase, so the hand
+    keeps pointing at the anchor while the forearm swings 70 degrees away.
+    """
+    defaultPrim = "JointAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "JointAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "JointAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "ShoulderCtl" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "ElbowCtl" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1006: 70; post linear,
+                    1012: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "WristCtl" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (4, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "Anchor" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (7.5, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </JointAsset/Rig/Controls/ShoulderCtl>,
+                    </JointAsset/Rig/Controls/ElbowCtl>,
+                    </JointAsset/Rig/Controls/WristCtl>,
+                ]
+                rel rigExec:joints = [
+                    </JointAsset/Rig/Joints/Shoulder>,
+                    </JointAsset/Rig/Joints/Shoulder/Elbow>,
+                    </JointAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Shoulder" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Elbow" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "Wrist" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        # rest:space is relative to the parent joint's rest,
+                        # so (2, 0, 0) under an Elbow at (2, 0, 0) puts the
+                        # wrist at the far end of the forearm, x = 4.
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "UpperW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </JointAsset/Geom/Upper.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "ForeW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </JointAsset/Geom/Fore.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "HandW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </JointAsset/Geom/Hand.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # The hierarchy is the displayed stack: bottom executes first.
+            # Keep Pose below Geometry so the wrist's aim revision is in
+            # place before the skinning movers read the final phase.
+            reorder nameChildren = ["Geometry", "Pose"]
+            def Scope "Pose"
+            {
+                def RigExecAimConstraint "WristAim" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double3 inputs:aimVector = (1, 0, 0)
+                    double3 inputs:upVector = (0, 1, 0)
+                    double3 inputs:worldUpVector = (0, 1, 0)
+                    rel rigExec:moves = </JointAsset/Rig/Joints/Shoulder/Elbow/Wrist>
+                    rel rigExec:sources = </JointAsset/Rig/Controls/Anchor>
+                    uniform token rigExec:worldUpType = "vector"
+                    uniform asset ui:nodegraph:node:icon = @../../icons/aim_constraint.png@
+                }
+            }
+
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "UpperSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </JointAsset/Geom/Upper.points>
+                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </JointAsset/Rig/Weights/UpperW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "ForeSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </JointAsset/Geom/Fore.points>
+                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder/Elbow>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </JointAsset/Rig/Weights/ForeW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "HandSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </JointAsset/Geom/Hand.points>
+                    rel rigExec:transform = </JointAsset/Rig/Joints/Shoulder/Elbow/Wrist>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </JointAsset/Rig/Weights/HandW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Upper"
+        {
+            color3f[] primvars:displayColor = [(1, 0.6, 0.15)]
+            float3[] extent = [(0, -0.35, 0), (2, 0.35, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0, -0.35, 0), (0.5, -0.35, 0), (1, -0.35, 0), (1.5, -0.35, 0), (2, -0.35, 0), (0, 0.35, 0), (0.5, 0.35, 0), (1, 0.35, 0), (1.5, 0.35, 0), (2, 0.35, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "Fore"
+        {
+            color3f[] primvars:displayColor = [(0.25, 0.8, 0.35)]
+            float3[] extent = [(2, -0.3, 0), (4, 0.3, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(2, -0.3, 0), (2.5, -0.3, 0), (3, -0.3, 0), (3.5, -0.3, 0), (4, -0.3, 0), (2, 0.3, 0), (2.5, 0.3, 0), (3, 0.3, 0), (3.5, 0.3, 0), (4, 0.3, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "Hand"
+        {
+            color3f[] primvars:displayColor = [(0.3, 0.55, 0.95)]
+            float3[] extent = [(4, -0.5, 0), (5.2, 0.5, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(4, -0.5, 0), (4.6, -0.5, 0), (5.2, -0.5, 0), (4, 0, 0), (4.6, 0, 0), (5.2, 0, 0), (4, 0.5, 0), (4.6, 0.5, 0), (5.2, 0.5, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1483, 127.3)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (11.01, 5.693, 11.62)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

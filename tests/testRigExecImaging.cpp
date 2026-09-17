@@ -57,6 +57,8 @@
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdUtils/stageCache.h"
+#include "pxr/usdImaging/usdImaging/sceneIndices.h"
+#include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
 #include <algorithm>
 #include <cmath>
@@ -4195,6 +4197,20 @@ _SchemaResourceDir(const std::string &examplesDir)
 #endif
 }
 
+// The generated imaging plugInfo, which carries the rig adapter's keyless
+// registration (it has no source-tree fallback: the checked-in file is a
+// template with an unexpanded library filename). Empty when the build did
+// not provide one, in which case the live-evaluation test skips itself.
+static std::string
+_ImagingResourceDir()
+{
+#ifdef RIGEXEC_IMAGING_RESOURCE_DIR
+    return TfAbsPath(RIGEXEC_IMAGING_RESOURCE_DIR);
+#else
+    return std::string();
+#endif
+}
+
 // Transform-authority validation (host-durability redesign): the compiler
 // warns about the two things that leave a provider's computed extent
 // placing its guide somewhere the rig is not, without failing a compile
@@ -4762,6 +4778,113 @@ TestXformPreviewDelta()
     chain.results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
 }
 
+// Live evaluation through the stage scene index's own clock -- the usdrecord
+// path (docs/specs/imaging-datasource-redesign.md §3.2). No explicit
+// activation anywhere in this test: the rig adapter notes the root during
+// populate, the results index's _PrimsAdded forces the activation, and every
+// SetTime after that re-evaluates through the rigExec/time trigger.
+static void
+TestSetTimeDrivenEvaluation(const std::string &examplesDir)
+{
+    if (_ImagingResourceDir().empty()) {
+        std::printf("  (no imaging plugInfo; skipping live-evaluation test)\n");
+        return;
+    }
+    const std::string path = examplesDir + "/10_AimXformTurret.usda";
+    UsdStageRefPtr stage = UsdStage::Open(path);
+    CHECK(stage != nullptr);
+    if (!stage) {
+        return;
+    }
+
+    SdfPath rigPath;
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (prim.GetTypeName() == TfToken("RigExecRoot")) {
+            rigPath = prim.GetPath();
+        }
+    }
+    CHECK(!rigPath.IsEmpty());
+    if (rigPath.IsEmpty()) {
+        return;
+    }
+
+    // Isolated from whatever earlier tests published: the store is cleared,
+    // and the per-session evaluation count below starts from each new
+    // session's own zero, so earlier publications cannot move these asserts.
+    RigExecImaging_Deactivate();
+
+    // The REAL chain, exactly as usdview/usdrecord build it: the RigExec
+    // scene index plugin inserts itself, and the rig adapter discovers the
+    // root. Nothing here activates explicitly.
+    UsdImagingCreateSceneIndicesInfo info;
+    info.stage = stage;
+    const UsdImagingSceneIndices sceneIndices =
+        UsdImagingCreateSceneIndices(info);
+    const HdSceneIndexBaseRefPtr terminal = sceneIndices.finalSceneIndex;
+    CHECK(terminal != nullptr);
+    if (!terminal) {
+        return;
+    }
+
+    // Populate alone activated the rig and evaluated it exactly once: one
+    // generation, no pulls, no SetTime.
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    const long long genPopulate = RigExecImaging_GetGeneration();
+    CHECK(genPopulate > 0);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == 1);
+
+    const SdfPath turret("/TurretAsset/Geom/Turret");
+    auto worldOf = [&](const SdfPath &p) {
+        HdXformSchema xf = HdXformSchema::GetFromParent(
+            terminal->GetPrim(p).dataSource);
+        return xf && xf.GetMatrix() ? xf.GetMatrix()->GetTypedValue(0.0f)
+                                   : GfMatrix4d(1.0);
+    };
+    _RecordingObserver observer;
+    terminal->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    // SetTime alone drives one fresh evaluated generation per frame...
+    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(1001));
+    CHECK(RigExecImaging_GetGeneration() == genPopulate + 1);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == 2);
+    const GfMatrix4d at1001 = worldOf(turret);
+    observer.dirtied.clear();
+    observer.dirtiedLocators.clear();
+    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(1024));
+    CHECK(RigExecImaging_GetGeneration() == genPopulate + 2);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == 3);
+    const GfMatrix4d at1024 = worldOf(turret);
+    CHECK(at1001 != at1024);
+
+    // ...announced through dirtied notices, not just visible to pulls (a
+    // pull-only test would pass on a frozen viewport).
+    bool sawTurretDirty = false;
+    for (const SdfPath &p : observer.dirtied) {
+        if (p == turret) {
+            sawTurretDirty = true;
+        }
+    }
+    CHECK(sawTurretDirty);
+
+    // ...and identical to the explicit path: the same frames driven through
+    // the C entry point publish the same values, and re-driving an already
+    // published frame is free through the redundant-call guard.
+    CHECK(RigExecImaging_SetTime(1001.0) == 0);
+    CHECK(worldOf(turret) == at1001);
+    CHECK(RigExecImaging_SetTime(1024.0) == 0);
+    CHECK(worldOf(turret) == at1024);
+    const long long genExplicit = RigExecImaging_GetGeneration();
+    const size_t countExplicit =
+        registry.GetSessionEvaluationCount(rigPath);
+    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(1024));
+    CHECK(RigExecImaging_GetGeneration() == genExplicit);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == countExplicit);
+    CHECK(worldOf(turret) == at1024);
+
+    terminal->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+    RigExecImaging_Deactivate();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4774,6 +4897,18 @@ main(int argc, char **argv)
     if (PlugRegistry::GetInstance().RegisterPlugins(resources).empty()) {
         std::printf("FATAL: no schema plugin found at %s\n",
                     resources.c_str());
+        return 2;
+    }
+    // The rig adapter's keyless registration, before any test builds a
+    // UsdImaging chain: the adapter registry reads Plug metadata once, on
+    // first use. Skipped (with the test that needs it) when the build did
+    // not provide the generated plugInfo.
+    const std::string imagingResources = _ImagingResourceDir();
+    if (!imagingResources.empty() &&
+        PlugRegistry::GetInstance().RegisterPlugins(
+            imagingResources).empty()) {
+        std::printf("FATAL: no imaging plugin found at %s\n",
+                    imagingResources.c_str());
         return 2;
     }
 
@@ -4815,6 +4950,9 @@ main(int argc, char **argv)
     TestExtentIsPureFunctionOfStageAndTime(examplesDir);
     TestPurposeScopedBounds(examplesDir);
     TestAllPurposeRenderTags(examplesDir);
+    // Last: it drives the real UsdImaging chain and deactivates on the way
+    // out, leaving the process-global registry cleared.
+    TestSetTimeDrivenEvaluation(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

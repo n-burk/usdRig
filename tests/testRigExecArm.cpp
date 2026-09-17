@@ -664,7 +664,7 @@ TestGeometryMovers(const std::string &examplesDir)
 
     // Mover-graph parity: the compiled graph runs alongside the generated-prim
     // chains and must never disagree with them (see
-    // docs/mover-graph-cutover.md). The summary line is asserted present, not
+    // docs/specs/mover-graph-cutover.md). The summary line is asserted present, not
     // just the absence of a mismatch: a parity pass that silently checked
     // nothing would otherwise read exactly like one that passed.
     //
@@ -2133,7 +2133,7 @@ TestImplicitJointDiscovery(const std::string &examplesDir)
 // 01_FkChainTail is a pure matrix chain (4 skinning movers), 04_BlendShapeFace
 // a pure blend chain. Both must AGREE, not defer -- "0 chain(s) agreed" fails,
 // because a parity pass that silently checked nothing is indistinguishable
-// from one that passed (see docs/mover-graph-cutover.md).
+// from one that passed (see docs/specs/mover-graph-cutover.md).
 static void
 TestMoverGraphParity(const std::string &examplesDir)
 {

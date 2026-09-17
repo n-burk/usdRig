@@ -1,0 +1,159 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecMatrixMathMover.
+
+    Two animator handles, one card, no solvers. Each control publishes its
+    posed matrix on posed:space, and the card Xform's xformOp:transform is
+    a two-revision property chain built from them: a blend takes the
+    matrix to the Spin dial's frame, then a multiply post-applies the
+    Slide handle's frame, so the card is drawn at Spin * Slide. The card
+    turns in place with the dial while riding out along X with the box
+    handle that sits at its centre.
+    """
+    defaultPrim = "MatMathAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "MatMathAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "MatMathAsset"
+
+        def Scope "Controls"
+        {
+            # The rotation the mover multiplies in: a dial at the rig origin
+            # turning about Z. Its guide ball is drawn 2.2 units above the
+            # pivot, so the angle is readable as the ball swings.
+            def RigExecControl "Spin" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                uniform token guide:drawMode = "geometry"
+                double3 guide:offset = (0, 2.2, 0)
+                double guide:scaleX = 0.35
+                double guide:scaleY = 0.35
+                double guide:scaleZ = 0.35
+                uniform token guide:shape = "sphere"
+                matrix4d posed:space.timeSamples = {
+                    1001: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1002: ( (0.975619, 0.219471, 0, 0), (-0.219471, 0.975619, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1003: ( (0.911196, 0.411973, 0, 0), (-0.411973, 0.911196, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1004: ( (0.828952, 0.559319, 0, 0), (-0.559319, 0.828952, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1005: ( (0.755471, 0.655182, 0, 0), (-0.655182, 0.755471, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1006: ( (0.712737, 0.701431, 0, 0), (-0.701431, 0.712737, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1007: ( (0.712737, 0.701431, 0, 0), (-0.701431, 0.712737, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1008: ( (0.755471, 0.655182, 0, 0), (-0.655182, 0.755471, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1009: ( (0.828952, 0.559319, 0, 0), (-0.559319, 0.828952, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1010: ( (0.911196, 0.411973, 0, 0), (-0.411973, 0.911196, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1011: ( (0.975619, 0.219471, 0, 0), (-0.219471, 0.975619, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1012: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            # The base transform the card rides. Its box guide sits at the
+            # card's centre, because the card's matrix ends with exactly
+            # this translation.
+            def RigExecControl "Slide" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.35
+                double guide:scaleY = 0.35
+                double guide:scaleZ = 0.35
+                uniform token guide:shape = "cube"
+                matrix4d posed:space.timeSamples = {
+                    1001: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                    1002: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.7889, 0, 0, 1) ),
+                    1003: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.5138, 0, 0, 1) ),
+                    1004: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.1161, 0, 0, 1) ),
+                    1005: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.547, 0, 0, 1) ),
+                    1006: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.7715, 0, 0, 1) ),
+                    1007: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.7715, 0, 0, 1) ),
+                    1008: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.547, 0, 0, 1) ),
+                    1009: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.1161, 0, 0, 1) ),
+                    1010: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.5138, 0, 0, 1) ),
+                    1011: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.7889, 0, 0, 1) ),
+                    1012: ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ),
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # The mover namespace is a stack: the bottom prim executes
+            # first. SpinBase below is revision 1, SlideOffset here is
+            # revision 2, and the card's matrix is Spin * Slide.
+            def Scope "Property"
+            {
+                # Revision 2: post-apply the Slide control's posed matrix.
+                # multiply applies it AFTER the incoming matrix, so the
+                # translation lands in the spun frame's parent, not inside
+                # the spin -- the card turns in place and then rides out.
+                def RigExecMatrixMathMover "SlideOffset" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d inputs:value.connect = </MatMathAsset/Rig/Controls/Slide.posed:space>
+                    rel rigExec:moves = </MatMathAsset/Geom/Card.xformOp:transform>
+                    uniform token rigExec:operation = "multiply"
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_math_mover.png@
+                }
+
+                # Revision 1: blend REPLACES the card's authored identity
+                # with the Spin control's posed matrix. At the default
+                # envelope of 1 that is a straight substitution; lower it
+                # and the card only takes part of the dial.
+                def RigExecMatrixMathMover "SpinBase" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d inputs:value.connect = </MatMathAsset/Rig/Controls/Spin.posed:space>
+                    rel rigExec:moves = </MatMathAsset/Geom/Card.xformOp:transform>
+                    uniform token rigExec:operation = "blend"
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_math_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Xform "Card"
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+            def Mesh "Panel"
+            {
+                color3f[] primvars:displayColor = [(0.9, 0.7, 0.25)]
+                float3[] extent = [(-0.9, -0.55, 0), (0.9, 0.55, 0)]
+                int[] faceVertexCounts = [4]
+                int[] faceVertexIndices = [0, 1, 2, 3]
+                point3f[] points = [(-0.9, -0.55, 0), (0.9, -0.55, 0), (0.9, 0.55, 0), (-0.9, 0.55, 0)]
+                uniform token subdivisionScheme = "none"
+            }
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.0852, 73.92)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (5.768, 2.758, 6.911)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

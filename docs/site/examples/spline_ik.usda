@@ -1,0 +1,306 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecSplineIk.
+
+    Six joints ride a four-CV B-spline built from three controls. The
+    mid control lifts, the curve arches, and the chain stretches along
+    it by arc length while the per-joint volume weights thin the tube --
+    squash-and-stretch spine behaviour with no joint animation anywhere.
+    """
+    defaultPrim = "SplineAsset"
+    endTimeCode = 1017
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "SplineAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "SplineAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "SpineRoot" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "SpineMid" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1009: 2.4; post linear,
+                    1017: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "SpineEnd" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (6, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecSplineIk "SpineSpline" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double inputs:midFollowWeight = 0.5
+                double inputs:preserveVolume = 1
+                rel rigExec:endControl = </SplineAsset/Rig/Controls/SpineEnd>
+                rel rigExec:joints = [
+                    </SplineAsset/Rig/Joints/Spine0>,
+                    </SplineAsset/Rig/Joints/Spine0/Spine1>,
+                    </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2>,
+                    </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3>,
+                    </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4>,
+                    </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4/Spine5>,
+                ]
+                rel rigExec:midControl = </SplineAsset/Rig/Controls/SpineMid>
+                uniform token rigExec:restLength = "curve"
+                rel rigExec:rootControl = </SplineAsset/Rig/Controls/SpineRoot>
+                uniform token rigExec:rootTangent = "rigid"
+                uniform float[] rigExec:volumeWeights = [0.15, 0.3, 0.45, 0.4, 0.25, 0.1]
+                uniform asset ui:nodegraph:node:icon = @../../icons/spline_ik.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Spine0" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Spine1" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.2, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "Spine2" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.2, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                        def RigExecJoint "Spine3" (
+                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                        )
+                        {
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.2, 0, 0, 1) )
+                            uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                            def RigExecJoint "Spine4" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.2, 0, 0, 1) )
+                                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                                def RigExecJoint "Spine5" (
+                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                )
+                                {
+                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.2, 0, 0, 1) )
+                                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "Spine0W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [1, 1, 1, 1, 0.5833, 0.5833, 0.5833, 0.5833, 0.1667, 0.1667, 0.1667, 0.1667, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+                rel rigExec:weightTarget = </SplineAsset/Geom/Tube.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Spine1W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0.4167, 0.4167, 0.4167, 0.4167, 0.8333, 0.8333, 0.8333, 0.8333, 0.75, 0.75, 0.75, 0.75, 0.3333, 0.3333, 0.3333, 0.3333, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+                rel rigExec:weightTarget = </SplineAsset/Geom/Tube.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Spine2W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.25, 0.25, 0.25, 0.25, 0.6667, 0.6667, 0.6667, 0.6667, 0.9167, 0.9167, 0.9167, 0.9167, 0.5, 0.5, 0.5, 0.5, 0.0833, 0.0833, 0.0833, 0.0833, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+                rel rigExec:weightTarget = </SplineAsset/Geom/Tube.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Spine3W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0833, 0.0833, 0.0833, 0.0833, 0.5, 0.5, 0.5, 0.5, 0.9167, 0.9167, 0.9167, 0.9167, 0.6667, 0.6667, 0.6667, 0.6667, 0.25, 0.25, 0.25, 0.25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+                rel rigExec:weightTarget = </SplineAsset/Geom/Tube.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Spine4W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.3333, 0.3333, 0.3333, 0.3333, 0.75, 0.75, 0.75, 0.75, 0.8333, 0.8333, 0.8333, 0.8333, 0.4167, 0.4167, 0.4167, 0.4167, 0, 0, 0, 0]
+                rel rigExec:weightTarget = </SplineAsset/Geom/Tube.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Spine5W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.1667, 0.1667, 0.1667, 0.1667, 0.5833, 0.5833, 0.5833, 0.5833, 1, 1, 1, 1]
+                rel rigExec:weightTarget = </SplineAsset/Geom/Tube.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "Spine0Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SplineAsset/Geom/Tube.points>
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine0W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "Spine1Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SplineAsset/Geom/Tube.points>
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine1W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "Spine2Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SplineAsset/Geom/Tube.points>
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine2W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "Spine3Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SplineAsset/Geom/Tube.points>
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine3W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "Spine4Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SplineAsset/Geom/Tube.points>
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine4W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "Spine5Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SplineAsset/Geom/Tube.points>
+                    rel rigExec:transform = </SplineAsset/Rig/Joints/Spine0/Spine1/Spine2/Spine3/Spine4/Spine5>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SplineAsset/Rig/Weights/Spine5W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Tube"
+        {
+            color3f[] primvars:displayColor = [(0.45, 0.6, 0.95)]
+            float3[] extent = [(0, -0.45, -0.45), (6, 0.45, 0.45)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6, 3, 0, 4, 7, 4, 5, 9, 8, 5, 6, 10, 9, 6, 7, 11, 10, 7, 4, 8, 11, 8, 9, 13, 12, 9, 10, 14, 13, 10, 11, 15, 14, 11, 8, 12, 15, 12, 13, 17, 16, 13, 14, 18, 17, 14, 15, 19, 18, 15, 12, 16, 19, 16, 17, 21, 20, 17, 18, 22, 21, 18, 19, 23, 22, 19, 16, 20, 23, 20, 21, 25, 24, 21, 22, 26, 25, 22, 23, 27, 26, 23, 20, 24, 27, 24, 25, 29, 28, 25, 26, 30, 29, 26, 27, 31, 30, 27, 24, 28, 31, 28, 29, 33, 32, 29, 30, 34, 33, 30, 31, 35, 34, 31, 28, 32, 35, 32, 33, 37, 36, 33, 34, 38, 37, 34, 35, 39, 38, 35, 32, 36, 39, 36, 37, 41, 40, 37, 38, 42, 41, 38, 39, 43, 42, 39, 36, 40, 43, 40, 41, 45, 44, 41, 42, 46, 45, 42, 43, 47, 46, 43, 40, 44, 47, 44, 45, 49, 48, 45, 46, 50, 49, 46, 47, 51, 50, 47, 44, 48, 51]
+            point3f[] points = [(0, 0.45, 0), (0, 0, 0.45), (0, -0.45, 0), (0, 0, -0.45), (0.5, 0.45, 0), (0.5, 0, 0.45), (0.5, -0.45, 0), (0.5, 0, -0.45), (1, 0.45, 0), (1, 0, 0.45), (1, -0.45, 0), (1, 0, -0.45), (1.5, 0.45, 0), (1.5, 0, 0.45), (1.5, -0.45, 0), (1.5, 0, -0.45), (2, 0.45, 0), (2, 0, 0.45), (2, -0.45, 0), (2, 0, -0.45), (2.5, 0.45, 0), (2.5, 0, 0.45), (2.5, -0.45, 0), (2.5, 0, -0.45), (3, 0.45, 0), (3, 0, 0.45), (3, -0.45, 0), (3, 0, -0.45), (3.5, 0.45, 0), (3.5, 0, 0.45), (3.5, -0.45, 0), (3.5, 0, -0.45), (4, 0.45, 0), (4, 0, 0.45), (4, -0.45, 0), (4, 0, -0.45), (4.5, 0.45, 0), (4.5, 0, 0.45), (4.5, -0.45, 0), (4.5, 0, -0.45), (5, 0.45, 0), (5, 0, 0.45), (5, -0.45, 0), (5, 0, -0.45), (5.5, 0.45, 0), (5.5, 0, 0.45), (5.5, -0.45, 0), (5.5, 0, -0.45), (6, 0.45, 0), (6, 0, 0.45), (6, -0.45, 0), (6, 0, -0.45)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1379, 117.9)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (9.714, 5.522, 10.74)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

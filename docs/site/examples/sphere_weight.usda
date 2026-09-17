@@ -1,0 +1,182 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecSphereWeight.
+
+    A 12 x 3 quad plank is lifted by a single matrix mover whose joint
+    holds a static one-unit rise. Nothing about that lift animates: the
+    only spline in the file slides the Probe control along the plank, and
+    the sphere volume authored INSIDE the probe joint rides it with no
+    wiring at all, so the region the mover grabs travels and a bump walks
+    out to the far end and back.
+
+    inputs:falloffMin is the distance at which the field is fully ON and
+    inputs:falloffMax the distance at which it is fully OFF, so for a
+    sphere they read directly as the inner and outer radii. Turn on
+    Display -> Display Purposes -> Guide to see the two iso-surfaces.
+    """
+    defaultPrim = "SphereWeightAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "SphereWeightAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "SphereWeightAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Probe" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 5; post linear,
+                    1024: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.5, 0, 0, 1) )
+                uniform token guide:shape = "sphere"
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "ProbeChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </SphereWeightAsset/Rig/Controls/Probe>
+                rel rigExec:joints = </SphereWeightAsset/Rig/Joints/ProbeJnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            # The travelling probe. Its only job is to carry the volume.
+            def RigExecJoint "ProbeJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.5, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                # Authored INSIDE the joint, with nothing wired: an
+                # unwired RigExecXformable follows its namespace-parent
+                # xformable's posed space, and a volume weight is one.
+                # That is the whole reason RigExecVolumeWeight inherits
+                # the xformable side rather than RigExecWeightObject.
+                #
+                # The field is radial about this placed origin: for every
+                # plank point, d = |(px/sx, py/sy, pz/sz)| in the rigid
+                # volume-local frame, remapped across
+                # falloffMin -> falloffMax by the `smooth` profile.
+                def RigExecSphereWeight "Ball" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:weightTarget = </SphereWeightAsset/Geom/Plank.points>
+                    uniform token rigExec:representation = "dense"
+                    uniform token rigExec:rangePolicy = "clamp"
+                    uniform token rigExec:falloffProfile = "smooth"
+                    uniform token rigExec:samplePhase = "reference"
+                    float inputs:falloffMin = 0.35
+                    float inputs:falloffMax = 1.4
+                    float inputs:invert = 0
+                    float inputs:strength = 1
+                    # A true sphere: these divisors are what would make
+                    # the iso-surfaces ellipsoidal, and together with the
+                    # band they are the only authority on the volume's
+                    # size -- a scale in the transform is orthonormalized
+                    # away before the field is built.
+                    float inputs:scaleX = 1
+                    float inputs:scaleY = 1
+                    float inputs:scaleZ = 1
+                    uniform token guide:drawMode = "wire"
+                    color3f guide:displayColor = (1, 0.2, 0.2)
+                    uniform asset ui:nodegraph:node:icon = @../../icons/sphere_weight.png@
+                }
+            }
+
+            # The deformation itself, held still on purpose: a one-unit
+            # rise that the sphere's field gates per point.
+            def RigExecJoint "Lift" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ty = 1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </SphereWeightAsset/Geom/Plank.points>
+                    rel rigExec:transform = </SphereWeightAsset/Rig/Joints/Lift>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </SphereWeightAsset/Rig/Joints/ProbeJnt/Ball>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Plank"
+        {
+            color3f[] primvars:displayColor = [(0.45, 0.6, 0.8)]
+            float3[] extent = [(0, 0, -0.75), (6, 1, 0.75)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 13, 14, 1, 1, 14, 15, 2, 2, 15, 16, 3, 3, 16, 17, 4,
+                4, 17, 18, 5, 5, 18, 19, 6, 6, 19, 20, 7, 7, 20, 21, 8,
+                8, 21, 22, 9, 9, 22, 23, 10, 10, 23, 24, 11, 11, 24, 25, 12,
+                13, 26, 27, 14, 14, 27, 28, 15, 15, 28, 29, 16, 16, 29, 30, 17,
+                17, 30, 31, 18, 18, 31, 32, 19, 19, 32, 33, 20, 20, 33, 34, 21,
+                21, 34, 35, 22, 22, 35, 36, 23, 23, 36, 37, 24, 24, 37, 38, 25,
+                26, 39, 40, 27, 27, 40, 41, 28, 28, 41, 42, 29, 29, 42, 43, 30,
+                30, 43, 44, 31, 31, 44, 45, 32, 32, 45, 46, 33, 33, 46, 47, 34,
+                34, 47, 48, 35, 35, 48, 49, 36, 36, 49, 50, 37, 37, 50, 51, 38
+            ]
+            point3f[] points = [
+                (0, 0, -0.75), (0.5, 0, -0.75), (1, 0, -0.75), (1.5, 0, -0.75), (2, 0, -0.75), (2.5, 0, -0.75),
+                (3, 0, -0.75), (3.5, 0, -0.75), (4, 0, -0.75), (4.5, 0, -0.75), (5, 0, -0.75), (5.5, 0, -0.75),
+                (6, 0, -0.75), (0, 0, -0.25), (0.5, 0, -0.25), (1, 0, -0.25), (1.5, 0, -0.25), (2, 0, -0.25),
+                (2.5, 0, -0.25), (3, 0, -0.25), (3.5, 0, -0.25), (4, 0, -0.25), (4.5, 0, -0.25), (5, 0, -0.25),
+                (5.5, 0, -0.25), (6, 0, -0.25), (0, 0, 0.25), (0.5, 0, 0.25), (1, 0, 0.25), (1.5, 0, 0.25),
+                (2, 0, 0.25), (2.5, 0, 0.25), (3, 0, 0.25), (3.5, 0, 0.25), (4, 0, 0.25), (4.5, 0, 0.25),
+                (5, 0, 0.25), (5.5, 0, 0.25), (6, 0, 0.25), (0, 0, 0.75), (0.5, 0, 0.75), (1, 0, 0.75),
+                (1.5, 0, 0.75), (2, 0, 0.75), (2.5, 0, 0.75), (3, 0, 0.75), (3.5, 0, 0.75), (4, 0, 0.75),
+                (4.5, 0, 0.75), (5, 0, 0.75), (5.5, 0, 0.75), (6, 0, 0.75)
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1275, 110.6)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (9.302, 4.753, 10.09)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

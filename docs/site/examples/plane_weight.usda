@@ -1,0 +1,208 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecPlaneWeight.
+
+    The hinge never changes: the Bend control holds a constant 35 degrees
+    and an FK chain poses one joint at the strip's root from it. The only
+    animation in the file is the PlaneSlide control's avars:tx, and the
+    plane weight's own avars:tx is connected to it -- a volume weight is a
+    RigExecXformable, so it is placed by exactly the avars a control is.
+
+    rigExec:planeAxis = "x" makes the field the SIGNED local x distance, so
+    inputs:falloffMin = 1.5 / falloffMax = -1.5 is a gradient ACROSS the
+    plane: fully ON 1.5 units past it, fully OFF 1.5 units before it. The
+    matrix mover blends p' = q + w (T q - q), so the half of the strip past
+    the plane swings up with the joint and the half before it stays flat.
+    Slide the plane out and the fold travels with it.
+
+    The plane is `unbounded`, so inputs:extentU / inputs:extentV only SIZE
+    the drawn square (U = y, V = z for planeAxis x) -- the field itself
+    reaches forever across the sheet. Set rigExec:planeBounds = "bounded"
+    and that same square becomes a hard boundary: zero outside it.
+
+    Turn on Display -> Display Purposes -> Guide to see the plane.
+    """
+    defaultPrim = "PlaneWeightAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PlaneWeightAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PlaneWeightAsset"
+
+        def Scope "Controls"
+        {
+            # The hinge angle. Deliberately NOT animated: every frame of
+            # motion in this example comes from where the plane is, not
+            # from how far the joint turns.
+            def RigExecControl "Bend" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 35
+                uniform token guide:shape = "circle"
+                double guide:scaleX = 0.7
+                double guide:scaleY = 0.7
+                double guide:scaleZ = 0.7
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            # The plane handle. Its avars:tx is the only authored spline
+            # in the file; the plane weight's own avars:tx is connected
+            # to it, so sliding this handle slides the field.
+            def RigExecControl "PlaneSlide" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:tx = 0.6
+                double avars:tx.spline = {
+                    bezier,
+                    1001: 0.6; post curve (6, 0),
+                    1012: 4.2; pre (5, 0); post curve (5, 0),
+                    1024: 0.6; pre (6, 0); post held,
+                }
+                uniform token guide:shape = "diamond"
+                double guide:scaleX = 0.35
+                double guide:scaleY = 0.35
+                double guide:scaleZ = 0.35
+                color3f guide:displayColor = (1, 0.85, 0.2)
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </PlaneWeightAsset/Rig/Controls/Bend>
+                rel rigExec:joints = </PlaneWeightAsset/Rig/Joints/Hinge>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            # At the strip's root, so the rotation lifts everything the
+            # plane hands it.
+            def RigExecJoint "Hinge" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            # The volume is a RigExecXformable, so it is placed by the
+            # same avars every control and joint uses -- here avars:tx is
+            # CONNECTED to the handle's, so the plane goes where the
+            # handle goes and there is one authored spline in the file.
+            # (Authoring the volume inside an xformable parent is the
+            # other idiom: an unwired xformable follows its namespace
+            # parent's posed space. See ShoulderVolume in
+            # examples/11_VolumeWeights.usda.)
+            #
+            # planeAxis = "x" is the length of the strip, so d is the
+            # signed x distance from the plane. The band is a distance
+            # ALONG that axis and slides the two iso-surfaces apart; the
+            # extents are half-sizes ACROSS it (U = y, V = z here) and
+            # size the drawn square. Different directions, and neither
+            # resizes the other.
+            def RigExecPlaneWeight "Cut" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:weightTarget = </PlaneWeightAsset/Geom/Strip.points>
+                uniform token rigExec:representation = "dense"
+                uniform token rigExec:rangePolicy = "clamp"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                double avars:tx.connect = </PlaneWeightAsset/Rig/Controls/PlaneSlide.avars:tx>
+                uniform token rigExec:planeAxis = "x"
+                uniform token rigExec:planeBounds = "unbounded"
+                uniform token rigExec:falloffProfile = "smooth"
+                uniform token rigExec:samplePhase = "reference"
+                float inputs:falloffMin = 1.5
+                float inputs:falloffMax = -1.5
+                float inputs:invert = 0
+                float inputs:strength = 1
+                float inputs:extentU = 1.2
+                float inputs:extentV = 1
+                uniform token guide:drawMode = "wire"
+                color3f guide:displayColor = (1, 0.2, 0.2)
+                uniform asset ui:nodegraph:node:icon = @../../icons/plane_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </PlaneWeightAsset/Geom/Strip.points>
+                    rel rigExec:transform = </PlaneWeightAsset/Rig/Joints/Hinge>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </PlaneWeightAsset/Rig/Weights/Cut>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        # 13 columns x 3 rows, 24 quads: dense enough along x that the
+        # fold the plane draws across it is a curve, not a crease.
+        def Mesh "Strip"
+        {
+            color3f[] primvars:displayColor = [(0.62, 0.66, 0.72)]
+            float3[] extent = [(0, -0.1, -0.7), (6, 4, 0.7)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 13, 14, 1, 1, 14, 15, 2, 2, 15, 16, 3, 3, 16, 17, 4,
+                4, 17, 18, 5, 5, 18, 19, 6, 6, 19, 20, 7, 7, 20, 21, 8,
+                8, 21, 22, 9, 9, 22, 23, 10, 10, 23, 24, 11, 11, 24, 25, 12,
+                13, 26, 27, 14, 14, 27, 28, 15, 15, 28, 29, 16, 16, 29, 30, 17,
+                17, 30, 31, 18, 18, 31, 32, 19, 19, 32, 33, 20, 20, 33, 34, 21,
+                21, 34, 35, 22, 22, 35, 36, 23, 23, 36, 37, 24, 24, 37, 38, 25
+            ]
+            point3f[] points = [
+                (0, 0, -0.7), (0.5, 0, -0.7), (1, 0, -0.7), (1.5, 0, -0.7), (2, 0, -0.7),
+                (2.5, 0, -0.7), (3, 0, -0.7), (3.5, 0, -0.7), (4, 0, -0.7), (4.5, 0, -0.7),
+                (5, 0, -0.7), (5.5, 0, -0.7), (6, 0, -0.7), (0, 0, 0), (0.5, 0, 0),
+                (1, 0, 0), (1.5, 0, 0), (2, 0, 0), (2.5, 0, 0), (3, 0, 0),
+                (3.5, 0, 0), (4, 0, 0), (4.5, 0, 0), (5, 0, 0), (5.5, 0, 0),
+                (6, 0, 0), (0, 0, 0.7), (0.5, 0, 0.7), (1, 0, 0.7), (1.5, 0, 0.7),
+                (2, 0, 0.7), (2.5, 0, 0.7), (3, 0, 0.7), (3.5, 0, 0.7), (4, 0, 0.7),
+                (4.5, 0, 0.7), (5, 0, 0.7), (5.5, 0, 0.7), (6, 0, 0.7)
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1418, 122.9)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (9.601, 6.131, 11.43)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

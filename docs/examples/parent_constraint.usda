@@ -1,0 +1,181 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecParentConstraint.
+
+    A prop card is parented to the Hand control with a translation and
+    rotation offset, so it swings out held at a fixed distance and tilt.
+    Mid-shot inputs:defaultWeight fades 1 -> 0 and the card drops back to
+    its own rest space, then the weight returns to 1 and the card snaps
+    back onto the hand with the same offset it left with.
+    """
+    defaultPrim = "PropParentAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PropParentAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PropParentAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Hand" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1005: -60; post linear,
+                    1016: -60; post linear,
+                    1024: 0; post linear,
+                }
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1005: 2.8; post linear,
+                    1016: 2.8; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:shape = "box"
+                double guide:scaleX = 0.5
+                double guide:scaleY = 0.35
+                double guide:scaleZ = 0.35
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.2, 3.2, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Prop" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:radius = 0.22
+                matrix4d rest:space = ( (0.906308, 0.422618, 0, 0), (-0.422618, 0.906308, 0, 0), (0, 0, 1, 0), (0.4, 3.2, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "CardW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </PropParentAsset/Geom/PropCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "PlateW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </PropParentAsset/Geom/HandPlate.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            # The hierarchy is the displayed stack: bottom executes first.
+            # Keep Pose below Geometry so final pose is available to skinning.
+            reorder nameChildren = ["Geometry", "Pose"]
+            def Scope "Pose"
+            {
+                def RigExecParentConstraint "PropFollow" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    float inputs:defaultWeight = 1
+                    float inputs:defaultWeight.spline = {
+                        1001: 1; pre (0, 0); post linear,
+                        1007: 1; post linear,
+                        1010: 0; post linear,
+                        1013: 0; post linear,
+                        1016: 1; post linear,
+                        1024: 1; post linear,
+                    }
+                    double3[] inputs:rotationOffsets = [(0, 0, 25)]
+                    double3[] inputs:translationOffsets = [(1.6, 0, 0)]
+                    rel rigExec:moves = </PropParentAsset/Rig/Joints/Prop>
+                    uniform token rigExec:rotationOrder = "XYZ"
+                    rel rigExec:sources = </PropParentAsset/Rig/Controls/Hand>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/parent_constraint.png@
+                }
+            }
+
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "PlateSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </PropParentAsset/Geom/HandPlate.points>
+                    rel rigExec:transform = </PropParentAsset/Rig/Controls/Hand>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </PropParentAsset/Rig/Weights/PlateW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "CardSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </PropParentAsset/Geom/PropCard.points>
+                    rel rigExec:transform = </PropParentAsset/Rig/Joints/Prop>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </PropParentAsset/Rig/Weights/CardW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "HandPlate"
+        {
+            color3f[] primvars:displayColor = [(0.55, 0.58, 0.66)]
+            float3[] extent = [(-1.65, 2.89, 0), (-0.75, 3.51, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+            point3f[] points = [(-1.65, 2.89, 0), (-1.2, 2.89, 0), (-0.75, 2.89, 0), (-1.65, 3.2, 0), (-1.2, 3.2, 0), (-0.75, 3.2, 0), (-1.65, 3.51, 0), (-1.2, 3.51, 0), (-0.75, 3.51, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "PropCard"
+        {
+            color3f[] primvars:displayColor = [(0.2, 0.55, 1)]
+            float3[] extent = [(-0.613367, 2.319647, 0), (1.413367, 4.080353, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8, 5, 6, 11, 10, 6, 7, 12, 11, 7, 8, 13, 12, 8, 9, 14, 13, 10, 11, 16, 15, 11, 12, 17, 16, 12, 13, 18, 17, 13, 14, 19, 18]
+            point3f[] points = [(-0.127356, 2.319647, 0), (0.257825, 2.49926, 0), (0.643006, 2.678873, 0), (1.028186, 2.858486, 0), (1.413367, 3.038099, 0), (-0.28936, 2.667065, 0), (0.095821, 2.846678, 0), (0.481002, 3.026291, 0), (0.866183, 3.205904, 0), (1.251363, 3.385517, 0), (-0.451363, 3.014483, 0), (-0.066183, 3.194096, 0), (0.318998, 3.373709, 0), (0.704179, 3.553322, 0), (1.08936, 3.732935, 0), (-0.613367, 3.361901, 0), (-0.228186, 3.541514, 0), (0.156994, 3.721127, 0), (0.542175, 3.90074, 0), (0.927356, 4.080353, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1106, 92.82)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (6.408, 6.074, 8.834)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

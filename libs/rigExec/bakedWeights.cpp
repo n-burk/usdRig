@@ -66,7 +66,7 @@
 // The seven weight object types, spelled once. The per-frame dispatch runs a
 // step body down this list, and TfToken(const char *) takes the token
 // registry's spin lock on every construction -- which a step body may not
-// take (docs/baked-step-graph.md section 2) -- so the comparison is against
+// take (docs/specs/baked-step-graph.md section 2) -- so the comparison is against
 // interned tokens rather than against literals.
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,

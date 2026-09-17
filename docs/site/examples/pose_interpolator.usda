@@ -1,0 +1,263 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecPoseInterpolator.
+
+    One Elbow control bends a skinned strip about Z and back. The
+    interpolator measures the Fore joint's local rotation against two
+    authored poses -- neutral and bent 80 degrees -- and publishes a float
+    on each. The bent pose's outputs:weight is connected to a blend
+    channel's inputs:weight, so the corrective bulge fades in exactly as
+    the elbow closes and is gone again when it opens.
+    """
+    defaultPrim = "PsdAsset"
+    endTimeCode = 1016
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "PsdAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "PsdAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Shoulder" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "Elbow" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1008: -80; post linear,
+                    1016: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </PsdAsset/Rig/Controls/Shoulder>,
+                    </PsdAsset/Rig/Controls/Elbow>,
+                ]
+                rel rigExec:joints = [
+                    </PsdAsset/Rig/Joints/Upper>,
+                    </PsdAsset/Rig/Joints/Upper/Fore>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Upper" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Fore" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                }
+            }
+        }
+
+        def Scope "PoseInterpolators"
+        {
+            def RigExecPoseInterpolator "ElbowSwing" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                bool inputs:enabled = 1
+                bool rigExec:allowNegativeWeights = 1
+                rel rigExec:driver = </PsdAsset/Rig/Joints/Upper/Fore>
+                bool rigExec:enableRotation = 1
+                bool rigExec:enableTranslation = 0
+                uniform token rigExec:kernel = "gaussian"
+                bool rigExec:normalize = 1
+                float rigExec:regularization = 0
+                uniform token rigExec:twistAxis = "X"
+                uniform asset ui:nodegraph:node:icon = @../../icons/pose_interpolator.png@
+
+                def RigExecPose "neutral" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (1, 0, 0, 0)
+                    float rigExec:rotationRadius = 1.3962634
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                    uniform asset ui:nodegraph:node:icon = @../../icons/pose_interpolator.png@
+                }
+
+                def RigExecPose "bent" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    bool inputs:enabled = 1
+                    float outputs:weight = 0
+                    float rigExec:falloff = 0.3
+                    rel rigExec:poseControls = </PsdAsset/Rig/Controls/Elbow.avars:rz>
+                    double[] rigExec:poseControlValues = [-80]
+                    uniform token rigExec:poseType = "swing"
+                    quatf rigExec:rotation = (0.76604444, 0, 0, -0.64278764)
+                    float rigExec:rotationRadius = 1.3962634
+                    float3 rigExec:translation = (0, 0, 0)
+                    float rigExec:translationRadius = 0
+                    uniform asset ui:nodegraph:node:icon = @../../icons/pose_interpolator.png@
+                }
+            }
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "ElbowBulge" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                float inputs:weight.connect = </PsdAsset/Rig/PoseInterpolators/ElbowSwing/bent.outputs:weight>
+                rel rigExec:samples = </PsdAsset/Rig/BlendInputs/ElbowBulge/Full>
+                uniform asset ui:nodegraph:node:icon = @../../icons/blend_input.png@
+
+                def RigExecBlendSample "Full" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </PsdAsset/Targets/ElbowBulge.points>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/blend_sample.png@
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "UpperW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [1, 1, 0.75, 0.25, 0, 0, 1, 1, 0.75, 0.25, 0, 0, 1, 1, 0.75, 0.25, 0, 0]
+                rel rigExec:weightTarget = </PsdAsset/Geom/Limb.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "ForeW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0.25, 0.75, 1, 1, 0, 0, 0.25, 0.75, 1, 1, 0, 0, 0.25, 0.75, 1, 1]
+                rel rigExec:weightTarget = </PsdAsset/Geom/Limb.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecBlendShapeMover "Corrective" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:blendInputs = </PsdAsset/Rig/BlendInputs/ElbowBulge>
+                    float inputs:defaultWeight = 1
+                    rel rigExec:moves = </PsdAsset/Geom/Limb.points>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/blendshape_mover.png@
+
+                    def RigExecMatrixMover "UpperSkin" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        rel rigExec:moves = </PsdAsset/Geom/Limb.points>
+                        rel rigExec:transform = </PsdAsset/Rig/Joints/Upper>
+                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:weightObject = </PsdAsset/Rig/Weights/UpperW>
+                        uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+
+                        def RigExecMatrixMover "ForeSkin" (
+                            prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                        )
+                        {
+                            rel rigExec:moves = </PsdAsset/Geom/Limb.points>
+                            rel rigExec:transform = </PsdAsset/Rig/Joints/Upper/Fore>
+                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:weightObject = </PsdAsset/Rig/Weights/ForeW>
+                            uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Limb"
+        {
+            color3f[] primvars:displayColor = [(0.35, 0.5, 0.75)]
+            float3[] extent = [(0, -0.6, 0), (5, 0.6, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 7, 6, 1, 2, 8, 7, 2, 3, 9, 8, 3, 4, 10, 9, 4, 5, 11, 10, 6, 7, 13, 12, 7, 8, 14, 13, 8, 9, 15, 14, 9, 10, 16, 15, 10, 11, 17, 16]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0, -0.6, 0), (1, -0.6, 0), (2, -0.6, 0), (3, -0.6, 0), (4, -0.6, 0), (5, -0.6, 0), (0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0), (5, 0, 0), (0, 0.6, 0), (1, 0.6, 0), (2, 0.6, 0), (3, 0.6, 0), (4, 0.6, 0), (5, 0.6, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Scope "Targets"
+    {
+        def Points "ElbowBulge"
+        {
+            point3f[] points = [(0, -0.6, 0), (1, -0.6, 0), (2, -0.35, 0), (3, -0.35, 0), (4, -0.6, 0), (5, -0.6, 0), (0, 0, 0), (1, 0, 0), (2, 0.15, 0), (3, 0.15, 0), (4, 0, 0), (5, 0, 0), (0, 0.6, 0), (1, 0.85, 0), (2, 1.45, 0), (3, 1.45, 0), (4, 0.85, 0), (5, 0.6, 0)]
+            token visibility = "invisible"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1537, 129.6)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (10.12, 4.981, 12.48)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

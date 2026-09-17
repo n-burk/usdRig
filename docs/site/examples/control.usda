@@ -1,0 +1,587 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecControl.
+
+    Every drawable control guide at once: the six guide:shape tokens
+    across the two guide:drawMode tokens, twelve controls in a 6x2 grid.
+    The top (wire) row also does real work -- each of its controls feeds
+    an FK chain that poses one joint, and a matrix mover carries a card
+    on it -- so the same avars:ry swing that turns the guides also turns
+    the geometry. Scrub 1001-1024.
+    """
+    defaultPrim = "ControlAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "ControlAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "ControlAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "sphere_wire" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "wire"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "sphere"
+                double guide:wireWidth = 0.1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-3.25, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "circle_wire" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "wire"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "circle"
+                double guide:wireWidth = 0.1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.95, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "box_wire" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "wire"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "box"
+                double guide:wireWidth = 0.1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.65, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "cube_wire" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "wire"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "cube"
+                double guide:wireWidth = 0.1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.65, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "diamond_wire" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "wire"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "diamond"
+                double guide:wireWidth = 0.1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.95, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "pyramid_wire" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "wire"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "pyramid"
+                double guide:wireWidth = 0.1
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3.25, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "sphere_geometry" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "sphere"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-3.25, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "circle_geometry" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "circle"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.95, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "box_geometry" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "box"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.65, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "cube_geometry" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "cube"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.65, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "diamond_geometry" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "diamond"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.95, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "pyramid_geometry" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ry = 0
+                double avars:ry.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1012: 90; post linear,
+                    1024: 0; post linear,
+                }
+                uniform token guide:drawMode = "geometry"
+                double guide:scaleX = 0.45
+                double guide:scaleY = 0.45
+                double guide:scaleZ = 0.45
+                uniform token guide:shape = "pyramid"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3.25, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "SphereChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </ControlAsset/Rig/Controls/sphere_wire>
+                rel rigExec:joints = </ControlAsset/Rig/Joints/SphereJnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecFkChain "CircleChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </ControlAsset/Rig/Controls/circle_wire>
+                rel rigExec:joints = </ControlAsset/Rig/Joints/CircleJnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecFkChain "BoxChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </ControlAsset/Rig/Controls/box_wire>
+                rel rigExec:joints = </ControlAsset/Rig/Joints/BoxJnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecFkChain "CubeChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </ControlAsset/Rig/Controls/cube_wire>
+                rel rigExec:joints = </ControlAsset/Rig/Joints/CubeJnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecFkChain "DiamondChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </ControlAsset/Rig/Controls/diamond_wire>
+                rel rigExec:joints = </ControlAsset/Rig/Joints/DiamondJnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecFkChain "PyramidChain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </ControlAsset/Rig/Controls/pyramid_wire>
+                rel rigExec:joints = </ControlAsset/Rig/Joints/PyramidJnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "SphereJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-3.25, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+
+            def RigExecJoint "CircleJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.95, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+
+            def RigExecJoint "BoxJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.65, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+
+            def RigExecJoint "CubeJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.65, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+
+            def RigExecJoint "DiamondJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.95, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+
+            def RigExecJoint "PyramidJnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3.25, 1.55, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "SphereW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </ControlAsset/Geom/SphereCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "CircleW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </ControlAsset/Geom/CircleCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "BoxW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </ControlAsset/Geom/BoxCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "CubeW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </ControlAsset/Geom/CubeCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "DiamondW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </ControlAsset/Geom/DiamondCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "PyramidW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </ControlAsset/Geom/PyramidCard.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "SphereSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </ControlAsset/Geom/SphereCard.points>
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/SphereJnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </ControlAsset/Rig/Weights/SphereW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "CircleSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </ControlAsset/Geom/CircleCard.points>
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/CircleJnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </ControlAsset/Rig/Weights/CircleW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "BoxSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </ControlAsset/Geom/BoxCard.points>
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/BoxJnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </ControlAsset/Rig/Weights/BoxW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "CubeSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </ControlAsset/Geom/CubeCard.points>
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/CubeJnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </ControlAsset/Rig/Weights/CubeW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "DiamondSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </ControlAsset/Geom/DiamondCard.points>
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/DiamondJnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </ControlAsset/Rig/Weights/DiamondW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "PyramidSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </ControlAsset/Geom/PyramidCard.points>
+                    rel rigExec:transform = </ControlAsset/Rig/Joints/PyramidJnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </ControlAsset/Rig/Weights/PyramidW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "SphereCard"
+        {
+            color3f[] primvars:displayColor = [(0.2, 0.55, 1)]
+            float3[] extent = [(-3.75, -1.75, -0.35), (-2.75, -1.75, 0.35)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 4, 8, 9, 5, 5, 9, 10, 6, 6, 10, 11, 7]
+            point3f[] points = [(-3.75, -1.75, -0.35), (-3.4167, -1.75, -0.35), (-3.0833, -1.75, -0.35), (-2.75, -1.75, -0.35), (-3.75, -1.75, 0), (-3.4167, -1.75, 0), (-3.0833, -1.75, 0), (-2.75, -1.75, 0), (-3.75, -1.75, 0.35), (-3.4167, -1.75, 0.35), (-3.0833, -1.75, 0.35), (-2.75, -1.75, 0.35)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "CircleCard"
+        {
+            color3f[] primvars:displayColor = [(0.2, 0.55, 1)]
+            float3[] extent = [(-2.45, -1.75, -0.35), (-1.45, -1.75, 0.35)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 4, 8, 9, 5, 5, 9, 10, 6, 6, 10, 11, 7]
+            point3f[] points = [(-2.45, -1.75, -0.35), (-2.1167, -1.75, -0.35), (-1.7833, -1.75, -0.35), (-1.45, -1.75, -0.35), (-2.45, -1.75, 0), (-2.1167, -1.75, 0), (-1.7833, -1.75, 0), (-1.45, -1.75, 0), (-2.45, -1.75, 0.35), (-2.1167, -1.75, 0.35), (-1.7833, -1.75, 0.35), (-1.45, -1.75, 0.35)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "BoxCard"
+        {
+            color3f[] primvars:displayColor = [(0.2, 0.55, 1)]
+            float3[] extent = [(-1.15, -1.75, -0.35), (-0.15, -1.75, 0.35)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 4, 8, 9, 5, 5, 9, 10, 6, 6, 10, 11, 7]
+            point3f[] points = [(-1.15, -1.75, -0.35), (-0.8167, -1.75, -0.35), (-0.4833, -1.75, -0.35), (-0.15, -1.75, -0.35), (-1.15, -1.75, 0), (-0.8167, -1.75, 0), (-0.4833, -1.75, 0), (-0.15, -1.75, 0), (-1.15, -1.75, 0.35), (-0.8167, -1.75, 0.35), (-0.4833, -1.75, 0.35), (-0.15, -1.75, 0.35)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "CubeCard"
+        {
+            color3f[] primvars:displayColor = [(0.2, 0.55, 1)]
+            float3[] extent = [(0.15, -1.75, -0.35), (1.15, -1.75, 0.35)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 4, 8, 9, 5, 5, 9, 10, 6, 6, 10, 11, 7]
+            point3f[] points = [(0.15, -1.75, -0.35), (0.4833, -1.75, -0.35), (0.8167, -1.75, -0.35), (1.15, -1.75, -0.35), (0.15, -1.75, 0), (0.4833, -1.75, 0), (0.8167, -1.75, 0), (1.15, -1.75, 0), (0.15, -1.75, 0.35), (0.4833, -1.75, 0.35), (0.8167, -1.75, 0.35), (1.15, -1.75, 0.35)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "DiamondCard"
+        {
+            color3f[] primvars:displayColor = [(0.2, 0.55, 1)]
+            float3[] extent = [(1.45, -1.75, -0.35), (2.45, -1.75, 0.35)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 4, 8, 9, 5, 5, 9, 10, 6, 6, 10, 11, 7]
+            point3f[] points = [(1.45, -1.75, -0.35), (1.7833, -1.75, -0.35), (2.1167, -1.75, -0.35), (2.45, -1.75, -0.35), (1.45, -1.75, 0), (1.7833, -1.75, 0), (2.1167, -1.75, 0), (2.45, -1.75, 0), (1.45, -1.75, 0.35), (1.7833, -1.75, 0.35), (2.1167, -1.75, 0.35), (2.45, -1.75, 0.35)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "PyramidCard"
+        {
+            color3f[] primvars:displayColor = [(0.2, 0.55, 1)]
+            float3[] extent = [(2.75, -1.75, -0.35), (3.75, -1.75, 0.35)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 4, 5, 1, 1, 5, 6, 2, 2, 6, 7, 3, 4, 8, 9, 5, 5, 9, 10, 6, 6, 10, 11, 7]
+            point3f[] points = [(2.75, -1.75, -0.35), (3.0833, -1.75, -0.35), (3.4167, -1.75, -0.35), (3.75, -1.75, -0.35), (2.75, -1.75, 0), (3.0833, -1.75, 0), (3.4167, -1.75, 0), (3.75, -1.75, 0), (2.75, -1.75, 0.35), (3.0833, -1.75, 0.35), (3.4167, -1.75, 0.35), (3.75, -1.75, 0.35)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1859, 159.4)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (9.193, 6.357, 14.71)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

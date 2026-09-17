@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Cone re-execution on the shipped biped, from Python: the baked program runs
-the CLOSURE of what a drag moved and nothing else (docs/baked-step-graph.md
+the CLOSURE of what a drag moved and nothing else (docs/specs/baked-step-graph.md
 §7), and asking for it can never change an answer.
 
 This is the step-graph twin of the dynamic-path Gate 1 / Gate 2 suite the

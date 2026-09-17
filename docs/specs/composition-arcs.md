@@ -359,7 +359,7 @@ mis-ordered:
 
 Adding a field — or a whole arc — is a change to the model and nothing
 in the Qt file. The split is the same one
-[the panel itself uses](../plugin/rigExecUsdview/layerOpinionsModel.py):
+[the panel itself uses](../../plugin/rigExecUsdview/layerOpinionsModel.py):
 rules in a headless module, Qt as a thin driver.
 
 ## Tests

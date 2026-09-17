@@ -1,0 +1,295 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecRibbon.
+
+    A native B-spline driver curls a 24-quad strip up one side, unfurls
+    it through the bind lean and whips it out the other way, once per
+    loop. The ribbon samples the driver into 9 rotation-minimizing frames,
+    poses a joint at every one of them, and a curve mover rides the strip
+    along the run through its primvars:st bind coordinates. The driver's
+    bind (default time) is a slight lean, never perfectly straight, so the
+    seed normal picks the same world axis at bind as it does at every
+    posed frame and the sampled frames never cross the straight-curve
+    flip.
+    """
+    defaultPrim = "RibbonAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "RibbonAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "RibbonAsset"
+
+        def Scope "Solvers"
+        {
+            def RigExecRibbon "SpineRibbon" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:radius = 0
+                rel rigExec:driverCurve = </RibbonAsset/Geom/SpineCurve>
+                rel rigExec:endFrame = </RibbonAsset/Rig/Joints/Tip>
+                uniform token rigExec:frameTransport = "rotationMinimizing"
+                rel rigExec:joints = [
+                    </RibbonAsset/Rig/Joints/Spine00>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01/Spine02>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01/Spine02/Spine03>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01/Spine02/Spine03/Spine04>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01/Spine02/Spine03/Spine04/Spine05>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01/Spine02/Spine03/Spine04/Spine05/Spine06>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01/Spine02/Spine03/Spine04/Spine05/Spine06/Spine07>,
+                    </RibbonAsset/Rig/Joints/Spine00/Spine01/Spine02/Spine03/Spine04/Spine05/Spine06/Spine07/Spine08>,
+                ]
+                uniform token rigExec:parameterization = "arcLength"
+                int rigExec:sampleCount = 9
+                rel rigExec:startFrame = </RibbonAsset/Rig/Joints/Base>
+                uniform asset ui:nodegraph:node:icon = @../../icons/ribbon.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Spine00" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:radius = 0.12
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Spine01" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    double guide:radius = 0.12
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.128, 0.863, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "Spine02" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        double guide:radius = 0.12
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.1048, 0.8661, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                        def RigExecJoint "Spine03" (
+                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                        )
+                        {
+                            double guide:radius = 0.12
+                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.0799, 0.8688, 0, 1) )
+                            uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                            def RigExecJoint "Spine04" (
+                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                            )
+                            {
+                                double guide:radius = 0.12
+                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.0533, 0.8708, 0, 1) )
+                                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                                def RigExecJoint "Spine05" (
+                                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                )
+                                {
+                                    double guide:radius = 0.12
+                                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.0249, 0.8721, 0, 1) )
+                                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                                    def RigExecJoint "Spine06" (
+                                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                    )
+                                    {
+                                        double guide:radius = 0.12
+                                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.0052, 0.8724, 0, 1) )
+                                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                                        def RigExecJoint "Spine07" (
+                                            prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                        )
+                                        {
+                                            double guide:radius = 0.12
+                                            matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.0369, 0.8716, 0, 1) )
+                                            uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                                            def RigExecJoint "Spine08" (
+                                                prepend apiSchemas = ["NodeGraphNodeAPI"]
+                                            )
+                                            {
+                                                double guide:radius = 0.12
+                                                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.0701, 0.8696, 0, 1) )
+                                                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            def RigExecJoint "Base" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:radius = 0.12
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+
+            def RigExecJoint "Tip" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                double guide:radius = 0.12
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.2787, 6.9543, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecCurveMover "RibbonWrap" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:bindCoordinates = </RibbonAsset/Geom/SpineStrip.primvars:st>
+                    rel rigExec:driverCurve = </RibbonAsset/Geom/SpineCurve>
+                    rel rigExec:driverFrames = </RibbonAsset/Rig/Solvers/SpineRibbon>
+                    uniform token rigExec:mode = "ribbon"
+                    rel rigExec:moves = </RibbonAsset/Geom/SpineStrip.points>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/curve_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def BasisCurves "SpineCurve"
+        {
+            uniform token basis = "bspline"
+            int[] curveVertexCounts = [4]
+            float3[] extent = [(-3.9686, -0.06, -0.06), (2.3419, 7.0143, 0.06)]
+            point3f[] points = [(1.5789, -6.8594, 0), (-0.2318, -0.0256, 0), (-0.6516, 6.9618, 0), (1.1658, 13.9045, 0)]
+            point3f[] points.timeSamples = {
+                1001: [(1.5789, -6.8594, 0), (-0.2318, -0.0256, 0), (-0.6516, 6.9618, 0), (1.1658, 13.9045, 0)],
+                1002: [(2.212, -6.8644, 0), (-0.5484, -0.0231, 0), (-0.0185, 6.9568, 0), (4.5053, 13.0329, 0)],
+                1003: [(2.6916, -6.9259, 0), (-0.7882, 0.0077, 0), (0.4611, 6.8953, 0), (7.3955, 11.3667, 0)],
+                1004: [(2.9829, -6.9884, 0), (-0.9338, 0.0389, 0), (0.7524, 6.8328, 0), (9.548, 9.3195, 0)],
+                1005: [(3.0702, -7.011, 0), (-0.9775, 0.0502, 0), (0.8397, 6.8102, 0), (10.939, 7.3985, 0)],
+                1006: [(2.9496, -6.9803, 0), (-0.9172, 0.0348, 0), (0.7192, 6.8409, 0), (11.732, 6.0346, 0)],
+                1007: [(2.6266, -6.9146, 0), (-0.7557, 0.002, 0), (0.3962, 6.9066, 0), (12.1185, 5.5025, 0)],
+                1008: [(2.1194, -6.8583, 0), (-0.5021, -0.0262, 0), (-0.111, 6.9629, 0), (12.1756, 5.9133, 0)],
+                1009: [(1.4665, -6.8675, 0), (-0.1756, -0.0215, 0), (-0.764, 6.9537, 0), (11.8077, 7.2172, 0)],
+                1010: [(0.7293, -6.9897, 0), (0.193, 0.0396, 0), (-1.5012, 6.8315, 0), (10.7936, 9.1843, 0)],
+                1011: [(-0.0148, -7.2436, 0), (0.565, 0.1665, 0), (-2.2452, 6.5776, 0), (8.9256, 11.396, 0)],
+                1012: [(-0.6895, -7.6081, 0), (0.9024, 0.3488, 0), (-2.9199, 6.2131, 0), (6.1808, 13.3156, 0)],
+                1013: [(-1.2387, -8.0272, 0), (1.177, 0.5583, 0), (-3.4692, 5.794, 0), (2.8196, 14.4616, 0)],
+                1014: [(-1.6369, -8.426, 0), (1.3761, 0.7577, 0), (-3.8674, 5.3952, 0), (-0.6749, 14.6067, 0)],
+                1015: [(-1.8855, -8.7322, 0), (1.5004, 0.9108, 0), (-4.116, 5.089, 0), (-3.792, 13.872, 0)],
+                1016: [(-1.9991, -8.8918, 0), (1.5572, 0.9906, 0), (-4.2296, 4.9294, 0), (-6.1907, 12.6512, 0)],
+                1017: [(-1.9894, -8.8775, 0), (1.5523, 0.9835, 0), (-4.2198, 4.9436, 0), (-7.7702, 11.4281, 0)],
+                1018: [(-1.8551, -8.6918, 0), (1.4852, 0.8906, 0), (-4.0856, 5.1293, 0), (-8.5947, 10.6064, 0)],
+                1019: [(-1.5834, -8.3665, 0), (1.3493, 0.7279, 0), (-3.8138, 5.4547, 0), (-8.7539, 10.4195, 0)],
+                1020: [(-1.1604, -7.9592, 0), (1.1378, 0.5243, 0), (-3.3909, 5.862, 0), (-8.2579, 10.9032, 0)],
+                1021: [(-0.5885, -7.5441, 0), (0.8519, 0.3168, 0), (-2.8189, 6.2771, 0), (-7.0254, 11.8904, 0)],
+                1022: [(0.1019, -7.1943, 0), (0.5067, 0.1419, 0), (-2.1286, 6.6269, 0), (-4.9719, 13.0254, 0)],
+                1023: [(0.8502, -6.9613, 0), (0.1325, 0.0253, 0), (-1.3802, 6.8599, 0), (-2.1484, 13.8383, 0)],
+                1024: [(1.5789, -6.8594, 0), (-0.2318, -0.0256, 0), (-0.6516, 6.9618, 0), (1.1658, 13.9045, 0)],
+            }
+            uniform token type = "cubic"
+            token visibility = "invisible"
+            float[] widths = [0.08, 0.08, 0.08, 0.08] (
+                interpolation = "vertex"
+            )
+            uniform token wrap = "nonperiodic"
+        }
+
+        def Mesh "SpineStrip"
+        {
+            color3f[] primvars:displayColor = [(0.35, 0.7, 1)]
+            float3[] extent = [(-0.55, 0, 0), (0.55, 7, 0)]
+            int[] faceVertexCounts = [
+                4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4
+            ]
+            int[] faceVertexIndices = [
+                0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 9, 8, 8, 9, 11, 10, 10, 11,
+                13, 12, 12, 13, 15, 14, 14, 15, 17, 16, 16, 17, 19, 18, 18, 19, 21, 20,
+                20, 21, 23, 22, 22, 23, 25, 24, 24, 25, 27, 26, 26, 27, 29, 28, 28, 29,
+                31, 30, 30, 31, 33, 32, 32, 33, 35, 34, 34, 35, 37, 36, 36, 37, 39, 38,
+                38, 39, 41, 40, 40, 41, 43, 42, 42, 43, 45, 44, 44, 45, 47, 46, 46, 47,
+                49, 48
+            ]
+            normal3f[] normals = [
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1)
+            ] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [
+                (-0.55, 0, 0), (0.55, 0, 0), (-0.55, 0.2917, 0), (0.55, 0.2917, 0),
+                (-0.55, 0.5833, 0), (0.55, 0.5833, 0), (-0.55, 0.875, 0),
+                (0.55, 0.875, 0), (-0.55, 1.1667, 0), (0.55, 1.1667, 0),
+                (-0.55, 1.4583, 0), (0.55, 1.4583, 0), (-0.55, 1.75, 0),
+                (0.55, 1.75, 0), (-0.55, 2.0417, 0), (0.55, 2.0417, 0),
+                (-0.55, 2.3333, 0), (0.55, 2.3333, 0), (-0.55, 2.625, 0),
+                (0.55, 2.625, 0), (-0.55, 2.9167, 0), (0.55, 2.9167, 0),
+                (-0.55, 3.2083, 0), (0.55, 3.2083, 0), (-0.55, 3.5, 0), (0.55, 3.5, 0),
+                (-0.55, 3.7917, 0), (0.55, 3.7917, 0), (-0.55, 4.0833, 0),
+                (0.55, 4.0833, 0), (-0.55, 4.375, 0), (0.55, 4.375, 0),
+                (-0.55, 4.6667, 0), (0.55, 4.6667, 0), (-0.55, 4.9583, 0),
+                (0.55, 4.9583, 0), (-0.55, 5.25, 0), (0.55, 5.25, 0),
+                (-0.55, 5.5417, 0), (0.55, 5.5417, 0), (-0.55, 5.8333, 0),
+                (0.55, 5.8333, 0), (-0.55, 6.125, 0), (0.55, 6.125, 0),
+                (-0.55, 6.4167, 0), (0.55, 6.4167, 0), (-0.55, 6.7083, 0),
+                (0.55, 6.7083, 0), (-0.55, 7, 0), (0.55, 7, 0)
+            ]
+            texCoord2f[] primvars:st = [
+                (0, 0), (0, 1), (0.0417, 0), (0.0417, 1), (0.0833, 0), (0.0833, 1),
+                (0.125, 0), (0.125, 1), (0.1667, 0), (0.1667, 1), (0.2083, 0),
+                (0.2083, 1), (0.25, 0), (0.25, 1), (0.2917, 0), (0.2917, 1),
+                (0.3333, 0), (0.3333, 1), (0.375, 0), (0.375, 1), (0.4167, 0),
+                (0.4167, 1), (0.4583, 0), (0.4583, 1), (0.5, 0), (0.5, 1), (0.5417, 0),
+                (0.5417, 1), (0.5833, 0), (0.5833, 1), (0.625, 0), (0.625, 1),
+                (0.6667, 0), (0.6667, 1), (0.7083, 0), (0.7083, 1), (0.75, 0),
+                (0.75, 1), (0.7917, 0), (0.7917, 1), (0.8333, 0), (0.8333, 1),
+                (0.875, 0), (0.875, 1), (0.9167, 0), (0.9167, 1), (0.9583, 0),
+                (0.9583, 1), (1, 0), (1, 1)
+            ] (
+                interpolation = "vertex"
+            )
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.2793, 234.7)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (13.21, 13.03, 22.18)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

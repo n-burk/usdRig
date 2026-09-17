@@ -24,7 +24,7 @@ because its label reports the mode in force rather than naming the button.
 
 The artwork in `plugin/rigExecUsdview/icons/` is generated — one image per
 glyph through the Codex CLI's built-in image generation, then normalised into
-a set by [`tools/bakeGizmoIcons.py`](../tools/bakeGizmoIcons.py), which keys
+a set by [`tools/bakeGizmoIcons.py`](../../tools/bakeGizmoIcons.py), which keys
 the black ground out to alpha and brings every glyph to a common extent and a
 common stroke weight. That script's docstring carries the prompt, so the set
 can be regenerated rather than only admired. `gizmoIcons` tints the white art
@@ -89,7 +89,7 @@ holds the value it had before the drag started. Letting go authors the result,
 once.
 
 That is visible, and it is meant to be. The [graph editor](graph-editor.md),
-the [Layer Opinions](../plugin/rigExecUsdview/layerOpinionsUI.py) panel and
+the [Layer Opinions](../../plugin/rigExecUsdview/layerOpinionsUI.py) panel and
 anything else watching the stage show the pre-drag value for the length of the
 gesture and the committed one the moment it ends. The viewport, the
 manipulator's own handles, and the guides all follow every mouse sample, which
@@ -105,7 +105,7 @@ generation Hydra draws is the previewed one. A plain `Xformable` has no rig to
 re-run, so its preview is a transform override in the Hydra chain
 (`RigExecXformOverrideSceneIndex`), which carries its children the way an
 authored edit would. Both are in memory only; the design note is
-[docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md](superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
+[docs/superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md](../superpowers/specs/2026-09-10-hydra-preview-manipulation-design.md).
 
 ## Where the value lands
 

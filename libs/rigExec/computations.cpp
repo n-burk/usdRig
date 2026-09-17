@@ -166,7 +166,7 @@ _IdentityLandmarks()
 // computations below: animation lives on avars / posed:space, and the rest
 // frame comes from rest:space plus the rest avars. There is no landmark-based
 // provider path -- RigExecPointTransformAPI carried one and was removed as
-// dead surface (see docs/dead-surface-removal.md).
+// dead surface (see docs/specs/dead-surface-removal.md).
 
 // ---------------------------------------------------------------------------
 // RigExecJoint (IrXformable mirror, user-directed alignment 2026-07-25):

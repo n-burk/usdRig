@@ -149,6 +149,7 @@ add_library(rigExecImaging SHARED
     libs/rigExecImaging/bridge.cpp
     libs/rigExecImaging/registry.cpp
     libs/rigExecImaging/sceneIndexPlugin.cpp
+    libs/rigExecImaging/rigAdapter.cpp
     libs/rigExecImaging/touchOverlayAdapter.cpp
     # TouchPose: posed-mesh picking and the Storm shader highlight.
     libs/rigExecImaging/touchPoseMesh.cpp
@@ -207,6 +208,10 @@ enable_testing()
 # that lets Plug load the compute-extent registration on demand.
 set(_rigexec_schema_resource_define
     RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+# The generated imaging plugInfo, for the test that drives the real
+# UsdImaging chain (the rig adapter's keyless registration lives there).
+set(_rigexec_imaging_resource_define
+    RIGEXEC_IMAGING_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecImaging/resources")
 
 add_executable(testRigExecMath tests/testRigExecMath.cpp)
 target_link_libraries(testRigExecMath PRIVATE rigExecMath)
@@ -612,7 +617,8 @@ rigexec_add_baked_parity_test(testRigExecArm REQUIRE_BAKE CONE_VERIFY
 
 add_executable(testRigExecImaging tests/testRigExecImaging.cpp)
 target_link_libraries(testRigExecImaging PRIVATE rigExecImaging)
-target_compile_definitions(testRigExecImaging PRIVATE ${_rigexec_schema_resource_define})
+target_compile_definitions(testRigExecImaging PRIVATE
+    ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
@@ -1281,6 +1287,11 @@ install(DIRECTORY plugin/museAssistant/
 # not here, since no debug postfix is set. If one is ever added, file(GENERATE)
 # fails loudly at generate time rather than emitting a wrong file, and the
 # output path then needs a $<CONFIG> component.
+# Editing the template has to re-run configure, for the same reason the
+# schema plugInfo above says: without this the runtime loads the stale
+# generated copy and nothing rebuilds it.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugin/rigExecImaging/resources/plugInfo.json.in")
 set(_rigexec_pluginfo
     "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecImaging/resources/plugInfo.json")
 file(READ

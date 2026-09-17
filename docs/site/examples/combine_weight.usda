@@ -1,0 +1,197 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecCombineWeight.
+
+    Two sphere volumes over one flat panel, folded by a single combine
+    under `max` -- the union. The joint holds a static 1.6-unit lift, so
+    the panel's height IS the combined weight field: wherever the folded
+    weight is 1 the panel rises the full amount, wherever it is 0 the
+    panel stays flat.
+
+    Anchor sits still at x = -1.8. Slider rides the animated control and
+    sweeps x = 1.8 -> -0.4 -> 1.8, so the two domes start apart with a
+    flat valley between them, merge into one wide ridge as the volumes
+    overlap, and part again. The
+    combine is the only thing that decides what happens in the overlap:
+    swap `max` for `min` and only the lens where both spheres agree is
+    left standing, and `multiply` softens that same intersection.
+
+    Turn on Display -> Display Purposes -> Guide to see the two volumes.
+    """
+    defaultPrim = "CombineAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "CombineAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "CombineAsset"
+
+        def Scope "Controls"
+        {
+            # The only animation in the file. The sliding volume reads
+            # this avar through a connection, so the control is the
+            # handle an animator scrubs to move the influence region.
+            def RigExecControl "Slide" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:tx = 1.8
+                double avars:tx.spline = {
+                    bezier,
+                    1001: 1.8; post curve (7, 0),
+                    1012: -0.4; pre (7, 0); post curve (7, 0),
+                    1024: 1.8; pre (7, 0); post held,
+                }
+                double avars:ty = 1.2
+                uniform token guide:shape = "circle"
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            # Static: the lift never changes, so every change in the
+            # panel comes from the folded weight field and nothing else.
+            def RigExecControl "Lift" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:ty = 1.6
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = </CombineAsset/Rig/Controls/Lift>
+                rel rigExec:joints = </CombineAsset/Rig/Joints/Jnt>
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Jnt" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+            }
+        }
+
+        def Scope "Weights"
+        {
+            # Input 1: a fixed ball of influence. falloffMin is the
+            # radius that is fully ON and falloffMax the radius that is
+            # fully OFF, so this is a small 0.25-unit core with a soft
+            # shoulder all the way out to 1.6.
+            def RigExecSphereWeight "Anchor" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:weightTarget = </CombineAsset/Geom/Panel.points>
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.8, 0, 0, 1) )
+                uniform token rigExec:falloffProfile = "smooth"
+                float inputs:falloffMin = 0.25
+                float inputs:falloffMax = 1.6
+                color3f guide:displayColor = (1, 0.2, 0.2)
+                uniform asset ui:nodegraph:node:icon = @../../icons/combine_weight.png@
+            }
+
+            # Input 2: the same ball, placed by the animated control.
+            # A volume weight is a RigExecXformable, so it is posed by
+            # the ordinary avar chain and an avar connection moves it
+            # exactly the way it moves a joint.
+            def RigExecSphereWeight "Slider" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:weightTarget = </CombineAsset/Geom/Panel.points>
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                double avars:tx.connect = </CombineAsset/Rig/Controls/Slide.avars:tx>
+                uniform token rigExec:falloffProfile = "smooth"
+                float inputs:falloffMin = 0.25
+                float inputs:falloffMax = 1.6
+                color3f guide:displayColor = (1, 0.45, 0.2)
+                uniform asset ui:nodegraph:node:icon = @../../icons/combine_weight.png@
+            }
+
+            # The fold. `max` is the union: every point takes the larger
+            # of the two fields, so neither volume can ever dim the
+            # other and the overlap reads as one region. It is order
+            # independent -- listing Slider first would mean the same
+            # thing -- unlike `subtract` and `overlay`, which seed from
+            # the first input and consume the authored order.
+            def RigExecCombineWeight "Union" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:weightTarget = </CombineAsset/Geom/Panel.points>
+                rel rigExec:inputWeights = [
+                    </CombineAsset/Rig/Weights/Anchor>,
+                    </CombineAsset/Rig/Weights/Slider>
+                ]
+                uniform token rigExec:combineMode = "max"
+                uniform token rigExec:representation = "dense"
+                uniform token rigExec:rangePolicy = "clamp"
+                float inputs:strength = 1
+                float inputs:invert = 0
+                uniform asset ui:nodegraph:node:icon = @../../icons/combine_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                # One mover, one weight object: the combine is bound
+                # exactly where a painted field would be.
+                def RigExecMatrixMover "Raise" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </CombineAsset/Geom/Panel.points>
+                    rel rigExec:transform = </CombineAsset/Rig/Joints/Jnt>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </CombineAsset/Rig/Weights/Union>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Panel"
+        {
+            color3f[] primvars:displayColor = [(0.45, 0.55, 0.7)]
+            float3[] extent = [(-3.6, 0, -0.8), (3.6, 1.6, 0.8)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 13, 14, 1, 1, 14, 15, 2, 2, 15, 16, 3, 3, 16, 17, 4, 4, 17, 18, 5, 5, 18, 19, 6, 6, 19, 20, 7, 7, 20, 21, 8, 8, 21, 22, 9, 9, 22, 23, 10, 10, 23, 24, 11, 11, 24, 25, 12, 13, 26, 27, 14, 14, 27, 28, 15, 15, 28, 29, 16, 16, 29, 30, 17, 17, 30, 31, 18, 18, 31, 32, 19, 19, 32, 33, 20, 20, 33, 34, 21, 21, 34, 35, 22, 22, 35, 36, 23, 23, 36, 37, 24, 24, 37, 38, 25]
+            point3f[] points = [(-3.6, 0, -0.8), (-3, 0, -0.8), (-2.4, 0, -0.8), (-1.8, 0, -0.8), (-1.2, 0, -0.8), (-0.6, 0, -0.8), (0, 0, -0.8), (0.6, 0, -0.8), (1.2, 0, -0.8), (1.8, 0, -0.8), (2.4, 0, -0.8), (3, 0, -0.8), (3.6, 0, -0.8), (-3.6, 0, 0), (-3, 0, 0), (-2.4, 0, 0), (-1.8, 0, 0), (-1.2, 0, 0), (-0.6, 0, 0), (0, 0, 0), (0.6, 0, 0), (1.2, 0, 0), (1.8, 0, 0), (2.4, 0, 0), (3, 0, 0), (3.6, 0, 0), (-3.6, 0, 0.8), (-3, 0, 0.8), (-2.4, 0, 0.8), (-1.8, 0, 0.8), (-1.2, 0, 0.8), (-0.6, 0, 0.8), (0, 0, 0.8), (0.6, 0, 0.8), (1.2, 0, 0.8), (1.8, 0, 0.8), (2.4, 0, 0.8), (3, 0, 0.8), (3.6, 0, 0.8)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1497, 129.5)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (7.359, 5.629, 11.78)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

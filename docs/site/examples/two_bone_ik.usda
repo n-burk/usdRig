@@ -1,0 +1,202 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecTwoBoneIk.
+
+    A two-card arm bends as its hand effector swings in and lifts. Bone
+    lengths are measured from the bound joints' rests every evaluation,
+    so no lengths are authored; the pole control above the elbow picks
+    the bend plane. The effector rests just inside full reach, so the arm
+    holds a slight natural bend at rest.
+    """
+    defaultPrim = "IkAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "IkAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "IkAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "ShoulderRoot" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "HandIK" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1006: -2.35; post linear,
+                    1012: 0; post linear,
+                }
+                double avars:ty = 0
+                double avars:ty.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1006: 1.5; post linear,
+                    1012: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5.85, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "ElbowPole" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 2, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecTwoBoneIk "ArmIK" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:softness = 0.15
+                float inputs:stretch = 0
+                rel rigExec:effectorControl = </IkAsset/Rig/Controls/HandIK>
+                rel rigExec:joints = [
+                    </IkAsset/Rig/Joints/Shoulder>,
+                    </IkAsset/Rig/Joints/Shoulder/Elbow>,
+                    </IkAsset/Rig/Joints/Shoulder/Elbow/Wrist>,
+                ]
+                rel rigExec:poleControl = </IkAsset/Rig/Controls/ElbowPole>
+                double rigExec:preferredBendRadians = 0.3
+                rel rigExec:rootControl = </IkAsset/Rig/Controls/ShoulderRoot>
+                uniform token rigExec:stretchPolicy = "uniformSegments"
+                uniform token rigExec:unreachablePolicy = "clampWithSoftness"
+                uniform asset ui:nodegraph:node:icon = @../../icons/two_bone_ik.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Shoulder" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Elbow" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "Wrist" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (3, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "UpperW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </IkAsset/Geom/Upper.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "ForeW" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 1
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "constant"
+                rel rigExec:weightTarget = </IkAsset/Geom/Fore.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "UpperSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </IkAsset/Geom/Upper.points>
+                    rel rigExec:transform = </IkAsset/Rig/Joints/Shoulder>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </IkAsset/Rig/Weights/UpperW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+
+                def RigExecMatrixMover "ForeSkin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </IkAsset/Geom/Fore.points>
+                    rel rigExec:transform = </IkAsset/Rig/Joints/Shoulder/Elbow>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </IkAsset/Rig/Weights/ForeW>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Upper"
+        {
+            color3f[] primvars:displayColor = [(1, 0.6, 0.15)]
+            float3[] extent = [(0, -0.3, 0), (3, 0.3, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(0, -0.3, 0), (3, -0.3, 0), (3, 0.3, 0), (0, 0.3, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+
+        def Mesh "Fore"
+        {
+            color3f[] primvars:displayColor = [(0.25, 0.8, 0.35)]
+            float3[] extent = [(3, -0.25, 0), (6, 0.25, 0)]
+            int[] faceVertexCounts = [4]
+            int[] faceVertexIndices = [0, 1, 2, 3]
+            point3f[] points = [(3, -0.25, 0), (6, -0.25, 0), (6, 0.25, 0), (3, 0.25, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1536, 130.1)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (10.36, 6.344, 11.9)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

@@ -1,0 +1,354 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecBlendPointFrames.
+
+    Two FK chains hold opposite poses of the same three-joint arm: FkA
+    curls it up, in front; FkB curls it down, behind. A third chain is the
+    blend of the two, and the weight sweeps 0 -> 1 -> 0, so the skinned
+    strip leaves the FkA pose, arrives at the FkB pose, and comes back.
+    """
+    defaultPrim = "BlendAsset"
+    endTimeCode = 1024
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "BlendAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "BlendAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "FkA1" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-5, 0, 1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "FkA2" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 30
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2.5, 0, 1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "FkA3" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 25
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "FkB1" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-5, 0, -1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "FkB2" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = -30
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-2.5, 0, -1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+
+            def RigExecControl "FkB3" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = -25
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, -1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "FkA" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </BlendAsset/Rig/Controls/FkA1>,
+                    </BlendAsset/Rig/Controls/FkA2>,
+                    </BlendAsset/Rig/Controls/FkA3>,
+                ]
+                rel rigExec:joints = [
+                    </BlendAsset/Rig/Joints/A1>,
+                    </BlendAsset/Rig/Joints/A1/A2>,
+                    </BlendAsset/Rig/Joints/A1/A2/A3>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecFkChain "FkB" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </BlendAsset/Rig/Controls/FkB1>,
+                    </BlendAsset/Rig/Controls/FkB2>,
+                    </BlendAsset/Rig/Controls/FkB3>,
+                ]
+                rel rigExec:joints = [
+                    </BlendAsset/Rig/Joints/B1>,
+                    </BlendAsset/Rig/Joints/B1/B2>,
+                    </BlendAsset/Rig/Joints/B1/B2/B3>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+
+            def RigExecBlendPointFrames "PoseBlend" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                float inputs:weight = 0
+                float inputs:weight.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1011: 1; post linear,
+                    1014: 1; post linear,
+                    1024: 0; post linear,
+                }
+                rel rigExec:inputA = </BlendAsset/Rig/Solvers/FkA>
+                rel rigExec:inputB = </BlendAsset/Rig/Solvers/FkB>
+                rel rigExec:joints = [
+                    </BlendAsset/Rig/Joints/Mix1>,
+                    </BlendAsset/Rig/Joints/Mix1/Mix2>,
+                    </BlendAsset/Rig/Joints/Mix1/Mix2/Mix3>,
+                ]
+                uniform token rigExec:rotationBlend = "shortestArc"
+                uniform token rigExec:scaleBlend = "log"
+                uniform asset ui:nodegraph:node:icon = @../../icons/blend_point_frames.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "A1" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-5, 0, 1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "A2" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "A3" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                    }
+                }
+            }
+
+            def RigExecJoint "B1" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-5, 0, -1.5, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "B2" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "B3" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                    }
+                }
+            }
+
+            def RigExecJoint "Mix1" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-5, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Mix2" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "Mix3" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2.5, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "Mix1W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [
+                    1, 1, 0.75, 0.5, 0.25, 0, 0, 0, 0, 0, 0,
+                    1, 1, 0.75, 0.5, 0.25, 0, 0, 0, 0, 0, 0,
+                ]
+                rel rigExec:weightTarget = </BlendAsset/Geom/Strip.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Mix2W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [
+                    0, 0, 0.25, 0.5, 0.75, 1, 0.75, 0.5, 0.25, 0, 0,
+                    0, 0, 0.25, 0.5, 0.75, 1, 0.75, 0.5, 0.25, 0, 0,
+                ]
+                rel rigExec:weightTarget = </BlendAsset/Geom/Strip.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Mix3W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [
+                    0, 0, 0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1,
+                    0, 0, 0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1,
+                ]
+                rel rigExec:weightTarget = </BlendAsset/Geom/Strip.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "Mix1Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </BlendAsset/Geom/Strip.points>
+                    rel rigExec:transform = </BlendAsset/Rig/Joints/Mix1>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </BlendAsset/Rig/Weights/Mix1W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+
+                    def RigExecMatrixMover "Mix2Skin" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        rel rigExec:moves = </BlendAsset/Geom/Strip.points>
+                        rel rigExec:transform = </BlendAsset/Rig/Joints/Mix1/Mix2>
+                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:weightObject = </BlendAsset/Rig/Weights/Mix2W>
+                        uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+
+                        def RigExecMatrixMover "Mix3Skin" (
+                            prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                        )
+                        {
+                            rel rigExec:moves = </BlendAsset/Geom/Strip.points>
+                            rel rigExec:transform = </BlendAsset/Rig/Joints/Mix1/Mix2/Mix3>
+                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:weightObject = </BlendAsset/Rig/Weights/Mix3W>
+                            uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Strip"
+        {
+            color3f[] primvars:displayColor = [(0.55, 0.6, 0.78)]
+            float3[] extent = [(-5, -0.45, 0), (0, 0.45, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 1, 12, 11,
+                1, 2, 13, 12,
+                2, 3, 14, 13,
+                3, 4, 15, 14,
+                4, 5, 16, 15,
+                5, 6, 17, 16,
+                6, 7, 18, 17,
+                7, 8, 19, 18,
+                8, 9, 20, 19,
+                9, 10, 21, 20,
+            ]
+            normal3f[] normals = [
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+                (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1),
+            ] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [
+                (-5, -0.45, 0), (-4.5, -0.45, 0), (-4, -0.45, 0), (-3.5, -0.45, 0),
+                (-3, -0.45, 0), (-2.5, -0.45, 0), (-2, -0.45, 0), (-1.5, -0.45, 0),
+                (-1, -0.45, 0), (-0.5, -0.45, 0), (0, -0.45, 0),
+                (-5, 0.45, 0), (-4.5, 0.45, 0), (-4, 0.45, 0), (-3.5, 0.45, 0),
+                (-3, 0.45, 0), (-2.5, 0.45, 0), (-2, 0.45, 0), (-1.5, 0.45, 0),
+                (-1, 0.45, 0), (-0.5, 0.45, 0), (0, 0.45, 0),
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1462, 128.1)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (4.784, 5.005, 11.66)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

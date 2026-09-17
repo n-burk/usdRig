@@ -47,7 +47,7 @@
 // status a failed revision publishes, and the attribute the defaultWeight
 // diagnostic re-reads. Hoisted because TfToken(const char *) takes the token
 // registry's spin lock on every construction, and a step body may take no
-// lock (docs/baked-step-graph.md §2).
+// lock (docs/specs/baked-step-graph.md §2).
 TF_DEFINE_PRIVATE_TOKENS(
     _tokens,
     ((moverFailed, "moverFailed"))
@@ -415,7 +415,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
 // vertices is an independent sub-problem whose result is bit-identical to the
 // same vertices computed as part of the whole array. What is NOT separable is
 // everything around that body, which is why the range is cut here and the
-// decisions stay whole (§6 of docs/baked-step-graph.md).
+// decisions stay whole (§6 of docs/specs/baked-step-graph.md).
 //
 // The cut is by vertex COUNT and the key follows from it, rather than the
 // other way round: the vertex order is the mesh's and is never permuted, so
