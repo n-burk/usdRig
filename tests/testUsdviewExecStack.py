@@ -39,6 +39,13 @@ def _RigExecMenu(appController):
     return menus
 
 
+def _Submenu(menu, title):
+    for action in menu.actions():
+        if action.menu() is not None and action.text() == title:
+            return action.menu()
+    return None
+
+
 def _Trigger(menu, title):
     for action in menu.actions():
         if action.text() == title:
@@ -69,11 +76,13 @@ def testUsdviewInputFunction(appController):
         "RigExec -> Execution Stack command is registered")
     menus = _RigExecMenu(appController)
     _Check("RigExec" in menus, "there is a RigExec menu: %s" % sorted(menus))
-    rigMenu = menus["RigExec"]
+    rigMenu = _Submenu(menus["RigExec"], "General Editors")
+    _Check(rigMenu is not None, "RigExec has a General Editors submenu")
     titles = [a.text() for a in rigMenu.actions()]
     title = next((t for t in titles if "Execution Stack" in t), None)
     _Check(title is not None,
-           "RigExec menu has an Execution Stack item: %s" % titles)
+           "RigExec -> General Editors has an Execution Stack item: %s"
+           % titles)
     window = menus.get("Window")
     if window is not None:
         _Check(not any("Execution Stack" in a.text()

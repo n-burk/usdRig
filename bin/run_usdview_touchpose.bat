@@ -10,7 +10,7 @@ rem   Biped_touch_regions.usda is the touch data alone and shows
 rem   nothing opened by itself -- it is `over`s with no geometry
 rem   under them, by design.
 rem
-rem Then: RigExec -> TouchPose, tick the box, and hover the character.
+rem Then: RigExec -> Animation Editors -> TouchPose, tick the box, and hover the character.
 rem The region under the cursor lights up; click it and the control that
 rem owns it becomes usdview's selection, so the Avar Editor and the
 rem viewport gizmo follow. While the box is ticked the MESH is not

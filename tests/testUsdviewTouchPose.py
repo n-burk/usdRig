@@ -96,6 +96,13 @@ def _RigExecMenu(appController):
     return menus
 
 
+def _Submenu(menu, title):
+    for action in menu.actions():
+        if action.menu() is not None and action.text() == title:
+            return action.menu()
+    return None
+
+
 def _Trigger(menu, title):
     for action in menu.actions():
         if action.text() == title:
@@ -281,18 +288,30 @@ def testUsdviewInputFunction(appController):
            "TouchPose is registered as a command plugin")
     menus = _RigExecMenu(appController)
     _Check("RigExec" in menus, "there is a RigExec menu: %s" % sorted(menus))
-    rigMenu = menus["RigExec"]
+    topMenu = menus["RigExec"]
+    # Two containers fill this menu, so this is where the layout is
+    # checked: one of each submenu, in order, whatever the load order.
+    top = [a.text() for a in topMenu.actions() if not a.isSeparator()]
+    _Check(top == ["Reactivate RigExec Evaluation", "Viewport",
+                   "General Editors", "Animation Editors"],
+           "the RigExec menu layout is item, then three submenus: %s" % top)
+    rigMenu = _Submenu(topMenu, "Animation Editors")
     titles = [a.text() for a in rigMenu.actions()]
     _Check("TouchPose" in titles,
-           "the RigExec menu carries TouchPose: %s" % titles)
-    # ...and it MERGED into the existing menu rather than making a second
-    # one, which is the only reason a separate plugin container is
+           "RigExec -> Animation Editors carries TouchPose: %s" % titles)
+    # ...and it MERGED into the existing submenu rather than making a
+    # second one, which is the only reason a separate plugin container is
     # acceptable here.
     _Check("Control Picker" in titles,
-           "the same menu still carries rigExecUsdview's own items: %s"
+           "the same submenu still carries rigExecUsdview's own items: %s"
            % titles)
+    order = ["Graph Editor", "Shape Editor", "Control Picker", "TouchPose",
+             "Volume Weight Editor", "Curvenet Authoring"]
+    _Check([t for t in order if t in titles] == titles,
+           "and the items are in layout order: %s" % titles)
     _Check("TouchPose" not in menus,
            "and no second top-level menu was created: %s" % sorted(menus))
+    viewportMenu = _Submenu(topMenu, "Viewport")
 
     _Check(_Trigger(rigMenu, "TouchPose"), "the menu item triggered")
     appController._processEvents()
@@ -872,7 +891,7 @@ def testUsdviewInputFunction(appController):
         if gizmo is None:
             # The toolbar is not installed by default in a headless
             # session; the menu item is what an animator would use.
-            _Trigger(rigMenu, "Viewport Tools")
+            _Trigger(viewportMenu, "Viewport Tools")
             appController._processEvents()
             gizmo = gizmoUI.GetController()
         if gizmo is not None:

@@ -1203,23 +1203,36 @@ class RigExecFloatMathMover "RigExecFloatMathMover" (
     customData = {
         string className = "FloatMathMover"
     }
-    doc = """Statically typed add, multiply, clamp, remap, or blend over an
-    exact float property target (spec section 4.1).
+    doc = """Statically typed add, multiply, clamp, remap, blend, or curve
+    over an exact float property target (spec section 4.1).
 
     The revision is r = op(incoming), then the common MoverAPI envelope mixes
     it back over the incoming value. Zero is a pass-through and one applies
     the operation outright -- the same rule every mover follows.
 
     remap normalizes from [inputs:min, inputs:max] to [0, 1] and does NOT
-    clamp; compose a clamp mover after it to bound the result."""
+    clamp; compose a clamp mover after it to bound the result.
+
+    curve maps the incoming value through inputs:keys, piecewise linear
+    between keys and extrapolated linearly past the first and last key."""
 )
 {
     uniform token rigExec:operation = "clamp" (
-        allowedTokens = ["add", "multiply", "clamp", "remap", "blend"]
+        allowedTokens = ["add", "multiply", "clamp", "remap", "blend", "curve"]
     )
     float inputs:value = 0
     float inputs:min = 0
     float inputs:max = 1
+    float2[] inputs:keys = [] (
+        doc = """(input, output) keys for the curve operation, strictly
+        increasing in input. One key is a constant output."""
+    )
+    float2[] inputs:tangents = [] (
+        doc = """Optional (in slope, out slope) per key for the curve
+        operation. Empty is piecewise linear, extrapolated along the end
+        segments; authored, the curve is a cubic Hermite through the keys,
+        extrapolated along the first in slope and the last out slope."""
+    )
 }
 
 ################################################################
@@ -1682,6 +1695,15 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     rel rigExec:transform (
         doc = "Exactly one GfMatrix4d provider (computeMatrix)."
     )
+    rel rigExec:transformSpace (
+        doc = """Optional second provider the transform is measured against:
+        T = M(transform) * inverse(M(transformSpace)), both read at the same
+        phase. With the transform nested under the space in the control
+        hierarchy, T is the transform's own local motion carried to its rest
+        pivot, so the points move by what the handle does inside the space
+        and not by the space's motion -- a localized cluster, for geometry
+        that is deformed at rest before it is skinned to that space."""
+    )
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
@@ -2097,10 +2119,57 @@ class RigExecCurveMover "RigExecCurveMover" (
     rel rigExec:driverFrames
     rel rigExec:bindCoordinates
     uniform token rigExec:mode = "ribbon" (
-        allowedTokens = ["ribbon", "emitGuidePoints"]
+        allowedTokens = ["ribbon", "emitGuidePoints", "wire"]
+        doc = """ribbon transports points along a ribbon aggregate's frames;
+        emitGuidePoints writes its sample positions; wire moves each point by
+        the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the
+        parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)
+        per point from rigExec:bindCoordinates, C the curve's posed control
+        points at rigExec:driverCurveReadPhase and C0 its authored ones. With
+        a sparse weight object the bind table may be sparse too: one (u, d)
+        per weighted point, in the weight object's index order."""
     )
     uniform token rigExec:driverCurveReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
+    )
+    rel rigExec:driverTransforms (
+        doc = """wire: move the driver curve's control points by matrix
+        providers instead of reading its points: one provider per unique
+        control point, or one for all. A periodic curve's repeated points
+        take their unique point's provider. The posed point is
+        C0 + w (M C0 - C0), M the provider measured against its entry in
+        rigExec:driverTransformSpaces and w its inputs:driverWeights entry.
+        No chain runs on the curve, so no phased read is needed."""
+    )
+    rel rigExec:driverTransformSpaces (
+        doc = """wire: the space each driver transform is measured against,
+        parallel to rigExec:driverTransforms, or one for all, or none."""
+    )
+    uniform token rigExec:transformReadPhase = "base" (
+        allowedTokens = ["base", "final"]
+        doc = "wire: which revision of the driver transforms is read."
+    )
+    float[] inputs:driverWeights = [] (
+        doc = """wire: per unique control point weight of its driver
+        transform, or one for all; empty is 1."""
+    )
+    rel rigExec:driverBaseTransforms (
+        doc = """wire: an optional base motion applied to the curve AND its
+        rest before the driver transforms, as a wire whose base curve rides
+        the same deformers as its driver: B = C0 + wb (Mb C0 - C0), then
+        C = B + w (M B - B), and the wire deforms by C - B. Same entry rules
+        as rigExec:driverTransforms."""
+    )
+    rel rigExec:driverBaseTransformSpaces (
+        doc = "wire: the spaces of rigExec:driverBaseTransforms."
+    )
+    float[] inputs:driverBaseWeights = [] (
+        doc = "wire: per unique control point weight of the base motion."
+    )
+    float inputs:dropoffDistance = 0 (
+        doc = """wire: distance over which a point's pull from the curve
+        falls to zero, as 1 - smoothstep(0, dropoffDistance, d) with d the
+        point's rest distance from the curve. 0 applies no falloff."""
     )
 }
 

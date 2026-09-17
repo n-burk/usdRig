@@ -39,6 +39,9 @@
 #include <atomic>
 #include <cmath>
 #include <iterator>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -65,6 +68,7 @@ TF_DEFINE_PRIVATE_TOKENS(
     ((lattice, "lattice"))
     ((surfaceProject, "surfaceProject"))
     ((ribbon, "ribbon"))
+    ((wire, "wire"))
     ((emitGuidePoints, "emitGuidePoints"))
     ((curvenet, "curvenet"))
     ((curvenetAdjuster, "curvenetAdjuster"))
@@ -179,6 +183,8 @@ _RevisionKindToken(RigExecRevisionOp op)
         return _kindTokens->surfaceProject;
     case RigExecRevisionOp::Ribbon:
         return _kindTokens->ribbon;
+    case RigExecRevisionOp::Wire:
+        return _kindTokens->wire;
     case RigExecRevisionOp::EmitGuidePoints:
         return _kindTokens->emitGuidePoints;
     case RigExecRevisionOp::Curvenet:
@@ -304,11 +310,131 @@ RigExecApplyMatrixKernelRange(const RigExecMoverParameters &p,
     }
 }
 
+namespace {
+
+// The wire basis cache. A basis depends on the bind table, the weighted
+// point set, the knots, the order, the control point count and the dropoff
+// -- never on where the control points are -- so it is built once and every
+// later frame is a lookup. Keyed by a hash of those inputs' CONTENT, not by
+// their addresses: an edited bind table can reuse a freed buffer's address,
+// and a stale basis would be a silently wrong deformation. The full inputs
+// are kept beside each entry and compared on a hit, so a hash collision
+// rebuilds rather than answers. Shared by the dynamic graph and the baked
+// program, which is what keeps the two paths bit-identical.
+struct _WireBasisEntry {
+    std::vector<GfVec2f> binds;
+    std::vector<int> indices;
+    std::vector<double> knots;
+    int order = 0;
+    size_t controlPoints = 0;
+    size_t meshPoints = 0;
+    double dropoff = 0.0;
+    std::shared_ptr<const RigExecWireBasis> basis;
+};
+
+uint64_t
+_HashBytes(uint64_t h, const void *data, size_t size)
+{
+    const unsigned char *bytes = static_cast<const unsigned char *>(data);
+    for (size_t i = 0; i < size; ++i) {
+        h = (h ^ bytes[i]) * 1099511628211ull;
+    }
+    return h;
+}
+
+std::shared_ptr<const RigExecWireBasis>
+_CachedWireBasis(const RigExecMoverParameters &p,
+                 const std::vector<int> &indices, size_t meshPoints)
+{
+    static std::mutex mutex;
+    static std::unordered_map<uint64_t, _WireBasisEntry> cache;
+
+    uint64_t h = 1469598103934665603ull;
+    h = _HashBytes(h, p.wireBindCoords.cdata(),
+                   p.wireBindCoords.size() * sizeof(GfVec2f));
+    h = _HashBytes(h, indices.data(), indices.size() * sizeof(int));
+    h = _HashBytes(h, p.curveKnots.data(), p.curveKnots.size() * sizeof(double));
+    const size_t controlPoints = p.restPoints.size();
+    h = _HashBytes(h, &p.curveOrder, sizeof(p.curveOrder));
+    h = _HashBytes(h, &controlPoints, sizeof(controlPoints));
+    h = _HashBytes(h, &meshPoints, sizeof(meshPoints));
+    h = _HashBytes(h, &p.dropoffDistance, sizeof(p.dropoffDistance));
+
+    const auto matches = [&](const _WireBasisEntry &e) {
+        return e.order == p.curveOrder && e.controlPoints == controlPoints &&
+               e.meshPoints == meshPoints && e.dropoff == p.dropoffDistance &&
+               e.knots == p.curveKnots && e.indices == indices &&
+               e.binds.size() == p.wireBindCoords.size() &&
+               std::equal(e.binds.begin(), e.binds.end(),
+                          p.wireBindCoords.cbegin());
+    };
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto it = cache.find(h);
+        if (it != cache.end() && matches(it->second)) {
+            return it->second.basis;
+        }
+    }
+    auto basis = std::make_shared<RigExecWireBasis>();
+    if (!RigExecBuildWireBasis(p.wireBindCoords.cdata(),
+                               p.wireBindCoords.size(), meshPoints, indices,
+                               p.curveOrder, p.curveKnots, controlPoints,
+                               p.dropoffDistance, basis.get())) {
+        return nullptr;
+    }
+    _WireBasisEntry entry;
+    entry.binds.assign(p.wireBindCoords.cbegin(), p.wireBindCoords.cend());
+    entry.indices = indices;
+    entry.knots = p.curveKnots;
+    entry.order = p.curveOrder;
+    entry.controlPoints = controlPoints;
+    entry.meshPoints = meshPoints;
+    entry.dropoff = p.dropoffDistance;
+    entry.basis = basis;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (cache.size() > 512) {
+        cache.clear();  // edits accumulate entries nothing will ask for again
+    }
+    cache[h] = std::move(entry);
+    return basis;
+}
+
+}  // namespace
+
 bool
 RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
                          std::vector<GfVec3f> *pts)
 {
     const size_t count = pts->size();
+    // A sparse field with a zero default touches only its named points: a
+    // face cluster weights a few hundred of a body's tens of thousands, so
+    // resolving and walking the dense array is almost all waste. Validated
+    // exactly as ResolveAll would, so the same packets fail.
+    const RigExecWeightPacket &w = p.weights;
+    if (w.valid && w.representation == "sparse" && w.defaultWeight == 0.0f &&
+        w.indices.size() == w.values.size() &&
+        (w.rangePolicy.IsEmpty() || w.rangePolicy == "strict" ||
+         w.rangePolicy == "clamp")) {
+        for (size_t k = 0; k < w.indices.size(); ++k) {
+            const int index = w.indices[k];
+            const float value = w.values[k];
+            if (index < 0 || size_t(index) >= count ||
+                (k > 0 && index <= w.indices[k - 1]) ||
+                !std::isfinite(value) || value < 0.0f || value > 1.0f) {
+                return false;
+            }
+        }
+        if (p.transform == GfMatrix4d(1.0)) {
+            return true;  // at rest every weighted point maps to itself
+        }
+        GfVec3f *data = pts->data();
+        for (size_t k = 0; k < w.indices.size(); ++k) {
+            GfVec3f &point = data[size_t(w.indices[k])];
+            point = GfVec3f(RigExecApplyWeightedMatrix(
+                GfVec3d(point), p.transform, w.values[k]));
+        }
+        return true;
+    }
     std::vector<float> weights(count);
     if (!p.weights.ResolveAll(count, &weights)) {
         return false;  // cardinality mismatch fails atomically
@@ -808,6 +934,62 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
         }
         return true;
     }
+    case RigExecRevisionOp::Wire: {
+        if (p.auxPoints.size() != p.restPoints.size()) {
+            return false;
+        }
+        const RigExecNurbsCurve rest{&p.restPoints, p.curveOrder,
+                                     &p.curveKnots};
+        const RigExecNurbsCurve posed{&p.auxPoints, p.curveOrder,
+                                      &p.curveKnots};
+        if (!rest.IsValid() || !posed.IsValid()) {
+            return false;
+        }
+        // A sparse zero-default envelope: evaluate only the named points.
+        // RigExecRunRevisionKernel routes a wire here with its envelope
+        // unapplied only when this packet shape is what it holds.
+        if (RigExecWireTakesSparseEnvelope(p.weights)) {
+            const RigExecWeightPacket &w = p.weights;
+            for (size_t k = 0; k < w.indices.size(); ++k) {
+                if (w.indices[k] < 0 || size_t(w.indices[k]) >= pts->size() ||
+                    (k > 0 && w.indices[k] <= w.indices[k - 1]) ||
+                    !std::isfinite(w.values[k]) || w.values[k] < 0.0f ||
+                    w.values[k] > 1.0f) {
+                    return false;
+                }
+            }
+            const std::shared_ptr<const RigExecWireBasis> basis =
+                _CachedWireBasis(p, w.indices, pts->size());
+            if (!basis) {
+                return false;
+            }
+            return RigExecApplyWireBasis(pts, *basis, w.indices, w.values,
+                                         p.restPoints, p.auxPoints);
+        }
+        if (p.wireBindCoords.size() != pts->size()) {
+            return false;  // a sparse bind table needs a sparse envelope
+        }
+        // Per-point and independent, so the range splits across threads;
+        // a small mesh stays on this thread.
+        bool ok = true;
+        if (RigExecParallelEvaluationEnabled() && pts->size() >= 4096) {
+            std::atomic<bool> good(true);
+            WorkParallelForN(pts->size(), [&](size_t b, size_t e) {
+                if (!RigExecApplyWire(pts, rest, posed,
+                                      p.wireBindCoords.cdata(),
+                                      p.wireBindCoords.size(),
+                                      p.dropoffDistance, b, e)) {
+                    good = false;
+                }
+            });
+            ok = good;
+        } else {
+            ok = RigExecApplyWire(pts, rest, posed, p.wireBindCoords.cdata(),
+                                  p.wireBindCoords.size(),
+                                  p.dropoffDistance, 0, pts->size());
+        }
+        return ok;
+    }
     case RigExecRevisionOp::CurvenetAdjuster: {
         if (!controlFrames) {
             return false;  // the adjuster's whole second output
@@ -881,7 +1063,9 @@ RigExecRunRevisionKernel(RigExecRevisionOp op,
     if (op == RigExecRevisionOp::Matrix ||
         op == RigExecRevisionOp::BlendShape ||
         op == RigExecRevisionOp::RecomputeNormals ||
-        op == RigExecRevisionOp::RecomputeExtent) {
+        op == RigExecRevisionOp::RecomputeExtent ||
+        (op == RigExecRevisionOp::Wire &&
+         RigExecWireTakesSparseEnvelope(p.weights))) {
         return RigExecApplyRevisionKernel(op, p, pts, controlFrames);
     }
 
@@ -917,12 +1101,19 @@ bool
 RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
 {
     return moverPath == o.moverPath && target == o.target &&
-           transform == o.transform && influences == o.influences &&
+           transform == o.transform &&
+           transformSpace == o.transformSpace && influences == o.influences &&
            weightObject == o.weightObject &&
            base == o.base && topologyCounts == o.topologyCounts &&
            topologyIndices == o.topologyIndices &&
            cagePoints == o.cagePoints && surfacePoints == o.surfacePoints &&
            bindCoords == o.bindCoords && driverFrames == o.driverFrames &&
+           driverCurvePoints == o.driverCurvePoints &&
+           driverCurveOrder == o.driverCurveOrder &&
+           driverCurveKnots == o.driverCurveKnots &&
+           driverTransformCount == o.driverTransformCount &&
+           driverSpaceCount == o.driverSpaceCount &&
+           driverBaseTransformCount == o.driverBaseTransformCount &&
            widths == o.widths && curvenet == o.curvenet &&
            curvenetPoints == o.curvenetPoints &&
            blendInputs == o.blendInputs && blendSamples == o.blendSamples &&
@@ -961,9 +1152,13 @@ RigExecRevisionOpForSchema(const TfToken &schemaType, const TfToken &curveMode)
     }
     if (schemaType == "RigExecCurveMover") {
         // The curve mover's frozen signature branches on its authored mode.
-        return curveMode == "emitGuidePoints"
-            ? RigExecRevisionOp::EmitGuidePoints
-            : RigExecRevisionOp::Ribbon;
+        if (curveMode == "emitGuidePoints") {
+            return RigExecRevisionOp::EmitGuidePoints;
+        }
+        if (curveMode == "wire") {
+            return RigExecRevisionOp::Wire;
+        }
+        return RigExecRevisionOp::Ribbon;
     }
     return std::nullopt;
 }
@@ -1377,6 +1572,17 @@ RigExecResolveRevisionBinding(
             }
         }
         binding.transform = provider;
+        const SdfPathVector spaces =
+            _Targets(moverPrim, "rigExec:transformSpace");
+        SdfPath space = spaces.empty() ? SdfPath() : spaces[0];
+        if (!space.IsEmpty() &&
+            binding.transformPhase.kind == RigExecReadPhaseKind::Final) {
+            const auto it = frameChainHeads.find(space);
+            if (it != frameChainHeads.end()) {
+                space = it->second;
+            }
+        }
+        binding.transformSpace = space;
     } else if (schemaType == "RigExecSkinMover") {
         // Every influence shares one declared phase, on rigExec:influences
         // or the legacy attribute, and "final" binds each provider's
@@ -1490,6 +1696,63 @@ RigExecResolveRevisionBinding(
         const SdfPathVector binds = _Targets(moverPrim, "rigExec:bindCoordinates");
         if (!binds.empty()) {
             binding.bindCoords = binds[0];
+        }
+        // The wire's driver: a NURBS curve prim, read at its declared phase
+        // (a curve deformed by its own chain reads "final").
+        const SdfPathVector curves = _Targets(moverPrim, "rigExec:driverCurve");
+        if (!curves.empty()) {
+            const SdfPath curvePrim = curves[0].GetPrimPath();
+            binding.driverCurvePoints =
+                curvePrim.AppendProperty(TfToken("points"));
+            binding.driverCurveOrder =
+                curvePrim.AppendProperty(TfToken("order"));
+            binding.driverCurveKnots =
+                curvePrim.AppendProperty(TfToken("knots"));
+            const RigExecReadPhase phase = phaseFor(
+                "rigExec:driverCurve", "rigExec:driverCurveReadPhase");
+            if (!phase.IsBase()) {
+                binding.phases[binding.driverCurvePoints] = phase;
+            }
+        }
+        // Or the wire's control points moved by matrix providers directly:
+        // one transform (or one for all) per unique control point, measured
+        // against its space. Carried as influences -- transforms first, then
+        // spaces -- so every path delivers them the way it delivers a skin's.
+        const SdfPathVector driverTransforms =
+            _Targets(moverPrim, "rigExec:driverTransforms");
+        if (!driverTransforms.empty()) {
+            binding.transformPhase = phaseFor("rigExec:driverTransforms",
+                                              "rigExec:transformReadPhase");
+            const auto provider = [&](SdfPath path) {
+                if (binding.transformPhase.kind ==
+                    RigExecReadPhaseKind::Final) {
+                    const auto it = frameChainHeads.find(path);
+                    if (it != frameChainHeads.end()) {
+                        path = it->second;
+                    }
+                }
+                return path;
+            };
+            for (const SdfPath &t : driverTransforms) {
+                binding.influences.push_back(provider(t));
+            }
+            const SdfPathVector spaces =
+                _Targets(moverPrim, "rigExec:driverTransformSpaces");
+            for (const SdfPath &s : spaces) {
+                binding.influences.push_back(provider(s));
+            }
+            const SdfPathVector baseTransforms =
+                _Targets(moverPrim, "rigExec:driverBaseTransforms");
+            for (const SdfPath &b : baseTransforms) {
+                binding.influences.push_back(provider(b));
+            }
+            for (const SdfPath &b :
+                     _Targets(moverPrim, "rigExec:driverBaseTransformSpaces")) {
+                binding.influences.push_back(provider(b));
+            }
+            binding.driverTransformCount = int(driverTransforms.size());
+            binding.driverSpaceCount = int(spaces.size());
+            binding.driverBaseTransformCount = int(baseTransforms.size());
         }
         const SdfPathVector frames = _Targets(moverPrim, "rigExec:driverFrames");
         if (!frames.empty()) {
@@ -2024,6 +2287,9 @@ RigExecAssembleParameters(
     case RigExecRevisionOp::Ribbon:
         params.kind = _kindTokens->ribbon;
         break;
+    case RigExecRevisionOp::Wire:
+        params.kind = _kindTokens->wire;
+        break;
     case RigExecRevisionOp::EmitGuidePoints:
         params.kind = _kindTokens->emitGuidePoints;
         break;
@@ -2274,6 +2540,116 @@ RigExecAssembleParameters(
         } else {
             params.valid = true;
         }
+        break;
+    }
+
+    case RigExecRevisionOp::Wire: {
+        // Posed control points at the declared phase; rest control points
+        // are the curve's AUTHORED ones, which is what the bind coordinates
+        // were computed against.
+        if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
+                binding.driverCurvePoints)) {
+            VtVec3fArray rest;
+            a.Get(&rest, UsdTimeCode::Default());
+            params.restPoints.assign(rest.begin(), rest.end());
+        }
+        if (binding.driverTransformCount > 0) {
+            // Posed control points from the providers: C_j = C0_j +
+            // w_j (M_j C0_j - C0_j), M_j the transform measured in its
+            // space. A periodic curve's repeated points wrap onto the
+            // unique ones, so one entry per unique point is enough.
+            const size_t t = size_t(binding.driverTransformCount);
+            const size_t s = size_t(binding.driverSpaceCount);
+            const size_t bt = size_t(binding.driverBaseTransformCount);
+            const std::vector<GfMatrix4d> *table = values.influenceTransforms;
+            if (!table || table->size() < t + s + bt) {
+                break;  // MoverFailed
+            }
+            const size_t bs = table->size() - t - s - bt;
+            const auto floats = [&](const char *name) {
+                VtFloatArray out;
+                if (const UsdAttribute a =
+                        moverPrim.GetAttribute(TfToken(name))) {
+                    if (!values.resolved ||
+                        !values.resolved->GetAttribute(a, time, &out)) {
+                        a.Get(&out, time);
+                    }
+                }
+                return out;
+            };
+            const VtFloatArray weights = floats("inputs:driverWeights");
+            const VtFloatArray baseWeights = floats("inputs:driverBaseWeights");
+            const auto pick = [](size_t count, size_t j) {
+                return count <= 1 ? size_t(0) : j % count;
+            };
+            const auto measured = [&](size_t first, size_t count,
+                                      size_t spaceFirst, size_t spaceCount,
+                                      size_t j) {
+                GfMatrix4d m = (*table)[first + pick(count, j)];
+                if (spaceCount > 0) {
+                    m = RigExecMeasureInSpace(
+                        m, (*table)[spaceFirst + pick(spaceCount, j)]);
+                }
+                return m;
+            };
+            params.auxPoints.resize(params.restPoints.size());
+            for (size_t j = 0; j < params.restPoints.size(); ++j) {
+                GfVec3f &rest = params.restPoints[j];
+                // A base motion moves the curve AND its rest: the wire
+                // then deforms by the driver's motion on top of it, as a
+                // wire does whose base curve rides the same deformers.
+                if (bt > 0) {
+                    const GfMatrix4d b = measured(t + s, bt, t + s + bt, bs, j);
+                    const float wb = baseWeights.empty()
+                        ? 1.0f : baseWeights[pick(baseWeights.size(), j)];
+                    const GfVec3f moved(b.TransformAffine(GfVec3d(rest)));
+                    rest = rest + (moved - rest) * wb;
+                }
+                const GfMatrix4d m = measured(0, t, t, s, j);
+                const float w =
+                    weights.empty() ? 1.0f : weights[pick(weights.size(), j)];
+                const GfVec3f moved(m.TransformAffine(GfVec3d(rest)));
+                params.auxPoints[j] = rest + (moved - rest) * w;
+            }
+        } else {
+            params.auxPoints = _Array<GfVec3f>(
+                moverPrim, binding.driverCurvePoints, time, values.resolved);
+        }
+        if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
+                binding.driverCurveOrder)) {
+            VtIntArray order;
+            if (a.Get(&order, UsdTimeCode::Default()) && !order.empty()) {
+                params.curveOrder = order[0];
+            }
+        }
+        if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
+                binding.driverCurveKnots)) {
+            VtDoubleArray knots;
+            a.Get(&knots, UsdTimeCode::Default());
+            params.curveKnots.assign(knots.begin(), knots.end());
+        }
+        if (const UsdAttribute a = moverPrim.GetAttribute(
+                TfToken("inputs:dropoffDistance"))) {
+            float dropoff = 0.0f;
+            a.Get(&dropoff, time);
+            params.dropoffDistance = dropoff;
+        }
+        if (!binding.bindCoords.IsEmpty()) {
+            if (!values.resolved ||
+                !values.resolved->Get(binding.bindCoords,
+                                      &params.wireBindCoords)) {
+                if (const UsdAttribute a =
+                        moverPrim.GetStage()->GetAttributeAtPath(
+                            binding.bindCoords)) {
+                    a.Get(&params.wireBindCoords, time);
+                }
+            }
+        }
+        const RigExecNurbsCurve rest{&params.restPoints, params.curveOrder,
+                                     &params.curveKnots};
+        params.valid = rest.IsValid() &&
+                       params.auxPoints.size() == params.restPoints.size() &&
+                       !params.wireBindCoords.empty();
         break;
     }
 

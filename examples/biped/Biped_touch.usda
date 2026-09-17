@@ -3,6 +3,7 @@
     defaultPrim = "Biped"
     subLayers = [
         @./Biped_touch_regions.usda@,
+        @./Biped_face_rig.usda@,
         @./Biped.usda@
     ]
 )

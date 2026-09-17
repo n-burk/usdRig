@@ -106,6 +106,59 @@ def _LoadRigExecImaging():
     return lib
 
 
+# The RigExec menu layout. Items sit at the top level or in one of these
+# submenus, and every entry carries a rank so that the order holds no
+# matter which plugin container's configureView runs first: usdview's
+# PluginMenu only appends, and plugin/touchPose and plugin/shapeEditor add
+# their items to the same submenus from their own containers. Those two
+# carry a copy of this helper rather than importing it, so the directories
+# stay independent; keep the ranks in step.
+#
+#   Reactivate RigExec Evaluation   0
+#   Viewport            10: Viewport Tools 10, View Cube 20
+#   General Editors     20: Avar Editor 10, Layer Opinions 20,
+#                           Execution Stack 30, Profiler 40
+#   Animation Editors   30: Graph Editor 10, Shape Editor 20,
+#                           Control Picker 30, TouchPose 40,
+#                           Volume Weight Editor 50, Curvenet Authoring 60
+_SUBMENU_RANKS = {"Viewport": 10, "General Editors": 20,
+                  "Animation Editors": 30}
+_MENU_RANK = "rigExecMenuRank"
+
+
+def _PlaceByRank(qMenu, action, rank):
+    # Move `action` ahead of the first entry ranked above it, unless it
+    # is already there. Unranked entries (another plugin's) stay put.
+    action.setProperty(_MENU_RANK, rank)
+    for other in qMenu.actions():
+        if other == action:
+            return
+        otherRank = other.property(_MENU_RANK)
+        if otherRank is not None and otherRank > rank:
+            qMenu.removeAction(action)
+            qMenu.insertAction(other, action)
+            return
+
+
+def AddToRigExecMenu(plugUIBuilder, submenu, commandPlugin, rank):
+    """Add `commandPlugin` to RigExec (or RigExec -> `submenu`) at `rank`.
+
+    findOrCreateMenu and findOrCreateSubmenu hand every container the same
+    menu objects, so no load order can make a second RigExec menu or a
+    second copy of a submenu.
+    """
+    menu = plugUIBuilder.findOrCreateMenu("RigExec")
+    if submenu is not None:
+        menu = menu.findOrCreateSubmenu(submenu)
+    action = menu.addItem(commandPlugin)
+    qMenu = action.parent()
+    _PlaceByRank(qMenu, action, rank)
+    if submenu is not None:
+        _PlaceByRank(qMenu.parent(), qMenu.menuAction(),
+                     _SUBMENU_RANKS[submenu])
+    return action
+
+
 # usdview's plugin loader does not retain container instances that
 # register no commands; without a strong reference the container is
 # garbage collected and Qt disconnects its signals. Keep it alive here.
@@ -154,7 +207,7 @@ class RigExecUsdviewContainer(PluginContainer):
         # tests use.
         self._volumeWeights = plugRegistry.registerCommandPlugin(
             "RigExecUsdviewContainer.volumeWeights",
-            "Volume Weight Authoring",
+            "Volume Weight Editor",
             lambda api: self._OpenVolumeWeightPanel(api))
 
         # The curvenet authoring window. Same lazy-import reasoning as the
@@ -236,18 +289,29 @@ class RigExecUsdviewContainer(PluginContainer):
             self._OnStageReplaced()
 
     def configureView(self, plugRegistry, plugUIBuilder):
-        menu = plugUIBuilder.findOrCreateMenu("RigExec")
-        menu.addItem(self._reactivate)
-        menu.addItem(self._volumeWeights)
-        menu.addItem(self._curvenets)
-        menu.addItem(self._graphEditor)
-        menu.addItem(self._layerOpinions)
-        menu.addItem(self._execStack)
-        menu.addItem(self._avarEditor)
-        menu.addItem(self._picker)
-        menu.addItem(self._viewportToolsCommand)
-        menu.addItem(self._viewCubeCommand)
-        menu.addItem(self._profiler)
+        AddToRigExecMenu(plugUIBuilder, None, self._reactivate, 0)
+        AddToRigExecMenu(plugUIBuilder, "Viewport",
+                         self._viewportToolsCommand, 10)
+        AddToRigExecMenu(plugUIBuilder, "Viewport",
+                         self._viewCubeCommand, 20)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._avarEditor, 10)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._layerOpinions, 20)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._execStack, 30)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._profiler, 40)
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._graphEditor, 10)
+        # Shape Editor (20) and TouchPose (40) come from their own
+        # plugin containers and slot in between by rank.
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._picker, 30)
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._volumeWeights, 50)
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._curvenets, 60)
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring

@@ -198,10 +198,14 @@ def testUsdviewInputFunction(appController):
                     continue
                 if str(child.title()).replace("&", "") != "RigExec":
                     continue
-                for action in child.actions():
-                    if action.text() == "TouchPose":
-                        action.trigger()
-                        break
+                for sub in child.actions():
+                    if sub.menu() is None or \
+                            sub.text() != "Animation Editors":
+                        continue
+                    for action in sub.menu().actions():
+                        if action.text() == "TouchPose":
+                            action.trigger()
+                            break
             appController._processEvents()
             touch = touchPoseUI.TouchPoseController._instance
     except Exception as error:

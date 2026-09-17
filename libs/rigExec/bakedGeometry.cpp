@@ -168,6 +168,9 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
         name(r.binding.cagePoints);
         name(r.binding.surfacePoints);
         name(r.binding.bindCoords);
+        name(r.binding.driverCurvePoints);
+        name(r.binding.driverCurveOrder);
+        name(r.binding.driverCurveKnots);
         name(r.binding.widths);
         name(r.binding.curvenetPoints);
         if (r.op == RigExecRevisionOp::CurvenetAdjuster) {
@@ -300,6 +303,13 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
             if (out.transformSlot < 0) {
                 refuse("mover transform provider is not a pose provider",
                        r.binding.transform);
+            }
+        }
+        if (!r.binding.transformSpace.IsEmpty()) {
+            out.transformSpaceSlot = slotOf(r.binding.transformSpace);
+            if (out.transformSpaceSlot < 0) {
+                refuse("mover transform space is not a pose provider",
+                       r.binding.transformSpace);
             }
         }
         // The solver whose aggregate supplies values.driverFrames, resolved
@@ -728,6 +738,10 @@ DeclareMatrixReads(const RigExecBakedProgramImpl::GeomRevision &revision,
     if (revision.transformSlot >= 0) {
         step->reads.push_back(
             RigExecBakedOne(domain, revision.transformSlot));
+    }
+    if (revision.transformSpaceSlot >= 0) {
+        step->reads.push_back(
+            RigExecBakedOne(domain, revision.transformSpaceSlot));
     }
     for (const int slot : revision.influenceSlots) {
         if (slot >= 0) {
@@ -1294,6 +1308,14 @@ FoldInfluences(const RigExecBakedProgramImpl &B,
         // pointer whenever the store answered, whatever the tap held.
         revision->haveTransform = true;
     }
+    if (revision->haveTransform && revision->transformSpaceSlot >= 0) {
+        const GfMatrix4d &space =
+            revision->finalPhase
+                ? B.finalMatrix[size_t(revision->transformSpaceSlot)]
+                : B.baseMatrix[size_t(revision->transformSpaceSlot)];
+        revision->transform =
+            RigExecMeasureInSpace(revision->transform, space);
+    }
     for (size_t k = 0; k < revision->influenceSlots.size(); ++k) {
         const size_t slot = size_t(revision->influenceSlots[k]);
         GfMatrix4d matrix = revision->finalPhase ? B.finalMatrix[slot]
@@ -1577,7 +1599,14 @@ AssembleRevision(RigExecBakedProgramImpl &B,
                              ? &revision->currentPhasePacket
                              : &B.weightPackets[size_t(revision->weightObject)];
     }
-    values.basePoints.assign(basePoints, basePoints + basePointCount);
+    // Only the operations that measure against the authored base read it; a
+    // matrix, skin or wire revision never does, and copying a whole body's
+    // points per revision per frame was most of what such a step cost.
+    if (revision->op != RigExecRevisionOp::Matrix &&
+        revision->op != RigExecRevisionOp::Skin &&
+        revision->op != RigExecRevisionOp::Wire) {
+        values.basePoints.assign(basePoints, basePoints + basePointCount);
+    }
     // The curvenet: the bind out of the program's OWN cache, resolved in the
     // prologue because that cache has no locking and reports a diagnostic per
     // bind; and the POSED net, which is the net's own chain result. The
@@ -2242,7 +2271,7 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
         // makes two revisions sharing one weight object last-writer-wins the
         // way the dynamic walk's per-chain merge does.
         revision.weightFieldPublished = false;
-        if (revision.weightObject >= 0) {
+        if (revision.weightObject >= 0 && B.publishWeightFields) {
             const RigExecWeightPacket &packet =
                 revision.weightCurrentPhase
                     ? revision.currentPhasePacket
@@ -2251,10 +2280,18 @@ RigExecBakedRunGeometryStep(RigExecBakedProgramImpl *program,
                 const size_t logicalCount =
                     revision.weightOperationDomain ? size_t(1)
                                                    : chain.lastBase.size();
-                revision.weightField.assign(logicalCount, 0.0f);
-                for (size_t i = 0; i < logicalCount; ++i) {
-                    const float w = packet.Resolve(i, logicalCount);
-                    revision.weightField[i] = w < 0.0f ? 0.0f : w;
+                // One scatter rather than a search per point: Resolve()
+                // binary-searches a sparse packet's indices, which for a
+                // face cluster on a body is tens of thousands of searches
+                // to find a few hundred weights. An unresolvable packet
+                // publishes what the per-point loop did: zero wherever
+                // Resolve() answered out of range.
+                if (!packet.ResolveAll(logicalCount, &revision.weightField)) {
+                    revision.weightField.assign(logicalCount, 0.0f);
+                    for (size_t i = 0; i < logicalCount; ++i) {
+                        const float w = packet.Resolve(i, logicalCount);
+                        revision.weightField[i] = w < 0.0f ? 0.0f : w;
+                    }
                 }
                 revision.weightFieldPublished = true;
             }

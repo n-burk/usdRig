@@ -970,6 +970,15 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRigExecEpochConstants COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_epoch_constants.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecWireMover COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_wire_mover.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecFloatCurveOp COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_float_curve_op.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecMatrixSpace COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_matrix_space.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     add_test(NAME testRigExecBakedAvarPatch COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_baked_avar_patch.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
@@ -1048,7 +1057,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRigExecBake testRigExecInverse
                          testRestLocal testRestMigration
                          testInterveningXform testRigExecEpochConstants
-                         testRigExecBakedAvarPatch
+                         testRigExecBakedAvarPatch testRigExecWireMover
+                         testRigExecMatrixSpace
+                         testRigExecFloatCurveOp
                          testRigExecUndo testGizmoMath testGizmoScreen
                          testLayerOpinionsModel testCompositionArcsModel
                          testAvarEditorModel

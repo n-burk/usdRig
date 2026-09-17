@@ -208,6 +208,11 @@ public:
     /// baked answer is never one of the outcomes.
     bool SetOverrides(const std::vector<RigExecValueOverride> &overrides);
 
+    /// Whether a run resolves RigExecRigPose::weightFields, following
+    /// RigExecRigEvaluator::SetPublishWeightFields: the per-point overlay
+    /// field is walked for every weighted mesh only when someone looks.
+    void SetPublishWeightFields(bool publish);
+
     /// How many clusters the program's schedule holds, and how many of them
     /// the last generation actually ran.
     ///

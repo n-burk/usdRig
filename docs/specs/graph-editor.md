@@ -6,7 +6,7 @@ Added 2026-09-01.
 The RigExec usdview plugin adds a Maya-style graph editor: a floating
 window that plots the animation curves of the current selection and lets
 you move keys, reshape tangents and set interpolation with the mouse.
-`RigExec → Graph Editor` opens it, and so does the `Graph…` button on the
+`RigExec → Animation Editors → Graph Editor` opens it, and so does the `Graph…` button on the
 [viewport gizmo toolbar](viewport-gizmos.md). There is one editor per
 session; asking for it again raises the window you already have.
 

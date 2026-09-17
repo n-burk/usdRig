@@ -1242,12 +1242,16 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     // run of a program is NOT one of them -- it has its own dirty set below.
     bool full = force || B.phasedReads ||
                 B.programStamp != B.lastProgramStamp;
-    if (!full && B.everRan && B.hasPropertyChains &&
-        B.propertyResults != B.lastPropertyResults) {
-        // A chain's result reaches a step through the generation's resolved
-        // inputs, which no slot names: every step that reads one has to run.
-        full = true;
-    }
+    // A chain's result reaches a step through the generation's resolved
+    // inputs, which no slot names, so every step that reads one has to run
+    // when a result moved. That is the steps flagged as reading resolved
+    // inputs, and the providers whose avars a chain writes -- which the
+    // steady state below already catches by comparing every avar by value.
+    // Running the whole program instead made every drag of a chain-driven
+    // control (a lid, a foot roll) cost a full evaluation.
+    const bool chainResultsMoved = !full && B.everRan &&
+                                   B.hasPropertyChains &&
+                                   B.propertyResults != B.lastPropertyResults;
     if (full) {
         dirty.SetAll(count);
     } else if (!B.everRan) {
@@ -1445,6 +1449,13 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         if (time != B.lastTime) {
             for (const int index : cones.varyingSteps) {
                 dirty.Set(B.steps[size_t(index)].cluster);
+            }
+        } else if (chainResultsMoved) {
+            for (const int index : cones.varyingSteps) {
+                const RigExecBakedStep &step = B.steps[size_t(index)];
+                if (step.resolvedInputReads) {
+                    dirty.Set(step.cluster);
+                }
             }
         }
         for (const int index : cones.overrideSteps) {

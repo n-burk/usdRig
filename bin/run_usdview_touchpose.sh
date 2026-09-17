@@ -10,7 +10,7 @@
 #   Biped_touch_regions.usda is the touch data alone -- that one shows
 #   nothing opened by itself, being `over`s with no geometry under them.
 #
-# Then: RigExec -> TouchPose, tick the box, and hover the character. The
+# Then: RigExec -> Animation Editors -> TouchPose, tick the box, and hover the character. The
 # region under the cursor lights up; click it and the control that owns
 # it becomes usdview's selection, so the Avar Editor and the viewport
 # gizmo follow. While the box is ticked the MESH is not selectable -- a

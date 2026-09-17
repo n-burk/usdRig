@@ -13,6 +13,7 @@
 #include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/gf/vec3i.h"
+#include "pxr/base/vt/array.h"
 
 #include <memory>
 #include <vector>
@@ -294,6 +295,19 @@ struct RigExecMoverParameters {
     /// posed+rest frame samples.
     std::vector<GfVec2f> bindCoords;
     RigExecPointFrameArray frames;
+    /// Wire: bind coordinates as the authored array itself. Shared, not
+    /// copied: a wire's table covers the whole mesh, is read every frame and
+    /// compared every frame, and a VtArray read from the stage hands back
+    /// the layer's own buffer, so both are a reference count and an
+    /// identity test.
+    VtArray<GfVec2f> wireBindCoords;
+
+    /// Wire: the driver NURBS curve's order and knots (restPoints are its
+    /// rest control points, auxPoints its posed ones) and the dropoff
+    /// distance of the falloff.
+    int curveOrder = 0;
+    std::vector<double> curveKnots;
+    double dropoffDistance = 0.0;
 
     /// Widths for the extent computation (empty, one, or per-point).
     std::vector<float> widths;
@@ -334,6 +348,9 @@ struct RigExecMoverParameters {
                auxPoints == o.auxPoints && auxPointsB == o.auxPointsB &&
                restPoints == o.restPoints && divisions == o.divisions &&
                bindCoords == o.bindCoords && frames == o.frames &&
+               wireBindCoords == o.wireBindCoords &&
+               curveOrder == o.curveOrder && curveKnots == o.curveKnots &&
+               dropoffDistance == o.dropoffDistance &&
                widths == o.widths &&
                skinTransforms == o.skinTransforms &&
                skinIndices == o.skinIndices &&

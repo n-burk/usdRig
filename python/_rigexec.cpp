@@ -26,6 +26,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/rbf.h"
+#include "rigExecMath/geometryKernels.h"
 #include "rigExecRigging/rigBuilder.h"
 #include "rigExecRigging/schemaAuthoring.h"
 
@@ -868,6 +869,12 @@ PYBIND11_MODULE(_rigexec, m) {
             "can never change an answer, only how fast it arrives.\n"
             "Setting it also takes the decision away from the rig's own\n"
             "rigExec:baked for good; see evaluation_mode_source.")
+        .def_property("publish_weight_fields",
+            [](_Rig &r) { return r.evaluator->GetPublishWeightFields(); },
+            [](_Rig &r, bool v) { r.evaluator->SetPublishWeightFields(v); },
+            "Whether each evaluation resolves the per-point weight fields\n"
+            "Pose.weight_field reads. On by default; the viewer turns it off\n"
+            "until a weight overlay is shown.")
         .def_property_readonly("evaluation_mode_source",
             [](_Rig &r) {
                 return _ModeSourceName(r.evaluator->GetEvaluationModeSource());
@@ -2505,6 +2512,31 @@ PYBIND11_MODULE(_rigexec, m) {
     // See the note above _RbfDescFrom. These two entries are what let the
     // converter drop its Python solver import.
 
+    m.def("bind_wire",
+          [](const std::vector<std::array<float, 3>> &points,
+             const std::vector<std::array<float, 3>> &controlPoints,
+             int order, const std::vector<double> &knots) {
+              std::vector<GfVec3f> pts, cvs;
+              pts.reserve(points.size());
+              for (const auto &p : points) pts.emplace_back(p[0], p[1], p[2]);
+              for (const auto &c : controlPoints) cvs.emplace_back(c[0], c[1], c[2]);
+              const rigExec::RigExecNurbsCurve curve{&cvs, order, &knots};
+              if (!curve.IsValid()) {
+                  throw py::value_error(
+                      "bind_wire: control points, order and knots do not "
+                      "describe a NURBS curve (knots must number points + order)");
+              }
+              std::vector<std::pair<float, float>> out;
+              for (const GfVec2f &b : rigExec::RigExecBindWire(pts, curve)) {
+                  out.emplace_back(b[0], b[1]);
+              }
+              return out;
+          },
+          py::arg("points"), py::arg("control_points"), py::arg("order"),
+          py::arg("knots"),
+          "Wire bind coordinates for RigExecCurveMover mode \"wire\": per "
+          "point, (u, d) with u the parameter of the closest point on the "
+          "rest NURBS curve and d the distance to it.");
     m.def("rbf_fit_width", [](py::object poses, py::object translations,
                               std::string kernel, py::object pose_types,
                               py::object twist_axis, double regularization,

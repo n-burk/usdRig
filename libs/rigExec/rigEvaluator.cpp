@@ -50,6 +50,7 @@
 #include <functional>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace rigExec {
 
@@ -557,15 +558,21 @@ _ValidateScalarConnection(
                  sources[0].GetString();
         return false;
     }
-    if (source.GetTypeName() != expectedType) {
+    // A float input may read a double source (an avar): the read is cast.
+    const bool coerced = expectedType == SdfValueTypeNames->Float &&
+                         source.GetTypeName() == SdfValueTypeNames->Double;
+    if (source.GetTypeName() != expectedType && !coerced) {
         *error = attribute.GetPath().GetString() +
                  ": connection target " + sources[0].GetString() +
                  " has type " + source.GetTypeName().GetAsToken().GetString() +
-                 ", expected " + expectedType.GetAsToken().GetString();
+                 ", expected " + expectedType.GetAsToken().GetString() +
+                 (expectedType == SdfValueTypeNames->Float ? " or double"
+                                                           : "");
         return false;
     }
     return _ValidateScalarConnection(
-        stage, source, expectedType, visiting, error);
+        stage, source, coerced ? SdfValueTypeNames->Double : expectedType,
+        visiting, error);
 }
 
 // Validates the complete weight-object composition against one mover domain.
@@ -1197,8 +1204,12 @@ _ValidateAdjustmentPoseConsumers(const UsdStageRefPtr &stage,
         if (_IsFrameConstraintType(type)) frameRelationships = {
             "rigExec:moves", "rigExec:sources", "rigExec:aimTarget", "rigExec:worldUpObject",
             "rigExec:firstJoint", "rigExec:endJoint", "rigExec:effector", "rigExec:poleVectorObjects"};
-        if (type == "RigExecMatrixMover") frameRelationships = {"rigExec:transform"};
+        if (type == "RigExecMatrixMover") frameRelationships = {"rigExec:transform", "rigExec:transformSpace"};
         if (type == "RigExecSkinMover") frameRelationships = {"rigExec:influences"};
+        if (type == "RigExecCurveMover") frameRelationships = {
+            "rigExec:driverTransforms", "rigExec:driverTransformSpaces",
+            "rigExec:driverBaseTransforms",
+            "rigExec:driverBaseTransformSpaces"};
         for (const char *name : frameRelationships) {
             SdfPathVector targets;
             if (const auto rel = prim.GetRelationship(TfToken(name))) rel.GetTargets(&targets);
@@ -2642,6 +2653,11 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
 
             // Declared dependency wiring and read phases.
             appendRelTargets(prim, "rigExec:transform", true);
+            appendRelTargets(prim, "rigExec:transformSpace", true);
+            appendRelTargets(prim, "rigExec:driverTransforms", false);
+            appendRelTargets(prim, "rigExec:driverTransformSpaces", false);
+            appendRelTargets(prim, "rigExec:driverBaseTransforms", false);
+            appendRelTargets(prim, "rigExec:driverBaseTransformSpaces", false);
             // Influence order is semantic: jointIndices index into it.
             appendRelTargets(prim, "rigExec:influences", false);
             appendToken(prim, "rigExec:transformReadPhase");
@@ -2651,7 +2667,8 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             appendToken(prim, "rigExec:deltaSpace");
             for (const char *input : {
                      "inputs:defaultWeight", "inputs:enabled",
-                     "inputs:value", "inputs:min", "inputs:max"}) {
+                     "inputs:value", "inputs:min", "inputs:max",
+                     "inputs:keys"}) {
                 appendAttributeBinding(prim, input);
             }
             // Pose-constraint wiring. Source order is semantic because every
@@ -3868,8 +3885,12 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     bool typeOk = false;
                     const char *expected = "";
                     if (type == "RigExecFloatMathMover") {
-                        expected = "float";
-                        typeOk = valueType == SdfValueTypeNames->Float;
+                        // A double target is a control's avar: the chain
+                        // computes in float and publishes the double, so a
+                        // hidden control's channels can be driven by keys.
+                        expected = "float/double";
+                        typeOk = valueType == SdfValueTypeNames->Float ||
+                                 valueType == SdfValueTypeNames->Double;
                     } else if (type == "RigExecVec3fMathMover") {
                         // Every GfVec3f-backed scalar role, not just float3:
                         // a mover offsetting a vector3f or a color3f is doing
@@ -3911,6 +3932,39 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                             ": unknown rigExec:operation '" +
                             operation.GetString() + "'");
                         return false;
+                    }
+                    if (op == RigExecPropertyOp::Curve) {
+                        VtArray<GfVec2f> keys;
+                        const UsdAttribute keysAttr =
+                            prim.GetAttribute(TfToken("inputs:keys"));
+                        if (type != "RigExecFloatMathMover") {
+                            reportError(
+                                type.GetString() + " " +
+                                prim.GetPath().GetString() +
+                                ": rigExec:operation 'curve' is defined only "
+                                "for RigExecFloatMathMover");
+                            return false;
+                        }
+                        VtArray<GfVec2f> tangents;
+                        if (const UsdAttribute t = prim.GetAttribute(
+                                TfToken("inputs:tangents"))) {
+                            t.Get(&tangents);
+                        }
+                        if (!keysAttr || !keysAttr.Get(&keys) ||
+                            keys.empty() ||
+                            !RigExecValidateLinearKeys(
+                                keys.cdata(), keys.size()) ||
+                            (!tangents.empty() &&
+                             tangents.size() != keys.size())) {
+                            reportError(
+                                type.GetString() + " " +
+                                prim.GetPath().GetString() +
+                                ": rigExec:operation 'curve' needs "
+                                "inputs:keys with finite keys strictly "
+                                "increasing in input, and inputs:tangents "
+                                "empty or one per key");
+                            return false;
+                        }
                     }
                     if (type == "RigExecMatrixMathMover" &&
                         op != RigExecPropertyOp::Multiply &&
@@ -4501,6 +4555,15 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             if (UsdRelationship rel = prim.GetRelationship(TfToken(
                     isSkin ? "rigExec:influences" : "rigExec:transform"))) {
                 rel.GetTargets(&transforms);
+            }
+            if (!isSkin) {
+                SdfPathVector spaces;
+                if (UsdRelationship rel = prim.GetRelationship(
+                        TfToken("rigExec:transformSpace"))) {
+                    rel.GetTargets(&spaces);
+                }
+                transforms.insert(transforms.end(), spaces.begin(),
+                                  spaces.end());
             }
             for (const SdfPath &provider : transforms) {
                 const auto it = lastFrameWriterOrdinal.find(provider);
@@ -5716,6 +5779,11 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             if (!revision.binding.transform.IsEmpty()) {
                 revision.transformTap = newTaps->Add(
                     RigExecValueAddress::Prim(revision.binding.transform,
+                                              TfToken("computeMatrix")));
+            }
+            if (!revision.binding.transformSpace.IsEmpty()) {
+                revision.transformSpaceTap = newTaps->Add(
+                    RigExecValueAddress::Prim(revision.binding.transformSpace,
                                               TfToken("computeMatrix")));
             }
             for (const SdfPath &influence : revision.binding.influences) {
@@ -7221,6 +7289,23 @@ RigExecRigEvaluator::_ValidateMatrixMover(
     const UsdPrim transformPrim = _stage->GetPrimAtPath(transforms[0]);
     static const std::set<TfToken> frameProviderTypes = {
         TfToken("RigExecControl"), TfToken("RigExecJoint")};
+    SdfPathVector spaces;
+    if (UsdRelationship rel =
+            prim.GetRelationship(TfToken("rigExec:transformSpace"))) {
+        rel.GetTargets(&spaces);
+    }
+    if (spaces.size() > 1) {
+        *error = who + ": rigExec:transformSpace takes at most one target";
+        return false;
+    }
+    if (!spaces.empty()) {
+        const UsdPrim spacePrim = _stage->GetPrimAtPath(spaces[0]);
+        if (!spacePrim || !frameProviderTypes.count(spacePrim.GetTypeName())) {
+            *error = who + ": rigExec:transformSpace target is not a "
+                           "catalogued matrix provider";
+            return false;
+        }
+    }
     // The applied-API arm is gone with RigExecPointTransformAPI: that was the
     // pre-alignment landmark transform model, superseded by RigExecXformable
     // (matrix rest/posed spaces plus avars) and applied by nothing.
@@ -8397,7 +8482,23 @@ RigExecRigEvaluator::_EvaluateChain(
                     transforms[0].GetString());
                 continue;
             }
-            const GfMatrix4d &m = matrixIt->second;
+            GfMatrix4d m = matrixIt->second;
+            SdfPathVector spaces;
+            if (UsdRelationship rel = prim.GetRelationship(
+                    TfToken("rigExec:transformSpace"))) {
+                rel.GetTargets(&spaces);
+            }
+            if (!spaces.empty()) {
+                const auto spaceIt = matrices.find(spaces[0]);
+                if (spaceIt == matrices.end()) {
+                    diagnostics->push_back(
+                        "MoverFailed " + mover->moverPath.GetString() +
+                        ": no " + phase.GetString() +
+                        " matrix provider at " + spaces[0].GetString());
+                    continue;
+                }
+                m = RigExecMeasureInSpace(m, spaceIt->second);
+            }
             for (size_t i = 0; i < points.size(); ++i) {
                 const GfVec3d moved = RigExecApplyWeightedMatrix(
                     GfVec3d(points[i]), m, 1.0f);
@@ -8602,6 +8703,191 @@ RigExecRigEvaluator::_EvaluateChain(
             TfToken mode("ribbon");
             if (UsdAttribute a = prim.GetAttribute(TfToken("rigExec:mode"))) {
                 a.Get(&mode, time);
+            }
+            if (mode == "wire") {
+                // The wire reads its NURBS driver directly: posed control
+                // points at the declared phase, rest control points, order
+                // and knots as authored, and the authored bind coordinates.
+                SdfPathVector curves, binds;
+                if (UsdRelationship rel = prim.GetRelationship(
+                        TfToken("rigExec:driverCurve"))) {
+                    rel.GetTargets(&curves);
+                }
+                if (UsdRelationship rel = prim.GetRelationship(
+                        TfToken("rigExec:bindCoordinates"))) {
+                    rel.GetTargets(&binds);
+                }
+                if (curves.empty() || binds.empty()) {
+                    diagnostics->push_back(
+                        "MoverFailed " + mover->moverPath.GetString() +
+                        ": wire needs rigExec:driverCurve and "
+                        "rigExec:bindCoordinates");
+                    continue;
+                }
+                const SdfPath curvePrim = curves[0].GetPrimPath();
+                VtVec3fArray posedCvs, restCvs;
+                SdfPathVector driverTransforms, driverSpaces;
+                if (UsdRelationship rel = prim.GetRelationship(
+                        TfToken("rigExec:driverTransforms"))) {
+                    rel.GetTargets(&driverTransforms);
+                }
+                if (UsdRelationship rel = prim.GetRelationship(
+                        TfToken("rigExec:driverTransformSpaces"))) {
+                    rel.GetTargets(&driverSpaces);
+                }
+                if (driverTransforms.empty()) {
+                    phasedPoints(prim, "rigExec:driverCurve",
+                                 "rigExec:driverCurveReadPhase",
+                                 curvePrim.AppendProperty(TfToken("points")),
+                                 mover->moverPath, &posedCvs);
+                }
+                VtIntArray order;
+                VtDoubleArray knots;
+                VtVec2fArray sts;
+                float dropoff = 0.0f;
+                if (const UsdPrim curve = _stage->GetPrimAtPath(curvePrim)) {
+                    curve.GetAttribute(TfToken("points"))
+                        .Get(&restCvs, UsdTimeCode::Default());
+                    curve.GetAttribute(TfToken("order"))
+                        .Get(&order, UsdTimeCode::Default());
+                    curve.GetAttribute(TfToken("knots"))
+                        .Get(&knots, UsdTimeCode::Default());
+                }
+                if (UsdAttribute a = _stage->GetAttributeAtPath(binds[0])) {
+                    a.Get(&sts, time);
+                }
+                if (UsdAttribute a =
+                        prim.GetAttribute(TfToken("inputs:dropoffDistance"))) {
+                    a.Get(&dropoff, time);
+                }
+                if (!driverTransforms.empty()) {
+                    // Independently of the assembler: the providers' own
+                    // matrices, measured and weighted per control point.
+                    TfToken phase("base");
+                    if (const UsdAttribute a = prim.GetAttribute(
+                            TfToken("rigExec:transformReadPhase"))) {
+                        a.Get(&phase);
+                    }
+                    const auto &matrices = phase == "final"
+                                               ? finalProviderMatrices
+                                               : baseProviderMatrices;
+                    VtFloatArray weights, baseWeights;
+                    if (const UsdAttribute a = prim.GetAttribute(
+                            TfToken("inputs:driverWeights"))) {
+                        a.Get(&weights, time);
+                    }
+                    if (const UsdAttribute a = prim.GetAttribute(
+                            TfToken("inputs:driverBaseWeights"))) {
+                        a.Get(&baseWeights, time);
+                    }
+                    SdfPathVector baseTransforms, baseSpaces;
+                    if (UsdRelationship rel = prim.GetRelationship(
+                            TfToken("rigExec:driverBaseTransforms"))) {
+                        rel.GetTargets(&baseTransforms);
+                    }
+                    if (UsdRelationship rel = prim.GetRelationship(
+                            TfToken("rigExec:driverBaseTransformSpaces"))) {
+                        rel.GetTargets(&baseSpaces);
+                    }
+                    const auto pick = [](size_t count, size_t j) {
+                        return count <= 1 ? size_t(0) : j % count;
+                    };
+                    bool missing = false;
+                    const auto measured = [&](const SdfPathVector &ts,
+                                              const SdfPathVector &ss,
+                                              size_t j) {
+                        GfMatrix4d m(1.0);
+                        const auto t = matrices.find(ts[pick(ts.size(), j)]);
+                        if (t == matrices.end()) {
+                            missing = true;
+                            return m;
+                        }
+                        m = t->second;
+                        if (!ss.empty()) {
+                            const auto sp =
+                                matrices.find(ss[pick(ss.size(), j)]);
+                            if (sp == matrices.end()) {
+                                missing = true;
+                                return m;
+                            }
+                            m = RigExecMeasureInSpace(m, sp->second);
+                        }
+                        return m;
+                    };
+                    posedCvs = restCvs;
+                    for (size_t j = 0; j < restCvs.size() && !missing; ++j) {
+                        if (!baseTransforms.empty()) {
+                            const GfMatrix4d b =
+                                measured(baseTransforms, baseSpaces, j);
+                            const float wb = baseWeights.empty()
+                                ? 1.0f
+                                : baseWeights[pick(baseWeights.size(), j)];
+                            const GfVec3f moved(
+                                b.TransformAffine(GfVec3d(restCvs[j])));
+                            restCvs[j] = restCvs[j] + (moved - restCvs[j]) * wb;
+                        }
+                        const GfMatrix4d m =
+                            measured(driverTransforms, driverSpaces, j);
+                        const float w = weights.empty()
+                            ? 1.0f : weights[pick(weights.size(), j)];
+                        const GfVec3f moved(
+                            m.TransformAffine(GfVec3d(restCvs[j])));
+                        posedCvs[j] = restCvs[j] + (moved - restCvs[j]) * w;
+                    }
+                    if (missing) {
+                        diagnostics->push_back(
+                            "MoverFailed " + mover->moverPath.GetString() +
+                            ": no matrix for a wire driver transform");
+                        continue;
+                    }
+                }
+                const std::vector<GfVec3f> rest(restCvs.begin(), restCvs.end());
+                const std::vector<GfVec3f> posed(posedCvs.begin(),
+                                                 posedCvs.end());
+                const std::vector<double> knotVec(knots.begin(), knots.end());
+                const int curveOrder = order.empty() ? 0 : order[0];
+                std::vector<GfVec3f> scratch(points.begin(), points.end());
+                // A sparse bind table is parallel to the weight object's
+                // indices; spread over the whole mesh here, where the
+                // envelope below zeroes every point it does not name.
+                std::vector<GfVec2f> bindAll(sts.begin(), sts.end());
+                if (sts.size() != scratch.size()) {
+                    SdfPathVector weightTargets;
+                    if (UsdRelationship rel = prim.GetRelationship(
+                            TfToken("rigExec:weightObject"))) {
+                        rel.GetTargets(&weightTargets);
+                    }
+                    VtIntArray indices;
+                    if (!weightTargets.empty()) {
+                        if (const UsdPrim w =
+                                _stage->GetPrimAtPath(weightTargets[0])) {
+                            w.GetAttribute(TfToken("rigExec:indices"))
+                                .Get(&indices);
+                        }
+                    }
+                    if (indices.size() == sts.size()) {
+                        bindAll.assign(scratch.size(), GfVec2f(0.0f));
+                        for (size_t k = 0; k < indices.size(); ++k) {
+                            if (indices[k] >= 0 &&
+                                size_t(indices[k]) < bindAll.size()) {
+                                bindAll[size_t(indices[k])] = sts[k];
+                            }
+                        }
+                    }
+                }
+                if (!RigExecApplyWire(
+                        &scratch, RigExecNurbsCurve{&rest, curveOrder, &knotVec},
+                        RigExecNurbsCurve{&posed, curveOrder, &knotVec},
+                        bindAll.data(), bindAll.size(), dropoff,
+                        0, scratch.size())) {
+                    diagnostics->push_back(
+                        "MoverFailed " + mover->moverPath.GetString() +
+                        ": wire driver curve or bind coordinates do not "
+                        "match the deformed points");
+                    continue;
+                }
+                std::copy(scratch.begin(), scratch.end(), points.begin());
+                goto envelope;
             }
             // Parity path samples the driver curve directly: rest from
             // the bind-time authored value, posed from the timed value.
@@ -8824,6 +9110,7 @@ RigExecRigEvaluator::_EvaluateChain(
             std::copy(scratch.begin(), scratch.end(), points.begin());
         }
 
+    envelope:
         // Every branch above computes the operation's full-strength
         // candidate. The universal envelope is the one and only blend back
         // over the preceding revision.
@@ -8926,6 +9213,8 @@ struct RigExecPropertyChainBindings
         Input value;
         Input minimum;
         Input maximum;
+        Input keys;
+        Input tangents;
     };
 
     /// One target, in _propertyChainOrder's order. An entry whose target
@@ -8937,9 +9226,39 @@ struct RigExecPropertyChainBindings
         UsdAttributeQuery targetQuery;
         SdfValueTypeName valueType;
         std::vector<Revision> revisions;
+
+        // What the chain's answer can depend on, so a frame in which none of
+        // it moved republishes the last answer instead of recomputing it.
+        //
+        //  * `watch`: every input attribute, and every attribute along an
+        //    input's connection chain -- where an interactive override can
+        //    stand;
+        //  * `upstream`: the chains whose targets are among those
+        //    attributes;
+        //  * `varying`: whether any of them, or the target's own authored
+        //    base, can change with time;
+        //  * `alwaysDirty`: a weight object is read through its own
+        //    resolution, which this does not follow.
+        std::vector<SdfPath> watch;
+        std::vector<size_t> upstream;
+        bool varying = false;
+        bool alwaysDirty = false;
+
+        // The last run: whether it published, what, and the diagnostics it
+        // pushed, all replayed verbatim when the chain is clean.
+        bool cached = false;
+        bool published = false;
+        VtValue lastValue;
+        std::vector<std::string> lastDiagnostics;
+        bool changedThisRun = false;
     };
 
     std::vector<Chain> chains;
+
+    // The interactive overrides and the time the last run saw.
+    bool haveLast = false;
+    UsdTimeCode lastTime;
+    std::unordered_map<SdfPath, VtValue, SdfPath::Hash> lastOverrides;
 };
 
 namespace {
@@ -9120,11 +9439,93 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                 boundRevision.value = _BindInput(mover, "inputs:value", time);
                 boundRevision.minimum = _BindInput(mover, "inputs:min", time);
                 boundRevision.maximum = _BindInput(mover, "inputs:max", time);
+                boundRevision.keys = _BindInput(mover, "inputs:keys", time);
+                boundRevision.tangents =
+                    _BindInput(mover, "inputs:tangents", time);
+                bound.alwaysDirty =
+                    bound.alwaysDirty || !boundRevision.weightObjects.empty();
+                for (const RigExecPropertyChainBindings::Input *input :
+                         {&boundRevision.enabled,
+                          &boundRevision.defaultWeight,
+                          &boundRevision.operation, &boundRevision.value,
+                          &boundRevision.minimum, &boundRevision.maximum,
+                          &boundRevision.keys, &boundRevision.tangents}) {
+                    if (!input->attribute) {
+                        continue;
+                    }
+                    bound.watch.push_back(input->path);
+                    if (input->constant) {
+                        continue;
+                    }
+                    if (!input->connected) {
+                        bound.varying = true;  // animated in place
+                        continue;
+                    }
+                    // Follow the connection chain the read will walk.
+                    UsdAttribute a = input->attribute;
+                    std::set<SdfPath> seen;
+                    while (a && seen.insert(a.GetPath()).second) {
+                        bound.watch.push_back(a.GetPath());
+                        if (a.ValueMightBeTimeVarying() ||
+                            a.GetNumTimeSamples() > 0) {
+                            bound.varying = true;
+                        }
+                        SdfPathVector sources;
+                        a.GetConnections(&sources);
+                        if (sources.size() != 1) {
+                            break;
+                        }
+                        a = _stage->GetAttributeAtPath(sources[0]);
+                    }
+                }
                 bound.revisions.push_back(std::move(boundRevision));
+            }
+            if (bound.target && (bound.target.ValueMightBeTimeVarying() ||
+                                 bound.target.GetNumTimeSamples() > 0)) {
+                bound.varying = true;
             }
             _propertyChainBindings->chains.push_back(std::move(bound));
         }
+        std::unordered_map<SdfPath, size_t, SdfPath::Hash> chainOf;
+        auto &chains = _propertyChainBindings->chains;
+        for (size_t i = 0; i < chains.size(); ++i) {
+            chainOf[chains[i].targetPath] = i;
+        }
+        for (size_t i = 0; i < chains.size(); ++i) {
+            for (const SdfPath &path : chains[i].watch) {
+                const auto it = chainOf.find(path);
+                if (it != chainOf.end() && it->second != i) {
+                    chains[i].upstream.push_back(it->second);
+                }
+            }
+        }
     }
+
+    // What moved since the last run: the time, and each interactive override
+    // placed, lifted or changed in value.
+    RigExecPropertyChainBindings &bindings = *_propertyChainBindings;
+    const bool timeMoved = !bindings.haveLast || time != bindings.lastTime;
+    std::unordered_map<SdfPath, VtValue, SdfPath::Hash> nowOverrides;
+    for (const RigExecValueOverride &o : _interactiveOverrides) {
+        if (!o.attribute.IsEmpty()) {
+            nowOverrides[o.prim.AppendProperty(o.attribute)] = o.value;
+        }
+    }
+    std::unordered_set<SdfPath, SdfPath::Hash> overrideMoved;
+    for (const auto &[path, value] : nowOverrides) {
+        const auto it = bindings.lastOverrides.find(path);
+        if (it == bindings.lastOverrides.end() || it->second != value) {
+            overrideMoved.insert(path);
+        }
+    }
+    for (const auto &[path, value] : bindings.lastOverrides) {
+        if (!nowOverrides.count(path)) {
+            overrideMoved.insert(path);
+        }
+    }
+    bindings.haveLast = true;
+    bindings.lastTime = time;
+    bindings.lastOverrides = std::move(nowOverrides);
 
     for (RigExecPropertyChainBindings::Chain &chain :
              _propertyChainBindings->chains) {
@@ -9136,6 +9537,60 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                  ": target attribute disappeared; chain skipped");
             continue;
         }
+        // Clean: nothing the chain reads moved, so the last answer stands.
+        // Published and reported exactly as a run would publish and report
+        // it, so no consumer can tell the difference.
+        bool dirty = !chain.cached || chain.alwaysDirty ||
+                     (chain.varying && timeMoved);
+        for (size_t k = 0; !dirty && k < chain.watch.size(); ++k) {
+            dirty = overrideMoved.count(chain.watch[k]) != 0;
+        }
+        for (size_t k = 0; !dirty && k < chain.upstream.size(); ++k) {
+            dirty = bindings.chains[chain.upstream[k]].changedThisRun;
+        }
+        if (!dirty) {
+            chain.changedThisRun = false;
+            for (const std::string &line : chain.lastDiagnostics) {
+                diag(line);
+            }
+            if (chain.published) {
+                if (results) {
+                    (*results)[target] = chain.lastValue;
+                }
+                _resolvedInputs.SetProperty(target, chain.lastValue);
+                if (overrides) {
+                    overrides->push_back(RigExecValueOverride{
+                        target.GetPrimPath(), TfToken(),
+                        target.GetNameToken(), chain.lastValue});
+                }
+            }
+            continue;
+        }
+        const size_t diagnosticsBefore =
+            diagnostics ? diagnostics->size() : 0;
+        _resolvedInputs.ClearProperty(target);
+        struct _Remember {
+            RigExecPropertyChainBindings::Chain &chain;
+            RigExecResolvedInputs &resolved;
+            std::vector<std::string> *diagnostics;
+            size_t before;
+            ~_Remember() {
+                const VtValue *now = resolved.Find(chain.targetPath);
+                const bool published = now != nullptr;
+                chain.changedThisRun =
+                    !chain.cached || published != chain.published ||
+                    (published && *now != chain.lastValue);
+                chain.published = published;
+                chain.lastValue = published ? *now : VtValue();
+                chain.lastDiagnostics.clear();
+                if (diagnostics) {
+                    chain.lastDiagnostics.assign(
+                        diagnostics->begin() + long(before),
+                        diagnostics->end());
+                }
+                chain.cached = true;
+            }
+        } remember{chain, _resolvedInputs, diagnostics, diagnosticsBefore};
         RIGEXEC_PROFILE_SCOPE_CAT(
             _profiler, "PropertyChain " + target.GetString(), "property");
         const SdfValueTypeName &valueType = chain.valueType;
@@ -9229,9 +9684,8 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
         };
 
         using BoundRevision = RigExecPropertyChainBindings::Revision;
-        if (valueType == SdfValueTypeNames->Float) {
-            runChain(float(0), [&](const BoundRevision &mover, float in,
-                                   float envelope, float *out) {
+        const auto applyFloat = [&](const BoundRevision &mover, float in,
+                                    float envelope, float *out) {
                 RigExecPropertyMathParams<float> params;
                 if (!_ReadPinnedPropertyMathParams(
                         _resolvedInputs, mover, time, &params) ||
@@ -9239,8 +9693,44 @@ RigExecRigEvaluator::_EvaluatePropertyChains(
                     !_IsFinite(params.max)) {
                     return false;
                 }
+                // Held here so the borrowed key pointer outlives the apply.
+                VtArray<GfVec2f> keys;
+                VtArray<GfVec2f> tangents;
+                if (params.op == RigExecPropertyOp::Curve) {
+                    keys = _PinnedRead(
+                        _resolvedInputs, mover.keys, keys, time);
+                    if (keys.empty() || !RigExecValidateLinearKeys(
+                                            keys.cdata(), keys.size())) {
+                        return false;
+                    }
+                    params.keys = keys.cdata();
+                    params.keyCount = keys.size();
+                    if (mover.tangents) {
+                        tangents = _PinnedRead(
+                            _resolvedInputs, mover.tangents, tangents, time);
+                    }
+                    if (!tangents.empty()) {
+                        if (tangents.size() != keys.size()) {
+                            return false;
+                        }
+                        params.tangents = tangents.cdata();
+                        params.tangentCount = tangents.size();
+                    }
+                }
                 params.weight = envelope;
                 *out = RigExecApplyFloatMath(in, params);
+                return true;
+        };
+        if (valueType == SdfValueTypeNames->Float) {
+            runChain(float(0), applyFloat);
+        } else if (valueType == SdfValueTypeNames->Double) {
+            runChain(double(0), [&](const BoundRevision &mover, double in,
+                                    float envelope, double *out) {
+                float result = 0.0f;
+                if (!applyFloat(mover, float(in), envelope, &result)) {
+                    return false;
+                }
+                *out = double(result);
                 return true;
             });
         } else if (valueType == SdfValueTypeNames->Matrix4d) {
@@ -10037,6 +10527,9 @@ RigExecRigEvaluator::Evaluate(UsdTimeCode time)
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "Evaluate.PlaceOverrides", "evaluate");
         overridesPlaceable = !_bakedProgram ||
             _bakedProgram->SetOverrides(_interactiveOverrides);
+        if (_bakedProgram) {
+            _bakedProgram->SetPublishWeightFields(_publishWeightFields);
+        }
     }
     // cpuParityMode publishes an independent scalar oracle for the geometry
     // chains. The program is not that oracle -- it shares the kernels -- so
@@ -12010,6 +12503,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 baseProviderMatrices[revision.binding.transform] =
                     snapshot.Get<GfMatrix4d>(revision.transformTap);
             }
+            if (revision.transformSpaceTap >= 0 &&
+                !baseProviderMatrices.count(
+                    revision.binding.transformSpace)) {
+                baseProviderMatrices[revision.binding.transformSpace] =
+                    snapshot.Get<GfMatrix4d>(revision.transformSpaceTap);
+            }
             for (size_t k = 0; k < revision.influenceTaps.size() &&
                                k < revision.binding.influences.size(); ++k) {
                 const SdfPath &provider = revision.binding.influences[k];
@@ -12314,6 +12813,21 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         values.transform = &transform;
                     }
                 }
+            }
+            // A space provider: the transform measured against it, read at
+            // the same phase, so the points take only the handle's motion
+            // inside the space.
+            if (values.transform && revision.transformSpaceTap >= 0) {
+                GfMatrix4d space =
+                    snapshot.Get<GfMatrix4d>(revision.transformSpaceTap);
+                if (revision.transformFinalPhase) {
+                    const auto revisedIt =
+                        finalMatrices.find(revision.binding.transformSpace);
+                    if (revisedIt != finalMatrices.end()) {
+                        space = revisedIt->second;
+                    }
+                }
+                transform = RigExecMeasureInSpace(transform, space);
             }
             // Skin influences: the phase rules of the single transform
             // above, applied to every rigExec:influences entry in order.

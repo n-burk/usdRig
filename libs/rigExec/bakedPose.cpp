@@ -1676,6 +1676,9 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
         if (revision.transformSlot >= 0) {
             table[size_t(revision.transformSlot)] = 1;
         }
+        if (revision.transformSpaceSlot >= 0) {
+            table[size_t(revision.transformSpaceSlot)] = 1;
+        }
         for (const int slot : revision.influenceSlots) {
             if (slot >= 0) {
                 table[size_t(slot)] = 1;

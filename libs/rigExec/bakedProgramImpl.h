@@ -374,6 +374,7 @@ RigExecBakedOpName(RigExecRevisionOp op)
     case RigExecRevisionOp::Lattice: return "lattice";
     case RigExecRevisionOp::SurfaceProject: return "surfaceProject";
     case RigExecRevisionOp::Ribbon: return "ribbon";
+    case RigExecRevisionOp::Wire: return "wire";
     case RigExecRevisionOp::EmitGuidePoints: return "emitGuidePoints";
     case RigExecRevisionOp::Curvenet: return "curvenet";
     case RigExecRevisionOp::CurvenetAdjuster: return "curvenetAdjuster";
@@ -1961,6 +1962,8 @@ struct RigExecBakedProgramImpl {
         std::vector<GeomBlendChannel> blendChannels;
         std::vector<int> influenceSlots;
         int transformSlot = -1;
+        /// The rigExec:transformSpace provider's slot, or -1.
+        int transformSpaceSlot = -1;
         /// The geometry-domain constraint whose delta IS this revision's
         /// transform, as an index into the dense delta tables, or -1. Joined
         /// on the mover path at Build, because that is the key the dynamic
@@ -2462,6 +2465,8 @@ struct RigExecBakedProgramImpl {
     /// which sends the generation down the path that decides.
     std::set<SdfPath> execTypedArrayInputs;
     bool anyOverridden = false;
+    /// RigExecBakedProgram::SetPublishWeightFields.
+    bool publishWeightFields = true;
 
     /// Registers \p input so an override can be placed on it, and records
     /// what a notice would have to touch to invalidate what was captured.

@@ -40,6 +40,13 @@ def _RigExecMenu(appController):
     return menus
 
 
+def _Submenu(menu, title):
+    for action in menu.actions():
+        if action.menu() is not None and action.text() == title:
+            return action.menu()
+    return None
+
+
 def _Trigger(menu, title):
     for action in menu.actions():
         if action.text() == title:
@@ -63,9 +70,10 @@ def testUsdviewInputFunction(appController):
            "RigExec -> Control Picker is registered")
     menus = _RigExecMenu(appController)
     _Check("RigExec" in menus, "there is a RigExec menu: %s" % sorted(menus))
-    rigMenu = menus["RigExec"]
+    rigMenu = _Submenu(menus["RigExec"], "Animation Editors")
+    _Check(rigMenu is not None, "RigExec has an Animation Editors submenu")
     _Check("Control Picker" in [a.text() for a in rigMenu.actions()],
-           "the RigExec menu carries it")
+           "RigExec -> Animation Editors carries it")
     window = menus.get("Window")
     if window is not None:
         _Check("Control Picker" not in [a.text() for a in window.actions()],

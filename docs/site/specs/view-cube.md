@@ -6,7 +6,7 @@ Added 2026-09-03.
 The RigExec usdview plugin adds a Maya-style view cube to the
 top-right corner of the viewport: a small labelled cube that shows
 the camera orientation and orbits the camera when clicked.
-`RigExec → View Cube` toggles it; like `Viewport Tools`, the menu
+`RigExec → Viewport → View Cube` toggles it; like `Viewport Tools`, the menu
 item is a toggle rather than a window because the cube lives inside
 the viewport frame, not in a floating panel.
 

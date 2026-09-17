@@ -4,7 +4,7 @@ Design spec `docs/superpowers/specs/2026-09-01-viewport-gizmo-toolbar-design.md`
 Added 2026-09-01.
 
 The RigExec usdview plugin adds a toolbar directly above the viewport with
-an undoable Move / Rotate / Scale manipulator. `RigExec → Viewport Tools`
+an undoable Move / Rotate / Scale manipulator. `RigExec → Viewport → Viewport Tools`
 toggles it; the menu item is a toggle rather than a window because the
 toolbar lives inside the viewport frame, not in a floating panel.
 

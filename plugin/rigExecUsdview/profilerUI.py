@@ -4,7 +4,7 @@
 # Licensed under the terms set forth in the LICENSE.txt file available
 # at the root of this repository.
 #
-"""RigExec -> Profiler: where the open rig's time goes, and on how many
+"""RigExec -> General Editors -> Profiler: where the open rig's time goes, and on how many
 threads.
 
 The panel face of `profilerModel`, which is also the CLI

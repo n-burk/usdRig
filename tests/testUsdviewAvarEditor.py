@@ -120,6 +120,13 @@ def _RigExecMenu(appController):
     return menus
 
 
+def _Submenu(menu, title):
+    for action in menu.actions():
+        if action.menu() is not None and action.text() == title:
+            return action.menu()
+    return None
+
+
 def _Select(appController, path, *more):
     stage = appController._usdviewApi.stage
     prim = stage.GetPrimAtPath(path)
@@ -201,9 +208,10 @@ def testUsdviewInputFunction(appController):
         "RigExec -> Avar Editor command is registered")
     menus = _RigExecMenu(appController)
     _Check("RigExec" in menus, "there is a RigExec menu: %s" % sorted(menus))
-    rigMenu = menus["RigExec"]
+    rigMenu = _Submenu(menus["RigExec"], "General Editors")
+    _Check(rigMenu is not None, "RigExec has a General Editors submenu")
     _Check("Avar Editor" in [a.text() for a in rigMenu.actions()],
-           "RigExec menu has an Avar Editor item")
+           "RigExec -> General Editors has an Avar Editor item")
     window = menus.get("Window")
     if window is not None:
         _Check("Avar Editor" not in [a.text() for a in window.actions()],

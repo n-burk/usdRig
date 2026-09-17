@@ -913,6 +913,8 @@ private:
         RigExecRevisionOp op;
         RigExecRevisionBinding binding;
         RigExecTapId transformTap = -1;
+        /// computeMatrix of binding.transformSpace, or -1 (matrix).
+        RigExecTapId transformSpaceTap = -1;
         /// computeMatrix per binding.influences entry, in that order (skin).
         std::vector<RigExecTapId> influenceTaps;
         RigExecTapId weightTap = -1;

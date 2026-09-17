@@ -598,6 +598,7 @@ RigExecBakedProgram::IsBakeable(const RigExecRigEvaluator &evaluator,
                        r.op == RigExecRevisionOp::CurvenetAdjuster ||
                        r.op == RigExecRevisionOp::EmitGuidePoints ||
                        r.op == RigExecRevisionOp::Ribbon ||
+                       r.op == RigExecRevisionOp::Wire ||
                        r.op == RigExecRevisionOp::VolumeCorrect ||
                        r.op == RigExecRevisionOp::Smooth ||
                        r.op == RigExecRevisionOp::Lattice ||
@@ -1266,6 +1267,12 @@ RigExecBakedProgram::ApplyAvarValueEdits(
                                 patch.animated);
     }
     return true;
+}
+
+void
+RigExecBakedProgram::SetPublishWeightFields(bool publish)
+{
+    _impl->publishWeightFields = publish;
 }
 
 bool

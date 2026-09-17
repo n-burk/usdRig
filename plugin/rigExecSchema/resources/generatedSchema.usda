@@ -1762,19 +1762,31 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
 
 class RigExecFloatMathMover "RigExecFloatMathMover" (
     customData = {
-        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an\r
-    exact float property target (spec section 4.1).\r
+        string userDocBrief = """Statically typed add, multiply, clamp, remap, blend, or curve\r
+    over an exact float property target (spec section 4.1).\r
 \r
     The revision is r = op(incoming), then the common MoverAPI envelope mixes\r
     it back over the incoming value."""
     }
 )
 {
+    float2[] inputs:keys = [] (
+        customData = {
+            string userDocBrief = """(input, output) keys for the curve operation, strictly\r
+        increasing in input."""
+        }
+    )
     float inputs:max = 1
     float inputs:min = 0
+    float2[] inputs:tangents = [] (
+        customData = {
+            string userDocBrief = """Optional (in slope, out slope) per key for the curve\r
+        operation."""
+        }
+    )
     float inputs:value = 0
     uniform token rigExec:operation = "clamp" (
-        allowedTokens = ["add", "multiply", "clamp", "remap", "blend"]
+        allowedTokens = ["add", "multiply", "clamp", "remap", "blend", "curve"]
     )
 }
 
@@ -2870,6 +2882,13 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
+    rel rigExec:transformSpace (
+        customData = {
+            string userDocBrief = """Optional second provider the transform is measured against:\r
+        T = M(transform) * inverse(M(transformSpace)), both read at the same\r
+        phase."""
+        }
+    )
 }
 
 class RigExecSkinMover "RigExecSkinMover" (
@@ -3163,14 +3182,72 @@ class RigExecCurveMover "RigExecCurveMover" (
     }
 )
 {
+    float[] inputs:driverBaseWeights = [] (
+        customData = {
+            string userDocBrief = "wire: per unique control point weight of the base motion."
+        }
+    )
+    float[] inputs:driverWeights = [] (
+        customData = {
+            string userDocBrief = """wire: per unique control point weight of its driver\r
+        transform, or one for all; empty is 1."""
+        }
+    )
+    float inputs:dropoffDistance = 0 (
+        customData = {
+            string userDocBrief = """wire: distance over which a point's pull from the curve\r
+        falls to zero, as 1 - smoothstep(0, dropoffDistance, d) with d the\r
+        point's rest distance from the curve."""
+        }
+    )
     rel rigExec:bindCoordinates
+    rel rigExec:driverBaseTransforms (
+        customData = {
+            string userDocBrief = """wire: an optional base motion applied to the curve AND its\r
+        rest before the driver transforms, as a wire whose base curve rides\r
+        the same deformers as its driver: B = C0 + wb (Mb C0 - C0), then\r
+        C = B + w (M B - B), and the wire deforms by C - B."""
+        }
+    )
+    rel rigExec:driverBaseTransformSpaces (
+        customData = {
+            string userDocBrief = "wire: the spaces of rigExec:driverBaseTransforms."
+        }
+    )
     rel rigExec:driverCurve
     uniform token rigExec:driverCurveReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
     rel rigExec:driverFrames
+    rel rigExec:driverTransforms (
+        customData = {
+            string userDocBrief = """wire: move the driver curve's control points by matrix\r
+        providers instead of reading its points: one provider per unique\r
+        control point, or one for all."""
+        }
+    )
+    rel rigExec:driverTransformSpaces (
+        customData = {
+            string userDocBrief = """wire: the space each driver transform is measured against,\r
+        parallel to rigExec:driverTransforms, or one for all, or none."""
+        }
+    )
     uniform token rigExec:mode = "ribbon" (
-        allowedTokens = ["ribbon", "emitGuidePoints"]
+        allowedTokens = ["ribbon", "emitGuidePoints", "wire"]
+        customData = {
+            string userDocBrief = """ribbon transports points along a ribbon aggregate's frames;\r
+        emitGuidePoints writes its sample positions; wire moves each point by\r
+        the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the\r
+        parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)\r
+        per point from rigExec:bindCoordinates, C the curve's posed control\r
+        points at rigExec:driverCurveReadPhase and C0 its authored ones."""
+        }
+    )
+    uniform token rigExec:transformReadPhase = "base" (
+        allowedTokens = ["base", "final"]
+        customData = {
+            string userDocBrief = "wire: which revision of the driver transforms is read."
+        }
     )
 }
 

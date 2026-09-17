@@ -8,8 +8,9 @@
 # would make the two directories mutually dependent for the sake of one
 # menu line. `findOrCreateMenu("RigExec")` is exactly the seam that makes
 # the separation free: both containers ask for the same menu, usdview
-# hands them the same QMenu, and the item lands under RigExec -> TouchPose
-# whichever container loads first.
+# hands them the same QMenu, and the item lands under
+# RigExec -> Animation Editors -> TouchPose whichever container loads
+# first.
 #
 # The panel is imported lazily inside the callback, as every panel in
 # rigExecUsdview is, so that this module stays importable with no Qt.
@@ -19,6 +20,36 @@ import sys
 
 from pxr import Tf
 from pxr.Usdviewq.plugin import PluginContainer
+
+
+# RigExec -> submenu placement by rank. A copy of
+# rigExecUsdview.AddToRigExecMenu, kept here so this directory does not
+# import that one; the rank table lives beside the original.
+_SUBMENU_RANKS = {"Viewport": 10, "General Editors": 20,
+                  "Animation Editors": 30}
+_MENU_RANK = "rigExecMenuRank"
+
+
+def _PlaceByRank(qMenu, action, rank):
+    action.setProperty(_MENU_RANK, rank)
+    for other in qMenu.actions():
+        if other == action:
+            return
+        otherRank = other.property(_MENU_RANK)
+        if otherRank is not None and otherRank > rank:
+            qMenu.removeAction(action)
+            qMenu.insertAction(other, action)
+            return
+
+
+def _AddToRigExecMenu(plugUIBuilder, submenu, commandPlugin, rank):
+    menu = plugUIBuilder.findOrCreateMenu("RigExec").findOrCreateSubmenu(
+        submenu)
+    action = menu.addItem(commandPlugin)
+    qMenu = action.parent()
+    _PlaceByRank(qMenu, action, rank)
+    _PlaceByRank(qMenu.parent(), qMenu.menuAction(), _SUBMENU_RANKS[submenu])
+    return action
 
 
 # usdview's plugin loader does not retain a container that registers no
@@ -49,8 +80,8 @@ class TouchPoseContainer(PluginContainer):
             lambda api: self._OpenPanel(api))
 
     def configureView(self, plugRegistry, plugUIBuilder):
-        menu = plugUIBuilder.findOrCreateMenu("RigExec")
-        menu.addItem(self._touchPose)
+        _AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                          self._touchPose, 40)
 
     def _OpenPanel(self, usdviewApi=None):
         try:

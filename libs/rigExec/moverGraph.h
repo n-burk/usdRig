@@ -65,6 +65,9 @@ enum class RigExecRevisionOp {
     Lattice,
     SurfaceProject,
     Ribbon,
+    /// RigExecCurveMover "wire": points follow a NURBS driver curve's
+    /// displacement at their bind parameter (RigExecApplyWire).
+    Wire,
     EmitGuidePoints,
     Curvenet,
     CurvenetAdjuster,
@@ -294,6 +297,9 @@ public:
         _values[path] = value;
     }
 
+    /// Forgets \p path, so a read of it goes back to the stage.
+    void ClearProperty(const SdfPath &path) { _values.erase(path); }
+
     /// The resolved value for \p path, or null to read the stage.
     const VtValue *Find(const SdfPath &path) const {
         const auto it = _values.find(path);
@@ -316,11 +322,32 @@ public:
     /// authored attribute connection is followed, otherwise the
     /// attribute's own value is read. Compile validates connection
     /// cardinality/type/cycles for schema inputs that require one scalar.
+    /// The float cast GetAttribute applies to a double source; false for
+    /// every other type, which never reaches it.
+    template <class T>
+    static bool _CoerceFromDouble(double, T *) { return false; }
+    static bool _CoerceFromDouble(double value, float *out) {
+        *out = static_cast<float>(value);
+        return true;
+    }
+
     template <class T>
     bool GetAttribute(
         const UsdAttribute &attribute, UsdTimeCode time, T *out) const {
         if (!out) {
             return false;
+        }
+        // A FLOAT read of a DOUBLE attribute is coerced. Every avar is a
+        // double while the math movers compute in float, so a float input
+        // connected to (or standing on) a control's avar reads its value
+        // cast, instead of failing and falling back to a default.
+        if (std::is_same<T, float>::value && attribute &&
+            attribute.GetTypeName() == SdfValueTypeNames->Double) {
+            double wide = 0.0;
+            if (!GetAttribute<double>(attribute, time, &wide)) {
+                return false;
+            }
+            return _CoerceFromDouble(wide, out);
         }
         // An input that cannot change until the stage does answers from the
         // cache -- but only after the in-memory value for this exact property
@@ -352,6 +379,15 @@ public:
         while (a && visiting.insert(a.GetPath()).second) {
             if (Get(a.GetPath(), out)) {
                 return true;
+            }
+            // A float connection chain may end on a double (an avar).
+            if (std::is_same<T, float>::value &&
+                a.GetTypeName() == SdfValueTypeNames->Double) {
+                double wide = 0.0;
+                if (!GetAttribute<double>(a, time, &wide)) {
+                    return false;
+                }
+                return _CoerceFromDouble(wide, out);
             }
             fallback.push_back(a);
             SdfPathVector connections;
@@ -476,6 +512,9 @@ struct RigExecRevisionBinding {
     SdfPath moverPath;        ///< the authored mover
     SdfPath target;           ///< canonical exact write target
     SdfPath transform;        ///< computeMatrix provider (matrix)
+    /// Optional provider the transform is measured against (matrix):
+    /// T = M(transform) * inverse(M(transformSpace)).
+    SdfPath transformSpace;
     /// Ordered computeMatrix providers (skin): rigExec:influences, which
     /// rigExec:jointIndices index. Every entry shares transformPhase.
     std::vector<SdfPath> influences;
@@ -485,7 +524,19 @@ struct RigExecRevisionBinding {
     SdfPath topologyIndices;  ///< faceVertexIndices (smooth/surface)
     SdfPath cagePoints;       ///< lattice cage points
     SdfPath surfacePoints;    ///< driver surface points
-    SdfPath bindCoords;       ///< ribbon bind coordinates
+    SdfPath bindCoords;       ///< ribbon / wire bind coordinates
+    SdfPath driverCurvePoints; ///< wire: driver NURBS curve points
+    SdfPath driverCurveOrder;  ///< wire: that curve's order
+    SdfPath driverCurveKnots;  ///< wire: that curve's knots
+    /// wire: how many of `influences` are rigExec:driverTransforms; the
+    /// rest are rigExec:driverTransformSpaces. Zero when the curve's own
+    /// points drive the wire.
+    int driverTransformCount = 0;
+    /// wire: how many of `influences` after the transforms are their
+    /// spaces, and how many after those are rigExec:driverBaseTransforms;
+    /// the rest are rigExec:driverBaseTransformSpaces.
+    int driverSpaceCount = 0;
+    int driverBaseTransformCount = 0;
     SdfPath driverFrames;     ///< aggregate frame provider
     SdfPath widths;           ///< authored widths (extent maintenance)
     SdfPath curvenet;         ///< RigExecCurvenet prim (Profile Mover)
@@ -768,6 +819,32 @@ RigExecMoverStatus RigExecStatusForParameters(
 ///
 /// Shared by the mover-graph revision node and by the baked program, which
 /// runs the same operation with no VdfNetwork around it.
+/// M(transform) * inverse(M(space)) for rigExec:transformSpace, with the
+/// projective column set exactly: the product of an affine matrix and an
+/// affine inverse is affine, but not to the last bit, and the matrix mover
+/// refuses a transform whose last column is not exactly (0, 0, 0, 1).
+inline GfMatrix4d
+RigExecMeasureInSpace(const GfMatrix4d &transform, const GfMatrix4d &space)
+{
+    GfMatrix4d m = transform * space.GetInverse();
+    m[0][3] = 0.0;
+    m[1][3] = 0.0;
+    m[2][3] = 0.0;
+    m[3][3] = 1.0;
+    return m;
+}
+
+/// Whether a wire applies its envelope itself: a valid sparse field with a
+/// zero default, where only the named points are worth evaluating.
+inline bool
+RigExecWireTakesSparseEnvelope(const RigExecWeightPacket &w)
+{
+    return w.valid && w.representation == "sparse" &&
+           w.defaultWeight == 0.0f && w.indices.size() == w.values.size() &&
+           (w.rangePolicy.IsEmpty() || w.rangePolicy == "strict" ||
+            w.rangePolicy == "clamp");
+}
+
 bool RigExecApplyMatrixKernel(const RigExecMoverParameters &p,
                               std::vector<GfVec3f> *pts);
 

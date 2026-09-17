@@ -9,7 +9,7 @@
     rig it annotates. `Biped_psd.usda` carries the RigExecPoseInterpolator
     prims that compute each corrective's weight, `Biped_shapes.usdc` the 161
     UsdSkelBlendShape targets and the mover that applies them, and
-    `Biped_face.usda` the face -- controls, the jaw compression and the
+    `Biped_eyes.usda` the eyes, over the face; `Biped_face.usda` the face -- controls, the jaw compression and the
     eye look-ats, additive and droppable -- and `Biped.usda` the rig itself. The middle two are useless apart: the
     interpolators publish weights nothing reads, and the shapes wait for
     weights nobody writes."""
@@ -19,7 +19,7 @@
     subLayers = [
         @./Biped_touch_regions.usda@,
         @./Biped_psd.usda@,
-        @./Biped_face.usda@,
+        @./Biped_face_rig.usda@,
         @./Biped_shapes.usdc@,
         @./Biped.usda@
     ]

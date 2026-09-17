@@ -66,9 +66,12 @@ def testUsdviewInputFunction(appController):
     menus = [c for c in appController._mainWindow.menuBar().children()
              if isinstance(c, QtWidgets.QMenu)
              and str(c.title()).replace("&", "") == "RigExec"]
+    menus = [a.menu() for a in (menus[0].actions() if len(menus) == 1
+                                else [])
+             if a.menu() is not None and a.text() == "General Editors"]
     _Check(len(menus) == 1 and "Layer Opinions" in
            [a.text() for a in menus[0].actions()],
-           "RigExec menu has no Layer Opinions item")
+           "RigExec -> General Editors has no Layer Opinions item")
 
     # --- 2. it builds from usdview's selection --------------------------
     prim = stage.GetPrimAtPath(IK)

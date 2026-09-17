@@ -215,6 +215,9 @@ Same(const RigExecMoverParameters &a, const RigExecMoverParameters &b)
            Same(a.auxPointsB, b.auxPointsB) &&
            Same(a.restPoints, b.restPoints) && a.divisions == b.divisions &&
            Same(a.bindCoords, b.bindCoords) && Same(a.frames, b.frames) &&
+           a.wireBindCoords == b.wireBindCoords &&
+           a.curveOrder == b.curveOrder && a.curveKnots == b.curveKnots &&
+           a.dropoffDistance == b.dropoffDistance &&
            Same(a.widths, b.widths) &&
            Same(a.skinTransforms, b.skinTransforms) &&
            a.skinIndices == b.skinIndices &&

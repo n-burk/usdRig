@@ -47,16 +47,16 @@ open, and a second launch will fail its build step. Close the window first.
 
 Both live under the **RigExec** menu (deliberately not Window).
 
-- **RigExec → Avar Editor** -- select a control, get its channels as spin
+- **RigExec → General Editors → Avar Editor** -- select a control, get its channels as spin
   boxes and sliders, live. Grouped Translate (cm) / Rotate (deg) / Scale /
   Custom / Other. Channels are discovered by namespace, so a rig's own
   dials show up automatically: `avars:ikfk` on the param nodes, and the
   `foot:roll` / `foot:bank` / `foot:toePlantAngle` dials on `bank_?`.
   A slider drag is one undo entry.
-- **RigExec → Execution Stack** -- every solver and mover in evaluation
+- **RigExec → General Editors → Execution Stack** -- every solver and mover in evaluation
   order, with filters. Use it when something does not move and you want to
   know what wrote it last.
-- **RigExec → Viewport Tools** -- conventional move/rotate/scale gizmos that
+- **RigExec → Viewport → Viewport Tools** -- conventional move/rotate/scale gizmos that
   write avars directly on controls and joints, with a Hydra preview
   mid-drag.
 
@@ -228,7 +228,7 @@ clavicle/pelvis control instead, so the hand or foot rides the girdle.
 
 ## 2b. Measuring it
 
-**RigExec -> Profiler** in usdview, or the same measurement from the
+**RigExec -> General Editors -> Profiler** in usdview, or the same measurement from the
 command line:
 
     bin\run_probe.bat tools\rigexec_schedule.py ^

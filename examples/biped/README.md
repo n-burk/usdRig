@@ -18,7 +18,12 @@ below.
 | `Biped_layered_center.usda` | spine, neck, hips, chest, the mesh and the materials |
 | `Biped_layered_left.usda` | everything on the left side |
 | `Biped_layered_right.usda` | the right side, as references onto the left layer plus the ~336 attributes that genuinely differ |
-| `Biped_face.usda` | the face, as one additive layer over the rig: sublayered by `Biped_stack.usda`, `Biped_all.usda` and `Biped_everything.usda`, and NOT by `Biped_layered.usda` |
+| `Biped_face_rig.usda` | the face rig as one branch of the tree, sublayered by `Biped_stack.usda`, `Biped_all.usda` and `Biped_everything.usda` and NOT by `Biped_layered.usda`. It sublayers the parts below, strongest first |
+| `Biped_cheeks.usda` | the cluster controls around the cheeks, nose and ears |
+| `Biped_brows.usda` | the brows' cluster controls: the corrugators |
+| `Biped_mouth.usda` | the mouth, over the face and the eyes |
+| `Biped_eyes.usda` | the eyes, over the face |
+| `Biped_face.usda` | the face's skeleton controls, over the rig |
 | `Biped.usda` | the same rig flat, in one file, if you want to read it |
 | `Biped_anim.usda` | an 8-frame animated overlay on `Biped.usda`, for timing and for testing the animated evaluate path |
 
@@ -45,9 +50,14 @@ controls that follow the arm in IK as well as FK, twist helpers, and
 
 The face arrives as its own sublayer: the jaw group, the jaw compression
 that couples the mid-face and the nose to it, the nose's blend between
-upper and lower face, and the eye look-ats. Open `Biped_stack.usda`,
-`Biped_all.usda` or `Biped_everything.usda` to get it; `Biped_layered.usda`
-is the body rig alone.
+upper and lower face, and the eye look-ats. The eyes arrive as one more
+sublayer over it: the lids and the blink, the socket stretch and lift, the
+lids following the eyes, and the lid and socket curves with a tweak control
+on every point of each. The mouth is one more: mouthMain, the lip
+clusters, the mouth corners driving lip main, and the lip curve with a
+tweak control on every point. Open `Biped_stack.usda`, `Biped_all.usda` or
+`Biped_everything.usda` to get all three; `Biped_layered.usda` is the body rig
+alone.
 
 ## Driving it
 
@@ -79,7 +89,25 @@ starting with:
 - `lookAt_ctl`, the wide plate in front of the eyes. It is top-level,
   beside `hips_ctl`, so a gaze holds while the head turns. `lookRot_ctl`
   sits between the eyes and turns both together; `eye_l_ctl` and
-  `eye_r_ctl` sit on the eyes and turn one each
+  `eye_r_ctl` sit on the eyes and turn one each. `lookRot_ctl`'s `drag`
+  (0 to 1) is how much the lids follow the eyes
+- `lidUpper_?_ctl` / `lidLower_?_ctl`, in front of each eye. Move them up
+  and down to blink and sideways to shift the lid; the lower lid never
+  closes past the upper. `sy` on the upper lid stretches the socket and
+  `socketLift` lifts it
+- the tweak controls along each lid (`lid_up_?`, `lid_low_?`, the two
+  corners) and around each socket (`socket_?_0` to `11`, `socketLine_*`).
+  They ride the blink and the socket, and move the skin only by what you
+  do to them
+- `mouth_corner_?_ctl` at the corners of the mouth. Moving one drives the
+  whole lip line on its side (lip main); `cornerPinch` presses the lips
+  together at the corner
+- `mouthMain_ctl` moves the whole mouth; `lip_upper_ctl` / `lip_lower_ctl`
+  move and turn each lip, with `lip_upper_center_ctl` /
+  `lip_lower_center_ctl` riding them and `lip_upper_?_ctl` /
+  `lip_lower_?_ctl` at the sides
+- the lip tweak controls (`lip_center_up`, `lip_up_?`, `lip_corner_?`,
+  `lip_low_?`, `lip_center_low`) ride lip main and shape the lips locally
 
 **RigExec → Viewport Tools** gives move/rotate/scale gizmos that write
 avars directly, if you would rather drag than type.
@@ -88,12 +116,12 @@ avars directly, if you would rather drag than type.
 
 `Biped.usda` authors `uniform bool rigExec:baked = true` on its
 `RigExecRoot` (and so does `Biped_layered_center.usda`, which is where the
-layered variants define theirs), so opening it — here, or through
-`rigExecPose` with no `--mode` — evaluates it through the BAKED PROGRAM: the
+layered variants define theirs), so opening it -- here, or through
+`rigExecPose` with no `--mode` -- evaluates it through the BAKED PROGRAM: the
 compiled epoch as a graph of steps over dense slots, with no exec round trip
 per frame. It is a request and not an assertion. Every value published is the
-same either way — that is proven exactly, frame by frame, by the parity
-entries — so what the attribute changes is how fast the character poses, not
+same either way -- that is proven exactly, frame by frame, by the parity
+entries -- so what the attribute changes is how fast the character poses, not
 how it poses, and a generation the program cannot answer falls back to the
 dynamic path and says so on the pose. Delete the line, or pass an explicit
 `--mode dynamic`, to drive it the other way.
@@ -180,7 +208,7 @@ move across a stroke.
 | file | what |
 |---|---|
 | `Biped_all.usda` | **the one to open** -- the touch regions over the layered rig, so TouchPose and the Control Picker both work on it |
-| `Biped_touch.usda` | the same regions over the flat `Biped.usda` |
+| `Biped_touch.usda` | the same regions over the face rig and the flat `Biped.usda` |
 | `Biped_touch_regions.usda` | **TouchPose alone** -- 98 regions on a `/Biped/TouchPose` scope and nothing else. Read it, validate it, or stack it under another composition. Opening it on its own shows nothing, because it is `over`s with no geometry under them. |
 
 The regions come from the studio's `touch_sets.touch`, which ships 247
@@ -188,7 +216,8 @@ painted sets. 98 are written here: a set naming a control this port does
 not have yet is **skipped rather than authored**, so nothing downstream
 pays to test, highlight and then refuse a region it can never act on. The
 skipped count stays in the import report, so the naming gap is still
-visible -- it is overwhelmingly the face rig, 56 eyelid sets among it. What
+visible -- it is overwhelmingly the cheeks, brows and teeth now that the
+eyelid, socket, lip and mouth sets bind to their controls. What
 is written covers 16,739 of `body_geo`'s 26,274 faces (64%).
 
 They are **not** `GeomSubset`s under the mesh, which is the obvious place
