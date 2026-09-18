@@ -2,6 +2,7 @@
 // RigExec tap set: USD backend implementation over ExecUsdSystem.
 //
 #include "tapSet.h"
+#include "debugCodes.h"
 
 #include "pxr/exec/exec/request.h"
 #include "pxr/exec/execUsd/cacheView.h"
@@ -13,6 +14,8 @@
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/base/tf/notice.h"
+#include "pxr/base/tf/registryManager.h"
+#include "pxr/base/tf/stopwatch.h"
 #include "pxr/base/tf/weakBase.h"
 
 #include <map>
@@ -20,6 +23,41 @@
 #include <set>
 
 namespace rigExec {
+
+TF_REGISTRY_FUNCTION(TfDebug)
+{
+    TF_DEBUG_ENVIRONMENT_SYMBOL(
+        RIGEXEC_TAP_TIMING,
+        "RigExecTapSet: time spent in ExecUsdSystem BuildRequest, "
+        "PrepareRequest and Compute, and the tap count per request.");
+}
+
+// A scoped stopwatch that reports only when the debug code is on. The
+// TF_DEBUG check is hoisted to the constructor so a disabled build pays
+// one array lookup per scope, not a stopwatch.
+namespace {
+class _DebugTimer {
+public:
+    explicit _DebugTimer(const char *label)
+        : _label(label), _on(TfDebug::IsEnabled(RIGEXEC_TAP_TIMING)) {
+        if (_on) _watch.Start();
+    }
+    ~_DebugTimer() {
+        if (!_on) return;
+        _watch.Stop();
+        // GetSeconds, not GetMilliseconds: the latter returns an int64 count
+        // of WHOLE milliseconds, so every sub-millisecond scope reported
+        // 0.000 ms.
+        TF_DEBUG(RIGEXEC_TAP_TIMING).Msg(
+            "[rigExec] %-22s %9.3f ms\n",
+            _label, _watch.GetSeconds() * 1000.0);
+    }
+private:
+    const char *_label;
+    bool _on;
+    TfStopwatch _watch;
+};
+}  // namespace
 
 // Requests share the stock compiler and value cache for a stage. Replacing a
 // tap list therefore changes requests, not the underlying execution network.
@@ -151,6 +189,11 @@ RigExecTapSet::Prepare()
         return true;
     }
 
+    TF_DEBUG(RIGEXEC_TAP_TIMING).Msg(
+        "[rigExec] Prepare() call #%zu, taps=%zu\n",
+        ++_prepareCount, _addresses.size());
+    _DebugTimer prepareTimer("Prepare total");
+
     std::vector<ExecUsdValueKey> keys;
     keys.reserve(_addresses.size());
     for (size_t i = 0; i < _addresses.size(); ++i) {
@@ -169,6 +212,8 @@ RigExecTapSet::Prepare()
     }
 
     ExecUsdSystem *const system = GetSystem();
+    {
+    _DebugTimer buildTimer("BuildRequest");
     _request = std::make_unique<ExecUsdRequest>(system->BuildRequest(
         std::move(keys),
         [this](const ExecRequestIndexSet &, const EfTimeInterval &) {
@@ -177,15 +222,39 @@ RigExecTapSet::Prepare()
             _dirty = true;
         },
         [this](const ExecRequestIndexSet &) {
+            // A time change invalidates values, not the request: the compiled
+            // network and its schedule are time-independent. Clearing
+            // _prepared here would rebuild and re-schedule every request on
+            // every animated frame, which is the whole cost of scrubbing a
+            // rig that has time samples.
             _dirty = true;
-            _prepared = false;
         }));
+    }
     if (!_request->IsValid()) {
         return false;
     }
-    system->PrepareRequest(*_request);
+    {
+        _DebugTimer prepareRequestTimer("PrepareRequest");
+        system->PrepareRequest(*_request);
+    }
     _prepared = true;
     return true;
+}
+
+void
+RigExecTapSet::Warm(UsdTimeCode time)
+{
+    if (!_prepared || (_request && !_request->IsValid())) {
+        Prepare();
+    }
+    if (_addresses.empty() || !_request || !_request->IsValid()) {
+        return;
+    }
+    ExecUsdSystem *const system = GetSystem();
+    system->ChangeTime(time);
+    // The cache view is deliberately dropped: the point is the computation it
+    // leaves behind in the shared executor, not the values.
+    system->Compute(*_request);
 }
 
 RigExecSnapshot
@@ -198,7 +267,14 @@ RigExecSnapshot
 RigExecTapSet::Evaluate(
     UsdTimeCode time, const std::vector<RigExecValueOverride> &overrides)
 {
-    if (!_prepared) {
+    // Rebuild on expiry as well as on an explicit tap-list change. A request
+    // can be invalidated under us by a structural edit -- a prim deactivated
+    // and reactivated, a variant switched away and back, a payload unloaded
+    // and reloaded, a delete undone -- and nothing else would ever rebuild it,
+    // leaving the tap set returning nothing for the rest of the session.
+    if (!_prepared || (_request && !_request->IsValid())) {
+        TF_DEBUG(RIGEXEC_TAP_TIMING).Msg(
+            "[rigExec] Evaluate: request was NOT prepared -- re-preparing\n");
         Prepare();
     }
 
@@ -217,7 +293,10 @@ RigExecTapSet::Evaluate(
     }
 
     ExecUsdSystem *const system = GetSystem();
-    system->ChangeTime(time);
+    {
+        _DebugTimer changeTimeTimer("ChangeTime");
+        system->ChangeTime(time);
+    }
 
     ExecUsdValueOverrideVector execOverrides;
     execOverrides.reserve(overrides.size());
@@ -240,6 +319,8 @@ RigExecTapSet::Evaluate(
                                  o.value});
     }
 
+    _DebugTimer computeTimer(execOverrides.empty()
+                             ? "Compute" : "ComputeWithOverrides");
     ExecUsdCacheView view = execOverrides.empty()
         ? system->Compute(*_request)
         : system->ComputeWithOverrides(*_request, std::move(execOverrides));

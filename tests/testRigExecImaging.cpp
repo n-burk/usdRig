@@ -57,6 +57,8 @@
 #include "pxr/usd/usdGeom/xformable.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdUtils/stageCache.h"
+#include "pxr/usdImaging/usdImaging/sceneIndices.h"
+#include "pxr/usdImaging/usdImaging/stageSceneIndex.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1421,6 +1423,91 @@ TestControlGuides(const std::string &examplesDir)
         }
     }
 
+    // ---- Opacity through a CONNECTION: an IK/FK switch fading the
+    // inactive control set. UsdAttribute::Get never follows a connection,
+    // so a bridge reading the attribute plainly drew the local value and a
+    // wired rig looked wired while nothing faded.
+    {
+        auto readOpacity = [&](const SdfPath &control) {
+            HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(
+                results->GetPrim(guidePath(control)).dataSource);
+            HdSampledDataSourceHandle v =
+                primvars.GetPrimvar(HdTokens->displayOpacity)
+                    .GetPrimvarValue();
+            const VtValue held = v ? v->GetValue(0.0f) : VtValue();
+            if (!held.IsHolding<VtFloatArray>() ||
+                held.UncheckedGet<VtFloatArray>().size() != 1) {
+                return -1.0f;
+            }
+            return held.UncheckedGet<VtFloatArray>()[0];
+        };
+        UsdPrim pole = stage->GetPrimAtPath(elbowPole);
+        const UsdPrim shoulder = stage->GetPrimAtPath(shoulderFk);
+        const UsdPrim elbow = stage->GetPrimAtPath(elbowFk);
+        // A float dial, as the biped's avars:ikfk is, and a double twin,
+        // as every schema avar is: both have to drive.
+        const UsdAttribute dial = pole.CreateAttribute(
+            TfToken("dial"), SdfValueTypeNames->Float, /* custom = */ true);
+        const UsdAttribute dialD = pole.CreateAttribute(
+            TfToken("dialD"), SdfValueTypeNames->Double, /* custom = */ true);
+        CHECK(dial.Set(0.3f) && dialD.Set(0.6));
+        const UsdAttribute shoulderOpacity =
+            shoulder.GetAttribute(TfToken("guide:displayOpacity"));
+        const UsdAttribute elbowOpacity =
+            elbow.GetAttribute(TfToken("guide:displayOpacity"));
+        CHECK(shoulderOpacity &&
+              shoulderOpacity.SetConnections({dial.GetPath()}));
+        CHECK(elbowOpacity && elbowOpacity.SetConnections({dialD.GetPath()}));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.3f) < 1e-6f);
+        CHECK(std::abs(readOpacity(elbowFk) - 0.6f) < 1e-6f);
+
+        // Invert: the FK side of one switch draws the complement.
+        const UsdAttribute invert =
+            shoulder.GetAttribute(TfToken("guide:displayOpacityInvert"));
+        CHECK(invert && invert.Set(true));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.7f) < 1e-6f);
+
+        // The floor: a dial at its end stop must not make the control
+        // vanish. The schema default first, then an authored one, then
+        // zero, which is how a true fade-out is asked for.
+        CHECK(dial.Set(1.0f));
+        observer.dirtied.clear();
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.15f) < 1e-6f);
+        // ...and an edit on the SOURCE prim dirtied the dependent guide,
+        // which hangs off a different prim entirely.
+        CHECK(std::find(observer.dirtied.begin(), observer.dirtied.end(),
+                        guidePath(shoulderFk)) != observer.dirtied.end());
+        const UsdAttribute floorAttr =
+            shoulder.GetAttribute(TfToken("guide:displayOpacityMin"));
+        CHECK(floorAttr && floorAttr.Set(0.4f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.4f) < 1e-6f);
+        CHECK(floorAttr.Set(0.0f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk)) < 1e-6f);
+        // An out-of-range source clamps (inverted: 1 - (-2) = 3 -> 1).
+        CHECK(dial.Set(-2.0f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 1.0f) < 1e-6f);
+
+        // Disconnected, the local value draws again, invert and floor
+        // ignored: an unconnected attribute means exactly what it says.
+        CHECK(shoulderOpacity.ClearConnections() &&
+              elbowOpacity.ClearConnections());
+        CHECK(shoulderOpacity.Set(0.9f));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+        CHECK(std::abs(readOpacity(shoulderFk) - 0.9f) < 1e-6f);
+        CHECK(std::abs(readOpacity(elbowFk) - 1.0f) < 1e-6f);
+        // Put the fixture back for the checks that follow.
+        CHECK(invert.Clear() && floorAttr.Clear() && shoulderOpacity.Clear());
+        CHECK(pole.RemoveProperty(TfToken("dial")) &&
+              pole.RemoveProperty(TfToken("dialD")));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode(1001)));
+    }
+
     // The guide sits at the control's posed frame, in ASSET space: nothing
     // upstream places /Shot/HeroArm here, so the asset root resolves to
     // identity and ShoulderFK's rest translate is the whole transform.
@@ -1831,6 +1918,31 @@ TestStandaloneControlGuide()
     CHECK(published->second.controlGuideShape == TfToken("circle"));
     CHECK(published->second.controlGuideDrawMode == TfToken("wire"));
     CHECK(published->second.controlGuideScale == GfVec3d(1.0));
+
+    // guide:offset moves the drawn shape in the control's local frame and
+    // leaves the control itself where it is.
+    {
+        const GfMatrix4d placement = published->second.controlGuideFrame;
+        const GfMatrix4d pivot = published->second.controlFrame;
+        const GfVec3d offset(1.0, 2.0, 3.0);
+        UsdAttribute attr = controlPrim.CreateAttribute(
+            TfToken("guide:offset"), SdfValueTypeNames->Double3);
+        CHECK(attr && attr.Set(offset));
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+        const RigExecImagingSnapshotConstPtr moved = bridge.GetStore()->Get();
+        const auto m = moved ? moved->prims.find(control)
+                             : snapshot->prims.end();
+        CHECK(moved && m != moved->prims.end());
+        if (moved && m != moved->prims.end()) {
+            const GfMatrix4d want =
+                GfMatrix4d(1.0).SetTranslate(offset) * placement;
+            CHECK(GfIsClose(m->second.controlGuideFrame, want, 1e-9));
+            CHECK(!GfIsClose(m->second.controlGuideFrame, placement, 1e-6));
+            CHECK(GfIsClose(m->second.controlFrame, pivot, 1e-12));
+        }
+        CHECK(attr.Clear());
+        CHECK(bridge.EvaluateAndPublish(UsdTimeCode::Default()));
+    }
 
     // The live guide gets its size from the evaluated frame, not a second raw
     // read of the avars. Authored guide scale remains a positive shape-size
@@ -4085,6 +4197,20 @@ _SchemaResourceDir(const std::string &examplesDir)
 #endif
 }
 
+// The generated imaging plugInfo, which carries the rig adapter's keyless
+// registration (it has no source-tree fallback: the checked-in file is a
+// template with an unexpanded library filename). Empty when the build did
+// not provide one, in which case the live-evaluation test skips itself.
+static std::string
+_ImagingResourceDir()
+{
+#ifdef RIGEXEC_IMAGING_RESOURCE_DIR
+    return TfAbsPath(RIGEXEC_IMAGING_RESOURCE_DIR);
+#else
+    return std::string();
+#endif
+}
+
 // Transform-authority validation (host-durability redesign): the compiler
 // warns about the two things that leave a provider's computed extent
 // placing its guide somewhere the rig is not, without failing a compile
@@ -4652,6 +4778,113 @@ TestXformPreviewDelta()
     chain.results->RemoveObserver(HdSceneIndexObserverPtr(&observer));
 }
 
+// Live evaluation through the stage scene index's own clock -- the usdrecord
+// path (docs/specs/imaging-datasource-redesign.md §3.2). No explicit
+// activation anywhere in this test: the rig adapter notes the root during
+// populate, the results index's _PrimsAdded forces the activation, and every
+// SetTime after that re-evaluates through the rigExec/time trigger.
+static void
+TestSetTimeDrivenEvaluation(const std::string &examplesDir)
+{
+    if (_ImagingResourceDir().empty()) {
+        std::printf("  (no imaging plugInfo; skipping live-evaluation test)\n");
+        return;
+    }
+    const std::string path = examplesDir + "/10_AimXformTurret.usda";
+    UsdStageRefPtr stage = UsdStage::Open(path);
+    CHECK(stage != nullptr);
+    if (!stage) {
+        return;
+    }
+
+    SdfPath rigPath;
+    for (const UsdPrim &prim : stage->Traverse()) {
+        if (prim.GetTypeName() == TfToken("RigExecRoot")) {
+            rigPath = prim.GetPath();
+        }
+    }
+    CHECK(!rigPath.IsEmpty());
+    if (rigPath.IsEmpty()) {
+        return;
+    }
+
+    // Isolated from whatever earlier tests published: the store is cleared,
+    // and the per-session evaluation count below starts from each new
+    // session's own zero, so earlier publications cannot move these asserts.
+    RigExecImaging_Deactivate();
+
+    // The REAL chain, exactly as usdview/usdrecord build it: the RigExec
+    // scene index plugin inserts itself, and the rig adapter discovers the
+    // root. Nothing here activates explicitly.
+    UsdImagingCreateSceneIndicesInfo info;
+    info.stage = stage;
+    const UsdImagingSceneIndices sceneIndices =
+        UsdImagingCreateSceneIndices(info);
+    const HdSceneIndexBaseRefPtr terminal = sceneIndices.finalSceneIndex;
+    CHECK(terminal != nullptr);
+    if (!terminal) {
+        return;
+    }
+
+    // Populate alone activated the rig and evaluated it exactly once: one
+    // generation, no pulls, no SetTime.
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    const long long genPopulate = RigExecImaging_GetGeneration();
+    CHECK(genPopulate > 0);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == 1);
+
+    const SdfPath turret("/TurretAsset/Geom/Turret");
+    auto worldOf = [&](const SdfPath &p) {
+        HdXformSchema xf = HdXformSchema::GetFromParent(
+            terminal->GetPrim(p).dataSource);
+        return xf && xf.GetMatrix() ? xf.GetMatrix()->GetTypedValue(0.0f)
+                                   : GfMatrix4d(1.0);
+    };
+    _RecordingObserver observer;
+    terminal->AddObserver(HdSceneIndexObserverPtr(&observer));
+
+    // SetTime alone drives one fresh evaluated generation per frame...
+    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(1001));
+    CHECK(RigExecImaging_GetGeneration() == genPopulate + 1);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == 2);
+    const GfMatrix4d at1001 = worldOf(turret);
+    observer.dirtied.clear();
+    observer.dirtiedLocators.clear();
+    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(1024));
+    CHECK(RigExecImaging_GetGeneration() == genPopulate + 2);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == 3);
+    const GfMatrix4d at1024 = worldOf(turret);
+    CHECK(at1001 != at1024);
+
+    // ...announced through dirtied notices, not just visible to pulls (a
+    // pull-only test would pass on a frozen viewport).
+    bool sawTurretDirty = false;
+    for (const SdfPath &p : observer.dirtied) {
+        if (p == turret) {
+            sawTurretDirty = true;
+        }
+    }
+    CHECK(sawTurretDirty);
+
+    // ...and identical to the explicit path: the same frames driven through
+    // the C entry point publish the same values, and re-driving an already
+    // published frame is free through the redundant-call guard.
+    CHECK(RigExecImaging_SetTime(1001.0) == 0);
+    CHECK(worldOf(turret) == at1001);
+    CHECK(RigExecImaging_SetTime(1024.0) == 0);
+    CHECK(worldOf(turret) == at1024);
+    const long long genExplicit = RigExecImaging_GetGeneration();
+    const size_t countExplicit =
+        registry.GetSessionEvaluationCount(rigPath);
+    sceneIndices.stageSceneIndex->SetTime(UsdTimeCode(1024));
+    CHECK(RigExecImaging_GetGeneration() == genExplicit);
+    CHECK(registry.GetSessionEvaluationCount(rigPath) == countExplicit);
+    CHECK(worldOf(turret) == at1024);
+
+    terminal->RemoveObserver(HdSceneIndexObserverPtr(&observer));
+    RigExecImaging_Deactivate();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4664,6 +4897,18 @@ main(int argc, char **argv)
     if (PlugRegistry::GetInstance().RegisterPlugins(resources).empty()) {
         std::printf("FATAL: no schema plugin found at %s\n",
                     resources.c_str());
+        return 2;
+    }
+    // The rig adapter's keyless registration, before any test builds a
+    // UsdImaging chain: the adapter registry reads Plug metadata once, on
+    // first use. Skipped (with the test that needs it) when the build did
+    // not provide the generated plugInfo.
+    const std::string imagingResources = _ImagingResourceDir();
+    if (!imagingResources.empty() &&
+        PlugRegistry::GetInstance().RegisterPlugins(
+            imagingResources).empty()) {
+        std::printf("FATAL: no imaging plugin found at %s\n",
+                    imagingResources.c_str());
         return 2;
     }
 
@@ -4705,6 +4950,9 @@ main(int argc, char **argv)
     TestExtentIsPureFunctionOfStageAndTime(examplesDir);
     TestPurposeScopedBounds(examplesDir);
     TestAllPurposeRenderTags(examplesDir);
+    // Last: it drives the real UsdImaging chain and deactivates on the way
+    // out, leaving the process-global registry cleared.
+    TestSetTimeDrivenEvaluation(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

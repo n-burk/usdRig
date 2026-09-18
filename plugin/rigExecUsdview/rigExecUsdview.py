@@ -106,6 +106,59 @@ def _LoadRigExecImaging():
     return lib
 
 
+# The RigExec menu layout. Items sit at the top level or in one of these
+# submenus, and every entry carries a rank so that the order holds no
+# matter which plugin container's configureView runs first: usdview's
+# PluginMenu only appends, and plugin/touchPose and plugin/shapeEditor add
+# their items to the same submenus from their own containers. Those two
+# carry a copy of this helper rather than importing it, so the directories
+# stay independent; keep the ranks in step.
+#
+#   Reactivate RigExec Evaluation   0
+#   Viewport            10: Viewport Tools 10, View Cube 20
+#   General Editors     20: Avar Editor 10, Layer Opinions 20,
+#                           Execution Stack 30, Profiler 40
+#   Animation Editors   30: Graph Editor 10, Shape Editor 20,
+#                           Control Picker 30, TouchPose 40,
+#                           Volume Weight Editor 50, Curvenet Authoring 60
+_SUBMENU_RANKS = {"Viewport": 10, "General Editors": 20,
+                  "Animation Editors": 30}
+_MENU_RANK = "rigExecMenuRank"
+
+
+def _PlaceByRank(qMenu, action, rank):
+    # Move `action` ahead of the first entry ranked above it, unless it
+    # is already there. Unranked entries (another plugin's) stay put.
+    action.setProperty(_MENU_RANK, rank)
+    for other in qMenu.actions():
+        if other == action:
+            return
+        otherRank = other.property(_MENU_RANK)
+        if otherRank is not None and otherRank > rank:
+            qMenu.removeAction(action)
+            qMenu.insertAction(other, action)
+            return
+
+
+def AddToRigExecMenu(plugUIBuilder, submenu, commandPlugin, rank):
+    """Add `commandPlugin` to RigExec (or RigExec -> `submenu`) at `rank`.
+
+    findOrCreateMenu and findOrCreateSubmenu hand every container the same
+    menu objects, so no load order can make a second RigExec menu or a
+    second copy of a submenu.
+    """
+    menu = plugUIBuilder.findOrCreateMenu("RigExec")
+    if submenu is not None:
+        menu = menu.findOrCreateSubmenu(submenu)
+    action = menu.addItem(commandPlugin)
+    qMenu = action.parent()
+    _PlaceByRank(qMenu, action, rank)
+    if submenu is not None:
+        _PlaceByRank(qMenu.parent(), qMenu.menuAction(),
+                     _SUBMENU_RANKS[submenu])
+    return action
+
+
 # usdview's plugin loader does not retain container instances that
 # register no commands; without a strong reference the container is
 # garbage collected and Qt disconnects its signals. Keep it alive here.
@@ -154,7 +207,7 @@ class RigExecUsdviewContainer(PluginContainer):
         # tests use.
         self._volumeWeights = plugRegistry.registerCommandPlugin(
             "RigExecUsdviewContainer.volumeWeights",
-            "Volume Weight Authoring",
+            "Volume Weight Editor",
             lambda api: self._OpenVolumeWeightPanel(api))
 
         # The curvenet authoring window. Same lazy-import reasoning as the
@@ -164,7 +217,7 @@ class RigExecUsdviewContainer(PluginContainer):
             "Curvenet Authoring",
             lambda api: self._OpenCurvenetPanel(api))
 
-        # The Maya-style animation graph editor. Same lazy-import
+        # The conventional animation graph editor. Same lazy-import
         # reasoning as the panels above: graphEditorUI pulls in Qt.
         self._graphEditor = plugRegistry.registerCommandPlugin(
             "RigExecUsdviewContainer.graphEditor",
@@ -178,6 +231,29 @@ class RigExecUsdviewContainer(PluginContainer):
             "Layer Opinions",
             lambda api: self._OpenLayerOpinionsPanel(api))
 
+        # The execution stack: what runs, in what order, and what it
+        # writes. Same lazy-import reasoning as the panels above.
+        self._execStack = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.execStack",
+            "Execution Stack",
+            lambda api: self._OpenExecStackPanel(api))
+
+        # The avar editor: the selected control's avar channels as
+        # sliders and number fields, writing through the shared undo
+        # stack. Same lazy-import reasoning as the panels above.
+        self._avarEditor = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.avarEditor",
+            "Avar Editor",
+            lambda api: self._OpenAvarEditorPanel(api))
+
+        # The control picker: a picker layout baked to JSON beside
+        # the rig, driving usdview's selection. Same lazy sibling
+        # import as the panels above.
+        self._picker = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.picker",
+            "Control Picker",
+            lambda api: self._OpenPickerPanel(api))
+
         # The viewport manipulator toolbar. Same lazy-import reasoning
         # again; the menu item toggles it rather than opening a window,
         # because the toolbar lives inside the viewport frame.
@@ -186,13 +262,21 @@ class RigExecUsdviewContainer(PluginContainer):
             "Viewport Tools",
             lambda api: self._ToggleViewportTools())
 
-        # The Maya-style view cube. Same lazy-import reasoning again;
+        # The conventional view cube. Same lazy-import reasoning again;
         # the menu item toggles it rather than opening a window,
         # because the cube lives inside the viewport.
         self._viewCubeCommand = plugRegistry.registerCommandPlugin(
             "RigExecUsdviewContainer.viewCube",
             "View Cube",
             lambda api: self._ToggleViewCube())
+
+        # The profiler: where the open rig's time goes, how deep its
+        # schedule is, and how many threads any of it actually ran on.
+        # Same lazy-import reasoning as the panels above.
+        self._profiler = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.profiler",
+            "Profiler",
+            lambda api: self._OpenProfilerPanel(api))
 
         dataModel = self._api.dataModel
         # Plugins load before the stage opens: bind stage observation on
@@ -205,14 +289,29 @@ class RigExecUsdviewContainer(PluginContainer):
             self._OnStageReplaced()
 
     def configureView(self, plugRegistry, plugUIBuilder):
-        menu = plugUIBuilder.findOrCreateMenu("RigExec")
-        menu.addItem(self._reactivate)
-        menu.addItem(self._volumeWeights)
-        menu.addItem(self._curvenets)
-        menu.addItem(self._graphEditor)
-        menu.addItem(self._layerOpinions)
-        menu.addItem(self._viewportToolsCommand)
-        menu.addItem(self._viewCubeCommand)
+        AddToRigExecMenu(plugUIBuilder, None, self._reactivate, 0)
+        AddToRigExecMenu(plugUIBuilder, "Viewport",
+                         self._viewportToolsCommand, 10)
+        AddToRigExecMenu(plugUIBuilder, "Viewport",
+                         self._viewCubeCommand, 20)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._avarEditor, 10)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._layerOpinions, 20)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._execStack, 30)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._profiler, 40)
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._graphEditor, 10)
+        # Shape Editor (20) and TouchPose (40) come from their own
+        # plugin containers and slot in between by rank.
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._picker, 30)
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._volumeWeights, 50)
+        AddToRigExecMenu(plugUIBuilder, "Animation Editors",
+                         self._curvenets, 60)
 
     def _EnsureLibrary(self):
         # The library is loaded on stage replacement, but the authoring
@@ -297,6 +396,63 @@ class RigExecUsdviewContainer(PluginContainer):
 
         return layerOpinionsUI.OpenLayerOpinionsPanel(
             usdviewApi or self._api, self._UndoStack())
+
+    def _OpenProfilerPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenExecStackPanel: profilerUI
+        # pulls in Qt, and this container must stay importable headless.
+        # profilerModel beside it does not, which is what lets the CLI
+        # run the same measurement with no Qt at all.
+        try:
+            import profilerUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import profilerUI
+
+        return profilerUI.OpenProfilerPanel(usdviewApi or self._api)
+
+    def _OpenExecStackPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenVolumeWeightPanel: execStackUI
+        # pulls in Qt, and this container must stay importable headless.
+        try:
+            import execStackUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import execStackUI
+
+        return execStackUI.OpenExecStackPanel(usdviewApi or self._api)
+
+    def _OpenAvarEditorPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenVolumeWeightPanel: avarEditorUI
+        # pulls in Qt, and this container must stay importable headless.
+        # Shares the undo stack, so Ctrl+Z spans a slider drag and a
+        # gizmo drag alike.
+        try:
+            import avarEditorUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import avarEditorUI
+
+        # A slider drag previews through the viewport tools' Hydra channel
+        # and authors once on release; that channel is installed with the
+        # tools, so make sure they exist even if the toolbar was never shown.
+        self._EnsureViewportTools()
+        return avarEditorUI.OpenAvarEditorPanel(
+            usdviewApi or self._api, self._UndoStack())
+
+    def _OpenPickerPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenAvarEditorPanel: pickerUI pulls
+        # in Qt and this container must stay importable headless.
+        try:
+            import pickerUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import pickerUI
+
+        return pickerUI.OpenPickerPanel(usdviewApi or self._api)
 
     def _OpenGraphEditor(self, usdviewApi=None):
         """

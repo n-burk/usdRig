@@ -15,6 +15,7 @@
 
 #include "pxr/pxr.h"
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/vec2f.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/token.h"
 
@@ -23,7 +24,7 @@ PXR_NAMESPACE_USING_DIRECTIVE
 namespace rigExec {
 
 /// The operation a property mover performs (schema `rigExec:operation`).
-enum class RigExecPropertyOp { Add, Multiply, Clamp, Remap, Blend };
+enum class RigExecPropertyOp { Add, Multiply, Clamp, Remap, Blend, Curve };
 
 /// Parses a `rigExec:operation` token. Returns false for an unknown token
 /// rather than substituting a default: the operation selects the compiled
@@ -48,7 +49,33 @@ struct RigExecPropertyMathParams {
     /// 0 is a no-op and weight 1 applies the operation outright. Same rule the
     /// point-domain matrix mover follows (p' = q + w*(T q - q)).
     float weight = 1.0f;
+    /// The curve operation's keys as (input, output) pairs sorted by input,
+    /// borrowed from the caller for the duration of one apply. Only curve
+    /// reads them, and only the float mover defines curve.
+    const GfVec2f *keys = nullptr;
+    size_t keyCount = 0;
+    /// Optional (in slope, out slope) per key, parallel to keys. With them
+    /// the curve is a cubic Hermite through the keys and extrapolates along
+    /// the first key's in slope and the last key's out slope, which is how a
+    /// driven key with fixed tangents and linear infinity evaluates.
+    const GfVec2f *tangents = nullptr;
+    size_t tangentCount = 0;
 };
+
+/// Piecewise-linear evaluation of sorted (input, output) keys with linear
+/// extrapolation past both ends along the first and last segments, the way
+/// a driven key with linear tangents and linear pre/post infinity behaves.
+/// One key is a constant; no keys return x unchanged.
+float RigExecEvaluateLinearKeys(const GfVec2f *keys, size_t keyCount, float x);
+
+/// Cubic Hermite evaluation of sorted keys with per-key (in, out) slopes,
+/// extrapolated linearly along the end slopes. tangents may be null, which
+/// is RigExecEvaluateLinearKeys.
+float RigExecEvaluateHermiteKeys(const GfVec2f *keys, const GfVec2f *tangents,
+                                 size_t keyCount, float x);
+
+/// True when the keys are finite and strictly increasing in input.
+bool RigExecValidateLinearKeys(const GfVec2f *keys, size_t keyCount);
 
 /// Applies one float revision: r = op(base), then base + weight*(r - base).
 ///
@@ -61,6 +88,7 @@ struct RigExecPropertyMathParams {
 ///             operations indistinguishable and cost the author the
 ///             out-of-range signal.
 /// - blend:    r = value (so the weighted result is lerp(base, value, w))
+/// - curve:    r = keys(base), piecewise linear with linear extrapolation
 float RigExecApplyFloatMath(
     float base, const RigExecPropertyMathParams<float> &params);
 

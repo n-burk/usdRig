@@ -22,7 +22,7 @@
 //     prescribes -- one sample per mesh edge length -- the two agree, and the
 //     target-seeking form is guaranteed to arrive.
 //
-// Both are recorded in docs/curvenet.md.
+// Both are recorded in docs/specs/curvenet.md.
 //
 #ifndef RIGEXEC_MATH_CUT_MESH_H
 #define RIGEXEC_MATH_CUT_MESH_H

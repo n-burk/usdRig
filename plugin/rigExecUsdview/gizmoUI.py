@@ -1,5 +1,5 @@
 #
-# RigExec usdview plugin: the viewport manipulator toolbar -- Maya-style
+# RigExec usdview plugin: the viewport manipulator toolbar -- conventional-style
 # Move / Rotate / Scale gizmos over the stage view, undoable through the
 # shared rigExecUndo stack.
 #
@@ -39,7 +39,7 @@
 # and AppEventFilter. Neither key below is given up, but both are
 # shared:
 #   J  -- "Toggle Framed View" (actionToggle_Framed_View, connected,
-#         application-wide). Maya's J is hold-to-step-snap and only
+#         application-wide). the conventional J is hold-to-step-snap and only
 #         means anything WHILE dragging, so a live drag claims it in
 #         ShortcutOverride and the rest of the time J still toggles the
 #         framed view.
@@ -70,7 +70,7 @@ import math
 import os
 import sys
 
-from pxr import Gf, Tf, Usd, UsdGeom
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
 
 try:
@@ -83,6 +83,7 @@ except ImportError:                                       # PySide2
 try:
     import gizmoDrag
     import gizmoIcons
+    import gizmoMarquee
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
@@ -93,6 +94,7 @@ except ImportError:                    # loader that did not add our dir
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import gizmoDrag
     import gizmoIcons
+    import gizmoMarquee
     import gizmoMath
     import gizmoScreen
     import gizmoSettings
@@ -106,7 +108,7 @@ TOOL_TRANSLATE = gizmoScreen.TOOL_TRANSLATE
 TOOL_ROTATE = gizmoScreen.TOOL_ROTATE
 TOOL_SCALE = gizmoScreen.TOOL_SCALE
 
-# Maya's names, not USD's: an animator reaches for "Move", not
+# the conventional names, not USD's: an animator reaches for "Move", not
 # "Translate". The token stays gizmoScreen's so one spelling reaches the
 # geometry code.
 TOOL_LABELS = {
@@ -149,7 +151,7 @@ COLOR_SNAP = (1.0, 0.55, 0.1)
 LEADER_OPACITY = 0.35
 
 # An arrowhead this many times its base radius long, which is the
-# proportion Maya's move cones use.
+# proportion the conventional move cones use.
 CONE_LENGTH_RATIO = 3.0
 
 # How near a click has to land, in LOGICAL pixels, before it counts as
@@ -268,7 +270,7 @@ class GizmoOverlay(QtWidgets.QWidget):
 
     def _HandleColor(self, handle, opacity=1.0):
         """
-        Maya's three states: the handle under the cursor is the pale
+        the conventional three states: the handle under the cursor is the pale
         pre-selection highlight, the last-dragged handle stays yellow
         (middle-drag repeats it), and an ungrabbable one is its own
         colour dimmed so the artist can see it is there and inert.
@@ -338,7 +340,7 @@ class GizmoOverlay(QtWidgets.QWidget):
 
     def _DrawRing(self, painter, handle, ratio):
         """
-        Only frontPoints: Maya hides the half of each ring behind the
+        Only frontPoints: the conventional tool hides the half of each ring behind the
         ring centre so three overlapping circles stay tellable apart,
         and a fully visible run already repeats its first point, so one
         drawPolyline closes it without a chord across the manipulator.
@@ -394,7 +396,7 @@ class GizmoOverlay(QtWidgets.QWidget):
 
     def _DrawPie(self, painter, ratio):
         """
-        Maya's rotation-amount wedge, from where the ring was grabbed to
+        the conventional rotation-amount wedge, from where the ring was grabbed to
         where the sweep has reached.
         """
         wedge = self._controller.PieSlice()
@@ -491,9 +493,20 @@ class ViewportToolbar(QtWidgets.QToolBar):
         # one thing this bar must say.
         self.setToolButtonStyle(QtCore.Qt.ToolButtonIconOnly)
         self.setIconSize(QtCore.QSize(18, 18))
+        # 3px of side padding, not 4. MEASURED inside usdview at its
+        # default layout, where the viewport frame is 601 logical px:
+        # the row is 575 px at 4px and 545 at 3px, and the difference is
+        # 15 buttons x 2 px. That 30 px is the whole margin of safety
+        # this row has -- the one remaining text button (Snap) is pinned
+        # to the width of "Snap: Surface" in the PLATFORM's UI font, and
+        # a font wider than this one is what would otherwise push the
+        # Settings gear back into the overflow chevron. Shrinking the
+        # glyphs from 18 px would have bought the same 26 px and made
+        # every button harder to read; a pixel of padding costs nothing
+        # anyone can see.
         self.setStyleSheet(
             "QToolBar { padding: 0px; spacing: 1px; }"
-            " QToolButton { padding: 2px 4px; margin: 0px; }"
+            " QToolButton { padding: 2px 3px; margin: 0px; }"
             " QToolButton:checked { background: #4879b4; color: white;"
             " border: 1px solid #79a6dc; border-radius: 3px; }")
         self.setContentsMargins(0, 0, 0, 0)
@@ -501,13 +514,21 @@ class ViewportToolbar(QtWidgets.QToolBar):
         self._toolActions = {}
         self._channelActions = {}
         self._writeActions = {}
+        self._orientAction = None
+        self._groupAction = None
         self._BuildTools()
+        # Beside the manipulator buttons, with no separator between: the
+        # question "which axes are these handles on" belongs to the tool
+        # buttons, not to the channel set two groups along, and the row
+        # has no room for a separator that says nothing.
+        self._BuildOrientation()
         self.addSeparator()
         self._BuildChannels()
         self.addSeparator()
         self._BuildWrite()
         self.addSeparator()
         self._BuildSnap()
+        self._BuildGroupPivot()
         # No separator of its own: Snap shares this one with Undo,
         # saving 7 px the default-width row cannot spare.
         self._BuildUndo()
@@ -555,6 +576,38 @@ class ViewportToolbar(QtWidgets.QToolBar):
                 tool == self._controller.Tool(),
                 lambda checked=False, t=tool: self._onTool(t),
                 icon=glyphs[tool])
+
+    def _BuildOrientation(self):
+        """
+        ONE button, Global <-> Local, beside the manipulator buttons.
+
+        It writes the ACTIVE TOOL's `orientation` field -- the same field
+        the Tool Settings panel's Axis Orientation combo box writes -- so
+        there is one answer to "which axes am I on" and flipping either
+        control moves the other. The panel keeps Parent and Gimbal, which
+        are not everyday switches; the bar carries the two that are.
+
+        ONE BUTTON RATHER THAN A PAIR, for the reason the whole row is
+        glyphs (see the class comment): QToolBar folds what does not fit
+        into an overflow chevron from the END, and the row was measured
+        against usdview's default ~598 logical px. A two-state pair costs
+        twice the width to say one thing. This shows the mode it is IN
+        -- the conventional axis-orientation button does the same -- and clicking
+        moves to the other.
+
+        For ONE selected prim these mean what they always have: Global
+        (the conventional "World") draws on the world axes, Local (the conventional "Object")
+        on the prim's own posed frame. For a MULTI-selection Local means
+        the LAST-SELECTED control's frame, which is the conventional
+        answer and the only stable one; it changes the AXES only. WHERE
+        a group turns is a separate setting (Tool Settings > Group
+        Pivot) and defaults to the selection centre either way.
+        """
+        self._orientAction = QtActionWidgets.QAction("Global", self)
+        self._orientAction.setCheckable(True)
+        self._orientAction.triggered.connect(self._onOrientationToggle)
+        self.addAction(self._orientAction)
+        self._SyncOrientation()
 
     def _BuildChannels(self):
         # No section label: the row already overflows at usdview's
@@ -651,6 +704,124 @@ class ViewportToolbar(QtWidgets.QToolBar):
         self._snapButton.setMinimumWidth(
             self._snapButton.sizeHint().width())
 
+    def _BuildGroupPivot(self):
+        """
+        WHERE a MULTI-selection turns, on the bar rather than in a panel.
+
+        This started life as a combo box in Tool Settings, next to the
+        Axis Orientation combo -- and that is exactly the control the
+        artist could not find, which is why Global/Local is on the bar
+        now. Burying the pivot mode in the same drawer cost them the
+        same afternoon twice, so it is here.
+
+        A CYCLING ICON, not a text button with a menu, and the row's
+        width is the whole reason. Measured inside usdview at its
+        default layout: the viewport frame is 601 logical px and the row
+        was 640 with this drawn as "Group: Centre" -- QToolBar folds
+        the overflow from the END, so the Settings gear and the Graph
+        button went behind a chevron nobody thinks to open, which is the
+        exact failure the class comment above already records once. One
+        glyph is 31 px against that button's 96, and three glyphs that
+        differ in one mark say "same question, different answer" better
+        than three words do.
+
+        It writes the ACTIVE TOOL's `groupPivot` field, the same field
+        the Tool Settings combo writes, so the two cannot disagree.
+        Disabled rather than hidden where it means nothing (Move and
+        Select, per gizmoSettings.GroupPivotChoices): a control that
+        comes and goes reflows the row, and reflow is what puts things
+        in the chevron.
+        """
+        self._groupAction = QtActionWidgets.QAction("Group Pivot", self)
+        self._groupAction.setCheckable(True)
+        self._groupAction.triggered.connect(self._onGroupPivotCycle)
+        self.addAction(self._groupAction)
+        self._SyncGroupPivot()
+
+    _GROUP_GLYPHS = {
+        gizmoMath.GROUP_PIVOT_CENTER: "groupCentre",
+        gizmoMath.GROUP_PIVOT_LEAD: "groupLead",
+        gizmoMath.GROUP_PIVOT_INDIVIDUAL: "groupEach",
+    }
+
+    def _SyncGroupPivot(self):
+        """
+        Mirror the active tool's group pivot onto the button.
+
+        The GLYPH and the action text always name the REAL setting, even
+        when one prim is selected and the setting is therefore inert --
+        the same honesty the orientation button owes for Parent and
+        Gimbal. What changes with the selection is the TOOLTIP, which
+        says whether it is doing anything right now; the status line
+        names a non-default pivot too (_GroupPivotClause).
+
+        Checked means "not the default": the highlight is the bar's way
+        of saying an option is in force, and Selection Centre is what a
+        fresh selection does.
+        """
+        if self._groupAction is None:
+            return
+        controller = self._controller
+        tool = controller.Tool()
+        choices = gizmoSettings.GroupPivotChoices(tool)
+        mode = controller.settings.For(tool).groupPivot
+        self._groupAction.setEnabled(bool(choices))
+        self._groupAction.setChecked(
+            bool(choices) and mode != gizmoMath.GROUP_PIVOT_CENTER)
+        self._groupAction.setText(
+            "Group Pivot: %s" % gizmoSettings.GroupPivotLabel(mode))
+        self._groupAction.setIcon(gizmoIcons.Icon(
+            self._GROUP_GLYPHS.get(mode, "groupCentre")))
+        if not choices:
+            self._groupAction.setToolTip(
+                "Group Pivot (P): where several selected controls move, "
+                "turn and scale about. Not used by Select.")
+            return
+        if tool == TOOL_TRANSLATE:
+            meaning = {
+                gizmoMath.GROUP_PIVOT_CENTER:
+                    "move together by the same distance in the same "
+                    "direction",
+                gizmoMath.GROUP_PIVOT_INDIVIDUAL:
+                    "each move the same distance along its OWN axes",
+            }.get(mode, "move together")
+            target = controller.Target()
+            count = (len(self._controller._TargetPrimPaths(target))
+                     if target is not None else 0)
+            active = ("Acting on %d controls." % count if count > 1
+                      else "Inert until more than one control is "
+                      "selected.")
+            self._groupAction.setToolTip(
+                "Group Pivot: %s, several selected controls %s. %s "
+                "Click or press P for the next one."
+                % (gizmoSettings.GroupPivotLabel(mode), meaning, active))
+            return
+        meaning = {
+            gizmoMath.GROUP_PIVOT_CENTER:
+                "about the CENTRE of the selection",
+            gizmoMath.GROUP_PIVOT_LEAD:
+                "about the LAST-SELECTED control, which stays put",
+            gizmoMath.GROUP_PIVOT_INDIVIDUAL:
+                "each about its OWN origin -- a chain curls instead of "
+                "swinging",
+        }[mode]
+        target = controller.Target()
+        count = (len(self._controller._TargetPrimPaths(target))
+                 if target is not None else 0)
+        active = ("Acting on %d controls." % count if count > 1
+                  else "Inert until more than one control is selected.")
+        self._groupAction.setToolTip(
+            "Group Pivot: %s, several selected controls turn %s. %s "
+            "Click or press P for the next one."
+            % (gizmoSettings.GroupPivotLabel(mode), meaning, active))
+
+    def _onGroupPivotCycle(self, checked=False):
+        # The CONTROLLER picks what comes next, not the checkbox state:
+        # this cycles three modes, not two, and Sync puts the widget
+        # back in step whatever the click left it in.
+        self._controller.CycleGroupPivot()
+        self._SyncGroupPivot()
+
     def _BuildUndo(self):
         # Qt.ApplicationShortcut so undo works with focus in the prim
         # tree or the attribute view, not only over the viewport.
@@ -664,7 +835,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
 
         self.redoAction = QtActionWidgets.QAction("Redo", self)
         self.redoAction.setIcon(gizmoIcons.Icon("redo"))
-        # Ctrl+Shift+Z is the user's ask, Shift+Z is Maya's, Ctrl+Y is
+        # Ctrl+Shift+Z is the user's ask, Shift+Z is the conventional tool's, Ctrl+Y is
         # what a Windows-trained hand reaches for.
         self.redoAction.setShortcuts([QtGui.QKeySequence("Ctrl+Shift+Z"),
                                       QtGui.QKeySequence("Shift+Z"),
@@ -705,6 +876,14 @@ class ViewportToolbar(QtWidgets.QToolBar):
     def _onWrite(self, mode):
         self._controller.SetWriteMode(mode)
 
+    def _onOrientationToggle(self, checked=False):
+        # The CONTROLLER decides what comes next, not the button's new
+        # checked state: the button can be showing Parent or Gimbal,
+        # where "the other one" is not the opposite of a checkbox. Sync
+        # puts the widget back in step whatever happens.
+        self._controller.ToggleOrientation()
+        self._SyncOrientation()
+
     def _onSnap(self, mode):
         self._controller.settings.For(
             self._controller.Tool()).snapMode = mode
@@ -720,7 +899,9 @@ class ViewportToolbar(QtWidgets.QToolBar):
             action.setChecked(channels == controller.Channels())
         for mode, action in self._writeActions.items():
             action.setChecked(mode == controller.WriteMode())
+        self._SyncOrientation()
         self._SyncSnap()
+        self._SyncGroupPivot()
         stack = controller.undoStack
         # Greyed out during a drag as well as when empty: the actions
         # are application shortcuts and would otherwise fire with a
@@ -736,6 +917,52 @@ class ViewportToolbar(QtWidgets.QToolBar):
             if stack.CanRedo()
             else "Nothing to redo (Ctrl+Shift+Z, Shift+Z, Ctrl+Y)")
         self._status.SetStatus(controller.Status())
+
+    def _SyncOrientation(self):
+        """
+        Put the button on the mode actually in force.
+
+        The LABEL and the GLYPH name the current mode, and the checked
+        highlight means Local -- so the bar answers "which axes am I on"
+        at a glance, and the tooltip answers "and what does clicking do".
+        Parent and Gimbal, which only the panel can set, are named in the
+        tooltip and leave the button unchecked on the world glyph rather
+        than being silently rounded to Global: the bar must not claim a
+        mode the gizmo is not in.
+        """
+        if self._orientAction is None:
+            return
+        controller = self._controller
+        tool = controller.Tool()
+        choices = gizmoSettings.OrientationChoices(tool)
+        current = controller.Orientation()
+        # Select has no manipulator and nothing to orient.
+        self._orientAction.setEnabled(bool(choices))
+        local = bool(choices) and current == gizmoSettings.ORIENT_OBJECT
+        known = current in gizmoSettings.ORIENT_TOGGLE
+        self._orientAction.setChecked(local)
+        self._orientAction.setText(
+            gizmoSettings.ToggleLabel(current) if known
+            else gizmoSettings.OrientationLabel(current))
+        self._orientAction.setIcon(gizmoIcons.Icon(
+            "local" if local else "global"))
+        if not choices:
+            self._orientAction.setToolTip(
+                "Axis Orientation (L): pick Move, Rotate or Scale first.")
+            return
+        if known:
+            here = ("Local: the handles are on the prim's own posed "
+                    "frame -- for several selected prims, on the "
+                    "last-selected one's." if local
+                    else "Global: the handles are on the WORLD axes.")
+            there = "Global" if local else "Local"
+        else:
+            here = ("Axis Orientation is %s, set in Tool Settings."
+                    % gizmoSettings.OrientationLabel(current))
+            there = "Global"
+        self._orientAction.setToolTip(
+            "%s Click or press L for %s. The values written are always "
+            "the prim's own channels." % (here, there))
 
     def _SyncSnap(self):
         """Mirror the sticky snap mode onto the Snap: button."""
@@ -765,7 +992,7 @@ class ViewportToolbar(QtWidgets.QToolBar):
 
 class ToolSettingsPanel(QtWidgets.QWidget):
     """
-    Maya's Tool Settings for the active tool (design spec 8.6).
+    the conventional Tool Settings for the active tool (design spec 8.6).
 
     One window per session, parented to usdview's main window exactly
     like VolumeWeightPanel, and rebuilt whenever the tool changes so it
@@ -813,7 +1040,7 @@ class ToolSettingsPanel(QtWidgets.QWidget):
 
         self._resetButton = QtWidgets.QPushButton("Reset Tool")
         self._resetButton.setToolTip(
-            "Restore this tool's Maya defaults.")
+            "Restore this tool's the conventional tool defaults.")
         self._resetButton.clicked.connect(self._onReset)
         outer.addWidget(self._resetButton)
 
@@ -929,6 +1156,19 @@ class ToolSettingsPanel(QtWidgets.QWidget):
                     self._onPreventNegative)
                 self._form.addRow("", self._preventNegative)
 
+            groupChoices = gizmoSettings.GroupPivotChoices(tool)
+            if groupChoices:
+                self._groupPivot = QtWidgets.QComboBox()
+                self._groupPivot.setToolTip(
+                    "What SEVERAL selected controls turn about. Inert "
+                    "for a single selection.")
+                for choice in groupChoices:
+                    self._groupPivot.addItem(
+                        gizmoSettings.GroupPivotLabel(choice), choice)
+                self._groupPivot.currentIndexChanged.connect(
+                    self._onGroupPivot)
+                self._form.addRow("Group Pivot", self._groupPivot)
+
             self._preserveChildren = QtWidgets.QCheckBox(
                 "Preserve Children")
             self._preserveChildren.toggled.connect(self._onPreserveChildren)
@@ -989,6 +1229,10 @@ class ToolSettingsPanel(QtWidgets.QWidget):
                 if self._tool == TOOL_SCALE:
                     self._preventNegative.setChecked(
                         bool(settings.preventNegativeScale))
+                if gizmoSettings.GroupPivotChoices(self._tool):
+                    index = self._groupPivot.findData(settings.groupPivot)
+                    if index >= 0:
+                        self._groupPivot.setCurrentIndex(index)
                 self._SyncPreserveChildren(settings)
             self._size.setValue(float(controller.settings.manipulatorSize))
         finally:
@@ -1029,6 +1273,11 @@ class ToolSettingsPanel(QtWidgets.QWidget):
         if self._updating or index < 0:
             return
         self._Settings().orientation = self._orientation.itemData(index)
+
+    def _onGroupPivot(self, index):
+        if self._updating or index < 0:
+            return
+        self._Settings().groupPivot = self._groupPivot.itemData(index)
 
     def _onStepSnap(self, checked):
         if not self._updating:
@@ -1154,6 +1403,12 @@ class GizmoController(QtCore.QObject):
         self._writeMode = gizmoMath.WRITE_ANIMATION
         self._target = None
         self._reason = "no stage"
+        # The selection the current target was built from, lead last, so
+        # a stage notice can tell a target that is merely stale from one
+        # that is built on the wrong set of prims. The focus prim alone
+        # cannot answer that any more: a group selection can gain or
+        # lose a member with the lead unchanged.
+        self._targetPaths = ()
         self._warnings = []
         self._handles = []
         self._drag = None
@@ -1188,6 +1443,21 @@ class GizmoController(QtCore.QObject):
         self._panel = None
         self._noticeKey = None
         self._solverPosed = gizmoMath.SolverPosedCache()
+        # Marquee state. `_marqueeAt` is the press point in PHYSICAL
+        # pixels and doubles as "a press is in flight"; `_marqueeBand`
+        # stays None until the cursor has travelled past the slop, which
+        # is what separates a click from a box.
+        self._marqueeAt = None
+        self._marqueeBand = None
+        self._marqueeMode = gizmoMarquee.MODE_REPLACE
+        # The selection AS IT WAS AT PRESS. usdview picks on the PRESS
+        # (stageView.mousePressEvent -> pickObject) and the press is
+        # deliberately not swallowed, so by the time the band is applied
+        # usdview has already replaced or extended the selection with
+        # whatever was under the first pixel. Resolving against this
+        # snapshot makes the marquee's answer independent of that.
+        self._marqueeWas = ()
+        self._rubber = None
         self._frame = usdviewApi.frame
 
         view = StageView(usdviewApi)
@@ -1207,7 +1477,7 @@ class GizmoController(QtCore.QObject):
             # application filter above (see ViewportHotkeyFilter).
             view.installEventFilter(self)
             view.destroyed.connect(self._onViewDestroyed)
-            # WA_Hover, not setMouseTracking: Maya's pre-selection
+            # WA_Hover, not setMouseTracking: the conventional pre-selection
             # highlight needs mouse moves with no button down, and Qt
             # delivers those to a widget only if it tracks the mouse --
             # which for usdview's stage view would also turn on a GPU
@@ -1304,6 +1574,12 @@ class GizmoController(QtCore.QObject):
     def _onViewDestroyed(self, *args):
         self._view = None
         self.overlay = None
+        # The rubber band is a CHILD of the view Qt has just destroyed;
+        # the Python wrapper outlives the C++ object, so touching it
+        # again would raise RuntimeError on the next marquee.
+        self._rubber = None
+        self._marqueeAt = None
+        self._marqueeBand = None
         self.Detach()
 
     def _ObserveStage(self, stage):
@@ -1321,6 +1597,60 @@ class GizmoController(QtCore.QObject):
 
     def Tool(self):
         return self._tool
+
+    def Orientation(self):
+        """
+        The ACTIVE TOOL's Axis Orientation token.
+
+        One field, read by three things: the toolbar's Global/Local
+        toggle, the Tool Settings combo box, and _Orientation() where it
+        actually decides which frame the handles are laid out on. There
+        is no second copy for the toolbar to drift out of step with.
+        """
+        return self.settings.For(self._tool).orientation
+
+    def SetOrientation(self, orientation):
+        """
+        Put the active tool on `orientation`.
+
+        The write goes through the settings model, whose Notify() runs
+        _onSettingsChanged -- which rebuilds the handles and re-syncs
+        BOTH the toolbar and the panel. So the toggle and the combo box
+        cannot disagree, and a drag that is in progress redraws on the
+        new axes without being interrupted.
+        """
+        if orientation not in gizmoSettings.OrientationChoices(self._tool):
+            return False
+        self.settings.For(self._tool).orientation = orientation
+        return True
+
+    def ToggleOrientation(self):
+        """Global <-> Local, the toolbar toggle's keyboard twin (L)."""
+        return self.SetOrientation(
+            gizmoSettings.NextToggleOrientation(self.Orientation()))
+
+    def GroupPivot(self):
+        """The ACTIVE TOOL's group pivot token (gizmoMath.GROUP_PIVOT_*)."""
+        return self.settings.For(self._tool).groupPivot
+
+    def SetGroupPivot(self, mode):
+        """
+        Choose what a MULTI-selection turns about.
+
+        Like SetOrientation, the write goes through the settings model,
+        so _onSettingsChanged re-primes the live target
+        (_PrimeGroupPivot) and re-syncs the toolbar and the panel: the
+        button, the combo box and the target cannot drift apart.
+        """
+        if mode not in gizmoSettings.GroupPivotChoices(self._tool):
+            return False
+        self.settings.For(self._tool).groupPivot = mode
+        return True
+
+    def CycleGroupPivot(self):
+        """Centre -> Last Selected -> Individual Origins, wrapping (P)."""
+        return self.SetGroupPivot(gizmoSettings.NextGroupPivot(
+            self.GroupPivot(), self._tool))
 
     def SetTool(self, tool):
         if tool == self._tool:
@@ -1421,13 +1751,79 @@ class GizmoController(QtCore.QObject):
                 return candidate
         return None
 
+    def _SelectedPrims(self):
+        """
+        Everything the gizmo will manipulate, LEAD LAST.
+
+        Lead last because that is what gizmoMath.MakeGroupTarget takes,
+        and because the LAST-picked control is what orients the group
+        frame and answers to the Last Selected pivot -- the conventional tool and
+        Blender convention.
+
+        NOT the focus prim, and this was measured the hard way.
+        usdview's focus prim is getPrimPaths()[0] (selectionDataModel
+        .py:623-627) -- the FIRST prim in the selection, not the last.
+        Shift-clicking the shoulder, then the elbow, then the wrist in a
+        live usdview gives api.prim == arm_l_fk_shoulder_l_bind, so
+        treating the focus prim as the lead put the FIRST control picked
+        in charge of the gizmo's axes, which is backwards from every
+        DCC. The selection is insertion-ordered, so the last real entry
+        IS the last-picked prim.
+
+        The pseudo-root is dropped rather than led: usdview leaves `/`
+        in the selection after ClearPrimSelection() followed by
+        AddPrimToSelection() -- measured, a four-control script
+        selection reads back as ['/', shoulder, elbow, wrist, spine]
+        with `/` as the focus -- and every documented way of driving
+        usdview goes through that pair. _FocusPrim is the fallback for
+        the case where the selection resolves to nothing at all.
+        """
+        api = self.usdviewApi
+        prims = []
+        seen = set()
+        for prim in (api.selectedPrims or []):
+            if not prim or prim.IsPseudoRoot():
+                continue
+            path = prim.GetPath()
+            if path not in seen:
+                seen.add(path)
+                prims.append(prim)
+        if prims:
+            return prims
+        lead = self._FocusPrim()
+        return [lead] if lead is not None else []
+
+    def _SelectionSignature(self):
+        """The paths _SelectedPrims would resolve to, for comparison."""
+        return tuple(p.GetPath() for p in self._SelectedPrims())
+
+    @staticmethod
+    def _TargetPrimPaths(target):
+        """
+        Every prim `target` edits: one for a plain target, all of them
+        for a group.
+        """
+        members = getattr(target, "members", None)
+        if members:
+            return [m.prim.GetPath() for m in members]
+        return [target.prim.GetPath()]
+
     def RefreshTarget(self):
         """
-        Re-resolve the edit target from usdview's focus prim, then
+        Re-resolve the edit target from usdview's SELECTION, then
         rebuild the handles and the status line.
+
+        One selected prim gives the single target it always did; several
+        give a gizmoMath.GroupTarget over all of them, pivoted on their
+        centroid and oriented like the lead. The two paths are kept
+        apart deliberately -- a single selection must not start paying
+        for a group -- and they meet again at the Target interface, so
+        everything below here (handles, drag, preview, undo) is unaware
+        of which one it is holding.
         """
         stage = self.usdviewApi.stage
-        prim = self._FocusPrim() if stage else None
+        prims = self._SelectedPrims() if stage else []
+        prim = prims[-1] if prims else None
         # The hover preview resolved against the old target: the next
         # hover move re-picks. Cleared before toolbar.Sync() below, so
         # the status never names a stale candidate.
@@ -1438,11 +1834,24 @@ class GizmoController(QtCore.QObject):
         self._warnings = []
         if not stage:
             self._target, self._reason = None, "no stage"
+        elif len(prims) > 1:
+            # ONE Writer for the whole group, handed to every member:
+            # that is what lets the drag push all of their previewed
+            # values to Hydra in a single UpdatePreview per mouse sample
+            # (gizmoPreview.Push takes writer.Pending()) and author them
+            # in a single change block on release. N writers would mean
+            # N pushes and N commits, and an authored edit costs ~150 ms
+            # on the next evaluate where a preview costs nothing.
+            self._target, self._reason = gizmoMath.MakeGroupTarget(
+                stage, prims, self._channels, self._Writer(),
+                self._solverPosed)
         else:
             self._target, self._reason = gizmoMath.MakeTarget(
                 stage, prim, self._channels, self._Writer(),
                 self._solverPosed)
+        self._targetPaths = tuple(p.GetPath() for p in prims)
         self._PrimePreserveChildren()
+        self._PrimeGroupPivot()
         self._RebuildHandles()
         self.toolbar.Sync()
         if self._panel is not None:
@@ -1472,6 +1881,27 @@ class GizmoController(QtCore.QObject):
         except Exception as error:
             Tf.Warn("rigExecUsdview: preserve-children probe failed: %s"
                     % error)
+
+    def _PrimeGroupPivot(self):
+        """
+        Tell a group target what to turn about (Tool Settings > Group
+        Pivot; gizmoMath.GROUP_PIVOT_*).
+
+        Set here rather than read inside the maths so the answer cannot
+        change under a live drag: BeginDrag() captures the pivot once,
+        and a mid-drag settings write would otherwise move it while the
+        cursor was down. A single target has no such setting and is
+        left alone.
+        """
+        target = self._target
+        setter = getattr(target, "SetPivotMode", None)
+        if setter is None:
+            return
+        settings = self.settings.For(self._tool)
+        setter(settings.groupPivot)
+        orient = getattr(target, "SetAxisOrientation", None)
+        if orient is not None:
+            orient(settings.orientation)
 
     def _Orientation(self, target):
         """
@@ -1507,13 +1937,17 @@ class GizmoController(QtCore.QObject):
         return False
 
     def _RebuildHandles(self):
-        # A rotate drag keeps the handles it started with. The rings
-        # turn with the object in Object orientation, and a manipulator
-        # that spins away under a held cursor is unusable -- Maya
-        # freezes it for the same reason. Translate and scale must keep
-        # following the object, so they rebuild every event.
-        if self._drag is not None and self._drag.tool == TOOL_ROTATE:
-            return
+        # EVERY tool rebuilds its handles live during a drag, rotate
+        # included. Rotate used to keep the handles it started with, on the
+        # reasoning that a ring that turns under a held cursor makes the
+        # manipulator chase itself -- but the drag never reads these
+        # handles: gizmoDrag.DragState holds its OWN frozen copy of the
+        # grabbed handle and turns about that axis for the whole drag. So the
+        # freeze only froze the DRAWING, and the rotate gizmo sat at the
+        # pre-drag orientation until release while the control turned.
+        # Rotating about an axis leaves that axis's own ring where it is;
+        # the others follow the object, which is what the artist expects.
+        #
         # resolveCamera() can emit signalFrustumChanged, whose handler
         # lands back here; without the guard the first paint after a
         # camera move recurses until the stack runs out.
@@ -1842,8 +2276,8 @@ class GizmoController(QtCore.QObject):
             return "%s %s  %.1f deg%s" % (verb, target.label,
                                           self._drag.angle,
                                           self._SnapClause())
-        text = "%s %s  [%s / %s]%s" % (
-            verb, target.label,
+        text = "%s %s%s  [%s / %s]%s" % (
+            verb, target.label, self._GroupPivotClause(target),
             "Pivot" if self._channels == gizmoMath.CHANNELS_PIVOT
             else "Pose",
             "Default" if self._writeMode == gizmoMath.WRITE_DEFAULT
@@ -1865,6 +2299,23 @@ class GizmoController(QtCore.QObject):
             text += "  warning: " + "; ".join(notes)
         return text
 
+    def _GroupPivotClause(self, target):
+        """
+        " about Last Selected" for a group turning about anything but
+        its centre, and "" otherwise.
+
+        Silent on the default deliberately: the centre is what a
+        selection does unless it was told not to, and a status line that
+        narrates the default trains people to stop reading it. A
+        NON-default is exactly the thing an artist forgets they set.
+        """
+        mode = getattr(target, "pivotMode", None)
+        if mode is None or mode == gizmoMath.GROUP_PIVOT_CENTER:
+            return ""
+        if not gizmoSettings.GroupPivotChoices(self._tool):
+            return ""
+        return " about %s" % gizmoSettings.GroupPivotLabel(mode)
+
     def SkippedChildren(self):
         """
         The target's explanations for children a Preserve Children drag
@@ -1880,7 +2331,7 @@ class GizmoController(QtCore.QObject):
     # -- undo -----------------------------------------------------------
 
     def Undo(self):
-        # Maya ignores undo while a manipulator is held. Running it here
+        # the conventional tool ignores undo while a manipulator is held. Running it here
         # would restore an earlier edit that the drag's next event then
         # overwrites from its own base, and the release would push over
         # the redo branch -- the earlier edit lost from history with its
@@ -1895,6 +2346,43 @@ class GizmoController(QtCore.QObject):
             return False
         self._AfterUndoRedo()
         return True
+
+    def FollowExternalPreview(self, primPath=None):
+        """
+        Redraw the handles against values another panel is previewing.
+
+        The Avar Editor previews a slider drag through the same Hydra
+        channel a drag here uses, and puts the same values in
+        gizmoMath's preview map, but nothing on the stage changes, so the
+        stage-notice refresh never fires. The panel calls this per sample
+        instead. The cheap per-sample refresh is used for the target the
+        slider is moving (its parent frames cannot change); anything else
+        re-reads in full. Ignored while a manipulator drag of our own is
+        in flight, which already refreshes on every mouse move.
+        """
+        if self._drag is not None:
+            return
+        if self._target is None:
+            # Nothing to redraw here, but the viewport still has to repaint:
+            # a dial on a control with no manipulator (a limb's params node)
+            # moves the rig all the same.
+            self.usdviewApi.UpdateViewport()
+            return
+        own = getattr(self._target, "prim", None)
+        cheap = (primPath is not None and own is not None
+                 and own.GetPath() == primPath)
+        try:
+            if cheap:
+                self._target.RefreshDuringDrag()
+            else:
+                self._target.Refresh()
+        except Exception:
+            try:
+                self._target.Refresh()
+            except Exception:
+                self.RefreshTarget()
+        self._RebuildHandles()
+        self.usdviewApi.UpdateViewport()
 
     def _AfterUndoRedo(self):
         # Restoring layer specs does not schedule a repaint by itself:
@@ -1956,6 +2444,7 @@ class GizmoController(QtCore.QObject):
 
     def _onSettingsChanged(self):
         self._PrimePreserveChildren()
+        self._PrimeGroupPivot()
         self._RebuildHandles()
         # Re-pick, never redraw stale: switching the Snap: dropdown
         # without moving the cursor must move the marker (spec 4.5).
@@ -1975,7 +2464,7 @@ class GizmoController(QtCore.QObject):
         self._RebuildHandles()
 
     def _onSelectionChanged(self, added=None, removed=None):
-        # _selected survives: Maya keeps the active handle across a
+        # _selected survives: the active handle is kept across a
         # selection change, so middle-drag still repeats it on the prim
         # you just picked. The hover is stale by definition.
         self._AbortDrag()
@@ -2047,13 +2536,17 @@ class GizmoController(QtCore.QObject):
             self._solverPosed.InvalidateChanged(changed)
         target = self._target
         # A missing target may be exactly what this notice creates, and a
-        # focus prim that no longer matches needs the full re-resolve.
-        if target is None or self._FocusPrim() != target.prim:
+        # SELECTION that no longer matches needs the full re-resolve --
+        # compared as the whole set, not just the focus prim, because a
+        # group can gain or lose a member with the lead unchanged.
+        if target is None or self._SelectionSignature() != self._targetPaths:
             self.RefreshTarget()
             return
-        if not gizmoMath.NoticeAffectsTarget(
-                resynced, changed,
-                target.prim.GetPath(), target.RigRootPath()):
+        # Any member answers for the group: they share a rig root, and a
+        # notice that moved one of them moved the pivot.
+        if not any(gizmoMath.NoticeAffectsTarget(
+                resynced, changed, path, target.RigRootPath())
+                for path in self._TargetPrimPaths(target)):
             return
         try:
             target.Refresh()
@@ -2154,20 +2647,25 @@ class GizmoController(QtCore.QObject):
             return False              # usdview's camera drags win
         if not self._visible or self._tool == TOOL_SELECT or \
                 not self._handles:
-            return False
+            # No handles to aim at -- Select tool, hidden gizmo, or
+            # nothing selected. A press here is a marquee in waiting.
+            return self._BeginMarquee(event)
         point = self._Position(event)
         self._ctrl = bool(event.modifiers() & QtCore.Qt.ControlModifier)
         if event.button() == QtCore.Qt.LeftButton:
             handle = self._HitTest(point)
             if handle is None:
-                return False          # let usdview pick the prim
+                # THE GIZMO WINS, and it did not want this pixel: off the
+                # handles, the press starts a marquee (and still reaches
+                # usdview, which picks the prim under it).
+                return self._BeginMarquee(event)
             if not self._BeginDrag(handle, point):
                 return False
             self._selected = handle.name
             self._Repaint()
             return True
         if event.button() == QtCore.Qt.MiddleButton:
-            # Maya's "middle-drag anywhere repeats the selected handle":
+            # the conventional "middle-drag anywhere repeats the selected handle":
             # the artist does not have to hit the handle again.
             handle = self._Handle(self._selected)
             if handle is None or not handle.grabbable:
@@ -2181,6 +2679,8 @@ class GizmoController(QtCore.QObject):
                 event.modifiers() & QtCore.Qt.ControlModifier)
             self._UpdateDrag(self._Position(event))
             return True
+        if self._marqueeAt is not None:
+            return self._UpdateMarquee(event)
         if not self._visible or self._tool == TOOL_SELECT:
             return False
         if event.buttons():
@@ -2189,7 +2689,7 @@ class GizmoController(QtCore.QObject):
         return False
 
     def _UpdateHover(self, point):
-        """Maya's pre-selection highlight; `point` None clears it."""
+        """The pre-selection highlight; `point` None clears it."""
         self._hoverPoint = point
         if point is None or not self._visible or self._tool == TOOL_SELECT:
             name = None
@@ -2254,12 +2754,198 @@ class GizmoController(QtCore.QObject):
 
     def _OnRelease(self, event):
         if self._drag is None:
+            if self._marqueeAt is not None \
+                    and event.button() == QtCore.Qt.LeftButton:
+                self._EndMarquee()
             return False
         if event.button() not in (QtCore.Qt.LeftButton,
                                   QtCore.Qt.MiddleButton):
             return False
         self._EndDrag()
         return True
+
+    # -- marquee (box) selection ----------------------------------------
+
+    @staticmethod
+    def _TouchPoseActive():
+        """True while TouchPose is running its own marquee.
+
+        TouchPose selects touch REGIONS with the identical gesture and
+        the identical three modes, and both filters sit on the same stage
+        view, so without this an animator with TouchPose on would get two
+        selections applied to one drag -- and which one landed last would
+        depend on the order the panels happened to be opened in. The
+        native marquee stands down for as long as TouchPose is on; it is
+        the one that knows about the skin.
+
+        STANDING DOWN IS NOT DROPPING OUT. It used to be: while TouchPose
+        was on, a box round the IK controls selected nothing, because
+        regions only cover the mesh and nothing else was looking. So
+        TouchPose now folds `gizmoMarquee.ControlsInBand` into its own
+        pick (touchPoseUI.TouchPoseController._ControlsInBand) and the
+        band catches controls either way. Box selection is native to
+        RigExec; which subsystem happens to own the drag is not something
+        the animator should be able to feel.
+
+        Never constructs a controller (that would load the mesh), and any
+        failure -- no touchPose on sys.path at all -- answers False,
+        which is the session this feature exists for.
+        """
+        try:
+            import touchPoseUI
+        except Exception:
+            return False
+        try:
+            controller = touchPoseUI.TouchPoseController._instance
+            return controller is not None and bool(controller.active)
+        except Exception:
+            return False
+
+    def _SelectedPaths(self):
+        """The selected prim paths, pseudo-root dropped, lead last.
+
+        THE PSEUDO-ROOT IS NOT A SELECTION: `clearPrims()` leaves `/`
+        behind, so the current set always looks non-empty and a toggle
+        would carry `/` forward for ever.
+        """
+        try:
+            prims = self.usdviewApi.dataModel.selection.getPrims()
+        except Exception:
+            return []
+        return [str(p.GetPath()) for p in prims
+                if p and p.IsValid() and not p.IsPseudoRoot()]
+
+    def _BeginMarquee(self, event):
+        """Arm a marquee on a left press. Never consumes the press.
+
+        Requirement 4 of the feature: a click must keep behaving exactly
+        as it does today, and usdview picks on the PRESS, so swallowing
+        it would kill single-prim picking outright. The press is recorded
+        and let through; only a drag past the slop turns into a band.
+        """
+        if event.button() != QtCore.Qt.LeftButton:
+            return False
+        if self._TouchPoseActive():
+            return False
+        self._marqueeAt = self._Position(event)
+        self._marqueeBand = None
+        self._marqueeMode = gizmoMarquee.Mode(
+            ctrl=bool(event.modifiers() & QtCore.Qt.ControlModifier),
+            shift=bool(event.modifiers() & QtCore.Qt.ShiftModifier))
+        self._marqueeWas = tuple(self._SelectedPaths())
+        return False
+
+    def _UpdateMarquee(self, event):
+        """Grow the band; consume the move only once there IS a band.
+
+        Below the slop nothing is consumed, so a plain click's event
+        stream is byte-for-byte what it was before this existed. Above
+        it the move is swallowed, which keeps stageView.mouseMoveEvent
+        from calling updateGL for every pixel of a drag that changes
+        nothing on screen but the rubber band.
+        """
+        if not (event.buttons() & QtCore.Qt.LeftButton):
+            # The button came up somewhere this filter never saw -- the
+            # cursor left the window mid-drag, or another widget grabbed
+            # it. Drop the armed press rather than leave it to fire on
+            # some unrelated later move.
+            self._marqueeAt = None
+            self._marqueeBand = None
+            self._marqueeWas = ()
+            self._HideBand()
+            return False
+        point = self._Position(event)
+        x, y = point
+        if self._marqueeBand is None and not gizmoMarquee.PastSlop(
+                self._marqueeAt, point, self._Ratio()):
+            return False
+        self._marqueeBand = (self._marqueeAt[0], self._marqueeAt[1], x, y)
+        self._ShowBand()
+        return True
+
+    def _EndMarquee(self):
+        """Apply the band, if the press ever became one."""
+        band, self._marqueeBand = self._marqueeBand, None
+        was, self._marqueeWas = self._marqueeWas, ()
+        mode, self._marqueeMode = self._marqueeMode, \
+            gizmoMarquee.MODE_REPLACE
+        self._marqueeAt = None
+        self._HideBand()
+        if band is None:
+            return False          # a click: usdview already answered it
+        self.Marquee(band[0], band[1], band[2], band[3], mode, was)
+        return True
+
+    def Marquee(self, x0, y0, x1, y1, mode=None, current=None):
+        """Select every control the band catches. Physical pixels.
+
+        Public because the in-app test drives it directly: a synthetic
+        QTest drag cannot be trusted to reproduce the exact pixel path
+        that decides what a band contains.
+        """
+        mode = gizmoMarquee.MODE_REPLACE if mode is None else mode
+        model = getattr(self.usdviewApi, "dataModel", None)
+        stage = getattr(model, "stage", None) if model is not None else None
+        if stage is None:
+            return []
+        camera, viewport, _ratio = self._Camera()
+        wanted = gizmoMarquee.ControlsInBand(
+            stage, camera, viewport, self.usdviewApi.frame,
+            (x0, y0, x1, y1), self._solverPosed)
+        if current is None:
+            current = self._SelectedPaths()
+        keep = gizmoMarquee.Resolve(list(current), wanted, mode)
+        self._ApplySelection(stage, keep)
+        return keep
+
+    def _ApplySelection(self, stage, paths):
+        """Write an ordered path list into usdview's selection.
+
+        batchPrimChanges when the build has it, so a band over forty
+        controls emits one selection change rather than forty -- each of
+        which would otherwise rebuild the gizmo's target.
+        """
+        selection = self.usdviewApi.dataModel.selection
+        prims = []
+        for path in paths:
+            prim = stage.GetPrimAtPath(Sdf.Path(path))
+            if prim and prim.IsValid():
+                prims.append(prim)
+        batch = getattr(selection, "batchPrimChanges", None)
+        if batch is None:
+            selection.clearPrims()
+            for prim in prims:
+                selection.addPrim(prim)
+            return
+        with batch:
+            selection.clearPrims()
+            for prim in prims:
+                selection.addPrim(prim)
+
+    def _ShowBand(self):
+        """Draw the band with Qt's own rubber band over the stage view.
+
+        A QRubberBand and not the GizmoOverlay: the overlay is hidden
+        whenever the gizmo is hidden (SetVisible), and the marquee has to
+        draw in exactly that state.
+        """
+        view = self._view
+        if view is None or self._marqueeBand is None:
+            return
+        if self._rubber is None:
+            self._rubber = QtWidgets.QRubberBand(
+                QtWidgets.QRubberBand.Rectangle, view)
+        ratio = self._Ratio()
+        x0, y0, x1, y1 = [v / ratio for v in self._marqueeBand]
+        self._rubber.setGeometry(QtCore.QRect(
+            QtCore.QPoint(int(min(x0, x1)), int(min(y0, y1))),
+            QtCore.QPoint(int(max(x0, x1)), int(max(y0, y1)))))
+        self._rubber.show()
+        self._rubber.raise_()
+
+    def _HideBand(self):
+        if self._rubber is not None:
+            self._rubber.hide()
 
     # -- keys -----------------------------------------------------------
 
@@ -2448,6 +3134,21 @@ class GizmoController(QtCore.QObject):
             self.settings.ScaleManipulator(
                 1.0 / 1.1 if key == QtCore.Qt.Key_Minus else 1.1)
             return True
+        if key == QtCore.Qt.Key_L:
+            # Global <-> Local, the toolbar toggle's keyboard twin. A
+            # bare letter like the tool keys, and free: usdview binds no
+            # L, and it is not one of the drag holds (J / X / C / V / B).
+            # The RESULT is returned, not True: under the Select tool
+            # there is no orientation to set, and a key we did nothing
+            # with must go back to usdview rather than be swallowed.
+            return self.ToggleOrientation()
+        if key == QtCore.Qt.Key_P:
+            # The group pivot cycle, the toolbar button's keyboard twin.
+            # Free like L: usdview binds bare C, F, I, J, V and W
+            # (mainWindowUI.py), and P is not among them. Returns its
+            # result for the same reason L does -- Move and Select offer
+            # no group pivot, so the key stays usdview's there.
+            return self.CycleGroupPivot()
         if key in self._PIVOT_KEYS:
             self.SetChannels(
                 gizmoMath.CHANNELS_POSE
@@ -3097,6 +3798,9 @@ class GizmoController(QtCore.QObject):
         # is on.
         target.SetPreserveChildren(bool(settings.preserveChildren)
                                    and target.supportsPreserveChildren)
+        # Frozen for the whole drag: BeginDrag() below captures the
+        # pivot from it, and the handles were laid out on it.
+        self._PrimeGroupPivot()
         try:
             recorder = rigExecUndo.EditRecorder(self.usdviewApi.stage,
                                                 target.AttributePaths())
@@ -3153,7 +3857,7 @@ class GizmoController(QtCore.QObject):
             # pre-drag pose while the geometry moved (gizmoPreview.Push sets
             # both in the right order).
             gizmoPreview.Push(drag.target.writer.Pending())
-            drag.target.Refresh()
+            drag.target.RefreshDuringDrag()
         except Exception as error:
             Tf.Warn("rigExecUsdview: gizmo drag failed: %s" % error)
         self._RebuildHandles()

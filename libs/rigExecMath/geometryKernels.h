@@ -86,6 +86,94 @@ void RigExecApplyLattice(
     const std::vector<GfVec3f> &posedCage,
     const GfVec3i &divisions);
 
+/// A non-rational NURBS curve as UsdGeomNurbsCurves authors one: control
+/// points, order (degree + 1) and a knot vector of points.size() + order
+/// entries. Open and periodic curves differ only in their knots and in the
+/// periodic curve's wrapped control points, so both evaluate the same way.
+struct RigExecNurbsCurve {
+    const std::vector<GfVec3f> *points = nullptr;
+    int order = 0;
+    const std::vector<double> *knots = nullptr;
+
+    /// True when the arrays describe an evaluable curve.
+    bool IsValid() const;
+    /// The parameter domain [knots[order-1], knots[pointCount]].
+    double DomainStart() const;
+    double DomainEnd() const;
+    /// The curve point at parameter u (clamped to the domain), by de Boor.
+    GfVec3f Evaluate(double u) const;
+};
+
+/// Bind coordinates for RigExecApplyWire: per point, (u, d) with u the
+/// parameter of the closest point on the REST curve and d the distance to
+/// it. Found by sampling every knot span and refining the best sample.
+std::vector<GfVec2f> RigExecBindWire(
+    const std::vector<GfVec3f> &points, const RigExecNurbsCurve &restCurve);
+
+/// Wire deformation (RigExecCurveMover "wire"): every point moves by the
+/// driver curve's displacement at the parameter it was bound to,
+///
+///   p' = p + f(d) * (C(u) - C0(u))
+///
+/// with C the posed curve, C0 the rest curve, (u, d) the point's bind
+/// coordinates and f = 1 - smoothstep(0, dropoff, d) (f = 1 when dropoff
+/// <= 0). The two curves must share order, knots and point count. Only the
+/// points in [begin, end) are written, so a caller can split the range
+/// across threads. Returns false, writing nothing, on a shape mismatch.
+bool RigExecApplyWire(
+    std::vector<GfVec3f> *points,
+    const RigExecNurbsCurve &restCurve,
+    const RigExecNurbsCurve &posedCurve,
+    const GfVec2f *bindCoords, size_t bindCount,
+    double dropoffDistance,
+    size_t begin, size_t end);
+
+/// RigExecApplyWire weighted by a sparse field: only the named points move,
+/// each by weight * f(d) * (C(u) - C0(u)). indices must be ascending and in
+/// range and weights parallel to them. bindCoords either covers every point
+/// or is itself sparse, one entry per index in the same order -- a wire
+/// moves only the points its weights name, so that is all it needs bound.
+bool RigExecApplyWireSparse(
+    std::vector<GfVec3f> *points,
+    const RigExecNurbsCurve &restCurve,
+    const RigExecNurbsCurve &posedCurve,
+    const GfVec2f *bindCoords, size_t bindCount,
+    double dropoffDistance,
+    const std::vector<int> &indices,
+    const std::vector<float> &weights);
+
+/// A sparse wire's deformation as a fixed linear map from control point
+/// motion to point motion.
+///
+/// A wire moves point k by f(d_k) * sum_j N_j(u_k) (C_j - C0_j): u_k and d_k
+/// are fixed at bind, the basis functions N_j depend only on the knots and
+/// order, so every coefficient f(d_k) N_j(u_k) is a constant until the bind,
+/// the knots or the weighted point set change. Stored per control point, so
+/// a frame in which one tweak moves touches only the points that control
+/// point can reach, with no curve evaluation at all.
+struct RigExecWireBasis {
+    /// For control point j: (position in the weight index list, coefficient).
+    std::vector<std::vector<std::pair<uint32_t, float>>> byControlPoint;
+};
+
+/// Builds the basis for the points named by \p indices. \p bindCoords is
+/// either one entry per mesh point (\p meshPointCount of them) or one per
+/// index. Returns false for an invalid curve layout.
+bool RigExecBuildWireBasis(
+    const GfVec2f *bindCoords, size_t bindCount, size_t meshPointCount,
+    const std::vector<int> &indices, int order,
+    const std::vector<double> &knots, size_t controlPointCount,
+    double dropoffDistance, RigExecWireBasis *basis);
+
+/// Applies a prebuilt basis: point indices[k] moves by
+/// weights[k] * sum_j coefficient * (posed[j] - rest[j]), summed over only
+/// the control points that moved.
+bool RigExecApplyWireBasis(
+    std::vector<GfVec3f> *points, const RigExecWireBasis &basis,
+    const std::vector<int> &indices, const std::vector<float> &weights,
+    const std::vector<GfVec3f> &restControlPoints,
+    const std::vector<GfVec3f> &posedControlPoints);
+
 /// Closest point on a triangulated standard mesh (RigExecSurfaceMover
 /// "project", spec §7.5): p' = lerp(p, closestSurfacePoint(p), weight).
 void RigExecApplySurfaceProject(

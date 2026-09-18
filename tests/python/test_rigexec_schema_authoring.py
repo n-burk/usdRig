@@ -151,8 +151,10 @@ CONCRETE_SCHEMA_TYPES = (
     "RigExecRotationConstraint",
     "RigExecScaleConstraint",
     "RigExecSingleChainIkConstraint",
+    "RigExecSkinMover",
     "RigExecSmoothMover",
     "RigExecSphereWeight",
+    "RigExecSplineIk",
     "RigExecStaticWeight",
     "RigExecSurfaceMover",
     "RigExecTwistDistribution",
@@ -230,7 +232,7 @@ class SchemaFacadeTests(_ContractTestCase):
             self.assertEqual(self.stage.GetRootLayer().ExportToString(), original)
 
     def test_all_concrete_types_define_and_get(self):
-        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 37)
+        self.assertEqual(len(CONCRETE_SCHEMA_TYPES), 39)
         self.assertEqual(
             set(rigexec.schema.names()), set(CONCRETE_SCHEMA_TYPES))
         self.assertFalse(hasattr(rigexec.schema, "CustomConstraint"))

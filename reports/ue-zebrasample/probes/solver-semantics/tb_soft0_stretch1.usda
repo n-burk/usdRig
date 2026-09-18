@@ -1,0 +1,91 @@
+#usda 1.0
+(
+    defaultPrim = "Asset"
+    startTimeCode = 1
+    endTimeCode = 11
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+        custom int rigExec:restFrameVersion = 2
+
+        def Scope "Controls"
+        {
+            def RigExecControl "HipRoot" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+
+            def RigExecControl "FootIK" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                double avars:tx.timeSamples = {
+                    1: 1.8,
+                    2: 1.8999999999999999,
+                    3: 1.98,
+                    4: 1.998,
+                    5: 2,
+                    6: 2.0019999999999998,
+                    7: 2.02,
+                    8: 2.1000000000000001,
+                    9: 2.3999999999999999,
+                    10: 6,
+                    11: 10
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+
+            def RigExecControl "KneePole" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 1, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecTwoBoneIk "LegIK"
+            {
+                float inputs:softness = 0.0
+                float inputs:stretch = 1.0
+                rel rigExec:effectorControl = </Asset/Rig/Controls/FootIK>
+                rel rigExec:joints = [
+                    </Asset/Rig/Joints/Hip>,
+                    </Asset/Rig/Joints/Hip/Knee>,
+                    </Asset/Rig/Joints/Hip/Knee/Ankle>,
+                ]
+                rel rigExec:poleControl = </Asset/Rig/Controls/KneePole>
+                rel rigExec:rootControl = </Asset/Rig/Controls/HipRoot>
+                uniform token rigExec:stretchPolicy = "uniformSegments"
+                uniform token rigExec:unreachablePolicy = "clampWithSoftness"
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Hip"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+
+                def RigExecJoint "Knee"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+
+                    def RigExecJoint "Ankle"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+                    }
+                }
+            }
+        }
+    }
+}

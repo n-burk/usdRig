@@ -1,0 +1,96 @@
+#usda 1.0
+(
+    """
+    Probe C3a: RigExecFloatMathMover inputs:value (float) CONNECTED to a
+    control's double avars:tx / avars:rx. Each "add" mover authors its own
+    inputs:value so the published target tells us which value was used:
+      Dials.fromTx : base 10, own value 0.25, avars:tx = 0.7  -> 10.7 if avar read, 10.25 if own value
+      Dials.fromRx : base 10, own value 0.5,  avars:rx = 33   -> 43   if avar read, 10.5  if own value
+      Dials.fromFloat (control): base 10, own value 0.125, connected to a FLOAT
+                     source = 3                            -> 13   if connection followed
+    """
+    defaultPrim = "Asset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Ctl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0.7
+                double avars:rx = 33
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/Ctl>
+                rel rigExec:joints = </Asset/Rig/Joints/Root>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Channels"
+        {
+            def Scope "Dials"
+            {
+                float rigExec:fromTx = 10
+                float rigExec:fromRx = 10
+                float rigExec:fromFloat = 10
+                float rigExec:floatSource = 3
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecFloatMathMover "AddTx" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float inputs:value = 0.25
+                float inputs:value.connect = </Asset/Rig/Controls/Ctl.avars:tx>
+                rel rigExec:moves = </Asset/Rig/Channels/Dials.rigExec:fromTx>
+            }
+
+            def RigExecFloatMathMover "AddRx" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float inputs:value = 0.5
+                float inputs:value.connect = </Asset/Rig/Controls/Ctl.avars:rx>
+                rel rigExec:moves = </Asset/Rig/Channels/Dials.rigExec:fromRx>
+            }
+
+            def RigExecFloatMathMover "AddFloat" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float inputs:value = 0.125
+                float inputs:value.connect = </Asset/Rig/Channels/Dials.rigExec:floatSource>
+                rel rigExec:moves = </Asset/Rig/Channels/Dials.rigExec:fromFloat>
+            }
+        }
+    }
+}

@@ -1,0 +1,250 @@
+#usda 1.0
+(
+    """
+    Probe C3b: one RigExecBlendShapeMover per mesh, each with ONE
+    RigExecBlendInput holding ONE RigExecBlendSample. Every target moves both
+    points of its 2-point mesh by +10 in Z, so the published Z of a point is
+    the applied (clamped) weight * 10 / activation-normalized.
+      Neg    weight -0.5, activation 1   -> clamp to 0   -> z 0   (unclamped would be -5)
+      Over   weight  1.5, activation 1   -> clamp to 1   -> z 10  (unclamped would be 15)
+      Half   weight  0.5, activation 1   -> z 5 (control)
+      One    weight  1.0, activation 1   -> z 10 (control)
+      OverA  weight  1.5, activation 0.5 -> clamp to 0.5 -> z 10 (full target at its activation)
+      QtrA   weight 0.25, activation 0.5 -> z 5  (lerp from implicit zero at 0)
+    """
+    defaultPrim = "Asset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Ctl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "BlendInputs"
+        {
+            def RigExecBlendInput "Neg"
+            {
+                float inputs:weight = -0.5
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Neg/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Targets/T_Neg.points>
+                }
+            }
+
+            def RigExecBlendInput "Over"
+            {
+                float inputs:weight = 1.5
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Over/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Targets/T_Over.points>
+                }
+            }
+
+            def RigExecBlendInput "Half"
+            {
+                float inputs:weight = 0.5
+                rel rigExec:samples = </Asset/Rig/BlendInputs/Half/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Targets/T_Half.points>
+                }
+            }
+
+            def RigExecBlendInput "One"
+            {
+                float inputs:weight = 1
+                rel rigExec:samples = </Asset/Rig/BlendInputs/One/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 1
+                    rel rigExec:targetPoints = </Asset/Targets/T_One.points>
+                }
+            }
+
+            def RigExecBlendInput "OverA"
+            {
+                float inputs:weight = 1.5
+                rel rigExec:samples = </Asset/Rig/BlendInputs/OverA/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 0.5
+                    rel rigExec:targetPoints = </Asset/Targets/T_OverA.points>
+                }
+            }
+
+            def RigExecBlendInput "QtrA"
+            {
+                float inputs:weight = 0.25
+                rel rigExec:samples = </Asset/Rig/BlendInputs/QtrA/Full>
+
+                def RigExecBlendSample "Full"
+                {
+                    float rigExec:activation = 0.5
+                    rel rigExec:targetPoints = </Asset/Targets/T_QtrA.points>
+                }
+            }
+
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecBlendShapeMover "BS_Neg" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/Neg>
+                rel rigExec:moves = </Asset/Geom/M_Neg.points>
+            }
+
+            def RigExecBlendShapeMover "BS_Over" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/Over>
+                rel rigExec:moves = </Asset/Geom/M_Over.points>
+            }
+
+            def RigExecBlendShapeMover "BS_Half" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/Half>
+                rel rigExec:moves = </Asset/Geom/M_Half.points>
+            }
+
+            def RigExecBlendShapeMover "BS_One" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/One>
+                rel rigExec:moves = </Asset/Geom/M_One.points>
+            }
+
+            def RigExecBlendShapeMover "BS_OverA" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/OverA>
+                rel rigExec:moves = </Asset/Geom/M_OverA.points>
+            }
+
+            def RigExecBlendShapeMover "BS_QtrA" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:blendInputs = </Asset/Rig/BlendInputs/QtrA>
+                rel rigExec:moves = </Asset/Geom/M_QtrA.points>
+            }
+
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "M_Neg"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+        def Mesh "M_Over"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+        def Mesh "M_Half"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+        def Mesh "M_One"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+        def Mesh "M_OverA"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+        def Mesh "M_QtrA"
+        {
+            int[] faceVertexCounts = []
+            int[] faceVertexIndices = []
+            point3f[] points = [(0, 0, 0), (1, 0, 0)]
+        }
+
+    }
+
+    def Scope "Targets"
+    {
+        def Points "T_Neg"
+        {
+            point3f[] points = [(0, 0, 10), (1, 0, 10)]
+            token visibility = "invisible"
+        }
+
+        def Points "T_Over"
+        {
+            point3f[] points = [(0, 0, 10), (1, 0, 10)]
+            token visibility = "invisible"
+        }
+
+        def Points "T_Half"
+        {
+            point3f[] points = [(0, 0, 10), (1, 0, 10)]
+            token visibility = "invisible"
+        }
+
+        def Points "T_One"
+        {
+            point3f[] points = [(0, 0, 10), (1, 0, 10)]
+            token visibility = "invisible"
+        }
+
+        def Points "T_OverA"
+        {
+            point3f[] points = [(0, 0, 10), (1, 0, 10)]
+            token visibility = "invisible"
+        }
+
+        def Points "T_QtrA"
+        {
+            point3f[] points = [(0, 0, 10), (1, 0, 10)]
+            token visibility = "invisible"
+        }
+
+    }
+}

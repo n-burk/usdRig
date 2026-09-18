@@ -145,10 +145,16 @@ def End():
     """
     global _declared, _expected
     gizmoMath.SetPreviewValues({})
+    declared = bool(_declared)
     _declared = ()
     _expected = 0
     if _sink is None:
         return False
+    if not declared:
+        # Nothing was ever begun on the host side, so there is nothing to
+        # drop. The host's End republishes the rig (about 10 ms on the
+        # biped), and every selection change aborts a drag and lands here.
+        return True
     return bool(_sink.End())
 
 

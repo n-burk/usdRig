@@ -1,5 +1,5 @@
 #
-# usdview panel for authoring curvenets (docs/curvenet.md).
+# usdview panel for authoring curvenets (docs/specs/curvenet.md).
 #
 # The toolkit the 2022 paper describes is the specification for this file:
 #

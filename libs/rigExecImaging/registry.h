@@ -92,6 +92,10 @@ public:
     /// Evaluates and republishes. Authors nothing.
     bool UpdatePreview(const double *values, size_t count);
 
+    /// Writes every active rig's recorded profile totals to \p path and
+    /// clears them. See RigExecImaging_WriteProfileSummary.
+    bool WriteProfileSummary(const std::string &path);
+
     /// Ends the manipulation: drops every override and delta and republishes
     /// the authored rig. The application authors the committed values itself,
     /// before or after this call -- the two are independent, which is why an
@@ -104,6 +108,64 @@ public:
     void Deactivate();
 
     bool IsActive() const { return !_sessions.empty(); }
+
+    /// Activates the stage's rigs unless this exact stage is already active
+    /// (adapter-driven discovery, docs/specs/imaging-datasource-redesign.md
+    /// §3.2).
+    ///
+    /// The stage scene index's rig adapter calls this the first time a
+    /// RigExecRoot prim's data is built, so a host with no explicit
+    /// activation (usdrecord) still evaluates. A no-op when already active
+    /// on \p stage -- hosts that activate explicitly (the usdview plugin)
+    /// are unaffected -- and otherwise exactly Activate with an empty rig
+    /// path: every RigExecRoot on the stage, compiled and published at
+    /// \p time.
+    ///
+    /// NOT a substitute for Activate: a rig authored into an already-active
+    /// stage still needs an explicit re-activation, which is what the
+    /// usdview plugin's root-set tracking does.
+    ///
+    /// Refuses (silently returns false) while active on a DIFFERENT stage:
+    /// unlike an explicit Activate, the automatic path never steals a live
+    /// activation. The refusal is silent because the adapter calls this on
+    /// every data pull -- a second stage's rigs would otherwise warn once
+    /// per pull, forever.
+    bool EnsureActivated(
+        const UsdStageRefPtr &stage, UsdTimeCode time);
+
+    /// Whether \p path is an active rig root. The results index's
+    /// _PrimsDirtied time trigger only fires for these, so output-prim
+    /// dirties (including the universal ones from epoch swaps) never
+    /// re-enter evaluation.
+    bool IsActiveRigRoot(const SdfPath &path);
+
+    /// Records a RigExecRoot sighting for eager activation. The rig adapter
+    /// calls this from GetImagingSubprims, which the stage scene index runs
+    /// for every prim during populate -- long before any data pull -- so the
+    /// results index's _PrimsAdded can force the rig's data (and its
+    /// time-varying flag, and its activation) into existence on the populate
+    /// thread instead of whichever render worker pulls first.
+    ///
+    /// Always records, even while active: GetImagingSubprims runs inside
+    /// GetChildPrimPaths walks the xform-override index makes WHILE HOLDING
+    /// _mutex (a preview's _DirtyXformSubtree), so this must never take it.
+    /// The set only holds distinct rig paths, so recording while active is
+    /// bounded and harmless -- the activation it forces resolves to a no-op
+    /// inside EnsureActivated. A rig authored into an already-active stage
+    /// is still the usdview plugin's re-activation to make: the forced pull
+    /// builds its data but EnsureActivated refuses to replace a live stage
+    /// (see below). Cleared by Activate and Deactivate; a note that
+    /// outlives a failed activation retries on the next resync, like the
+    /// plugin's own retry.
+    ///
+    /// Paths only, no stage: the note is just the _PrimsAdded matcher, and
+    /// the activation it forces runs through the pulled prim's own adapter,
+    /// which always names the true stage. A path collision across two stages
+    /// therefore still activates the right one.
+    void NoteRigRoot(const SdfPath &rigPath);
+
+    /// Whether \p path was noted by NoteRigRoot and is still pending.
+    bool IsNotedRigRoot(const SdfPath &path);
 
 private:
     RigExecImagingRegistry();
@@ -143,6 +205,10 @@ private:
         std::shared_ptr<RigExecImagingSnapshot> snapshot,
         const RigExecBindingResolvingSceneIndex::BindingEpochConstPtr &epoch);
 
+    /// Broadcasts a publication to every chain. Call WITHOUT _mutex held:
+    /// the sends re-enter this registry (the results index's time trigger),
+    /// so _Broadcast snapshots the chain list under a short lock and sends
+    /// outside it.
     void _Broadcast(const RigExecImagingBridge::PublishResult &result);
     void _RefreshReadRoots();
 
@@ -189,6 +255,16 @@ private:
     std::vector<Chain> _chains;
     RigSessions _sessions;
     UsdStageRefPtr _stage;
+    /// Rig roots sighted by the rig adapter (see NoteRigRoot).
+    ///
+    /// Its own mutex, SEPARATE from _mutex on purpose: the adapter notes
+    /// roots from inside scene index traversals that run while _mutex is
+    /// held, and taking _mutex there is a self-deadlock (MSVC throws
+    /// device_or_resource_busy). Lock order is _mutex THEN _notedMutex --
+    /// Activate and Deactivate clear the set while holding _mutex -- and
+    /// nothing ever takes _mutex while holding _notedMutex.
+    std::mutex _notedMutex;
+    std::set<SdfPath> _notedRigRoots;
     std::set<SdfPath> _generatedScopes;
     std::set<SdfPath> _assetRoots;
     std::set<SdfPath> _readRoots;
@@ -235,6 +311,9 @@ extern "C" {
 RIGEXEC_IMAGING_C_API int RigExecImaging_Activate(
     long long stageCacheId, const char *rigPath, double initialFrame);
 RIGEXEC_IMAGING_C_API int RigExecImaging_SetTime(double frame);
+/// Per-phase viewport profile totals to a text file, then cleared. Needs
+/// RIGEXEC_IMAGING_PROFILE set when the rig was activated.
+RIGEXEC_IMAGING_C_API int RigExecImaging_WriteProfileSummary(const char *path);
 RIGEXEC_IMAGING_C_API void RigExecImaging_Deactivate();
 /// Current published snapshot generation (0 before first publication).
 RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGeneration();
@@ -242,6 +321,21 @@ RIGEXEC_IMAGING_C_API long long RigExecImaging_GetGeneration();
 /// Reads one complete evaluated control matrix from the exact published
 /// stage/time. Returns 1 on success, 0 without changing output otherwise.
 /// isDefault selects UsdTimeCode::Default; ordinary frames must be finite.
+/// Reads scalar properties this generation published, by property path.
+///
+/// \p packedPaths is newline-separated absolute property paths, the same
+/// convention BeginPreview uses; \p out receives one float each and must
+/// hold \p count of them. Returns how many were FOUND; a path the rig did
+/// not publish leaves its slot at 0 and is not counted, so a caller can
+/// tell "everything is zero" from "nothing was published".
+///
+/// This exists so a tool does not have to evaluate the rig a second time to
+/// see numbers the viewport already computed. The Shape Editor was doing
+/// exactly that -- 9-15 ms per refresh to recover pose-interpolator weights
+/// sitting in the current snapshot.
+RIGEXEC_IMAGING_C_API int RigExecImaging_GetMovedFloats(
+    const char *packedPaths, float *out, int count);
+
 RIGEXEC_IMAGING_C_API int RigExecImaging_GetControlFrameAssetSpace(
     long long stageCacheId, const char *primPath, double frame,
     int isDefault, double outMatrix[16]);

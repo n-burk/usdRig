@@ -5,7 +5,7 @@
 
     An implementation of de Goes, Sheffler & Fleischer, "Character
     Articulation through Profile Curves" (ACM TOG 41(4), SIGGRAPH 2022).
-    See docs/curvenet.md for the implementation notes and source citations.
+    See docs/specs/curvenet.md for the implementation notes and source citations.
 
     The net is three profile rings joined by four longitudinal rails. Every
     ring knot is shared by two ring spans and two rails, so §3 labels it an

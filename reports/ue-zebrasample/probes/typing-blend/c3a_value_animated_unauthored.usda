@@ -1,0 +1,72 @@
+#usda 1.0
+(
+    """
+    Probe C3a (variant): inputs:value has ONLY a connection (no authored own
+    value -> schema default 0) to an ANIMATED double avars:tx (0 at 1, 8 at 11).
+    Dial base 10: avar read -> 10 / 14 / 18 at frames 1 / 6 / 11; fallback -> 10.
+    """
+    defaultPrim = "Asset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+    startTimeCode = 1
+    endTimeCode = 11
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Ctl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx.timeSamples = {
+                    1: 0,
+                    11: 8,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/Ctl>
+                rel rigExec:joints = </Asset/Rig/Joints/Root>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Root"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Channels"
+        {
+            def Scope "Dials"
+            {
+                float rigExec:dial = 10
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecFloatMathMover "AddTx" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                uniform token rigExec:operation = "add"
+                float inputs:value.connect = </Asset/Rig/Controls/Ctl.avars:tx>
+                rel rigExec:moves = </Asset/Rig/Channels/Dials.rigExec:dial>
+            }
+        }
+    }
+}

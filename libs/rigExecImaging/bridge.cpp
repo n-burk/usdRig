@@ -7,6 +7,7 @@
 #include "rigExecMath/curvenet.h"
 
 #include "pxr/base/gf/vec3f.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/prim.h"
@@ -180,20 +181,117 @@ _ReadGuidePurpose(const UsdPrim &prim)
     return UsdGeomTokens->default_;
 }
 
+// The value the FIRST connection source of \p attr holds at the pose's
+// time, or nothing when the attribute has no connection or the source
+// cannot supply one (dangling path, a relationship, no value).
+//
+// UsdAttribute::Get() does NOT follow connections: they are a
+// shading-graph concept, not value resolution. So a rig that authored
+// `guide:displayOpacity.connect = </limb_params.avars:ikfk>` compiled,
+// drew nothing different, and gave no hint why. This is the read-through.
+//
+// A property-mover result for the source wins over its authored value,
+// exactly as the volume guides read their driven dimensions: a dial that
+// is itself computed must fade the guide by what it computed.
+bool
+_ReadConnectedValue(
+    const UsdAttribute &attr, const RigExecRigPose &pose, VtValue *held)
+{
+    SdfPathVector connections;
+    if (!attr.GetConnections(&connections) || connections.empty()) {
+        return false;
+    }
+    const SdfPath &sourcePath = connections.front();
+    if (!sourcePath.IsPropertyPath()) {
+        return false;
+    }
+    const UsdAttribute source =
+        attr.GetStage()->GetAttributeAtPath(sourcePath);
+    if (!source) {
+        return false;
+    }
+    const auto moved = pose.movedProperties.find(sourcePath);
+    if (moved != pose.movedProperties.end() && !moved->second.IsEmpty()) {
+        *held = moved->second;
+        return true;
+    }
+    return source.Get(held, pose.time);
+}
+
+// The scalar a float OR double VtValue holds -- avars are double, the
+// biped's ikfk dial is float, and a guide must accept either -- or
+// nothing when it holds neither or the value is not finite.
+bool
+_HeldScalar(const VtValue &held, double *value)
+{
+    if (held.IsHolding<float>()) {
+        *value = held.UncheckedGet<float>();
+    } else if (held.IsHolding<double>()) {
+        *value = held.UncheckedGet<double>();
+    } else {
+        return false;
+    }
+    return std::isfinite(*value);
+}
+
+// The schema fallback for guide:displayOpacityMin, restated for the same
+// reason _FillControlGuides restates its own: a stage composed without the
+// codeless schema plugin has no fallback to resolve.
+constexpr double _kDefaultGuideOpacityMin = 0.15;
+
 void
 _ReadGuideStyle(
-    const UsdPrim &prim, UsdTimeCode time, RigExecPublishedPrim *published)
+    const UsdPrim &prim, const RigExecRigPose &pose,
+    RigExecPublishedPrim *published)
 {
     if (!prim) {
         return;
     }
+    const UsdTimeCode time = pose.time;
     published->guidePurpose = _ReadGuidePurpose(prim);
     if (UsdAttribute a = prim.GetAttribute(TfToken("guide:displayColor"))) {
-        a.Get(&published->guideColor, time);
+        VtValue held;
+        if (_ReadConnectedValue(a, pose, &held) &&
+            held.IsHolding<GfVec3f>()) {
+            published->guideColor = held.UncheckedGet<GfVec3f>();
+        } else {
+            a.Get(&published->guideColor, time);
+        }
     }
     if (UsdAttribute a =
             prim.GetAttribute(TfToken("guide:displayOpacity"))) {
-        a.Get(&published->guideOpacity, time);
+        VtValue held;
+        double driven = 0.0;
+        if (_ReadConnectedValue(a, pose, &held) &&
+            _HeldScalar(held, &driven)) {
+            // A driven opacity is a dial's value, and a dial parks at its
+            // end stops: without the complement one switch could not fade
+            // two control sets in opposite directions, and without the
+            // floor the inactive set would vanish -- unfindable, so
+            // unswitchable-back. Both apply ONLY to a connected value; an
+            // unconnected attribute draws exactly what it says.
+            bool invert = false;
+            if (UsdAttribute i = prim.GetAttribute(
+                    TfToken("guide:displayOpacityInvert"))) {
+                i.Get(&invert, time);
+            }
+            double floor = _kDefaultGuideOpacityMin;
+            if (UsdAttribute m = prim.GetAttribute(
+                    TfToken("guide:displayOpacityMin"))) {
+                VtValue heldMin;
+                double authoredMin = 0.0;
+                if (m.Get(&heldMin, time) &&
+                    _HeldScalar(heldMin, &authoredMin)) {
+                    floor = authoredMin;
+                }
+            }
+            floor = std::min(1.0, std::max(0.0, floor));
+            double opacity = invert ? 1.0 - driven : driven;
+            opacity = std::min(1.0, std::max(floor, opacity));
+            published->guideOpacity = static_cast<float>(opacity);
+        } else {
+            a.Get(&published->guideOpacity, time);
+        }
     }
 }
 
@@ -651,11 +749,22 @@ RigExecImagingBridge::RigExecImagingBridge(
     , _evaluator(std::make_unique<RigExecRigEvaluator>(stage, rigPath))
     , _store(std::move(store))
 {
+    // No overlay is selected yet, so nothing consumes the per-point influence
+    // field. SetWeightOverlay turns it back on the moment one is.
+    _evaluator->SetPublishWeightFields(false);
+    // Viewport profiling: the evaluator's own phases plus the imaging
+    // layer's (see EvaluateAndPublishResult and the registry), dumped with
+    // RigExecImaging_WriteProfileSummary. Off by default; recording changes
+    // no evaluated value.
+    if (TfGetenvBool("RIGEXEC_IMAGING_PROFILE", false)) {
+        _evaluator->SetProfilingEnabled(true);
+    }
 }
 
 bool
 RigExecImagingBridge::Compile(std::vector<std::string> *errors)
 {
+    InvalidateGuideCaches();
     return _evaluator->Compile(errors);
 }
 
@@ -706,9 +815,190 @@ RigExecImagingBridge::_FillProviderXforms(
 }
 
 void
+RigExecImagingBridge::InvalidateGuideCaches()
+{
+    _guideInputs.clear();
+    _jointChildren.clear();
+    _jointChildrenValid = false;
+    _controlSpaceJoints.clear();
+}
+
+bool
+RigExecImagingBridge::_IsControlSpaceJoint(const SdfPath &path) const
+{
+    auto found = _controlSpaceJoints.find(path);
+    if (found == _controlSpaceJoints.end()) {
+        bool nested = false;
+        // Any control above it through a chain of controls and joints: a
+        // pivot can nest under another pivot (a follow above a compression).
+        static const TfToken kControl("RigExecControl");
+        static const TfToken kJoint("RigExecJoint");
+        if (const UsdPrim prim = _stage->GetPrimAtPath(path)) {
+            for (UsdPrim up = prim.GetParent(); up; up = up.GetParent()) {
+                const TfToken &type = up.GetTypeName();
+                if (type == kControl) {
+                    nested = true;
+                    break;
+                }
+                if (type != kJoint) {
+                    break;
+                }
+            }
+        }
+        found = _controlSpaceJoints.emplace(path, nested).first;
+    }
+    return found->second;
+}
+
+void
+RigExecImagingBridge::_SyncGuideCaches() const
+{
+    // Every stage edit the evaluator saw -- through the registry or not;
+    // a bridge driven directly (tests, headless tools) gets no registry
+    // notice forwarding, and must not publish stale styling for it.
+    const uint64_t serial = _evaluator->GetStageEditSerial();
+    if (serial != _guideCacheSerial) {
+        _guideInputs.clear();
+        _jointChildren.clear();
+        _jointChildrenValid = false;
+        _controlSpaceJoints.clear();
+        _guideCacheSerial = serial;
+    }
+}
+
+namespace {
+
+// Can this attribute's value differ between two generations with no stage
+// notice in between? Connected (a dial drives it) or time-varying.
+bool
+_GuideAttrIsLive(const UsdAttribute &attribute)
+{
+    return attribute &&
+           (attribute.HasAuthoredConnections() ||
+            attribute.ValueMightBeTimeVarying());
+}
+
+}  // namespace
+
+RigExecImagingBridge::_GuideInputs &
+RigExecImagingBridge::_GuideInputsFor(const SdfPath &path) const
+{
+    auto found = _guideInputs.find(path);
+    if (found == _guideInputs.end()) {
+        found = _guideInputs.emplace(path, _GuideInputs()).first;
+        found->second.prim = _stage->GetPrimAtPath(path);
+    }
+    return found->second;
+}
+
+double
+RigExecImagingBridge::_GuideRadius(_GuideInputs &inputs,
+                                   UsdTimeCode time) const
+{
+    // Schema default, so an unauthored joint keeps Hydra's own fallback
+    // radius and every existing rig looks exactly as it did.
+    if (!inputs.prim) {
+        return 1.0;
+    }
+    if (!inputs.radiusReady || inputs.radiusLive) {
+        double radius = 1.0;
+        const UsdAttribute a =
+            inputs.prim.GetAttribute(TfToken("guide:radius"));
+        if (a) {
+            a.Get(&radius, time);
+        }
+        inputs.radius = radius;
+        inputs.radiusLive = _GuideAttrIsLive(a);
+        inputs.radiusReady = true;
+    }
+    return inputs.radius;
+}
+
+void
+RigExecImagingBridge::_ReadGuideStyleCached(
+    _GuideInputs &inputs, const RigExecRigPose &pose,
+    RigExecPublishedPrim *published) const
+{
+    const UsdPrim &prim = inputs.prim;
+    if (!prim) {
+        return;
+    }
+    const UsdTimeCode time = pose.time;
+    if (!inputs.styleReady) {
+        inputs.styleReady = true;
+        inputs.purpose = _ReadGuidePurpose(prim);
+        inputs.colorAttr = prim.GetAttribute(TfToken("guide:displayColor"));
+        inputs.colorLive = _GuideAttrIsLive(inputs.colorAttr);
+        if (inputs.colorAttr && !inputs.colorLive) {
+            inputs.hasColor = inputs.colorAttr.Get(&inputs.color, time);
+        }
+        inputs.opacityAttr =
+            prim.GetAttribute(TfToken("guide:displayOpacity"));
+        inputs.opacityLive = _GuideAttrIsLive(inputs.opacityAttr);
+        if (inputs.opacityAttr && !inputs.opacityLive) {
+            inputs.hasOpacity =
+                inputs.opacityAttr.Get(&inputs.opacity, time);
+        }
+    }
+    published->guidePurpose = inputs.purpose;
+    if (inputs.colorAttr) {
+        if (inputs.colorLive) {
+            VtValue held;
+            if (_ReadConnectedValue(inputs.colorAttr, pose, &held) &&
+                held.IsHolding<GfVec3f>()) {
+                published->guideColor = held.UncheckedGet<GfVec3f>();
+            } else {
+                inputs.colorAttr.Get(&published->guideColor, time);
+            }
+        } else if (inputs.hasColor) {
+            published->guideColor = inputs.color;
+        }
+    }
+    if (inputs.opacityAttr) {
+        if (inputs.opacityLive) {
+            // The live half is _ReadGuideStyle's opacity rule verbatim
+            // (connected dial, invert, floor): only the static half is new.
+            RigExecPublishedPrim scratch;
+            _ReadGuideStyle(prim, pose, &scratch);
+            published->guideOpacity = scratch.guideOpacity;
+        } else if (inputs.hasOpacity) {
+            published->guideOpacity = inputs.opacity;
+        }
+    }
+}
+
+const std::map<SdfPath, std::vector<SdfPath>> &
+RigExecImagingBridge::_JointChildren(const RigExecRigPose &pose) const
+{
+    // Namespace nesting is joint hierarchy, which only a recompile can
+    // change -- so the map is rebuilt when the binding epoch or the joint
+    // count moves, not on every generation.
+    const size_t key = _evaluator->GetBindingEpochDigest() ^
+                       (pose.jointFramesFinal.size() * 0x9E3779B97F4A7C15ull);
+    if (_jointChildrenValid && key == _jointChildrenKey) {
+        return _jointChildren;
+    }
+    _jointChildren.clear();
+    for (const auto &[childPath, childFrame] : pose.jointFramesFinal) {
+        for (SdfPath ancestor = childPath.GetParentPath();
+             !ancestor.IsEmpty() && ancestor != _rigPath;
+             ancestor = ancestor.GetParentPath()) {
+            if (pose.jointFramesFinal.count(ancestor)) {
+                _jointChildren[ancestor].push_back(childPath);
+                break;
+            }
+        }
+    }
+    _jointChildrenKey = key;
+    _jointChildrenValid = true;
+    return _jointChildren;
+}
+
+void
 RigExecImagingBridge::_FillGuides(
     const RigExecRigPose &pose, RigExecImagingSnapshot *snapshot) const
 {
+    _SyncGuideCaches();
     // Guide frames are asset-space; the consumer needs to know which prim
     // that space is anchored to in order to place them.
     snapshot->assetRoot = _rigPath.GetParentPath();
@@ -716,29 +1006,13 @@ RigExecImagingBridge::_FillGuides(
     // Namespace nesting is joint hierarchy. Map every joint to its nearest
     // joint ancestor; scopes or other grouping prims between them do not
     // interrupt the same NamespaceAncestor relationship evaluation uses.
-    std::map<SdfPath, std::vector<SdfPath>> jointChildren;
-    for (const auto &[childPath, childFrame] : pose.jointFramesFinal) {
-        for (SdfPath ancestor = childPath.GetParentPath();
-             !ancestor.IsEmpty() && ancestor != _rigPath;
-             ancestor = ancestor.GetParentPath()) {
-            if (pose.jointFramesFinal.count(ancestor)) {
-                jointChildren[ancestor].push_back(childPath);
-                break;
-            }
-        }
-    }
+    // Cached per binding epoch (see _JointChildren).
+    const std::map<SdfPath, std::vector<SdfPath>> &jointChildren =
+        _JointChildren(pose);
 
     for (const auto &[jointPath, frame] : pose.jointFramesFinal) {
-        const UsdPrim prim = _stage->GetPrimAtPath(jointPath);
-        // Schema default, so an unauthored joint keeps Hydra's own fallback
-        // radius and every existing rig looks exactly as it did.
-        double authoredRadius = 1.0;
-        if (prim) {
-            if (UsdAttribute a =
-                    prim.GetAttribute(TfToken("guide:radius"))) {
-                a.Get(&authoredRadius, pose.time);
-            }
-        }
+        _GuideInputs &inputs = _GuideInputsFor(jointPath);
+        const double authoredRadius = _GuideRadius(inputs, pose.time);
         RigExecPublishedPrim &published = snapshot->prims[jointPath];
         bool any = false;
         const auto children = jointChildren.find(jointPath);
@@ -778,7 +1052,7 @@ RigExecImagingBridge::_FillGuides(
         if (any) {
             published.assetRoot = _rigPath.GetParentPath();
             published.hasGuides = true;
-            _ReadGuideStyle(prim, pose.time, &published);
+            _ReadGuideStyleCached(inputs, pose, &published);
         }
     }
     for (const auto &[solverPath, frames] : pose.solverFrames) {
@@ -788,14 +1062,8 @@ RigExecImagingBridge::_FillGuides(
         // so the radius comes off it too, exactly as a joint's does. The
         // schema default is 1.0, so a rig that authors nothing draws what
         // it always drew.
-        const UsdPrim solverPrim = _stage->GetPrimAtPath(solverPath);
-        double authoredRadius = 1.0;
-        if (solverPrim) {
-            if (UsdAttribute a =
-                    solverPrim.GetAttribute(TfToken("guide:radius"))) {
-                a.Get(&authoredRadius, pose.time);
-            }
-        }
+        _GuideInputs &solverInputs = _GuideInputsFor(solverPath);
+        const double authoredRadius = _GuideRadius(solverInputs, pose.time);
         bool any = false;
         for (const RigExecPointFrame &frame : frames) {
             any = _AppendGuideFrame(frame, 0.0, authoredRadius,
@@ -807,7 +1075,7 @@ RigExecImagingBridge::_FillGuides(
         if (any) {
             published.assetRoot = _rigPath.GetParentPath();
             published.hasGuides = true;
-            _ReadGuideStyle(solverPrim, pose.time, &published);
+            _ReadGuideStyleCached(solverInputs, pose, &published);
         } else if (!published.hasPoints && !published.hasNormals &&
                    !published.hasExtent && !published.hasXform) {
             snapshot->prims.erase(solverPath);
@@ -824,6 +1092,7 @@ void
 RigExecImagingBridge::_FillControlGuides(
     const RigExecRigPose &pose, RigExecImagingSnapshot *snapshot) const
 {
+    _SyncGuideCaches();
     // Set here as well as in _FillGuides: control guide frames are
     // asset-space too, and a rig can publish these and no joint guides at
     // all (every joint frame degenerate, say), in which case this is the
@@ -844,37 +1113,59 @@ RigExecImagingBridge::_FillControlGuides(
         if (!_RigidGuideMatrix(frame, &placement, &evaluatedScale)) {
             continue;
         }
-        const UsdPrim prim = _stage->GetPrimAtPath(controlPath);
-        // The schema fallbacks, restated. Normally GetAttribute resolves
-        // them for us, but a stage composed without the codeless schema
-        // plugin registered has no fallback to find, and an empty shape
-        // token names no shape at all -- so a rig would silently stop
-        // drawing control guides rather than draw the documented default.
-        TfToken shape("circle");
-        TfToken drawMode("wire");
-        GfVec3d authoredScale(1.0, 1.0, 1.0);
-        double wireWidth = 0.05;
-        if (prim) {
-            if (UsdAttribute a = prim.GetAttribute(TfToken("guide:shape"))) {
-                a.Get(&shape, pose.time);
-            }
-            if (UsdAttribute a =
-                    prim.GetAttribute(TfToken("guide:drawMode"))) {
-                a.Get(&drawMode, pose.time);
-            }
-            static const TfToken scaleAttrs[3] = {
-                TfToken("guide:scaleX"), TfToken("guide:scaleY"),
-                TfToken("guide:scaleZ")};
-            for (int axis = 0; axis < 3; ++axis) {
-                if (UsdAttribute a = prim.GetAttribute(scaleAttrs[axis])) {
-                    a.Get(&authoredScale[axis], pose.time);
+        _GuideInputs &inputs = _GuideInputsFor(controlPath);
+        const UsdPrim &prim = inputs.prim;
+        if (!inputs.controlReady || inputs.controlLive) {
+            // The schema fallbacks, restated. Normally GetAttribute resolves
+            // them for us, but a stage composed without the codeless schema
+            // plugin registered has no fallback to find, and an empty shape
+            // token names no shape at all -- so a rig would silently stop
+            // drawing control guides rather than draw the documented default.
+            inputs.shape = TfToken("circle");
+            inputs.drawMode = TfToken("wire");
+            inputs.scale = GfVec3d(1.0, 1.0, 1.0);
+            inputs.wireWidth = 0.05;
+            inputs.offset = GfVec3d(0.0);
+            bool live = false;
+            if (prim) {
+                if (UsdAttribute a =
+                        prim.GetAttribute(TfToken("guide:shape"))) {
+                    a.Get(&inputs.shape, pose.time);
+                    live = live || _GuideAttrIsLive(a);
+                }
+                if (UsdAttribute a =
+                        prim.GetAttribute(TfToken("guide:drawMode"))) {
+                    a.Get(&inputs.drawMode, pose.time);
+                    live = live || _GuideAttrIsLive(a);
+                }
+                static const TfToken scaleAttrs[3] = {
+                    TfToken("guide:scaleX"), TfToken("guide:scaleY"),
+                    TfToken("guide:scaleZ")};
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (UsdAttribute a =
+                            prim.GetAttribute(scaleAttrs[axis])) {
+                        a.Get(&inputs.scale[axis], pose.time);
+                        live = live || _GuideAttrIsLive(a);
+                    }
+                }
+                if (UsdAttribute a =
+                        prim.GetAttribute(TfToken("guide:wireWidth"))) {
+                    a.Get(&inputs.wireWidth, pose.time);
+                    live = live || _GuideAttrIsLive(a);
+                }
+                if (UsdAttribute a =
+                        prim.GetAttribute(TfToken("guide:offset"))) {
+                    a.Get(&inputs.offset, pose.time);
+                    live = live || _GuideAttrIsLive(a);
                 }
             }
-            if (UsdAttribute a =
-                    prim.GetAttribute(TfToken("guide:wireWidth"))) {
-                a.Get(&wireWidth, pose.time);
-            }
+            inputs.controlLive = live;
+            inputs.controlReady = true;
         }
+        TfToken shape = inputs.shape;
+        TfToken drawMode = inputs.drawMode;
+        GfVec3d authoredScale = inputs.scale;
+        double wireWidth = inputs.wireWidth;
         // Unlike the scale, a non-positive width is NOT a reason to draw
         // nothing: it selects the hairline fallback, which is what wire
         // guides did before the width existed. Non-finite collapses to the
@@ -910,12 +1201,47 @@ RigExecImagingBridge::_FillControlGuides(
         RigExecPublishedPrim &published = snapshot->prims[controlPath];
         published.assetRoot = _rigPath.GetParentPath();
         published.hasControlGuide = true;
-        published.controlGuideFrame = placement;
+        // guide:offset moves the drawn shape in the control's local frame,
+        // carried by the evaluated scale; the pivot stays where it is.
+        GfMatrix4d guideFrame = placement;
+        if (inputs.offset != GfVec3d(0.0) &&
+            std::isfinite(inputs.offset[0]) &&
+            std::isfinite(inputs.offset[1]) &&
+            std::isfinite(inputs.offset[2])) {
+            const GfVec3d local(inputs.offset[0] * evaluatedScale[0],
+                                inputs.offset[1] * evaluatedScale[1],
+                                inputs.offset[2] * evaluatedScale[2]);
+            guideFrame = GfMatrix4d(1.0).SetTranslate(local) * placement;
+        }
+        published.controlGuideFrame = guideFrame;
         published.controlGuideShape = shape;
         published.controlGuideDrawMode = drawMode;
         published.controlGuideScale = effectiveScale;
         published.controlGuideWireWidth = wireWidth;
-        _ReadGuideStyle(prim, pose.time, &published);
+        _ReadGuideStyleCached(inputs, pose, &published);
+    }
+
+    // The evaluated frames of the PIVOTS nested in a control hierarchy
+    // (a RigExecJoint whose parent is a control: a follow, compression or
+    // drag pivot). A constraint writes those frames, so a viewer composing
+    // them from authored values gets the rest pose, and the controls
+    // nested under them would have no trustworthy parent frame. Published
+    // beside the controls' own frames so a manipulator can read the
+    // evaluator's answer for them. Only these joints: every other joint's
+    // frame is not something a control composes against.
+    static const RigExecPointFrame identityFrame;
+    for (const auto &[jointPath, frame] : pose.jointFramesFinal) {
+        if (!frame.IsValid() || !_IsControlSpaceJoint(jointPath)) {
+            continue;
+        }
+        GfMatrix4d evaluated(1.0);
+        if (RigExecPointsToMatrix(identityFrame.points, frame.points,
+                                  &evaluated)) {
+            auto &published = snapshot->prims[jointPath];
+            published.assetRoot = _rigPath.GetParentPath();
+            published.hasControlFrame = true;
+            published.controlFrame = evaluated;
+        }
     }
 }
 
@@ -1092,7 +1418,7 @@ RigExecImagingBridge::_FillVolumeGuides(
         published.assetRoot = _rigPath.GetParentPath();
         published.hasVolumeGuides = true;
         published.volumeGuides = std::move(elements);
-        _ReadGuideStyle(prim, pose.time, &published);
+        _ReadGuideStyle(prim, pose, &published);
     }
 }
 
@@ -1172,7 +1498,7 @@ RigExecImagingBridge::_FillCurvenetGuides(
         published.volumeGuideAnchorToAsset = toAsset;
         published.guideColor = GfVec3f(0.15f, 0.8f, 0.45f);
         published.guideOpacity = 1.0f;
-        _ReadGuideStyle(prim, pose.time, &published);
+        _ReadGuideStyle(prim, pose, &published);
     }
 }
 
@@ -1246,8 +1572,14 @@ RigExecImagingBridge::PublishResult
 RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
 {
     PublishResult result;
+    RigExecProfileScope wholeScope(MutableProfiler(),
+                                   "Imaging.EvaluateAndPublish", "imaging");
     // 1. Evaluation always completes before publication (spec §8.2).
-    const RigExecRigPose pose = _evaluator->Evaluate(time);
+    const RigExecRigPose pose = [&] {
+        RigExecProfileScope scope(MutableProfiler(), "Imaging.Evaluate",
+                                  "imaging");
+        return _evaluator->Evaluate(time);
+    }();
     if (!pose.valid) {
         // A rig that cannot evaluate STOPS DRIVING THE SCENE.
         //
@@ -1298,6 +1630,19 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
             (property == "points" || property == "normals" ||
              property == "extent");
         if (!isGeometry) {
+            // Not Hydra data -- but a scalar here is a rig output a
+            // tool may want (a blend weight, a pose-interpolator
+            // result), and recovering it otherwise costs a whole
+            // second evaluation of the rig. Recorded beside the
+            // generation that produced it; see
+            // RigExecImagingSnapshot::movedFloats.
+            if (value.IsHolding<float>()) {
+                snapshot->movedFloats[propertyPath] =
+                    value.UncheckedGet<float>();
+            } else if (value.IsHolding<double>()) {
+                snapshot->movedFloats[propertyPath] =
+                    static_cast<float>(value.UncheckedGet<double>());
+            }
             continue;
         }
         RigExecPublishedPrim &published = snapshot->prims[primPath];
@@ -1318,12 +1663,16 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
     }
     // Joints and aggregate solvers publish guide payloads (drawn by the
     // results scene index like OpenExec's IrJointScope guides).
-    _FillProviderXforms(pose, snapshot.get());
-    _FillGuides(pose, snapshot.get());
-    _FillControlGuides(pose, snapshot.get());
-    _FillVolumeGuides(pose, snapshot.get());
-    _FillCurvenetGuides(pose, snapshot.get());
-    _FillWeightOverlay(pose, snapshot.get());
+    {
+        RigExecProfileScope scope(MutableProfiler(), "Imaging.Guides",
+                                  "imaging");
+        _FillProviderXforms(pose, snapshot.get());
+        _FillGuides(pose, snapshot.get());
+        _FillControlGuides(pose, snapshot.get());
+        _FillVolumeGuides(pose, snapshot.get());
+        _FillCurvenetGuides(pose, snapshot.get());
+        _FillWeightOverlay(pose, snapshot.get());
+    }
 
     // 3. A structural recompile publishes a replacement binding epoch
     // before value notices (spec §10.4).
@@ -1341,7 +1690,11 @@ RigExecImagingBridge::EvaluateAndPublishResult(UsdTimeCode time)
 
     // 4. Atomic snapshot swap; the caller sends the coalesced precise
     // dirtied notices from the notice owner (spec §8.2, §10.4).
-    result.dirtied = _store->Publish(std::move(snapshot));
+    {
+        RigExecProfileScope scope(MutableProfiler(), "Imaging.StorePublish",
+                                  "imaging");
+        result.dirtied = _store->Publish(std::move(snapshot));
+    }
     result.ok = true;
     return result;
 }
@@ -1439,6 +1792,19 @@ RigExecImagingBridge::EvaluateAndPublishSamples(
                 (property == "points" || property == "normals" ||
                  property == "extent");
             if (!isGeometry) {
+                // Not Hydra data -- but a scalar here is a rig output a
+                // tool may want (a blend weight, a pose-interpolator
+                // result), and recovering it otherwise costs a whole
+                // second evaluation of the rig. Recorded beside the
+                // generation that produced it; see
+                // RigExecImagingSnapshot::movedFloats.
+                if (value.IsHolding<float>()) {
+                    snapshot->movedFloats[propertyPath] =
+                        value.UncheckedGet<float>();
+                } else if (value.IsHolding<double>()) {
+                    snapshot->movedFloats[propertyPath] =
+                        static_cast<float>(value.UncheckedGet<double>());
+                }
                 continue;
             }
             RigExecPublishedPrim &published = snapshot->prims[primPath];

@@ -23,6 +23,25 @@ rem Hosted providers need MUSE_API_KEY (or ANTHROPIC_API_KEY). Local Apple FM
 rem and Ollama do not.
 set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\museAssistant"
 
+rem TouchPose, for the same reason and with the same caveat. This launcher
+rem is the one an animator opens, and the toolset is not something they
+rem should have to pick a launcher for: without this the RigExec menu
+rem simply has no TouchPose item and nothing says why. plugin\touchPose
+rem is NOT on _env.bat's PYTHONPATH the way rigExecUsdview is, so both
+rem the plugin path and the import path are added here.
+set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\touchPose"
+set "PYTHONPATH=%RIG%\plugin\touchPose;%PYTHONPATH%"
+set "TOUCHPOSE_PLUGIN_DIR=%RIG%\plugin\touchPose"
+
+rem The Shape Editor rides along, for the same reason and with the same
+rem caveat: a self-contained plugin directory whose container asks
+rem findOrCreateMenu for the RigExec menu, so its item lands under the
+rem same menu whichever container loads first. plugin\shapeEditor is not
+rem on _env.bat's PYTHONPATH either, so the module search path is added
+rem beside the plugin path.
+set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\plugin\shapeEditor"
+set "PYTHONPATH=%RIG%\plugin\shapeEditor;%PYTHONPATH%"
+
 rem Fail early and legibly rather than deep inside python.
 set "USDVIEW=%USD%\bin\usdview"
 if not exist "%USDVIEW%" (
@@ -43,19 +62,19 @@ if exist "%RIG%\build\CMakeCache.txt" (
 
 rem Register the usdNoodles node-graph editor the build staged under
 rem build\python\UsdNoodles -- after building, so a first build has produced
-rem it. Skipped when this USD install ships its own pxr.UsdNoodles (an OpenUSD
-rem built from PR #4156 with noodles): the two register the same usdview
-rem command names, and usdview answers a duplicate name by loading no plugins
-rem at all. rigexec_register_usdnoodles in _env.sh is the POSIX twin.
-set "USD_NOODLES="
-if exist "%USD%\Lib\site-packages\pxr\UsdNoodles" set "USD_NOODLES=%USD%\Lib\site-packages\pxr\UsdNoodles"
-if exist "%USD%\lib\python\pxr\UsdNoodles" set "USD_NOODLES=%USD%\lib\python\pxr\UsdNoodles"
-if defined USD_NOODLES (
-    >&2 echo usdNoodles: %USD_NOODLES% is loaded instead of the in-repo copy;
-    >&2 echo             registering both stops usdview loading any plugin.
-    >&2 echo             Build OpenUSD without noodles to use plugin\usdNoodles.
-) else if exist "%RIG%\build\python\UsdNoodles\plugInfo.json" (
+rem it. An OpenUSD built from PR #4156 with noodles also installs the older
+rem editor as pxr.UsdNoodles; the in-repo copy takes its place when both are
+rem present (UsdNoodles\__init__.py, _supersedeInstalledCopy), so registering
+rem it is always right. rigexec_register_usdnoodles in _env.sh is the POSIX
+rem twin.
+if exist "%RIG%\build\python\UsdNoodles\plugInfo.json" (
     set "PXR_PLUGINPATH_NAME=%PXR_PLUGINPATH_NAME%;%RIG%\build\python\UsdNoodles"
+    set "USD_NOODLES="
+    if exist "%USD%\Lib\site-packages\pxr\UsdNoodles" set "USD_NOODLES=%USD%\Lib\site-packages\pxr\UsdNoodles"
+    if exist "%USD%\lib\python\pxr\UsdNoodles" set "USD_NOODLES=%USD%\lib\python\pxr\UsdNoodles"
+    if defined USD_NOODLES (
+        >&2 echo usdNoodles: plugin\usdNoodles supersedes !USD_NOODLES!
+    )
 )
 
 rem A leading non-flag argument is the stage; otherwise open a blank one.

@@ -38,9 +38,9 @@ dict _layoutGraphPositions(const dict& pyNodes, const list& pyLinks, const Layou
 
   std::unordered_map<std::string, NodeData> nodes;
   list nodeItems = pyNodes.items();
-  ssize_t nodeCount = len(nodeItems);
+  Py_ssize_t nodeCount = len(nodeItems);
   nodes.reserve(static_cast<size_t>(nodeCount));
-  for (ssize_t i = 0; i < nodeCount; ++i) {
+  for (Py_ssize_t i = 0; i < nodeCount; ++i) {
     object kv = nodeItems[i];
     extract<std::string> keyExtract(kv[0]);
     extract<NodeData&> nodeExtract(kv[1]);
@@ -52,9 +52,9 @@ dict _layoutGraphPositions(const dict& pyNodes, const list& pyLinks, const Layou
   graph.nodes = std::move(nodes);
 
   std::vector<LinkData> links;
-  ssize_t linkCount = len(pyLinks);
+  Py_ssize_t linkCount = len(pyLinks);
   links.reserve(static_cast<size_t>(linkCount));
-  for (ssize_t i = 0; i < linkCount; ++i) {
+  for (Py_ssize_t i = 0; i < linkCount; ++i) {
     extract<LinkData&> linkExtract(pyLinks[i]);
     if (!linkExtract.check()) {
       continue;

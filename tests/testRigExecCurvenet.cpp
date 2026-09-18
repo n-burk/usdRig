@@ -28,6 +28,10 @@ using namespace rigExec;
 
 static int failures = 0;
 
+// std::acos(-1) rather than M_PI: the latter is not a standard C++ macro
+// (it needs _USE_MATH_DEFINES on MSVC and a non-strict mode on glibc).
+static const double kPi = std::acos(-1);
+
 #define CHECK(cond)                                                        \
     do {                                                                   \
         if (!(cond)) {                                                     \
@@ -797,7 +801,7 @@ static Tube MakeTube()
     for (int ring = 0; ring < tube.rings; ++ring) {
         const double y = tube.height * ring / double(tube.rings - 1);
         for (int side = 0; side < tube.sides; ++side) {
-            const double a = 2.0 * M_PI * side / double(tube.sides);
+            const double a = 2.0 * kPi * side / double(tube.sides);
             tube.points.push_back(GfVec3f(float(tube.radius * std::cos(a)),
                                           float(y),
                                           float(tube.radius * std::sin(a))));
@@ -826,16 +830,16 @@ static void BuildTubeCurvenet(double netRadius, std::vector<GfVec3f> *points,
     points->clear();
     splines->clear();
     const int spokes = 4;
-    const double k = 4.0 / 3.0 * std::tan(M_PI / (2.0 * spokes));
+    const double k = 4.0 / 3.0 * std::tan(kPi / (2.0 * spokes));
     const double heights[3] = {1.5, 3.0, 4.5};
 
     auto ringPoint = [&](double y, int spoke) {
-        const double a = 2.0 * M_PI * spoke / double(spokes);
+        const double a = 2.0 * kPi * spoke / double(spokes);
         return GfVec3f(float(netRadius * std::cos(a)), float(y),
                        float(netRadius * std::sin(a)));
     };
     auto ringTangent = [&](int spoke) {
-        const double a = 2.0 * M_PI * spoke / double(spokes);
+        const double a = 2.0 * kPi * spoke / double(spokes);
         return GfVec3f(float(-netRadius * std::sin(a)), 0.0f,
                        float(netRadius * std::cos(a)));
     };

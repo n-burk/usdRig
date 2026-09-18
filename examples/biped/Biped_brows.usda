@@ -1,0 +1,216 @@
+#usda 1.0
+(
+    defaultPrim = "Biped"
+    doc = "The brows' cluster controls over the face: the corrugators. Adds prims and overrides nothing, so dropping this sublayer leaves the character exactly as it was."
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        over "Weights"
+        {
+            def Scope "brows"
+            {
+                def RigExecStaticWeight "brow_corrugator_l_cluster"
+                {
+                    uniform float rigExec:defaultWeight = 0
+                    uniform int[] rigExec:indices = [797, 799, 816, 818, 819, 820, 821, 822, 823, 837, 838, 839, 840, 841, 842, 843, 848, 849, 851, 852, 853, 854, 855, 856, 867, 868, 869, 870, 871, 872, 873, 874, 875, 876, 889, 890, 891, 892, 974, 1032, 1033, 1034, 1035, 1036, 1260, 1261, 1262, 1263, 1264, 1265, 1266, 1267, 1452, 1453, 1454, 1455, 1456, 1457, 1458, 1488, 1489, 1490, 1491, 1492, 1493, 1494, 1495, 1496, 1497, 1512, 1513, 1514, 1515, 1516, 1517, 1518, 1519, 1520, 1591, 1592, 1593, 1621, 1622, 1623, 1624, 1625, 1626, 1627, 1632, 1633, 1634, 1635, 1636, 1637, 1638, 1639, 1640, 1668, 1669, 1670, 1671, 1672, 1673, 1674, 1675, 1676, 1677, 1700, 1701, 1702, 1703, 1704, 1705, 1706, 1707, 1708, 1709, 1727, 1728, 1729, 1730, 1731, 1732, 1733, 1734, 1735, 1764, 1765, 1766, 1767, 1768, 1769, 1770, 1771, 1772, 1773, 1796, 1797, 1798, 1799, 1800, 1801, 1802, 1803, 1804, 1805, 1887, 1888, 1889, 1890, 1891, 1892, 2012, 2013, 2014, 2015, 2016, 2017, 2058, 2068, 2069, 2135, 2136, 2137, 2138, 2139, 2140, 2141, 2323, 2324, 2325, 2326, 2327, 2328, 2329, 2330, 2957, 2958, 2959, 2960, 2961, 2962, 2963, 2964, 2965, 2966, 2967, 2968, 2969, 2970, 2971, 3157, 3158, 3159, 3160, 3161, 3162, 3163, 3164, 3187, 3188, 3189, 3190, 3191, 3192, 3193, 3194, 3195, 3196, 3197, 3198, 3199, 3200, 3201, 3202, 3203, 3285, 3286, 3287, 3288, 3289, 3290, 3291, 3292, 3293, 3294, 3295, 3318, 3319, 3320, 3321, 3322, 3323, 3324, 3325, 3326, 3327, 3363, 3364, 3365, 3366, 3367, 3368, 3369, 3370, 3371, 3372, 3373]
+                    uniform token rigExec:representation = "sparse"
+                    uniform float[] rigExec:values = [0.002, 0.002, 0.005, 0.012, 0.169, 0.061, 0.408, 0.837, 0.874, 0.971, 0.834, 0.445, 0.206, 0.08, 0.012, 0.004, 0.037, 0.001, 0.004, 0.039, 0.017, 0.154, 0.31, 0.301, 0.053, 0.05, 0.021, 0.022, 0.015, 0.03, 0.003, 0.006, 0.001, 0.003, 0.007, 0.008, 0.006, 0.001, 0.61, 0.596, 0.279, 0.089, 0.008, 0.003, 0.002, 0.006, 0.024, 0.055, 0.218, 0.44, 0.431, 0.002, 0.92, 0.818, 0.411, 0.183, 0.064, 0.012, 0.004, 0.005, 0.009, 0.022, 0.048, 0.263, 0.369, 0.481, 0.674, 0.672, 0.658, 0.003, 0.007, 0.019, 0.168, 0.251, 0.342, 0.561, 0.485, 0.468, 0.054, 0.477, 0.004, 0.013, 0.1, 0.719, 0.662, 0.533, 0.336, 0.173, 0.011, 0.07, 0.169, 0.154, 0.131, 0.088, 0.043, 0.02, 0.003, 0.007, 0.058, 0.128, 0.235, 0.363, 0.432, 0.486, 0.313, 0.049, 0.009, 0.01, 0.068, 0.155, 0.286, 0.45, 0.55, 0.606, 0.413, 0.049, 0.008, 0.024, 0.161, 0.252, 0.23, 0.194, 0.13, 0.069, 0.032, 0.004, 0.011, 0.072, 0.184, 0.383, 0.607, 0.768, 0.851, 0.508, 0.02, 0.004, 0.006, 0.045, 0.098, 0.181, 0.273, 0.325, 0.372, 0.236, 0.037, 0.008, 0.022, 0.01, 0.096, 0.083, 0.102, 0.057, 0.005, 0.006, 0.006, 0.007, 0.002, 0.001, 0.002, 0.054, 0.006, 0.004, 0.004, 0.003, 0.003, 0.002, 0.001, 0.001, 0.001, 0.004, 0.009, 0.03, 0.046, 0.053, 0.059, 0.03, 0.003, 0.014, 0.047, 0.077, 0.114, 0.152, 0.192, 0.21, 0.153, 0.019, 0.046, 0.031, 0.054, 0.052, 0.023, 0.001, 0.006, 0.012, 0.057, 0.096, 0.109, 0.108, 0.046, 0.001, 0.003, 0.008, 0.012, 0.016, 0.03, 0.025, 0.025, 0.027, 0.026, 0.025, 0.021, 0.017, 0.012, 0.007, 0.004, 0.002, 0.072, 0.52, 0.917, 0.865, 0.634, 0.389, 0.182, 0.079, 0.03, 0.011, 0.004, 0.008, 0.097, 0.192, 0.194, 0.168, 0.099, 0.019, 0.011, 0.006, 0.003, 0.003, 0.009, 0.02, 0.055, 0.148, 0.338, 0.553, 0.739, 0.793, 0.43, 0.087]
+                    rel rigExec:weightTarget = </Biped/Geom/body_geo.points>
+                }
+
+                def RigExecStaticWeight "brow_corrugator_r_cluster"
+                {
+                    uniform float rigExec:defaultWeight = 0
+                    uniform int[] rigExec:indices = [13205, 13207, 13224, 13226, 13227, 13228, 13229, 13230, 13231, 13245, 13246, 13247, 13248, 13249, 13250, 13251, 13256, 13257, 13259, 13260, 13261, 13262, 13263, 13264, 13275, 13276, 13277, 13278, 13279, 13280, 13281, 13282, 13283, 13284, 13297, 13298, 13299, 13300, 13382, 13440, 13441, 13442, 13443, 13444, 13668, 13669, 13670, 13671, 13672, 13673, 13674, 13675, 13860, 13861, 13862, 13863, 13864, 13865, 13866, 13896, 13897, 13898, 13899, 13900, 13901, 13902, 13903, 13904, 13905, 13920, 13921, 13922, 13923, 13924, 13925, 13926, 13927, 13928, 13999, 14000, 14001, 14029, 14030, 14031, 14032, 14033, 14034, 14035, 14040, 14041, 14042, 14043, 14044, 14045, 14046, 14047, 14048, 14076, 14077, 14078, 14079, 14080, 14081, 14082, 14083, 14084, 14085, 14108, 14109, 14110, 14111, 14112, 14113, 14114, 14115, 14116, 14117, 14135, 14136, 14137, 14138, 14139, 14140, 14141, 14142, 14143, 14172, 14173, 14174, 14175, 14176, 14177, 14178, 14179, 14180, 14181, 14204, 14205, 14206, 14207, 14208, 14209, 14210, 14211, 14212, 14213, 14295, 14296, 14297, 14298, 14299, 14300, 14420, 14421, 14422, 14423, 14424, 14425, 14466, 14476, 14477, 14543, 14544, 14545, 14546, 14547, 14548, 14549, 14731, 14732, 14733, 14734, 14735, 14736, 14737, 14738, 15365, 15366, 15367, 15368, 15369, 15370, 15371, 15372, 15373, 15374, 15375, 15376, 15377, 15378, 15379, 15565, 15566, 15567, 15568, 15569, 15570, 15571, 15572, 15595, 15596, 15597, 15598, 15599, 15600, 15601, 15602, 15603, 15604, 15605, 15606, 15607, 15608, 15609, 15610, 15611, 15693, 15694, 15695, 15696, 15697, 15698, 15699, 15700, 15701, 15702, 15703, 15726, 15727, 15728, 15729, 15730, 15731, 15732, 15733, 15734, 15735, 15771, 15772, 15773, 15774, 15775, 15776, 15777, 15778, 15779, 15780, 15781]
+                    uniform token rigExec:representation = "sparse"
+                    uniform float[] rigExec:values = [0.002, 0.002, 0.005, 0.012, 0.169, 0.061, 0.408, 0.837, 0.874, 0.971, 0.834, 0.445, 0.206, 0.08, 0.012, 0.004, 0.037, 0.001, 0.004, 0.039, 0.017, 0.154, 0.31, 0.301, 0.053, 0.05, 0.021, 0.022, 0.015, 0.03, 0.003, 0.006, 0.001, 0.003, 0.007, 0.008, 0.006, 0.001, 0.61, 0.596, 0.279, 0.089, 0.008, 0.003, 0.002, 0.006, 0.024, 0.055, 0.218, 0.44, 0.431, 0.002, 0.92, 0.818, 0.411, 0.183, 0.064, 0.012, 0.004, 0.005, 0.009, 0.022, 0.048, 0.263, 0.369, 0.481, 0.674, 0.672, 0.658, 0.003, 0.007, 0.019, 0.168, 0.251, 0.342, 0.561, 0.485, 0.468, 0.054, 0.477, 0.004, 0.013, 0.1, 0.719, 0.662, 0.533, 0.336, 0.173, 0.011, 0.07, 0.169, 0.154, 0.131, 0.088, 0.043, 0.02, 0.003, 0.007, 0.058, 0.128, 0.235, 0.363, 0.432, 0.486, 0.313, 0.049, 0.009, 0.01, 0.068, 0.155, 0.286, 0.45, 0.55, 0.606, 0.413, 0.049, 0.008, 0.024, 0.161, 0.252, 0.23, 0.194, 0.13, 0.069, 0.032, 0.004, 0.011, 0.072, 0.184, 0.383, 0.607, 0.768, 0.851, 0.508, 0.02, 0.004, 0.006, 0.045, 0.098, 0.181, 0.273, 0.325, 0.372, 0.236, 0.037, 0.008, 0.022, 0.01, 0.096, 0.083, 0.102, 0.057, 0.005, 0.006, 0.006, 0.007, 0.002, 0.001, 0.002, 0.054, 0.006, 0.004, 0.004, 0.003, 0.003, 0.002, 0.001, 0.001, 0.001, 0.004, 0.009, 0.03, 0.046, 0.053, 0.059, 0.03, 0.003, 0.014, 0.047, 0.077, 0.114, 0.152, 0.192, 0.21, 0.153, 0.019, 0.046, 0.031, 0.054, 0.052, 0.023, 0.001, 0.006, 0.012, 0.057, 0.096, 0.109, 0.108, 0.046, 0.001, 0.003, 0.008, 0.012, 0.016, 0.03, 0.025, 0.025, 0.027, 0.026, 0.025, 0.021, 0.017, 0.012, 0.007, 0.004, 0.002, 0.072, 0.52, 0.917, 0.865, 0.634, 0.389, 0.182, 0.079, 0.03, 0.011, 0.004, 0.008, 0.097, 0.192, 0.194, 0.168, 0.099, 0.019, 0.011, 0.006, 0.003, 0.003, 0.009, 0.02, 0.055, 0.148, 0.338, 0.553, 0.739, 0.793, 0.431, 0.087]
+                    rel rigExec:weightTarget = </Biped/Geom/body_geo.points>
+                }
+            }
+        }
+
+        over "Controls"
+        {
+            over "hips_ctl"
+            {
+                over "torso_ctl"
+                {
+                    over "spine_end_pivot"
+                    {
+                        over "spine_end_ctl"
+                        {
+                            over "neck_root_ctl"
+                            {
+                                over "neck_end_pivot"
+                                {
+                                    over "neck_end_ctl"
+                                    {
+                                        over "skull_follow"
+                                        {
+                                            over "skull_ctl"
+                                            {
+                                                over "face_upper_ctl"
+                                                {
+                                                    over "head_tip_ctl"
+                                                    {
+                                                        over "brow_main_l_auto"
+                                                        {
+                                                            over "brow_main_l_ctl"
+                                                            {
+                                                                over "brow_inner_l_auto"
+                                                                {
+                                                                    over "brow_inner_l_ctl"
+                                                                    {
+                                                                        def RigExecControl "brow_corrugator_l_auto" (
+                                                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                                                        )
+                                                                        {
+                                                                            double guide:scaleX = 0
+                                                                            double guide:scaleY = 0
+                                                                            double guide:scaleZ = 0
+                                                                            uniform token purpose = "default"
+                                                                            matrix4d rest:space = ( (0.8977588447210862, -0.409630055886923, -0.16196379118240242, 0), (0.41271217212599415, 0.910725977725205, -0.015711738400902425, 0), (0.1539406333993577, -0.052739064552747274, 0.9866716143657207, 0), (0.8336000282266474, 0.15320005382872637, 0.31210005094893845, 1) )
+
+                                                                            def RigExecControl "brow_corrugator_l_ctl" (
+                                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                                            )
+                                                                            {
+                                                                                color3f guide:displayColor = (1, 0, 0)
+                                                                                double guide:scaleX = 0.5538000000000002
+                                                                                double guide:scaleY = 0.7385000000000003
+                                                                                double guide:scaleZ = 0.05
+                                                                                uniform token guide:shape = "sphere"
+                                                                                uniform token purpose = "default"
+                                                                                matrix4d rest:space = ( (1, -9.71445146547012e-17, 1.1102230246251565e-16, 0), (-9.71445146547012e-17, 1, 2.7755575615628914e-17, 0), (1.1102230246251565e-16, 5.551115123125783e-17, 0.9999999999999996, 0), (0, 0, 1.5987211554602254e-14, 1) )
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        over "brow_main_r_auto"
+                                                        {
+                                                            over "brow_main_r_ctl"
+                                                            {
+                                                                over "brow_inner_r_auto"
+                                                                {
+                                                                    over "brow_inner_r_ctl"
+                                                                    {
+                                                                        def RigExecControl "brow_corrugator_r_auto" (
+                                                                            prepend apiSchemas = ["RigExecControlAPI"]
+                                                                        )
+                                                                        {
+                                                                            double guide:scaleX = 0
+                                                                            double guide:scaleY = 0
+                                                                            double guide:scaleZ = 0
+                                                                            uniform token purpose = "default"
+                                                                            matrix4d rest:space = ( (0.8977588495056636, -0.4096300629384899, 0.1619637916857578, 0), (0.41271216514042885, 0.9107259744864995, 0.01571174152121807, 0), (-0.1539406320765105, 0.05273906835272615, 0.9866716128670585, 0), (0.8335999502056763, 0.15320003305487262, -0.31210002048474905, 1) )
+
+                                                                            def RigExecControl "brow_corrugator_r_ctl" (
+                                                                                prepend apiSchemas = ["RigExecControlAPI"]
+                                                                            )
+                                                                            {
+                                                                                color3f guide:displayColor = (1, 0, 0)
+                                                                                double guide:scaleX = 0.5538
+                                                                                double guide:scaleY = 0.7385000000000002
+                                                                                double guide:scaleZ = 0.05
+                                                                                uniform token guide:shape = "sphere"
+                                                                                uniform token purpose = "default"
+                                                                                matrix4d rest:space = ( (1, -1.5265566588595902e-16, 2.220446049250313e-16, 0), (-1.6653345369377348e-16, 1.0000000000000002, -2.7755575615628914e-17, 0), (5.551115123125783e-17, 5.551115123125783e-17, 1.0000000000000002, 0), (-1.4210854715202004e-14, 2.842170943040401e-14, -1.2434497875801753e-14, 1) )
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        over "Movers"
+        {
+            reorder nameChildren = ["param_follow", "skin_body_geo", "eyes_r_geo", "eyes_l_geo", "mouth_geo", "brows_geo", "shapes_body_geo", "brows_drivers", "mouth_drivers", "eyes_l_drivers", "eyes_r_drivers", "pose_drivers", "twist_aims", "eyes_r_pose", "eyes_l_pose", "mouth_pose", "face_eyes", "face_brow_joints", "face_inner_joints", "nose_bridge_compress_scale_w", "face_brow_pivots", "face_pivots", "nose_compress_w", "nose_bridge_compress_w", "nose_bridge_follow_w", "face_mid_compress_w", "face_outer_joints", "neck_to_bind", "girdles", "spine_to_bind", "hips_follow", "ball_l_bind_scAim", "ankle_l_bind_scAim", "ballRoll_l_down_rc", "ballRoll_l_down_w", "ballRoll_l_up_rc", "ballRoll_l_up_w", "toe_l_roll_rc", "toe_l_roll_w", "heel_l_roll_rc", "heel_l_roll_w", "bankOut_l_pivot_rc", "bankOut_l_pivot_w", "bankIn_l_pivot_rc", "bankIn_l_pivot_w", "ball_r_bind_scAim", "ankle_r_bind_scAim", "ballRoll_r_down_rc", "ballRoll_r_down_w", "ballRoll_r_up_rc", "ballRoll_r_up_w", "toe_r_roll_rc", "toe_r_roll_w", "heel_r_roll_rc", "heel_r_roll_w", "bankOut_r_pivot_rc", "bankOut_r_pivot_w", "bankIn_r_pivot_rc", "bankIn_r_pivot_w", "hand_l_follow", "hand_r_follow", "spine_mid_follow"]
+            def Scope "brows_drivers"
+            {
+                reorder nameChildren = ["brow_corrugator_r_auto_avars_tx_1_curve", "brow_corrugator_r_auto_avars_tx_0_blend", "brow_corrugator_l_auto_avars_tx_1_curve", "brow_corrugator_l_auto_avars_tx_0_blend"]
+                def RigExecFloatMathMover "brow_corrugator_l_auto_avars_tx_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_auto/brow_main_l_ctl/brow_inner_l_auto/brow_inner_l_ctl/brow_corrugator_l_auto/brow_corrugator_l_ctl.avars:ty>
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_auto/brow_main_l_ctl/brow_inner_l_auto/brow_inner_l_ctl/brow_corrugator_l_auto.avars:tx>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "brow_corrugator_l_auto_avars_tx_1_curve" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float2[] inputs:keys = [(-1, -0.18), (0, 0), (1, -0.22537914)]
+                    float2[] inputs:tangents = [(0.18, 0.18), (-0.022689568, -0.022689568), (-0.22537914, -0.22537914)]
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_auto/brow_main_l_ctl/brow_inner_l_auto/brow_inner_l_ctl/brow_corrugator_l_auto.avars:tx>
+                    uniform token rigExec:operation = "curve"
+                }
+
+                def RigExecFloatMathMover "brow_corrugator_r_auto_avars_tx_0_blend" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float inputs:value.connect = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_auto/brow_main_r_ctl/brow_inner_r_auto/brow_inner_r_ctl/brow_corrugator_r_auto/brow_corrugator_r_ctl.avars:ty>
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_auto/brow_main_r_ctl/brow_inner_r_auto/brow_inner_r_ctl/brow_corrugator_r_auto.avars:tx>
+                    uniform token rigExec:operation = "blend"
+                }
+
+                def RigExecFloatMathMover "brow_corrugator_r_auto_avars_tx_1_curve" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    float2[] inputs:keys = [(-1, -0.18), (0, 0), (1, -0.22537914)]
+                    float2[] inputs:tangents = [(0.18, 0.18), (-0.022689568, -0.022689568), (-0.22537914, -0.22537914)]
+                    rel rigExec:moves = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_auto/brow_main_r_ctl/brow_inner_r_auto/brow_inner_r_ctl/brow_corrugator_r_auto.avars:tx>
+                    uniform token rigExec:operation = "curve"
+                }
+            }
+
+            def Scope "brows_geo"
+            {
+                reorder nameChildren = ["brow_corrugator_r_cluster", "brow_corrugator_l_cluster"]
+                def RigExecMatrixMover "brow_corrugator_l_cluster" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    rel rigExec:moves = </Biped/Geom/body_geo.points>
+                    rel rigExec:transform = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_auto/brow_main_l_ctl/brow_inner_l_auto/brow_inner_l_ctl/brow_corrugator_l_auto/brow_corrugator_l_ctl>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transformSpace = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_l_auto/brow_main_l_ctl/brow_inner_l_auto/brow_inner_l_ctl>
+                    rel rigExec:weightObject = </Biped/Rig/Weights/brows/brow_corrugator_l_cluster>
+                }
+
+                def RigExecMatrixMover "brow_corrugator_r_cluster" (
+                    prepend apiSchemas = ["RigExecMoverAPI"]
+                )
+                {
+                    rel rigExec:moves = </Biped/Geom/body_geo.points>
+                    rel rigExec:transform = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_auto/brow_main_r_ctl/brow_inner_r_auto/brow_inner_r_ctl/brow_corrugator_r_auto/brow_corrugator_r_ctl>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:transformSpace = </Biped/Rig/Controls/hips_ctl/torso_ctl/spine_end_pivot/spine_end_ctl/neck_root_ctl/neck_end_pivot/neck_end_ctl/skull_follow/skull_ctl/face_upper_ctl/head_tip_ctl/brow_main_r_auto/brow_main_r_ctl/brow_inner_r_auto/brow_inner_r_ctl>
+                    rel rigExec:weightObject = </Biped/Rig/Weights/brows/brow_corrugator_r_cluster>
+                }
+            }
+        }
+    }
+}
+

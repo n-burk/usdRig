@@ -69,6 +69,7 @@ from .pinUtils import (
     split_direction_hint,
 )
 from .textRenderer import TextRenderer
+from .touchPose import collect_graph_prims, is_touch_group
 from .usdNoticeHandler import UsdNoticeHandler
 from .utils import M, MenuBuilder
 from .widgets.textInputWidget import TextInputWidget
@@ -9236,8 +9237,16 @@ class GraphView(QGLWidget):
 
                 # Check if this is a container-type prim (Container or Blueprint)
                 # If so, add all its child nodes instead of the container itself
-                if primType in ["Container", "Blueprint"]:
-                    childNodes = self._getContainerChildNodes(prim)
+                # A TouchPose scope is the third kind of group: selecting it
+                # means "show me the regions", exactly as selecting a Container
+                # means "show me its nodes" (see touchPose.collect_graph_prims
+                # for why the controls come too).
+                isTouchGroup = is_touch_group(prim)
+                if primType in ["Container", "Blueprint"] or isTouchGroup:
+                    if isTouchGroup:
+                        childNodes = collect_graph_prims(prim, stage)
+                    else:
+                        childNodes = self._getContainerChildNodes(prim)
                     if childNodes:
                         for childPrim in childNodes:
                             childPathStr = str(childPrim.GetPath())
@@ -9754,7 +9763,7 @@ class GraphView(QGLWidget):
         if newNodeId in self.nodes:
             self.nodes[newNodeId].selected = True
             self._selectedNodes.add(newNodeId)
-            self._syncSelectionToPrimtree()
+            self._afterUsdviewRefresh(self._syncSelectionToPrimtree)
 
         gv = self
         _push_undo_command(
@@ -9765,6 +9774,33 @@ class GraphView(QGLWidget):
 
         self._showPopupMessage(f"Renamed {oldName} to {newName}")
         self.update()
+
+    def _afterUsdviewRefresh(self, callback):
+        """Run *callback* once usdview has rebuilt its prim browser.
+
+        A namespace edit makes usdview schedule a full prim-browser rebuild on
+        a zero-interval QTimer (AppController.updateGUI). Selecting the new
+        path before that runs makes usdview look it up in a prim-to-item map
+        that still describes the old namespace; its updateSelection then fails
+        on the missing item with an AttributeError inside usdview's own slot,
+        and the prim browser does not follow the rename.
+
+        Another zero-interval QTimer started now fires after usdview's, because
+        timers with equal timeouts fire in the order they were started, so the
+        callback sees the rebuilt tree. QTimer.singleShot(0) is not the same:
+        it posts an event, and some event dispatchers deliver posted events
+        before pending timers.
+        """
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(0)
+
+        def fire():
+            timer.deleteLater()
+            callback()
+
+        timer.timeout.connect(fire)
+        timer.start()
 
     def _paintNodeRename(self):
         """Draw the inline editor over the node being renamed."""

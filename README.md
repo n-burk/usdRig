@@ -62,14 +62,14 @@ stage's OpenExec requests before the stock adapter processes a missing prim;
 the point graphs and their unaffected cached results remain available.
 
 Default-space channels and translation units are evaluated and editable; see
-[space composition](docs/xformable-default-spaces.md). Twist distribution
+[space composition](docs/specs/xformable-default-spaces.md). Twist distribution
 supports animated fractional `inputs:twistTurns`. Blend samples support base,
 preceding, final, and named checkpoints, including independent target fan-out.
 Use `rigExec:deltaSpace = "surfaceFrame"` to transport sculpt detail with the
 preceding mesh deformation.
 
-[Curvenet authoring](docs/curvenet.md) includes adjustments, posed guides, and
-cached surface weight parametrization. [Bake and inverse APIs](docs/python-bake-inverse.md)
+[Curvenet authoring](docs/specs/curvenet.md) includes adjustments, posed guides, and
+cached surface weight parametrization. [Bake and inverse APIs](docs/specs/python-bake-inverse.md)
 provide standard USD export and a bounded numeric inverse solver.
 
 `RigExecRigPose` exposes per-evaluation graph creation, execution, and schedule
@@ -156,6 +156,25 @@ Developer Command Prompt is already initialized and is left alone. If the
 compiler is somewhere neither finds, point `RIGEXEC_VCVARS` at its
 `vcvars64.bat`, or configure manually as below.
 
+### Recording with usdrecord
+
+Stock `usdrecord` evaluates a rig live -- no bake step and no RigExec flags.
+Opening the stage activates its rigs, and every recorded frame evaluates at
+that frame. Run it with the build tree and the two plugin resources on the
+environment (the `_env` helper sets both):
+
+```sh
+USD/bin/usdrecord --renderer GL --camera /IkAsset/MainCam \
+  --frames 1001:1012 docs/examples/two_bone_ik.usda frame.###.png
+```
+
+Pass an explicit `--camera`: without one `usdrecord` frames the stage's
+authored bounds, which do not cover evaluated motion, so the recording can
+frame empty space. Every `docs/examples/*.usda` carries a `MainCam` under its
+asset root for exactly this. (`docs/render_media.py` no longer bakes: it
+renders the rig live through an offscreen Storm viewport with the rig guides
+shown.)
+
 ## Start with an example
 
 The examples are self-contained animated stages. These are the best entry
@@ -172,6 +191,15 @@ points:
 
 See the [complete example catalog](examples/README.md) for all 13 focused
 demos and their authoring notes.
+
+## Node reference
+
+One page per operator -- what it does, how to wire it, every parameter,
+and a minimal animated example, rendered live from its stage by
+`docs/render_media.py` in an offscreen Storm viewport with the rig guides on:
+
+[RigExec nodes](docs/index.md) -- per-operator stages in
+[`docs/examples/`](docs/examples/)
 
 ## How it works
 
@@ -250,6 +278,70 @@ The easiest way to author a first rig is to copy
    curves, and blend targets, even when they also have time samples.
 6. Run `rigExecPose` while editing; it exits non-zero on compile or evaluation
    failure and can print joints, moved targets, and diagnostics.
+7. To find where evaluation time goes, pass `--profile <file.trace>`; it
+   records per-phase timings (compile, property chains, pose seed, each
+   solver batch and constraint, the exec snapshot, each geometry chain)
+   as Chrome Trace JSON for Perfetto or `chrome://tracing`, and prints a
+   per-phase summary.
+8. `--mode baked` asks for the flattened evaluation path: the compiled epoch
+   as an op list over dense slots, with no exec round trip per frame. It is a
+   REQUEST -- a rig using a feature the program cannot express evaluates
+   dynamically and the tool prints one reason per feature -- so it can never
+   change an answer, only how fast it arrives. `--mode parity` runs both
+   paths and reports any disagreement (exit status is non-zero if there is
+   one). `--mode parity --require-baked` is the form a test uses: it fails
+   the run when the rig declines the bake, and fails it when fewer
+   generations came from the program than frames were asked for -- which is
+   what catches a fallback that is not a refusal, such as an interactive
+   override the program cannot place. `--guides` adds the solver guide
+   frames to what is evaluated and therefore to what parity compares; they
+   are off by default because nothing else in the tool reads them.
+9. The baked program survives scene edits. It records which properties it
+   read and which prims it read them from, and a notice that misses that
+   index -- a value on an input it re-reads every frame, anything on a prim
+   it never looked at -- leaves it standing. A notice that hits it rebuilds
+   the program alone, without recompiling the epoch, because the epoch digest
+   is deliberately blind to values and is unchanged by exactly the edits that
+   make a captured constant wrong. An interactive override is placed into the
+   program for as long as it stands, unless it names a value folded in at
+   bake time or a prim computation, in which case that generation evaluates
+   dynamically rather than answering from state the override cannot reach.
+   Setting `RIGEXEC_EVALUATION_MODE` to `baked` or `parity` picks the initial
+   mode of every evaluator in the process; it is how the existing test suites
+   are re-run under the program (`ctest -R BakedParity`) and changes nothing
+   a caller could not set itself. The variable is read ONCE per process, when
+   the first evaluator is constructed, and the value is then fixed for the
+   life of the process: changing the environment afterwards has no effect,
+   and the only way to change an evaluator's mode is `SetEvaluationMode`.
+   A rig can also ask for the program itself, by authoring
+   `uniform bool rigExec:baked = true` on its `RigExecRoot` -- which is what
+   `examples/biped` does, so opening the biped in a host, or running
+   `rigExecPose` on it with no `--mode`, evaluates it through the program.
+   The attribute is read at every compile and re-read when a notice names it,
+   so flipping it under a running evaluator drops or builds the program on
+   the fly. It is the WEAKEST of the three requests and is consulted only
+   where neither stronger one has been made: `SetEvaluationMode` outranks it
+   (including `rigExecPose --mode`, which is why the parity entries are
+   unaffected by it), and so does a non-empty `RIGEXEC_EVALUATION_MODE`,
+   `=dynamic` included. `GetEvaluationModeSource()` -- `Rig`
+   `.evaluation_mode_source` in Python, and the `mode ... from ...` half of
+   `rigExecPose`'s compile line -- says which of them answered. A rig that
+   asked and was evaluated dynamically anyway publishes one plain diagnostic
+   per generation saying so and naming the first reason; it is news, not a
+   failure, and is not the `baked parity mismatch` line `RIGEXEC_BAKE_REQUIRED`
+   produces.
+10. Evaluation spreads two kinds of work across cores: the per-point geometry
+    kernels (linear blend skinning and the envelope blend, split by point
+    range), and the geometry chain walk, whose mutually independent chains run
+    one task each when Compile classified their dependency level as safe.
+    Both splits are bit-identical to the serial walk by construction -- a
+    point range is an independent sub-layout, and a level's per-chain buffers
+    are merged in compiled chain order, not completion order -- so the result
+    does not depend on the thread count. Setting `RIGEXEC_ENABLE_PARALLEL_EVAL`
+    to `0` runs all of it, and the two compile-time tasks, inline on the
+    calling thread; it exists so a suspected threading regression can be
+    bisected without `PXR_WORK_THREAD_LIMIT`, which also changes what USD
+    itself does.
 
 A rig may publish control guides, joints, placed volume guides, driven
 transforms, revised properties, or any combination of them. Control-only and
@@ -360,9 +452,13 @@ a copy under `NOODLES_ROOT` (default: the USD install, where
 commit is fetched and built at configure time. Its unittest suite runs as the
 `testUsdNoodles` CTest entry. The package imports as the top-level `UsdNoodles`,
 not `pxr.UsdNoodles`, because nothing outside the USD install can add to `pxr`.
-`bin/launch.sh` and `bin/usdview.sh` register it, except against a USD install
-that ships its own `pxr.UsdNoodles`: the two register the same usdview
-commands, and usdview then loads no plugins at all.
+`bin/launch.sh`, `bin/usdview.sh` and `bin\launch_usdview.bat` register it. A
+USD install built with `--build-noodles` also ships the older editor as
+`pxr.UsdNoodles`; the in-repo copy takes that one's place when both are
+present, because the two register the same usdview commands and usdview
+answers a duplicate by loading no plugins at all. Without that, usdview would
+keep running the installed editor, which lacks this copy's additions (such as
+renaming a prim by double-clicking its node).
 
 The Qt-free plugin tests also run on their own, with no build and no display,
 which is the quick loop while editing a panel:
@@ -392,8 +488,8 @@ Install the libraries, headers, plugins, Python modules, and CMake package with:
 cmake --install build --prefix /absolute/path/to/rigexec-install
 ```
 
-The usdview plugins install as whole directories — every panel module and the
-toolbar's artwork, not a hand-kept list — so an installed tree opens the same
+The usdview plugins install as whole directories -- every panel module and the
+toolbar's artwork, not a hand-kept list -- so an installed tree opens the same
 panels the source tree does. Point usdview at one with:
 
 ```sh
@@ -454,14 +550,14 @@ and `rigExec::rigExecImaging`, plus `rigExec_PLUGINPATHS`, `rigExec_PYTHON_DIR`,
 - Curvenet adjustment frames are available to viewport gizmos. Using these
   point-graph outputs as earlier pose or MatrixMover inputs is rejected during
   compilation; authored scalar adjustment channels remain readable.
-- The experimental [standalone backend and rigpack](docs/standalone-pack.md)
+- The experimental [standalone backend and rigpack](docs/specs/standalone-pack.md)
   execute supported providers through Esf without a USD stage. Whole-rig mover
   lowering and imaging profiles remain outside that backend's current scope.
 - PRMan-class production render delegates have not been qualified.
 - This project is pinned to OpenUSD 26.08; newer OpenUSD releases require a
   separate compatibility pass.
 
-See the [September 2026 code review](docs/code-review-2026-09-05.md) for
+See the [September 2026 code review](docs/specs/code-review-2026-09-05.md) for
 verified fixes, regression coverage, and remaining scope limits.
 
 ## Repository map
@@ -482,15 +578,18 @@ verified fixes, regression coverage, and remaining scope limits.
 
 ## Further reading
 
-- [Architecture and implementation specification](docs/spec.md)
-- [OpenUSD 26.08 capability validation](docs/spec-validation-2026-07-24.md)
-- [Hydra integration notes](docs/hydra-integration-notes.md)
-- [Control and solver guides](docs/control-guides.md)
-- [Curvenet design and authoring](docs/curvenet.md)
-- [Volumetric weights](docs/volume-weights.md)
-- [Viewport gizmos in usdview](docs/viewport-gizmos.md)
-- [Graph editor in usdview](docs/graph-editor.md)
-- [ViewCube in usdview](docs/view-cube.md)
-- [Guided composition arcs in usdview](docs/composition-arcs.md)
-- [OpenExec API notes](docs/exec-api-notes.md) and
-  [ExecUsd API notes](docs/execusd-api-notes.md)
+- [The biped rig](docs/specs/biped-rig.md) -- building, opening and animating the
+  ported character, including how its side layers compose. Start here
+  if you want a real rig on screen rather than an example.
+- [Architecture and implementation specification](docs/specs/spec.md)
+- [OpenUSD 26.08 capability validation](docs/specs/spec-validation-2026-07-24.md)
+- [Hydra integration notes](docs/specs/hydra-integration-notes.md)
+- [Control and solver guides](docs/specs/control-guides.md)
+- [Curvenet design and authoring](docs/specs/curvenet.md)
+- [Volumetric weights](docs/specs/volume-weights.md)
+- [Viewport gizmos in usdview](docs/specs/viewport-gizmos.md)
+- [Graph editor in usdview](docs/specs/graph-editor.md)
+- [ViewCube in usdview](docs/specs/view-cube.md)
+- [Guided composition arcs in usdview](docs/specs/composition-arcs.md)
+- [OpenExec API notes](docs/specs/exec-api-notes.md) and
+  [ExecUsd API notes](docs/specs/execusd-api-notes.md)

@@ -1,7 +1,7 @@
 //
 // Curvenet representation and scaled frames (de Goes, Sheffler & Fleischer,
 // "Character Articulation through Profile Curves", ACM TOG 41(4) 2022, §3).
-// See docs/curvenet.md; section numbers below are that paper's.
+// See docs/specs/curvenet.md; section numbers below are that paper's.
 //
 // A curvenet is a pool of control points plus a list of four-index tuples
 // naming cubic splines over it. Connectivity is index SHARING -- two splines

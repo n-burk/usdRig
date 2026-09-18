@@ -1,0 +1,107 @@
+#usda 1.0
+(
+    """
+    Probe C4c: does RigExecTwistDistribution distribute SWING as well as
+    twist?  Start (elbow) control at the origin aiming +X; end (wrist)
+    control at (2,0,0), identity rest. Five joints bound to elements 0..4
+    with weights [0, .25, .5, .75, 1].
+      frame 1: wrist avars:rz = 45 (bend about Z, perpendicular to +X aim), zero twist
+      frame 2: wrist avars:ry = 45 (bend about Y), zero twist
+      frame 3: wrist avars:rx = 90 (pure twist about the +X aim) -- reference
+      frame 4: rest (all zero) -- reference
+    """
+    defaultPrim = "Asset"
+    startTimeCode = 1
+    endTimeCode = 4
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+        custom int rigExec:restFrameVersion = 2
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Elbow" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+
+            def RigExecControl "Wrist" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rx = 0
+                double avars:rx.timeSamples = {
+                    1: 0,
+                    2: 0,
+                    3: 90,
+                    4: 0,
+                }
+                double avars:ry = 0
+                double avars:ry.timeSamples = {
+                    1: 0,
+                    2: 45,
+                    3: 0,
+                    4: 0,
+                }
+                double avars:rz = 0
+                double avars:rz.timeSamples = {
+                    1: 45,
+                    2: 0,
+                    3: 0,
+                    4: 0,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecTwistDistribution "ForearmTwist"
+            {
+                int rigExec:count = 5
+                uniform token rigExec:distribution = "minimumEnergy"
+                rel rigExec:start = </Asset/Rig/Controls/Elbow>
+                rel rigExec:end = </Asset/Rig/Controls/Wrist>
+                float[] rigExec:weights = [0, 0.25, 0.5, 0.75, 1]
+                rel rigExec:joints = [
+                    </Asset/Rig/Joints/T0>,
+                    </Asset/Rig/Joints/T1>,
+                    </Asset/Rig/Joints/T2>,
+                    </Asset/Rig/Joints/T3>,
+                    </Asset/Rig/Joints/T4>,
+                ]
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "T0"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+            }
+            def RigExecJoint "T1"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0.5, 0, 0, 1) )
+            }
+            def RigExecJoint "T2"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+            }
+            def RigExecJoint "T3"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1.5, 0, 0, 1) )
+            }
+            def RigExecJoint "T4"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+            }
+        }
+    }
+}

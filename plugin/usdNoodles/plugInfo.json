@@ -23,6 +23,13 @@
                         ],
                         "displayName": "USD Prims",
                         "priority": 1000
+                    },
+                    "UsdNoodles.nodeLibs.touchPoseLibrary.TouchPoseLibrary": {
+                        "bases": [
+                            "UsdNoodles.nodeLibs.usdTypedPrimBase.UsdTypedPrimLibraryBase"
+                        ],
+                        "displayName": "TouchPose",
+                        "priority": 100
                     }
                 }
             }

@@ -1,0 +1,71 @@
+#usda 1.0
+(
+    defaultPrim = "Asset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Ctl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 90
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )
+            }
+
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/Ctl>
+                rel rigExec:joints = </Asset/Rig/Joints/J>
+            }
+
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "J"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )
+
+                def RigExecJoint "C"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+
+                    def RigExecJoint "K"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+                    }
+                }
+            }
+
+        }
+
+
+
+        def Scope "Movers"
+        {
+            def RigExecParentConstraint "Off" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Rig/Joints/J>
+                rel rigExec:sources = [</Asset/Rig/Joints/J>]
+                double3[] inputs:translationOffsets = [(1.0, 0.0, 0.0)]
+                double3[] inputs:rotationOffsets = [(0.0, 0.0, 30.0)]
+                float inputs:defaultWeight = 0.75
+            }
+        }
+    }
+}

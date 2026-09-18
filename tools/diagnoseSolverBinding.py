@@ -11,6 +11,11 @@ layer. It reports, per RigExec solver:
     and a target whose prim does not resolve;
   * the joint order, because a TwoBoneIk reads rigExec:joints positionally
     as (root, mid, end) -- rebinding one joint appends it to the END;
+  * every joint MORE THAN ONE solver writes, because rigExec:joints is an
+    ordered write rather than an exclusive claim: all of those solvers run
+    and the last one in the stack supplies the joint's frame, so "my solver
+    stopped driving this joint" can mean "another solver writes it after
+    mine" rather than anything being broken;
   * the compile result, including the diagnostics the viewport discards.
 
 Usage:
@@ -41,6 +46,61 @@ def _Bootstrap():
     from pxr import Plug
     if os.path.isdir(schema):
         Plug.Registry().RegisterPlugins(schema)
+
+
+_SOLVER_TYPES = ("RigExecFkChain", "RigExecTwoBoneIk",
+                 "RigExecBlendPointFrames", "RigExecTwistDistribution",
+                 "RigExecRibbon", "RigExecSplineIk")
+
+
+def _Stacks(rig):
+    """Joint path -> the solver paths that WRITE it, for joints with >1.
+
+    Discovery order only, NOT stack order: the compiler decides that from
+    the solver DAG first and the reverse composed pre-order second, and
+    restating that rule here is how a tool starts disagreeing with the
+    engine. The compile note is what names the order.
+
+    The one compiler rule this DOES restate, because without it the report
+    is actively wrong on every IK/FK arm in the tree: a solver whose
+    aggregate another solver reads does not write the joints that consumer
+    writes. Its rigExec:joints is a REST reference there -- which is why an
+    IK feeding a blend is one writer and not two.
+    """
+    from pxr import Usd
+
+    solvers = [p for p in Usd.PrimRange(rig)
+               if p.GetTypeName() in _SOLVER_TYPES]
+    paths = {str(p.GetPath()) for p in solvers}
+    consumed = set()
+    for solver in solvers:
+        for rel in solver.GetRelationships():
+            if rel.GetName() == "rigExec:joints":
+                continue
+            for target in rel.GetTargets():
+                prim = str(target.GetPrimPath())
+                if prim != str(solver.GetPath()) and prim in paths:
+                    consumed.add(prim)
+
+    named = {str(p.GetPath()): [str(t) for t in
+                                (p.GetRelationship("rigExec:joints")
+                                 .GetTargets()
+                                 if p.GetRelationship("rigExec:joints")
+                                 else [])]
+             for p in solvers}
+    byUnconsumed = set()
+    for solver, joints in named.items():
+        if solver not in consumed:
+            byUnconsumed.update(joints)
+
+    writers = {}
+    for solver in solvers:
+        path = str(solver.GetPath())
+        for joint in named[path]:
+            if path in consumed and joint in byUnconsumed:
+                continue  # a rest reference, not a write
+            writers.setdefault(joint, []).append(path)
+    return {joint: who for joint, who in writers.items() if len(who) > 1}
 
 
 def Diagnose(stage, rigPath=None):
@@ -84,6 +144,16 @@ def Diagnose(stage, rigPath=None):
                         i, target, role,
                         "".join("\n         !! " + n for n in notes)))
                     problems += len(notes)
+
+        stacks = _Stacks(rig)
+        if stacks:
+            print("  joints written by more than one solver (the LAST writer "
+                  "supplies the frame; the compile note names the order):")
+            for joint in sorted(stacks):
+                print("    %s  <- %s" % (joint, ", ".join(stacks[joint])))
+            print("    A solver whose aggregate ANOTHER solver reads "
+                  "does not write the joints that consumer writes, so the "
+                  "IK/FK idiom is one writer and is not listed above.")
 
         try:
             import _rigexec

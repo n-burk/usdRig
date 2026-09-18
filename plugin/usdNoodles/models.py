@@ -321,19 +321,47 @@ class NodeModel(NodeData):
         self._writePositionToUsdRaw(value)
 
     def _write_expansion_state_to_usd(self):
-        """Write expansion state to the stage's current edit target."""
-        if not self._prim:
-            return
-        from pxr import UsdUI
+        """Write expansion state to the stage's current edit target.
 
+        Never raises. Folding a title is a UI gesture, and the click that
+        triggered it must not be dropped because the stage refused the edit:
+        the node has already folded in the view by the time we get here, so a
+        refused write costs the persisted state, not the interaction.
+        """
+        if not self._prim or not self._prim.IsValid():
+            return
+        from pxr import Tf, UsdUI
+
+        # Authoring to an instance proxy raises outright, and bulk authoring
+        # (auto-layout, save) must not abort on instanced nodes -- the same
+        # reason _writePositionToUsdRaw skips them.
+        if self._prim.IsInstanceProxy():
+            return
+
+        path = self._prim.GetPath()
         warn_if_non_persistent_edit_target(self._prim.GetStage())
-        api = UsdUI.NodeGraphNodeAPI(self._prim)
-        attr = api.GetExpansionStateAttr()
-        if not attr or not attr.IsValid():
-            attr = api.CreateExpansionStateAttr()
-        if attr:
-            state = "closed" if self._title_collapsed else "open"
+        state = "closed" if self._title_collapsed else "open"
+        try:
+            api = UsdUI.NodeGraphNodeAPI(self._prim)
+            attr = api.GetExpansionStateAttr()
+            if not attr or not attr.IsValid():
+                attr = api.CreateExpansionStateAttr()
+            # An attribute carrying an empty property name throws from its
+            # own truth test as readily as from Set(), so every check here
+            # has to stay inside the guard rather than in front of it.
+            if not attr or not attr.IsValid() or not attr.GetName():
+                Tf.Warn(
+                    "usdNoodles: could not author "
+                    "ui:nodegraph:node:expansionState on %s; the fold is "
+                    "not persisted" % path
+                )
+                return
             attr.Set(state)
+        except (Tf.ErrorException, RuntimeError) as e:
+            Tf.Warn(
+                "usdNoodles: authoring ui:nodegraph:node:expansionState on "
+                "%s failed, so the fold is not persisted: %s" % (path, e)
+            )
 
     def beginDrag(self):
         """Begin a drag operation - cache position for performance.

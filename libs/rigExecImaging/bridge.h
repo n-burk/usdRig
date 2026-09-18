@@ -14,8 +14,10 @@
 
 #include "rigExec/rigEvaluator.h"
 
+#include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace rigExec {
@@ -112,6 +114,10 @@ public:
     /// (the registry republishes at the current time right after).
     void SetWeightOverlay(const SdfPath &weightPrimPath) {
         _weightOverlay = weightPrimPath;
+        // Resolving the per-point influence field is the overlay's whole
+        // cost, and this bridge is its only consumer: pay it only while an
+        // overlay is actually selected.
+        _evaluator->SetPublishWeightFields(!_weightOverlay.IsEmpty());
     }
 
     const SdfPath &GetWeightOverlay() const { return _weightOverlay; }
@@ -177,12 +183,90 @@ private:
     /// Weight object currently painted as the influence overlay; empty
     /// means off, which is the default and the ordinary render.
     SdfPath _weightOverlay;
+public:
+    /// The evaluator's profiler, which the imaging layer also records its
+    /// own publish phases into, so one summary covers a whole viewport
+    /// update. Recording is off unless RIGEXEC_IMAGING_PROFILE is set.
+    const RigExecProfiler &GetProfiler() const
+    {
+        return _evaluator->GetProfiler();
+    }
+    RigExecProfiler *MutableProfiler() const
+    {
+        return const_cast<RigExecProfiler *>(&_evaluator->GetProfiler());
+    }
+    /// The evaluation mode actually answering this rig (baked, dynamic...),
+    /// for diagnostics a viewer shows. See RigExecRigEvaluator.
+    const RigExecRigEvaluator &GetEvaluator() const { return *_evaluator; }
+
+    /// Forgets every cached guide input. Called for any stage notice that
+    /// touches the rig and on every recompile: the caches hold AUTHORED
+    /// styling, and only an edit can move that.
+    void InvalidateGuideCaches();
+
+private:
+    /// A prim's guide styling, read once and republished every generation.
+    ///
+    /// Measured on the biped: rebuilding the guides for ~400 joints and
+    /// controls re-read every one of these off the stage on EVERY mouse
+    /// move of a drag -- 14-16 ms of each move, more than the rig's own
+    /// evaluation. They are authored values that do not move while a
+    /// control is dragged, so each is read once. An attribute that CAN move
+    /// between two generations -- connected (the opacity an IK/FK switch
+    /// drives) or time-varying -- is marked live and read exactly as before.
+    struct _GuideInputs {
+        UsdPrim prim;
+        bool styleReady = false;
+        TfToken purpose;
+        UsdAttribute colorAttr;
+        bool colorLive = false;
+        bool hasColor = false;
+        GfVec3f color;
+        UsdAttribute opacityAttr;
+        bool opacityLive = false;
+        bool hasOpacity = false;
+        float opacity = 1.0f;
+        bool controlReady = false;
+        bool controlLive = false;
+        TfToken shape;
+        TfToken drawMode;
+        GfVec3d scale;
+        double wireWidth = 0.05;
+        GfVec3d offset = GfVec3d(0.0);
+        bool radiusReady = false;
+        bool radiusLive = false;
+        double radius = 1.0;
+    };
+    _GuideInputs &_GuideInputsFor(const SdfPath &path) const;
+    void _ReadGuideStyleCached(_GuideInputs &inputs,
+                               const RigExecRigPose &pose,
+                               RigExecPublishedPrim *published) const;
+    double _GuideRadius(_GuideInputs &inputs, UsdTimeCode time) const;
+    const std::map<SdfPath, std::vector<SdfPath>> &
+    _JointChildren(const RigExecRigPose &pose) const;
+
     std::unique_ptr<RigExecRigEvaluator> _evaluator;
     std::shared_ptr<RigExecSnapshotStore> _store;
     RigExecBindingResolvingSceneIndexRefPtr _binding;
     RigExecResultsSceneIndexRefPtr _results;
     uint64_t _generation = 0;
     size_t _publishedEpochDigest = 0;
+    mutable std::unordered_map<SdfPath, _GuideInputs, SdfPath::Hash>
+        _guideInputs;
+    mutable std::map<SdfPath, std::vector<SdfPath>> _jointChildren;
+    /// Joint path -> whether a RigExecControl is above it (through joints): the
+    /// hidden pivots nested in a control hierarchy. Stage-edit scoped like
+    /// the other guide caches.
+    mutable std::unordered_map<SdfPath, bool, SdfPath::Hash>
+        _controlSpaceJoints;
+    bool _IsControlSpaceJoint(const SdfPath &path) const;
+    mutable size_t _jointChildrenKey = 0;
+    mutable bool _jointChildrenValid = false;
+    /// The evaluator's stage-edit serial the guide caches were filled under.
+    mutable uint64_t _guideCacheSerial = 0;
+    /// Drops the guide caches if any stage edit has happened since they
+    /// were filled. Called at the top of every fill that reads them.
+    void _SyncGuideCaches() const;
 };
 
 }  // namespace rigExec

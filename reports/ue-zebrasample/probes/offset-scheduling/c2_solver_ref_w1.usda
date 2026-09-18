@@ -1,0 +1,144 @@
+#usda 1.0
+(
+    defaultPrim = "Asset"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "Asset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "Asset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "Ctl" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 90
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )
+            }
+            def RigExecControl "Drv" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:rz = 45
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (5, 0, 0, 1) )
+            }
+
+            def RigExecControl "QA" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 0
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 10, 1) )
+            }
+
+            def RigExecControl "QB" (
+                prepend apiSchemas = ["RigExecControlAPI"]
+            )
+            {
+                double avars:tx = 4
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 10, 1) )
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/Ctl>
+                rel rigExec:joints = </Asset/Rig/Joints/J>
+            }
+            def RigExecFkChain "QA"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/QA>
+                rel rigExec:joints = </Asset/Rig/Joints/Q>
+            }
+
+            def RigExecFkChain "QB"
+            {
+                rel rigExec:controls = </Asset/Rig/Controls/QB>
+                rel rigExec:joints = </Asset/Rig/Joints/Q>
+            }
+
+            def RigExecBlendPointFrames "QBlend"
+            {
+                float inputs:weight = 1.0
+                rel rigExec:inputA = </Asset/Rig/Solvers/QA>
+                rel rigExec:inputB = </Asset/Rig/Solvers/QB>
+                rel rigExec:joints = </Asset/Rig/Joints/Q>
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "J"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 1, 0, 1) )
+
+                def RigExecJoint "C"
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+
+                    def RigExecJoint "K"
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (1, 0, 0, 1) )
+                    }
+                }
+            }
+            def RigExecJoint "Q"
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 10, 1) )
+            }
+        }
+
+        def Scope "PoseInterpolators"
+        {
+            def RigExecPoseInterpolator "Swing"
+            {
+                rel rigExec:driver = </Asset/Rig/Controls/Drv>
+                uniform token rigExec:kernel = "gaussian"
+                uniform token rigExec:twistAxis = "Z"
+
+                def RigExecPose "neutral"
+                {
+                    uniform token rigExec:poseType = "whole"
+                    quatf rigExec:rotation = (1.0, 0, 0, 0.0)
+                    float rigExec:rotationRadius = 0.7853981633974483
+                }
+
+                def RigExecPose "Forward"
+                {
+                    uniform token rigExec:poseType = "whole"
+                    quatf rigExec:rotation = (0.9238795325112867, 0, 0, 0.3826834323650898)
+                    float rigExec:rotationRadius = 0.7853981633974483
+                }
+
+                def RigExecPose "Back"
+                {
+                    uniform token rigExec:poseType = "whole"
+                    quatf rigExec:rotation = (0.9238795325112867, 0, 0, -0.3826834323650898)
+                    float rigExec:rotationRadius = 0.7853981633974483
+                }
+            }
+        }
+
+
+        def Scope "Movers"
+        {
+            def RigExecParentConstraint "Off" (
+                prepend apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </Asset/Rig/Joints/J>
+                rel rigExec:sources = [</Asset/Rig/Joints/J>]
+                double3[] inputs:translationOffsets = [(1.0, 0.0, 0.0)]
+                double3[] inputs:rotationOffsets = [(0.0, 0.0, 0.0)]
+                float inputs:defaultWeight = 0.0
+            }
+        }
+    }
+}

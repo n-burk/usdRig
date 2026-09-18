@@ -4,6 +4,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/frameExtraction.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/splineIk.h"
 
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
@@ -14,6 +15,7 @@
 #include "pxr/usd/usdGeom/xform.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -74,6 +76,31 @@ MakeConstraint(const UsdStageRefPtr &stage, const char *name,
     CHECK(prim.ApplyAPI(TfToken("RigExecMoverAPI")));
     prim.CreateRelationship(TfToken("rigExec:moves")).SetTargets(targets);
     return prim;
+}
+
+/// Author `reorder nameChildren` on the rig root putting Solvers LAST.
+///
+/// Aggregate solvers and pose constraints share ONE hierarchical stack whose
+/// BOTTOM sibling runs first (spec 4.2), so "solve, then revise" is authored
+/// by putting the Solvers scope at the bottom of the rig -- which is what
+/// every shipped rig does. The fixtures here define Solvers before Movers, so
+/// without this they would author the opposite shape: the constraints would
+/// FEED the solvers rather than revise them.
+static void
+SolversLast(const UsdStageRefPtr &stage,
+            const char *rig = "/Asset/Rig")
+{
+    const UsdPrim prim = stage->GetPrimAtPath(SdfPath(rig));
+    CHECK(prim);
+    if (!prim) return;
+    std::vector<TfToken> order;
+    for (const UsdPrim &child : prim.GetChildren()) {
+        if (child.GetName() != TfToken("Solvers")) {
+            order.push_back(child.GetName());
+        }
+    }
+    order.push_back(TfToken("Solvers"));
+    prim.SetChildrenReorder(order);
 }
 
 static bool
@@ -404,7 +431,75 @@ TestEvaluatorSemantics()
                    GfVec3d(1, 1, 5)));
     }
 
+    // A LIVE constraint with a malformed table says so and passes through,
+    // in the dynamic walk's own order: the cardinality line the raw read
+    // owns, then the mover's "unusable constraint inputs". Both arrays are
+    // read per frame on both paths, so this is also what proves the program
+    // reproduces the diagnostic from THIS run's numbers rather than from
+    // something captured at bake.
+    position.GetAttribute(TfToken("inputs:defaultWeight")).Set(1.0f);
+    const RigExecRigPose malformed =
+        evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(malformed.valid);
+    const auto cardinality = std::find_if(
+        malformed.diagnostics.begin(), malformed.diagnostics.end(),
+        [](const std::string &diagnostic) {
+            return diagnostic.find(
+                       "inputs:sourceWeights has 3 entries for 2 sources") !=
+                   std::string::npos;
+        });
+    CHECK(cardinality != malformed.diagnostics.end());
+    if (cardinality != malformed.diagnostics.end()) {
+        const auto unusable = std::find_if(
+            cardinality, malformed.diagnostics.end(),
+            [](const std::string &diagnostic) {
+                return diagnostic.find("has unusable constraint inputs") !=
+                       std::string::npos;
+            });
+        CHECK(unusable != malformed.diagnostics.end());
+    }
+    const auto malformedPosition =
+        malformed.providerXforms.find(SdfPath("/Asset/Targets/Position"));
+    CHECK(malformedPosition != malformed.providerXforms.end());
+    if (malformedPosition != malformed.providerXforms.end()) {
+        CHECK(Near(malformedPosition->second.ExtractTranslation(),
+                   GfVec3d(1, 1, 5)));
+    }
+
+    // An ANIMATED blend between two parents. The bake used to refuse the rig
+    // outright for this; now the table is re-read per frame, so the two
+    // frames below have to differ -- and differ from each other by the
+    // weights alone, since nothing else on the stage moves.
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Set(VtFloatArray{1, 0}, UsdTimeCode(1.0));
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Set(VtFloatArray{0, 1}, UsdTimeCode(2.0));
+    const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+    const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+    CHECK(atOne.valid);
+    CHECK(atTwo.valid);
+    const auto oneAt = atOne.providerXforms.find(
+        SdfPath("/Asset/Targets/Position"));
+    const auto twoAt = atTwo.providerXforms.find(
+        SdfPath("/Asset/Targets/Position"));
+    CHECK(oneAt != atOne.providerXforms.end());
+    CHECK(twoAt != atTwo.providerXforms.end());
+    if (oneAt != atOne.providerXforms.end() &&
+        twoAt != atTwo.providerXforms.end()) {
+        CHECK(!Near(oneAt->second.ExtractTranslation(),
+                    twoAt->second.ExtractTranslation()));
+    }
+    // Back to the MALFORMED table the dormant case above left standing --
+    // not a well-formed one -- so the disabled case below keeps proving what
+    // it always proved: that a shape-preserving pass-through does not
+    // inspect the source data either.
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Clear();
+    position.GetAttribute(TfToken("inputs:sourceWeights"))
+        .Set(VtFloatArray{1, 2, 3});
+
     // MoverAPI enable is a shape-preserving pass-through.
+    position.GetAttribute(TfToken("inputs:defaultWeight")).Set(0.0f);
     position.GetAttribute(TfToken("inputs:enabled")).Set(false);
     const RigExecRigPose disabled =
         evaluator.Evaluate(UsdTimeCode::Default());
@@ -2238,10 +2333,12 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
     ik.CreateRelationship(TfToken("rigExec:poleControl"))
         .SetTargets({SdfPath("/Asset/Rig/Controls/Pole")});
     if (throughBlend) {
-        // Only the blend owns the output joints -- rigExec:joints is an
-        // exclusive output claim, so the IK cannot list them too. It finds
-        // their rests by following its own output edge to the consumer
-        // that does own them.
+        // Only the blend WRITES the output joints. rigExec:joints is an
+        // ordered write rather than an exclusive claim, so the IK listing
+        // them too would be legal -- but the IK's aggregate is consumed by
+        // the blend, and a consumed solver does not write: its rigExec:joints
+        // is a rest reference, which is how it finds the rests it measures
+        // its bone lengths from. One writer, so no stack and no note.
         const UsdPrim fk = stage->DefinePrim(
             SdfPath("/Asset/Rig/Solvers/FK"), TfToken("RigExecFkChain"));
         fk.CreateRelationship(TfToken("rigExec:controls"))
@@ -2259,10 +2356,10 @@ TestTwoBoneIkImpliedLengths(bool throughBlend)
         blend.CreateRelationship(TfToken("rigExec:joints"))
             .SetTargets({shoulder, elbow, wrist});
     }
-    // The IK names its chain either way. When the blend poses those
-    // joints this is a REST reference -- the claim check defers to the
-    // unconsumed blend -- and it is what gives the kernel the rests it
-    // measures its bone lengths from.
+    // The IK names its chain either way. When the blend writes those
+    // joints this is a REST reference -- the relaxation demotes a consumed
+    // solver rather than adding it to the joint's writer stack -- and it is
+    // what gives the kernel the rests it measures its bone lengths from.
     ik.CreateRelationship(TfToken("rigExec:joints"))
         .SetTargets({shoulder, elbow, wrist});
 
@@ -2566,6 +2663,19 @@ TestDeepSolverDependencySchedule()
         previousSolver = solverPath;
         finalSolver = solverPath;
     }
+    // S0 feeds S1 feeds S2 ... so S0 has to run FIRST, and the pose stack is
+    // the REVERSE of the composed child order (spec 4.2): the bottom sibling
+    // runs first. Definition order is S0..S95, so the scope is reordered
+    // S95..S0 to put S0 at the bottom. Without it the aggregate edge at every
+    // eighth solver contradicts the hierarchy and the compile says so by name.
+    {
+        std::vector<TfToken> order;
+        for (int i = depth - 1; i >= 0; --i) {
+            order.push_back(TfToken("S" + std::to_string(i)));
+        }
+        stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers"))
+            .SetChildrenReorder(order);
+    }
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -2640,14 +2750,18 @@ TestDeepSolverDependencySchedule()
         .SetTargets({SdfPath("/Asset/Rig/Joints/J46/Input")});
     CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
 
-    // A cycle hidden through a control's namespace parent must be rejected
-    // at compilation, rather than discovered after many refinement rounds.
+    // A loop closed through a control's namespace PARENT is a FRAME read,
+    // and a frame read is positional under the unified pose stack (spec 4.2):
+    // S0 stands at the bottom, so it reads J95 as it was BEFORE S95 wrote it,
+    // and there is one well-defined order rather than two contradicting
+    // demands. It is no longer a cycle and no longer refused.
     const UsdPrim first = stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers/S0"));
     first.GetRelationship(TfToken("rigExec:start"))
         .SetTargets({previousJoint.AppendChild(TfToken("Input"))});
-    const RigExecRigPose cyclic = evaluator.Evaluate(UsdTimeCode::Default());
-    CHECK(!cyclic.valid);
-    CHECK(HasDiagnostic(cyclic, "solver dependency cycle"));
+    const RigExecRigPose positional = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(positional.valid);
+    CHECK(!HasDiagnostic(positional, "solver dependency cycle"));
+    CHECK(!HasDiagnostic(positional, "pose dependency cycle"));
 }
 
 static void
@@ -2764,9 +2878,15 @@ TestConstraintSolverDependencySchedule()
         prim.GetAttribute(TfToken("rest:tx")).Set(tx);
         return prim;
     };
+    // The solvers live in the SAME SCOPE as the constraints here, because
+    // that is the only way to interleave them under the unified pose stack
+    // (spec 4.2): solvers are discovered by type anywhere beneath the rig,
+    // the mover walk skips a non-mover prim as a grouping scope, and one
+    // `reorder nameChildren` over the scope then spells the exact order
+    // Source FK -> DriveGoal -> IK -> FollowEnd -> Final FK.
     const auto fk = [&](const char *name, const UsdPrim &input, const UsdPrim &output) {
         const UsdPrim prim = stage->DefinePrim(
-            SdfPath(std::string("/Asset/Rig/Solvers/") + name),
+            SdfPath(std::string("/Asset/Rig/Movers/") + name),
             TfToken("RigExecFkChain"));
         prim.GetRelationship(TfToken("rigExec:controls")).SetTargets({input.GetPath()});
         prim.GetRelationship(TfToken("rigExec:joints")).SetTargets({output.GetPath()});
@@ -2787,7 +2907,7 @@ TestConstraintSolverDependencySchedule()
     fk("Final", follow, finalJoint);
     fk("Independent", other, joint("Independent"));
     const UsdPrim ik = stage->DefinePrim(
-        SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+        SdfPath("/Asset/Rig/Movers/IK"), TfToken("RigExecTwoBoneIk"));
     ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
     ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
@@ -2803,6 +2923,11 @@ TestConstraintSolverDependencySchedule()
         stage, "DriveGoal", "RigExecPositionConstraint", {goal.GetPath()});
     driveConstraint.GetRelationship(TfToken("rigExec:sources"))
         .SetTargets({sourceJoint.GetPath()});
+    // Bottom sibling first, so this list is the execution order REVERSED.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+        .SetChildrenReorder({TfToken("Independent"), TfToken("Final"),
+                             TfToken("FollowEnd"), TfToken("IK"),
+                             TfToken("DriveGoal"), TfToken("Source")});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
@@ -2834,12 +2959,16 @@ TestConstraintSolverDependencySchedule()
     checkPose(8, 2);
     checkPose(8, 0);
 
-    // A final-frame feedback edge is a cycle, not a previous-generation read.
+    // Pointing DriveGoal at the joint the IK writes is a FRAME read from
+    // BELOW that writer, which the unified pose stack resolves positionally
+    // (spec 4.2): DriveGoal stands before the IK, so it reads the end joint
+    // as the steps before IT left it, and the IK is not fed its own output.
+    // That used to be a pose cycle; it is now an ordinary, ordered read.
     driveConstraint.GetRelationship(TfToken("rigExec:sources"))
         .SetTargets({endJoint.GetPath()});
     errors.clear();
-    CHECK(!evaluator.Compile(&errors));
-    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
+    CHECK(evaluator.Compile(&errors));
+    CHECK(!std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
         return error.find("pose dependency cycle") != std::string::npos;
     }));
     driveConstraint.GetRelationship(TfToken("rigExec:sources"))
@@ -2904,6 +3033,122 @@ TestConstrainedSolverInputAncestor()
     }
 }
 
+// Namespace propagation must STOP at a path that owns its own pose.
+//
+// A constraint that moves an ancestor publishes a delta its namespace
+// descendants ride, but a joint a solver writes is an absolute posed
+// override: neither it nor anything beneath it may take that ride. Every
+// other test asserts the ride; this one asserts the stop, and its negative
+// control is the same subtree with the joint unbound, which must ride.
+//
+// The constraint's source is itself solver-driven, so the constraint is
+// scheduled after every solver batch and nothing rewrites the blocked frames
+// afterwards -- with the constraint first, a later solver commit would
+// re-derive the subtree from its own output and hide a lost boundary.
+static void
+TestSolverOwnedJointBlocksNamespacePropagation()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    MakeXform(stage, SdfPath("/Asset"), Matrix());
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    // rest:tx is parent-relative: the asset-space origins below are the sums
+    // spelled out in the expectations.
+    const auto provider = [&](const char *path, const char *type, double x) {
+        const UsdPrim prim = stage->DefinePrim(SdfPath(path), TfToken(type));
+        prim.GetAttribute(TfToken("rest:tx")).Set(x);
+        prim.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        return prim;
+    };
+    const auto control = [&](const char *path, double x) {
+        return provider(path, "RigExecControl", x);
+    };
+    const auto joint = [&](const char *path, double x) {
+        return provider(path, "RigExecJoint", x);
+    };
+    const auto fkChain = [&](const char *name, const UsdPrim &driver,
+                             const SdfPath &drivenJoint) {
+        const UsdPrim solver = stage->DefinePrim(
+            SdfPath(std::string("/Asset/Rig/Solvers/") + name),
+            TfToken("RigExecFkChain"));
+        solver.GetRelationship(TfToken("rigExec:controls"))
+            .SetTargets({driver.GetPath()});
+        solver.GetRelationship(TfToken("rigExec:joints")).SetTargets({drivenJoint});
+        return solver;
+    };
+
+    const UsdPrim lead = control("/Asset/Rig/Controls/Lead", 0);
+    lead.GetAttribute(TfToken("avars:tx")).Set(2.0, UsdTimeCode(1.0));
+    lead.GetAttribute(TfToken("avars:tx")).Set(5.0, UsdTimeCode(2.0));
+    const UsdPrim leadJoint = joint("/Asset/Rig/Joints/Lead", 0);
+    fkChain("Lead", lead, leadJoint.GetPath());
+
+    // The moved subtree. Bound is solver-owned and Free is not; each carries
+    // a deeper provider that inherits its namespace pose.
+    const UsdPrim group = control("/Asset/Rig/Controls/Group", 0);
+    const UsdPrim bound = joint("/Asset/Rig/Controls/Group/Bound", 1);
+    const SdfPath boundTip = control("/Asset/Rig/Controls/Group/Bound/Tip", 2).GetPath();
+    const UsdPrim free = joint("/Asset/Rig/Controls/Group/Free", 10);
+    const SdfPath freeTip = control("/Asset/Rig/Controls/Group/Free/Tip", 11).GetPath();
+    const UsdPrim boundDriver = control("/Asset/Rig/Controls/BoundDriver", 1);
+    const UsdPrim boundSolver = fkChain("Bound", boundDriver, bound.GetPath());
+
+    const UsdPrim move = MakeConstraint(
+        stage, "MoveGroup", "RigExecPositionConstraint", {group.GetPath()});
+    move.GetRelationship(TfToken("rigExec:sources")).SetTargets({leadJoint.GetPath()});
+    SolversLast(stage);
+
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+
+    // `delta` is where the constraint takes Group, and therefore the shift
+    // every unblocked descendant must show.
+    const auto check = [&](double time, double delta, bool blocked) {
+        const auto pose = evaluator.Evaluate(UsdTimeCode(time));
+        CHECK(pose.valid);
+        if (!pose.valid) return;
+        const auto joints = [&](const SdfPath &path) {
+            const auto frame = pose.jointFramesFinal.find(path);
+            CHECK(frame != pose.jointFramesFinal.end());
+            return frame == pose.jointFramesFinal.end()
+                ? GfVec3d(std::numeric_limits<double>::quiet_NaN())
+                : frame->second.Origin();
+        };
+        const auto controls = [&](const SdfPath &path) {
+            const auto frame = pose.controlFrames.find(path);
+            CHECK(frame != pose.controlFrames.end());
+            return frame == pose.controlFrames.end()
+                ? GfVec3d(std::numeric_limits<double>::quiet_NaN())
+                : frame->second.Origin();
+        };
+        CHECK(Near(controls(group.GetPath()), GfVec3d(delta, 0, 0)));
+        // Unowned: the whole subtree rides the delta.
+        CHECK(Near(joints(free.GetPath()), GfVec3d(10 + delta, 0, 0)));
+        CHECK(Near(controls(freeTip), GfVec3d(21 + delta, 0, 0)));
+        // Owned by a solver: the joint holds its solved frame and its own
+        // descendant stays with it. Unbind the solver and both ride.
+        CHECK(Near(joints(bound.GetPath()),
+                   GfVec3d(blocked ? 1 : 1 + delta, 0, 0)));
+        CHECK(Near(controls(boundTip),
+                   GfVec3d(blocked ? 3 : 3 + delta, 0, 0)));
+    };
+    // Two times: the ownership table is rebuilt per evaluation, and a table
+    // that survived one would be wrong on the next.
+    check(1.0, 2.0, true);
+    check(2.0, 5.0, true);
+
+    // Negative control: the same rig with Bound bound to nothing.
+    joint("/Asset/Rig/Joints/Decoy", 0);
+    boundSolver.GetRelationship(TfToken("rigExec:joints"))
+        .SetTargets({SdfPath("/Asset/Rig/Joints/Decoy")});
+    errors.clear();
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+    check(1.0, 2.0, false);
+    check(2.0, 5.0, false);
+}
+
 static void
 TestConnectedParentSpaceSolverInputs()
 {
@@ -2924,8 +3169,15 @@ TestConnectedParentSpaceSolverInputs()
     const UsdPrim source = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Source"), TfToken("RigExecJoint"));
     const UsdPrim altSource = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/AltSource"), TfToken("RigExecJoint"));
     for (const auto &binding : {std::make_pair(driver, source), std::make_pair(altDriver, altSource)}) {
+        // Every solver in this fixture lives in the SAME SCOPE as the
+        // constraints, because the IK has to read a control whose space
+        // resolves through a joint a CONSTRAINT revises -- and under the
+        // unified pose stack (spec 4.2) the only thing that can put the IK
+        // after that constraint is the composed namespace. Solvers are
+        // discovered by type anywhere beneath the rig, so one scope and one
+        // `reorder nameChildren` spells the whole order.
         const UsdPrim fk = stage->DefinePrim(
-            SdfPath("/Asset/Rig/Solvers").AppendChild(binding.first.GetName()), TfToken("RigExecFkChain"));
+            SdfPath("/Asset/Rig/Movers").AppendChild(binding.first.GetName()), TfToken("RigExecFkChain"));
         fk.GetRelationship(TfToken("rigExec:controls")).SetTargets({binding.first.GetPath()});
         fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({binding.second.GetPath()});
     }
@@ -2934,6 +3186,41 @@ TestConnectedParentSpaceSolverInputs()
     const UsdPrim bridge = control("/Asset/Rig/Controls/Bridge", 0);
     bridge.GetAttribute(TfToken("default:space"))
         .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
+    // Bridge's own namespace descendants: the connected refresh has to carry
+    // the BASE phase of a descendant with its connected ancestor, and has to
+    // honour the same ownership boundary the constraint walk honours. Rider
+    // inherits its pose and must follow; Owner is written by a solver of its
+    // own and must not. Owner has to be solver-bound for the boundary to be
+    // observable at all: a descendant the refresh walk visits in its own
+    // right recomputes its base frame from its own tap straight afterwards,
+    // while a solver-bound joint is skipped, so what the carry leaves on it
+    // is what the pose publishes.
+    const UsdPrim rider = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Bridge/Rider"), TfToken("RigExecJoint"));
+    rider.GetAttribute(TfToken("rest:tx")).Set(1.0);
+    rider.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    const UsdPrim owner = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Bridge/Owner"), TfToken("RigExecJoint"));
+    owner.GetAttribute(TfToken("rest:tx")).Set(1.0);
+    owner.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    // A descendant a constraint owns is skipped by the refresh walk too, so
+    // its base phase is exactly what the loop leaves behind.
+    const UsdPrim held = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Bridge/Held"), TfToken("RigExecJoint"));
+    held.GetAttribute(TfToken("rest:tx")).Set(2.0);
+    held.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+    MakeXform(stage, SdfPath("/Asset/HeldTarget"), Matrix(GfVec3d(9, 0, 0)));
+    MakeConstraint(stage, "MoveHeld", "RigExecPositionConstraint", {held.GetPath()})
+        .GetRelationship(TfToken("rigExec:sources"))
+        .SetTargets({SdfPath("/Asset/HeldTarget")});
+    const UsdPrim ownerDriver = control("/Asset/Rig/Controls/OwnerDriver", 7);
+    {
+        const UsdPrim fk = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/Owner"), TfToken("RigExecFkChain"));
+        fk.GetRelationship(TfToken("rigExec:controls"))
+            .SetTargets({ownerDriver.GetPath()});
+        fk.GetRelationship(TfToken("rigExec:joints")).SetTargets({owner.GetPath()});
+    }
     const UsdPrim goal = control("/Asset/Rig/Controls/Goal", 2);
     goal.GetAttribute(TfToken("parent:space"))
         .SetConnections({bridge.GetPath().AppendProperty(TfToken("posed:defaultSpace"))});
@@ -2953,7 +3240,7 @@ TestConnectedParentSpaceSolverInputs()
             joints.push_back(path);
         }
     }
-    const UsdPrim ik = stage->DefinePrim(SdfPath("/Asset/Rig/Solvers/IK"), TfToken("RigExecTwoBoneIk"));
+    const UsdPrim ik = stage->DefinePrim(SdfPath("/Asset/Rig/Movers/IK"), TfToken("RigExecTwoBoneIk"));
     ik.GetRelationship(TfToken("rigExec:rootControl")).SetTargets({root.GetPath()});
     ik.GetRelationship(TfToken("rigExec:effectorControl")).SetTargets({goal.GetPath()});
     ik.GetRelationship(TfToken("rigExec:poleControl")).SetTargets({pole.GetPath()});
@@ -2962,55 +3249,1110 @@ TestConnectedParentSpaceSolverInputs()
     moveJoint.GetRelationship(TfToken("rigExec:sources")).SetTargets({target.GetPath()});
     const UsdPrim moveDriver = MakeConstraint(stage, "MoveDriver", "RigExecPositionConstraint", {driver.GetPath()});
     moveDriver.GetRelationship(TfToken("rigExec:sources")).SetTargets({SdfPath("/Asset/DriverTarget")});
+    // Bottom sibling first, so this list is the execution order REVERSED:
+    // MoveDriver, Driver FK, AltDriver FK, MoveJoint, Owner FK, IK, MoveHeld.
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Movers"))
+        .SetChildrenReorder({TfToken("MoveHeld"), TfToken("IK"),
+                             TfToken("Owner"), TfToken("MoveJoint"),
+                             TfToken("AltDriver"), TfToken("Driver"),
+                             TfToken("MoveDriver")});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const size_t epoch = evaluator.GetBindingEpochDigest();
-    auto check = [&](double expected, size_t evaluations) {
+    // `riderBase` is where Bridge's BASE phase leaves its inheriting
+    // descendant, which is one unit past Bridge's own base frame and lags
+    // the final phase whenever a constraint has revised Bridge's input.
+    auto check = [&](double expected, size_t evaluations, double riderBase) {
         const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(pose.valid);
         CHECK(pose.solverEvaluations == evaluations);
         if (pose.valid) {
             CHECK(Near(pose.controlFrames.at(goal.GetPath()).Origin(), GfVec3d(expected, 0, 0)));
             CHECK(Near(pose.jointFramesFinal.at(joints[2]).Origin(), GfVec3d(expected, 0, 0)));
+            // Both phases of a connected provider carry its descendants.
+            CHECK(Near(pose.jointFramesBase.at(rider.GetPath()).Origin(),
+                       GfVec3d(riderBase, 0, 0)));
+            CHECK(Near(pose.jointFramesFinal.at(rider.GetPath()).Origin(),
+                       pose.controlFrames.at(bridge.GetPath()).Origin() +
+                           GfVec3d(1, 0, 0)));
+            // Held sits one unit further out and is carried by the same
+            // write, with its own constraint owning only the final phase.
+            CHECK(Near(pose.jointFramesBase.at(held.GetPath()).Origin(),
+                       GfVec3d(riderBase + 1, 0, 0)));
+            CHECK(Near(pose.jointFramesFinal.at(held.GetPath()).Origin(),
+                       GfVec3d(9, 0, 0)));
+            // ... and neither may cross an ownership boundary: Owner keeps
+            // the frame its own solver wrote, in both phases.
+            CHECK(Near(pose.jointFramesBase.at(owner.GetPath()).Origin(), GfVec3d(7, 0, 0)));
+            CHECK(Near(pose.jointFramesFinal.at(owner.GetPath()).Origin(), GfVec3d(7, 0, 0)));
         }
         return pose;
     };
-    const auto first = check(7, 3);
+    const auto first = check(7, 4, 5);
     if (first.valid) {
         CHECK(Near(first.jointFramesBase.at(source.GetPath()).Origin(), GfVec3d(4, 0, 0)));
         CHECK(Near(first.jointFramesFinal.at(source.GetPath()).Origin(), GfVec3d(5, 0, 0)));
     }
-    check(7, 0);
+    check(7, 0, 5);
     goal.GetAttribute(TfToken("rest:tx")).Set(3.0);
-    check(8, 1);
+    check(8, 1, 5);
     target.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(6, 0, 0)));
-    check(9, 1);
+    check(9, 1, 5);
     CHECK(evaluator.GetBindingEpochDigest() == epoch);
     bridge.GetAttribute(TfToken("default:space"))
         .SetConnections({altRelay.GetPath().AppendProperty(TfToken("parent:space"))});
-    check(5, 3);
+    check(5, 4, 3);
     CHECK(evaluator.GetBindingEpochDigest() != epoch);
     target.GetAttribute(TfToken("xformOp:transform")).Set(Matrix(GfVec3d(7, 0, 0)));
-    check(5, 0);
+    check(5, 0, 3);
     altDriver.GetAttribute(TfToken("avars:tx")).Set(1.0);
-    check(6, 2);
+    check(6, 2, 4);
     altDriver.GetAttribute(TfToken("avars:tx")).Set(2.0);
-    check(7, 2);
-    // Connected space ancestry participates in cycle validation.
+    check(7, 2, 5);
+    // Connected space ancestry participates in ordering, and pointing the
+    // FIRST constraint at the joint the LAST solver writes is now a
+    // positional frame read rather than a cycle (spec 4.2): MoveDriver
+    // stands at the bottom of the pose stack, so it reads the end joint as
+    // the steps before it left it and the IK still runs after it.
     bridge.GetAttribute(TfToken("default:space"))
         .SetConnections({relay.GetPath().AppendProperty(TfToken("parent:space"))});
     moveDriver.GetRelationship(TfToken("rigExec:sources")).SetTargets({joints[2]});
     errors.clear();
-    CHECK(!evaluator.Compile(&errors));
-    CHECK(std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
+    CHECK(evaluator.Compile(&errors));
+    CHECK(!std::any_of(errors.begin(), errors.end(), [](const std::string &error) {
         return error.find("pose dependency cycle") != std::string::npos;
     }));
+    CHECK(evaluator.Evaluate(UsdTimeCode::Default()).valid);
+}
+
+static void
+TestSolverGuidesGate()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Source"), TfToken("RigExecControl"));
+    source.GetAttribute(TfToken("avars:tx")).Set(2.0);
+    const SdfPath jointPath("/Asset/Rig/Joints/J0");
+    stage->DefinePrim(jointPath, TfToken("RigExecJoint"));
+    const SdfPath solverPath("/Asset/Rig/Solvers/Twist");
+    const UsdPrim twist = stage->DefinePrim(solverPath, TfToken("RigExecTwistDistribution"));
+    twist.GetRelationship(TfToken("rigExec:start")).SetTargets({source.GetPath()});
+    twist.GetRelationship(TfToken("rigExec:end")).SetTargets({source.GetPath()});
+    twist.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointPath});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(evaluator.GetSolverGuidesEnabled());
+    const auto guided = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(guided.valid);
+    const auto guidedFrames = guided.solverFrames.find(solverPath);
+    CHECK(guidedFrames != guided.solverFrames.end() && guidedFrames->second.size() == 1);
+
+    // Headless consumers skip the whole guide request; everything else in
+    // the generation must be unchanged.
+    evaluator.SetSolverGuidesEnabled(false);
+    CHECK(!evaluator.GetSolverGuidesEnabled());
+    const auto unguided = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(unguided.valid);
+    CHECK(unguided.solverFrames.empty());
+    CHECK(unguided.jointFramesFinal.size() == guided.jointFramesFinal.size());
+    for (const auto &[path, frame] : guided.jointFramesFinal) {
+        const auto it = unguided.jointFramesFinal.find(path);
+        CHECK(it != unguided.jointFramesFinal.end());
+        if (it != unguided.jointFramesFinal.end()) {
+            CHECK(Near(it->second.Origin(), frame.Origin()));
+        }
+    }
+
+    // Re-enabling restores the exact guide frames.
+    evaluator.SetSolverGuidesEnabled(true);
+    const auto reguided = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(reguided.valid);
+    const auto reguidedFrames = reguided.solverFrames.find(solverPath);
+    CHECK(reguidedFrames != reguided.solverFrames.end() &&
+          reguidedFrames->second.size() == guidedFrames->second.size());
+    if (reguidedFrames != reguided.solverFrames.end() &&
+        reguidedFrames->second.size() == guidedFrames->second.size()) {
+        for (size_t i = 0; i < guidedFrames->second.size(); ++i) {
+            CHECK(Near(reguidedFrames->second[i].Origin(),
+                       guidedFrames->second[i].Origin()));
+        }
+    }
+}
+
+static void
+TestSolverBatchLevelAudit()
+{
+    // Diamond aggregate dependency: A feeds B and C through their joints,
+    // D blends B and C directly. Minimal longest-path layering puts A at 0,
+    // B and C together at 1, and D at 2 -- dense, with no wave wasted on
+    // schedule order.
+    const auto stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const UsdPrim source = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Controls/Source"), TfToken("RigExecControl"));
+    source.GetAttribute(TfToken("avars:tx")).Set(2.0);
+    const auto jointInput = [&](const SdfPath &jointPath) {
+        stage->DefinePrim(jointPath, TfToken("RigExecJoint"));
+        const UsdPrim child = stage->DefinePrim(
+            jointPath.AppendChild(TfToken("Input")), TfToken("RigExecControl"));
+        child.GetAttribute(TfToken("rest:tx")).Set(1.0);
+        child.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        return child.GetPath();
+    };
+    const SdfPath jointA("/Asset/Rig/Joints/JA");
+    const UsdPrim twistA = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/A"), TfToken("RigExecTwistDistribution"));
+    twistA.GetRelationship(TfToken("rigExec:start")).SetTargets({source.GetPath()});
+    twistA.GetRelationship(TfToken("rigExec:end")).SetTargets({source.GetPath()});
+    twistA.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointA});
+    const SdfPath inputA = jointInput(jointA);
+    const SdfPath jointB("/Asset/Rig/Joints/JB");
+    const UsdPrim twistB = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/B"), TfToken("RigExecTwistDistribution"));
+    twistB.GetRelationship(TfToken("rigExec:start")).SetTargets({inputA});
+    twistB.GetRelationship(TfToken("rigExec:end")).SetTargets({inputA});
+    twistB.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointB});
+    jointInput(jointB);
+    const SdfPath jointC("/Asset/Rig/Joints/JC");
+    const UsdPrim twistC = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/C"), TfToken("RigExecTwistDistribution"));
+    twistC.GetRelationship(TfToken("rigExec:start")).SetTargets({inputA});
+    twistC.GetRelationship(TfToken("rigExec:end")).SetTargets({inputA});
+    twistC.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointC});
+    jointInput(jointC);
+    const SdfPath jointD("/Asset/Rig/Joints/JD");
+    stage->DefinePrim(jointD, TfToken("RigExecJoint"));
+    const SdfPath solverA("/Asset/Rig/Solvers/A");
+    const SdfPath solverB("/Asset/Rig/Solvers/B");
+    const SdfPath solverC("/Asset/Rig/Solvers/C");
+    const SdfPath solverD("/Asset/Rig/Solvers/D");
+    const UsdPrim blend = stage->DefinePrim(solverD, TfToken("RigExecBlendPointFrames"));
+    blend.GetRelationship(TfToken("rigExec:inputA")).SetTargets({solverB});
+    blend.GetRelationship(TfToken("rigExec:inputB")).SetTargets({solverC});
+    blend.GetAttribute(TfToken("inputs:weight")).Set(0.5f);
+    blend.GetRelationship(TfToken("rigExec:joints")).SetTargets({jointD});
+    // A -> B, C -> D by aggregate, so D runs LAST -- and an AGGREGATE read
+    // that contradicts the hierarchy is a compile error under the unified
+    // pose stack (spec 4.2). Definition order A, B, C, D reversed would run D
+    // first, so the scope is reordered to put D at the TOP. (B and C write
+    // joints D does not name, so the consumed-solver relaxation leaves them
+    // as stack steps and the check is reachable here.)
+    stage->GetPrimAtPath(SdfPath("/Asset/Rig/Solvers"))
+        .SetChildrenReorder({TfToken("D"), TfToken("C"), TfToken("B"),
+                             TfToken("A")});
+    RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    CHECK(errors.empty());
+    const std::map<SdfPath, size_t> levels = evaluator.GetSolverBatchLevels();
+    CHECK(levels.size() == 4);
+    CHECK(levels.at(solverA) == 0);
+    CHECK(levels.at(solverB) == 1);
+    CHECK(levels.at(solverC) == 1);
+    CHECK(levels.at(solverD) == 2);
+    std::set<size_t> dense;
+    for (const auto &[solver, level] : levels) dense.insert(level);
+    CHECK((dense == std::set<size_t>{0, 1, 2}));
+    const auto pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid && pose.solverOverridesConverged);
+    CHECK(pose.solverEvaluations == 4);
+    CHECK(pose.solverOverrideRounds == 3);
+}
+
+// ---------------------------------------------------------------------------
+// RigExecSplineIk: the control-driven spine solver, exercised through exec
+// (the aggregate tap, like TestTwoBoneIkRestFrameInputs) and through the
+// evaluator (joint binding, and the non-uniform squash scale surviving into
+// the bound joints' frames and matrices). The kernel itself is covered by
+// testRigExecSplineIk; these tests are about the wiring: control frames in,
+// per-joint frames out, and the schema knobs reaching the solve.
+// ---------------------------------------------------------------------------
+
+static constexpr double kSplineIkPi = 3.141592653589793238462643383279502884;
+
+static GfVec3d
+SplineIkUnitX(const RigExecPointFrame &f)
+{
+    return (f.X() - f.Origin()).GetNormalized();
+}
+
+static GfVec3d
+SplineIkUnitY(const RigExecPointFrame &f)
+{
+    return (f.Y() - f.Origin()).GetNormalized();
+}
+
+static double
+SplineIkHandle(const RigExecPointFrame &f, int axis)
+{
+    return (f.points[axis] - f.Origin()).GetLength();
+}
+
+// Orthonormal rest matrix (row-vector convention) with X along `aim` and Y
+// the projected `up`: what a joint's rest:space must be, since rest spaces
+// are orthonormalized by contract.
+static GfMatrix4d
+SplineIkRestSpace(
+    const GfVec3d &origin, const GfVec3d &aim, const GfVec3d &upCandidate)
+{
+    const GfVec3d x = aim.GetNormalized();
+    GfVec3d y = upCandidate - x * GfDot(x, upCandidate);
+    y.Normalize();
+    const GfVec3d z = GfCross(x, y);
+    GfMatrix4d m(1.0);
+    m.SetRow(0, GfVec4d(x[0], x[1], x[2], 0));
+    m.SetRow(1, GfVec4d(y[0], y[1], y[2], 0));
+    m.SetRow(2, GfVec4d(z[0], z[1], z[2], 0));
+    m.SetRow(3, GfVec4d(origin[0], origin[1], origin[2], 1));
+    return m;
+}
+
+struct SplineIkStage {
+    UsdStageRefPtr stage;
+    UsdPrim root, mid, end, solver;
+    std::vector<UsdPrim> joints;
+    std::vector<GfVec3d> origins;
+};
+
+// A chain whose rest origins are `origins` (X aims at the successor, Y the
+// projected +Y up), root/mid/end controls at the first, middle, and last
+// joint with the same orientation, and a RigExecSplineIk over the chain,
+// all under a rig root so the evaluator can compile it too.
+static SplineIkStage
+MakeSplineIkStage(const std::vector<GfVec3d> &origins)
+{
+    SplineIkStage s;
+    s.origins = origins;
+    s.stage = UsdStage::CreateInMemory();
+    s.stage->DefinePrim(SdfPath("/Asset"), TfToken("Xform"));
+    s.stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+    const size_t n = origins.size();
+    std::vector<GfMatrix4d> rests;
+    for (size_t i = 0; i < n; ++i) {
+        const GfVec3d aim = i + 1 < n ? origins[i + 1] - origins[i]
+                                      : origins[i] - origins[i - 1];
+        rests.push_back(SplineIkRestSpace(origins[i], aim, GfVec3d(0, 1, 0)));
+    }
+    const auto define = [&](const std::string &path, const char *type,
+                            const GfMatrix4d &rest) {
+        const UsdPrim prim = s.stage->DefinePrim(SdfPath(path), TfToken(type));
+        CHECK(prim);
+        CHECK(prim.GetAttribute(TfToken("rest:space")).Set(rest));
+        return prim;
+    };
+    SdfPathVector jointPaths;
+    for (size_t i = 0; i < n; ++i) {
+        s.joints.push_back(define(
+            "/Asset/Rig/Joints/J" + std::to_string(i), "RigExecJoint", rests[i]));
+        jointPaths.push_back(s.joints.back().GetPath());
+    }
+    s.root = define("/Asset/Rig/Controls/Root", "RigExecControl", rests[0]);
+    s.mid = define("/Asset/Rig/Controls/Mid", "RigExecControl", rests[n / 2]);
+    s.end = define("/Asset/Rig/Controls/End", "RigExecControl", rests[n - 1]);
+    s.solver = s.stage->DefinePrim(
+        SdfPath("/Asset/Rig/Solvers/Spine"), TfToken("RigExecSplineIk"));
+    CHECK(s.solver);
+    s.solver.GetRelationship(TfToken("rigExec:rootControl"))
+        .SetTargets({s.root.GetPath()});
+    s.solver.GetRelationship(TfToken("rigExec:midControl"))
+        .SetTargets({s.mid.GetPath()});
+    s.solver.GetRelationship(TfToken("rigExec:endControl"))
+        .SetTargets({s.end.GetPath()});
+    s.solver.GetRelationship(TfToken("rigExec:joints")).SetTargets(jointPaths);
+    return s;
+}
+
+static std::vector<GfVec3d>
+SplineIkStraightOrigins()
+{
+    std::vector<GfVec3d> origins;
+    for (int i = 0; i < 7; ++i) {
+        origins.emplace_back(double(i), 0.0, 0.0);
+    }
+    return origins;
+}
+
+static RigExecPointFrameArray
+SplineIkSolve(const SplineIkStage &s)
+{
+    RigExecTapSet taps(s.stage);
+    const RigExecTapId tap = taps.Add(RigExecValueAddress::Prim(
+        s.solver.GetPath(), TfToken("computePointFrameArray")));
+    CHECK(taps.Prepare());
+    const RigExecSnapshot snapshot = taps.Evaluate(UsdTimeCode::Default());
+    CHECK(snapshot.IsValid() && snapshot.IsComplete());
+    return snapshot.Get<RigExecPointFrameArray>(tap);
+}
+
+static void
+SplineIkSet(const UsdPrim &prim, const char *attr, double value)
+{
+    CHECK(prim.GetAttribute(TfToken(attr)).Set(value));
+}
+
+static void
+TestSplineIkRest()
+{
+    // Straight chain: the rest curve IS the chain, so every joint reproduces
+    // its rest frame exactly and the published rests are the joint rests.
+    {
+        const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+        const RigExecPointFrameArray frames = SplineIkSolve(s);
+        CHECK(frames.GetSize() == 7 && frames.rests.size() == 7);
+        if (frames.GetSize() != 7 || frames.rests.size() != 7) {
+            return;
+        }
+        for (size_t i = 0; i < 7; ++i) {
+            const RigExecPointFrame &f = frames.frames[i];
+            CHECK(f.IsValid() && !f.IsDegenerate());
+            CHECK(Near(f.Origin(), s.origins[i], 1e-9));
+            CHECK(Near(SplineIkUnitX(f), GfVec3d(1, 0, 0), 1e-9));
+            CHECK(Near(SplineIkUnitY(f), GfVec3d(0, 1, 0), 1e-9));
+            for (int axis = 1; axis < 4; ++axis) {
+                CHECK(std::abs(SplineIkHandle(f, axis) - 1.0) < 1e-9);
+            }
+            CHECK(Near(frames.rests[i][0], s.origins[i], 1e-12));
+        }
+    }
+    // Curved chain: the degree-2 curve through rest CVs [0], [1], [N-2],
+    // [N-1] interpolates only its end CVs, so the interior joints carry a
+    // rest residual. That is inherent to the model (a maintained offset
+    // downstream absorbs it, as the conventional mo=1 constraints do): measure and
+    // bound it, do not assert it away. With restLength = curve the ratio
+    // is exactly one at rest, so the tip overshoots the curve end by the
+    // chain/curve length difference along the end tangent.
+    {
+        std::vector<GfVec3d> origins;
+        const double radius = 10.0;
+        for (int i = 0; i < 7; ++i) {
+            const double a = i * 8.0 * kSplineIkPi / 180.0;
+            origins.emplace_back(radius * std::sin(a), radius * (1 - std::cos(a)), 0.0);
+        }
+        const SplineIkStage s = MakeSplineIkStage(origins);
+        const RigExecPointFrameArray frames = SplineIkSolve(s);
+        CHECK(frames.GetSize() == 7);
+        if (frames.GetSize() != 7) {
+            return;
+        }
+        double chainLength = 0.0;
+        for (size_t i = 1; i < 7; ++i) {
+            chainLength += (origins[i] - origins[i - 1]).GetLength();
+        }
+        const double segment = chainLength / 6.0;
+        const RigExecSplineIkCurve restCurve(
+            {origins[0], origins[1], origins[5], origins[6]});
+        const double curveLength = restCurve.ArcLength();
+        CHECK(chainLength > curveLength);
+
+        CHECK(Near(frames.frames[0].Origin(), origins[0], 1e-9));
+        double maxResidual = 0.0;
+        for (size_t i = 1; i < 6; ++i) {
+            const double residual =
+                (frames.frames[i].Origin() - origins[i]).GetLength();
+            maxResidual = std::max(maxResidual, residual);
+            CHECK(residual < 0.5 * segment);
+            CHECK(!frames.frames[i].IsDegenerate());
+        }
+        CHECK(maxResidual > 1e-6);  // measured, not zero: the model's residual
+        std::printf("SplineIk curved rest: interior residual max %.4f "
+                    "(segment %.4f, chain %.4f, curve %.4f)\n",
+                    maxResidual, segment, chainLength, curveLength);
+        const GfVec3d endTangent = (origins[6] - origins[5]).GetNormalized();
+        CHECK(Near(frames.frames[6].Origin(),
+                   origins[6] + endTangent * (chainLength - curveLength), 1e-9));
+
+        // restLength = chain: the chain spans the curve, tip on the end CV.
+        CHECK(s.solver.GetAttribute(TfToken("rigExec:restLength"))
+                  .Set(TfToken("chain")));
+        const RigExecPointFrameArray spanned = SplineIkSolve(s);
+        CHECK(spanned.GetSize() == 7);
+        if (spanned.GetSize() == 7) {
+            CHECK(Near(spanned.frames[6].Origin(), origins[6], 1e-9));
+            CHECK(Near(spanned.frames[0].Origin(), origins[0], 1e-9));
+        }
+    }
+}
+
+static void
+TestSplineIkStretch()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    // End control pulled +3 along the chain; the mid control rides on its
+    // follow point (half the end displacement) so it adds no offset.
+    SplineIkSet(s.end, "avars:tx", 3.0);
+    SplineIkSet(s.mid, "avars:tx", 1.5);
+    const RigExecPointFrameArray frames = SplineIkSolve(s);
+    CHECK(frames.GetSize() == 7);
+    if (frames.GetSize() != 7) {
+        return;
+    }
+    // ratio 1.5: joints at 1.5 spacing, the tip at the curve end (9), no
+    // thinning without volume weights.
+    for (size_t i = 0; i < 7; ++i) {
+        const RigExecPointFrame &f = frames.frames[i];
+        CHECK(Near(f.Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+        CHECK(Near(SplineIkUnitX(f), GfVec3d(1, 0, 0), 1e-9));
+        CHECK(Near(SplineIkUnitY(f), GfVec3d(0, 1, 0), 1e-9));
+        CHECK(std::abs(SplineIkHandle(f, 1) - 1.0) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(f, 2) - 1.0) < 1e-9);
+    }
+
+    // Off-axis pull: the curve bends and lengthens; the ratio tracks the
+    // posed curve's ARC LENGTH, so joint i sits at arc distance
+    // ratio * i = (L / 6) * i along it. Verify against the curve built
+    // from the CVs this pose produces: cv0/cv1 carried by the root
+    // (unchanged), cv2/cv3 by the end (+4, +2), mid on its follow point.
+    SplineIkSet(s.end, "avars:tx", 4.0);
+    SplineIkSet(s.end, "avars:ty", 2.0);
+    SplineIkSet(s.mid, "avars:tx", 2.0);
+    SplineIkSet(s.mid, "avars:ty", 1.0);
+    const RigExecPointFrameArray bent = SplineIkSolve(s);
+    CHECK(bent.GetSize() == 7);
+    if (bent.GetSize() != 7) {
+        return;
+    }
+    const RigExecSplineIkCurve curve(
+        {GfVec3d(0, 0, 0), GfVec3d(1, 0, 0), GfVec3d(9, 2, 0), GfVec3d(10, 2, 0)});
+    const double ratio = curve.ArcLength() / 6.0;
+    CHECK(ratio > 1.0);
+    for (size_t i = 0; i < 7; ++i) {
+        GfVec3d expected;
+        CHECK(curve.PointAtArcLength(ratio * i, &expected, nullptr));
+        CHECK(Near(bent.frames[i].Origin(), expected, 1e-9));
+    }
+    CHECK(Near(bent.frames[6].Origin(), GfVec3d(10, 2, 0), 1e-9));
+    for (size_t i = 0; i + 1 < 7; ++i) {
+        const GfVec3d chord = (bent.frames[i + 1].Origin() -
+                               bent.frames[i].Origin()).GetNormalized();
+        CHECK(Near(SplineIkUnitX(bent.frames[i]), chord, 1e-9));
+    }
+}
+
+static void
+TestSplineIkMidBend()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    // Mid control lifted +1.5 in Z: cv1 and cv2 take the offset, the
+    // endpoints stay put, and the bend lies in the XZ plane so the +Y up
+    // is untouched.
+    SplineIkSet(s.mid, "avars:tz", 1.5);
+    const RigExecPointFrameArray frames = SplineIkSolve(s);
+    CHECK(frames.GetSize() == 7);
+    if (frames.GetSize() != 7) {
+        return;
+    }
+    CHECK(Near(frames.frames[0].Origin(), GfVec3d(0, 0, 0), 1e-9));
+    CHECK(Near(frames.frames[6].Origin(), GfVec3d(6, 0, 0), 1e-9));
+    for (size_t i = 1; i < 6; ++i) {
+        CHECK(frames.frames[i].Origin()[2] > 0.1);
+        CHECK(frames.frames[i].Origin()[2] <= 1.5);
+        CHECK(std::abs(frames.frames[i].Origin()[1]) < 1e-9);
+    }
+    CHECK(frames.frames[3].Origin()[2] > frames.frames[1].Origin()[2]);
+    CHECK(frames.frames[3].Origin()[2] > frames.frames[5].Origin()[2]);
+    for (size_t i = 0; i < 7; ++i) {
+        CHECK(Near(SplineIkUnitY(frames.frames[i]), GfVec3d(0, 1, 0), 1e-9));
+    }
+    // Exactly the curve those CVs define.
+    const RigExecSplineIkCurve curve(
+        {GfVec3d(0, 0, 0), GfVec3d(1, 0, 1.5), GfVec3d(5, 0, 1.5), GfVec3d(6, 0, 0)});
+    const double ratio = curve.ArcLength() / 6.0;
+    for (size_t i = 0; i < 7; ++i) {
+        GfVec3d expected;
+        CHECK(curve.PointAtArcLength(ratio * i, &expected, nullptr));
+        CHECK(Near(frames.frames[i].Origin(), expected, 1e-9));
+    }
+
+    // inputs:midFollowWeight moves the follow point. With the end lifted
+    // +2 in Z and the mid control left alone: weight 0 follows the root
+    // only, so the mid registers no offset and only cv2/cv3 rise; weight 1
+    // follows the end, so the mid registers minus the end displacement and
+    // cv1/cv2 drop by it. Each is exactly the curve those CVs define.
+    SplineIkSet(s.mid, "avars:tz", 0.0);
+    SplineIkSet(s.end, "avars:tz", 2.0);
+    const auto expectCurve = [&](const RigExecPointFrameArray &r,
+                                 const std::array<GfVec3d, 4> &cvs) {
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() != 7) {
+            return;
+        }
+        const RigExecSplineIkCurve c(cvs);
+        const double ratio = c.ArcLength() / 6.0;
+        for (size_t i = 0; i < 7; ++i) {
+            GfVec3d expected;
+            CHECK(c.PointAtArcLength(ratio * i, &expected, nullptr));
+            CHECK(Near(r.frames[i].Origin(), expected, 1e-9));
+        }
+    };
+    SplineIkSet(s.solver, "inputs:midFollowWeight", 0.0);
+    expectCurve(SplineIkSolve(s),
+                {GfVec3d(0, 0, 0), GfVec3d(1, 0, 0), GfVec3d(5, 0, 2), GfVec3d(6, 0, 2)});
+    SplineIkSet(s.solver, "inputs:midFollowWeight", 1.0);
+    expectCurve(SplineIkSolve(s),
+                {GfVec3d(0, 0, 0), GfVec3d(1, 0, -2), GfVec3d(5, 0, 0), GfVec3d(6, 0, 2)});
+    SplineIkSet(s.solver, "inputs:midFollowWeight", 0.5);
+    expectCurve(SplineIkSolve(s),
+                {GfVec3d(0, 0, 0), GfVec3d(1, 0, -1), GfVec3d(5, 0, 1), GfVec3d(6, 0, 2)});
+}
+
+static void
+TestSplineIkTwist()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    const RigExecPointFrameArray plain = SplineIkSolve(s);
+    CHECK(plain.GetSize() == 7);
+    if (plain.GetSize() != 7) {
+        return;
+    }
+    // Signed rotation of a joint's posed up about its aim, relative to the
+    // untwisted solve.
+    const auto upRotation = [&](const RigExecPointFrameArray &r, size_t i) {
+        const GfVec3d x = SplineIkUnitX(r.frames[i]);
+        const GfVec3d y0 = SplineIkUnitY(plain.frames[i]);
+        const GfVec3d y1 = SplineIkUnitY(r.frames[i]);
+        return std::atan2(GfDot(GfCross(y0, y1), x), GfDot(y0, y1));
+    };
+    const auto degrees = [](double d) { return d * kSplineIkPi / 180.0; };
+
+    // inputs:roll is constant along the chain (the handle's roll).
+    {
+        SplineIkSet(s.solver, "inputs:roll", 35.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(35.0)) < 1e-9);
+                CHECK(Near(r.frames[i].Origin(), s.origins[i], 1e-9));
+            }
+        }
+        SplineIkSet(s.solver, "inputs:roll", 0.0);
+    }
+    // Root and end controls rolled together about the chain axis: the
+    // root twist is constant along the chain and every joint is its rest
+    // frame rotated about that axis.
+    {
+        SplineIkSet(s.root, "avars:rx", 35.0);
+        SplineIkSet(s.end, "avars:rx", 35.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            const GfRotation rot(GfVec3d(1, 0, 0), 35.0);
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(35.0)) < 1e-9);
+                for (int k = 0; k < 4; ++k) {
+                    CHECK(Near(r.frames[i].points[k],
+                               rot.TransformDir(plain.frames[i].points[k]), 1e-9));
+                }
+            }
+        }
+        SplineIkSet(s.root, "avars:rx", 0.0);
+        SplineIkSet(s.end, "avars:rx", 0.0);
+    }
+    // End control twisted alone: a gradient exactly linear in t_i = i/6,
+    // asserted as equal increments between equally spaced joints, not just
+    // at the endpoints.
+    {
+        SplineIkSet(s.end, "avars:rx", -80.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            const double slope = degrees(-80.0);
+            CHECK(std::abs(upRotation(r, 0)) < 1e-9);
+            CHECK(std::abs(upRotation(r, 6) - slope) < 1e-9);
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - slope * i / 6.0) < 1e-9);
+                if (i > 0) {
+                    CHECK(std::abs((upRotation(r, i) - upRotation(r, i - 1)) -
+                                   slope / 6.0) < 1e-9);
+                }
+                CHECK(Near(r.frames[i].Origin(), s.origins[i], 1e-9));
+            }
+        }
+        SplineIkSet(s.end, "avars:rx", 0.0);
+    }
+    // Root control twisted alone: the end holds its orientation, so the
+    // roll fades linearly to zero at the tip (roll * (1 - t_i)).
+    {
+        SplineIkSet(s.root, "avars:rx", 30.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(30.0) * (1.0 - i / 6.0)) < 1e-9);
+            }
+        }
+        SplineIkSet(s.root, "avars:rx", 0.0);
+    }
+    // inputs:twist adds a linear gradient on top (the handle's twist).
+    {
+        SplineIkSet(s.solver, "inputs:twist", 60.0);
+        const RigExecPointFrameArray r = SplineIkSolve(s);
+        CHECK(r.GetSize() == 7);
+        if (r.GetSize() == 7) {
+            for (size_t i = 0; i < 7; ++i) {
+                CHECK(std::abs(upRotation(r, i) - degrees(60.0) * i / 6.0) < 1e-9);
+            }
+        }
+        SplineIkSet(s.solver, "inputs:twist", 0.0);
+    }
+}
+
+static void
+TestSplineIkSquash()
+{
+    const SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    const std::vector<float> weights = {
+        0.0f, 0.1429f, 0.5f, 1.0f, 0.25f, 0.3571f, 0.0714f};
+    CHECK(s.solver.GetAttribute(TfToken("rigExec:volumeWeights"))
+              .Set(VtFloatArray(weights.begin(), weights.end())));
+    const auto solveWithEndAt = [&](double x, double preserveVolume) {
+        SplineIkSet(s.end, "avars:tx", x - 6.0);
+        SplineIkSet(s.mid, "avars:tx", (x - 6.0) * 0.5);
+        SplineIkSet(s.solver, "inputs:preserveVolume", preserveVolume);
+        return SplineIkSolve(s);
+    };
+    // s_y = s_z = 1 - w_i * preserveVolume * (ratio - 1), s_x = 1.
+    const auto expectScale = [&](const RigExecPointFrameArray &r, double ratio,
+                                 double preserveVolume, size_t i) {
+        const double expected = 1.0 - double(weights[i]) * preserveVolume * (ratio - 1.0);
+        CHECK(std::abs(SplineIkHandle(r.frames[i], 2) - expected) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(r.frames[i], 3) - expected) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(r.frames[i], 1) - 1.0) < 1e-9);
+    };
+
+    // ratio 1.5, full strength: s = 1 - w / 2.
+    const RigExecPointFrameArray stretched = solveWithEndAt(9.0, 1.0);
+    CHECK(stretched.GetSize() == 7);
+    if (stretched.GetSize() != 7) {
+        return;
+    }
+    CHECK(std::abs(SplineIkHandle(stretched.frames[3], 2) - 0.5) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(stretched.frames[2], 2) - 0.75) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(stretched.frames[0], 2) - 1.0) < 1e-9);
+    for (size_t i = 0; i < 7; ++i) {
+        expectScale(stretched, 1.5, 1.0, i);
+        CHECK(Near(stretched.frames[i].Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+    }
+    // The scale is what element extraction hands the bound joint: the
+    // out-space measures posed/rest handle-length ratios per axis, so
+    // the joint's frame carries (1, s, s) -- non-uniform, not laundered.
+    const RigExecPointFrame extracted = RigExecExtractElementFrame(&stretched, 3);
+    CHECK(extracted.IsValid() && !extracted.IsDegenerate());
+    CHECK(std::abs(SplineIkHandle(extracted, 1) - 1.0) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(extracted, 2) - 0.5) < 1e-9);
+    CHECK(std::abs(SplineIkHandle(extracted, 3) - 0.5) < 1e-9);
+    CHECK(Near(extracted.Origin(), GfVec3d(4.5, 0, 0), 1e-9));
+
+    // Partial strength: s = 1 - w * 0.4 * 0.5.
+    const RigExecPointFrameArray partial = solveWithEndAt(9.0, 0.4);
+    CHECK(partial.GetSize() == 7);
+    if (partial.GetSize() == 7) {
+        CHECK(std::abs(SplineIkHandle(partial.frames[3], 2) - 0.8) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(partial.frames[2], 3) - 0.9) < 1e-9);
+        for (size_t i = 0; i < 7; ++i) {
+            expectScale(partial, 1.5, 0.4, i);
+        }
+    }
+    // preserveVolume 0: no thinning anywhere, the stretch still applies.
+    const RigExecPointFrameArray off = solveWithEndAt(9.0, 0.0);
+    CHECK(off.GetSize() == 7);
+    if (off.GetSize() == 7) {
+        for (size_t i = 0; i < 7; ++i) {
+            for (int axis = 1; axis < 4; ++axis) {
+                CHECK(std::abs(SplineIkHandle(off.frames[i], axis) - 1.0) < 1e-9);
+            }
+            CHECK(Near(off.frames[i].Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+        }
+    }
+    // ratio 0.8 (squash): s = 1 + w * 0.2, thickening.
+    const RigExecPointFrameArray squashed = solveWithEndAt(4.8, 1.0);
+    CHECK(squashed.GetSize() == 7);
+    if (squashed.GetSize() == 7) {
+        CHECK(std::abs(SplineIkHandle(squashed.frames[3], 2) - 1.2) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(squashed.frames[2], 2) - 1.1) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(squashed.frames[4], 2) - 1.05) < 1e-9);
+        for (size_t i = 0; i < 7; ++i) {
+            expectScale(squashed, 0.8, 1.0, i);
+            CHECK(Near(squashed.frames[i].Origin(), GfVec3d(0.8 * i, 0, 0), 1e-9));
+        }
+    }
+}
+
+static void
+TestSplineIkEvaluatorBinding()
+{
+    // The evaluator recognizes the solver as an aggregate, accepts its
+    // rigExec:joints claim, binds each joint to its chain slot, and the
+    // per-joint non-uniform scale reaches the joint frames and matrices.
+    SplineIkStage s = MakeSplineIkStage(SplineIkStraightOrigins());
+    const std::vector<float> weights = {
+        0.0f, 0.1429f, 0.5f, 1.0f, 0.25f, 0.3571f, 0.0714f};
+    CHECK(s.solver.GetAttribute(TfToken("rigExec:volumeWeights"))
+              .Set(VtFloatArray(weights.begin(), weights.end())));
+    SplineIkSet(s.end, "avars:tx", 3.0);
+    SplineIkSet(s.mid, "avars:tx", 1.5);
+
+    RigExecRigEvaluator evaluator(s.stage, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    for (const std::string &e : errors) {
+        std::printf("  compile: %s\n", e.c_str());
+    }
+    CHECK(errors.empty());
+    const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(pose.valid);
+    for (const std::string &d : pose.diagnostics) {
+        std::printf("  diagnostic: %s\n", d.c_str());
+    }
+    const auto solverFrames = pose.solverFrames.find(s.solver.GetPath());
+    CHECK(solverFrames != pose.solverFrames.end() &&
+          solverFrames->second.size() == 7);
+    for (size_t i = 0; i < 7; ++i) {
+        const auto it = pose.jointFramesFinal.find(s.joints[i].GetPath());
+        CHECK(it != pose.jointFramesFinal.end());
+        if (it == pose.jointFramesFinal.end()) {
+            continue;
+        }
+        const RigExecPointFrame &f = it->second;
+        CHECK(f.IsValid() && !f.IsDegenerate());
+        CHECK(Near(f.Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+        const double expected = 1.0 - double(weights[i]) * 0.5;
+        CHECK(std::abs(SplineIkHandle(f, 1) - 1.0) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(f, 2) - expected) < 1e-9);
+        CHECK(std::abs(SplineIkHandle(f, 3) - expected) < 1e-9);
+    }
+    // The joint matrix carries the same (1, s, s): its Y row is half length.
+    const auto m = pose.jointMatricesFinal.find(s.joints[3].GetPath());
+    CHECK(m != pose.jointMatricesFinal.end());
+    if (m != pose.jointMatricesFinal.end()) {
+        const GfVec3d xRow(m->second[0][0], m->second[0][1], m->second[0][2]);
+        const GfVec3d yRow(m->second[1][0], m->second[1][1], m->second[1][2]);
+        const GfVec3d zRow(m->second[2][0], m->second[2][1], m->second[2][2]);
+        CHECK(std::abs(xRow.GetLength() - 1.0) < 1e-9);
+        CHECK(std::abs(yRow.GetLength() - 0.5) < 1e-9);
+        CHECK(std::abs(zRow.GetLength() - 0.5) < 1e-9);
+    }
+
+    // A value edit on a control re-solves without a recompile.
+    const size_t epoch = evaluator.GetBindingEpochDigest();
+    SplineIkSet(s.end, "avars:tx", 0.0);
+    SplineIkSet(s.mid, "avars:tx", 0.0);
+    const RigExecRigPose atRest = evaluator.Evaluate(UsdTimeCode::Default());
+    CHECK(atRest.valid);
+    CHECK(evaluator.GetBindingEpochDigest() == epoch);
+    const auto tip = atRest.jointFramesFinal.find(s.joints[6].GetPath());
+    CHECK(tip != atRest.jointFramesFinal.end());
+    if (tip != atRest.jointFramesFinal.end()) {
+        CHECK(Near(tip->second.Origin(), GfVec3d(6, 0, 0), 1e-9));
+        CHECK(std::abs(SplineIkHandle(tip->second, 2) - 1.0) < 1e-9);
+    }
+
+    // rigExec:jointElements remaps list position to chain slot: listing
+    // the tip first with a permutation binds every joint to the same slot.
+    {
+        SplineIkStage p = MakeSplineIkStage(SplineIkStraightOrigins());
+        SplineIkSet(p.end, "avars:tx", 3.0);
+        SplineIkSet(p.mid, "avars:tx", 1.5);
+        SdfPathVector order = {p.joints[6].GetPath()};
+        VtIntArray elements = {6};
+        for (int i = 0; i < 6; ++i) {
+            order.push_back(p.joints[i].GetPath());
+            elements.push_back(i);
+        }
+        p.solver.GetRelationship(TfToken("rigExec:joints")).SetTargets(order);
+        CHECK(p.solver.GetAttribute(TfToken("rigExec:jointElements")).Set(elements));
+        RigExecRigEvaluator permuted(p.stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> permutedErrors;
+        CHECK(permuted.Compile(&permutedErrors));
+        CHECK(permutedErrors.empty());
+        const RigExecRigPose remapped = permuted.Evaluate(UsdTimeCode::Default());
+        CHECK(remapped.valid);
+        for (size_t i = 0; i < 7; ++i) {
+            const auto it = remapped.jointFramesFinal.find(p.joints[i].GetPath());
+            CHECK(it != remapped.jointFramesFinal.end());
+            if (it != remapped.jointFramesFinal.end()) {
+                CHECK(Near(it->second.Origin(), GfVec3d(1.5 * i, 0, 0), 1e-9));
+            }
+        }
+    }
+    // Compile rejects a volumeWeights array that is not parallel to the
+    // chain, and a remap that fills one chain slot twice.
+    {
+        SplineIkStage bad = MakeSplineIkStage(SplineIkStraightOrigins());
+        CHECK(bad.solver.GetAttribute(TfToken("rigExec:volumeWeights"))
+                  .Set(VtFloatArray{0.1f, 0.2f, 0.3f}));
+        RigExecRigEvaluator rejected(bad.stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> badErrors;
+        CHECK(!rejected.Compile(&badErrors));
+        bool named = false;
+        for (const std::string &e : badErrors) {
+            named = named || e.find("rigExec:volumeWeights") != std::string::npos;
+        }
+        CHECK(named);
+    }
+    {
+        SplineIkStage bad = MakeSplineIkStage(SplineIkStraightOrigins());
+        CHECK(bad.solver.GetAttribute(TfToken("rigExec:jointElements"))
+                  .Set(VtIntArray{0, 1, 2, 3, 4, 5, 5}));
+        RigExecRigEvaluator rejected(bad.stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> badErrors;
+        CHECK(!rejected.Compile(&badErrors));
+        bool named = false;
+        for (const std::string &e : badErrors) {
+            named = named || e.find("twice") != std::string::npos;
+        }
+        CHECK(named);
+    }
+}
+
+
+// The three inputs nothing but a SingleChainIK reads: inputs:poleVector and
+// inputs:twistDegrees, which its RotatePlane mode reads directly, and the
+// inputs:poleVectorWeights table its object pole mode blends its poles with.
+// Each has to move the solve when TIME moves and when an interactive drag
+// holds it, and that is what is checked here -- but the reason this test
+// exists is what it does under RIGEXEC_EVALUATION_MODE=parity, where every
+// Evaluate below compares the baked program against the dynamic walk. No
+// other rig or fixture in the tree animates or drags one of these, so
+// nothing else can tell whether the baked constraint step is dirtied when
+// one of them moves: an input the step never declared, or a source table
+// never compared, simply holds the previous frame's solve and says nothing.
+static void
+TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag()
+{
+    const SdfPath ikPath("/Asset/Rig/Movers/IK");
+    const SdfPath midPath("/Asset/Rig/Joints/Root/Mid");
+    // The MIDDLE joint, because the pole and the twist turn the chain about
+    // the root-to-effector axis without moving either end of it: an end-joint
+    // check would pass with the pole ignored entirely.
+    const auto mid = [&midPath](const RigExecRigPose &pose, GfVec3d *out) {
+        const auto found = pose.jointFramesFinal.find(midPath);
+        if (found == pose.jointFramesFinal.end()) {
+            return false;
+        }
+        *out = found->second.Origin();
+        return true;
+    };
+    // 1. An animated inputs:poleVector.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        const UsdAttribute pole = stage->GetPrimAtPath(ikPath).GetAttribute(
+            TfToken("inputs:poleVector"));
+        pole.Clear();
+        pole.Set(GfVec3d(0, 0, 1), UsdTimeCode(1.0));
+        pole.Set(GfVec3d(0, 1, 0), UsdTimeCode(2.0));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+        const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+        GfVec3d one, two;
+        CHECK(atOne.valid && atTwo.valid);
+        CHECK(mid(atOne, &one) && mid(atTwo, &two));
+        CHECK(!Near(one, two));
+    }
+
+    // 2. An animated inputs:twistDegrees.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        const UsdPrim ik = stage->GetPrimAtPath(ikPath);
+        const UsdAttribute twist = ik.CreateAttribute(
+            TfToken("inputs:twistDegrees"), SdfValueTypeNames->Double);
+        twist.Set(0.0, UsdTimeCode(1.0));
+        twist.Set(80.0, UsdTimeCode(2.0));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+        const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+        GfVec3d one, two;
+        CHECK(atOne.valid && atTwo.valid);
+        CHECK(mid(atOne, &one) && mid(atTwo, &two));
+        CHECK(!Near(one, two));
+    }
+
+    // 3. An animated inputs:poleVectorWeights, which is not an input of the
+    //    step at all but a TABLE the prologue re-reads -- so it is the
+    //    source comparison, and not the varying-input flag, that has to
+    //    notice it. Two poles on opposite sides, blended one to the other.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        MakeXform(stage, SdfPath("/Asset/Sources/PoleA"),
+                  Matrix(GfVec3d(2, 0, 8)));
+        MakeXform(stage, SdfPath("/Asset/Sources/PoleB"),
+                  Matrix(GfVec3d(2, 8, 0)));
+        const UsdPrim ik = stage->GetPrimAtPath(ikPath);
+        ik.GetAttribute(TfToken("rigExec:poleVectorMode"))
+            .Set(TfToken("object"));
+        ik.CreateRelationship(TfToken("rigExec:poleVectorObjects"))
+            .SetTargets({SdfPath("/Asset/Sources/PoleA"),
+                         SdfPath("/Asset/Sources/PoleB")});
+        const UsdAttribute weights = ik.CreateAttribute(
+            TfToken("inputs:poleVectorWeights"),
+            SdfValueTypeNames->FloatArray);
+        weights.Set(VtFloatArray{1, 0}, UsdTimeCode(1.0));
+        weights.Set(VtFloatArray{0, 1}, UsdTimeCode(2.0));
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose atOne = evaluator.Evaluate(UsdTimeCode(1.0));
+        const RigExecRigPose atTwo = evaluator.Evaluate(UsdTimeCode(2.0));
+        GfVec3d one, two;
+        CHECK(atOne.valid && atTwo.valid);
+        CHECK(mid(atOne, &one) && mid(atTwo, &two));
+        CHECK(!Near(one, two));
+    }
+
+    // 4. The same two inputs under a DRAG, on a stage where nothing is
+    //    animated: an override is the other way a per-frame input moves, and
+    //    it moves without the time moving, which is the case a program that
+    //    keys its dirtiness off the clock gets wrong.
+    {
+        const UsdStageRefPtr stage = BuildConstraintStage(nullptr);
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        std::vector<std::string> errors;
+        CHECK(evaluator.Compile(&errors));
+        const RigExecRigPose rest =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        GfVec3d held, dragged;
+        CHECK(rest.valid && mid(rest, &held));
+
+        evaluator.SetInteractiveOverrides({RigExecValueOverride{
+            ikPath, TfToken(), TfToken("inputs:twistDegrees"),
+            VtValue(80.0)}});
+        const RigExecRigPose twisted =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(twisted.valid && mid(twisted, &dragged));
+        CHECK(!Near(held, dragged));
+
+        evaluator.SetInteractiveOverrides({RigExecValueOverride{
+            ikPath, TfToken(), TfToken("inputs:poleVector"),
+            VtValue(GfVec3d(0, 1, 0))}});
+        const RigExecRigPose poled =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        CHECK(poled.valid && mid(poled, &dragged));
+        CHECK(!Near(held, dragged));
+
+        // And releasing it comes back to where it started, rather than to
+        // whatever the last drag step left in the program's storage.
+        evaluator.ClearInteractiveOverrides();
+        const RigExecRigPose released =
+            evaluator.Evaluate(UsdTimeCode::Default());
+        GfVec3d back;
+        CHECK(released.valid && mid(released, &back));
+        CHECK(Near(held, back));
+    }
+}
+
+// An AUTHORED posed:space is the pose: exec returns its frame and reads
+// neither the avars nor the parent, so the baked program says the same and
+// the epoch bakes. An ANIMATED one bakes too, now that the provider ladder
+// is a per-frame input -- and it is the case that matters, because its
+// Default value is the schema identity: a bake that judged "is it authored"
+// once, at Default, would call it static and compose through the ladder
+// while exec used the authored matrix at every numeric frame. So the
+// assertion is not that it refuses but that it FOLLOWS, frame by frame.
+static void
+TestAuthoredPosedSpaceBakesAndAnimatedOneFollows()
+{
+    const auto build = [](bool animate) {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim root = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/Root"), TfToken("RigExecJoint"));
+        const UsdPrim child = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Joints/Root/Child"), TfToken("RigExecJoint"));
+        const UsdAttribute posed = child.CreateAttribute(
+            TfToken("posed:space"), SdfValueTypeNames->Matrix4d);
+        if (animate) {
+            posed.Set(Matrix(GfVec3d(1, 0, 0)), UsdTimeCode(1.0));
+            posed.Set(Matrix(GfVec3d(3, 0, 0)), UsdTimeCode(2.0));
+        } else {
+            posed.Set(Matrix(GfVec3d(2, 0, 0)));
+        }
+        (void)root;
+        return stage;
+    };
+
+    const UsdStageRefPtr stable = build(/* animate = */ false);
+    RigExecRigEvaluator still(stable, SdfPath("/Asset/Rig"));
+    std::vector<std::string> errors;
+    CHECK(still.Compile(&errors));
+    std::vector<std::string> reasons;
+    CHECK(still.IsBakeable(&reasons));
+    if (!reasons.empty()) {
+        for (const std::string &reason : reasons) {
+            std::printf("    unexpected refusal: %s\n", reason.c_str());
+        }
+    }
+    const RigExecRigPose pose = still.Evaluate(UsdTimeCode::Default());
+    const auto posed =
+        pose.jointFramesFinal.find(SdfPath("/Asset/Rig/Joints/Root/Child"));
+    CHECK(posed != pose.jointFramesFinal.end());
+    if (posed != pose.jointFramesFinal.end()) {
+        CHECK(Near(posed->second.Origin(), GfVec3d(2, 0, 0)));
+    }
+
+    const UsdStageRefPtr moving = build(/* animate = */ true);
+    RigExecRigEvaluator animated(moving, SdfPath("/Asset/Rig"));
+    CHECK(animated.Compile(&errors));
+    reasons.clear();
+    CHECK(animated.IsBakeable(&reasons));
+    for (const std::string &reason : reasons) {
+        std::printf("    unexpected refusal: %s\n", reason.c_str());
+    }
+    // Both samples, in both directions, because the failure this guards
+    // against is a value judged ONCE: a program that read posed:space at
+    // Default would see the schema identity, take the ladder branch, and
+    // park the child on its parent at every frame.
+    for (const auto &[frame, x] : {std::make_pair(1.0, 1.0),
+                                   std::make_pair(2.0, 3.0),
+                                   std::make_pair(1.0, 1.0)}) {
+        const RigExecRigPose moved = animated.Evaluate(UsdTimeCode(frame));
+        CHECK(moved.valid);
+        const auto child = moved.jointFramesFinal.find(
+            SdfPath("/Asset/Rig/Joints/Root/Child"));
+        CHECK(child != moved.jointFramesFinal.end());
+        if (child != moved.jointFramesFinal.end()) {
+            CHECK(Near(child->second.Origin(), GfVec3d(x, 0, 0)));
+        }
+    }
+    // And the connected case, which is the one the program still hands
+    // back: exec reads the connection's computeValue, which can be any
+    // computation at all, and no per-frame read off the stage is that.
+    const UsdStageRefPtr connected = build(/* animate = */ false);
+    const UsdPrim child =
+        connected->GetPrimAtPath(SdfPath("/Asset/Rig/Joints/Root/Child"));
+    const UsdAttribute driver = child.CreateAttribute(
+        TfToken("inputs:posedDriver"), SdfValueTypeNames->Matrix4d);
+    driver.Set(Matrix(GfVec3d(4, 0, 0)));
+    child.GetAttribute(TfToken("posed:space"))
+        .SetConnections({driver.GetPath()});
+    RigExecRigEvaluator wired(connected, SdfPath("/Asset/Rig"));
+    CHECK(wired.Compile(&errors));
+    reasons.clear();
+    CHECK(!wired.IsBakeable(&reasons));
+    bool named = false;
+    for (const std::string &reason : reasons) {
+        named = named ||
+                reason.find("connected posed:space") != std::string::npos;
+    }
+    CHECK(named);
 }
 
 int
 main()
 {
+    // Unbuffered, so that a fail-fast abort in the middle of the suite still
+    // leaves every FAIL line already printed in the log. Redirected stdout is
+    // fully buffered by default and a crash discards the whole buffer, which
+    // turns "this test crashed" into a report with no failures in it at all.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     const auto plugins = PlugRegistry::GetInstance().RegisterPlugins(
         RIGEXEC_SCHEMA_RESOURCE_DIR);
     if (plugins.empty()) {
@@ -3045,12 +4387,23 @@ main()
     TestTwoBoneIkImpliedLengths(false);
     TestTwoBoneIkImpliedLengths(true);
     TestTwoBoneIkRestFrameInputs();
+    TestSplineIkRest();
+    TestSplineIkStretch();
+    TestSplineIkMidBend();
+    TestSplineIkTwist();
+    TestSplineIkSquash();
+    TestSplineIkEvaluatorBinding();
     TestAggregateSolverValueUpdates();
     TestDeepSolverDependencySchedule();
     TestSolverTransitiveConnectionInvalidation();
     TestConstraintSolverDependencySchedule();
     TestConstrainedSolverInputAncestor();
+    TestSolverOwnedJointBlocksNamespacePropagation();
     TestConnectedParentSpaceSolverInputs();
+    TestSolverGuidesGate();
+    TestSolverBatchLevelAudit();
+    TestAuthoredPosedSpaceBakesAndAnimatedOneFollows();
+    TestSingleChainIkOwnInputsMoveOverTimeAndUnderDrag();
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

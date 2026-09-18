@@ -1,0 +1,122 @@
+#usda 1.0
+(
+    """
+    RigExec example 14 - a volume weight on a CONSTRAINT.
+
+    Every other example binds a weight object to a mover. This one binds
+    one to a constraint, which is a different question: a constraint
+    normally resolves its envelope as a single scalar, so a volumetric
+    field -- which is per point by construction -- can only reach one
+    whose rigExec:moves names a `.points` attribute rather than a prim.
+
+    That is what this rig is. RigExecPositionConstraint "Sweep" writes
+    the GEOMETRY domain, so it does not revise a transform at all: it
+    solves the strip's frame towards /SweepAsset/Target and hands the
+    resulting delta to the Matrix revision on the same mover prim, and
+    the revision is where the sphere's field is applied -- per point,
+    exactly as it would be on a RigExecMatrixMover.
+
+    So the strip does not swing rigidly towards the target. The points
+    inside the ball follow it, the points outside stay put, and the ones
+    in the falloff shell lag behind. Scrub inputs:falloffMax on
+    </SweepAsset/Rig/Controls/Band/Volume> to widen the region that
+    follows, or drag the Band control's avars:ty to slide the ball up and
+    down the strip.
+
+    The sphere is authored INSIDE the Band control and wired to nothing:
+    an unwired RigExecXformable follows its namespace-parent xformable's
+    posed space, so the ball rides the control with no relationship to
+    author. Note what the rig deliberately does NOT do: it never makes
+    the volume a constraint TARGET. A constrained volume is exec-seeded
+    and xform-derived at the same time and so carries two placements at
+    once, which is a rig the baked program declines.
+
+    Turn on Display -> Display Purposes -> Guide to see the ball.
+    """
+    defaultPrim = "SweepAsset"
+    endTimeCode = 1048
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "SweepAsset"
+{
+    def Scope "Geom"
+    {
+        def Mesh "Strip"
+        {
+            int[] faceVertexCounts = [4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [
+                0, 1, 3, 2,
+                2, 3, 5, 4,
+                4, 5, 7, 6,
+                6, 7, 9, 8,
+                8, 9, 11, 10
+            ]
+            point3f[] points = [
+                (-1, 0, 0), (1, 0, 0),
+                (-1, 2, 0), (1, 2, 0),
+                (-1, 4, 0), (1, 4, 0),
+                (-1, 6, 0), (1, 6, 0),
+                (-1, 8, 0), (1, 8, 0),
+                (-1, 10, 0), (1, 10, 0)
+            ]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    # Where the constrained points are pulled to. A plain Xform, animated,
+    # so the sweep has something to follow over the shot.
+    def Xform "Target"
+    {
+        double3 xformOp:translate.timeSamples = {
+            1001: (0, 5, 0),
+            1024: (6, 5, 0),
+            1048: (6, 5, 4),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def RigExecRoot "Rig"
+    {
+        def Scope "Controls"
+        {
+            # The handle the ball rides. Everything about the region the
+            # constraint grabs is authored on, or under, this control.
+            def RigExecControl "Band"
+            {
+                double avars:ty.timeSamples = {
+                    1001: 2,
+                    1024: 5,
+                    1048: 8,
+                }
+
+                def RigExecSphereWeight "Volume"
+                {
+                    float inputs:falloffMin = 0
+                    float inputs:falloffMax.timeSamples = {
+                        1001: 3,
+                        1024: 5,
+                        1048: 3,
+                    }
+                    uniform token rigExec:falloffProfile = "linear"
+                    rel rigExec:weightTarget = </SweepAsset/Geom/Strip.points>
+                }
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def RigExecPositionConstraint "Sweep" (
+                apiSchemas = ["RigExecMoverAPI"]
+            )
+            {
+                rel rigExec:moves = </SweepAsset/Geom/Strip.points>
+                rel rigExec:sources = </SweepAsset/Target>
+                rel rigExec:weightObject = </SweepAsset/Rig/Controls/Band/Volume>
+            }
+        }
+    }
+}

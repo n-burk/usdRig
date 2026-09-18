@@ -1,0 +1,179 @@
+#usda 1.0
+(
+    # An eight-frame animated overlay on the flat biped: six controls keyed
+    # on avars:rz and avars:ty over frames 1-8. A static stage never re-reads
+    # a time sample, so this is the stage that exercises -- and times -- the
+    # animated evaluate path. See README.md.
+    subLayers = [
+        @./Biped.usda@
+    ]
+)
+
+over "Biped"
+{
+    over "Rig"
+    {
+        over "Controls"
+        {
+            over "hips_ctl"
+            {
+                custom double avars:rz
+                double avars:rz.timeSamples = {
+                    1: 2,
+                    2: 4,
+                    3: 6,
+                    4: 8,
+                    5: 10,
+                    6: 12,
+                    7: 14,
+                    8: 16,
+                }
+                custom double avars:ty
+                double avars:ty.timeSamples = {
+                    1: 0.35,
+                    2: 0.7,
+                    3: 1.0499999999999998,
+                    4: 1.4,
+                    5: 1.75,
+                    6: 2.0999999999999996,
+                    7: 2.4499999999999997,
+                    8: 2.8,
+                }
+
+                over "torso_ctl"
+                {
+                    custom double avars:rz
+                    double avars:rz.timeSamples = {
+                        1: 2,
+                        2: 4,
+                        3: 6,
+                        4: 8,
+                        5: 10,
+                        6: 12,
+                        7: 14,
+                        8: 16,
+                    }
+                    custom double avars:ty
+                    double avars:ty.timeSamples = {
+                        1: 0.35,
+                        2: 0.7,
+                        3: 1.0499999999999998,
+                        4: 1.4,
+                        5: 1.75,
+                        6: 2.0999999999999996,
+                        7: 2.4499999999999997,
+                        8: 2.8,
+                    }
+
+                    over "spine_end_pivot"
+                    {
+                        over "spine_end_ctl"
+                        {
+                            custom double avars:rz
+                            double avars:rz.timeSamples = {
+                                1: 2,
+                                2: 4,
+                                3: 6,
+                                4: 8,
+                                5: 10,
+                                6: 12,
+                                7: 14,
+                                8: 16,
+                            }
+                            custom double avars:ty
+                            double avars:ty.timeSamples = {
+                                1: 0.35,
+                                2: 0.7,
+                                3: 1.0499999999999998,
+                                4: 1.4,
+                                5: 1.75,
+                                6: 2.0999999999999996,
+                                7: 2.4499999999999997,
+                                8: 2.8,
+                            }
+
+                            over "neck_root_ctl"
+                            {
+                                custom double avars:rz
+                                double avars:rz.timeSamples = {
+                                    1: 2,
+                                    2: 4,
+                                    3: 6,
+                                    4: 8,
+                                    5: 10,
+                                    6: 12,
+                                    7: 14,
+                                    8: 16,
+                                }
+                                custom double avars:ty
+                                double avars:ty.timeSamples = {
+                                    1: 0.35,
+                                    2: 0.7,
+                                    3: 1.0499999999999998,
+                                    4: 1.4,
+                                    5: 1.75,
+                                    6: 2.0999999999999996,
+                                    7: 2.4499999999999997,
+                                    8: 2.8,
+                                }
+                            }
+
+                            over "clavicle_l_ctl"
+                            {
+                                custom double avars:rz
+                                double avars:rz.timeSamples = {
+                                    1: 2,
+                                    2: 4,
+                                    3: 6,
+                                    4: 8,
+                                    5: 10,
+                                    6: 12,
+                                    7: 14,
+                                    8: 16,
+                                }
+                                custom double avars:ty
+                                double avars:ty.timeSamples = {
+                                    1: 0.35,
+                                    2: 0.7,
+                                    3: 1.0499999999999998,
+                                    4: 1.4,
+                                    5: 1.75,
+                                    6: 2.0999999999999996,
+                                    7: 2.4499999999999997,
+                                    8: 2.8,
+                                }
+                            }
+
+                            over "clavicle_r_ctl"
+                            {
+                                custom double avars:rz
+                                double avars:rz.timeSamples = {
+                                    1: 2,
+                                    2: 4,
+                                    3: 6,
+                                    4: 8,
+                                    5: 10,
+                                    6: 12,
+                                    7: 14,
+                                    8: 16,
+                                }
+                                custom double avars:ty
+                                double avars:ty.timeSamples = {
+                                    1: 0.35,
+                                    2: 0.7,
+                                    3: 1.0499999999999998,
+                                    4: 1.4,
+                                    5: 1.75,
+                                    6: 2.0999999999999996,
+                                    7: 2.4499999999999997,
+                                    8: 2.8,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

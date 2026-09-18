@@ -19,7 +19,7 @@ rem The python that has to import pxr. An explicit PY wins; then a venv, in
 rem either layout; then whatever python is on PATH, which is the right answer
 rem when the USD build's own interpreter is already the active one.
 if not defined VENV (
-    for %%V in ("%RIG%\..\usd-venv" "%RIG%\..\venv" "%RIG%\.venv") do (
+    for %%V in ("%RIG%\..\usd-pr4156-venv" "%RIG%\..\usd-venv" "%RIG%\..\venv" "%RIG%\.venv") do (
         if not defined VENV if exist "%%~fV\Scripts\python.exe" set "VENV=%%~fV"
     )
 )

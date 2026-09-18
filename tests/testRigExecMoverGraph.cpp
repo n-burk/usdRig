@@ -11,6 +11,7 @@
 #include "rigExec/types.h"
 
 #include "pxr/base/gf/matrix4d.h"
+#include "pxr/base/gf/rotation.h"
 #include "pxr/base/gf/vec3f.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/vt/array.h"
@@ -79,12 +80,295 @@ MakeMatrixParams(const GfVec3d &translate, float weight)
     return params;
 }
 
+static RigExecMoverParameters
+MakeSkinParams(const std::vector<GfMatrix4d> &transforms,
+               const std::vector<int> &indices,
+               const std::vector<float> &weights, int elementSize,
+               float envelope = 1.0f)
+{
+    RigExecMoverParameters params;
+    params.valid = true;
+    params.kind = TfToken("skin");
+    params.skinTransforms = transforms;
+    params.skinIndices = indices;
+    params.skinWeights = weights;
+    params.skinElementSize = elementSize;
+    params.skinningMethod = TfToken("classicLinear");
+    params.weights = RigExecWeightPacket::Constant(envelope);
+    return params;
+}
+
 static RigExecMoverStatus
 MakeOkStatus()
 {
     RigExecMoverStatus status;
     status.state = TfToken("ok");
     return status;
+}
+
+// The multi-influence skin revision (RigExecSkinMover, classicLinear):
+// p' = (1 - sum w) p + sum_i w_i T_i p per point, from the incoming revision.
+static void
+TestSkinRevision()
+{
+    const SdfPath target("/M.points");
+    const VtVec3fArray base = MakePoints();
+    GfMatrix4d t1(1.0), t2(1.0);
+    t1.SetTranslate(GfVec3d(10, 0, 0));
+    t2.SetTranslate(GfVec3d(0, 10, 0));
+    const GfMatrix4d rt = GfMatrix4d(GfRotation(GfVec3d(0, 0, 1), 90.0),
+                                     GfVec3d(1, 2, 3));
+    const std::vector<GfMatrix4d> transforms = {t1, t2, rt};
+
+    // Single influence at weight 1: identical to the sequential matrix
+    // mover on the same transform, point for point.
+    {
+        RigExecMoverGraph graph;
+        const auto source = graph.AddPointSource(target, base);
+        const auto skin = graph.AddRevision(
+            RigExecRevisionOp::Skin, source,
+            MakeSkinParams(transforms, {2, 2, 2, 2}, {1, 1, 1, 1}, 1),
+            MakeOkStatus());
+        const VtVec3fArray skinned = graph.Evaluate(skin);
+        CHECK(graph.GetRevisionStatus(skin).state == "ok");
+
+        RigExecMoverGraph sequential;
+        const auto seqSource = sequential.AddPointSource(target, base);
+        RigExecMoverParameters matrix = MakeMatrixParams(GfVec3d(0), 1.0f);
+        matrix.transform = rt;
+        const VtVec3fArray moved = sequential.Evaluate(
+            sequential.AddRevision(RigExecRevisionOp::Matrix, seqSource,
+                                   matrix, MakeOkStatus()));
+        CHECK(skinned.size() == 4 && moved.size() == 4);
+        for (size_t i = 0; i < skinned.size() && i < moved.size(); ++i) {
+            CHECK(Near(skinned[i], moved[i]));
+            CHECK(Near(skinned[i], GfVec3f(rt.TransformAffine(GfVec3d(base[i])))));
+        }
+    }
+    // Two translations at 0.5 / 0.5 on every point: the analytic midpoint
+    // of T1 p and T2 p.
+    {
+        RigExecMoverGraph graph;
+        const auto source = graph.AddPointSource(target, base);
+        const auto skin = graph.AddRevision(
+            RigExecRevisionOp::Skin, source,
+            MakeSkinParams(transforms, {0, 1, 0, 1, 0, 1, 0, 1},
+                           {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}, 2),
+            MakeOkStatus());
+        const VtVec3fArray out = graph.Evaluate(skin);
+        CHECK(out.size() == 4);
+        for (size_t i = 0; i < out.size(); ++i) {
+            CHECK(Near(out[i], base[i] + GfVec3f(5, 5, 0)));
+        }
+    }
+    // Weights that do not sum to one: the shortfall keeps the rest point
+    // (0.25 / 0.25 retains half of p), and all-zero weights leave a point
+    // exactly where it was. Per-point layouts differ to prove the gather
+    // indexes per point, not per mesh.
+    {
+        RigExecMoverGraph graph;
+        const auto source = graph.AddPointSource(target, base);
+        const auto skin = graph.AddRevision(
+            RigExecRevisionOp::Skin, source,
+            MakeSkinParams(transforms, {0, 1, 0, 1, 1, 0, 2, 2},
+                           {0.25f, 0.25f, 0.0f, 0.0f, 1.0f, 0.0f, 0.5f, 0.5f}, 2),
+            MakeOkStatus());
+        const VtVec3fArray out = graph.Evaluate(skin);
+        CHECK(out.size() == 4);
+        if (out.size() == 4) {
+            CHECK(Near(out[0], base[0] + GfVec3f(2.5f, 2.5f, 0)));
+            CHECK(out[1] == base[1]);
+            CHECK(Near(out[2], base[2] + GfVec3f(0, 10, 0)));
+            CHECK(Near(out[3], GfVec3f(rt.TransformAffine(GfVec3d(base[3])))));
+        }
+    }
+    // The common MoverAPI envelope mixes the skinned candidate back over
+    // the incoming revision, as for every other point mover.
+    {
+        RigExecMoverGraph graph;
+        const auto source = graph.AddPointSource(target, base);
+        const auto skin = graph.AddRevision(
+            RigExecRevisionOp::Skin, source,
+            MakeSkinParams(transforms, {0, 0, 0, 0}, {1, 1, 1, 1}, 1, 0.5f),
+            MakeOkStatus());
+        const VtVec3fArray out = graph.Evaluate(skin);
+        CHECK(out.size() == 4);
+        for (size_t i = 0; i < out.size(); ++i) {
+            CHECK(Near(out[i], base[i] + GfVec3f(5, 0, 0)));
+        }
+    }
+    // The skin reads the INCOMING revision: a blend shape ahead of it is
+    // skinned, as a skinCluster skins its input geometry.
+    {
+        RigExecMoverGraph graph;
+        const auto source = graph.AddPointSource(target, base);
+        RigExecMoverParameters blend;
+        blend.valid = true;
+        blend.kind = TfToken("blendShape");
+        blend.weights = RigExecWeightPacket::Constant(1.0f);
+        blend.blendDeltas.assign(4, GfVec3f(0, 0, 1));
+        const auto blended = graph.AddRevision(
+            RigExecRevisionOp::BlendShape, source, blend, MakeOkStatus());
+        const auto skin = graph.AddRevision(
+            RigExecRevisionOp::Skin, blended,
+            MakeSkinParams(transforms, {0, 0, 0, 0}, {1, 1, 1, 1}, 1),
+            MakeOkStatus());
+        const VtVec3fArray out = graph.Evaluate(skin);
+        CHECK(out.size() == 4);
+        for (size_t i = 0; i < out.size(); ++i) {
+            CHECK(Near(out[i], base[i] + GfVec3f(10, 0, 1)));
+        }
+    }
+    // dualQuaternion on a single rotation + translation influence at
+    // weight 1 is that transform, as the linear kernel is (the two methods
+    // only part with two or more rotating influences).
+    {
+        RigExecMoverGraph graph;
+        const auto source = graph.AddPointSource(target, base);
+        RigExecMoverParameters dq =
+            MakeSkinParams(transforms, {2, 2, 2, 2}, {1, 1, 1, 1}, 1);
+        dq.skinningMethod = TfToken("dualQuaternion");
+        const auto skin = graph.AddRevision(
+            RigExecRevisionOp::Skin, source, dq, MakeOkStatus());
+        const VtVec3fArray out = graph.Evaluate(skin);
+        CHECK(graph.GetRevisionStatus(skin).state == "ok");
+        CHECK(out.size() == 4);
+        for (size_t i = 0; i < out.size(); ++i) {
+            CHECK(Near(out[i], GfVec3f(rt.TransformAffine(GfVec3d(base[i])))));
+        }
+    }
+    // Cardinality and range failures pass the incoming revision through
+    // atomically and report moverFailed; so does a method token neither
+    // kernel owns.
+    {
+        auto failing = [&](const RigExecMoverParameters &params) {
+            RigExecMoverGraph graph;
+            const auto source = graph.AddPointSource(target, base);
+            const auto skin = graph.AddRevision(
+                RigExecRevisionOp::Skin, source, params, MakeOkStatus());
+            CHECK(graph.Evaluate(skin) == base);
+            CHECK(graph.GetRevisionStatus(skin).state == "moverFailed");
+        };
+        failing(MakeSkinParams(transforms, {0, 0, 0}, {1, 1, 1}, 1));
+        failing(MakeSkinParams(transforms, {0, 0, 0, 3}, {1, 1, 1, 1}, 1));
+        failing(MakeSkinParams(transforms, {0, 0, 0, 0}, {1, 1, 1, -1}, 1));
+        failing(MakeSkinParams(transforms, {0, 0, 0, 0}, {1, 1, 1, 1}, 0));
+        RigExecMoverParameters unknown =
+            MakeSkinParams(transforms, {0, 0, 0, 0}, {1, 1, 1, 1}, 1);
+        unknown.skinningMethod = TfToken("bogus");
+        failing(unknown);
+    }
+}
+
+// A RigExecSkinMover prim resolves to the Skin op, binds its ordered
+// influences, and assembles a packet from provider matrices with nothing
+// authored beyond the mover itself.
+static void
+TestSkinBindingAndAssembly()
+{
+    UsdStageRefPtr stage = UsdStage::CreateInMemory();
+    stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Mesh"));
+    const SdfPath target("/Asset/Geom/M.points");
+    UsdPrim mover = stage->DefinePrim(
+        SdfPath("/Asset/Rig/Movers/Skin"), TfToken("RigExecSkinMover"));
+    mover.CreateRelationship(TfToken("rigExec:influences"))
+        .SetTargets({SdfPath("/Asset/Rig/Joints/B"),
+                     SdfPath("/Asset/Rig/Joints/A")});
+    mover.CreateAttribute(TfToken("rigExec:elementSize"),
+                          SdfValueTypeNames->Int).Set(2);
+    mover.CreateAttribute(TfToken("rigExec:jointIndices"),
+                          SdfValueTypeNames->IntArray)
+        .Set(VtIntArray({0, 1, 0, 1, 0, 1, 0, 1}));
+    mover.CreateAttribute(TfToken("rigExec:jointWeights"),
+                          SdfValueTypeNames->FloatArray)
+        .Set(VtFloatArray({0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}));
+
+    CHECK(RigExecRevisionOpForSchema(TfToken("RigExecSkinMover"), TfToken()) ==
+          RigExecRevisionOp::Skin);
+    const RigExecRevisionBinding binding =
+        RigExecResolveRevisionBinding(mover, target, {});
+    CHECK(binding.influences.size() == 2);
+    CHECK(binding.influences.size() == 2 &&
+          binding.influences[0] == SdfPath("/Asset/Rig/Joints/B") &&
+          binding.influences[1] == SdfPath("/Asset/Rig/Joints/A"));
+    CHECK(binding.transform.IsEmpty());
+
+    // "final" rebinding applies to every influence, as it does for the
+    // matrix mover's one.
+    mover.CreateAttribute(TfToken("rigExec:transformReadPhase"),
+                          SdfValueTypeNames->Token).Set(TfToken("final"));
+    const RigExecRevisionBinding finalBinding = RigExecResolveRevisionBinding(
+        mover, target,
+        {{SdfPath("/Asset/Rig/Joints/A"), SdfPath("/Asset/Rig/Heads/A")}});
+    CHECK(finalBinding.influences.size() == 2 &&
+          finalBinding.influences[1] == SdfPath("/Asset/Rig/Heads/A"));
+
+    GfMatrix4d tb(1.0), ta(1.0);
+    tb.SetTranslate(GfVec3d(10, 0, 0));
+    ta.SetTranslate(GfVec3d(0, 10, 0));
+    const std::vector<GfMatrix4d> matrices = {tb, ta};
+    rigExec::RigExecProviderValues values;
+    values.influenceTransforms = &matrices;
+    const RigExecMoverParameters params = RigExecAssembleParameters(
+        mover, RigExecRevisionOp::Skin, binding, values);
+    CHECK(params.valid);
+    CHECK(params.kind == TfToken("skin"));
+    CHECK(params.skinningMethod == TfToken("classicLinear"));
+    CHECK(params.skinElementSize == 2);
+    CHECK(params.skinTransforms.size() == 2);
+    CHECK(RigExecStatusForParameters(params, binding.moverPath).AllowsApply());
+
+    RigExecMoverGraph graph;
+    const auto source = graph.AddPointSource(target, MakePoints());
+    const VtVec3fArray out = graph.Evaluate(graph.AddRevision(
+        RigExecRevisionOp::Skin, source, params,
+        RigExecStatusForParameters(params, binding.moverPath)));
+    CHECK(out.size() == 4);
+    for (size_t i = 0; i < out.size(); ++i) {
+        CHECK(Near(out[i], MakePoints()[i] + GfVec3f(5, 5, 0)));
+    }
+
+    // No providers, a layout that does not divide by elementSize, and an
+    // index past the influence table each fail assembly.
+    rigExec::RigExecProviderValues none;
+    CHECK(!RigExecAssembleParameters(
+        mover, RigExecRevisionOp::Skin, binding, none).valid);
+    mover.GetAttribute(TfToken("rigExec:elementSize")).Set(3);
+    CHECK(!RigExecAssembleParameters(
+        mover, RigExecRevisionOp::Skin, binding, values).valid);
+    mover.GetAttribute(TfToken("rigExec:elementSize")).Set(2);
+    mover.GetAttribute(TfToken("rigExec:jointIndices"))
+        .Set(VtIntArray({0, 1, 0, 1, 0, 1, 0, 2}));
+    CHECK(!RigExecAssembleParameters(
+        mover, RigExecRevisionOp::Skin, binding, values).valid);
+    mover.GetAttribute(TfToken("rigExec:jointIndices"))
+        .Set(VtIntArray({0, 1, 0, 1, 0, 1, 0, 1}));
+
+    // dualQuaternion assembles (the packet carries the author's intent) and
+    // the kernel honours it: two pure translations at 0.5 / 0.5 blend to
+    // the same midpoint under either method.
+    mover.CreateAttribute(TfToken("rigExec:skinningMethod"),
+                          SdfValueTypeNames->Token)
+        .Set(TfToken("dualQuaternion"));
+    const RigExecMoverParameters dq = RigExecAssembleParameters(
+        mover, RigExecRevisionOp::Skin, binding, values);
+    CHECK(dq.valid);
+    CHECK(dq.skinningMethod == TfToken("dualQuaternion"));
+    RigExecMoverGraph dqGraph;
+    const auto dqSource = dqGraph.AddPointSource(target, MakePoints());
+    const auto dqHead = dqGraph.AddRevision(
+        RigExecRevisionOp::Skin, dqSource, dq,
+        RigExecStatusForParameters(dq, binding.moverPath));
+    const VtVec3fArray dqOut = dqGraph.Evaluate(dqHead);
+    CHECK(dqGraph.GetRevisionStatus(dqHead).state != "moverFailed");
+    CHECK(dqOut.size() == 4);
+    for (size_t i = 0; i < dqOut.size(); ++i) {
+        CHECK(Near(dqOut[i], MakePoints()[i] + GfVec3f(5, 5, 0)));
+    }
+
+    // Nothing was authored to express any of it.
+    CHECK(!stage->GetPrimAtPath(SdfPath("/Asset/Rig/__RigExecGenerated")));
+    CHECK(!mover.GetRelationship(TfToken("rigExec:resolvedInfluences")));
 }
 
 // One revision: a full-weight translate must move every point by the offset.
@@ -765,6 +1049,16 @@ TestEveryOperationUpdatesInteractively()
     };
     const VtVec3fArray tetra = MakePoints();
     {
+        auto a = MakeSkinParams(
+            {GfMatrix4d(1.0), GfMatrix4d(1.0).SetTranslate(GfVec3d(0, 4, 0))},
+            {0, 1, 0, 1, 0, 1, 0, 1},
+            {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f}, 2);
+        auto b = a;
+        b.skinWeights[0] = 0.0f;
+        b.skinWeights[1] = 1.0f;
+        check(RigExecRevisionOp::Skin, tetra, a, b);
+    }
+    {
         auto a = packet("blendShape");
         a.blendDeltas.assign(4, GfVec3f(0, 0, 0));
         auto b = a;
@@ -930,6 +1224,8 @@ main(int argc, char **argv)
     ExecTypeRegistry::GetInstance();
 
     TestSingleRevision();
+    TestSkinRevision();
+    TestSkinBindingAndAssembly();
     TestChainedRevisions();
     TestWeightedRevision();
     TestStatusPassThrough();

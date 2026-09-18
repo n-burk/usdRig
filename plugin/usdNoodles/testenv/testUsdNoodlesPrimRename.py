@@ -329,6 +329,10 @@ class _StubGraphView:
         self._showPopupMessage = MagicMock()
         self._showWarningPopup = MagicMock()
         self._syncSelectionToPrimtree = MagicMock()
+        # usdview rebuilds its prim browser on a zero-delay timer after a
+        # namespace edit; what waits for that is queued here and run by hand.
+        self.deferredAfterUsdviewRefresh = []
+        self._afterUsdviewRefresh = self.deferredAfterUsdviewRefresh.append
         self._reloadCurrentGraph = MagicMock()
         self.update = MagicMock()
 
@@ -421,6 +425,11 @@ class InlineRenameEditorTest(unittest.TestCase):
         self.view._commitRename()
 
         self.assertEqual(self.view._selectedNodes, {"/World/New"})
+        # Not yet: usdview's prim browser still describes the old namespace
+        # until its own refresh runs, and selecting into it now fails there.
+        self.view._syncSelectionToPrimtree.assert_not_called()
+        for callback in self.view.deferredAfterUsdviewRefresh:
+            callback()
         self.view._syncSelectionToPrimtree.assert_called_once()
 
     def test_cancel_authors_nothing(self):
@@ -1119,6 +1128,97 @@ class RenameOwnsTheKeyboardTest(unittest.TestCase):
         )
 
         self.view._performUndo.assert_called_once()
+
+
+@unittest.skipUnless(_has_graph_view, "graphView module not available")
+class DoubleClickOpensRenameTest(unittest.TestCase):
+    """A double-click on a node opens the editor; on a link it keeps its old meaning."""
+
+    def setUp(self):
+        try:
+            from PySide6 import QtCore
+        except ImportError:
+            self.skipTest("PySide6 not available")
+        self.QtCore = QtCore
+
+        self.stage = _wiredStage()
+        self.view = _StubGraphView(self.stage)
+        self.view.links = []
+        self.view._cachedLinkLineWidth = 1.0
+        self.view.linkRenderer = MagicMock()
+        self.view.linkRenderer.findLinkUnderCursor.return_value = -1
+        self.view._findDanglingLinkAtPort = MagicMock(return_value=-1)
+        self.view._addNodesFromDanglingLink = MagicMock()
+        self.view._getNodeIdAtWorldPos = MagicMock(return_value="/World/Old")
+
+    def _doubleClick(self, x, y, button=None):
+        event = MagicMock()
+        event.button.return_value = (
+            self.QtCore.Qt.LeftButton if button is None else button
+        )
+        event.position.return_value = self.QtCore.QPointF(x, y)
+        GraphView.mouseDoubleClickEvent(self.view, event)
+
+    def test_a_node_under_the_cursor_opens_the_editor(self):
+        self._doubleClick(70.0, 35.0)
+
+        self.assertEqual(self.view._renamingNodeId, "/World/Old")
+        self.assertEqual(self.view._renameInput.text, "Old")
+        # Hit-tested in world space: screen / zoom + pan.
+        (worldPos,), _ = self.view._getNodeIdAtWorldPos.call_args
+        self.assertAlmostEqual(worldPos[0], 70.0 / 0.35 + 137.0)
+        self.assertAlmostEqual(worldPos[1], 35.0 / 0.35 - 42.0)
+
+    def test_a_dangling_link_keeps_its_double_click(self):
+        link = MagicMock()
+        self.view.links = [link]
+        self.view._findDanglingLinkAtPort.return_value = 0
+
+        self._doubleClick(70.0, 35.0)
+
+        self.view._addNodesFromDanglingLink.assert_called_once_with(link)
+        self.assertEqual(self.view._renamingNodeId, "")
+
+    def test_other_buttons_do_nothing(self):
+        self._doubleClick(70.0, 35.0, button=self.QtCore.Qt.RightButton)
+
+        self.assertEqual(self.view._renamingNodeId, "")
+        self.view._getNodeIdAtWorldPos.assert_not_called()
+
+
+@unittest.skipUnless(_has_graph_view, "graphView module not available")
+class AfterUsdviewRefreshTest(unittest.TestCase):
+    """The deferred selection sync runs after usdview's own zero-delay refresh."""
+
+    def setUp(self):
+        try:
+            from PySide6 import QtCore
+        except ImportError:
+            self.skipTest("PySide6 not available")
+        self.QtCore = QtCore
+        self.app = QtCore.QCoreApplication.instance() or QtCore.QCoreApplication([])
+
+    def _drain(self):
+        for _ in range(20):
+            self.app.processEvents()
+
+    def test_runs_after_a_zero_timer_started_before_it(self):
+        order = []
+        owner = self.QtCore.QObject()
+
+        # What AppController.updateGUI does when a namespace edit arrives.
+        usdviewRefresh = self.QtCore.QTimer(owner)
+        usdviewRefresh.setInterval(0)
+        usdviewRefresh.setSingleShot(True)
+        usdviewRefresh.timeout.connect(lambda: order.append("usdview"))
+        usdviewRefresh.start()
+
+        GraphView._afterUsdviewRefresh(owner, lambda: order.append("noodles"))
+        self.assertEqual(order, [])
+
+        self._drain()
+
+        self.assertEqual(order, ["usdview", "noodles"])
 
 
 class _ReloadStubGraphView:

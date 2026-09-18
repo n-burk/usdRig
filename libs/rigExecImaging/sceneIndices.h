@@ -54,6 +54,15 @@ using RigExecXformOverrideSceneIndexRefPtr =
 bool RigExecControlGuideIsDrawn(
     const TfToken &shape, const TfToken &drawMode);
 
+/// The Hydra container and leaf naming the rig adapter's time-varying
+/// trigger (rigAdapter.cpp): UsdImagingStageSceneIndex::SetTime dirties
+/// rigExec/time on every RigExecRoot prim, and
+/// RigExecResultsSceneIndex::_PrimsDirtied pulls the frame out of it and
+/// evaluates -- the path that lets a host with no RigExec timeline glue
+/// (usdrecord) record a live evaluation.
+const TfToken &RigExecTriggerContainerToken();
+const TfToken &RigExecTriggerLeafToken();
+
 /// Removes only the derived __RigExecGenerated application paths owned by
 /// the current system (spec §10.1). The predicate is deliberately narrow:
 /// exactly the reserved scopes registered by the compiler; unrelated

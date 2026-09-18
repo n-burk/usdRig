@@ -103,7 +103,7 @@ aggregate frame element with their own radius, color, and opacity.
   `rigExec:planeAxis` and slide the drawn surfaces, while
   `inputs:extentU`/`extentV` size them *across* it and, under
   `rigExec:planeBounds = "bounded"`, stop the field at that rectangle. See
-  [`docs/volume-weights.md`](../docs/volume-weights.md).
+  [`docs/specs/volume-weights.md`](../docs/specs/volume-weights.md).
 - **12_CurvenetProfile.usda** — curvenets and the Profile Mover
   (de Goes, Sheffler & Fleischer, SIGGRAPH 2022). Three profile rings
   joined by four longitudinal rails around a tube; every ring knot is
@@ -115,7 +115,7 @@ aggregate frame element with their own radius, color, and opacity.
   `RigExecCurvenetMover` propagates that onto the surface. Re-mesh the
   tube and the same net still articulates it. **Generated** by
   `build_curvenet_example.py`; edit that, not the `.usda`. See
-  [`docs/curvenet.md`](../docs/curvenet.md).
+  [`docs/specs/curvenet.md`](../docs/specs/curvenet.md).
 - **13_ReadPhases.usda** — read phases as property metadata. A Slab is
   deformed through a cage that is itself deformed by two movers, and the
   lattice declares which cage it wants. `base` leaves the slab alone,

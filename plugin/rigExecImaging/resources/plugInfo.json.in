@@ -3,6 +3,26 @@
         {
             "Info": {
                 "Types": {
+                    "RigExecTouchOverlayAdapter": {
+                        "bases": [
+                            "UsdImagingMeshAdapter"
+                        ],
+                        "displayName": "RigExec TouchPose highlight overlay",
+                        "primTypeName": "RigExecTouchOverlay"
+                    },
+                    "RigExecTouchPoseSceneIndexPlugin": {
+                        "bases": [
+                            "UsdImagingSceneIndexPlugin"
+                        ],
+                        "displayName": "RigExec TouchPose shader highlight"
+                    },
+                    "RigExecImagingRigAdapter": {
+                        "bases": [
+                            "UsdImagingAPISchemaAdapter"
+                        ],
+                        "displayName": "RigExec rig time trigger",
+                        "apiSchemaName": ""
+                    },
                     "RigExecUsdImagingSceneIndexPlugin": {
                         "bases": [
                             "UsdImagingSceneIndexPlugin"

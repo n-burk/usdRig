@@ -68,6 +68,13 @@ class RigExecRoot "RigExecRoot" (
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
+    uniform bool rigExec:baked = 0 (
+        customData = {
+            string userDocBrief = """Asks the evaluator to answer this rig through its BAKED\r
+        PROGRAM -- the flattened, epoch-constant form of the rig -- instead\r
+        of through OpenExec and the in-memory pose walk."""
+        }
+    )
     uniform token rigExec:partition = ""
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
@@ -88,7 +95,7 @@ class RigExecControl "RigExecControl" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -139,13 +146,39 @@ class RigExecControl "RigExecControl" (
         extent of the authored gprim in its own local space (i.e."""
         }
     )
-    color3f guide:displayColor = (1, 0.85, 0.2)
-    float guide:displayOpacity = 1
+    color3f guide:displayColor = (1, 0.85, 0.2) (
+        customData = {
+            string userDocBrief = "Constant colour of the synthesized guide."
+        }
+    )
+    float guide:displayOpacity = 1 (
+        customData = {
+            string userDocBrief = "Constant opacity of the synthesized guide."
+        }
+    )
+    uniform bool guide:displayOpacityInvert = 0 (
+        customData = {
+            string userDocBrief = """When guide:displayOpacity is connected, draw 1 - source\r
+        instead of source."""
+        }
+    )
+    uniform float guide:displayOpacityMin = 0.15 (
+        customData = {
+            string userDocBrief = """Floor applied to a CONNECTED guide:displayOpacity after the\r
+        optional inversion."""
+        }
+    )
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry"]
         customData = {
             string userDocBrief = """wire draws the guide as curves, widthed by\r
         guide:wireWidth."""
+        }
+    )
+    double3 guide:offset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """Where the guide shape is drawn, in the control's LOCAL frame,\r
+        relative to the control's origin."""
         }
     )
     double guide:scaleX = 1 (
@@ -193,7 +226,8 @@ class RigExecControl "RigExecControl" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -221,7 +255,7 @@ class RigExecControl "RigExecControl" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -256,7 +290,7 @@ class "RigExecXformable" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -304,7 +338,8 @@ class "RigExecXformable" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -332,7 +367,7 @@ class "RigExecXformable" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -366,7 +401,7 @@ class RigExecJoint "RigExecJoint" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -437,7 +472,8 @@ class RigExecJoint "RigExecJoint" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -471,7 +507,7 @@ class RigExecJoint "RigExecJoint" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -545,10 +581,31 @@ class RigExecFkChain "RigExecFkChain" (
             string userDocBrief = "Ordered chain controls (parents resolved via rigExec:parent)."
         }
     )
+    uniform token rigExec:controlSpace = "world" (
+        allowedTokens = ["world", "parentRelative"]
+        customData = {
+            string userDocBrief = """What each control's posed frame already contains, i.e.\r
+        whether it carries the motion of the control before it in the\r
+        chain.\r
+\r
+        `world` (the default): the controls are independent asset-space\r
+        frames, siblings under the rig's Controls scope, each contributing\r
+        only its own rest-to-pose delta A_i; the solver composes them down\r
+        the chain, W_i = W_(i-1)."""
+        }
+    )
     rel rigExec:joints (
         customData = {
             string userDocBrief = """Ordered output joints this solver poses (view-free\r
         extraction, user-directed 2026-07-25)."""
+        }
+    )
+    rel rigExec:startFrame (
+        customData = {
+            string userDocBrief = """Optional single provider (joint or control) whose POSED\r
+        frame is the base the whole chain hangs from: the solver composes\r
+        every element on top of that provider's rest-to-pose delta S, so\r
+        W_0 = S."""
         }
     )
     token visibility = "inherited" (
@@ -775,7 +832,7 @@ class RigExecTwistDistribution "RigExecTwistDistribution" (
     )
     double inputs:twistTurns = 0 (
         customData = {
-            string userDocBrief = """Signed additional aim-axis revolutions beyond the principal
+            string userDocBrief = """Signed additional aim-axis revolutions beyond the principal\r
         endpoint twist."""
         }
     )
@@ -913,6 +970,150 @@ class RigExecRibbon "RigExecRibbon" (
         allowedTokens = ["base", "final"]
     )
     rel rigExec:twistFrames
+    token visibility = "inherited" (
+        allowedTokens = ["inherited", "invisible"]
+        customData = {
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+        visibility that is supported by most DCC apps.'''
+        }
+    )
+    uniform token[] xformOpOrder (
+        customData = {
+            string userDocBrief = """Encodes the sequence of transformation operations in the
+        order in which they should be pushed onto a transform stack while
+        visiting a UsdStage's prims in a graph traversal that will effect
+        the desired positioning for this prim and its descendant prims."""
+        }
+    )
+}
+
+class RigExecSplineIk "RigExecSplineIk" (
+    customData = {
+        string userDocBrief = """Control-driven spline IK for a spine or neck: the counterpart of\r
+    The spline IK solver as the biped uses it."""
+    }
+)
+{
+    float3[] extent (
+        customData = {
+            string userDocBrief = """Extent is a three dimensional range measuring the geometric
+        extent of the authored gprim in its own local space (i.e."""
+        }
+    )
+    color3f guide:displayColor = (0.3, 0.6, 1)
+    float guide:displayOpacity = 0.5
+    double guide:radius = 1 (
+        customData = {
+            string userDocBrief = """Radius of the sphere and cone drawn at each aggregate\r
+        element: the exact counterpart of RigExecJoint's guide:radius,\r
+        including the rule that zero or negative draws no guides at all,\r
+        which is how a solver's diagnostics are turned off.\r
+\r
+        Without it the elements are stuck at Hydra's fallback radius of\r
+        1.0."""
+        }
+    )
+    double inputs:midFollowWeight = 0.5 (
+        customData = {
+            string userDocBrief = """Blend of the mid control's follow point between its rest\r
+        origin carried by the root control (0) and by the end control (1):\r
+        a parentConstraint with maintainOffset on both parents."""
+        }
+    )
+    double inputs:minLengthRatio = 0 (
+        customData = {
+            string userDocBrief = """Length floor as a fraction of the rest root->end chord; 0\r
+        switches it off."""
+        }
+    )
+    double inputs:preserveVolume = 1 (
+        customData = {
+            string userDocBrief = """Strength of the linear volume preservation in [0, 1]:\r
+        s_y = s_z = 1 - w_i * preserveVolume * (ratio - 1), s_x = 1.\r
+        Zero leaves every handle at rest length; ratio < 1 thickens."""
+        }
+    )
+    double inputs:roll = 0 (
+        customData = {
+            string userDocBrief = """Additional roll in DEGREES about every joint's +X aim,\r
+        added to the root control's own twist about the rest chain axis\r
+        (the handle's roll)."""
+        }
+    )
+    double inputs:twist = 0 (
+        customData = {
+            string userDocBrief = """Additional twist in DEGREES, linear in arc position from 0\r
+        at the root to the full value at the curve end, added to the end\r
+        control's twist minus the root's (the handle's twist)."""
+        }
+    )
+    rel proxyPrim (
+        customData = {
+            string userDocBrief = '''The proxyPrim relationship allows us to link a
+        prim whose purpose is "render" to its (single target)
+        purpose="proxy" prim.'''
+        }
+    )
+    uniform token purpose = "guide" (
+        allowedTokens = ["default", "render", "proxy", "guide"]
+        customData = {
+            string userDocBrief = """Render purpose, overriding UsdGeomImageable's `default`\r
+        fallback: joint and solver guides are DIAGNOSTICS, drawn when a\r
+        viewer asks for guides.\r
+\r
+        This is the stock attribute rather than a RigExec-specific token so\r
+        that the bounds and the drawing cannot disagree: UsdGeomBBoxCache\r
+        classifies a prim's extent by this exact attribute, and the results\r
+        scene index stamps the same resolved value onto the guide it\r
+        synthesizes."""
+        }
+    )
+    rel rigExec:endControl (
+        customData = {
+            string userDocBrief = "Control carrying the curve end (cv2, cv3) and the end twist."
+        }
+    )
+    uniform int[] rigExec:jointElements = [] (
+        customData = {
+            string userDocBrief = """Optional chain slot per rigExec:joints entry (parallel\r
+        array)."""
+        }
+    )
+    rel rigExec:joints (
+        customData = {
+            string userDocBrief = """Ordered chain, root to tip, posed by this solve (view-free\r
+        extraction)."""
+        }
+    )
+    rel rigExec:midControl (
+        customData = {
+            string userDocBrief = """Control whose translation offset from its follow point bends\r
+        the interior (cv1, cv2)."""
+        }
+    )
+    uniform token rigExec:restLength = "curve" (
+        allowedTokens = ["curve", "chain"]
+        customData = {
+            string userDocBrief = "What the stretch ratio is measured against."
+        }
+    )
+    rel rigExec:rootControl (
+        customData = {
+            string userDocBrief = "Control carrying the curve start (cv0, cv1) and the root roll."
+        }
+    )
+    uniform token rigExec:rootTangent = "rigid" (
+        allowedTokens = ["rigid", "aim"]
+        customData = {
+            string userDocBrief = "How cv1, the root's tangent CV, is posed."
+        }
+    )
+    uniform float[] rigExec:volumeWeights = [] (
+        customData = {
+            string userDocBrief = """Per-joint squash/stretch weight w_i, parallel to\r
+        rigExec:joints (in chain-slot order)."""
+        }
+    )
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
@@ -1561,19 +1762,31 @@ class RigExecSingleChainIkConstraint "RigExecSingleChainIkConstraint" (
 
 class RigExecFloatMathMover "RigExecFloatMathMover" (
     customData = {
-        string userDocBrief = """Statically typed add, multiply, clamp, remap, or blend over an\r
-    exact float property target (spec section 4.1).\r
+        string userDocBrief = """Statically typed add, multiply, clamp, remap, blend, or curve\r
+    over an exact float property target (spec section 4.1).\r
 \r
     The revision is r = op(incoming), then the common MoverAPI envelope mixes\r
     it back over the incoming value."""
     }
 )
 {
+    float2[] inputs:keys = [] (
+        customData = {
+            string userDocBrief = """(input, output) keys for the curve operation, strictly\r
+        increasing in input."""
+        }
+    )
     float inputs:max = 1
     float inputs:min = 0
+    float2[] inputs:tangents = [] (
+        customData = {
+            string userDocBrief = """Optional (in slope, out slope) per key for the curve\r
+        operation."""
+        }
+    )
     float inputs:value = 0
     uniform token rigExec:operation = "clamp" (
-        allowedTokens = ["add", "multiply", "clamp", "remap", "blend"]
+        allowedTokens = ["add", "multiply", "clamp", "remap", "blend", "curve"]
     )
 }
 
@@ -1697,7 +1910,7 @@ class "RigExecVolumeWeight" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -1790,7 +2003,8 @@ class "RigExecVolumeWeight" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -1820,7 +2034,7 @@ class "RigExecVolumeWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -1910,7 +2124,7 @@ class RigExecSphereWeight "RigExecSphereWeight" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -2011,7 +2225,8 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -2041,7 +2256,7 @@ class RigExecSphereWeight "RigExecSphereWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -2133,7 +2348,7 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -2244,7 +2459,8 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -2274,7 +2490,7 @@ class RigExecPlaneWeight "RigExecPlaneWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -2385,7 +2601,7 @@ class RigExecCurveWeight "RigExecCurveWeight" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -2485,7 +2701,8 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -2515,7 +2732,7 @@ class RigExecCurveWeight "RigExecCurveWeight" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -2665,6 +2882,60 @@ class RigExecMatrixMover "RigExecMatrixMover" (
     uniform token rigExec:transformReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
+    rel rigExec:transformSpace (
+        customData = {
+            string userDocBrief = """Optional second provider the transform is measured against:\r
+        T = M(transform) * inverse(M(transformSpace)), both read at the same\r
+        phase."""
+        }
+    )
+}
+
+class RigExecSkinMover "RigExecSkinMover" (
+    customData = {
+        string userDocBrief = """Multi-influence skinning of an exact native point3f[] points\r
+    property in ONE pass: every influence's matrix is gathered per point and\r
+    blended by that point's authored weights, then the result is mixed with\r
+    the common MoverAPI envelope.\r
+\r
+    RigExecMatrixMover applies one influence per mover, sequentially, each\r
+    from the PRECEDING revision."""
+    }
+)
+{
+    uniform int rigExec:elementSize = 1 (
+        customData = {
+            string userDocBrief = "Influences per point."
+        }
+    )
+    rel rigExec:influences (
+        customData = {
+            string userDocBrief = """Ordered GfMatrix4d providers (computeMatrix), one per\r
+        influence."""
+        }
+    )
+    int[] rigExec:jointIndices = [] (
+        customData = {
+            string userDocBrief = """Per-point influence indices into rigExec:influences,\r
+        rigExec:elementSize entries per point in point order (UsdSkel's\r
+        primvars:skel:jointIndices layout)."""
+        }
+    )
+    float[] rigExec:jointWeights = [] (
+        customData = {
+            string userDocBrief = """Per-point influence weights parallel to rigExec:jointIndices.\r
+        Finite and non-negative; not renormalized."""
+        }
+    )
+    uniform token rigExec:skinningMethod = "classicLinear" (
+        allowedTokens = ["classicLinear", "dualQuaternion"]
+    )
+    uniform token rigExec:transformReadPhase = "base" (
+        allowedTokens = ["base", "preceding", "final"]
+        customData = {
+            string userDocBrief = "Which revision of every influence's matrix is read."
+        }
+    )
 }
 
 class RigExecBlendShapeMover "RigExecBlendShapeMover" (
@@ -2698,19 +2969,207 @@ class RigExecBlendInput "RigExecBlendInput" (
 
 class RigExecBlendSample "RigExecBlendSample" (
     customData = {
-        string userDocBrief = """One target or in-between activation related to an exact native\r
-    target-shape points property; dense deltas are derived against the base\r
-    points."""
+        string userDocBrief = """One target or in-between activation, related EITHER to an exact\r
+    native target-shape points property or to a UsdSkelBlendShape carrying the\r
+    same shape as sparse offsets."""
     }
 )
 {
     float rigExec:activation = 1
+    rel rigExec:blendShape (
+        customData = {
+            string userDocBrief = """A UsdSkelBlendShape whose offsets (and pointIndices, when\r
+        non-empty) ARE the sample's deltas -- the same shape rigExec:targetPoints\r
+        expresses as a full moved-points array, stored as only the points that\r
+        move."""
+        }
+    )
     uniform token rigExec:pointsReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
     rel rigExec:targetPoints (
         customData = {
             string userDocBrief = "Exact native points property of the target shape."
+        }
+    )
+}
+
+class RigExecPoseInterpolator "RigExecPoseInterpolator" (
+    customData = {
+        string userDocBrief = """A pose interpolator: one driver joint in, one weight per\r
+    authored RigExecPose child out.\r
+\r
+    WHY A DRIVER JOINT AND NOT THE CONTROL THE ANIMATOR MOVES."""
+    }
+)
+{
+    bool inputs:enabled = 1 (
+        customData = {
+            string userDocBrief = "Shape-preserving enable."
+        }
+    )
+    bool rigExec:allowNegativeWeights = 1 (
+        customData = {
+            string userDocBrief = "allowNegativeWeights."
+        }
+    )
+    rel rigExec:driver (
+        customData = {
+            string userDocBrief = """The driver, at most one target: a RigExecJoint (or any\r
+        RigExecXformable) whose LOCAL rotation -- its pose relative to its own\r
+        rest, in its parent's frame -- is what every pose is measured against.\r
+\r
+        LOCAL, not world, and relative to rest rather than absolute: the rest\r
+        orientation is the joint orient the authored data removes from\r
+        poseRotation, so a driver sitting at its rest measures as identity and\r
+        the neutral pose reads 1.000 with the rig s..."""
+        }
+    )
+    bool rigExec:enableRotation = 1 (
+        customData = {
+            string userDocBrief = """enableRotation: measure the driver's rotation.\r
+\r
+        Honoured rather than assumed."""
+        }
+    )
+    bool rigExec:enableTranslation = 0 (
+        customData = {
+            string userDocBrief = """enableTranslation: measure the driver's translation as\r
+        well, in the driver's own frame."""
+        }
+    )
+    uniform token rigExec:kernel = "gaussian" (
+        allowedTokens = ["gaussian", "linear"]
+        customData = {
+            string userDocBrief = "How a pose's weight falls away with distance."
+        }
+    )
+    bool rigExec:normalize = 1 (
+        customData = {
+            string userDocBrief = """Divide the weights by their SUM, so they stay a partition of\r
+        unity."""
+        }
+    )
+    float rigExec:regularization = 0 (
+        customData = {
+            string userDocBrief = """regularization, added to the matrix diagonal before\r
+        inverting."""
+        }
+    )
+    uniform token rigExec:twistAxis = "X" (
+        allowedTokens = ["X", "Y", "Z"]
+        customData = {
+            string userDocBrief = """The axis a twist pose spins about, in the DRIVER's own frame.\r
+        driverTwistAxis (0 X, 1 Y, 2 Z), and X on every body\r
+        interpolator of the shipped biped because the bind skeleton aims +X\r
+        down the bone.\r
+\r
+        Read only by poses whose rigExec:poseType is swing or twist; a whole\r
+        pose measures the entire rotation and never splits it."""
+        }
+    )
+}
+
+class RigExecPose "RigExecPose" (
+    customData = {
+        string userDocBrief = """One authored pose of a RigExecPoseInterpolator, and the float it\r
+    publishes.\r
+\r
+    A pose is a place the driver can be, plus how wide its influence reaches.\r
+    Its outputs:weight is what a RigExecBlendInput's inputs:weight connects\r
+    to; the weight is 1 when the driver stands exactly on this pose and\r
+    (after normalization) shares the rig with its neighbours elsewhere.\r
+\r
+    Poses are children of their interpolator rather than a parallel array on\r
+    it so that each one composes i..."""
+    }
+)
+{
+    bool inputs:enabled = 1 (
+        customData = {
+            string userDocBrief = "Shape-preserving enable."
+        }
+    )
+    float outputs:weight = 0 (
+        customData = {
+            string userDocBrief = """How much this pose counts, for wherever the driver is now.\r
+        The output a RigExecBlendInput's inputs:weight connects to.\r
+\r
+        1 with the driver standing on this pose, and elsewhere a share of the\r
+        interpolator's normalized total -- which may be negative when\r
+        rigExec:allowNegativeWeights is on, and should be: that is the\r
+        instruction to lean away from a pose, and clamping it is what makes a\r
+        blend muddy."""
+        }
+    )
+    float rigExec:falloff = 0.3 (
+        customData = {
+            string userDocBrief = """poseFalloff, kept as provenance and as the editable\r
+        dial: the share the artist painted on top of the fitted width, where\r
+        0.3 is the default and means just reach the closest other pose."""
+        }
+    )
+    rel rigExec:poseControls (
+        customData = {
+            string userDocBrief = """The exact control PROPERTIES that put the rig into this pose\r
+        -- </Rig/Controls/arm_l_fk_shoulder_l_bind.avars:ry> and the like --\r
+        parallel to rigExec:poseControlValues."""
+        }
+    )
+    double[] rigExec:poseControlValues = [] (
+        customData = {
+            string userDocBrief = """The value for each target of rigExec:poseControls, in OUR\r
+        units and from OUR zero: degrees for a rotation avar, centimetres for\r
+        a translation one, measured from the rig's rest rather than from\r
+        the authored data's.\r
+\r
+        The authored numbers are absolute and in radians, and their zero is the\r
+        configuration the poses were captured in rather than the bind pose.\r
+        Measured: driving this rig with those absolute values reaches the\r
+        authored quater..."""
+        }
+    )
+    uniform token rigExec:poseType = "swing" (
+        allowedTokens = ["swing", "twist", "whole"]
+        customData = {
+            string userDocBrief = """poseType (1 swing, 2 twist, 0 whole): WHICH PART of\r
+        the driver's rotation this pose is measured against.\r
+\r
+        The metric belongs to the pose and not to the interpolator because one\r
+        driver usually carries both at once and they mean different things: a\r
+        neck that has twisted has not bent, and its bend shapes should stay at\r
+        zero."""
+        }
+    )
+    quatf rigExec:rotation = (1, 0, 0, 0) (
+        customData = {
+            string userDocBrief = """Where the driver stands in this pose: its LOCAL rotation\r
+        relative to its own rest, in the driver's parent frame.\r
+\r
+        REBASED."""
+        }
+    )
+    float rigExec:rotationRadius = 0 (
+        customData = {
+            string userDocBrief = """How far in RADIANS the driver may stray before this pose's\r
+        kernel has fallen away -- one falloff width, this pose's own.\r
+\r
+        FITTED, NOT EXPORTED."""
+        }
+    )
+    float3 rigExec:translation = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """The driver's translation in this pose, in CENTIMETRES, in the\r
+        driver's own frame."""
+        }
+    )
+    float rigExec:translationRadius = 0 (
+        customData = {
+            string userDocBrief = """The same width for the translation channel, in CENTIMETRES.\r
+\r
+        It is NOT the rotation radius and must not be borrowed from it: a\r
+        brow's poses sit millimetres apart and a rotation width would swallow\r
+        every one of them."""
         }
     )
 }
@@ -2723,14 +3182,72 @@ class RigExecCurveMover "RigExecCurveMover" (
     }
 )
 {
+    float[] inputs:driverBaseWeights = [] (
+        customData = {
+            string userDocBrief = "wire: per unique control point weight of the base motion."
+        }
+    )
+    float[] inputs:driverWeights = [] (
+        customData = {
+            string userDocBrief = """wire: per unique control point weight of its driver\r
+        transform, or one for all; empty is 1."""
+        }
+    )
+    float inputs:dropoffDistance = 0 (
+        customData = {
+            string userDocBrief = """wire: distance over which a point's pull from the curve\r
+        falls to zero, as 1 - smoothstep(0, dropoffDistance, d) with d the\r
+        point's rest distance from the curve."""
+        }
+    )
     rel rigExec:bindCoordinates
+    rel rigExec:driverBaseTransforms (
+        customData = {
+            string userDocBrief = """wire: an optional base motion applied to the curve AND its\r
+        rest before the driver transforms, as a wire whose base curve rides\r
+        the same deformers as its driver: B = C0 + wb (Mb C0 - C0), then\r
+        C = B + w (M B - B), and the wire deforms by C - B."""
+        }
+    )
+    rel rigExec:driverBaseTransformSpaces (
+        customData = {
+            string userDocBrief = "wire: the spaces of rigExec:driverBaseTransforms."
+        }
+    )
     rel rigExec:driverCurve
     uniform token rigExec:driverCurveReadPhase = "base" (
         allowedTokens = ["base", "preceding", "final"]
     )
     rel rigExec:driverFrames
+    rel rigExec:driverTransforms (
+        customData = {
+            string userDocBrief = """wire: move the driver curve's control points by matrix\r
+        providers instead of reading its points: one provider per unique\r
+        control point, or one for all."""
+        }
+    )
+    rel rigExec:driverTransformSpaces (
+        customData = {
+            string userDocBrief = """wire: the space each driver transform is measured against,\r
+        parallel to rigExec:driverTransforms, or one for all, or none."""
+        }
+    )
     uniform token rigExec:mode = "ribbon" (
-        allowedTokens = ["ribbon", "emitGuidePoints"]
+        allowedTokens = ["ribbon", "emitGuidePoints", "wire"]
+        customData = {
+            string userDocBrief = """ribbon transports points along a ribbon aggregate's frames;\r
+        emitGuidePoints writes its sample positions; wire moves each point by\r
+        the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the\r
+        parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)\r
+        per point from rigExec:bindCoordinates, C the curve's posed control\r
+        points at rigExec:driverCurveReadPhase and C0 its authored ones."""
+        }
+    )
+    uniform token rigExec:transformReadPhase = "base" (
+        allowedTokens = ["base", "final"]
+        customData = {
+            string userDocBrief = "wire: which revision of the driver transforms is read."
+        }
     )
 }
 
@@ -2970,7 +3487,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
 {
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the
+            string userDocBrief = """Zero pose supplied to avar evaluation; falls back to the\r
         computed default:space."""
         }
     )
@@ -3021,13 +3538,39 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
         extent of the authored gprim in its own local space (i.e."""
         }
     )
-    color3f guide:displayColor = (1, 0.85, 0.2)
-    float guide:displayOpacity = 1
+    color3f guide:displayColor = (1, 0.85, 0.2) (
+        customData = {
+            string userDocBrief = "Constant colour of the synthesized guide."
+        }
+    )
+    float guide:displayOpacity = 1 (
+        customData = {
+            string userDocBrief = "Constant opacity of the synthesized guide."
+        }
+    )
+    uniform bool guide:displayOpacityInvert = 0 (
+        customData = {
+            string userDocBrief = """When guide:displayOpacity is connected, draw 1 - source\r
+        instead of source."""
+        }
+    )
+    uniform float guide:displayOpacityMin = 0.15 (
+        customData = {
+            string userDocBrief = """Floor applied to a CONNECTED guide:displayOpacity after the\r
+        optional inversion."""
+        }
+    )
     uniform token guide:drawMode = "wire" (
         allowedTokens = ["wire", "geometry"]
         customData = {
             string userDocBrief = """wire draws the guide as curves, widthed by\r
         guide:wireWidth."""
+        }
+    )
+    double3 guide:offset = (0, 0, 0) (
+        customData = {
+            string userDocBrief = """Where the guide shape is drawn, in the control's LOCAL frame,\r
+        relative to the control's origin."""
         }
     )
     double guide:scaleX = 1 (
@@ -3075,7 +3618,8 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     )
     matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Controller-adjusted zero pose; falls back to avars:defaultSpace."
+            string userDocBrief = """Controller-adjusted zero pose; falls back to avars:defaultSpace.\r
+        Used by the local-avars pose path before parent motion."""
         }
     )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
@@ -3093,8 +3637,8 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     uniform token purpose = "default" (
         allowedTokens = ["default", "render", "proxy", "guide"]
         customData = {
-            string userDocBrief = """Purpose is a classification of geometry into categories that
-        can each be independently included or excluded from traversals of prims
+            string userDocBrief = """Purpose is a classification of geometry into categories that 
+        can each be independently included or excluded from traversals of prims 
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
@@ -3103,7 +3647,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     double rest:rz = 0
     matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
         customData = {
-            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized. A provider with no RigExec ancestor resolves against identity, so its rest:space is its local-to-world bind transform."
+            string userDocBrief = "Bind transform relative to the namespace frame provider's rest frame; always orthonormalized."
         }
     )
     double rest:tx = 0
@@ -3118,7 +3662,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {
-            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning"
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
         visibility that is supported by most DCC apps.'''
         }
     )
@@ -3134,7 +3678,7 @@ class RigExecCurvenetAdjustment "RigExecCurvenetAdjustment" (
 
 class RigExecCurvenetAdjusterMover "RigExecCurvenetAdjusterMover" (
     customData = {
-        string userDocBrief = """Applies deformation-relative knot and tangent animation controls
+        string userDocBrief = """Applies deformation-relative knot and tangent animation controls\r
     to exactly one native RigExecCurvenet points property."""
     }
 )
@@ -3170,5 +3714,481 @@ class RigExecVolumeCorrectMover "RigExecVolumeCorrectMover" (
     }
 )
 {
+}
+
+class RigExecPicker "RigExecPicker" (
+    customData = {
+        string userDocBrief = """A character's control picker: one tab in the picker panel,\r
+    holding one RigExecPickerPanel per sub-tab.\r
+\r
+    Discovery is by TYPE, never by path."""
+    }
+)
+{
+    rel rigExec:picker:rig (
+        customData = {
+            string userDocBrief = "The RigExecRoot this picker drives."
+        }
+    )
+    uniform string ui:label = "" (
+        customData = {
+            string userDocBrief = "Tab label."
+        }
+    )
+    uniform int ui:order = 0 (
+        customData = {
+            string userDocBrief = "Sort key among sibling pickers."
+        }
+    )
+}
+
+class RigExecPickerPanel "RigExecPickerPanel" (
+    customData = {
+        string userDocBrief = "One sub-tab of a RigExecPicker: Body, Face, and so on."
+    }
+)
+{
+    uniform color4f ui:background = (0.16, 0.16, 0.16, 1) (
+        customData = {
+            string userDocBrief = "Panel fill behind every button."
+        }
+    )
+    uniform string ui:label = "" (
+        customData = {
+            string userDocBrief = "Sub-tab label; empty means use the prim name."
+        }
+    )
+    uniform int ui:order = 0 (
+        customData = {
+            string userDocBrief = "Sort key among sibling panels."
+        }
+    )
+    uniform float2 ui:size = (400, 600) (
+        customData = {
+            string userDocBrief = "Panel extent in picker units, before the view's fit scale."
+        }
+    )
+}
+
+class RigExecPickerButton "RigExecPickerButton" (
+    customData = {
+        string userDocBrief = "One button."
+    }
+)
+{
+    rel rigExec:picker:attribute (
+        customData = {
+            string userDocBrief = """The single attribute this button edits, for a switch or a\r
+        dial."""
+        }
+    )
+    uniform token[] rigExec:picker:attributeLabels = [] (
+        customData = {
+            string userDocBrief = """Labels for the values rigExec:picker:attribute cycles\r
+        through, low to high, e.g."""
+        }
+    )
+    uniform token rigExec:picker:command = "" (
+        customData = {
+            string userDocBrief = """A named action this button runs, instead of selecting or\r
+        editing."""
+        }
+    )
+    rel rigExec:picker:controls (
+        customData = {
+            string userDocBrief = "The prims this button selects, in order."
+        }
+    )
+    uniform token rigExec:picker:mode = "" (
+        allowedTokens = ["", "ik", "fk"]
+        customData = {
+            string userDocBrief = """Show this button only while its limb is in this mode.\r
+        Empty means always shown, which is right for anything that is not\r
+        half of an IK/FK pair."""
+        }
+    )
+    rel rigExec:picker:modeDial (
+        customData = {
+            string userDocBrief = "The attribute rigExec:picker:mode is tested against."
+        }
+    )
+    uniform bool ui:alternate = 0 (
+        customData = {
+            string userDocBrief = """This button shares a slot with another and is the one\r
+        hidden at rest."""
+        }
+    )
+    uniform float2[] ui:bezier = [] (
+        customData = {
+            string userDocBrief = """Cubic control points for ui:shape = bezier, THREE per\r
+        knot -- on-curve point, out-tangent, in-tangent -- flattened,\r
+        with each span completed by the following knot's in-tangent."""
+        }
+    )
+    uniform bool ui:bold = 0 (
+        customData = {
+            string userDocBrief = "Label weight."
+        }
+    )
+    uniform float ui:depth = 0 (
+        customData = {
+            string userDocBrief = "Painter's-algorithm order; higher draws later, on top."
+        }
+    )
+    uniform token ui:direction = "top" (
+        allowedTokens = ["top", "bottom", "left", "right"]
+        customData = {
+            string userDocBrief = "Which edge a trapezoid or triangle points at."
+        }
+    )
+    uniform color4f ui:fill = (0.5, 0.5, 0.5, 1) (
+        customData = {
+            string userDocBrief = "Interior colour, linear, alpha premultiplied by the view."
+        }
+    )
+    uniform float ui:fontSize = 8 (
+        customData = {
+            string userDocBrief = "Label size in panel units."
+        }
+    )
+    uniform float2[] ui:polygon = [] (
+        customData = {
+            string userDocBrief = "Outline vertices for ui:shape = polygon, panel units."
+        }
+    )
+    uniform float2 ui:position = (0, 0) (
+        customData = {
+            string userDocBrief = "Top-left corner in panel units."
+        }
+    )
+    uniform float ui:rotation = 0 (
+        customData = {
+            string userDocBrief = "Degrees clockwise about the button's own centre."
+        }
+    )
+    uniform float ui:roundness = 0 (
+        customData = {
+            string userDocBrief = "Corner radius fraction for roundedRectangle, 0 to 1."
+        }
+    )
+    uniform token ui:shape = "rectangle" (
+        allowedTokens = ["rectangle", "roundedRectangle", "circle", "ellipse", "hexagon", "triangle", "trapezoid", "polygon", "bezier", "widgetControl", "slider"]
+        customData = {
+            string userDocBrief = "Outline."
+        }
+    )
+    uniform float2 ui:size = (10, 10) (
+        customData = {
+            string userDocBrief = "Width and height in panel units."
+        }
+    )
+    uniform float ui:slopeLeft = 0 (
+        customData = {
+            string userDocBrief = "Trapezoid left-edge inset, as a fraction of ui:size width."
+        }
+    )
+    uniform float ui:slopeRight = 0 (
+        customData = {
+            string userDocBrief = "Trapezoid right-edge inset, as a fraction of ui:size width."
+        }
+    )
+    uniform color4f ui:stroke = (0, 0, 0, 0.8) (
+        customData = {
+            string userDocBrief = "Outline colour."
+        }
+    )
+    uniform float ui:strokeWidth = 1 (
+        customData = {
+            string userDocBrief = "Outline width in panel units."
+        }
+    )
+    uniform string ui:text = "" (
+        customData = {
+            string userDocBrief = "Label drawn inside the button."
+        }
+    )
+    uniform token ui:textAlign = "center" (
+        allowedTokens = ["left", "center", "right"]
+        customData = {
+            string userDocBrief = "Horizontal label alignment inside the button."
+        }
+    )
+    uniform color4f ui:textColor = (0, 0, 0, 1) (
+        customData = {
+            string userDocBrief = "Label colour."
+        }
+    )
+    uniform color4f ui:valueColor = (0, 0, 0, 1) (
+        customData = {
+            string userDocBrief = """Colour of the VALUE a switch or dial displays, as\r
+        distinct from its label: `Foot` is drawn in ui:textColor and the\r
+        `IK` beside it in this."""
+        }
+    )
+}
+
+class RigExecTouchRegions "RigExecTouchRegions" (
+    customData = {
+        string userDocBrief = """A mesh's touch regions: the shared palette, and one\r
+    RigExecTouchRegion child per named set.\r
+\r
+    A SCOPE rather than a bare Typed prim: it is a grouping of\r
+    annotations on drawable geometry, and an imageable container costs\r
+    nothing and keeps the door open for anything drawable parented under\r
+    it later.\r
+\r
+    THE HIGHLIGHT OVERLAY IS NOT HERE, and that is measured rather than\r
+    chosen."""
+    }
+)
+{
+    rel proxyPrim (
+        customData = {
+            string userDocBrief = '''The proxyPrim relationship allows us to link a
+        prim whose purpose is "render" to its (single target)
+        purpose="proxy" prim.'''
+        }
+    )
+    uniform token purpose = "default" (
+        allowedTokens = ["default", "render", "proxy", "guide"]
+        customData = {
+            string userDocBrief = """Purpose is a classification of geometry into categories that 
+        can each be independently included or excluded from traversals of prims 
+        on a stage, such as rendering or bounding-box computation traversals."""
+        }
+    )
+    uniform float rigExec:touch:alpha = 1 (
+        customData = {
+            string userDocBrief = "Opacity the overlay draws the regions at."
+        }
+    )
+    rel rigExec:touch:mesh (
+        customData = {
+            string userDocBrief = "The UsdGeomMesh whose faces these regions index."
+        }
+    )
+    uniform color3f[] rigExec:touch:palette = [] (
+        customData = {
+            string userDocBrief = """One ramp shared by every region, indexed by the\r
+        region's own order."""
+        }
+    )
+    token visibility = "inherited" (
+        allowedTokens = ["inherited", "invisible"]
+        customData = {
+            string userDocBrief = '''Visibility is meant to be the simplest form of "pruning" 
+        visibility that is supported by most DCC apps.'''
+        }
+    )
+}
+
+class RigExecTouchOverlay "RigExecTouchOverlay" (
+    customData = {
+        string userDocBrief = """The surface TouchPose lights the hovered region on.\r
+\r
+    SHIPPED WITH THE ASSET, one per RigExecTouchRegions scope."""
+    }
+)
+{
+    vector3f[] accelerations (
+        customData = {
+            string userDocBrief = """If provided, 'accelerations' should be used with
+        velocities to compute positions between samples for the 'points'
+        attribute rather than interpolating between neighboring 'points'
+        samples."""
+        }
+    )
+    int[] cornerIndices = [] (
+        customData = {
+            string userDocBrief = """The indices of points for which a corresponding sharpness
+        value is specified in _cornerSharpnesses_ (so the size of this array
+        must match that of _cornerSharpnesses_)."""
+        }
+    )
+    float[] cornerSharpnesses = [] (
+        customData = {
+            string userDocBrief = """The sharpness values associated with a corresponding set of
+        points specified in _cornerIndices_ (so the size of this array must
+        match that of _cornerIndices_)."""
+        }
+    )
+    int[] creaseIndices = [] (
+        customData = {
+            string userDocBrief = """The indices of points grouped into sets of successive pairs
+        that identify edges to be creased."""
+        }
+    )
+    int[] creaseLengths = [] (
+        customData = {
+            string userDocBrief = """The length of this array specifies the number of creases
+        (sets of adjacent sharpened edges) on the mesh."""
+        }
+    )
+    float[] creaseSharpnesses = [] (
+        customData = {
+            string userDocBrief = "The per-crease or per-edge sharpness values for all creases."
+        }
+    )
+    uniform bool doubleSided = 0 (
+        customData = {
+            string userDocBrief = """Although some renderers treat all parametric or polygonal
+        surfaces as if they were effectively laminae with outward-facing
+        normals on both sides, some renderers derive significant optimizations
+        by considering these surfaces to have only a single outward side,
+        typically determined by control-point winding order and/or 
+        orientation."""
+        }
+    )
+    float3[] extent (
+        customData = {
+            string userDocBrief = """Extent is a three dimensional range measuring the geometric
+        extent of the authored gprim in its own local space (i.e."""
+        }
+    )
+    token faceVaryingLinearInterpolation = "cornersPlus1" (
+        allowedTokens = ["none", "cornersOnly", "cornersPlus1", "cornersPlus2", "boundaries", "all"]
+        customData = {
+            string userDocBrief = '''Specifies how elements of a primvar of interpolation type
+        "faceVarying" are interpolated for subdivision surfaces.'''
+        }
+    )
+    int[] faceVertexCounts (
+        customData = {
+            string userDocBrief = """Provides the number of vertices in each face of the mesh, 
+        which is also the number of consecutive indices in _faceVertexIndices_
+        that define the face."""
+        }
+    )
+    int[] faceVertexIndices (
+        customData = {
+            string userDocBrief = """Flat list of the index (into the _points_ attribute) of each
+        vertex of each face in the mesh."""
+        }
+    )
+    int[] holeIndices = [] (
+        customData = {
+            string userDocBrief = """The indices of all faces that should be treated as holes,
+        i.e."""
+        }
+    )
+    token interpolateBoundary = "edgeAndCorner" (
+        allowedTokens = ["none", "edgeOnly", "edgeAndCorner"]
+        customData = {
+            string userDocBrief = """Specifies how subdivision is applied for faces adjacent to
+        boundary edges and boundary points."""
+        }
+    )
+    normal3f[] normals (
+        customData = {
+            string userDocBrief = """Provide an object-space orientation for individual points, 
+        which, depending on subclass, may define a surface, curve, or free 
+        points."""
+        }
+    )
+    uniform token orientation = "rightHanded" (
+        allowedTokens = ["rightHanded", "leftHanded"]
+        customData = {
+            string userDocBrief = """Orientation specifies whether the gprim's surface normal 
+        should be computed using the right hand rule, or the left hand rule."""
+        }
+    )
+    point3f[] points (
+        customData = {
+            string userDocBrief = """The primary geometry attribute for all PointBased
+        primitives, describes points in (local) space."""
+        }
+    )
+    color3f[] primvars:displayColor (
+        customData = {
+            string userDocBrief = '''It is useful to have an "official" colorSet that can be used
+        as a display or modeling color, even in the absence of any specified
+        shader for a gprim.'''
+        }
+    )
+    float[] primvars:displayOpacity (
+        customData = {
+            string userDocBrief = """Companion to displayColor that specifies opacity, broken
+        out as an independent attribute rather than an rgba color, both so that
+        each can be independently overridden, and because shaders rarely consume
+        rgba parameters."""
+        }
+    )
+    rel proxyPrim (
+        customData = {
+            string userDocBrief = '''The proxyPrim relationship allows us to link a
+        prim whose purpose is "render" to its (single target)
+        purpose="proxy" prim.'''
+        }
+    )
+    uniform token purpose = "default" (
+        allowedTokens = ["default", "render", "proxy", "guide"]
+        customData = {
+            string userDocBrief = """Purpose is a classification of geometry into categories that 
+        can each be independently included or excluded from traversals of prims 
+        on a stage, such as rendering or bounding-box computation traversals."""
+        }
+    )
+    uniform token subdivisionScheme = "catmullClark" (
+        allowedTokens = ["catmullClark", "loop", "bilinear", "none"]
+        customData = {
+            string userDocBrief = "The subdivision scheme to be applied to the surface."
+        }
+    )
+    token triangleSubdivisionRule = "catmullClark" (
+        allowedTokens = ["catmullClark", "smooth"]
+        customData = {
+            string userDocBrief = """Specifies an option to the subdivision rules for the
+        Catmull-Clark scheme to try and improve undesirable artifacts when
+        subdividing triangles."""
+        }
+    )
+    vector3f[] velocities (
+        customData = {
+            string userDocBrief = """If provided, 'velocities' should be used by renderers to 
+
+        compute positions between samples for the 'points' attribute, rather
+        than interpolating between neighboring 'points' samples."""
+        }
+    )
+    token visibility = "invisible" (
+        allowedTokens = ["inherited", "invisible"]
+        customData = {
+            string userDocBrief = "Hidden until TouchPose lights it."
+        }
+    )
+    uniform token[] xformOpOrder (
+        customData = {
+            string userDocBrief = """Encodes the sequence of transformation operations in the
+        order in which they should be pushed onto a transform stack while
+        visiting a UsdStage's prims in a graph traversal that will effect
+        the desired positioning for this prim and its descendant prims."""
+        }
+    )
+}
+
+class RigExecTouchRegion "RigExecTouchRegion" (
+    customData = {
+        string userDocBrief = """One named touch set: the faces it owns and the control a\r
+    click inside it selects."""
+    }
+)
+{
+    rel rigExec:touch:control (
+        customData = {
+            string userDocBrief = "The control a click in this region selects."
+        }
+    )
+    uniform token rigExec:touch:elementType = "face" (
+        allowedTokens = ["face"]
+        customData = {
+            string userDocBrief = "What rigExec:touch:faces indexes."
+        }
+    )
+    uniform int[] rigExec:touch:faces = [] (
+        customData = {
+            string userDocBrief = """Face indices on the mesh named by the parent's\r
+        rigExec:touch:mesh."""
+        }
+    )
 }
 

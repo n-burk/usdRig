@@ -601,9 +601,12 @@ def testUsdviewInputFunction(appController):
              appController._mainWindow.menuBar().children()
              if isinstance(c, d.QtWidgets.QMenu)
              and str(c.title()).replace("&", "") == "RigExec"]
+    menus = [a.menu() for a in (menus[0].actions() if len(menus) == 1
+                                else [])
+             if a.menu() is not None and a.text() == "Viewport"]
     _Check(len(menus) == 1 and "View Cube" in
            [a.text() for a in menus[0].actions()],
-           "RigExec menu has no View Cube item")
+           "RigExec -> Viewport has no View Cube item")
 
     # --- 10. grab -------------------------------------------------------
     shot = os.environ.get("RIGEXEC_VIEWCUBE_SHOT")

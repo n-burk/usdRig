@@ -162,7 +162,7 @@ def _State(tool, handle, press, target, camera=None, **kwargs):
 
 
 def _Settings(tool):
-    return gset.MayaDefaults(tool)
+    return gset.ToolDefaults(tool)
 
 
 # ---------------------------------------------------------------------
@@ -198,7 +198,7 @@ def TestAxisTranslate():
 
 def TestCtrlAxisTranslate():
     """
-    Maya's Ctrl+axis: the drag moves in the plane PERPENDICULAR to the
+    the conventional Ctrl+axis: the drag moves in the plane PERPENDICULAR to the
     axis, so the axis's own component stays put.
     """
     # A tilted view: with the camera down -Z the plane normal to X is
@@ -522,7 +522,7 @@ def TestSnapMissWritesNothing():
         out = gd.ApplyDrag(state, current, settings,
                            snapMode=gset.SNAP_POINT)
         _Check(target.calls == [],
-               "%s: the object does not move, Maya does not fall "
+               "%s: the object does not move, the conventional tool does not fall "
                "back to free dragging: %s" % (label, target.calls))
         _Check(out == Gf.Vec3d(0, 0, 0),
                "%s: and nothing is reported applied: %s"
@@ -732,7 +732,7 @@ def TestRingRotate():
 
 def TestRotateAccumulatesPast180():
     """
-    Maya keeps counting: walking the cursor right round the ring passes
+    the conventional tool keeps counting: walking the cursor right round the ring passes
     180 without wrapping and returns to ~360 for a full turn.
     """
     target = FakeTarget()
@@ -888,7 +888,7 @@ def TestRotateSnapping():
     held = gd.ApplyDrag(state, (ball.center[0] + 37.0, ball.center[1]),
                         settings, holdSnap=True)
     _Check(target.LastKwargs() == {"snapStep": 15.0},
-           "Maya's snap rotate applies to the ball too: %s"
+           "the conventional snap rotate applies to the ball too: %s"
            % (target.LastKwargs(),))
     _Check(_Close(held % 15.0, 0.0, 1e-9) or _Close(held % 15.0, 15.0, 1e-9),
            "and the ball reports the snapped angle: %.4f" % held)
@@ -968,7 +968,7 @@ def TestRotateGrid():
 # ---------------------------------------------------------------------
 
 def TestAxisScale():
-    """An axis cube scales that axis by the Maya distance ratio."""
+    """An axis cube scales that axis by the distance ratio."""
     target = FakeTarget()
     axis = _Named(_Handles(gs.TOOL_SCALE), "x")
     press = axis.points[1]
@@ -1070,6 +1070,88 @@ def TestScaleAxesMapping():
            "and the xz plane names 0 and 2")
 
 
+def TestGlobalVersusLocalAxes():
+    """
+    The toolbar's Global/Local toggle changes the DRAWN AXES and the
+    VALUES WRITTEN, not just a stored setting.
+
+    Same prim, same handle, same screen travel, twice: Global lays the
+    X arrow on world +X and Local on the prim's own +X, which on a prim
+    rotated 40 degrees about Z is a different direction, a different
+    world delta, and a different set of channel values. Driven through a
+    real gizmoMath target rather than the FakeTarget above, because what
+    is being asserted is the round trip -- orientation in, channels out.
+
+    Measured on examples/biped/Biped.usda through the same path, dragging
+    arm_l_fk_shoulder_l_bind's X arrow 120 px: Global wrote avars:t
+    [5.694218, 0.361702, 5.758059] and moved it 8.1062 cm along world X;
+    Local wrote [4.232632, 0, 0] -- a pure avars:tx, which is what local
+    means -- and moved it 4.2326 cm along the shoulder's own X. The two
+    world distances differ because the two arrows project to different
+    screen lengths, so 120 px of cursor travel buys a different distance
+    along each; that is the conventional behaviour too.
+    """
+    time = Usd.TimeCode.Default()
+    results = {}
+    for mode in ("global", "local"):
+        stage = Usd.Stage.CreateInMemory()
+        xform = UsdGeom.Xform.Define(stage, "/Box")
+        api = UsdGeom.XformCommonAPI(xform)
+        api.SetTranslate(Gf.Vec3d(0, 0, 0))
+        api.SetRotate(Gf.Vec3f(0, 0, 40.0))
+        api.SetScale(Gf.Vec3f(1, 1, 1))
+        writer = gm.Writer(stage, time, gm.WRITE_DEFAULT)
+        target, reason = gm.MakeTarget(stage, xform.GetPrim(),
+                                       gm.CHANNELS_POSE, writer)
+        _Check(target is not None, reason)
+        orientation = (Gf.Matrix4d(1.0) if mode == "global"
+                       else target.ObjectFrame())
+        handles = gs.BuildHandles(gs.TOOL_TRANSLATE, target.GizmoMatrix(),
+                                  _Camera(), VIEWPORT, RATIO,
+                                  orientation=orientation)
+        axis = _Named(handles, "x")
+        press = (axis.points[0][0] * 0.4 + axis.points[1][0] * 0.6,
+                 axis.points[0][1] * 0.4 + axis.points[1][1] * 0.6)
+        state = _State(gs.TOOL_TRANSLATE, axis, press, target,
+                       origin2d=axis.center)
+        target.BeginDrag()
+        delta = gd.ApplyDrag(state, (press[0] + 120.0, press[1]),
+                             _Settings(gs.TOOL_TRANSLATE))
+        writer.CommitToStage()
+        results[mode] = (Gf.Vec3d(axis.worldAxis), Gf.Vec3d(delta),
+                         Gf.Vec3d(api.GetXformVectors(time)[0]))
+
+    worldAxis, worldDelta, worldValue = results["global"]
+    localAxis, localDelta, localValue = results["local"]
+    # The drawn axis: world +X against the prim's own +X, 40 degrees apart.
+    _Check(_Close(worldAxis[0], 1.0) and _Close(worldAxis[1], 0.0),
+           "Global draws the X arrow on world X: %s" % (worldAxis,))
+    _Check(_Close(localAxis[0], math.cos(math.radians(40.0)), 1e-6)
+           and _Close(localAxis[1], math.sin(math.radians(40.0)), 1e-6),
+           "Local draws it on the prim's own X: %s" % (localAxis,))
+    # The applied delta: along each of those, not along one of them twice.
+    _Check(_Close(worldDelta[1], 0.0, 1e-9) and worldDelta[0] > 0.0,
+           "the Global drag moved along world X: %s" % (worldDelta,))
+    _Check(localDelta[1] > 0.0,
+           "the Local drag moved off world X: %s" % (localDelta,))
+    # And the values that landed on the stage differ, which is the part
+    # a stored-setting-only bug would not reach.
+    _Check((localValue - worldValue).GetLength() > 0.1,
+           "different channel values: %s vs %s"
+           % (worldValue, localValue))
+    # WHICH channels each one needed is the mirror image of the rig
+    # case in the docstring, and for a reason worth stating: an
+    # XformCommonAPI translate op is in PARENT space and applies BEFORE
+    # the rotate, so here it is GLOBAL that lands on one channel and
+    # LOCAL that needs two. A rig control's avars:t is in P, which
+    # carries the control's own rest orientation, so there it is the
+    # other way round. Either way the two modes write different values,
+    # which is the thing under test.
+    _Check(abs(worldValue[1]) < 1e-9,
+           "global is a pure parent-space X move: %s" % (worldValue,))
+    _Check(abs(localValue[1]) > 1e-6,
+           "local needed both channels: %s" % (localValue,))
+
 def main():
     groups = [
         ("axis translate", TestAxisTranslate),
@@ -1096,6 +1178,7 @@ def main():
         ("centre scale", TestCentreScale),
         ("scale negative and snapping", TestScaleNegativeAndSnapping),
         ("scale axes mapping", TestScaleAxesMapping),
+        ("global vs local axes", TestGlobalVersusLocalAxes),
     ]
     for name, fn in groups:
         fn()

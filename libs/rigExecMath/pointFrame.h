@@ -28,6 +28,14 @@ enum RigExecPointFrameFlags : uint32_t {
     RigExecPointFrameDegenerate = 1u << 1,  ///< posed frame is singular/collapsed
     RigExecPointFrameReflected  = 1u << 2,  ///< negative-determinant linear part
     RigExecPointFrameAffine     = 1u << 3,  ///< carries shear/nonuniform scale
+    /// This frame is a joint's rest reference AND an earlier step of the
+    /// pose stack wrote it, so it is that step's frame rather than the
+    /// joint's authored rest (spec 4.2). Set only by the evaluator, on the
+    /// computeRestFrame override it pushes into a solver batch, and read only
+    /// by the solver kernels that have a basis of their own to fall back on:
+    /// it is what lets an FK chain compose over a constrained joint while
+    /// staying bit-identical on every rig where no step wrote it.
+    RigExecPointFrameLiveRest   = 1u << 4,
 };
 
 /// The runtime scalar transform value (spec §5.1).

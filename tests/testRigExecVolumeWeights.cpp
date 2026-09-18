@@ -17,6 +17,7 @@
 #include "rigExec/types.h"
 
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/getenv.h"
 #include "pxr/base/tf/pathUtils.h"
 #include "pxr/base/ts/knot.h"
 #include "pxr/base/ts/spline.h"
@@ -25,14 +26,64 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
+#include "pxr/usd/usdGeom/xform.h"
 
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace rigExec;
 
 static int failures = 0;
+
+// Whether this run asks for the BAKED program instead of the CPU oracle.
+//
+// The suite's default is cpuParityMode, which is what it was written for:
+// every expectation below is checked against an independently written CPU
+// resolver as well as against exec. That mode deliberately turns the baked
+// program OFF -- the oracle and the program are alternatives, not peers, and
+// the program shares exec's kernels -- so the whole of this suite's coverage
+// (every shape, both plane bounds, invert, strength, sampleSource, every
+// combine mode, both sample phases) was unreachable from the program.
+//
+// So the same binary is registered a second time with this set, and with
+// RIGEXEC_EVALUATION_MODE=parity and RIGEXEC_BAKE_REQUIRED=1 beside it: the
+// assertions are the same, the rig must bake, and the two paths are compared
+// exactly in every generation. Nothing is given up -- the default
+// registration still runs the oracle over all of it.
+static bool
+BakedPathRequested()
+{
+    static const bool requested =
+        TfGetenvBool("RIGEXEC_TEST_BAKED_PATH", false);
+    return requested;
+}
+
+// The vacuity guard, in whichever mode is running.
+//
+// "The parity harness ran" is what says a case tested a rig that actually
+// built a revision rather than passing because nothing happened. With the
+// oracle off there are no agreements to count, and what says the same thing
+// is the program having been used at all.
+static void
+CheckTheHarnessRan(const char *label, const RigExecRigPose &pose)
+{
+    if (pose.moverGraphParityMismatches != 0) {
+        std::printf("%s: %zu graph/CPU parity MISMATCHES\n", label,
+                    size_t(pose.moverGraphParityMismatches));
+        ++failures;
+    }
+    if (pose.bakedParityMismatches != 0) {
+        std::printf("%s: %zu baked parity mismatch(es)\n", label,
+                    size_t(pose.bakedParityMismatches));
+        ++failures;
+    }
+    if (!BakedPathRequested() && pose.moverGraphParityAgreements == 0) {
+        std::printf("%s: parity harness never ran\n", label);
+        ++failures;
+    }
+}
 
 #define CHECK(cond)                                                        \
     do {                                                                   \
@@ -69,27 +120,49 @@ struct Fixture {
         stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
         joint = stage->DefinePrim(SdfPath("/Asset/Rig/Joints/J"),
                                   TfToken("RigExecJoint"));
-        GfMatrix4d posed(1.0);
-        posed.SetTranslate(translate);
-        joint.CreateAttribute(TfToken("posed:space"),
-                              SdfValueTypeNames->Matrix4d).Set(posed);
+        PlaceAt(joint, translate);
     }
 
     static SdfPath Target() { return SdfPath("/Asset/Geom/M.points"); }
 
-    // Places a volume weight by authoring posed:space directly, the same
-    // way the joint above is posed -- the avar path has its own coverage
-    // and would only add noise here.
+    // Puts \p prim at \p at, through the TRANSLATE AVARS.
+    //
+    // An authored posed:space would say the same thing in one attribute --
+    // it is what this fixture used to do -- and it is the one placement the
+    // baked program declines, because a posed:space is whatever an arbitrary
+    // computation says from the middle of the pose walk and there is no
+    // epoch-constant summary of that. Over an identity rest with no default
+    // and no posed parent, a translation composed from avars is the same
+    // frame to the bit; saying it this way is what lets this suite's
+    // coverage reach both evaluation paths (see BakedPathRequested).
+    static void PlaceAt(const UsdPrim &prim, const GfVec3d &at)
+    {
+        static const char *const names[3] = {"avars:tx", "avars:ty",
+                                             "avars:tz"};
+        for (int k = 0; k < 3; ++k) {
+            prim.CreateAttribute(TfToken(names[k]),
+                                 SdfValueTypeNames->Double).Set(at[k]);
+        }
+    }
+
+    /// Undoes PlaceAt, for the case that places by rest instead.
+    static void ClearPlacement(const UsdPrim &prim)
+    {
+        for (const char *name : {"avars:tx", "avars:ty", "avars:tz"}) {
+            if (const UsdAttribute a = prim.GetAttribute(TfToken(name))) {
+                a.Clear();
+            }
+        }
+    }
+
+    // Places a volume weight the same way the joint above is placed.
     UsdPrim MakeVolume(
         const char *name, const TfToken &type, const GfVec3d &at,
         float falloffMin, float falloffMax)
     {
         UsdPrim v = stage->DefinePrim(
             SdfPath(std::string("/Asset/Rig/Weights/") + name), type);
-        GfMatrix4d posed(1.0);
-        posed.SetTranslate(at);
-        v.CreateAttribute(TfToken("posed:space"),
-                          SdfValueTypeNames->Matrix4d).Set(posed);
+        PlaceAt(v, at);
         v.CreateRelationship(TfToken("rigExec:weightTarget"))
             .SetTargets({Target()});
         v.CreateAttribute(TfToken("inputs:falloffMin"),
@@ -136,7 +209,7 @@ struct Fixture {
     VtVec3fArray Resolve(const char *label)
     {
         RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
-        evaluator.cpuParityMode = true;
+        evaluator.cpuParityMode = !BakedPathRequested();
         std::vector<std::string> errors;
         if (!evaluator.Compile(&errors)) {
             for (const std::string &e : errors) {
@@ -155,16 +228,9 @@ struct Fixture {
             std::printf("%s: diagnostic: %s\n", label, d.c_str());
         }
         // The whole point of the exercise: exec and the CPU oracle must
-        // have computed the same field.
-        if (pose.moverGraphParityMismatches != 0) {
-            std::printf("%s: %zu graph/CPU parity MISMATCHES\n", label,
-                        size_t(pose.moverGraphParityMismatches));
-            ++failures;
-        }
-        if (pose.moverGraphParityAgreements == 0) {
-            std::printf("%s: parity harness never ran\n", label);
-            ++failures;
-        }
+        // have computed the same field -- or, in the baked registration,
+        // exec and the program.
+        CheckTheHarnessRan(label, pose);
         const auto it = pose.movedProperties.find(Target());
         if (it == pose.movedProperties.end()) {
             std::printf("%s: no moved points\n", label);
@@ -209,8 +275,8 @@ TestSphereWeight()
 // A volume placed by rest:space alone, with NOTHING animated.
 //
 // This is the case every other test here avoids, and it is the one that
-// matters most: MakeVolume authors posed:space over an IDENTITY rest, and
-// for that configuration the rest->posed delta happens to equal the
+// matters most: MakeVolume places over an IDENTITY rest, and for that
+// configuration the rest->posed delta happens to equal the
 // desired placement. Author the placement on rest:space instead -- which
 // is how the shipped example places its mid-body volumes -- and the two
 // stop being the same thing.
@@ -229,8 +295,8 @@ TestVolumePlacedByRestSpace()
     UsdPrim v = f.MakeVolume("Sphere", TfToken("RigExecSphereWeight"),
                              GfVec3d(0, 0, 0), 0.0f, 2.0f);
     // Replace the posed placement with a REST placement at Y=5 and leave
-    // posed:space unauthored, so the volume simply sits there.
-    v.GetAttribute(TfToken("posed:space")).Clear();
+    // the volume unposed, so it simply sits there.
+    Fixture::ClearPlacement(v);
     GfMatrix4d rest(1.0);
     rest.SetTranslate(GfVec3d(0, 5, 0));
     v.CreateAttribute(TfToken("rest:space"),
@@ -271,6 +337,49 @@ TestSphereAxisScales()
     const float expected[4] = {1.0f, 0.5f, 0.0f, 0.0f};
     for (size_t i = 0; i < 4; ++i) {
         CHECK(Near(points[i], Moved(f.base[i], expected[i])));
+    }
+}
+
+// The TRANSFORM's scale avars are not part of a volume's placement.
+//
+// A volume weight is a pose provider, so it composes like a joint -- but
+// exec never binds avars:sx/sy/sz for one, and its shape is
+// inputs:scaleX/Y/Z's business alone. The two say opposite things about the
+// same points: a transform scale of 2 in X would HALVE the local distance
+// of a point at X=2 and hand it a weight the rigid placement gives to X=1.
+// So this case authors all three, expects the answers of the case that
+// authors none, and is the only place either path's discard is checked --
+// no shipped rig scales a volume's transform.
+static void
+TestVolumeIgnoresTransformScaleAvars()
+{
+    const VtVec3fArray points{GfVec3f(1, 0, 0), GfVec3f(2, 0, 0),
+                              GfVec3f(3, 0, 0), GfVec3f(0, 1, 0)};
+    // distances 1, 2, 3, 1 over a [0, 2] band -> 0.5, 0, 0, 0.5. Under a
+    // composed sx=2/sy=0.5 they would be 0.75, 0.5, 0.25, 0 instead, so
+    // three of the four points say which placement was used.
+    const float expected[4] = {0.5f, 0.0f, 0.0f, 0.5f};
+    for (const bool scaled : {false, true}) {
+        Fixture f(points, GfVec3d(0, 2, 0));
+        UsdPrim v = f.MakeVolume("Sphere", TfToken("RigExecSphereWeight"),
+                                 GfVec3d(0, 0, 0), 0.0f, 2.0f);
+        if (scaled) {
+            const std::pair<const char *, double> avars[3] = {
+                {"avars:sx", 2.0}, {"avars:sy", 0.5}, {"avars:sz", 3.0}};
+            for (const auto &[name, value] : avars) {
+                v.CreateAttribute(TfToken(name),
+                                  SdfValueTypeNames->Double).Set(value);
+            }
+        }
+        f.MakeMover(SdfPath("/Asset/Rig/Movers/M"), v.GetPath());
+
+        const VtVec3fArray moved =
+            f.Resolve(scaled ? "volume-scale-avars" : "volume-no-scale-avars");
+        CHECK(moved.size() == 4);
+        if (moved.size() != 4) return;
+        for (size_t i = 0; i < 4; ++i) {
+            CHECK(Near(moved[i], Moved(f.base[i], expected[i])));
+        }
     }
 }
 
@@ -411,7 +520,7 @@ TestPlaneBoundsEpochSplit()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = true;
+    evaluator.cpuParityMode = !BakedPathRequested();
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         for (const std::string &e : errors) {
@@ -425,17 +534,10 @@ TestPlaneBoundsEpochSplit()
         const RigExecRigPose pose =
             evaluator.Evaluate(UsdTimeCode::Default());
         CHECK(pose.valid);
-        if (pose.moverGraphParityMismatches != 0) {
-            std::printf("plane-epoch %s: %zu parity MISMATCHES\n", label,
-                        size_t(pose.moverGraphParityMismatches));
-            ++failures;
-        }
-        if (pose.moverGraphParityAgreements == 0) {
-            // Without this the whole case passes vacuously on a rig that
-            // never built a revision at all.
-            std::printf("plane-epoch %s: parity harness never ran\n", label);
-            ++failures;
-        }
+        // Without this the whole case passes vacuously on a rig that
+        // never built a revision at all.
+        CheckTheHarnessRan(
+            (std::string("plane-epoch ") + label).c_str(), pose);
         bool rebuilt = false;
         for (const std::string &d : pose.diagnostics) {
             if (d.find("epoch rebuilt") != std::string::npos) {
@@ -520,7 +622,7 @@ TestPlaneBoundedInvalidExtents()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = true;
+    evaluator.cpuParityMode = !BakedPathRequested();
     std::vector<std::string> errors;
     if (!evaluator.Compile(&errors)) {
         for (const std::string &e : errors) {
@@ -531,17 +633,9 @@ TestPlaneBoundedInvalidExtents()
     }
     const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
     CHECK(pose.valid);
-    if (pose.moverGraphParityMismatches != 0) {
-        std::printf("plane-bad-extent: %zu graph/CPU parity MISMATCHES\n",
-                    size_t(pose.moverGraphParityMismatches));
-        ++failures;
-    }
-    if (pose.moverGraphParityAgreements == 0) {
-        // The rejection has to be the EXTENT, not a rig that never built
-        // a revision: without this the case passes on any failure at all.
-        std::printf("plane-bad-extent: parity harness never ran\n");
-        ++failures;
-    }
+    // The rejection has to be the EXTENT, not a rig that never built a
+    // revision: without this the case passes on any failure at all.
+    CheckTheHarnessRan("plane-bad-extent", pose);
     // Rejected means PASS-THROUGH, not "weight zero" and not "unbounded":
     // the points come out exactly as authored.
     const auto it = pose.movedProperties.find(Fixture::Target());
@@ -882,10 +976,7 @@ TestSamplePhase(bool current)
     // A second joint that lifts everything +5Y first, unweighted.
     UsdPrim lift = f.stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Lift"),
                                        TfToken("RigExecJoint"));
-    GfMatrix4d lifted(1.0);
-    lifted.SetTranslate(GfVec3d(0, 5, 0));
-    lift.CreateAttribute(TfToken("posed:space"),
-                         SdfValueTypeNames->Matrix4d).Set(lifted);
+    Fixture::PlaceAt(lift, GfVec3d(0, 5, 0));
     UsdPrim full = f.MakeStaticWeight(
         "Full", VtFloatArray{1.0f, 1.0f, 1.0f, 1.0f});
 
@@ -947,7 +1038,7 @@ TestVolumeWeightTargetMismatchFailsCompile()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = true;
+    evaluator.cpuParityMode = !BakedPathRequested();
     std::vector<std::string> errors;
     CHECK(!evaluator.Compile(&errors));
     CHECK(!errors.empty());
@@ -980,7 +1071,7 @@ TestCurveWeightRejectsTwoCurves()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = true;
+    evaluator.cpuParityMode = !BakedPathRequested();
     std::vector<std::string> errors;
     CHECK(!evaluator.Compile(&errors));
     CHECK(!errors.empty());
@@ -1034,10 +1125,7 @@ TestCurrentPhaseThroughCombine()
 
     UsdPrim lift = f.stage->DefinePrim(SdfPath("/Asset/Rig/Joints/Lift"),
                                        TfToken("RigExecJoint"));
-    GfMatrix4d lifted(1.0);
-    lifted.SetTranslate(GfVec3d(0, 5, 0));
-    lift.CreateAttribute(TfToken("posed:space"),
-                         SdfValueTypeNames->Matrix4d).Set(lifted);
+    Fixture::PlaceAt(lift, GfVec3d(0, 5, 0));
     UsdPrim full = f.MakeStaticWeight(
         "Full", VtFloatArray{1.0f, 1.0f, 1.0f, 1.0f});
 
@@ -1099,10 +1187,171 @@ TestCombineCycleFailsCompile()
 
     RigExecRigEvaluator evaluator(f.stage, SdfPath("/Asset/Rig"));
 
-    evaluator.cpuParityMode = true;
+    evaluator.cpuParityMode = !BakedPathRequested();
     std::vector<std::string> errors;
     CHECK(!evaluator.Compile(&errors));
     CHECK(!errors.empty());
+}
+
+
+// ---------------------------------------------------------------------------
+// A volume weight object bound to a CONSTRAINT.
+//
+// The reachable shape of it is a GEOMETRY-DOMAIN constraint: a volumetric
+// field needs a point domain (_ValidateWeightObjectDomain refuses one on a
+// transform domain outright, composed inputs included), so the constraint
+// that can bind a sphere is one whose rigExec:moves names a .points
+// attribute. Its envelope is then per POINT and resolves on the Matrix
+// revision the constraint's delta feeds -- a constraint and its revision
+// being the same mover prim -- rather than as the one scalar a
+// transform-domain constraint would resolve.
+//
+// Nothing in examples/ and nothing in this suite reached it, which is why
+// the program refused "volume weight object on constraint" outright and
+// with no parity evidence either way.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct ConstraintEnvelopeFixture {
+    UsdStageRefPtr stage;
+    VtVec3fArray base;
+
+    // \p volumeAt places the sphere through its own avars.
+    //
+    // The sphere is deliberately NOT a constraint target here. Making one is
+    // a rig the program refuses ("constraint target is both exec-seeded and
+    // xform-derived"), for a reason that belongs to the dynamic path rather
+    // than to the bake: see TestAConstrainedVolumeWeightFallsBack in
+    // testRigExecBakedMode.
+    ConstraintEnvelopeFixture(const GfVec3d &volumeAt,
+                              const char *samplePhase)
+    {
+        stage = UsdStage::CreateInMemory();
+        stage->DefinePrim(SdfPath("/Asset"), TfToken("Scope"));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+
+        base = VtVec3fArray{GfVec3f(0, 0, 0), GfVec3f(0, 4, 0),
+                            GfVec3f(0, 8, 0)};
+        const UsdPrim mesh =
+            stage->DefinePrim(SdfPath("/Asset/Geom/M"), TfToken("Points"));
+        mesh.CreateAttribute(TfToken("points"),
+                             SdfValueTypeNames->Point3fArray).Set(base);
+
+        // Where the geometry constraint pulls the point set to. A position
+        // constraint rather than an aim: a translation shows the resolved
+        // field directly in the answer, which is what the assertions read.
+        const UsdGeomXform source =
+            UsdGeomXform::Define(stage, SdfPath("/Asset/PullTo"));
+        source.MakeMatrixXform().Set(
+            GfMatrix4d(1.0).SetTranslate(GfVec3d(6, 0, 0)));
+
+        // The sphere, painted over the three points and ramped across them,
+        // so the envelope is strictly inside (0, 1) on at least one of them
+        // and the placement is visible in the answer.
+        const UsdPrim sphere = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Weights/Sphere"),
+            TfToken("RigExecSphereWeight"));
+        Fixture::PlaceAt(sphere, volumeAt);
+        sphere.CreateRelationship(TfToken("rigExec:weightTarget"))
+            .SetTargets({SdfPath("/Asset/Geom/M.points")});
+        sphere.CreateAttribute(TfToken("inputs:falloffMin"),
+                               SdfValueTypeNames->Float).Set(0.0f);
+        sphere.CreateAttribute(TfToken("inputs:falloffMax"),
+                               SdfValueTypeNames->Float).Set(8.0f);
+        sphere.CreateAttribute(TfToken("rigExec:falloffProfile"),
+                               SdfValueTypeNames->Token)
+            .Set(TfToken("linear"));
+        sphere.CreateAttribute(TfToken("rigExec:samplePhase"),
+                               SdfValueTypeNames->Token)
+            .Set(TfToken(samplePhase));
+
+        // The geometry-domain constraint, and the weight object on it.
+        const UsdPrim constraint = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Movers/Sweep/Pull"),
+            TfToken("RigExecPositionConstraint"));
+        constraint.ApplyAPI(TfToken("RigExecMoverAPI"));
+        constraint.CreateRelationship(TfToken("rigExec:moves"))
+            .SetTargets({SdfPath("/Asset/Geom/M.points")});
+        constraint.CreateRelationship(TfToken("rigExec:sources"))
+            .SetTargets({source.GetPath()});
+        constraint.CreateRelationship(TfToken("rigExec:weightObject"))
+            .SetTargets({sphere.GetPath()});
+    }
+
+    VtVec3fArray Resolve(const std::string &label)
+    {
+        RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+        evaluator.cpuParityMode = !BakedPathRequested();
+        std::vector<std::string> errors;
+        if (!evaluator.Compile(&errors)) {
+            for (const std::string &e : errors) {
+                std::printf("%s: compile error: %s\n", label.c_str(),
+                            e.c_str());
+            }
+            ++failures;
+            return {};
+        }
+        const RigExecRigPose pose = evaluator.Evaluate(UsdTimeCode::Default());
+        if (!pose.valid) {
+            for (const std::string &d : pose.diagnostics) {
+                std::printf("%s: diagnostic: %s\n", label.c_str(), d.c_str());
+            }
+            std::printf("%s: pose invalid\n", label.c_str());
+            ++failures;
+            return {};
+        }
+        CheckTheHarnessRan(label.c_str(), pose);
+        const auto it =
+            pose.movedProperties.find(SdfPath("/Asset/Geom/M.points"));
+        if (it == pose.movedProperties.end()) {
+            std::printf("%s: no moved points\n", label.c_str());
+            ++failures;
+            return {};
+        }
+        return it->second.Get<VtVec3fArray>();
+    }
+};
+
+// How many of \p points the constraint moved, and how many it left alone.
+std::pair<size_t, size_t>
+SplitByMovement(const VtVec3fArray &points, const VtVec3fArray &base)
+{
+    size_t moved = 0, held = 0;
+    for (size_t i = 0; i < points.size() && i < base.size(); ++i) {
+        (Near(points[i], base[i]) ? held : moved) += 1;
+    }
+    return {moved, held};
+}
+
+}  // namespace
+
+static void
+TestVolumeWeightOnAConstraint(const char *samplePhase)
+{
+    const std::string what =
+        std::string("volume envelope on a geometry constraint, ") +
+        samplePhase;
+    ConstraintEnvelopeFixture low(GfVec3d(0, 0, 0), samplePhase);
+    ConstraintEnvelopeFixture high(GfVec3d(0, 8, 0), samplePhase);
+    const VtVec3fArray lowPoints = low.Resolve(what + ", low");
+    const VtVec3fArray highPoints = high.Resolve(what + ", high");
+    if (lowPoints.size() != low.base.size() ||
+        highPoints.size() != high.base.size()) {
+        return;
+    }
+    // The envelope is partial: the constraint moved some points and not all
+    // of them. An all-or-nothing field would agree between the two rigs
+    // whatever the placement and prove nothing about either.
+    const auto [moved, held] = SplitByMovement(lowPoints, low.base);
+    CHECK(moved > 0);
+    CHECK(held > 0);
+    // And the sphere's own placement reaches the field: the two rigs differ
+    // in nothing else.
+    bool differs = false;
+    for (size_t i = 0; i < lowPoints.size(); ++i) {
+        differs = differs || !Near(lowPoints[i], highPoints[i]);
+    }
+    CHECK(differs);
 }
 
 static std::string
@@ -1130,6 +1379,7 @@ main(int argc, char **argv)
     TestSphereWeight();
     TestVolumePlacedByRestSpace();
     TestSphereAxisScales();
+    TestVolumeIgnoresTransformScaleAvars();
     TestPlaneWeight();
     TestPlaneBounded();
     TestPlaneBoundsEpochSplit();
@@ -1148,6 +1398,8 @@ main(int argc, char **argv)
     TestSamplePhase(/* current */ true);
     TestVolumeWeightTargetMismatchFailsCompile();
     TestCurveWeightRejectsTwoCurves();
+    TestVolumeWeightOnAConstraint("reference");
+    TestVolumeWeightOnAConstraint("current");
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

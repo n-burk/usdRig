@@ -22,6 +22,10 @@ using namespace rigExec;
 
 static int failures = 0;
 
+// std::acos(-1) rather than M_PI: the latter is not a standard C++ macro
+// (it needs _USE_MATH_DEFINES on MSVC and a non-strict mode on glibc).
+static const double kPi = std::acos(-1);
+
 #define CHECK(cond)                                                        \
     do {                                                                   \
         if (!(cond)) {                                                     \
@@ -260,7 +264,7 @@ TestOrthogonalReconstruction()
 
     // Twist rotates transverse axes about aim.
     args.policy = RigExecFramePolicy::Rigid;
-    args.twist = M_PI / 2;
+    args.twist = kPi / 2;
     const RigExecPointFrame t =
         RigExecReconstructFrame(kUnitRest, kUnitRest, args);
     CHECK(Near(t.Y() - t.Origin(), GfVec3d(0, 0, 1), 1e-9));
@@ -503,7 +507,7 @@ TestTwistSideScaleInteraction()
     // (spec §5.2): a mirrored side landmark stays mirrored under twist.
     RigExecFrameReconstructionArgs args;
     args.policy = RigExecFramePolicy::Orthogonal;
-    args.twist = M_PI / 2;
+    args.twist = kPi / 2;
 
     std::array<GfVec3d, 4> mirrored = {
         GfVec3d(0, 0, 0), GfVec3d(1, 0, 0), GfVec3d(0, 1, 0),
@@ -723,7 +727,7 @@ TestFbxRotationConstraintKernel()
     // From 170 degrees the shortest deltas are +20 and -20.  Their 1:3
     // weighted mean is -10; the global +20 offset makes +10, and global
     // weight 0.5 lands at 175 degrees rather than crossing the long arc.
-    const double radians = 175.0 * M_PI / 180.0;
+    const double radians = 175.0 * kPi / 180.0;
     const GfVec3d outputX =
         (output.X() - output.Origin()).GetNormalized();
     CHECK(Near(outputX, GfVec3d(std::cos(radians), std::sin(radians), 0),
@@ -866,7 +870,7 @@ TestFbxParentConstraintKernel()
     CHECK(Near(after.translation, GfVec3d(9.75, 4, 21.75), 1e-8));
     CHECK(Near(after.scale, GfVec3d(4.5, 3, 6.5), 1e-8));
     CHECK(Near(after.shear, before.shear, 1e-8));
-    const double radians = 12.5 * M_PI / 180.0;
+    const double radians = 12.5 * kPi / 180.0;
     CHECK(Near(after.rotation.Transform(GfVec3d(1, 0, 0)),
                GfVec3d(std::cos(radians), std::sin(radians), 0), 1e-8));
 
@@ -1416,6 +1420,141 @@ TestSimdParity()
     CHECK(SameVec3fBits(endpointOut[1], GfVec3f(1.0f, -2.0f, 3.0f)));
 }
 
+// Linear blend skinning (RigExecSkinMover): the scalar reference against
+// analytic expectations, then the SSE kernel against the scalar one.
+static void
+TestLinearBlendSkin()
+{
+    const GfVec3d p(1, 2, 3);
+    GfMatrix4d t1(1.0), t2(1.0);
+    t1.SetTranslate(GfVec3d(10, 0, 0));
+    t2.SetTranslate(GfVec3d(0, 10, 0));
+    const GfMatrix4d rt = GfMatrix4d(GfRotation(GfVec3d(0, 0, 1), 90.0),
+                                     GfVec3d(1, 2, 3));
+    const std::vector<GfMatrix4d> transforms = {t1, t2, rt};
+
+    auto layoutFor = [&](const std::vector<int> &indices,
+                         const std::vector<float> &weights, size_t elementSize) {
+        RigExecSkinLayout layout;
+        layout.transforms = transforms.data();
+        layout.transformCount = transforms.size();
+        layout.indices = indices.data();
+        layout.weights = weights.data();
+        layout.indexCount = indices.size();
+        layout.elementSize = elementSize;
+        layout.pointCount = indices.size() / elementSize;
+        return layout;
+    };
+
+    // Single influence at weight 1: exactly the transform, no blending.
+    {
+        const std::vector<int> indices = {2};
+        const std::vector<float> weights = {1.0f};
+        const RigExecSkinLayout layout = layoutFor(indices, weights, 1);
+        CHECK(layout.Validate());
+        CHECK(Near(RigExecApplyLinearBlendSkin(p, layout, 0),
+                   rt.TransformAffine(p)));
+        CHECK(Near(RigExecApplyLinearBlendSkin(p, layout, 0),
+                   RigExecApplyWeightedMatrix(p, rt, 1.0)));
+    }
+    // Two translations at 0.5 / 0.5: the analytic midpoint.
+    {
+        const std::vector<int> indices = {0, 1};
+        const std::vector<float> weights = {0.5f, 0.5f};
+        const RigExecSkinLayout layout = layoutFor(indices, weights, 2);
+        CHECK(layout.Validate());
+        CHECK(Near(RigExecApplyLinearBlendSkin(p, layout, 0),
+                   p + GfVec3d(5, 5, 0)));
+    }
+    // Weights summing below one: the complement stays with the rest point,
+    // so 0.25 / 0.25 moves a quarter of each way and keeps half of p --
+    // NOT the bare sum 0.25 T1 p + 0.25 T2 p, which would halve p itself.
+    {
+        const std::vector<int> indices = {0, 1};
+        const std::vector<float> weights = {0.25f, 0.25f};
+        const RigExecSkinLayout layout = layoutFor(indices, weights, 2);
+        CHECK(Near(RigExecApplyLinearBlendSkin(p, layout, 0),
+                   p + GfVec3d(2.5, 2.5, 0)));
+    }
+    // All-zero weights leave the point where it was.
+    {
+        const std::vector<int> indices = {0, 1};
+        const std::vector<float> weights = {0.0f, 0.0f};
+        const RigExecSkinLayout layout = layoutFor(indices, weights, 2);
+        CHECK(RigExecApplyLinearBlendSkin(p, layout, 0) == p);
+    }
+    // Shape validation: range, sign, finiteness, and length agreement.
+    {
+        std::string error;
+        const std::vector<int> bad = {3};
+        const std::vector<float> one = {1.0f};
+        CHECK(!layoutFor(bad, one, 1).Validate(&error));
+        CHECK(!error.empty());
+        const std::vector<int> ok = {0};
+        const std::vector<float> negative = {-0.5f};
+        CHECK(!layoutFor(ok, negative, 1).Validate());
+        const std::vector<float> nan = {
+            std::numeric_limits<float>::quiet_NaN()};
+        CHECK(!layoutFor(ok, nan, 1).Validate());
+        RigExecSkinLayout short_ = layoutFor(ok, one, 1);
+        short_.pointCount = 2;
+        CHECK(!short_.Validate());
+        RigExecSkinLayout zeroSlots = layoutFor(ok, one, 1);
+        zeroSlots.elementSize = 0;
+        CHECK(!zeroSlots.Validate());
+    }
+
+    // SIMD parity against the scalar reference over a mixed layout of
+    // rotations, shears and scales (spec 13.4: within 1e-6 x extent).
+    {
+        const GfMatrix4d shear(1, 0, 0, 0, 0.3, 1, 0, 0, 0, 0.2, 1, 0, 0, 0, 0, 1);
+        std::vector<GfMatrix4d> many = {
+            GfMatrix4d(1.0).SetScale(GfVec3d(1.5, 0.8, 2.0)) * shear *
+                GfMatrix4d(GfRotation(GfVec3d(1, 1, 0), 33.0), GfVec3d(2, -1, 4)),
+            GfMatrix4d(GfRotation(GfVec3d(0, 1, 0), -70.0), GfVec3d(-3, 5, 1)),
+            GfMatrix4d(1.0).SetTranslate(GfVec3d(7, 7, 7)),
+            GfMatrix4d(GfRotation(GfVec3d(1, 0, 0), 120.0), GfVec3d(0, 0, 0))};
+        std::vector<GfVec3f> in;
+        std::vector<int> indices;
+        std::vector<float> weights;
+        const size_t elementSize = 3;
+        for (int i = 0; i < 257; ++i) {
+            in.push_back(GfVec3f(
+                float(i % 17) - 8.0f, float(i % 5) * 2.0f, float(i % 11)));
+            for (size_t k = 0; k < elementSize; ++k) {
+                indices.push_back(int((i + k) % many.size()));
+                // Sums vary above and below one on purpose.
+                weights.push_back(float((i * 7 + k * 13) % 50) / 100.0f);
+            }
+        }
+        RigExecSkinLayout layout;
+        layout.transforms = many.data();
+        layout.transformCount = many.size();
+        layout.indices = indices.data();
+        layout.weights = weights.data();
+        layout.indexCount = indices.size();
+        layout.elementSize = elementSize;
+        layout.pointCount = in.size();
+        CHECK(layout.Validate());
+        std::vector<GfVec3f> simd(in.size());
+        RigExecApplyLinearBlendSkinSimd(in.data(), simd.data(), layout);
+        std::vector<GfVec3f> scalar(in.size());
+        RigExecApplyLinearBlendSkin(in.data(), scalar.data(), layout);
+        const double scale = 20.0;  // point-set extent
+        for (size_t i = 0; i < in.size(); ++i) {
+            CHECK((GfVec3d(simd[i]) - GfVec3d(scalar[i])).GetLength() <=
+                  1e-6 * scale);
+        }
+        // In-place aliasing is part of the contract for both kernels.
+        std::vector<GfVec3f> aliased = in;
+        RigExecApplyLinearBlendSkinSimd(aliased.data(), aliased.data(), layout);
+        CHECK(aliased == simd);
+        aliased = in;
+        RigExecApplyLinearBlendSkin(aliased.data(), aliased.data(), layout);
+        CHECK(aliased == scalar);
+    }
+}
+
 static void
 TestWeightedMatrix()
 {
@@ -1579,6 +1718,7 @@ main()
     TestSurfaceOffsets();
     TestSimdParity();
     TestWeightedMatrix();
+    TestLinearBlendSkin();
     TestPropertyMath();
     TestAvarScaleNormalization();
 

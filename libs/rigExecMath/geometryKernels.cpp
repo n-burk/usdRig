@@ -670,3 +670,274 @@ RigExecApplyRibbonTransport(
 }
 
 }  // namespace rigExec
+
+namespace rigExec {
+
+bool
+RigExecNurbsCurve::IsValid() const
+{
+    if (!points || !knots || order < 2) {
+        return false;
+    }
+    const size_t n = points->size();
+    return order <= 16 && n >= size_t(order) &&
+           knots->size() == n + size_t(order) &&
+           (*knots)[size_t(order) - 1] < (*knots)[n];
+}
+
+double
+RigExecNurbsCurve::DomainStart() const
+{
+    return (*knots)[size_t(order) - 1];
+}
+
+double
+RigExecNurbsCurve::DomainEnd() const
+{
+    return (*knots)[points->size()];
+}
+
+GfVec3f
+RigExecNurbsCurve::Evaluate(double u) const
+{
+    const std::vector<double> &k = *knots;
+    const std::vector<GfVec3f> &cv = *points;
+    const int p = order - 1;
+    const size_t n = cv.size();
+    u = std::min(std::max(u, DomainStart()), DomainEnd());
+    // The span: largest s in [p, n-1] with k[s] <= u < k[s+1]; the domain
+    // end belongs to the last non-empty span.
+    size_t s = size_t(p);
+    while (s + 1 < n && k[s + 1] <= u) {
+        ++s;
+    }
+    // de Boor over the order control points of that span.
+    GfVec3d d[16];
+    const int count = std::min(order, 16);
+    for (int j = 0; j < count; ++j) {
+        d[j] = GfVec3d(cv[s - size_t(p) + size_t(j)]);
+    }
+    for (int r = 1; r <= p && r < 16; ++r) {
+        for (int j = p; j >= r; --j) {
+            const size_t i = s - size_t(p) + size_t(j);
+            const double denom = k[i + size_t(p) + 1 - size_t(r)] - k[i];
+            const double a = denom > 0.0 ? (u - k[i]) / denom : 0.0;
+            d[j] = d[j - 1] * (1.0 - a) + d[j] * a;
+        }
+    }
+    return GfVec3f(d[p]);
+}
+
+bool
+RigExecBuildWireBasis(const GfVec2f *bindCoords, size_t bindCount,
+                      size_t meshPointCount, const std::vector<int> &indices,
+                      int order, const std::vector<double> &knots,
+                      size_t controlPointCount, double dropoffDistance,
+                      RigExecWireBasis *basis)
+{
+    const size_t n = controlPointCount;
+    if (!basis || !bindCoords || order < 1 || order > 16 || n < size_t(order) ||
+        knots.size() != n + size_t(order) ||
+        !(knots[size_t(order - 1)] < knots[n]) ||
+        (bindCount != meshPointCount && bindCount != indices.size())) {
+        return false;
+    }
+    const bool parallel = bindCount == indices.size();
+    const int p = order - 1;
+    const double u0 = knots[size_t(p)];
+    const double u1 = knots[n];
+    basis->byControlPoint.assign(n, {});
+    double left[16], right[16], N[16];
+    for (size_t k = 0; k < indices.size(); ++k) {
+        const int index = indices[k];
+        if (index < 0 || size_t(index) >= meshPointCount) {
+            return false;
+        }
+        const GfVec2f &bind = bindCoords[parallel ? k : size_t(index)];
+        double f = 1.0;
+        if (dropoffDistance > 0.0) {
+            const double s =
+                std::min(std::max(double(bind[1]) / dropoffDistance, 0.0), 1.0);
+            f = 1.0 - s * s * (3.0 - 2.0 * s);
+        }
+        if (f <= 0.0) {
+            continue;
+        }
+        const double u = std::min(std::max(double(bind[0]), u0), u1);
+        // The span exactly as RigExecNurbsCurve::Evaluate finds it.
+        size_t span = size_t(p);
+        while (span + 1 < n && knots[span + 1] <= u) {
+            ++span;
+        }
+        // The order nonzero basis functions at u (Piegl and Tiller, A2.2).
+        N[0] = 1.0;
+        for (int j = 1; j <= p; ++j) {
+            left[j] = u - knots[span + 1 - size_t(j)];
+            right[j] = knots[span + size_t(j)] - u;
+            double saved = 0.0;
+            for (int r = 0; r < j; ++r) {
+                const double denom = right[r + 1] + left[j - r];
+                const double temp = denom != 0.0 ? N[r] / denom : 0.0;
+                N[r] = saved + right[r + 1] * temp;
+                saved = left[j - r] * temp;
+            }
+            N[j] = saved;
+        }
+        for (int r = 0; r <= p; ++r) {
+            const double c = f * N[r];
+            if (c != 0.0) {
+                basis->byControlPoint[span - size_t(p) + size_t(r)].emplace_back(
+                    uint32_t(k), float(c));
+            }
+        }
+    }
+    return true;
+}
+
+bool
+RigExecApplyWireBasis(std::vector<GfVec3f> *points,
+                      const RigExecWireBasis &basis,
+                      const std::vector<int> &indices,
+                      const std::vector<float> &weights,
+                      const std::vector<GfVec3f> &restControlPoints,
+                      const std::vector<GfVec3f> &posedControlPoints)
+{
+    const size_t n = basis.byControlPoint.size();
+    if (!points || restControlPoints.size() != n ||
+        posedControlPoints.size() != n || indices.size() != weights.size()) {
+        return false;
+    }
+    GfVec3f *data = points->data();
+    for (size_t j = 0; j < n; ++j) {
+        const GfVec3f delta = posedControlPoints[j] - restControlPoints[j];
+        if (delta == GfVec3f(0.0f)) {
+            continue;  // a control point at rest moves nothing
+        }
+        for (const auto &[k, coefficient] : basis.byControlPoint[j]) {
+            data[size_t(indices[k])] += delta * (coefficient * weights[k]);
+        }
+    }
+    return true;
+}
+
+std::vector<GfVec2f>
+RigExecBindWire(const std::vector<GfVec3f> &points,
+                const RigExecNurbsCurve &restCurve)
+{
+    std::vector<GfVec2f> out(points.size(), GfVec2f(0.0f, 0.0f));
+    if (!restCurve.IsValid()) {
+        return out;
+    }
+    const double u0 = restCurve.DomainStart();
+    const double u1 = restCurve.DomainEnd();
+    const size_t spans = std::max<size_t>(
+        1, restCurve.points->size() - size_t(restCurve.order) + 1);
+    const size_t samples = spans * 32;
+    std::vector<GfVec3f> table(samples + 1);
+    for (size_t i = 0; i <= samples; ++i) {
+        table[i] = restCurve.Evaluate(u0 + (u1 - u0) * double(i) / samples);
+    }
+    const double step = (u1 - u0) / double(samples);
+    for (size_t pi = 0; pi < points.size(); ++pi) {
+        const GfVec3f &p = points[pi];
+        size_t best = 0;
+        float bestSq = std::numeric_limits<float>::max();
+        for (size_t i = 0; i <= samples; ++i) {
+            const float dSq = (table[i] - p).GetLengthSq();
+            if (dSq < bestSq) {
+                bestSq = dSq;
+                best = i;
+            }
+        }
+        // Ternary refinement inside the neighbouring samples.
+        double lo = std::max(u0, u0 + step * (double(best) - 1.0));
+        double hi = std::min(u1, u0 + step * (double(best) + 1.0));
+        for (int it = 0; it < 40; ++it) {
+            const double m1 = lo + (hi - lo) / 3.0;
+            const double m2 = hi - (hi - lo) / 3.0;
+            if ((restCurve.Evaluate(m1) - p).GetLengthSq() <
+                (restCurve.Evaluate(m2) - p).GetLengthSq()) {
+                hi = m2;
+            } else {
+                lo = m1;
+            }
+        }
+        const double u = 0.5 * (lo + hi);
+        out[pi] = GfVec2f(float(u),
+                          float((restCurve.Evaluate(u) - p).GetLength()));
+    }
+    return out;
+}
+
+bool
+RigExecApplyWire(std::vector<GfVec3f> *points,
+                 const RigExecNurbsCurve &restCurve,
+                 const RigExecNurbsCurve &posedCurve,
+                 const GfVec2f *bindCoords, size_t bindCount,
+                 double dropoffDistance, size_t begin, size_t end)
+{
+    if (!points || !bindCoords || !restCurve.IsValid() ||
+        !posedCurve.IsValid() ||
+        restCurve.order != posedCurve.order ||
+        restCurve.points->size() != posedCurve.points->size() ||
+        *restCurve.knots != *posedCurve.knots ||
+        bindCount != points->size()) {
+        return false;
+    }
+    end = std::min(end, points->size());
+    for (size_t i = begin; i < end; ++i) {
+        const double u = bindCoords[i][0];
+        const double d = bindCoords[i][1];
+        double f = 1.0;
+        if (dropoffDistance > 0.0) {
+            const double s = std::min(std::max(d / dropoffDistance, 0.0), 1.0);
+            f = 1.0 - s * s * (3.0 - 2.0 * s);
+        }
+        if (f <= 0.0) {
+            continue;
+        }
+        const GfVec3f delta = posedCurve.Evaluate(u) - restCurve.Evaluate(u);
+        (*points)[i] += delta * float(f);
+    }
+    return true;
+}
+
+bool
+RigExecApplyWireSparse(std::vector<GfVec3f> *points,
+                       const RigExecNurbsCurve &restCurve,
+                       const RigExecNurbsCurve &posedCurve,
+                       const GfVec2f *bindCoords, size_t bindCount,
+                       double dropoffDistance,
+                       const std::vector<int> &indices,
+                       const std::vector<float> &weights)
+{
+    if (!points || !bindCoords || !restCurve.IsValid() ||
+        !posedCurve.IsValid() ||
+        restCurve.order != posedCurve.order ||
+        restCurve.points->size() != posedCurve.points->size() ||
+        *restCurve.knots != *posedCurve.knots ||
+        (bindCount != points->size() && bindCount != indices.size()) ||
+        indices.size() != weights.size()) {
+        return false;
+    }
+    const bool parallel = bindCount == indices.size();
+    for (size_t k = 0; k < indices.size(); ++k) {
+        const size_t i = size_t(indices[k]);
+        const GfVec2f &bind = bindCoords[parallel ? k : i];
+        const double u = bind[0];
+        const double d = bind[1];
+        double f = weights[k];
+        if (dropoffDistance > 0.0) {
+            const double s = std::min(std::max(d / dropoffDistance, 0.0), 1.0);
+            f *= 1.0 - s * s * (3.0 - 2.0 * s);
+        }
+        if (f <= 0.0) {
+            continue;
+        }
+        const GfVec3f delta = posedCurve.Evaluate(u) - restCurve.Evaluate(u);
+        (*points)[i] += delta * float(f);
+    }
+    return true;
+}
+
+}  // namespace rigExec

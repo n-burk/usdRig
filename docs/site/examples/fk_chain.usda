@@ -1,0 +1,225 @@
+#usda 1.0
+(
+    """
+    Docs example: RigExecFkChain.
+
+    Three nested controls curl a six-quad strip. C2 is a namespace child of
+    C1 and C3 of C2, each carrying the same local rest offset as its joint,
+    so every ring sits on its joint and rides its parent; the chain reads
+    them as `parentRelative`. One matrix mover per joint skins the ten-quad
+    strip through three linear weight ramps, so each joint's influence hands
+    over to the next across a two-unit span and both bends draw as arcs.
+    """
+    defaultPrim = "FkAsset"
+    endTimeCode = 1012
+    metersPerUnit = 0.01
+    startTimeCode = 1001
+    timeCodesPerSecond = 24
+    upAxis = "Y"
+)
+
+def Xform "FkAsset"
+{
+    def RigExecRoot "Rig"
+    {
+        uniform token rigExec:partition = "FkAsset"
+
+        def Scope "Controls"
+        {
+            def RigExecControl "C1" (
+                prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+            )
+            {
+                double avars:rz = 0
+                double avars:rz.spline = {
+                    1001: 0; pre (0, 0); post linear,
+                    1006: 20; post linear,
+                    1012: 0; post linear,
+                }
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+
+                def RigExecControl "C2" (
+                    prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    double avars:rz = 0
+                    double avars:rz.spline = {
+                        1001: 0; pre (0, 0); post linear,
+                        1006: 35; post linear,
+                        1012: 0; post linear,
+                    }
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+
+                    def RigExecControl "C3" (
+                        prepend apiSchemas = ["RigExecControlAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        double avars:rz = 0
+                        double avars:rz.spline = {
+                            1001: 0; pre (0, 0); post linear,
+                            1006: 35; post linear,
+                            1012: 0; post linear,
+                        }
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/control.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Solvers"
+        {
+            def RigExecFkChain "Chain" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                rel rigExec:controls = [
+                    </FkAsset/Rig/Controls/C1>,
+                    </FkAsset/Rig/Controls/C1/C2>,
+                    </FkAsset/Rig/Controls/C1/C2/C3>,
+                ]
+                uniform token rigExec:controlSpace = "parentRelative"
+                rel rigExec:joints = [
+                    </FkAsset/Rig/Joints/Seg1>,
+                    </FkAsset/Rig/Joints/Seg1/Seg2>,
+                    </FkAsset/Rig/Joints/Seg1/Seg2/Seg3>,
+                ]
+                uniform asset ui:nodegraph:node:icon = @../../icons/fk_chain.png@
+            }
+        }
+
+        def Scope "Joints"
+        {
+            def RigExecJoint "Seg1" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                def RigExecJoint "Seg2" (
+                    prepend apiSchemas = ["NodeGraphNodeAPI"]
+                )
+                {
+                    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                    uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+
+                    def RigExecJoint "Seg3" (
+                        prepend apiSchemas = ["NodeGraphNodeAPI"]
+                    )
+                    {
+                        matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (2, 0, 0, 1) )
+                        uniform asset ui:nodegraph:node:icon = @../../icons/joint.png@
+                    }
+                }
+            }
+        }
+
+        def Scope "Weights"
+        {
+            def RigExecStaticWeight "Seg1W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [1, 1, 1, 0.75, 0.5, 0.25, 0, 0, 0, 0, 0, 1, 1, 1, 0.75, 0.5, 0.25, 0, 0, 0, 0, 0]
+                rel rigExec:weightTarget = </FkAsset/Geom/Strip.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Seg2W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0.25, 0.5, 0.5, 0.5, 0.25, 0, 0, 0, 0, 0, 0, 0.25, 0.5, 0.5, 0.5, 0.25, 0, 0, 0]
+                rel rigExec:weightTarget = </FkAsset/Geom/Strip.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+
+            def RigExecStaticWeight "Seg3W" (
+                prepend apiSchemas = ["NodeGraphNodeAPI"]
+            )
+            {
+                uniform float rigExec:defaultWeight = 0
+                uniform token rigExec:rangePolicy = "strict"
+                uniform token rigExec:representation = "dense"
+                uniform float[] rigExec:values = [0, 0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1, 1, 0, 0, 0, 0, 0, 0.25, 0.5, 0.75, 1, 1, 1]
+                rel rigExec:weightTarget = </FkAsset/Geom/Strip.points>
+                uniform asset ui:nodegraph:node:icon = @../../icons/static_weight.png@
+            }
+        }
+
+        def Scope "Movers"
+        {
+            def Scope "Geometry"
+            {
+                def RigExecMatrixMover "Seg1Skin" (
+                    prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                )
+                {
+                    rel rigExec:moves = </FkAsset/Geom/Strip.points>
+                    rel rigExec:transform = </FkAsset/Rig/Joints/Seg1>
+                    uniform token rigExec:transformReadPhase = "final"
+                    rel rigExec:weightObject = </FkAsset/Rig/Weights/Seg1W>
+                    uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+
+                    def RigExecMatrixMover "Seg2Skin" (
+                        prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                    )
+                    {
+                        rel rigExec:moves = </FkAsset/Geom/Strip.points>
+                        rel rigExec:transform = </FkAsset/Rig/Joints/Seg1/Seg2>
+                        uniform token rigExec:transformReadPhase = "final"
+                        rel rigExec:weightObject = </FkAsset/Rig/Weights/Seg2W>
+                        uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+
+                        def RigExecMatrixMover "Seg3Skin" (
+                            prepend apiSchemas = ["RigExecMoverAPI", "NodeGraphNodeAPI"]
+                        )
+                        {
+                            rel rigExec:moves = </FkAsset/Geom/Strip.points>
+                            rel rigExec:transform = </FkAsset/Rig/Joints/Seg1/Seg2/Seg3>
+                            uniform token rigExec:transformReadPhase = "final"
+                            rel rigExec:weightObject = </FkAsset/Rig/Weights/Seg3W>
+                            uniform asset ui:nodegraph:node:icon = @../../icons/matrix_mover.png@
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "Geom"
+    {
+        def Mesh "Strip"
+        {
+            color3f[] primvars:displayColor = [(0.65, 0.4, 1)]
+            float3[] extent = [(0, -0.5, 0), (5, 0.5, 0)]
+            int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 12, 11, 1, 2, 13, 12, 2, 3, 14, 13, 3, 4, 15, 14, 4, 5, 16, 15, 5, 6, 17, 16, 6, 7, 18, 17, 7, 8, 19, 18, 8, 9, 20, 19, 9, 10, 21, 20]
+            normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+                interpolation = "vertex"
+            )
+            point3f[] points = [(0, -0.5, 0), (0.5, -0.5, 0), (1, -0.5, 0), (1.5, -0.5, 0), (2, -0.5, 0), (2.5, -0.5, 0), (3, -0.5, 0), (3.5, -0.5, 0), (4, -0.5, 0), (4.5, -0.5, 0), (5, -0.5, 0), (0, 0.5, 0), (0.5, 0.5, 0), (1, 0.5, 0), (1.5, 0.5, 0), (2, 0.5, 0), (2.5, 0.5, 0), (3, 0.5, 0), (3.5, 0.5, 0), (4, 0.5, 0), (4.5, 0.5, 0), (5, 0.5, 0)]
+            uniform token subdivisionScheme = "none"
+        }
+    }
+
+    def Camera "MainCam"
+    {
+        float2 clippingRange = (0.1463, 123.7)
+        float focalLength = 35
+        float horizontalAperture = 20.95
+        float verticalAperture = 11.79
+        double3 xformOp:rotateXYZ = (-20, 32, 0)
+        double3 xformOp:translate = (9.505, 6.067, 11.49)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+}

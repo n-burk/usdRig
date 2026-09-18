@@ -25,13 +25,17 @@
 
 #include "rigExec/rigEvaluator.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecMath/rbf.h"
+#include "rigExecMath/geometryKernels.h"
 #include "rigExecRigging/rigBuilder.h"
 #include "rigExecRigging/schemaAuthoring.h"
 
 #include <array>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace py = pybind11;
@@ -526,6 +530,47 @@ _PythonToDependencyPaths(
 // Rig: the evaluator wrapper.
 // ---------------------------------------------------------------------------
 
+const char *
+_ModeName(rigExec::RigExecEvaluationMode mode)
+{
+    switch (mode) {
+    case rigExec::RigExecEvaluationMode::Baked: return "baked";
+    case rigExec::RigExecEvaluationMode::BakedWithParityCheck: return "parity";
+    case rigExec::RigExecEvaluationMode::Dynamic: break;
+    }
+    return "dynamic";
+}
+
+// Who chose the mode. Spelled as the thing a reader would go and look at:
+// the attribute by its property name, the variable by its own name.
+const char *
+_ModeSourceName(rigExec::RigExecEvaluationModeSource source)
+{
+    switch (source) {
+    case rigExec::RigExecEvaluationModeSource::Explicit: return "explicit";
+    case rigExec::RigExecEvaluationModeSource::Environment:
+        return "environment";
+    case rigExec::RigExecEvaluationModeSource::Attribute: return "attribute";
+    case rigExec::RigExecEvaluationModeSource::Default: break;
+    }
+    return "default";
+}
+
+rigExec::RigExecEvaluationMode
+_ParseMode(const std::string &name)
+{
+    if (name == "baked") return rigExec::RigExecEvaluationMode::Baked;
+    if (name == "parity") {
+        return rigExec::RigExecEvaluationMode::BakedWithParityCheck;
+    }
+    if (name != "dynamic") {
+        throw py::value_error(
+            "evaluation_mode must be 'dynamic', 'baked' or 'parity' (got '" +
+            name + "')");
+    }
+    return rigExec::RigExecEvaluationMode::Dynamic;
+}
+
 struct _Rig {
     UsdStageRefPtr stage;  ///< keeps the stage alive for the rig's lifetime
     SdfPath rigPath;
@@ -539,9 +584,29 @@ struct _Rig {
         evaluator.reset(new rigExec::RigExecRigEvaluator(stage, rigPath));
     }
 
+    // Compile and Evaluate run WITHOUT the GIL, and that is load-bearing.
+    //
+    // Both dispatch work to TBB and wait for it. The first task to ask
+    // OpenExec for a computation definition makes Exec_DefinitionRegistry
+    // load the plugin that defines it, and TfDlopen finishes a load by
+    // importing the library's Python module, which takes the GIL
+    // (TfScriptModuleLoader::LoadModules -> TfPyLock). When that first
+    // task lands on a worker thread while this thread holds the GIL and
+    // spins in WorkDispatcher::Wait for the worker, neither can move --
+    // one in five runs of the evaluator tests hung exactly there, and
+    // PXR_WORK_THREAD_LIMIT=1 made it go away because the task then ran
+    // on this thread. usdview never saw it: ctypes drops the GIL around
+    // every foreign call. Nothing the evaluator does needs the GIL held,
+    // so the two entry points that dispatch work give it up for the
+    // duration; the exception below is thrown with it held again.
     void Compile() {
         std::vector<std::string> errors;
-        if (!evaluator->Compile(&errors)) {
+        bool ok = false;
+        {
+            py::gil_scoped_release release;
+            ok = evaluator->Compile(&errors);
+        }
+        if (!ok) {
             std::string msg = "rig compile failed:";
             for (const auto &e : errors) {
                 msg += "\n  - " + e;
@@ -552,9 +617,183 @@ struct _Rig {
 
     rigExec::RigExecRigPose Evaluate(double timeFrames) const {
         UsdTimeCode t = timeFrames < 0 ? UsdTimeCode::Default() : UsdTimeCode(timeFrames);
+        py::gil_scoped_release release;
         return evaluator->Evaluate(t);
     }
 };
+
+// ---------------------------------------------------------------------------
+// RBF pose interpolators (libs/rigExecMath/rbf.h).
+//
+// Enough surface for the converter to stop importing a Python
+// solver: a fitter that hands back a solved TABLE as a plain dict,
+// and an evaluator that takes that same dict back. The dict is exactly the
+// record a converted rig writes out, so it round-trips through JSON and
+// through the schema without a second shape to keep in step.
+//
+// Free functions rather than a class on purpose. The solve is a build-time
+// step whose product is data; a live object would invite the per-frame path
+// to reach back through Python, which is the thing this port exists to stop.
+// ---------------------------------------------------------------------------
+
+std::vector<double>
+_SeqToDoubles(const py::object &obj)
+{
+    std::vector<double> out;
+    if (obj.is_none()) {
+        return out;
+    }
+    for (const py::handle &item : py::iterable(obj)) {
+        out.push_back(item.cast<double>());
+    }
+    return out;
+}
+
+GfVec3d
+_SeqToVec3d(const py::object &obj)
+{
+    const std::vector<double> values = _SeqToDoubles(obj);
+    return GfVec3d(values.size() > 0 ? values[0] : 0.0,
+                   values.size() > 1 ? values[1] : 0.0,
+                   values.size() > 2 ? values[2] : 0.0);
+}
+
+std::vector<GfVec3d>
+_SeqToVec3ds(const py::object &obj)
+{
+    std::vector<GfVec3d> out;
+    if (obj.is_none()) {
+        return out;
+    }
+    for (const py::handle &item : py::iterable(obj)) {
+        out.push_back(_SeqToVec3d(py::reinterpret_borrow<py::object>(item)));
+    }
+    return out;
+}
+
+/// Fill the parts of a desc that the fitter and the evaluator share.
+rigExec::RigExecRbfSolverDesc
+_RbfDescFrom(const py::object &poses, const py::object &translations,
+             const std::string &kernel, const py::object &poseTypes,
+             const py::object &twistAxis, double regularization,
+             bool enableRotation, bool enableTranslation)
+{
+    rigExec::RigExecRbfSolverDesc desc;
+    desc.poses = _SeqToVec3ds(poses);
+    desc.translations = _SeqToVec3ds(translations);
+    // Anything that is not "linear" is the gaussian, which is the Python's
+    // own fallback for an unknown kernel name (rbf.py:117-120).
+    desc.kernel = kernel == "linear" ? rigExec::RigExecRbfKernel::Linear
+                                     : rigExec::RigExecRbfKernel::Gaussian;
+    for (double value : _SeqToDoubles(poseTypes)) {
+        const int kind = int(value);
+        desc.poseTypes.push_back(
+            kind == 1   ? rigExec::RigExecRbfPoseType::Swing
+            : kind == 2 ? rigExec::RigExecRbfPoseType::Twist
+                        : rigExec::RigExecRbfPoseType::Whole);
+    }
+    if (!twistAxis.is_none()) {
+        desc.twistAxis = _SeqToVec3d(twistAxis);
+    }
+    desc.regularization = regularization;
+    desc.enableRotation = enableRotation;
+    desc.enableTranslation = enableTranslation;
+    return desc;
+}
+
+/// The solved interpolator as the dict the converter writes out.
+py::dict
+_RbfTable(const rigExec::RigExecRbfSolver &solver,
+          const rigExec::RigExecRbfSolverDesc &desc,
+          const std::string &kernel)
+{
+    py::list poses, translations, weights;
+    for (const GfVec3d &p : solver.GetPoses()) {
+        poses.append(py::make_tuple(p[0], p[1], p[2]));
+    }
+    for (const GfVec3d &t : solver.GetTranslations()) {
+        translations.append(py::make_tuple(t[0], t[1], t[2]));
+    }
+    for (const std::vector<double> &row : solver.GetWeights()) {
+        weights.append(py::cast(row));
+    }
+    py::list poseTypes;
+    for (rigExec::RigExecRbfPoseType kind : desc.poseTypes) {
+        poseTypes.append(int(kind));
+    }
+    py::dict table;
+    table["poses"] = poses;
+    table["translations"] = translations;
+    table["kernel"] = kernel;
+    table["radius"] = solver.GetRadius();
+    table["radii"] = py::cast(solver.GetRadii());
+    table["translation_radius"] = solver.GetTranslationRadius();
+    table["translation_radii"] = py::cast(solver.GetTranslationRadii());
+    table["pose_types"] = poseTypes;
+    table["twist_axis"] = py::make_tuple(desc.twistAxis[0], desc.twistAxis[1],
+                                         desc.twistAxis[2]);
+    table["regularization"] = desc.regularization;
+    table["normalize"] = solver.GetNormalize();
+    table["enable_rotation"] = solver.GetEnableRotation();
+    table["enable_translation"] = solver.GetEnableTranslation();
+    table["degenerate"] = solver.Degenerate();
+    table["singular"] = solver.GetRegularizedSingular();
+    table["weights"] = weights;
+    return table;
+}
+
+/// Rebuild a solved interpolator from such a dict.
+rigExec::RigExecRbfSolver
+_RbfSolverFromTable(const py::dict &table)
+{
+    auto get = [&table](const char *key) -> py::object {
+        return table.contains(key)
+                   ? py::reinterpret_borrow<py::object>(table[key])
+                   : py::none();
+    };
+    const py::object kernel = get("kernel");
+    rigExec::RigExecRbfSolverDesc desc = _RbfDescFrom(
+        get("poses"), get("translations"),
+        kernel.is_none() ? std::string("gaussian")
+                         : kernel.cast<std::string>(),
+        get("pose_types"), get("twist_axis"),
+        get("regularization").is_none()
+            ? 0.0
+            : get("regularization").cast<double>(),
+        get("enable_rotation").is_none()
+            ? true
+            : get("enable_rotation").cast<bool>(),
+        get("enable_translation").is_none()
+            ? false
+            : get("enable_translation").cast<bool>());
+    // The shared widths go in through the desc so the constructor does not
+    // measure its own; the per-pose ones and the inverted matrix are adopted
+    // wholesale, because a shipped table's widths may carry a painted
+    // poseFalloff that no falloff vector would reproduce.
+    desc.radius = get("radius").is_none() ? 0.0
+                                          : get("radius").cast<double>();
+    desc.translationRadius = get("translation_radius").is_none()
+                                 ? 0.0
+                                 : get("translation_radius").cast<double>();
+    desc.normalize = get("normalize").is_none()
+                         ? true
+                         : get("normalize").cast<bool>();
+
+    std::vector<std::vector<double>> weights;
+    if (!get("weights").is_none()) {
+        for (const py::handle &row : py::iterable(get("weights"))) {
+            weights.push_back(
+                _SeqToDoubles(py::reinterpret_borrow<py::object>(row)));
+        }
+    }
+    rigExec::RigExecRbfSolver solver(desc);
+    solver.SetSolvedTable(_SeqToDoubles(get("radii")),
+                          _SeqToDoubles(get("translation_radii")), weights);
+    if (weights.empty()) {
+        solver.Solve();
+    }
+    return solver;
+}
 
 }  // namespace
 
@@ -618,6 +857,135 @@ PYBIND11_MODULE(_rigexec, m) {
         .def_property("cpu_parity_mode",
             [](_Rig &r) { return r.evaluator->cpuParityMode; },
             [](_Rig &r, bool v) { r.evaluator->cpuParityMode = v; })
+        .def_property("evaluation_mode",
+            [](_Rig &r) { return _ModeName(r.evaluator->GetEvaluationMode()); },
+            [](_Rig &r, std::string v) {
+                r.evaluator->SetEvaluationMode(_ParseMode(v));
+            },
+            "'dynamic' (OpenExec plus the pose walk), 'baked' (the flattened\n"
+            "epoch when the rig allows it, dynamic otherwise), or 'parity'\n"
+            "(both, compared with exact equality; see\n"
+            "Pose.baked_parity_mismatches). Baked is a request: setting it\n"
+            "can never change an answer, only how fast it arrives.\n"
+            "Setting it also takes the decision away from the rig's own\n"
+            "rigExec:baked for good; see evaluation_mode_source.")
+        .def_property("publish_weight_fields",
+            [](_Rig &r) { return r.evaluator->GetPublishWeightFields(); },
+            [](_Rig &r, bool v) { r.evaluator->SetPublishWeightFields(v); },
+            "Whether each evaluation resolves the per-point weight fields\n"
+            "Pose.weight_field reads. On by default; the viewer turns it off\n"
+            "until a weight overlay is shown.")
+        .def_property_readonly("evaluation_mode_source",
+            [](_Rig &r) {
+                return _ModeSourceName(r.evaluator->GetEvaluationModeSource());
+            },
+            "Who chose evaluation_mode: 'explicit' (this property was set),\n"
+            "'environment' (a non-empty RIGEXEC_EVALUATION_MODE),\n"
+            "'attribute' (the rig's own uniform bool rigExec:baked) or\n"
+            "'default' (nobody asked). That is also the precedence, highest\n"
+            "first -- an interactive host leaves the mode alone so a rig\n"
+            "authored rigExec:baked = true opens through the program.")
+        .def_property_readonly("baked_cluster_count", [](const _Rig &r) {
+                return r.evaluator->GetBakedClusterCount();
+            },
+            "How many clusters the standing baked program holds; zero with\n"
+            "no program.")
+        .def_property_readonly("baked_clusters_run_last_generation",
+            [](const _Rig &r) {
+                return r.evaluator->GetBakedClustersRunLastGeneration();
+            },
+            "How many of those clusters the last generation ran. Cone\n"
+            "re-execution is invisible on a published pose -- a frame that\n"
+            "re-ran everything publishes the same numbers as one that\n"
+            "skipped the right half -- so this is what makes a skipped\n"
+            "cone observable, with baked_cluster_count beside it.")
+        .def_property_readonly("skin_topology_cache_size", [](const _Rig &r) {
+                return r.evaluator->GetSkinTopologyCacheSize();
+            },
+            "How many skin layouts the epoch's topology cache holds answers\n"
+            "for. Dropping and re-reading a layout publishes the same\n"
+            "deformation as keeping it, so only the cache's occupancy says\n"
+            "whether an interactive override paid for the re-read.")
+        .def("set_interactive_overrides",
+             [](_Rig &r, const std::vector<std::tuple<std::string, std::string,
+                                                     py::object>> &entries) {
+                 // The shape the manipulation path actually pushes: an
+                 // ATTRIBUTE override per dragged avar, with no computation
+                 // named (rigExecImaging/registry.cpp _ResolvePreviewSample).
+                 std::vector<rigExec::RigExecValueOverride> overrides;
+                 overrides.reserve(entries.size());
+                 for (const auto &entry : entries) {
+                     const py::object &value = std::get<2>(entry);
+                     if (!py::isinstance<py::float_>(value) &&
+                         !py::isinstance<py::int_>(value)) {
+                         throw py::type_error(
+                             "interactive override values must be numeric");
+                     }
+                     // Typed like the attribute, as the viewport's preview
+                     // channel types it: a float dial overridden with a
+                     // double VtValue is a different value to every reader
+                     // that asks for a float.
+                     const SdfPath primPath(std::get<0>(entry));
+                     const TfToken attrName(std::get<1>(entry));
+                     VtValue typed(value.cast<double>());
+                     if (const UsdStageRefPtr &s =
+                             r.evaluator->GetEvaluationStage()) {
+                         const UsdAttribute a = s->GetAttributeAtPath(
+                             primPath.AppendProperty(attrName));
+                         if (a && a.GetTypeName() == SdfValueTypeNames->Float) {
+                             typed = VtValue(static_cast<float>(value.cast<double>()));
+                         } else if (a && a.GetTypeName() ==
+                                             SdfValueTypeNames->Int) {
+                             typed = VtValue(static_cast<int>(value.cast<double>()));
+                         }
+                     }
+                     overrides.push_back(rigExec::RigExecValueOverride{
+                         primPath, TfToken(), attrName, typed});
+                 }
+                 r.evaluator->SetInteractiveOverrides(std::move(overrides));
+             },
+             py::arg("overrides"),
+             "Uncommitted manipulation values as (prim_path, attribute, value)\ntriples -- the route a gizmo drag takes, with NOTHING authored.\nSetting them does not evaluate.")
+        .def("clear_interactive_overrides", [](_Rig &r) {
+                 r.evaluator->ClearInteractiveOverrides();
+             },
+             "Drops every interactive override; the next evaluate is the\nauthored rig again.")
+        .def_property_readonly("has_interactive_overrides", [](const _Rig &r) {
+                 return r.evaluator->HasInteractiveOverrides();
+             })
+        .def("solver_batch_levels", [](const _Rig &r) {
+                 std::map<std::string, size_t> out;
+                 for (const auto &entry : r.evaluator->GetSolverBatchLevels()) {
+                     out[_PathStr(entry.first)] = entry.second;
+                 }
+                 return out;
+             },
+             "Aggregate solver path -> its dependency level in the compiled\npose schedule. Diagnostic: evaluation order comes from the\ninterleaved pose steps, not from this map.")
+        .def("chain_levels", [](const _Rig &r) {
+                 std::vector<py::dict> out;
+                 for (size_t i = 0; i < r.evaluator->GetChainLevelCount(); ++i) {
+                     py::dict d;
+                     std::vector<std::string> targets;
+                     for (const SdfPath &t :
+                          r.evaluator->GetChainLevelTargets(i)) {
+                         targets.push_back(_PathStr(t));
+                     }
+                     d["targets"] = targets;
+                     d["parallel"] = r.evaluator->IsChainLevelParallel(i);
+                     out.push_back(d);
+                 }
+                 return out;
+             },
+             "The compiled geometry-chain levels, in walk order.")
+        .def("is_bakeable", [](const _Rig &r) {
+            return r.evaluator->IsBakeable(nullptr);
+        }, "Whether the compiled epoch can be expressed as a baked program.")
+        .def("bakeability_reasons", [](const _Rig &r) {
+            std::vector<std::string> reasons;
+            r.evaluator->IsBakeable(&reasons);
+            return reasons;
+        }, "One reason per feature that stops the rig from baking; empty\n"
+           "when is_bakeable() is true.")
         .def("binding_epoch_digest", [](const _Rig &r) {
             return r.evaluator->GetBindingEpochDigest();
         })
@@ -636,7 +1004,60 @@ PYBIND11_MODULE(_rigexec, m) {
                 out.push_back(d);
             }
             return out;
-        }, "The composed movers in execution order (reverse-sibling\npost-order: bottom-to-top stack walk, spec section 4.2).");
+        }, "The composed movers in execution order (reverse-sibling\npost-order: bottom-to-top stack walk, spec section 4.2).")
+        .def_property("profiling_enabled",
+            [](_Rig &r) { return r.evaluator->GetProfilingEnabled(); },
+            [](_Rig &r, bool v) { r.evaluator->SetProfilingEnabled(v); },
+            "When set, compile and evaluate record scoped phase timings.")
+        .def_property("solver_guides_enabled",
+            [](_Rig &r) { return r.evaluator->GetSolverGuidesEnabled(); },
+            [](_Rig &r, bool v) { r.evaluator->SetSolverGuidesEnabled(v); },
+            "When set (the default), evaluate fills pose solver guide frames. "
+            "Clear it when nothing reads solver_frames to skip the guide request.")
+        .def("clear_profile", [](_Rig &r) { r.evaluator->ClearProfile(); },
+             "Drops every recorded profile event.")
+        .def("write_profile_trace", [](_Rig &r, std::string path) {
+                 std::string error;
+                 if (!r.evaluator->WriteProfileTrace(path, &error)) {
+                     throw py::value_error(error);
+                 }
+             },
+             py::arg("path"),
+             "Writes the accumulated phase timings as Chrome Trace Event JSON.")
+        .def("profile_summary", [](const _Rig &r) {
+            std::vector<py::dict> out;
+            for (const rigExec::RigExecProfileSummaryRow &row :
+                 r.evaluator->GetProfiler().Summarize()) {
+                py::dict d;
+                d["name"] = row.name;
+                d["category"] = row.category;
+                d["count"] = row.count;
+                d["total_us"] = row.totalUs;
+                d["max_us"] = row.maxUs;
+                out.push_back(d);
+            }
+            return out;
+        }, "Per-phase timing totals, sorted by total cost descending.")
+        .def("profile_events", [](const _Rig &r) {
+            // WHICH THREAD RAN WHAT, which the summary aggregates away and
+            // is the only direct evidence that a parallel region actually
+            // ran in parallel rather than merely being allowed to. The
+            // Chrome trace carries it too, but reading a trace file is not
+            // something a report can do in line.
+            std::vector<py::dict> out;
+            for (const rigExec::RigExecProfileEvent &event :
+                 r.evaluator->GetProfiler().GetEvents()) {
+                py::dict d;
+                d["name"] = event.name;
+                d["category"] = event.category;
+                d["start_us"] = event.startUs;
+                d["duration_us"] = event.durationUs;
+                d["thread"] = event.threadIndex;
+                out.push_back(d);
+            }
+            return out;
+        }, "Every recorded scope in completion order, with the index of the\n"
+           "thread that ran it. Use profile_summary for totals.");
 
     // ---- Pose ---------------------------------------------------------------
 
@@ -651,6 +1072,8 @@ PYBIND11_MODULE(_rigexec, m) {
         })
         .def_property_readonly("mover_graph_parity_mismatches",
             [](const rigExec::RigExecRigPose &p) { return p.moverGraphParityMismatches; })
+        .def_property_readonly("baked_parity_mismatches",
+            [](const rigExec::RigExecRigPose &p) { return p.bakedParityMismatches; })
         .def_readonly("mover_graph_revisions_created",
             &rigExec::RigExecRigPose::moverGraphRevisionsCreated)
         .def_readonly("mover_graph_revisions_executed",
@@ -979,7 +1402,22 @@ PYBIND11_MODULE(_rigexec, m) {
                                 const py::iterable &controls) {
             h.SetControls(_PythonToDependencyPaths(
                 controls, h.GetStage(), TfToken("RigExecControl")));
-        }, py::arg("paths"));
+        }, py::arg("paths"))
+        .def("set_control_space", [](rigExec::RigExecFkChainHandle &h, std::string v) { h.SetControlSpace(TfToken(v)); }, py::arg("space"),
+             "'world' (sibling controls; the solver composes the chain) or "
+             "'parentRelative' (controls nested one under the next already "
+             "travel with their parent; the solver takes each delta as-is). "
+             "Same joints either way.")
+        .def("set_start_frame", [](rigExec::RigExecFkChainHandle &h,
+                                   py::object p) {
+            h.SetStartFrame(_PythonToDependencyPath(p, h.GetStage()));
+        }, py::arg("path"),
+             "The joint or control the chain HANGS FROM (rigExec:startFrame). "
+             "Every element is composed onto that provider's rest-to-pose "
+             "delta, so the chain rides it -- in whatever poses the provider, "
+             "including another solver. Unauthored, or None/empty to clear, "
+             "keeps the historical absolute solve, where a chain whose joints "
+             "sit under a solver-posed joint simply does not follow it.");
 
     py::class_<rigExec::RigExecTwoBoneIkHandle, rigExec::RigExecSolverHandle>(m, "TwoBoneIk")
         .def("set_root_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {
@@ -1050,6 +1488,32 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_driver_curve_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetDriverCurveReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_surface_read_phase", [](rigExec::RigExecRibbonHandle &h, std::string v) { h.SetSurfaceReadPhase(TfToken(v)); }, py::arg("phase"))
         .def("set_joint_elements", [](rigExec::RigExecRibbonHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
+
+    py::class_<rigExec::RigExecSplineIkHandle, rigExec::RigExecSolverHandle>(m, "SplineIk",
+        "Control-driven spline IK: root/mid/end controls shape a degree-2 "
+        "B-spline and the ordered joint chain is laid along it by arc length.")
+        .def("set_root_control", [](rigExec::RigExecSplineIkHandle &h, py::object p) {
+            h.SetRootControl(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecControl"), false));
+        }, py::arg("path"))
+        .def("set_mid_control", [](rigExec::RigExecSplineIkHandle &h, py::object p) {
+            h.SetMidControl(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecControl"), false));
+        }, py::arg("path"))
+        .def("set_end_control", [](rigExec::RigExecSplineIkHandle &h, py::object p) {
+            h.SetEndControl(_PythonToDependencyPath(p, h.GetStage(), TfToken("RigExecControl"), false));
+        }, py::arg("path"))
+        .def("set_volume_weights", [](rigExec::RigExecSplineIkHandle &h, std::vector<float> w) { h.SetVolumeWeights(w); }, py::arg("weights"),
+             "Per-joint squash/stretch weights parallel to the joints; empty means no thinning.")
+        .def("set_rest_length", [](rigExec::RigExecSplineIkHandle &h, std::string v) { h.SetRestLength(TfToken(v)); }, py::arg("mode"),
+             "'curve' (ratio == 1 at rest) or 'chain' (chain spans the curve exactly).")
+        .def("set_preserve_volume", &rigExec::RigExecSplineIkHandle::SetPreserveVolume, py::arg("amount"))
+        .def("set_mid_follow_weight", &rigExec::RigExecSplineIkHandle::SetMidFollowWeight, py::arg("weight"))
+        .def("set_roll", &rigExec::RigExecSplineIkHandle::SetRoll, py::arg("degrees"))
+        .def("set_twist", &rigExec::RigExecSplineIkHandle::SetTwist, py::arg("degrees"))
+        .def("set_min_length_ratio", &rigExec::RigExecSplineIkHandle::SetMinLengthRatio, py::arg("ratio"),
+             "Length floor as a fraction of the rest root->end chord (inputs:minLengthRatio); 0 = off.")
+        .def("set_root_tangent", [](rigExec::RigExecSplineIkHandle &h, std::string v) { h.SetRootTangent(TfToken(v)); }, py::arg("mode"),
+             "'rigid' carries cv1 with the root control; 'aim' turns it onto the chord to the (floored) end (rigExec:rootTangent).")
+        .def("set_joint_elements", [](rigExec::RigExecSplineIkHandle &h, std::vector<int> e) { h.SetJointElements(e); }, py::arg("elements"));
 
     // Constraints.
     py::class_<rigExec::RigExecConstraintHandle, rigExec::RigExecMoverHandle>(m, "Constraint")
@@ -1252,13 +1716,115 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("set_target_points", [](rigExec::RigExecBlendSampleHandle &h, py::object p) {
             h.SetTargetPoints(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false));
         }, py::arg("path"))
+        .def("set_blend_shape", [](rigExec::RigExecBlendSampleHandle &h, py::object p) {
+            h.SetBlendShape(_PythonToDependencyPath(p, h.GetStage(), TfToken("BlendShape"), false));
+        }, py::arg("path"),
+           "Point this sample at a UsdSkelBlendShape whose offsets (and\n"
+           "pointIndices, when non-empty) ARE its deltas. The sparse\n"
+           "alternative to set_target_points, and mutually exclusive\n"
+           "with it.")
         .def("set_read_phase", [](rigExec::RigExecBlendSampleHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
     py::class_<rigExec::RigExecBlendInputHandle, RigExecHandleBase>(m, "BlendInput")
         .def("set_weight", &rigExec::RigExecBlendInputHandle::SetWeight, py::arg("weight"))
+        .def("connect_weight", [](rigExec::RigExecBlendInputHandle &h, py::object p) {
+            h.ConnectWeight(_PythonToPath(p, true));
+        }, py::arg("output"),
+           "Drive inputs:weight from a Pose's outputs:weight instead of an\n"
+           "authored number. Takes the property path pose.weight_output()\n"
+           "returns; None removes the connection.")
         .def("add_sample", [](rigExec::RigExecBlendInputHandle &h, std::string name, float activation) {
             return h.AddSample(name, activation);
         }, py::arg("name"), py::arg("activation") = 1.0f);
+
+    // Pose interpolators (the conventional poseInterpolator; the maths is
+    // libs/rigExecMath/rbf.h). Authoring only: the solved matrix is not
+    // stored, because it is a function of the poses, the radii, the kernel
+    // and the regularization, every one of which is authored.
+    // "InterpolatorPose" and not "Pose": the module already binds Pose for
+    // an evaluated rig pose, and pybind answers a duplicate type name by
+    // refusing to initialize the module at all.
+    py::class_<rigExec::RigExecPoseHandle, RigExecHandleBase>(
+        m, "InterpolatorPose")
+        .def("set_pose_type", [](rigExec::RigExecPoseHandle &h, std::string v) {
+            h.SetPoseType(TfToken(v));
+        }, py::arg("pose_type"),
+           "swing | twist | whole -- WHICH PART of the driver's rotation this\n"
+           "pose is measured against. poseType, and a property of the\n"
+           "pose rather than the interpolator: a neck that has twisted has\n"
+           "not bent, and its bend shapes should stay at zero.")
+        .def("set_rotation", [](rigExec::RigExecPoseHandle &h,
+                                std::array<double, 4> q) {
+            // (real, imaginary), the order GfQuatf takes -- NOT the conventional tool's
+            // [x, y, z, w], which the converter reorders on the way in.
+            h.SetRotation(GfQuatf(float(q[0]),
+                                  GfVec3f(float(q[1]), float(q[2]),
+                                          float(q[3]))));
+        }, py::arg("quaternion"),
+           "The driver's local rotation in this pose as (real, i, j, k),\n"
+           "REBASED with the neutral taken out.")
+        .def("set_translation", [](rigExec::RigExecPoseHandle &h,
+                                   std::array<double, 3> t) {
+            h.SetTranslation(GfVec3f(float(t[0]), float(t[1]), float(t[2])));
+        }, py::arg("translation"))
+        .def("set_radii", &rigExec::RigExecPoseHandle::SetRadii,
+             py::arg("rotation_radius"), py::arg("translation_radius") = 0.0f,
+             "The pose's own falloff widths: radians and centimetres. Zero\n"
+             "means measure one from the poses.")
+        .def("set_falloff", &rigExec::RigExecPoseHandle::SetFalloff,
+             py::arg("falloff"))
+        .def("set_pose_controls", [](rigExec::RigExecPoseHandle &h,
+                                     py::object properties,
+                                     std::vector<double> values) {
+            std::vector<SdfPath> paths;
+            for (const py::handle &item : py::iterable(properties)) {
+                paths.push_back(_PythonToPath(item, false));
+            }
+            h.SetPoseControls(paths, values);
+        }, py::arg("properties"), py::arg("values"),
+           "The exact control PROPERTIES that put the rig into this pose and\n"
+           "their values, in OUR units and from OUR zero (degrees,\n"
+           "centimetres). Parallel arrays; authoring data only.")
+        .def("set_enabled", &rigExec::RigExecPoseHandle::SetEnabled,
+             py::arg("enabled"))
+        .def("weight_output", [](const rigExec::RigExecPoseHandle &h) {
+            return h.GetWeightOutput().GetString();
+        }, "The outputs:weight property path, which is what a blend input's\n"
+           "inputs:weight connects to.");
+
+    py::class_<rigExec::RigExecPoseInterpolatorHandle, RigExecHandleBase>(
+        m, "PoseInterpolator")
+        .def("set_driver", [](rigExec::RigExecPoseInterpolatorHandle &h,
+                              py::object p) {
+            h.SetDriver(_PythonToDependencyPath(p, h.GetStage(), TfToken(),
+                                                false));
+        }, py::arg("driver"))
+        .def("set_kernel", [](rigExec::RigExecPoseInterpolatorHandle &h,
+                              std::string v) {
+            h.SetKernel(TfToken(v));
+        }, py::arg("kernel"), "gaussian | linear (interpolation).")
+        .def("set_channels", &rigExec::RigExecPoseInterpolatorHandle::SetChannels,
+             py::arg("enable_rotation"), py::arg("enable_translation"))
+        .def("set_allow_negative_weights",
+             &rigExec::RigExecPoseInterpolatorHandle::SetAllowNegativeWeights,
+             py::arg("allow"))
+        .def("set_normalize",
+             &rigExec::RigExecPoseInterpolatorHandle::SetNormalize,
+             py::arg("normalize"))
+        .def("set_regularization",
+             &rigExec::RigExecPoseInterpolatorHandle::SetRegularization,
+             py::arg("regularization"))
+        .def("set_twist_axis", [](rigExec::RigExecPoseInterpolatorHandle &h,
+                                  std::string v) {
+            h.SetTwistAxis(TfToken(v));
+        }, py::arg("axis"), "X | Y | Z, in the driver's own frame.")
+        .def("set_enabled",
+             &rigExec::RigExecPoseInterpolatorHandle::SetEnabled,
+             py::arg("enabled"))
+        .def("add_pose", [](rigExec::RigExecPoseInterpolatorHandle &h,
+                            std::string name) {
+            return h.AddPose(name);
+        }, py::arg("name"));
 
     py::class_<rigExec::RigExecCurvenetAdjustmentHandle, rigExec::RigExecControlHandle>(m, "CurvenetAdjustment")
         .def("set_curvenet", [](rigExec::RigExecCurvenetAdjustmentHandle &h, py::object p) {
@@ -1295,6 +1861,23 @@ PYBIND11_MODULE(_rigexec, m) {
                 TfToken(property), phase);
         }, py::arg("property_name"), py::arg("phase"))
         .def("set_transform_read_phase", [](rigExec::RigExecMatrixMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
+
+    py::class_<rigExec::RigExecSkinMoverHandle, rigExec::RigExecMoverHandle>(m, "SkinMover",
+        "Multi-influence skinning in one pass over an ordered influence list\n"
+        "(UsdSkel's jointIndices / jointWeights layout).")
+        .def("set_influences", [](rigExec::RigExecSkinMoverHandle &h, py::iterable providers) {
+            std::vector<SdfPath> paths;
+            for (const auto &p : providers) paths.push_back(_PythonToDependencyPath(
+                py::reinterpret_borrow<py::object>(p), h.GetStage(), TfToken(), false));
+            h.SetInfluences(paths);
+        }, py::arg("providers"))
+        .def("set_joint_influences", [](rigExec::RigExecSkinMoverHandle &h,
+                                         std::vector<int> indices,
+                                         std::vector<float> weights, int elementSize) {
+            h.SetJointInfluences(indices, weights, elementSize);
+        }, py::arg("joint_indices"), py::arg("joint_weights"), py::arg("element_size"))
+        .def("set_skinning_method", [](rigExec::RigExecSkinMoverHandle &h, std::string v) { h.SetSkinningMethod(TfToken(v)); }, py::arg("method"))
+        .def("set_transform_read_phase", [](rigExec::RigExecSkinMoverHandle &h, std::string v) { h.SetReadPhase(TfToken(v)); }, py::arg("phase"));
 
     py::class_<rigExec::RigExecLatticeMoverHandle, rigExec::RigExecMoverHandle>(m, "LatticeMover")
         .def("set_cage", [](rigExec::RigExecLatticeMoverHandle &h, py::object p) { h.SetCage(_PythonToDependencyPath(p, h.GetStage(), TfToken(), false)); }, py::arg("path"))
@@ -1411,6 +1994,19 @@ PYBIND11_MODULE(_rigexec, m) {
                 _PythonToDependencyPath(weightObject, c.GetStage()),
                 _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
         }, py::arg("name"), py::arg("transform_provider"),
+           py::arg("weight_object") = py::none(),
+           py::arg("target") = py::none(), py::arg("read_phase") = "base")
+        .def("add_skin_mover", [](rigExec::RigExecMoverChain &c, std::string name,
+                                   py::iterable influences, py::object weightObject,
+                                   py::object target, std::string readPhase) {
+            std::vector<SdfPath> paths;
+            for (const auto &p : influences) paths.push_back(_PythonToDependencyPath(
+                py::reinterpret_borrow<py::object>(p), c.GetStage(), TfToken(), false));
+            return c.AddSkinMover(
+                name, paths,
+                _PythonToDependencyPath(weightObject, c.GetStage()),
+                _PythonToDependencyPath(target, c.GetStage()), TfToken(readPhase));
+        }, py::arg("name"), py::arg("influences"),
            py::arg("weight_object") = py::none(),
            py::arg("target") = py::none(), py::arg("read_phase") = "base")
         .def("add_lattice_mover", [](rigExec::RigExecMoverChain &c, std::string name,
@@ -1632,9 +2228,26 @@ PYBIND11_MODULE(_rigexec, m) {
         .def_property_readonly("root_path", [](const rigExec::RigExecRigBuilder &b) { return _PathStr(b.GetRootPath()); })
 
         // Transform providers.
-        .def("add_control", [](rigExec::RigExecRigBuilder &b, std::string name, std::vector<double> restSpace) {
-            return b.AddControl(name, restSpace.empty() ? GfMatrix4d() : _VecToMat4(restSpace));
-        }, py::arg("name"), py::arg("rest_space") = py::list())
+        .def("add_control", [](rigExec::RigExecRigBuilder &b, std::string name,
+                                std::vector<double> restSpace,
+                                const py::object &parentObject) {
+            rigExec::RigExecControlHandle parent;
+            const rigExec::RigExecControlHandle *parentPtr = nullptr;
+            if (!parentObject.is_none()) {
+                parent = rigExec::RigExecControlHandle(
+                    b.GetStage(), _PythonToDependencyPath(
+                        parentObject, b.GetStage(),
+                        TfToken("RigExecControl"), false));
+                parentPtr = &parent;
+            }
+            return b.AddControl(
+                name, restSpace.empty() ? GfMatrix4d() : _VecToMat4(restSpace),
+                parentPtr);
+        }, py::arg("name"), py::arg("rest_space") = py::list(),
+           py::arg("parent") = py::none(),
+           "Create <rig>/Controls/<name>, or nest it under `parent` (another "
+           "control), in which case rest_space is relative to that parent's "
+           "rest and the control travels with it.")
         .def("add_joint", [](rigExec::RigExecRigBuilder &b, std::string name,
                               std::vector<double> restSpace,
                               const py::object &parentObject) {
@@ -1723,6 +2336,27 @@ PYBIND11_MODULE(_rigexec, m) {
                 sampleCount);
         }, py::arg("name"), py::arg("driver_curve"),
            py::arg("sample_count") = 5)
+        .def("add_spline_ik", [](rigExec::RigExecRigBuilder &b,
+                                   std::string name, py::object rootControl,
+                                   py::object midControl, py::object endControl,
+                                   const py::object &joints) {
+            auto handle = b.AddSplineIk(
+                name,
+                _PythonToDependencyPath(rootControl, b.GetStage(),
+                    TfToken("RigExecControl"), false),
+                _PythonToDependencyPath(midControl, b.GetStage(),
+                    TfToken("RigExecControl"), false),
+                _PythonToDependencyPath(endControl, b.GetStage(),
+                    TfToken("RigExecControl"), false));
+            if (!joints.is_none()) {
+                handle.SetJoints(_PythonToDependencyPaths(
+                    joints, b.GetStage(), TfToken("RigExecJoint")));
+            }
+            return handle;
+        }, py::arg("name"), py::arg("root_control"), py::arg("mid_control"),
+           py::arg("end_control"), py::arg("joints") = py::none(),
+           "Create a spline IK solver from three controls and optionally wire "
+           "its ordered joint chain (root to tip).")
 
         // Weight objects.
         .def("add_static_weight", [](rigExec::RigExecRigBuilder &b,
@@ -1825,6 +2459,29 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("add_blend_input", &rigExec::RigExecRigBuilder::AddBlendInput,
              py::arg("name"), py::arg("weight") = 0.0f)
 
+        // A handle onto a blend input that already exists -- the ones
+        // build_shapes.py authored, which build_psd.py then connects to a
+        // pose weight. Handles are cheap values naming one prim and the
+        // C++ side constructs them freely; this is the one way python has
+        // to name a prim it did not itself create, and it type-checks.
+        .def("blend_input", [](rigExec::RigExecRigBuilder &b,
+                               py::object path) {
+            return rigExec::RigExecBlendInputHandle(
+                b.GetStage(), _PythonToDependencyPath(
+                    path, b.GetStage(), TfToken("RigExecBlendInput"),
+                    false));
+        }, py::arg("path"))
+
+        // Pose interpolators, at <rig>/PoseInterpolators/<name>. Its own
+        // scope and not /Movers: an interpolator writes no transform and no
+        // points, so it has no place in an order that exists to say which
+        // write lands on top of which.
+        .def("add_pose_interpolator", [](rigExec::RigExecRigBuilder &b,
+                std::string name, py::object driver) {
+            return b.AddPoseInterpolator(name, _PythonToDependencyPath(
+                driver, b.GetStage(), TfToken(), false));
+        }, py::arg("name"), py::arg("driver"))
+
         .def("add_curvenet_adjustment", [](rigExec::RigExecRigBuilder &b, std::string name,
                 py::object curvenet, int index) {
             return b.AddCurvenetAdjustment(name,_PythonToDependencyPath(curvenet,
@@ -1849,4 +2506,124 @@ PYBIND11_MODULE(_rigexec, m) {
              }, py::arg("name"), py::arg("default_target") = py::none(),
              "Start a mover chain; operations added without an explicit target"
              " reuse default_target.");
+
+    // ---- RBF pose interpolators -------------------------------------------
+    //
+    // See the note above _RbfDescFrom. These two entries are what let the
+    // converter drop its Python solver import.
+
+    m.def("bind_wire",
+          [](const std::vector<std::array<float, 3>> &points,
+             const std::vector<std::array<float, 3>> &controlPoints,
+             int order, const std::vector<double> &knots) {
+              std::vector<GfVec3f> pts, cvs;
+              pts.reserve(points.size());
+              for (const auto &p : points) pts.emplace_back(p[0], p[1], p[2]);
+              for (const auto &c : controlPoints) cvs.emplace_back(c[0], c[1], c[2]);
+              const rigExec::RigExecNurbsCurve curve{&cvs, order, &knots};
+              if (!curve.IsValid()) {
+                  throw py::value_error(
+                      "bind_wire: control points, order and knots do not "
+                      "describe a NURBS curve (knots must number points + order)");
+              }
+              std::vector<std::pair<float, float>> out;
+              for (const GfVec2f &b : rigExec::RigExecBindWire(pts, curve)) {
+                  out.emplace_back(b[0], b[1]);
+              }
+              return out;
+          },
+          py::arg("points"), py::arg("control_points"), py::arg("order"),
+          py::arg("knots"),
+          "Wire bind coordinates for RigExecCurveMover mode \"wire\": per "
+          "point, (u, d) with u the parameter of the closest point on the "
+          "rest NURBS curve and d the distance to it.");
+    m.def("rbf_fit_width", [](py::object poses, py::object translations,
+                              std::string kernel, py::object pose_types,
+                              py::object twist_axis, double regularization,
+                              bool enable_rotation, bool enable_translation,
+                              double pose_falloff) {
+        rigExec::RigExecRbfSolverDesc desc = _RbfDescFrom(
+            poses, translations, kernel, pose_types, twist_axis,
+            regularization, enable_rotation, enable_translation);
+        rigExec::RigExecRbfFitReport report;
+        rigExec::RigExecRbfSolver solver =
+            rigExec::RigExecRbfFitWidth(desc, &report);
+        // the conventional painted poseFalloff, on top of the fitted width. 0.3 is
+        // the conventional default and leaves the fit alone; the floor at 0.05 is the
+        // the reference implementation's.
+        if (std::abs(pose_falloff - 0.3) > 1.0e-6) {
+            solver.ScaleWidths(std::max(pose_falloff / 0.3, 0.05));
+            solver.Solve();
+        }
+        py::dict table = _RbfTable(solver, desc, kernel);
+        py::dict fit;
+        fit["width"] = report.width;
+        fit["translation_width"] = report.translationWidth;
+        fit["per_pose"] = report.perPose;
+        fit["scale"] = report.scale;
+        fit["coverage"] = report.coverage;
+        fit["overshoot"] = report.overshoot;
+        table["fit"] = fit;
+        return table;
+    }, py::arg("poses"), py::arg("translations") = py::none(),
+       py::arg("kernel") = "gaussian", py::arg("pose_types") = py::none(),
+       py::arg("twist_axis") = py::none(), py::arg("regularization") = 0.0,
+       py::arg("enable_rotation") = true,
+       py::arg("enable_translation") = false,
+       py::arg("pose_falloff") = 0.3,
+       "Fit an interpolator's falloff width, solve it, and return the table.\n"
+       "\n"
+       "poses are XYZ eulers in radians, translations are metres in the\n"
+       "driver's own frame, pose_types are poseType (0 whole, 1 swing,\n"
+       "2 twist). The returned dict is the solved interpolator and is what\n"
+       "rbf_evaluate takes back.");
+
+    // The converter stores a pose as a QUATERNION (the schema's
+    // rigExec:rotation) and the solver takes XYZ eulers, so the conversion has
+    // to happen somewhere. Here, rather than as a second copy of
+    // rbf.py:1130-1146 in python: the closed form is not interchangeable with
+    // GfRotation's decomposition at the precision the parity fixture is
+    // compared at, and two spellings of it would drift.
+    m.def("rbf_euler_from_quaternion", [](std::array<double, 4> q) {
+        const GfVec3d e = rigExec::RigExecRbfEulerFromQuaternion(
+            GfQuatd(q[0], GfVec3d(q[1], q[2], q[3])));
+        return py::make_tuple(e[0], e[1], e[2]);
+    }, py::arg("quaternion"),
+       "A (real, i, j, k) quaternion as an XYZ euler in radians -- the exact\n"
+       "inverse of the closed form the solver's poses are built with.");
+
+    // The gate tools/biped/verify_psd.py holds every interpolator to:
+    // the kernels must still sum to at least RigExecRbfCoverageFloor
+    // everywhere BETWEEN the poses. Zero there is a dead zone -- every
+    // shape switches off and snaps back as the driver leaves -- and it
+    // is invisible to any check made AT the poses, which is why it needs
+    // its own entry point rather than a loop over rbf_evaluate.
+    m.def("rbf_coverage", [](py::dict table, int steps) {
+        return _RbfSolverFromTable(table).Coverage(steps);
+    }, py::arg("table"), py::arg("steps") = 8,
+       "The lowest total kernel value anywhere between the poses,\n"
+       "sampled along every ordered pair.");
+
+    m.def("rbf_evaluate", [](py::dict table, py::object rotation,
+                             py::object translation, bool allow_negative) {
+        rigExec::RigExecRbfSolver solver = _RbfSolverFromTable(table);
+        const GfVec3d euler = _SeqToVec3d(rotation);
+        GfVec3d moved(0.0);
+        const bool haveTranslation = !translation.is_none();
+        if (haveTranslation) {
+            moved = _SeqToVec3d(translation);
+        }
+        std::vector<double> out;
+        solver.Evaluate(euler, haveTranslation ? &moved : nullptr, &out,
+                        allow_negative);
+        return out;
+    }, py::arg("table"), py::arg("rotation"),
+       py::arg("translation") = py::none(),
+       py::arg("allow_negative") = true,
+       "How much each authored pose counts, for one driver pose.\n"
+       "\n"
+       "table is what rbf_fit_width returned (or the same dict read back from\n"
+       "a converted rig). allow_negative is allowNegativeWeights: with\n"
+       "it off the weights are clamped at zero AFTER normalisation, never\n"
+       "before.");
 }

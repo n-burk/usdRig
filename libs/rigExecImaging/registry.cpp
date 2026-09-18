@@ -1,6 +1,7 @@
 //
 // RigExec imaging registry and C activation surface.
 //
+#include <fstream>
 #include "registry.h"
 
 #include "rigExecMath/avarScale.h"
@@ -8,6 +9,7 @@
 #include "pxr/base/gf/bbox3d.h"
 #include "pxr/base/gf/range3d.h"
 #include "pxr/base/gf/rotation.h"
+#include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/registryManager.h"
 #include "pxr/base/tf/type.h"
 #include "pxr/usd/usd/attribute.h"
@@ -28,6 +30,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace rigExec {
 
@@ -221,6 +224,18 @@ RigExecImagingRegistry::_EvaluateSessions(
         combined->xformResetPaths.insert(rigSnapshot->xformResetPaths.begin(),
                                         rigSnapshot->xformResetPaths.end());
 
+        // Carried across for the same reason xformResetPaths is: the
+        // combined snapshot is BUILT here, field by field, so anything
+        // not named is silently dropped. That is how this one was lost
+        // the first time -- the bridge recorded every pose weight, the
+        // store published them, and the merge quietly left them behind,
+        // so RigExecImaging_GetMovedFloats found 0 of 121 with no error
+        // anywhere. Two rigs cannot publish the same property path (the
+        // prim check below already rejects a shared prim), so a plain
+        // insert is right.
+        combined->movedFloats.insert(rigSnapshot->movedFloats.begin(),
+                                     rigSnapshot->movedFloats.end());
+
         if (firstRoot) {
             commonAssetRoot = session.assetRoot;
             firstRoot = false;
@@ -270,7 +285,12 @@ RigExecImagingRegistry::Activate(
     const UsdStageRefPtr &stage, const SdfPath &rigPath,
     UsdTimeCode initialTime, std::vector<std::string> *errors)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // unique_lock, not lock_guard: the broadcast at the end runs WITHOUT the
+    // lock (see _Broadcast), because scene indices call back into the
+    // registry -- the results index's time trigger evaluates through
+    // IsActiveRigRoot/SetTime -- and broadcasting while holding it is a
+    // self-deadlock. Same rule SetWeightOverlay documents, applied here.
+    std::unique_lock<std::mutex> lock(_mutex);
     if (!stage) {
         if (errors) {
             errors->push_back("no stage to activate");
@@ -394,6 +414,11 @@ RigExecImagingRegistry::Activate(
     _changeKey = candidateChangeKey;
     _sessions = std::move(candidate);
     _stage = stage;
+    {
+        // Nested _mutex -> _notedMutex: the documented lock order.
+        std::lock_guard<std::mutex> notedLock(_notedMutex);
+        _notedRigRoots.clear();
+    }
     _generatedScopes.clear();
     _assetRoots.clear();
     for (const RigSession &session : _sessions) {
@@ -407,16 +432,113 @@ RigExecImagingRegistry::Activate(
         }
     }
     _lastTime = initialTime;
-    _Broadcast(_Publish(std::move(initialSnapshot), initialEpoch));
+    RigExecImagingBridge::PublishResult published =
+        _Publish(std::move(initialSnapshot), initialEpoch);
+    // Unlocked: the commit above is complete, and _Broadcast sends scene
+    // index notices whose observers call back into this registry.
+    lock.unlock();
+    _Broadcast(published);
     return true;
+}
+
+bool
+RigExecImagingRegistry::EnsureActivated(
+    const UsdStageRefPtr &stage, UsdTimeCode time)
+{
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_sessions.empty()) {
+            // Already active: a no-op on this stage, a silent refusal on any
+            // other (the automatic path never steals a live activation).
+            return _stage == stage;
+        }
+    }
+    // Outside the lock: Activate takes the same non-recursive mutex (the
+    // rule SetWeightOverlay documents). Two rigs populating at once can both
+    // reach here; the activations serialize inside Activate and the second
+    // transactionally replaces the first, so the race costs a compile, not
+    // correctness.
+    std::vector<std::string> errors;
+    if (!Activate(stage, SdfPath::EmptyPath(), time, &errors)) {
+        // One line, not silent: a broken rig in a batch host (usdrecord)
+        // otherwise renders its rest pose with no explanation. During live
+        // authoring this fires at most once per root definition -- defining
+        // the outputs that complete the rig does not resync the root, so the
+        // adapter is not asked again; the host's explicit activation (or the
+        // next resync of the root itself) retries.
+        TF_WARN("RigExec: automatic activation failed for %s: %s",
+                stage ? stage->GetRootLayer()->GetIdentifier().c_str()
+                      : "<no stage>",
+                errors.empty() ? "unknown error" : errors.front().c_str());
+        return false;
+    }
+    return true;
+}
+
+bool
+RigExecImagingRegistry::IsActiveRigRoot(const SdfPath &path)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == path) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void
+RigExecImagingRegistry::NoteRigRoot(const SdfPath &rigPath)
+{
+    if (rigPath.IsEmpty()) {
+        return;
+    }
+    // _notedMutex, never _mutex: the adapter calls this from inside scene
+    // index traversals that run while _mutex is held.
+    std::lock_guard<std::mutex> lock(_notedMutex);
+    _notedRigRoots.insert(rigPath);
+}
+
+bool
+RigExecImagingRegistry::IsNotedRigRoot(const SdfPath &path)
+{
+    std::lock_guard<std::mutex> lock(_notedMutex);
+    return _notedRigRoots.count(path) != 0;
 }
 
 bool
 RigExecImagingRegistry::SetTime(UsdTimeCode time)
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // unique_lock: both broadcasts below run unlocked (see Activate), because
+    // the notices they send re-enter this registry through the results
+    // index's time trigger.
+    std::unique_lock<std::mutex> lock(_mutex);
     if (_sessions.empty() || !_stage) {
         return false;
+    }
+    // A publish still dirties every prim in the generation through
+    // _Broadcast, even when it republishes content nothing changed -- so a
+    // redundant SetTime cost a full Hydra redraw for nothing. In usdview the
+    // generation was observed advancing by 2 per frame change while the
+    // plugin's Python _OnFrameChanged fired once, which means a second
+    // SetTime arrives from somewhere else (UpdatePreview/EndPreview,
+    // SetWeightOverlay and _OnObjectsChanged all republish at _lastTime).
+    // Rather than chase which, make the redundant one free: nothing dirty
+    // plus the same stage/time already published means there is nothing to
+    // say. Headless, generation advanced by exactly 1 per SetTime, so this
+    // guard is what closes the gap the usdview session showed.
+    if (!_readRootsDirty && _publishedEpochId != 0) {
+        bool anyDirty = false;
+        for (const RigSession &session : _sessions) {
+            anyDirty = anyDirty || session.dirty || session.readRootsDirty;
+        }
+        if (!anyDirty) {
+            const RigExecImagingSnapshotConstPtr current = _store->Get();
+            if (current && current->Describes(UsdStageWeakPtr(_stage), time)) {
+                _lastTime = time;
+                return true;
+            }
+        }
     }
     if (_readRootsDirty) {
         _RefreshReadRoots();
@@ -444,11 +566,28 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
         // The next good generation must re-announce its epoch; the one the
         // binding index holds names prims this clear just removed.
         _publishedEpochId = 0;
+        lock.unlock();
         _Broadcast(cleared);
         return false;
     }
     _lastTime = time;
-    _Broadcast(_Publish(std::move(snapshot), epoch));
+    // Recorded into the first rig's profiler, so one summary holds the whole
+    // update: the rig (Imaging.EvaluateAndPublish, per session, inside
+    // _EvaluateSessions above) and then the COMBINED generation's publish
+    // and the dirty notices that drive Hydra's sync.
+    RigExecProfiler *const profiler =
+        _sessions.empty() ? nullptr : _sessions.front().bridge->MutableProfiler();
+    RigExecImagingBridge::PublishResult published;
+    {
+        RigExecProfileScope scope(profiler, "Imaging.CombinedPublish",
+                                  "imaging");
+        published = _Publish(std::move(snapshot), epoch);
+    }
+    lock.unlock();
+    {
+        RigExecProfileScope scope(profiler, "Imaging.Broadcast", "imaging");
+        _Broadcast(published);
+    }
     return true;
 }
 
@@ -831,6 +970,36 @@ RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
 }
 
 bool
+RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\tmode\n";
+    for (const RigSession &session : _sessions) {
+        const RigExecRigEvaluator &evaluator = session.bridge->GetEvaluator();
+        // The mode ASKED for. Whether the baked program actually answered is
+        // in the rows themselves: a generation it served records `Baked`.
+        const RigExecEvaluationMode requested = evaluator.GetEvaluationMode();
+        const std::string mode =
+            requested == RigExecEvaluationMode::Dynamic ? "dynamic"
+            : requested == RigExecEvaluationMode::Baked ? "baked"
+                                                        : "parity";
+        for (const RigExecProfileSummaryRow &row :
+             session.bridge->GetProfiler().Summarize()) {
+            out << session.rigPath.GetString() << '\t' << row.name << '\t'
+                << row.category << '\t' << row.count << '\t'
+                << (row.totalUs / 1000.0) << '\t' << (row.maxUs / 1000.0)
+                << '\t' << mode << '\n';
+        }
+        session.bridge->MutableProfiler()->Clear();
+    }
+    return true;
+}
+
+bool
 RigExecImagingRegistry::EndPreview()
 {
     UsdTimeCode time;
@@ -904,8 +1073,41 @@ RigExecImagingRegistry::_OnObjectsChanged(
             // A value-only edit keeps the cached dependency regions. Resyncs
             // and connection/relationship edits may introduce a new external
             // input even when the evaluator's binding epoch stays unchanged.
-            _readRootsDirty = _readRootsDirty ||
-                !notice.GetResyncedPaths().empty();
+            //
+            // A property resync that names only a value (a spec created by
+            // its first authored value, or removed by the undo of it) is a
+            // value edit here too: a new connection or target would arrive
+            // as its own field, and a removed one leaves the cached regions
+            // a superset of what is read, which is safe. The one input a
+            // removal can reveal is a weaker layer's connection the removed
+            // spec was hiding, so a property still connected afterwards
+            // counts as structure.
+            for (const SdfPath &path : notice.GetResyncedPaths()) {
+                if (_readRootsDirty) {
+                    break;
+                }
+                if (!path.IsPropertyPath()) {
+                    _readRootsDirty = true;
+                    break;
+                }
+                const UsdAttribute attribute =
+                    _stage ? _stage->GetAttributeAtPath(path) : UsdAttribute();
+                const UsdRelationship relationship =
+                    _stage ? _stage->GetRelationshipAtPath(path)
+                           : UsdRelationship();
+                if ((attribute && attribute.HasAuthoredConnections()) ||
+                    (relationship && relationship.HasAuthoredTargets())) {
+                    _readRootsDirty = true;
+                    break;
+                }
+                for (const TfToken &field : notice.GetChangedFields(path)) {
+                    if (field != "typeName" && field != "default" &&
+                        field != "timeSamples" && field != "spline") {
+                        _readRootsDirty = true;
+                        break;
+                    }
+                }
+            }
             for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
                 for (const TfToken &field : notice.GetChangedFields(path)) {
                     if (field == "connectionPaths" || field == "targetPaths") {
@@ -929,6 +1131,10 @@ RigExecImagingRegistry::_OnObjectsChanged(
                 if (affected) {
                     session.dirty = true;
                     session.readRootsDirty = session.readRootsDirty || _readRootsDirty;
+                    // The bridge caches authored guide styling (shape, scale,
+                    // colour, purpose...) across generations; an edit that
+                    // reaches the rig is the only thing that can move it.
+                    session.bridge->InvalidateGuideCaches();
                 }
             }
             time = _lastTime;
@@ -940,7 +1146,10 @@ RigExecImagingRegistry::_OnObjectsChanged(
 void
 RigExecImagingRegistry::Deactivate()
 {
-    std::lock_guard<std::mutex> lock(_mutex);
+    // unique_lock: the broadcast below runs unlocked (see Activate), because
+    // the notices it sends re-enter this registry through the results
+    // index's time trigger.
+    std::unique_lock<std::mutex> lock(_mutex);
     TfNotice::Revoke(_changeKey);
     _changeKey = TfNotice::Key();
     _assetRoots.clear();
@@ -949,6 +1158,11 @@ RigExecImagingRegistry::Deactivate()
     _generatedScopes.clear();
     _sessions.clear();
     _stage.Reset();
+    {
+        // Nested _mutex -> _notedMutex: the documented lock order.
+        std::lock_guard<std::mutex> notedLock(_notedMutex);
+        _notedRigRoots.clear();
+    }
     _publishedEpochId = 0;
     for (Chain &chain : _chains) {
         if (chain.pruning) {
@@ -958,6 +1172,7 @@ RigExecImagingRegistry::Deactivate()
     RigExecImagingBridge::PublishResult cleared;
     cleared.ok = true;
     cleared.dirtied = _store->Publish(nullptr);
+    lock.unlock();
     _Broadcast(cleared);
 }
 
@@ -968,12 +1183,24 @@ RigExecImagingRegistry::_Broadcast(
     if (!result.ok) {
         return;
     }
-    // Prune chains whose scene index graphs were destroyed.
-    _chains.erase(
-        std::remove_if(_chains.begin(), _chains.end(),
-                       [](const Chain &c) { return !c.results; }),
-        _chains.end());
-    for (Chain &chain : _chains) {
+    // The chain list is snapshotted under a short lock; the sends go out
+    // WITHOUT it. Scene indices call back into this registry -- the results
+    // index's time trigger evaluates through IsActiveRigRoot/SetTime -- so
+    // every caller unlocks first (see Activate), and this function never
+    // assumes the lock is held. A chain whose graph dies between the snapshot
+    // and its send simply fails its weak-pointer check and is pruned on the
+    // next broadcast.
+    std::vector<Chain> chains;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        // Prune chains whose scene index graphs were destroyed.
+        _chains.erase(
+            std::remove_if(_chains.begin(), _chains.end(),
+                           [](const Chain &c) { return !c.results; }),
+            _chains.end());
+        chains = _chains;
+    }
+    for (Chain &chain : chains) {
         if (result.epoch && chain.binding) {
             chain.binding->SetBindingEpoch(result.epoch);
         }
@@ -1535,8 +1762,8 @@ _WriteBounds(const PXR_NS::GfRange3d &range, double outMinMax[6])
 // transform provider (spec §10.3 extension, host-durability redesign).
 //
 // This is what makes framing a control work in EVERY host rather than in
-// the one whose Python we could reach. UsdGeomBBoxCache is what usdview,
-// Solaris, and mayaUsd all consult, and it asks a Boundable for its extent;
+// the one whose Python we could reach. UsdGeomBBoxCache is what usdview
+// and Solaris both consult, and it asks a Boundable for its extent;
 // before this, RigExec types were not Boundable and reported nothing, so a
 // rig had no bounds anywhere and framing a control moved the camera not at
 // all. The usdview adapter used to monkeypatch computeWorldBound to paper
@@ -1690,7 +1917,8 @@ TF_REGISTRY_FUNCTION(UsdGeomBoundable)
                              "RigExecTwoBoneIk",
                              "RigExecBlendPointFrames",
                              "RigExecTwistDistribution",
-                             "RigExecRibbon"}) {
+                             "RigExecRibbon",
+                             "RigExecSplineIk"}) {
         const TfType type = TfType::FindByName(name);
         if (type.IsUnknown()) {
             // The schema plugin is not registered in this process, so
@@ -1767,6 +1995,48 @@ RigExecImaging_GetGeneration()
 }
 
 int
+RigExecImaging_GetMovedFloats(
+    const char *packedPaths, float *out, int count)
+{
+    if (!packedPaths || !out || count <= 0) {
+        return 0;
+    }
+    const rigExec::RigExecImagingSnapshotConstPtr snapshot =
+        RigExecImagingRegistry::GetInstance().GetStore()->Get();
+    if (!snapshot) {
+        return 0;
+    }
+    // Every slot is cleared first: a caller that reads past the return
+    // value gets zeros rather than whatever was in its buffer.
+    for (int i = 0; i < count; ++i) {
+        out[i] = 0.0f;
+    }
+    int found = 0;
+    int index = 0;
+    const char *cursor = packedPaths;
+    while (*cursor && index < count) {
+        const char *end = std::strchr(cursor, '\n');
+        const std::string text(cursor, end ? end - cursor
+                                           : std::strlen(cursor));
+        // An arbitrary caller-supplied string reaches SdfPath here, whose
+        // constructor is loud about a malformed one. Ask first.
+        if (!text.empty() && PXR_NS::SdfPath::IsValidPathString(text)) {
+            const auto it = snapshot->movedFloats.find(PXR_NS::SdfPath(text));
+            if (it != snapshot->movedFloats.end()) {
+                out[index] = it->second;
+                ++found;
+            }
+        }
+        ++index;
+        if (!end) {
+            break;
+        }
+        cursor = end + 1;
+    }
+    return found;
+}
+
+int
 RigExecImaging_GetControlFrameAssetSpace(
     long long stageCacheId, const char *primPath, double frame,
     int isDefault, double outMatrix[16])
@@ -1812,6 +2082,18 @@ RigExecImaging_GetGuideBoundsAssetSpace(
     }
     _WriteBounds(range, outMinMax);
     return 1;
+}
+
+// Viewport profiling. With RIGEXEC_IMAGING_PROFILE set, every active rig's
+// evaluator records its own phases and the imaging layer's publish phases;
+// this writes the per-phase totals as tab-separated text and clears them,
+// so a caller can bracket exactly the interaction it wants to measure.
+int
+RigExecImaging_WriteProfileSummary(const char *path)
+{
+    return RigExecImagingRegistry::GetInstance().WriteProfileSummary(
+               path ? std::string(path) : std::string())
+        ? 0 : 1;
 }
 
 int
