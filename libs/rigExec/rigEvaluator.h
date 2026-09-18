@@ -33,6 +33,8 @@
 #include <list>
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -942,6 +944,15 @@ private:
         bool cached = false;
     };
     std::map<SdfPath, _ConnectedPoseResult> _connectedPoseCache;
+    /// Namespace-pose predicate answers that are stage-constant: parent:space
+    /// has no time samples, so the answer does not vary with evaluation time.
+    /// Populated lazily on cache miss; cleared on epoch change with
+    /// _connectedPoseCache. A time-sampled parent:space stays out of this
+    /// cache and is re-read every frame.
+    std::unordered_map<SdfPath, bool, SdfPath::Hash> _namespaceInheritsCache;
+    /// Hierarchical (first-frame-pose) providers, compiled once per epoch.
+    /// Replaces the per-frame std::set build in _EvaluateDynamic.
+    std::unordered_set<SdfPath, SdfPath::Hash> _hierarchicalProviderSet;
     std::vector<RigExecTapId> _jointFrameTaps;
     std::vector<RigExecTapId> _jointFinalFrameTaps;
     std::vector<RigExecTapId> _jointFinalMatrixTaps;

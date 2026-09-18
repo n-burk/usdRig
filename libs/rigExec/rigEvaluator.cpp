@@ -7402,6 +7402,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _poseProviderInputs = std::move(newPoseProviderInputs);
     _connectedPoseTaps = std::move(newConnectedPoseTaps);
     _connectedPoseCache.clear();
+    _namespaceInheritsCache.clear();
     _poseSteps = std::move(newPoseSteps);
     _firstFramePoseTaps = std::move(newFirstFramePoseTaps);
     _firstFramePoseCache.Clear();
@@ -7409,6 +7410,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _authSnapshotCache.Clear();
     _authSnapshotDirty = true;
     _firstFramePoseFrames = std::move(newFirstFramePoseFrames);
+    _hierarchicalProviderSet.clear();
+    _hierarchicalProviderSet.reserve(_firstFramePoseFrames.size());
+    for (const auto &[provider, tap] : _firstFramePoseFrames)
+        _hierarchicalProviderSet.insert(provider);
     _firstFramePoseRests = std::move(newFirstFramePoseRests);
     _restTaps = std::move(newRestTaps);
     _restTapIds = std::move(newRestTapIds);
@@ -11709,6 +11714,24 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
 
 
+    {
+        static bool measured = false;
+        if (!measured) {
+            measured = true;
+            std::map<std::string, size_t> typeCount;
+            size_t vecBytes = 0;
+            for (const auto &o : baseOverrides) {
+                std::string tn = o.value.GetTypeName();
+                typeCount[tn]++;
+            }
+            std::fprintf(stderr,
+                "RIGEXEC_MEASURE baseOverrides=%zu solverBatches=%zu connectedPoseTaps=%zu firstFramePose=%zu\n",
+                baseOverrides.size(), _solverBatches.size(),
+                _connectedPoseTaps.size(), _firstFramePoseFrames.size());
+            for (const auto &[tn, c] : typeCount)
+                std::fprintf(stderr, "  type %-28s count=%zu\n", tn.c_str(), c);
+        }
+    }
     std::vector<RigExecValueOverride> jointOverrides = baseOverrides;
     // Joints whose solver published no element for them (an incomplete
     // solver: its required inputs are unwired, so the kernel returned an
@@ -12001,34 +12024,39 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
     };
 
-    const std::set<SdfPath> hierarchicalProviders(
-        [&]() {
-            std::set<SdfPath> result;
-            for (const auto &[path, tap] : _firstFramePoseFrames) result.insert(path);
-            return result;
-        }());
+    const std::unordered_set<SdfPath, SdfPath::Hash> &hierarchicalProviders =
+        _hierarchicalProviderSet;
 
     // MEASURED 2026-09-13, biped: 3003 calls per frame, 8.1 us each -- 24 ms
     // of a 49 ms evaluate -- because commitConstraintFrames asks this once per
     // descendant joint per constraint, and the same handful of joints are
     // walked again for every constraint in the rig.
     //
-    // The cache is a LOCAL of this Evaluate call, not compiled state. That is
-    // what makes it safe: the predicate reads parent:space AT A TIME, and
-    // parent:space may carry time samples, so a compile-time answer would be
-    // wrong on any frame but the one it was baked at -- and this predicate
-    // decides whether a constraint's pose propagates through a joint, so a
-    // wrong answer moves joints by centimetres (see verify_spine.py). Within
-    // one Evaluate, `time` is fixed and the stage cannot change, so a memo is
-    // byte-identical to recomputing.
+    // The predicate reads parent:space AT A TIME, and parent:space may carry
+    // time samples, so a compile-time answer would be wrong on any frame but
+    // the one it was baked at -- and this predicate decides whether a
+    // constraint's pose propagates through a joint, so a wrong answer moves
+    // joints by centimetres (see verify_spine.py). Within one Evaluate,
+    // `time` is fixed and the stage cannot change, so a memo is byte-identical
+    // to recomputing.
+    //
+    // Two tiers: _namespaceInheritsCache is a persistent member, cleared on
+    // epoch change, that records only stage-constant answers (parent:space
+    // with no time samples). Time-sampled attributes stay in the per-Evaluate
+    // namespacePoseCache and are re-read every frame.
     std::unordered_map<SdfPath, bool, SdfPath::Hash> namespacePoseCache;
     const auto inheritsNamespacePose = [&](const SdfPath &path) {
+        const auto persistCached = _namespaceInheritsCache.find(path);
+        if (persistCached != _namespaceInheritsCache.end()) {
+            return persistCached->second;
+        }
         const auto cached = namespacePoseCache.find(path);
         if (cached != namespacePoseCache.end()) {
             return cached->second;
         }
         const UsdPrim prim = _stage->GetPrimAtPath(path);
         bool inherits = true;
+        bool stageConstant = true;
         for (const char *name : {"parent:space"}) {
             const UsdAttribute attribute = prim.GetAttribute(TfToken(name));
             SdfPathVector connections;
@@ -12039,10 +12067,18 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 attribute.GetConnections(&connections) &&
                 !connections.empty()) { inherits = false; break; }
             GfMatrix4d authored(1.0);
-            if (attribute && attribute.Get(&authored, time) &&
-                authored != GfMatrix4d(1.0)) { inherits = false; break; }
+            if (attribute) {
+                if (attribute.GetNumTimeSamples() > 0) {
+                    stageConstant = false;
+                }
+                if (attribute.Get(&authored, time) &&
+                    authored != GfMatrix4d(1.0)) { inherits = false; break; }
+            }
         }
         namespacePoseCache.emplace(path, inherits);
+        if (stageConstant) {
+            _namespaceInheritsCache.emplace(path, inherits);
+        }
         return inherits;
     };
 
@@ -12420,7 +12456,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // Only direct prerequisites enter this request. Copying all previous
             // joint overrides into every level would itself be quadratic for a
             // deep chain, even if the kernels each executed only once.
-            std::vector<RigExecValueOverride> inputs = baseOverrides;
+            std::vector<RigExecValueOverride> inputs;
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Inputs", "pose");
+                inputs = baseOverrides;
+            }
             for (const SdfPath &dependency : batch.dependencies) {
                 const auto aggregate = solvedAggregates.find(dependency);
                 if (aggregate != solvedAggregates.end()) {
@@ -12476,8 +12516,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // dirty flag is drained, not consulted (it fires across sibling
             // frames sharing the system); genuine edits ride batch.dirty.
             batch.taps->ConsumeDirty();
-            _SnapshotCache::Entry *hit =
-                !batch.dirty ? batch.cache.Find(inputs, time) : nullptr;
+            _SnapshotCache::Entry *hit = nullptr;
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Find", "pose");
+                hit = !batch.dirty ? batch.cache.Find(inputs, time) : nullptr;
+            }
             if (hit != nullptr) {
                 batch.snapshot = hit->snapshot;
             } else {
