@@ -12021,7 +12021,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // wrong answer moves joints by centimetres (see verify_spine.py). Within
     // one Evaluate, `time` is fixed and the stage cannot change, so a memo is
     // byte-identical to recomputing.
-    std::map<SdfPath, bool> namespacePoseCache;
+    std::unordered_map<SdfPath, bool, SdfPath::Hash> namespacePoseCache;
     const auto inheritsNamespacePose = [&](const SdfPath &path) {
         const auto cached = namespacePoseCache.find(path);
         if (cached != namespacePoseCache.end()) {
@@ -12060,7 +12060,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     //
     // The climb closes over every path element, not only the known providers:
     // a provider's parent need not itself be a provider.
-    std::map<SdfPath, SdfPath> nearestBlockingCache;
+    std::unordered_map<SdfPath, SdfPath, SdfPath::Hash> nearestBlockingCache;
     const auto ownsItsPose = [&](const SdfPath &path) {
         return _jointSolverBinding.count(path) ||
             (hierarchicalProviders.count(path) && !inheritsNamespacePose(path));
