@@ -140,4 +140,4 @@ python docs/render_media.py --page lattice_mover
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

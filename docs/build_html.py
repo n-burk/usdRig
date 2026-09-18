@@ -6,8 +6,9 @@ Usage: python docs/build_html.py
 Reads the operator prose from docs/operator_notes.py and the attribute
 reference from libs/rigExecSchema/schema.usda (via build_pages), the same
 sources as the Markdown pages, and writes docs/site/: an index gallery,
-one page per operator under nodes/, a shared stylesheet, and copied
-icons/, gifs/, examples/ and specs/ trees so the site is
+one page per operator under nodes/, one page per hand-written concept
+under concepts/ (sources: docs/concepts/*.md), a shared stylesheet, and
+copied icons/, gifs/, examples/ and specs/ trees so the site is
 self-contained.  Open docs/site/index.html in a browser to read it.
 
 The theme follows the SideFX Houdini help: a black 32px top bar whose
@@ -32,7 +33,8 @@ SITE = os.path.join(RIG, "docs", "site")
 
 sys.path.insert(0, os.path.join(RIG, "docs"))
 from operator_notes import OPERATORS, CATEGORIES  # noqa: E402
-from build_pages import parse_schema, example_stage, check_examples  # noqa: E402
+from build_pages import (parse_schema, example_stage, check_examples,  # noqa: E402
+                         load_concepts, concept_headings)
 
 try:
     import markdown
@@ -55,7 +57,7 @@ SECTIONS = [
 ]
 
 CSS = """\
-/* RigExec node reference: a port of the SideFX Houdini help look.
+/* UsdRig node reference: a port of the SideFX Houdini help look.
    Black 32px top bar, fixed left TOC, ruled sections, side-by-side
    parameter grid. Every colour is a custom property, so the dark
    scheme further down is a token swap and nothing else. */
@@ -876,6 +878,12 @@ def _md_block(text):
     return markdown.markdown(text.strip(), extensions=["fenced_code"])
 
 
+def _md_doc(text):
+    """Hand-written prose: fenced code and pipe tables, no generated TOC."""
+    return markdown.markdown(text.strip(),
+                             extensions=["fenced_code", "tables"])
+
+
 def _md_inline(text):
     out = markdown.markdown(text.strip(), extensions=["fenced_code"])
     if out.startswith("<p>") and out.endswith("</p>"):
@@ -896,11 +904,79 @@ def _section(ident, title, inner):
             % (ident, _esc(title), ident, ident, inner))
 
 
-def _sidebar(active, prefix):
-    chunks = ['<label class="toc-toggle" for="toc-switch">Nodes</label>',
+# Restores the table of contents' own scroll position across page loads.
+# It is emitted inline immediately after the #toc markup -- the element is
+# fully parsed by then, and the assignment lands before the browser paints,
+# so the list does not visibly jump back to the top.  sessionStorage can
+# throw outright (file:// in some browsers, blocked site data), so every
+# access is guarded and a failure just means the page behaves as before.
+TOC_JS = """\
+<script>
+(function () {
+    try {
+        var toc = document.getElementById('toc');
+        if (!toc) { return; }
+        var KEY = 'usdrig.toc.scroll';
+        var stored = null;
+        try { stored = window.sessionStorage.getItem(KEY); } catch (e) {}
+        var save = function () {
+            try {
+                window.sessionStorage.setItem(KEY, String(toc.scrollTop));
+            } catch (e) {}
+        };
+        var restore = function () {
+            if (stored !== null && stored !== '') {
+                toc.scrollTop = parseInt(stored, 10) || 0;
+                return;
+            }
+            // First visit of the session: show where we are instead.
+            var here = toc.querySelector('li.here');
+            if (here && here.scrollIntoView) {
+                try { here.scrollIntoView({block: 'center'}); }
+                catch (e) { here.scrollIntoView(); }
+            }
+        };
+        restore();
+        // The fixed TOC has no height until layout runs; re-apply once it
+        // does, in case the first assignment was clamped to 0.
+        window.addEventListener('DOMContentLoaded', restore);
+        var pending = 0;
+        toc.addEventListener('scroll', function () {
+            if (pending) { return; }
+            pending = window.setTimeout(function () {
+                pending = 0;
+                save();
+            }, 150);
+        });
+        var links = toc.getElementsByTagName('a');
+        for (var i = 0; i < links.length; i++) {
+            links[i].addEventListener('click', save);
+        }
+        window.addEventListener('beforeunload', save);
+    } catch (e) {}
+}());
+</script>
+"""
+
+
+def _sidebar(active, prefix, concepts=(), concept=None):
+    chunks = ['<label class="toc-toggle" for="toc-switch">Contents</label>',
               '<div id="toc"><div id="toc-body">',
-              '<a class="tochome" href="%sindex.html">RigExec nodes</a>'
-              % prefix]
+              '<a class="tochome" href="%sindex.html">UsdRig</a>' % prefix]
+    if concepts:
+        chunks.append('<div class="navgroup">')
+        chunks.append("<h3>Concepts</h3>")
+        chunks.append("<ul>")
+        for page in concepts:
+            cls = "node here" if page["slug"] == concept else "node"
+            chunks.append(
+                '<li class="%s" data-title="%s">'
+                '<a href="%sconcepts/%s.html">'
+                '<img src="%sicons/concept.png" alt="">'
+                "<span>%s</span></a></li>"
+                % (cls, _esc(page["title"].lower()), prefix, page["slug"],
+                   prefix, _esc(page["title"])))
+        chunks.append("</ul></div>")
     for category, keys in CATEGORIES:
         chunks.append('<div class="navgroup">')
         chunks.append("<h3>%s</h3>" % _esc(category))
@@ -917,6 +993,7 @@ def _sidebar(active, prefix):
                    prefix, key, _esc(note["title"])))
         chunks.append("</ul></div>")
     chunks.append("</div></div>")
+    chunks.append(TOC_JS)
     return "\n".join(chunks)
 
 
@@ -927,15 +1004,18 @@ def _shell(title, prefix, sidebar, header, body):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>%s &mdash; RigExec nodes</title>
+<title>%s &mdash; UsdRig</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="%s">
 <link rel="stylesheet" href="%sstyle.css">
+<link rel="icon" type="image/svg+xml" href="%sicons/favicon.svg">
+<link rel="alternate icon" href="%sicons/favicon.ico">
+<link rel="apple-touch-icon" href="%sicons/favicon.png">
 </head>
 <body>
 <nav id="topnav" role="navigation">
-<span class="brandname"><a href="%sindex.html">RigExec</a>\
+<span class="brandname"><a href="%sindex.html">UsdRig</a>\
 <span class="brandsub">&nbsp;node reference</span></span>
 <span id="navsearch"><input id="q" type="search" placeholder="Filter nodes"
  aria-label="Filter nodes" oninput="rigFilter(this.value)"></span>
@@ -957,8 +1037,8 @@ def _shell(title, prefix, sidebar, header, body):
 %s
 </body>
 </html>
-""" % (_esc(title), FONTS, prefix, prefix, prefix, prefix, sidebar,
-       header, body, JS)
+""" % (_esc(title), FONTS, prefix, prefix, prefix, prefix, prefix,
+       prefix, prefix, sidebar, header, body, JS)
 
 
 def _titleblock(icon, prefix, ancestors, name, suffix, summary):
@@ -1043,11 +1123,11 @@ def _catlist(keys, icon_prefix, link_prefix, current=None):
     return "\n".join(out)
 
 
-def render_node(key, category, classes):
+def render_node(key, category, classes, concepts=()):
     note = OPERATORS[key]
     schema = classes[note["schema"]]
     stage = example_stage(key, note)
-    ancestors = ('<a href="../index.html">RigExec nodes</a>'
+    ancestors = ('<a href="../index.html">UsdRig</a>'
                  '<i class="pathsep">&rsaquo;</i>'
                  '<a href="../index.html#%s">%s</a>'
                  '<i class="pathsep">&rsaquo;</i>'
@@ -1184,22 +1264,126 @@ def render_node(key, category, classes):
                 if _category_of(k) == category]
     body.append(_section("more", "More %s nodes" % category.lower(),
                          _catlist(siblings, "../", "", current=key)))
-    body.append('<p class="footer"><a href="../index.html">RigExec nodes</a>'
-                " reference</p>")
-    return _shell(note["title"], "../", _sidebar(key, "../"), header,
-                  "\n".join(body))
+    body.append('<p class="footer"><a href="../index.html">UsdRig</a>'
+                " node reference</p>")
+    return _shell(note["title"], "../", _sidebar(key, "../", concepts),
+                  header, "\n".join(body))
 
 
-def render_index():
-    ancestors = ('<a href="index.html">RigExec nodes</a>'
+# ---- concept pages ---------------------------------------------------
+# Authors write one convention, relative to docs/: a node page is
+# "nodes/<key>.md" and an image is "gifs/<name>.gif".  The Markdown
+# sources under docs/concepts/ are themselves the Markdown output and are
+# never rewritten on disk; only the site copy is fixed up, to
+# "../nodes/<key>.html" and "../gifs/<name>.gif".  A leading "../" is
+# tolerated and dropped, so a page written either way still resolves.
+_DOC_LINK_RE = re.compile(
+    r"(\]\()(?:\.{1,2}/)*"
+    r"((?:nodes|concepts|gifs|icons|examples|specs)/[^)\s]+)")
+
+
+def _concept_links(text):
+    def fix(match):
+        target = match.group(2)
+        if target.startswith(("nodes/", "concepts/")) and target.endswith(".md"):
+            target = target[:-3] + ".html"
+        return "%s../%s" % (match.group(1), target)
+    return _DOC_LINK_RE.sub(fix, text)
+
+
+_FIG_RE = re.compile(r'<p>(<img [^>]*?alt="([^"]*)"[^>]*>)</p>')
+
+
+def _concept_html(body):
+    """Concept Markdown to site HTML: node-page figures and scrolling tables."""
+    out = _md_doc(body)
+    out = _FIG_RE.sub(
+        lambda m: '<figure class="fig">%s%s</figure>'
+                  % (m.group(1), ("<figcaption>%s</figcaption>" % m.group(2))
+                     if m.group(2) else ""),
+        out)
+    out = out.replace("<table>", '<div class="table-scroll"><table class="table">')
+    out = out.replace("</table>", "</table></div>")
+    return out
+
+
+def render_concept(page, concepts):
+    body_md = _concept_links(page["body"])
+    headings = concept_headings(page["body"])
+    ancestors = ('<a href="../index.html">UsdRig</a>'
+                 '<i class="pathsep">&rsaquo;</i>'
+                 '<a href="../index.html#concepts">Concepts</a>'
                  '<i class="pathsep">&rsaquo;</i>')
-    header = _titleblock(None, "", ancestors, "RigExec", "node reference",
+    header = _titleblock("concept", "../", ancestors, page["title"], "",
+                         _md_inline(page["summary"]) if page["summary"] else "")
+
+    body = []
+    body.append('<table id="premeta" class="metatable">')
+    if headings:
+        onpage = " ".join('<li><a href="#%s">%s</a></li>'
+                          % (ident, _esc(title)) for ident, title in headings)
+        body.append('<tr><td class="label">On this page</td>'
+                    '<td class="content"><ul class="minitoc">%s</ul>'
+                    "</td></tr>" % onpage)
+    body.append('<tr><td class="label">Section</td>'
+                '<td class="content">'
+                '<a href="../index.html#concepts">Concepts</a></td></tr>')
+    body.append('<tr><td class="label">Source</td>'
+                '<td class="content"><code>docs/concepts/%s.md</code>'
+                "</td></tr>" % _esc(page["slug"]))
+    body.append("</table>")
+
+    # Split on the page's own "## " headings so each one becomes a ruled
+    # section, exactly like the generated node pages.
+    parts = re.split(r"(?m)^##[ \t]+(.+?)[ \t]*#*[ \t]*$", body_md)
+    intro = parts[0].strip()
+    if intro:
+        body.append('<div class="content">%s</div>' % _concept_html(intro))
+    for index in range(1, len(parts), 2):
+        title = parts[index].strip()
+        body.append(_section(_slug(title), title,
+                             _concept_html(parts[index + 1])))
+
+    others = [p for p in concepts if p["slug"] != page["slug"]]
+    if others:
+        body.append(_section("more", "More concepts",
+                             _concept_catlist(others, "../", "")))
+    body.append('<p class="footer"><a href="../index.html">UsdRig</a>'
+                " node reference</p>")
+    return _shell(page["title"], "../",
+                  _sidebar(None, "../", concepts, page["slug"]),
+                  header, "\n".join(body))
+
+
+def _concept_catlist(pages, icon_prefix, link_prefix, current=None):
+    out = ['<ul class="catlist">']
+    for page in pages:
+        icon = '<img src="%sicons/concept.png" alt="">' % icon_prefix
+        summary = _md_inline(page["summary"]) if page["summary"] else ""
+        if page["slug"] == current:
+            out.append('<li class="current">%s<span class="t">%s</span>'
+                       '<p class="d">%s</p></li>'
+                       % (icon, _esc(page["title"]), summary))
+        else:
+            out.append('<li>%s<a class="t" href="%s%s.html">%s</a>'
+                       '<p class="d">%s</p></li>'
+                       % (icon, link_prefix, page["slug"],
+                          _esc(page["title"]), summary))
+    out.append("</ul>")
+    return "\n".join(out)
+
+
+def render_index(concepts=()):
+    ancestors = ('<a href="index.html">UsdRig</a>'
+                 '<i class="pathsep">&rsaquo;</i>')
+    header = _titleblock(None, "", ancestors, "UsdRig", "node reference",
                          "Every rig operator, its wiring, its parameters, "
                          "and a minimal animated example.")
     body = []
-    onpage = " ".join('<li><a href="#%s">%s</a></li>'
-                      % (_slug(category), _esc(category))
-                      for category, _ in CATEGORIES)
+    groups = ([("concepts", "Concepts")] if concepts else []) + [
+        (_slug(category), category) for category, _ in CATEGORIES]
+    onpage = " ".join('<li><a href="#%s">%s</a></li>' % (ident, _esc(title))
+                      for ident, title in groups)
     body.append('<table id="premeta" class="metatable">')
     body.append('<tr><td class="label">On this page</td>'
                 '<td class="content"><ul class="minitoc">%s</ul></td></tr>'
@@ -1222,13 +1406,16 @@ def render_index():
                 "is rendered live from that stage by "
                 "<code>docs/render_media.py</code>, an offscreen Storm "
                 "viewport with the rig guides on.</p>")
+    if concepts:
+        body.append(_section("concepts", "Concepts",
+                             _concept_catlist(concepts, "", "concepts/")))
     for category, keys in CATEGORIES:
         body.append(_section(_slug(category), category,
                              _catlist(keys, "", "nodes/")))
     body.append("<p>Implementation and design notes live in "
                 '<a href="specs/">specs/</a>.</p>')
-    body.append('<p class="footer">RigExec nodes reference</p>')
-    return _shell("RigExec nodes", "", _sidebar(None, ""), header,
+    body.append('<p class="footer">UsdRig node reference</p>')
+    return _shell("UsdRig", "", _sidebar(None, "", concepts), header,
                   "\n".join(body))
 
 
@@ -1261,14 +1448,23 @@ def main():
     os.makedirs(nodes_dir)
     with open(os.path.join(SITE, "style.css"), "w") as stream:
         stream.write(CSS)
-    with open(os.path.join(SITE, "index.html"), "w") as stream:
-        stream.write(render_index())
+    concepts = load_concepts()
+    with open(os.path.join(SITE, "index.html"), "w", encoding="utf-8") as stream:
+        stream.write(render_index(concepts))
     print("wrote index.html")
     for key in OPERATORS:
-        page = render_node(key, _category_of(key), classes)
+        page = render_node(key, _category_of(key), classes, concepts)
         with open(os.path.join(nodes_dir, key + ".html"), "w") as stream:
             stream.write(page)
         print("wrote nodes/%s.html" % key)
+    if concepts:
+        concepts_dir = os.path.join(SITE, "concepts")
+        os.makedirs(concepts_dir, exist_ok=True)
+        for page in concepts:
+            with open(os.path.join(concepts_dir, page["slug"] + ".html"),
+                      "w", encoding="utf-8") as stream:
+                stream.write(render_concept(page, concepts))
+            print("wrote concepts/%s.html" % page["slug"])
     _copy_tree(os.path.join(RIG, "icons"), os.path.join(SITE, "icons"))
     _copy_tree(os.path.join(RIG, "docs", "gifs"), os.path.join(SITE, "gifs"))
     _copy_tree(os.path.join(RIG, "docs", "examples"),

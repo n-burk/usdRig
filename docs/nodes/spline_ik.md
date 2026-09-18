@@ -276,4 +276,4 @@ python docs/render_media.py --page spline_ik
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

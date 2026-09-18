@@ -64,6 +64,16 @@
 // a canonical text form (%.17g doubles, %.9g floats), so two runs -- two
 // builds, two modes -- can be compared byte for byte with `cmp`.
 //
+// --verify-binary <file.rigexec> gates the zero-USD runtime: every frame is
+// evaluated in parity mode (dynamic==baked, enforced internally) and replayed
+// from the binary, and the two generations are compared bit for bit over
+// joint matrices, moved points, weight frames and fields, diagnostics and
+// work counters. With no --frames it verifies the binary's own frame list.
+// It implies --require-baked, replaces the reporting loop, and still honors
+// --pose-out/--joints-out (from the parity poses); --repeat/--drag/--profile
+// are ignored with a note.
+//
+//
 // --joints-out writes the evaluated joint frames, as asset-space matrices
 // sampled at every requested frame, to a plain USD layer. It is deliberately
 // schema-neutral -- a joint path list and a parallel matrix array per time
@@ -76,6 +86,7 @@
 #include "rigExec/rigEvaluator.h"
 #include "rigExec/types.h"
 #include "rigExecMath/pointFrame.h"
+#include "rigExecRuntime/runtime.h"
 
 #include "pxr/base/arch/env.h"
 #include "pxr/base/gf/matrix4d.h"
@@ -96,6 +107,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -539,6 +551,403 @@ ModeSourceName(rigExec::RigExecEvaluationModeSource source)
     return "the default";
 }
 
+
+// ---- --verify-binary ------------------------------------------------------
+//
+// The zero-USD runtime gate: every frame runs in parity mode (so a
+// dynamic==baked disagreement already fails the frame) and replays from
+// the binary, and the two generations are compared bit for bit.
+
+std::string
+_FormatDouble(double value)
+{
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.17g", value);
+    return std::string(buffer);
+}
+
+void
+_VerifyPush(std::vector<std::string> *diffs, const std::string &line)
+{
+    if (diffs->size() < 12) {
+        diffs->push_back(line);
+    }
+}
+
+void
+_VerifyJoints(const std::map<SdfPath, GfMatrix4d> &baked,
+              const std::vector<rigExec::RigExecRuntimeJointMatrix> &rt,
+              std::vector<std::string> *diffs)
+{
+    if (baked.size() != rt.size()) {
+        _VerifyPush(diffs, "joint count baked " +
+                                std::to_string(baked.size()) + " binary " +
+                                std::to_string(rt.size()));
+    }
+    std::map<std::string, const rigExec::RrMat4d *> byPath;
+    for (const auto &joint : rt) {
+        byPath[joint.path] = &joint.matrix;
+    }
+    for (const auto &[path, matrix] : baked) {
+        const auto found = byPath.find(path.GetString());
+        if (found == byPath.end()) {
+            _VerifyPush(diffs, "joint " + path.GetString() +
+                                    " missing from the binary");
+            continue;
+        }
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (matrix[r][c] != (*found->second)[r][c]) {
+                    _VerifyPush(diffs,
+                                "joint " + path.GetString() + " [" +
+                                    std::to_string(r) + "][" +
+                                    std::to_string(c) + "] baked " +
+                                    _FormatDouble(matrix[r][c]) +
+                                    " binary " +
+                                    _FormatDouble((*found->second)[r][c]));
+                    r = 4;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+// Entries the baked pose carries that hold anything other than a point
+// array (a float dial, a matrix, a lone vector -- fixture 09 has all
+// three) are SKIPPED, counted into skippedScalars, and reported once
+// per run: the runtime publishes no scalar moved properties (there is
+// no GetMovedFloats), so they sit outside the output contract the gate
+// can hold it to, and playback documents the same gap. What the gate
+// does hold: every baked point array has a binary twin, and the
+// binary owns no array the baked pose lacks.
+void
+_VerifyMoved(const std::map<SdfPath, VtValue> &baked,
+             const std::vector<rigExec::RigExecRuntimePoints> &rt,
+             std::vector<std::string> *diffs, size_t *skippedScalars)
+{
+    std::map<std::string, const std::vector<rigExec::RrVec3f> *> byPath;
+    for (const auto &moved : rt) {
+        byPath[moved.path] = &moved.points;
+    }
+    size_t bakedPoints = 0;
+    for (const auto &[path, value] : baked) {
+        if (!value.IsHolding<VtVec3fArray>()) {
+            ++(*skippedScalars);
+            continue;
+        }
+        ++bakedPoints;
+        const auto found = byPath.find(path.GetString());
+        if (found == byPath.end()) {
+            _VerifyPush(diffs, "moved " + path.GetString() +
+                                    " missing from the binary");
+            continue;
+        }
+        const VtVec3fArray &array = value.UncheckedGet<VtVec3fArray>();
+        if (array.size() != found->second->size()) {
+            _VerifyPush(diffs, "moved " + path.GetString() + " count " +
+                                    std::to_string(array.size()) +
+                                    " vs " +
+                                    std::to_string(found->second->size()));
+            continue;
+        }
+        for (size_t i = 0; i < array.size(); ++i) {
+            const GfVec3f &a = array[i];
+            const rigExec::RrVec3f &b = (*found->second)[i];
+            if (a[0] != b[0] || a[1] != b[1] || a[2] != b[2]) {
+                _VerifyPush(diffs, "moved " + path.GetString() +
+                                        " point " + std::to_string(i) +
+                                        " differs");
+                break;
+            }
+        }
+    }
+    if (bakedPoints != byPath.size()) {
+        _VerifyPush(diffs, "moved-property count baked " +
+                                std::to_string(bakedPoints) +
+                                " binary " +
+                                std::to_string(byPath.size()));
+    }
+    for (const auto &[path, points] : byPath) {
+        if (baked.find(SdfPath(path)) == baked.end()) {
+            _VerifyPush(diffs, "moved " + path +
+                                    " missing from the baked pose");
+        }
+    }
+}
+
+void
+_VerifyWeightFrames(
+    const std::map<SdfPath, GfMatrix4d> &baked,
+    const std::vector<rigExec::RigExecRuntimeWeightFrame> &rt,
+    std::vector<std::string> *diffs)
+{
+    std::map<std::string, const rigExec::RrMat4d *> byPath;
+    for (const auto &placed : rt) {
+        byPath[placed.path] = &placed.matrix;
+    }
+    if (baked.size() != byPath.size()) {
+        _VerifyPush(diffs, "weight-frame count baked " +
+                                std::to_string(baked.size()) + " binary " +
+                                std::to_string(byPath.size()));
+    }
+    for (const auto &[path, matrix] : baked) {
+        const auto found = byPath.find(path.GetString());
+        if (found == byPath.end()) {
+            _VerifyPush(diffs, "weight frame " + path.GetString() +
+                                    " missing from the binary");
+            continue;
+        }
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (matrix[r][c] != (*found->second)[r][c]) {
+                    _VerifyPush(diffs, "weight frame " + path.GetString() +
+                                            " differs");
+                    r = 4;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+void
+_VerifyWeightFields(
+    const std::map<SdfPath, rigExec::RigExecResolvedWeightField> &baked,
+    const std::vector<rigExec::RigExecRuntimeWeightField> &rt,
+    std::vector<std::string> *diffs)
+{
+    std::map<std::string, const rigExec::RigExecRuntimeWeightField *>
+        byPath;
+    for (const auto &field : rt) {
+        byPath[field.path] = &field;
+    }
+    if (baked.size() != byPath.size()) {
+        _VerifyPush(diffs, "weight-field count baked " +
+                                std::to_string(baked.size()) + " binary " +
+                                std::to_string(byPath.size()));
+    }
+    for (const auto &[path, field] : baked) {
+        const auto found = byPath.find(path.GetString());
+        if (found == byPath.end()) {
+            _VerifyPush(diffs, "weight field " + path.GetString() +
+                                    " missing from the binary");
+            continue;
+        }
+        if (field.target.GetString() != found->second->target) {
+            _VerifyPush(diffs, "weight field " + path.GetString() +
+                                    " targets " + found->second->target);
+            continue;
+        }
+        if (field.weights.size() != found->second->weights.size()) {
+            _VerifyPush(diffs, "weight field " + path.GetString() +
+                                    " count differs");
+            continue;
+        }
+        for (size_t i = 0; i < field.weights.size(); ++i) {
+            if (field.weights[i] != found->second->weights[i]) {
+                _VerifyPush(diffs, "weight field " + path.GetString() +
+                                        " weight " + std::to_string(i) +
+                                        " differs");
+                break;
+            }
+        }
+    }
+}
+
+void
+_VerifyDiagnostics(const std::vector<std::string> &baked,
+                   const std::vector<std::string> &rt,
+                   std::vector<std::string> *diffs)
+{
+    if (baked.size() != rt.size()) {
+        _VerifyPush(diffs, "diagnostic count baked " +
+                                std::to_string(baked.size()) + " binary " +
+                                std::to_string(rt.size()));
+    }
+    for (size_t i = 0; i < std::min(baked.size(), rt.size()); ++i) {
+        if (baked[i] != rt[i]) {
+            _VerifyPush(diffs, "diagnostic " + std::to_string(i) +
+                                    " baked [" + baked[i].substr(0, 160) +
+                                    "] binary [" + rt[i].substr(0, 160) +
+                                    "]");
+        }
+    }
+}
+
+int
+RunVerifyBinary(const UsdStageRefPtr &stage, const SdfPath &rigPath,
+                const std::vector<UsdTimeCode> &askedFrames,
+                const std::string &binaryPath, const std::string &poseOut,
+                const std::string &jointsOut, bool solverGuides)
+{
+    std::ifstream stream(binaryPath, std::ios::binary);
+    const std::vector<char> raw(
+        (std::istreambuf_iterator<char>(stream)),
+        std::istreambuf_iterator<char>());
+    const std::vector<uint8_t> bytes(raw.begin(), raw.end());
+    if (bytes.empty()) {
+        std::printf("  FATAL: cannot read %s\n", binaryPath.c_str());
+        return 2;
+    }
+    std::string error;
+    std::unique_ptr<rigExec::RigExecRuntimeReader> reader =
+        rigExec::RigExecRuntimeReader::Open(bytes.data(), bytes.size(),
+                                            &error);
+    if (!reader) {
+        std::printf("  FATAL: cannot open %s: %s\n", binaryPath.c_str(),
+                    error.c_str());
+        return 2;
+    }
+    std::vector<UsdTimeCode> frames = askedFrames;
+    if (frames.empty()) {
+        for (double t : reader->GetFrameTimes()) {
+            frames.push_back(UsdTimeCode(t));
+        }
+    }
+    if (frames.empty()) {
+        std::printf("  FATAL: no frames to verify\n");
+        return 2;
+    }
+
+    rigExec::RigExecRigEvaluator evaluator(stage, rigPath);
+    evaluator.SetSolverGuidesEnabled(solverGuides);
+    evaluator.SetEvaluationMode(
+        rigExec::RigExecEvaluationMode::BakedWithParityCheck);
+    std::vector<std::string> errors;
+    if (!evaluator.Compile(&errors)) {
+        std::printf("  FAIL: verify leg did not compile\n");
+        for (const std::string &line : errors) {
+            std::printf("    %s\n", line.c_str());
+        }
+        return 1;
+    }
+    std::vector<std::string> reasons;
+    if (!evaluator.IsBakeable(&reasons)) {
+        std::printf("  FAIL: not bakeable; the binary has no baked leg\n");
+        for (const std::string &reason : reasons) {
+            std::printf("    %s\n", reason.c_str());
+        }
+        return 1;
+    }
+
+    FILE *poseDump = nullptr;
+    if (!poseOut.empty()) {
+        poseDump = std::fopen(poseOut.c_str(), "w");
+        if (!poseDump) {
+            std::printf("  cannot open %s for writing\n", poseOut.c_str());
+            return 2;
+        }
+    }
+    JointExport jointExport;
+    int status = 0;
+    size_t matched = 0;
+    size_t skippedScalars = 0;
+    // The explicit Compile above consumed what a fresh session's first
+    // generation would have settled: notices (inert movers, purpose
+    // warnings) the runtime replays ahead of its first Execute. They are
+    // re-attached to the first compared frame below, restoring exactly
+    // the no-precompile flow. Keyed off the first comparison rather than
+    // the first loop frame, so a skipped frame cannot desync the
+    // runtime's drain-once replay.
+    bool seedAttached = errors.empty();
+    for (UsdTimeCode frame : frames) {
+        const double t = frame.GetValue();
+        const rigExec::RigExecRigPose pose = evaluator.Evaluate(frame);
+        if (!pose.valid || pose.moverGraphParityMismatches ||
+            pose.bakedParityMismatches) {
+            std::printf("\n  frame %g: parity leg INVALID "
+                        "(dynamic==baked failed)\n",
+                        t);
+            status = 1;
+            continue;
+        }
+        if (!reader->SetFrame(t, &error)) {
+            std::printf("\n  frame %g: FAIL: %s\n", t, error.c_str());
+            status = 1;
+            continue;
+        }
+        if (!reader->Execute(&error)) {
+            std::printf("\n  frame %g: FAIL: %s\n", t, error.c_str());
+            status = 1;
+            continue;
+        }
+        std::vector<std::string> diffs;
+        _VerifyJoints(pose.jointMatricesFinal, reader->GetJointMatrices(),
+                      &diffs);
+        _VerifyMoved(pose.movedProperties, reader->GetPoints(), &diffs,
+                     &skippedScalars);
+        _VerifyWeightFrames(pose.weightFrames, reader->GetWeightFrames(),
+                             &diffs);
+        _VerifyWeightFields(pose.weightFields, reader->GetWeightFields(),
+                             &diffs);
+        std::vector<std::string> expectedDiagnostics = pose.diagnostics;
+        if (!seedAttached) {
+            seedAttached = true;
+            expectedDiagnostics.insert(expectedDiagnostics.begin(),
+                                       errors.begin(), errors.end());
+        }
+        _VerifyDiagnostics(expectedDiagnostics,
+                           reader->GetDiagnostics(),
+                           &diffs);
+        const rigExec::RigExecRuntimeCounters counters =
+            reader->GetCounters();
+        if (pose.moverGraphRevisionsExecuted !=
+                counters.revisionsExecuted ||
+            pose.moverGraphRevisionsCreated != counters.revisionsCreated ||
+            pose.moverGraphSchedulesBuilt != counters.schedulesBuilt) {
+            _VerifyPush(&diffs, "work counters differ");
+        }
+        if (diffs.empty()) {
+            ++matched;
+            std::printf("  frame %g: binary==baked (%zu joints, "
+                        "%zu moved, %zu weight frames, %zu fields, "
+                        "%zu diagnostics)\n",
+                        t, reader->GetJointMatrices().size(),
+                        reader->GetPoints().size(),
+                        reader->GetWeightFrames().size(),
+                        reader->GetWeightFields().size(),
+                        reader->GetDiagnostics().size());
+        } else {
+            std::printf("  frame %g: MISMATCH (%zu differences)\n", t,
+                        diffs.size());
+            for (const std::string &line : diffs) {
+                std::printf("    %s\n", line.c_str());
+            }
+            status = 1;
+        }
+        if (poseDump) {
+            WritePoseDump(poseDump, pose, t);
+        }
+        if (!jointsOut.empty()) {
+            jointExport.Add(pose, t);
+        }
+    }
+    if (poseDump) {
+        std::fclose(poseDump);
+    }
+    if (!jointsOut.empty()) {
+        if (!jointExport.Write(jointsOut, &error)) {
+            std::printf("  joint export FAILED: %s\n", error.c_str());
+            status = 1;
+        }
+    }
+    if (evaluator.GetBakedGenerationCount() != frames.size()) {
+        std::printf("  FAIL: only %zu of %zu generation(s) came from the "
+                    "program\n",
+                    evaluator.GetBakedGenerationCount(), frames.size());
+        status = 1;
+    }
+    std::printf("  verify-binary: %zu of %zu frame(s) match\n", matched,
+                frames.size());
+    if (skippedScalars > 0) {
+        std::printf("  note: %zu scalar moved propert%s skipped "
+                    "(outside the runtime output contract)\n",
+                    skippedScalars, skippedScalars == 1 ? "y" : "ies");
+    }
+    return status;
+}
+
 }  // namespace
 
 int
@@ -551,7 +960,8 @@ main(int argc, char **argv)
             "[--joints-out <file.usda>] [--pose-out <file.txt>] "
             "[--profile <file.trace>] [--mode dynamic|baked|parity] "
             "[--guides] [--require-baked] "
-            "[--drag <prim> <attr> <steps>]\n");
+            "[--drag <prim> <attr> <steps>] "
+            "[--verify-binary <file.rigexec>]\n");
         return 2;
     }
     std::string stagePath = argv[1];
@@ -559,6 +969,7 @@ main(int argc, char **argv)
     std::string jointsOut;
     std::string poseOut;
     std::string profileOut;
+    std::string verifyBinary;
     // Two facts, not one: which mode --mode named, and whether it was given
     // at all. An absent --mode is not a request for Dynamic -- it is this
     // tool declining to make the choice, which is what lets a stage carrying
@@ -609,6 +1020,8 @@ main(int argc, char **argv)
             }
         } else if (arg == "--profile" && i + 1 < argc) {
             profileOut = argv[++i];
+        } else if (arg == "--verify-binary" && i + 1 < argc) {
+            verifyBinary = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
             const std::string value = argv[++i];
             modeGiven = true;
@@ -737,6 +1150,15 @@ main(int argc, char **argv)
                 std::printf("        -> %s\n", target.GetText());
             }
         }
+    }
+
+    if (!verifyBinary.empty()) {
+        if (repeat > 1 || dragSteps > 0 || !profileOut.empty()) {
+            std::printf("  note: --verify-binary ignores "
+                        "--repeat/--drag/--profile\n");
+        }
+        return RunVerifyBinary(stage, rigPath, frames, verifyBinary,
+                               poseOut, jointsOut, solverGuides);
     }
 
     if (frames.empty()) {

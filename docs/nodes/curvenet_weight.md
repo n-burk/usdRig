@@ -185,4 +185,4 @@ python docs/render_media.py --page curvenet_weight
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

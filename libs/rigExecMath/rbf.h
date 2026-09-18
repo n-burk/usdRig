@@ -386,6 +386,11 @@ public:
     const std::vector<std::vector<double>> &GetWeights() const {
         return _weights;
     }
+    const std::vector<RigExecRbfPoseType> &GetPoseTypes() const {
+        return _poseTypes;
+    }
+    const GfVec3d &GetTwistAxis() const { return _twistAxis; }
+    double GetRegularization() const { return _regularization; }
     bool GetEnableRotation() const { return _enableRotation; }
     bool GetEnableTranslation() const { return _enableTranslation; }
     RigExecRbfKernel GetKernel() const { return _kernel; }

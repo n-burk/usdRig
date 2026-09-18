@@ -134,4 +134,4 @@ bin\launch_usdview.bat docs\examples\two_bone_ik.usda
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

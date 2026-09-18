@@ -198,7 +198,7 @@ One page per operator -- what it does, how to wire it, every parameter,
 and a minimal animated example, rendered live from its stage by
 `docs/render_media.py` in an offscreen Storm viewport with the rig guides on:
 
-[RigExec nodes](docs/index.md) -- per-operator stages in
+[UsdRig](docs/index.md) -- per-operator stages in
 [`docs/examples/`](docs/examples/)
 
 ## How it works

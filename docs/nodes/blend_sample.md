@@ -120,4 +120,4 @@ python docs/render_media.py --page blend_sample
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

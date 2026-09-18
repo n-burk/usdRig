@@ -148,6 +148,7 @@ add_library(rigExecImaging SHARED
     libs/rigExecImaging/sceneIndices.cpp
     libs/rigExecImaging/bridge.cpp
     libs/rigExecImaging/registry.cpp
+    libs/rigExecImaging/playback.cpp
     libs/rigExecImaging/sceneIndexPlugin.cpp
     libs/rigExecImaging/rigAdapter.cpp
     libs/rigExecImaging/touchOverlayAdapter.cpp
@@ -172,7 +173,68 @@ target_link_libraries(rigExecImaging PUBLIC
 )
 # Selects dllexport over dllimport in registry.h's C surface while building
 # this library; consumers including the installed header get dllimport.
+# Baked playback (M2b) executes binaries through the zero-USD runtime,
+# statically linked here like every other runtime consumer.
+target_link_libraries(rigExecImaging PRIVATE rigExecRuntime)
 target_compile_definitions(rigExecImaging PRIVATE RIGEXEC_IMAGING_EXPORTS)
+
+# ---------------------------------------------------------------------------
+# rigExecBinary: the .rigexec sectioned container, shared by every bake
+# producer and runtime consumer. Zero dependencies by design -- it is the
+# foundation of the zero-USD runtime (M2), so it must never link USD.
+# ---------------------------------------------------------------------------
+add_library(rigExecBinary STATIC
+    libs/rigExecBinary/container.cpp
+    libs/rigExecBinary/program.cpp
+    libs/rigExecBinary/pose.cpp
+    libs/rigExecBinary/geometry.cpp
+    libs/rigExecBinary/inputTable.cpp)
+target_include_directories(rigExecBinary PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+set_target_properties(rigExecBinary PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ---------------------------------------------------------------------------
+# rigExecRuntime: zero-USD .rigexec playback (M2).
+#
+# The wire decode comes from rigExecBinary (already USD-free); the math is
+# vendored (runtimeMath.h); the step bodies are ports. This target must
+# never link or include USD: consumers without an OpenUSD install (Godot)
+# compile these sources directly. The M4 import check enforces it.
+# ---------------------------------------------------------------------------
+add_library(rigExecRuntime STATIC
+    libs/rigExecRuntime/open.cpp
+    libs/rigExecRuntime/exec.cpp
+    libs/rigExecRuntime/closure.cpp
+    libs/rigExecRuntime/publish.cpp
+    libs/rigExecRuntime/kernels.cpp
+    libs/rigExecRuntime/pose.cpp
+    libs/rigExecRuntime/geometry.cpp
+    libs/rigExecRuntime/weights.cpp)
+target_include_directories(rigExecRuntime PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecRuntime PUBLIC rigExecBinary)
+set_target_properties(rigExecRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if (MSVC)
+    target_compile_options(rigExecRuntime PRIVATE /fp:precise)
+else ()
+    target_compile_options(rigExecRuntime PRIVATE -fno-fast-math)
+endif ()
+
+# ---------------------------------------------------------------------------
+# rigExecBake: .rigexec baking from a compiled evaluator (M1).
+# ---------------------------------------------------------------------------
+add_library(rigExecBake SHARED
+    libs/rigExecBake/bake.cpp
+    libs/rigExecBake/serialize.cpp
+    libs/rigExecBake/capture.cpp)
+target_include_directories(rigExecBake PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
+    $<INSTALL_INTERFACE:${RIGEXEC_INSTALL_INCLUDEDIR}>)
+target_link_libraries(rigExecBake PUBLIC
+    rigExec
+    rigExecBinary)
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -181,8 +243,14 @@ target_compile_definitions(rigExecImaging PRIVATE RIGEXEC_IMAGING_EXPORTS)
 # the tests it asserts nothing about a fixture it owns, which is what makes it
 # usable on an asset being authored -- see tools/rigExecPose.cpp.
 # ---------------------------------------------------------------------------
+add_executable(rigExecBakeTool tools/rigExecBake.cpp)
+set_target_properties(rigExecBakeTool PROPERTIES OUTPUT_NAME rigExecBake)
+target_link_libraries(rigExecBakeTool PRIVATE rigExecBake)
+target_compile_definitions(rigExecBakeTool PRIVATE
+    RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+
 add_executable(rigExecPose tools/rigExecPose.cpp)
-target_link_libraries(rigExecPose PRIVATE rigExec)
+target_link_libraries(rigExecPose PRIVATE rigExec rigExecRuntime)
 target_compile_definitions(rigExecPose PRIVATE
     RIGEXEC_SCHEMA_RESOURCE_DIR="${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 
@@ -499,6 +567,109 @@ target_link_libraries(testRigExecStandalone PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecStandalone PRIVATE ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecStandalone COMMAND testRigExecStandalone)
 
+# The .rigexec container + bake conformance. The walk covers every fixture
+# in tests/exampleFixtures.cmake (same table as the parity entries); argv[1]
+# is either the examples directory (table walk) or a stage (ad-hoc bake).
+add_executable(testRigExecRuntimeMath tests/testRigExecRuntimeMath.cpp)
+target_link_libraries(testRigExecRuntimeMath PRIVATE rigExecRuntime gf)
+add_test(NAME testRigExecRuntimeMath COMMAND testRigExecRuntimeMath)
+
+add_executable(testRigExecRuntimeLoader tests/testRigExecRuntimeLoader.cpp)
+target_link_libraries(testRigExecRuntimeLoader PRIVATE rigExecRuntime rigExecBake)
+target_include_directories(testRigExecRuntimeLoader PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecRuntimeLoader PRIVATE
+    ${_rigexec_schema_resource_define}
+    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecRuntimeLoader COMMAND testRigExecRuntimeLoader
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# Family parity tests: baked program vs runtime, per family. Each is
+# owned by that family's port worker; the bodies land with the ports.
+add_executable(testRigExecRuntimePose tests/testRigExecRuntimePose.cpp)
+target_link_libraries(testRigExecRuntimePose PRIVATE rigExecRuntime rigExecBake)
+target_include_directories(testRigExecRuntimePose PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecRuntimePose PRIVATE
+    ${_rigexec_schema_resource_define}
+    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecRuntimePose COMMAND testRigExecRuntimePose
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecRuntimeWeights tests/testRigExecRuntimeWeights.cpp)
+target_link_libraries(testRigExecRuntimeWeights PRIVATE rigExecRuntime rigExecBake)
+target_include_directories(testRigExecRuntimeWeights PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecRuntimeWeights PRIVATE
+    ${_rigexec_schema_resource_define}
+    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecRuntimeWeights COMMAND testRigExecRuntimeWeights
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecRuntimeGeometry tests/testRigExecRuntimeGeometry.cpp)
+target_link_libraries(testRigExecRuntimeGeometry PRIVATE rigExecRuntime rigExecBake)
+target_include_directories(testRigExecRuntimeGeometry PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecRuntimeGeometry PRIVATE
+    ${_rigexec_schema_resource_define}
+    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecRuntimeGeometry COMMAND testRigExecRuntimeGeometry
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecBinary tests/testRigExecBinary.cpp)
+target_link_libraries(testRigExecBinary PRIVATE rigExecBake)
+target_include_directories(testRigExecBinary PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecBinary PRIVATE
+    ${_rigexec_schema_resource_define}
+    RIGEXEC_EXAMPLES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecBinary COMMAND testRigExecBinary
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# The M2 end-to-end gate, one entry per baking fixture: bake the stage to a
+# .rigexec with the CLI, then prove the zero-USD runtime replays it bit for
+# bit (rigExecPose --verify-binary runs the evaluator in parity mode, so a
+# dynamic==baked disagreement fails the frame before the binary is compared).
+# The stages and frame lists come from tests/exampleFixtures.cmake -- the
+# same table as every other example sweep. Enabled by M2 integrate once the
+# family ports (pose, weights, geometry) and the compile-diagnostics seed
+# replay landed and the first fixture verified.
+function(rigexec_add_verify_binary_test)
+    cmake_parse_arguments(A "" "NAME;RIG;FRAMES" "" ${ARGN})
+    if (NOT DEFINED A_NAME OR NOT DEFINED A_RIG OR NOT DEFINED A_FRAMES)
+        message(FATAL_ERROR "rigexec_add_verify_binary_test: "
+                            "NAME, RIG and FRAMES are all required")
+    endif()
+    if (A_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "rigexec_add_verify_binary_test: unknown "
+                            "argument(s): ${A_UNPARSED_ARGUMENTS}")
+    endif()
+    set(_out "${CMAKE_CURRENT_BINARY_DIR}/verify-binary/${A_NAME}.rigexec")
+    add_test(NAME verify_binary_${A_NAME} COMMAND "${CMAKE_COMMAND}"
+        "-DBAKE=$<TARGET_FILE:rigExecBakeTool>" "-DPOSE=$<TARGET_FILE:rigExecPose>"
+        "-DSTAGE=${CMAKE_CURRENT_SOURCE_DIR}/examples/${A_RIG}"
+        "-DFRAMES=${A_FRAMES}" "-DOUT=${_out}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/runVerifyBinary.cmake")
+    set(_schema_resources
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    set_property(TEST verify_binary_${A_NAME} APPEND PROPERTY ENVIRONMENT
+        "PXR_PLUGINPATH_NAME=${_schema_resources}")
+endfunction()
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/verify-binary")
+foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
+    string(REPLACE "|" ";" _fixture_fields "${_fixture}")
+    list(GET _fixture_fields 0 _fixture_stage)
+    list(GET _fixture_fields 1 _fixture_frames)
+    list(GET _fixture_fields 6 _fixture_bakes)
+    string(REGEX REPLACE "\\.(usda|usd)$" "" _fixture_name "${_fixture_stage}")
+    string(REPLACE "/" "_" _fixture_name "${_fixture_name}")
+    if (_fixture_bakes STREQUAL "YES")
+        rigexec_add_verify_binary_test(NAME ${_fixture_name}
+            RIG ${_fixture_stage} FRAMES ${_fixture_frames})
+    endif()
+endforeach()
+
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
 target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)
 target_compile_definitions(testRigExecPack PRIVATE ${_rigexec_schema_resource_define})
@@ -633,6 +804,15 @@ target_link_libraries(testRigExecImaging PRIVATE rigExecImaging)
 target_compile_definitions(testRigExecImaging PRIVATE
     ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 add_test(NAME testRigExecImaging COMMAND testRigExecImaging
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecImagingPlayback tests/testRigExecImagingPlayback.cpp)
+target_link_libraries(testRigExecImagingPlayback PRIVATE rigExecImaging rigExecBake)
+target_include_directories(testRigExecImagingPlayback PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecImagingPlayback PRIVATE
+    ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
+add_test(NAME testRigExecImagingPlayback COMMAND testRigExecImagingPlayback
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 
 add_executable(testRigExecTouchPose tests/testRigExecTouchPose.cpp)
@@ -1170,7 +1350,7 @@ endforeach()
 # ---------------------------------------------------------------------------
 include(CMakePackageConfigHelpers)
 
-install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging
+install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake
     EXPORT rigExecTargets
     RUNTIME DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${RIGEXEC_INSTALL_LIBDIR}"
@@ -1178,7 +1358,7 @@ install(TARGETS rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImag
 
 # FILES_MATCHING still walks -- and recreates -- every subdirectory it passes
 # through, so dot-directories and local tooling state are excluded explicitly.
-foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging)
+foreach(_lib rigExecMath rigExec rigExecStandalone rigExecRigging rigExecImaging rigExecBinary rigExecBake)
     install(DIRECTORY "libs/${_lib}/"
         DESTINATION "${RIGEXEC_INSTALL_INCLUDEDIR}/${_lib}"
         FILES_MATCHING

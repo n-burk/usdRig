@@ -141,10 +141,21 @@ class NodeModel(NodeData):
 
         # Title-level collapse: hides all property rows, shows aggregate port
         self._title_collapsed = False
-        self._icon_path = None  # Path to node icon image (from ui_node_icon metadata)
+        # Title-bar icon path (ui:nodegraph:node:icon). Write-through property:
+        # the value lives on the C++ NodeData field the icon producer reads.
+        self._icon_path = None
         self._display_color = (
             None  # Display color tuple (R, G, B) from UsdUINodeGraphNodeAPI
         )
+        # Inline attribute value cells: {(pin_name, is_output): ValueRow},
+        # built lazily from the composed prim definition and dropped whole by
+        # invalidateCache. _value_rows_time is the Usd.TimeCode the cached
+        # components were read at, so a frame change rebuilds them.
+        # _value_cell_width is the world-space width the layout pass reserved
+        # (see nodeGraph.value_cell_reserve); 0 means "no cells on this node".
+        self._value_rows = None
+        self._value_rows_time = None
+        self._value_cell_width = 0.0
         _sync_cpp_vector(_cpp_inputRowKinds, self, [])
         _sync_cpp_vector(_cpp_outputRowKinds, self, [])
         _sync_cpp_vector(_cpp_inputRowSlots, self, [])
@@ -161,6 +172,28 @@ class NodeModel(NodeData):
             self.renderer = createNodeRenderer(uiStyle)
         else:
             self.renderer = renderer
+
+    @property
+    def _icon_path(self):
+        """Title-bar icon path, stored ON the C++ ``NodeData.titleIconPath``.
+
+        There is deliberately no separate Python mirror. The C++ icon producer
+        reads ``titleIconPath`` (and keys its vertex cache on it), while the icon
+        is authored from the prim -- NodeFactory._apply_icon_from_prim -- AFTER
+        the pin setters have run their last ``_sync_content_to_cpp``. A mirrored
+        Python attribute therefore never reached C++, and every node fell back
+        to the default ``box`` texture no matter what
+        ``ui:nodegraph:node:icon`` said. One storage cannot desync.
+
+        Reads give None (not "") when unset, so ``if node._icon_path`` keeps
+        working.
+        """
+        return _cpp_titleIconPath.__get__(self) or None
+
+    @_icon_path.setter
+    def _icon_path(self, value):
+        # The C++ field is a std::string and cannot take None.
+        _cpp_titleIconPath.__set__(self, str(value) if value else "")
 
     @property
     def name(self):
@@ -682,6 +715,11 @@ class NodeModel(NodeData):
         self._input_pin_alias_map = {}
         self._output_pin_alias_map = {}
         self._ordered_pin_entries = None
+        # Value rows are derived from the same prim state as the pins, so they
+        # go stale for exactly the same reasons. The reserved cell width is
+        # kept: it is layout, and the next _calculateNodeSize recomputes it.
+        self._value_rows = None
+        self._value_rows_time = None
         # Clear the C++ struct's row kinds / slots / displayRowKinds so a render
         # between invalidation and the next layout can't show stale rows; the
         # folded maps are part of that struct state and clear with them.
@@ -890,9 +928,9 @@ class NodeModel(NodeData):
         _sync_cpp_vector(
             _cpp_outputDualPinNames, self, self._output_dual_pin_names or set()
         )
-        # Title-bar icon path (empty string when unset; the C++ field is a
-        # std::string and cannot take None). The C++ icon producer reads this.
-        _cpp_titleIconPath.__set__(self, self._icon_path or "")
+        # The title-bar icon path is NOT mirrored here: ``_icon_path`` writes
+        # straight through to the C++ ``titleIconPath`` field, because the icon
+        # is authored after this method has run for the last time.
 
     def _rebuild_display_pins(self, is_output=False):
         """Re-derive the display pins / row kinds / slots / folded maps in C++.
@@ -990,6 +1028,71 @@ class NodeModel(NodeData):
                 if doc:
                     return doc
         return ""
+
+    def value_rows(self, time_code=None):
+        """``{(pin_name, is_output): ValueRow}`` for every row with a value cell.
+
+        Only INPUT-side rows are candidates. A real output row (an explicit
+        ``out:``/``outputs:`` attribute) has its label right-aligned by the C++
+        layout into exactly the space a cell would want, so it gets none -- a
+        known gap, documented rather than papered over. Bare and namespaced
+        attributes are input-side rows here even though they carry a port on
+        both edges, which is why the ordinary case works.
+
+        Cached until :meth:`invalidateCache` or a frame change, because the
+        components are read from USD and the paint pass asks every frame.
+        """
+        if (
+            self._value_rows is not None
+            and self._value_rows_time == time_code
+        ):
+            return self._value_rows
+
+        from . import noodlesValues
+
+        rows = {}
+        prim = self._prim
+        if prim is not None and prim.IsValid():
+            stage = self._stage
+            for pin_property in get_schema_aware_pin_properties(prim):
+                if pin_property.is_relationship or pin_property.side != "input":
+                    continue
+                row = noodlesValues.build_value_row(
+                    stage,
+                    prim,
+                    pin_property.pin_name,
+                    pin_property.property_name,
+                    time_code,
+                )
+                if row is not None:
+                    rows[(pin_property.pin_name, False)] = row
+
+        self._value_rows = rows
+        self._value_rows_time = time_code
+        return rows
+
+    def has_value_row(self, property_name):
+        """Whether *property_name* is shown as a value cell on this node.
+
+        The USD-notice path asks this to decide whether a property change can
+        be answered by refreshing one cell instead of re-laying out the graph.
+        """
+        for row in self.value_rows(self._value_rows_time).values():
+            if row.property_name == property_name:
+                return True
+        return False
+
+    def invalidate_value_row(self, property_name=None):
+        """Drop the cached value rows so the next paint re-reads them.
+
+        Deliberately NOT ``invalidateCache``: nothing about the node's pins,
+        slots or size changed, so this must not make the view set
+        ``textChanged`` and re-lay out every node in the graph. That storm --
+        once per mouse-move of a value drag -- is the performance failure this
+        method exists to avoid. ``property_name`` is accepted for call-site
+        clarity; the whole per-node dict is cheap to rebuild.
+        """
+        self._value_rows = None
 
     def resolve_pin_name(self, pin_name, is_output: bool | None = None):
         """Resolve a pin name through alias and folded maps.

@@ -153,4 +153,4 @@ python docs/render_media.py --page curvenet
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

@@ -1537,6 +1537,7 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     const RigExecResolvedInputs &R = *B.resolvedInputs;
     RigExecProviderValues values;
     values.resolved = &R;
+    values.curvenetBindInputs = &revision->curvenetBindInputs;
     // One overlay per REVISION: the generation-wide resolved inputs, plus
     // whatever this revision's declared phases resolve to out of the run's
     // snapshot store. The assembler reads inputs by path and never learns a
@@ -1653,8 +1654,9 @@ AssembleRevision(RigExecBakedProgramImpl &B,
     if (!revision->blendChannels.empty()) {
         std::vector<RigExecBlendChannel> channels;
         channels.reserve(revision->blendChannels.size());
-        for (const RigExecBakedProgramImpl::GeomBlendChannel &bound :
-                 revision->blendChannels) {
+        for (size_t c = 0; c < revision->blendChannels.size(); ++c) {
+            RigExecBakedProgramImpl::GeomBlendChannel &bound =
+                revision->blendChannels[c];
             RigExecBlendChannel channel;
             // A pose-driven weight is this run's slot -- unless an override
             // stands on the weight itself, which the dynamic walk's lookup
@@ -1665,10 +1667,16 @@ AssembleRevision(RigExecBakedProgramImpl &B,
             } else {
                 R.GetAttribute(bound.weight, time, &channel.weight);
             }
-            for (const auto &boundSample : bound.samples) {
+            // Retained for the bake beside the read, before the accumulate
+            // below consumes the local: what the record carries is what the
+            // gather gathered, whatever route it came by.
+            bound.lastWeight = channel.weight;
+            for (size_t s = 0; s < bound.samples.size(); ++s) {
+                auto &boundSample = bound.samples[s];
                 RigExecBlendSampleData sample;
                 R.GetAttribute(boundSample.activation, time,
                                &sample.activation);
+                boundSample.lastActivation = sample.activation;
                 if (!boundSample.blendShape.IsEmpty()) {
                     // Sparse: the shape the prologue resolved, shared by
                     // pointer. The packet compares layouts by pointer, so an
@@ -1687,6 +1695,7 @@ AssembleRevision(RigExecBakedProgramImpl &B,
                     R.GetAttribute(boundSample.points, time, &points);
                 }
                 sample.points.assign(points.begin(), points.end());
+                boundSample.lastPoints.assign(points.begin(), points.end());
                 channel.samples.push_back(std::move(sample));
             }
             std::stable_sort(channel.samples.begin(), channel.samples.end(),
@@ -1859,6 +1868,7 @@ RigExecBakedRunGeometryPrologue(RigExecBakedProgramImpl *program,
                         return B.resolveBlendSample(sample.blendShape,
                                                     pointCount, layout);
                     });
+                sample.layoutRefused = !sample.layout;
                 if (!sample.layout) {
                     // Refused the cache: something about the shape can move
                     // inside this epoch, so it is read per frame instead.
@@ -2722,7 +2732,7 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
     std::unique_ptr<UsdGeomXformCache> xformCache;
     const UsdPrim assetRoot = B.stage->GetPrimAtPath(B.assetRootPath);
     const auto publishAdjuster =
-        [&](const RigExecBakedProgramImpl::GeomRevision &revision) {
+        [&](RigExecBakedProgramImpl::GeomRevision &revision) {
         if (revision.op != RigExecRevisionOp::CurvenetAdjuster ||
             revision.resultStatus != "ok") {
             return;
@@ -2756,6 +2766,9 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                 break;
             }
         }
+        // Retained for the bake beside the compose the publish below
+        // consumes: the per-frame stage read the recorder cannot see.
+        revision.lastAdjusterNetToAsset = netToAsset;
         // min(), and not a cardinality refusal: the walk publishes what both
         // sides have and says nothing about the rest.
         for (size_t j = 0;
@@ -2798,7 +2811,7 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                 field.weights = revision.weightField;
             }
         } else if (step.kind == RigExecBakedStepKind::ChainStatus) {
-            const RigExecBakedProgramImpl::GeomChain &chain =
+            RigExecBakedProgramImpl::GeomChain &chain =
                 B.chains[size_t(step.object)];
             if (chain.haveBase) {
                 // The adjusters of this chain, in revision order, where the
@@ -2807,7 +2820,7 @@ RigExecBakedPublishGeometry(RigExecBakedProgramImpl *program,
                 // pose half published the rig's own controls -- so an
                 // adjustment path that collides with a RigExecControl path
                 // wins, as it does there.
-                for (const RigExecBakedProgramImpl::GeomRevision &revision :
+                for (RigExecBakedProgramImpl::GeomRevision &revision :
                          chain.revisions) {
                     publishAdjuster(revision);
                 }

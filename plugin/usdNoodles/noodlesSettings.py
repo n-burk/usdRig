@@ -415,6 +415,41 @@ class NoodlesSettingsDataModel(StateSource, QtCore.QObject):
                 lambda v: len(v) == 4,
                 "Node inner stroke color when selected (RGBA 0-1)",
             ),
+            # Inline attribute value cells (see noodlesValues / widgets.valueCell).
+            (
+                "valueFontScale",
+                0.85,
+                lambda v: v > 0,
+                "Value-cell font size as a fraction of the pin font size",
+            ),
+            # The cell FILL, hairline, accent and popup are derived from the
+            # node theme (nodeBgHigh / nodeBgLow / selectedNodeStrokeColor),
+            # so they are not settings of their own; only the text colours,
+            # which carry meaning rather than depth, are configurable.
+            (
+                "valueAuthoredColor",
+                [0.93, 0.93, 0.95, 1.0],
+                lambda v: len(v) == 4,
+                "Value text with an authored opinion (RGBA 0-1)",
+            ),
+            (
+                "valueFallbackColor",
+                [0.93, 0.93, 0.95, 0.42],
+                lambda v: len(v) == 4,
+                "Value text coming from the schema fallback (RGBA 0-1)",
+            ),
+            (
+                "valueAnimatedColor",
+                [0.95, 0.72, 0.25, 1.0],
+                lambda v: len(v) == 4,
+                "Value text for a time-sampled attribute (RGBA 0-1)",
+            ),
+            (
+                "valueConnectedColor",
+                [0.45, 0.62, 0.85, 1.0],
+                lambda v: len(v) == 4,
+                "Value text for a connection-driven (read-only) attribute (RGBA 0-1)",
+            ),
         ],
         "behavior": [
             (
@@ -450,6 +485,32 @@ class NoodlesSettingsDataModel(StateSource, QtCore.QObject):
                 "Hide ui: namespace attributes (editor metadata) from node pins",
             ),
             ("linkDimmingSpeed", 1.0, lambda v: v > 0, "Link dimming animation speed"),
+            (
+                "showAttributeValues",
+                True,
+                lambda v: isinstance(v, bool),
+                "Show (and edit) simple attribute values on the right of each row",
+            ),
+            (
+                "valueMinPixelHeight",
+                9.0,
+                lambda v: v > 0,
+                "Skip value cells below this on-screen row height in pixels",
+            ),
+            (
+                "mungDragThresholdPx",
+                3.0,
+                lambda v: v >= 0,
+                "Pixels of horizontal drag before a value press becomes a drag-edit",
+            ),
+            (
+                "valueWriteMode",
+                "auto",
+                lambda v: v in ("auto", "default", "animation"),
+                "Where inline attribute edits are authored: auto (sample only if "
+                "the attribute already has time samples), always Default, or "
+                "always a key at the current frame",
+            ),
         ],
         "performance": [
             (

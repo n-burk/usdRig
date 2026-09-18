@@ -29,8 +29,8 @@ department upstream authored it in, and `remap` divides it down into the
 rest. `remap` deliberately does not bound its result, so a clamp mover
 after it is what keeps an overshoot from driving a shape past its target.
 
-Statically typed add, multiply, clamp, remap, or blend over an
-exact float property target (spec section 4.1).
+Statically typed add, multiply, clamp, remap, blend, or curve
+over an exact float property target (spec section 4.1).
 
 The revision is r = op(incoming), then the common MoverAPI envelope mixes
 it back over the incoming value. Zero is a pass-through and one applies
@@ -38,6 +38,9 @@ the operation outright -- the same rule every mover follows.
 
 remap normalizes from [inputs:min, inputs:max] to [0, 1] and does NOT
 clamp; compose a clamp mover after it to bound the result.
+
+curve maps the incoming value through inputs:keys, piecewise linear
+between keys and extrapolated linearly past the first and last key.
 
 ## How it works
 
@@ -104,7 +107,7 @@ every application of the atomic mover.
 
 *Type:* `uniform token`. *Default:* `"clamp"`.
 
-Valid values: `add`, `multiply`, `clamp`, `remap`, `blend`.
+Valid values: `add`, `multiply`, `clamp`, `remap`, `blend`, `curve`.
 
 #### `inputs:value`
 
@@ -117,6 +120,22 @@ Valid values: `add`, `multiply`, `clamp`, `remap`, `blend`.
 #### `inputs:max`
 
 *Type:* `float`. *Default:* `1`.
+
+#### `inputs:keys`
+
+*Type:* `float2[]`. *Default:* `[]`.
+
+(input, output) keys for the curve operation, strictly
+increasing in input. One key is a constant output.
+
+#### `inputs:tangents`
+
+*Type:* `float2[]`. *Default:* `[]`.
+
+Optional (in slope, out slope) per key for the curve
+operation. Empty is piecewise linear, extrapolated along the end
+segments; authored, the curve is a cubic Hermite through the keys,
+extrapolated along the first in slope and the last out slope.
 
 ## Example
 
@@ -163,4 +182,4 @@ python docs/render_media.py --page float_math_mover
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

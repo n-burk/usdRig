@@ -117,4 +117,4 @@ python docs/render_media.py --page volume_correct_mover
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

@@ -21,7 +21,7 @@ On this page:
 
 ![Single-Chain IK Constraint effect](../gifs/single_chain_ik_constraint.gif)
 
-FBX-style single-chain IK, and the only IK in RigExec that is a
+FBX-style single-chain IK, and the only IK in UsdRig that is a
 **constraint** rather than a solver: it does not publish a frame array that
 joints extract from, it revises the joint frames that are already there —
 whatever the last solver in each joint's stack committed.
@@ -293,4 +293,4 @@ python docs/render_media.py --page single_chain_ik_constraint
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

@@ -313,4 +313,4 @@ python docs/render_media.py --page joint
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

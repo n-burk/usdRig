@@ -376,4 +376,4 @@ python docs/render_media.py --page pose
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

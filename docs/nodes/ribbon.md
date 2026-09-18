@@ -216,4 +216,4 @@ python docs/render_media.py --page ribbon
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

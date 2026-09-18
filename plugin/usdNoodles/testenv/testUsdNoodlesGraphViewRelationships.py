@@ -2980,6 +2980,13 @@ class LinkClickDispatchTest(unittest.TestCase):
             nodeCreationHotbox=SimpleNamespace(is_visible=False),
             # No rename in progress; a press commits one when there is.
             _renamingNodeId="",
+            # Same for the value editor and the token popup, and the value
+            # cells are off so a press cannot be claimed by one.
+            _valueEditTarget=None,
+            _tokenPopup=None,
+            _mungState=None,
+            _cachedShowAttributeValues=False,
+            _valueCellAtPoint=MagicMock(return_value=None),
             minimap=SimpleNamespace(handleMousePress=MagicMock(return_value=False)),
             # mousePressEvent now gates the minimap branch on this; production
             # sets it in _initCachedSettings (default True), which this

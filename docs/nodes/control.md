@@ -409,4 +409,4 @@ python docs/render_media.py --page control
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

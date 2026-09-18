@@ -298,6 +298,16 @@ RigExecBakedBindInput(const UsdPrim &prim, const char *name, T fallback,
 }
 
 template <class T>
+inline void
+RigExecBakeRecordRead(const RigExecResolvedInputs &resolved,
+                      const void *input, const T &value)
+{
+    if (resolved.bakeRecorder) {
+        resolved.bakeRecorder->Record(input, VtValue(value));
+    }
+}
+
+template <class T>
 inline T
 RigExecBakedRead(const RigExecBakedInput<T> &input,
                  const RigExecResolvedInputs &resolved, UsdTimeCode time,
@@ -319,10 +329,12 @@ RigExecBakedRead(const RigExecBakedInput<T> &input,
     }
     if (input.resolvedAttr) {
         resolved.GetAttribute(input.resolvedAttr, time, &value);
+        RigExecBakeRecordRead(resolved, &input, value);
         return value;
     }
     if (input.query.IsValid()) {
         input.query.Get(&value, time);
+        RigExecBakeRecordRead(resolved, &input, value);
     }
     return value;
 }
@@ -1940,6 +1952,10 @@ struct RigExecBakedProgramImpl {
         /// phase filled; here the phase is a step and the value is a slot,
         /// which is what puts the edge in the graph.
         int poseWeight = -1;
+        /// The weight the last assembly consumed for this channel, retained
+        /// for the bake (M1 slice 4): the assembly reads it off the resolved
+        /// inputs or a pose slot, neither of which the read recorder sees.
+        float lastWeight = 0.0f;
         struct Sample {
             /// The RigExecBlendSample prim, which keys the shape cache.
             SdfPath samplePath;
@@ -1957,6 +1973,17 @@ struct RigExecBakedProgramImpl {
             /// run once.
             SdfPath blendShape;
             std::shared_ptr<const RigExecBlendSampleLayout> layout;
+            /// Whether the prologue's resolve refused the cache this frame,
+            /// which is what puts the layout on the per-frame stream rather
+            /// than leaving the runtime to the epoch one. Written beside
+            /// `layout`, every frame, so it is never stale.
+            bool layoutRefused = false;
+            /// The activation and dense points the last assembly consumed,
+            /// retained for the bake (M1 slice 4): same read-recorder gap
+            /// as the channel weight. Points only for the dense form; a
+            /// sparse sample's shape rides the layout stream instead.
+            float lastActivation = 1.0f;
+            std::vector<GfVec3f> lastPoints;
         };
         std::vector<Sample> samples;
     };
@@ -1983,6 +2010,12 @@ struct RigExecBakedProgramImpl {
         /// produced, and the published map is one of the seven the
         /// comparator checks.
         std::vector<GfMatrix4d> controlFrames;
+        /// The net-to-asset ladder the last publish composed for this
+        /// adjuster, retained for the bake (M1 slice 4): the epilogue reads
+        /// it off the stage per frame, past the read recorder's reach.
+        /// Fresh only when the revision published (a CurvenetAdjuster whose
+        /// status is "ok"); the drain consults the same condition.
+        GfMatrix4d lastAdjusterNetToAsset{1.0};
         /// The Profile Mover bind, resolved in the PROLOGUE.
         ///
         /// RigExecCurvenetBindCache has no locking at all and reports one
@@ -1991,6 +2024,12 @@ struct RigExecBakedProgramImpl {
         /// `curvenetBindResolved` says.
         std::shared_ptr<const RigExecProfileMoverBinding> curvenetBind;
         bool curvenetBindResolved = false;
+        /// The bind's inputs, retained through
+        /// RigExecProviderValues::curvenetBindInputs for the bake (M1 slice
+        /// 3b): the runtime re-binds from these because the factorization
+        /// has no by-value form. Filled once -- the prologue's assembly is
+        /// first -- and epoch data, like every read it holds.
+        RigExecCurvenetBindInputs curvenetBindInputs;
         /// This revision's blend channels, in `binding.blendInputs` order.
         /// Empty for every operation but a blend shape.
         std::vector<GeomBlendChannel> blendChannels;

@@ -1,4 +1,4 @@
-"""Hand-written prose for the RigExec node pages (see build_pages.py).
+"""Hand-written prose for the UsdRig node pages (see build_pages.py).
 
 Each entry supplies the user-facing description, wiring table, example
 story, tips, and cross-links for one operator. Parameter reference comes
@@ -1124,7 +1124,7 @@ home.""",
         "title": "Single-Chain IK Constraint",
         "schema": "RigExecSingleChainIkConstraint",
         "summary": "Re-poses an existing joint chain of any length onto an effector goal.",
-        "description": """FBX-style single-chain IK, and the only IK in RigExec that is a
+        "description": """FBX-style single-chain IK, and the only IK in UsdRig that is a
 **constraint** rather than a solver: it does not publish a frame array that
 joints extract from, it revises the joint frames that are already there —
 whatever the last solver in each joint's stack committed.

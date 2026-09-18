@@ -176,4 +176,4 @@ python docs/render_media.py --page blend_point_frames
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

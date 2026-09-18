@@ -178,7 +178,9 @@ RigExecImagingRegistry::_EvaluateSessions(
         RigExecImagingSnapshotConstPtr rigSnapshot = session.store->Get();
         if (session.dirty || !rigSnapshot || !rigSnapshot->Describes(stage, time)) {
             const RigExecImagingBridge::PublishResult result =
-                session.bridge->EvaluateAndPublishResult(time);
+                session.playback
+                    ? session.playback->EvaluateAndPublishResult(time)
+                    : session.bridge->EvaluateAndPublishResult(time);
             ++session.evaluationCount;
             if (!result.ok) {
                 if (errors) {
@@ -208,7 +210,10 @@ RigExecImagingRegistry::_EvaluateSessions(
         if (!session.epoch) {
             auto rigEpoch = std::make_shared<
                 RigExecBindingResolvingSceneIndex::BindingEpoch>();
-            rigEpoch->id = session.bridge->GetBindingEpochDigest();
+            rigEpoch->id =
+                session.playback
+                    ? session.playback->GetBindingEpochDigest()
+                    : session.bridge->GetBindingEpochDigest();
             for (const auto &[path, published] : rigSnapshot->prims) {
                 rigEpoch->publishedPrims.insert(path);
             }
@@ -387,15 +392,38 @@ RigExecImagingRegistry::Activate(
         session.rigPath = path;
         session.assetRoot = path.GetParentPath();
         session.store = std::make_shared<RigExecSnapshotStore>();
-        session.bridge = std::make_unique<RigExecImagingBridge>(
-            stage, path, session.store);
-        // A selection made before this rig was activated applies to it: the
-        // overlay is a viewer mode, not a property of one bridge. Set before
-        // the first evaluation so the initial generation already carries it.
-        session.bridge->SetWeightOverlay(_weightOverlay);
-        if (!session.bridge->Compile(errors)) {
-            abandon();
-            return false;
+        // Baked playback (M2b): a rig naming rigExec:asset plays the
+        // file instead of evaluating. An unreadable or unplayable
+        // file falls back to live evaluation with a warning -- the
+        // schema contract -- rather than failing the activation.
+        std::string assetPath;
+        if (RigExecPlaybackAssetFor(rig, &assetPath)) {
+            auto playback = std::make_unique<RigExecBakedPlayback>(
+                stage, path, session.store);
+            std::string why;
+            if (playback->Open(assetPath, &why)) {
+                playback->SetWeightOverlay(_weightOverlay);
+                session.playback = std::move(playback);
+                session.readRoots = {session.assetRoot};
+                session.readRootsDirty = false;
+            } else {
+                TF_WARN("rigExec: %s names rigExec:asset %s (%s); "
+                        "evaluating live",
+                        path.GetString().c_str(), assetPath.c_str(),
+                        why.c_str());
+            }
+        }
+        if (!session.playback) {
+            session.bridge = std::make_unique<RigExecImagingBridge>(
+                stage, path, session.store);
+            // A selection made before this rig was activated applies to it: the
+            // overlay is a viewer mode, not a property of one bridge. Set before
+            // the first evaluation so the initial generation already carries it.
+            session.bridge->SetWeightOverlay(_weightOverlay);
+            if (!session.bridge->Compile(errors)) {
+                abandon();
+                return false;
+            }
         }
         candidate.push_back(std::move(session));
     }
@@ -422,7 +450,9 @@ RigExecImagingRegistry::Activate(
     _generatedScopes.clear();
     _assetRoots.clear();
     for (const RigSession &session : _sessions) {
-        _generatedScopes.insert(session.bridge->GetGeneratedScope());
+        _generatedScopes.insert(
+            session.playback ? session.playback->GetGeneratedScope()
+                             : session.bridge->GetGeneratedScope());
         _assetRoots.insert(session.assetRoot);
     }
     _RefreshReadRoots();
@@ -575,8 +605,10 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
     // update: the rig (Imaging.EvaluateAndPublish, per session, inside
     // _EvaluateSessions above) and then the COMBINED generation's publish
     // and the dirty notices that drive Hydra's sync.
-    RigExecProfiler *const profiler =
-        _sessions.empty() ? nullptr : _sessions.front().bridge->MutableProfiler();
+    RigExecProfiler *profiler = nullptr;
+    if (!_sessions.empty() && !_sessions.front().playback) {
+        profiler = _sessions.front().bridge->MutableProfiler();
+    }
     RigExecImagingBridge::PublishResult published;
     {
         RigExecProfileScope scope(profiler, "Imaging.CombinedPublish",
@@ -644,7 +676,11 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
         // Offered to every active rig: the path selects at most one rig's
         // weight object, and a bridge that does not own it draws no overlay.
         for (RigSession &session : _sessions) {
-            session.bridge->SetWeightOverlay(resolved);
+            if (session.playback) {
+                session.playback->SetWeightOverlay(resolved);
+            } else {
+                session.bridge->SetWeightOverlay(resolved);
+            }
             session.dirty = true;
         }
         time = _lastTime;
@@ -786,8 +822,12 @@ RigExecImagingRegistry::BeginPreview(const std::string &packedAttributePaths)
         }
         // Which lane. An attribute inside an active rig previews through that
         // rig's evaluator; everything else is a transform of its own.
+        // A playback rig offers no evaluator lane: its inputs are baked,
+        // so an attribute under one falls through to the xform lane (or
+        // is refused, when it is not an xform op either).
         for (const RigSession &session : _sessions) {
-            if (slot.primPath.HasPrefix(session.rigPath)) {
+            if (!session.playback &&
+                slot.primPath.HasPrefix(session.rigPath)) {
                 slot.rigPath = session.rigPath;
                 break;
             }
@@ -951,8 +991,10 @@ RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
         for (RigSession &session : _sessions) {
             const auto found = byRig.find(session.rigPath);
             if (found == byRig.end()) {
-                session.bridge->ClearInteractiveOverrides();
-            } else {
+                if (session.bridge) {
+                    session.bridge->ClearInteractiveOverrides();
+                }
+            } else if (session.bridge) {
                 session.bridge->SetInteractiveOverrides(found->second);
                 needsRigPublish = true;
             }
@@ -979,6 +1021,10 @@ RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
     }
     out << "rig\tname\tcategory\tcount\ttotal_ms\tmax_ms\tmode\n";
     for (const RigSession &session : _sessions) {
+        // Playback records no phases, so it contributes no rows.
+        if (session.playback) {
+            continue;
+        }
         const RigExecRigEvaluator &evaluator = session.bridge->GetEvaluator();
         // The mode ASKED for. Whether the baked program actually answered is
         // in the rows themselves: a generation it served records `Baked`.
@@ -1010,7 +1056,9 @@ RigExecImagingRegistry::EndPreview()
         _previewActive = false;
         _SetChainXformDeltas({});
         for (RigSession &session : _sessions) {
-            session.bridge->ClearInteractiveOverrides();
+            if (session.bridge) {
+                session.bridge->ClearInteractiveOverrides();
+            }
             session.dirty = true;
             hadRigOverrides = true;
         }
@@ -1128,7 +1176,11 @@ RigExecImagingRegistry::_OnObjectsChanged(
                     affected = affected || affects(path);
                 for (const SdfPath &path : notice.GetChangedInfoOnlyPaths())
                     affected = affected || affects(path);
-                if (affected) {
+                // A playback session never dirties: the binary is static,
+                // so no stage edit changes what it publishes. Picking up
+                // a new asset (or a new file behind it) needs a
+                // re-activation.
+                if (affected && !session.playback) {
                     session.dirty = true;
                     session.readRootsDirty = session.readRootsDirty || _readRootsDirty;
                     // The bridge caches authored guide styling (shape, scale,

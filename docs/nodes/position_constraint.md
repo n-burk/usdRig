@@ -240,4 +240,4 @@ python docs/render_media.py --page position_constraint
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

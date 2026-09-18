@@ -248,15 +248,52 @@ class NodeFactory:
 
     @staticmethod
     def _apply_icon_from_prim(node: NodeModel, prim: Usd.Prim) -> None:
+        """Set the node's title-bar icon from ``ui:nodegraph:node:icon``.
+
+        The attribute is read by name rather than through
+        ``UsdUI.NodeGraphNodeAPI.GetIconAttr`` on purpose: the two return the
+        same attribute, but the name works whether or not the prim actually
+        applies the API schema, and an authored opinion is what the editor
+        should honour.
+        """
         try:
             icon_attr = prim.GetAttribute("ui:nodegraph:node:icon")
             if icon_attr.IsValid() and icon_attr.HasAuthoredValue():
-                icon_asset = icon_attr.Get()
-                icon_path = icon_asset.resolvedPath or icon_asset.path
+                icon_path = NodeFactory._resolve_icon_asset(icon_attr)
                 if icon_path:
-                    node._icon_path = str(icon_path)
+                    # Writes through to the C++ NodeData.titleIconPath the icon
+                    # renderer reads (see NodeModel._icon_path).
+                    node._icon_path = icon_path
         except Exception:
             pass
+
+    @staticmethod
+    def _resolve_icon_asset(icon_attr: Usd.Attribute) -> str:
+        """Absolute filesystem path for an authored icon asset, or "".
+
+        USD fills ``SdfAssetPath.resolvedPath`` when the asset resolves, already
+        anchored to the layer that authored the opinion. When it does not
+        resolve (a missing file) that field is empty and the authored path is
+        still relative TO THAT LAYER -- never to the process's working
+        directory -- so it is anchored by hand here. Handing the renderer a
+        bare "../../icons/foo.png" would make the icon depend on where usdview
+        happened to be started; an anchored path that does not exist simply
+        falls back to the default icon.
+        """
+        icon_asset = icon_attr.Get()
+        if icon_asset is None:
+            return ""
+        resolved = str(getattr(icon_asset, "resolvedPath", "") or "")
+        if resolved:
+            return resolved
+        authored = str(getattr(icon_asset, "path", "") or "")
+        if not authored:
+            return ""
+        for spec in icon_attr.GetPropertyStack(Usd.TimeCode.Default()):
+            layer = spec.layer
+            if layer:
+                return str(layer.ComputeAbsolutePath(authored))
+        return authored
 
     @staticmethod
     def _apply_display_color_from_prim(node: NodeModel, prim: Usd.Prim) -> None:

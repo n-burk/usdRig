@@ -68,6 +68,14 @@ class RigExecRoot "RigExecRoot" (
         on a stage, such as rendering or bounding-box computation traversals."""
         }
     )
+    uniform asset rigExec:asset = @@ (
+        customData = {
+            string userDocBrief = """Baked-playback selector: when set, hosts that can play a\r
+        .rigexec file (usdview through rigExecImaging, the Godot player)\r
+        answer this rig from the binary instead of evaluating it, and when\r
+        unset the rig evaluates live."""
+        }
+    )
     uniform bool rigExec:baked = 0 (
         customData = {
             string userDocBrief = """Asks the evaluator to answer this rig through its BAKED\r

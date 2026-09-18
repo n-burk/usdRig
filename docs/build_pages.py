@@ -8,6 +8,10 @@ doc strings) from libs/rigExecSchema/schema.usda, combines it with the
 hand-written prose in docs/operator_notes.py, and writes one page per
 operator to docs/nodes/<operator>.md plus the gallery at docs/index.md.
 Re-running regenerates every page; prose lives only in operator_notes.py.
+
+Concept pages are hand-written Markdown in docs/concepts/ and are not
+generated: this module only parses their front matter (see parse_concept)
+so the index can list them and build_html.py can render them.
 """
 import os
 import re
@@ -21,6 +25,101 @@ from operator_notes import OPERATORS, CATEGORIES  # noqa: E402
 SCHEMA = os.path.join(RIG, "libs", "rigExecSchema", "schema.usda")
 NODES_DIR = os.path.join(RIG, "docs", "nodes")
 GIFS_DIR = os.path.join(RIG, "docs", "gifs")
+CONCEPTS_DIR = os.path.join(RIG, "docs", "concepts")
+
+
+# ---- concept pages ---------------------------------------------------
+# Hand-written prose, one Markdown file per page in docs/concepts/. The
+# sources are the Markdown output -- nothing is generated for them here --
+# and build_html.py renders the same files into docs/site/concepts/.
+#
+# A page opens with an optional front matter block:
+#
+#     ---
+#     title: How operators fire
+#     summary: One line.
+#     order: 20
+#     ---
+#
+# and continues with ordinary Markdown whose own headings start at "##".
+# Links and images are written ONCE, relative to docs/: a node page is
+# "nodes/<key>.md", an image is "gifs/<name>.gif". build_html.py rewrites
+# them to "../nodes/<key>.html" and "../gifs/<name>.gif" for the site.
+
+_FRONT_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?", re.S)
+_H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.M)
+
+
+def _unquote_scalar(text):
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1]
+    return text
+
+
+def parse_concept(path):
+    """One concept source as {slug, title, summary, order, body, path}."""
+    slug = os.path.splitext(os.path.basename(path))[0]
+    with open(path, encoding="utf-8") as stream:
+        text = stream.read()
+    meta = {}
+    match = _FRONT_RE.match(text)
+    if match:
+        body = text[match.end():]
+        for line in match.group(1).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue
+            name, _, value = line.partition(":")
+            meta[name.strip().lower()] = _unquote_scalar(value)
+    else:
+        body = text
+    title = meta.get("title", "")
+    if not title:
+        # No front matter: the first "# " heading names the page, and is
+        # dropped from the body so the rendered title is not printed twice.
+        heading = _H1_RE.search(body)
+        if heading:
+            title = heading.group(1).strip()
+            body = body[:heading.start()] + body[heading.end():]
+        else:
+            title = slug.replace("-", " ").capitalize()
+    try:
+        order = int(meta.get("order", "1000"))
+    except ValueError:
+        order = 1000
+    return {"slug": slug, "title": title, "summary": meta.get("summary", ""),
+            "order": order, "body": body.strip(), "path": path}
+
+
+def load_concepts():
+    """Every docs/concepts/*.md, ordered by front-matter "order" then title."""
+    if not os.path.isdir(CONCEPTS_DIR):
+        return []
+    pages = [parse_concept(os.path.join(CONCEPTS_DIR, name))
+             for name in sorted(os.listdir(CONCEPTS_DIR))
+             if name.endswith(".md")]
+    pages.sort(key=lambda page: (page["order"], page["title"].lower()))
+    return pages
+
+
+def concept_headings(body):
+    """The page's "## " headings as [(slug, title)], for "On this page"."""
+    out, fenced = [], False
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fenced = not fenced
+            continue
+        if fenced or not stripped.startswith("## "):
+            continue
+        title = stripped[3:].strip().rstrip("#").strip()
+        out.append((concept_slug(title), title))
+    return out
+
+
+def concept_slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
 def example_stage(key, note):
@@ -340,14 +439,14 @@ def render_page(key, note, classes):
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.append("[RigExec nodes](../index.md)")
+    lines.append("[UsdRig](../index.md)")
     lines.append("")
     return "\n".join(lines)
 
 
-def render_index():
+def render_index(concepts=()):
     lines = []
-    lines.append("# RigExec nodes")
+    lines.append("# UsdRig")
     lines.append("")
     lines.append("One page per operator: what it does, how to wire it, every")
     lines.append("parameter, and a minimal animated example. Each example stage")
@@ -356,6 +455,16 @@ def render_index():
     lines.append("live from that stage by `docs/render_media.py`, an offscreen")
     lines.append("Storm viewport with the rig guides on.")
     lines.append("")
+    if concepts:
+        lines.append("## Concepts")
+        lines.append("")
+        lines.append("| | Page | About |")
+        lines.append("|---|---|---|")
+        for page in concepts:
+            lines.append("| ![%s](../icons/concept.png) | [%s](concepts/%s.md)"
+                         " | %s |" % (page["title"], page["title"],
+                                      page["slug"], page["summary"]))
+        lines.append("")
     for category, keys in CATEGORIES:
         lines.append("## %s" % category)
         lines.append("")
@@ -391,8 +500,12 @@ def main():
         with open(os.path.join(NODES_DIR, key + ".md"), "w") as stream:
             stream.write(page)
         print("wrote nodes/%s.md" % key)
+    concepts = load_concepts()
+    for page in concepts:
+        print("concept concepts/%s.md (order %d)"
+              % (page["slug"], page["order"]))
     with open(os.path.join(RIG, "docs", "index.md"), "w") as stream:
-        stream.write(render_index())
+        stream.write(render_index(concepts))
     print("wrote index.md")
 
 

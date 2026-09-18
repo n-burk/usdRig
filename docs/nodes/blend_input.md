@@ -86,4 +86,4 @@ python docs/render_media.py --page blend_input
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

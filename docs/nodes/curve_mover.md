@@ -114,13 +114,86 @@ every application of the atomic mover.
 
 *Type:* `uniform token`. *Default:* `"ribbon"`.
 
-Valid values: `ribbon`, `emitGuidePoints`.
+Valid values: `ribbon`, `emitGuidePoints`, `wire`.
+
+ribbon transports points along a ribbon aggregate's frames;
+emitGuidePoints writes its sample positions; wire moves each point by
+the displacement of rigExec:driverCurve (a UsdGeomNurbsCurves) at the
+parameter it was bound to: p' = p + f(d) * (C(u) - C0(u)), with (u, d)
+per point from rigExec:bindCoordinates, C the curve's posed control
+points at rigExec:driverCurveReadPhase and C0 its authored ones. With
+a sparse weight object the bind table may be sparse too: one (u, d)
+per weighted point, in the weight object's index order.
 
 #### `rigExec:driverCurveReadPhase`
 
 *Type:* `uniform token`. *Default:* `"base"`.
 
 Valid values: `base`, `preceding`, `final`.
+
+#### `rigExec:driverTransforms`
+
+*Relationship.*
+
+wire: move the driver curve's control points by matrix
+providers instead of reading its points: one provider per unique
+control point, or one for all. A periodic curve's repeated points
+take their unique point's provider. The posed point is
+C0 + w (M C0 - C0), M the provider measured against its entry in
+rigExec:driverTransformSpaces and w its inputs:driverWeights entry.
+No chain runs on the curve, so no phased read is needed.
+
+#### `rigExec:driverTransformSpaces`
+
+*Relationship.*
+
+wire: the space each driver transform is measured against,
+parallel to rigExec:driverTransforms, or one for all, or none.
+
+#### `rigExec:transformReadPhase`
+
+*Type:* `uniform token`. *Default:* `"base"`.
+
+Valid values: `base`, `final`.
+
+wire: which revision of the driver transforms is read.
+
+#### `inputs:driverWeights`
+
+*Type:* `float[]`. *Default:* `[]`.
+
+wire: per unique control point weight of its driver
+transform, or one for all; empty is 1.
+
+#### `rigExec:driverBaseTransforms`
+
+*Relationship.*
+
+wire: an optional base motion applied to the curve AND its
+rest before the driver transforms, as a wire whose base curve rides
+the same deformers as its driver: B = C0 + wb (Mb C0 - C0), then
+C = B + w (M B - B), and the wire deforms by C - B. Same entry rules
+as rigExec:driverTransforms.
+
+#### `rigExec:driverBaseTransformSpaces`
+
+*Relationship.*
+
+wire: the spaces of rigExec:driverBaseTransforms.
+
+#### `inputs:driverBaseWeights`
+
+*Type:* `float[]`. *Default:* `[]`.
+
+wire: per unique control point weight of the base motion.
+
+#### `inputs:dropoffDistance`
+
+*Type:* `float`. *Default:* `0`.
+
+wire: distance over which a point's pull from the curve
+falls to zero, as 1 - smoothstep(0, dropoffDistance, d) with d the
+point's rest distance from the curve. 0 applies no falloff.
 
 ## Example
 
@@ -162,4 +235,4 @@ python docs/render_media.py --page curve_mover
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

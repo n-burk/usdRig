@@ -170,4 +170,4 @@ python docs/render_media.py --page twist_distribution
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

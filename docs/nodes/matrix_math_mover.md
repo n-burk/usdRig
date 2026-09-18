@@ -150,4 +150,4 @@ python docs/render_media.py --page matrix_math_mover
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

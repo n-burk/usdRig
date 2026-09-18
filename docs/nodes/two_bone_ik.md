@@ -193,4 +193,4 @@ python docs/render_media.py --page two_bone_ik
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

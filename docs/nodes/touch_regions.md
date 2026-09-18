@@ -173,4 +173,4 @@ bin\launch_usdview.bat docs\examples\touch_regions.usda
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

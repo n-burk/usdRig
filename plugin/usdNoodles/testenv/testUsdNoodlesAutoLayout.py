@@ -283,6 +283,11 @@ class TestAutoLayoutAction(unittest.TestCase):
             _autoLayoutNodes=MagicMock(),
             # No rename in progress; the editor owns the keyboard when it is.
             _renamingNodeId="",
+            # Nor a value drag / editor / token popup, each of which is asked
+            # about before the single-letter shortcuts get a turn.
+            _mungState=None,
+            _tokenPopup=None,
+            _valueEditTarget=None,
         )
         event = SimpleNamespace(
             key=MagicMock(return_value=QtCore.Qt.Key_L),

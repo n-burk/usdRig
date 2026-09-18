@@ -225,4 +225,4 @@ python docs/render_media.py --page fk_chain
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

@@ -442,6 +442,10 @@ public:
     }
     bool GetPublishWeightFields() const { return _publishWeightFields; }
 
+    /// The rig prim this evaluator was constructed with, for tools that
+    /// report on the bake (a bake manifest names its rig).
+    const SdfPath &GetRigPath() const { return _rigPath; }
+
     /// Composed mover-stack applications: descendants before their mover
     /// parent, sibling branches in reverse composed child order (the bottom
     /// usdview row executes first; spec §4.2).

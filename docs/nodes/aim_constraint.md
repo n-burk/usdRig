@@ -293,4 +293,4 @@ python docs/render_media.py --page aim_constraint
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

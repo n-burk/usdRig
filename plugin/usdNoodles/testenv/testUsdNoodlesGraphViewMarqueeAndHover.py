@@ -74,6 +74,10 @@ class MarqueeSelectionTest(unittest.TestCase):
             _updateNodeUnderCursor=MagicMock(),
             _updateHoveredPort=MagicMock(return_value=False),
             _updatePropertyTooltip=MagicMock(),
+            # mouseMoveEvent checks for a value drag before any hover work and
+            # updates the resize cursor over a value cell; no drag here.
+            _mungState=None,
+            _updateValueHoverCursor=MagicMock(),
             draggingNodes=False,
             _draggingLink=False,
             linkRenderer=SimpleNamespace(
@@ -202,6 +206,10 @@ class HoverGatingDuringDragTest(unittest.TestCase):
             _updateNodeUnderCursor=MagicMock(),
             _updateHoveredPort=MagicMock(return_value=False),
             _updatePropertyTooltip=MagicMock(),
+            # No value drag in progress, and the value-hover cursor is a
+            # widget-level edge this fixture does not exercise.
+            _mungState=None,
+            _updateValueHoverCursor=MagicMock(),
             draggingNodes=dragging_nodes,
             _draggingLink=dragging_link,
             linkRenderer=SimpleNamespace(

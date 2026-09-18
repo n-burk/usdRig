@@ -11,12 +11,23 @@
 namespace rigExec {
 namespace {
 template<class T> T _Read(const UsdPrim &prim, const std::string &name,
-    T fallback, UsdTimeCode time, const RigExecResolvedInputs *resolved) {
+    T fallback, UsdTimeCode time, const RigExecResolvedInputs *resolved,
+    RigExecBakeReadRecorder *bakeRecorder=nullptr) {
     const auto attr=prim.GetAttribute(TfToken(name));
+    if (!bakeRecorder && resolved) bakeRecorder=resolved->bakeRecorder;
     if (attr) {
-        if (resolved) resolved->GetAttribute(attr,time,&fallback);
-        else attr.Get(&fallback,time);
-    }
+        if (resolved && resolved->GetAttribute(attr,time,&fallback))
+            RigExecRecordStageRead(resolved,bakeRecorder,attr.GetPath(),attr,
+                time,VtValue(fallback),/*forceFrame=*/true);
+        else {
+            if (!resolved) attr.Get(&fallback,time);
+            RigExecRecordStageRead(nullptr,bakeRecorder,attr.GetPath(),attr,
+                time,VtValue(fallback),/*forceFrame=*/false);
+        }
+    } else
+        RigExecRecordStageRead(nullptr,bakeRecorder,
+            prim.GetPath().AppendProperty(TfToken(name)),attr,
+            time,VtValue(fallback),/*forceFrame=*/false);
     return fallback;
 }
 GfMatrix4d _Space(const UsdPrim &prim,const char *name,const GfMatrix4d &fallback,
@@ -95,7 +106,8 @@ RigExecMoverParameters RigExecAssembleCurvenetAdjusterParameters(
     if (!p.enabled) { p.valid=true; return p; }
     const auto net=mover.GetStage()->GetPrimAtPath(target.GetPrimPath());
     if (!net || net.GetTypeName()!="RigExecCurvenet" || !p.weights.valid) return p;
-    const auto rest=_Read(net,"points",VtVec3fArray(),UsdTimeCode::Default(),nullptr);
+    const auto rest=_Read(net,"points",VtVec3fArray(),UsdTimeCode::Default(),nullptr,
+        resolved ? resolved->bakeRecorder : nullptr);
     p.restPoints.assign(rest.begin(),rest.end());
     const auto indices=_Read(net,"rigExec:splineIndices",VtIntArray(),time,resolved);
     p.topologyIndices.assign(indices.begin(),indices.end());

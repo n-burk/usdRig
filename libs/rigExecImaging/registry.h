@@ -10,6 +10,7 @@
 #define RIGEXEC_IMAGING_REGISTRY_H
 
 #include "bridge.h"
+#include "playback.h"
 #include "sceneIndices.h"
 #include "snapshotStore.h"
 
@@ -184,6 +185,9 @@ private:
         SdfPath assetRoot;
         std::shared_ptr<RigExecSnapshotStore> store;
         std::unique_ptr<RigExecImagingBridge> bridge;
+        /// Set when the rig plays a .rigexec instead of evaluating:
+        /// exactly one of bridge/playback is ever set (see Activate).
+        std::unique_ptr<RigExecBakedPlayback> playback;
         RigExecBindingResolvingSceneIndex::BindingEpochConstPtr epoch;
         std::set<SdfPath> readRoots;
         bool readRootsDirty = true;

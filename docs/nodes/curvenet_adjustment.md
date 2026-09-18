@@ -428,4 +428,4 @@ python docs/render_media.py --page curvenet_adjustment
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

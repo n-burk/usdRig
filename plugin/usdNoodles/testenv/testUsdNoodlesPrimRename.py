@@ -283,6 +283,19 @@ class _StubGraphView:
         self._renamingNodeId = ""
         self._renameInput = TextInputWidget()
 
+        # The inline VALUE editor shares every handler the rename goes
+        # through -- keyPressEvent asks it first, mousePressEvent commits it
+        # on click-away, and _remapMovedNodes carries it across a move -- so
+        # the slice of state mirrored here has to include it. Nothing in
+        # these tests opens one; they all stay at "not in progress".
+        self._valueEditTarget = None
+        self._valueEditInput = TextInputWidget()
+        self._valueEditFresh = True
+        self._mungState = None
+        self._mungActive = False
+        self._tokenPopup = None
+        self._cachedShowAttributeValues = False
+
         self._selectedNodes = set()
 
         self.nodeGraph = MagicMock()
@@ -1254,6 +1267,9 @@ class _ReloadStubGraphView:
         self._cppIconRenderer = MagicMock()
         self._nodeTransformFrame = MagicMock()
         self.update = MagicMock()
+        # A reload rebuilds every node object, so it first abandons any value
+        # edit / drag / popup pinned to the graph that is going away.
+        self._clearValueInteractionState = MagicMock()
 
         self.zoom = 0.35
         self.panX = 137.0

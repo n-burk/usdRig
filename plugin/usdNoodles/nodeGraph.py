@@ -6,7 +6,7 @@
 #
 
 from UsdNoodles.core import FontMetrics, GraphModel, RenderConfig
-from pxr import Tf
+from pxr import Gf, Tf
 
 
 try:
@@ -188,6 +188,65 @@ def warn_if_non_persistent_edit_target(stage):
     return message
 
 
+def value_cell_reserve(node, calculateTextWidth, config):
+    """Extra world-space width *node* needs for its inline value cells.
+
+    Returns 0.0 when the node shows no values at all, which is the common
+    case and the whole point of doing this here: the reserve is pure
+    arithmetic over numbers the node already carries, so it is unit-testable
+    headless and costs nothing on a node with no editable rows.
+
+    Side effect, deliberately: the chosen cell width is stored on
+    ``node._value_cell_width``. The paint and hit-test passes must use the
+    SAME width the layout reserved, and recomputing it from measured text on
+    every frame would both cost more and drift.
+    """
+    from .noodlesConfig import NoodlesConfig
+    from .widgets import valueCell
+
+    if not NoodlesConfig.get("showAttributeValues", True):
+        node._value_cell_width = 0.0
+        return 0.0
+
+    rows_fn = getattr(node, "value_rows", None)
+    if rows_fn is None:
+        return 0.0
+    try:
+        rows = rows_fn(getattr(node, "_value_rows_time", None))
+    except Exception as e:  # a node whose prim expired mid-layout
+        Tf.Warn(f"value_cell_reserve: {e}")
+        node._value_cell_width = 0.0
+        return 0.0
+    if not rows:
+        node._value_cell_width = 0.0
+        return 0.0
+
+    h = float(node.layoutPortLineHeight)
+    if h <= 0.0:
+        node._value_cell_width = 0.0
+        return 0.0
+
+    font_scale = float(NoodlesConfig.get("valueFontScale", 0.85))
+    font_size = float(config.nodePinFontSize) * font_scale
+
+    def measure(text):
+        return calculateTextWidth(text, font_size)
+
+    widest = 0.0
+    for row in rows.values():
+        widest = max(
+            widest,
+            valueCell.measure_row_width(row.texts, measure, h, row.has_swatch),
+        )
+    if widest <= 0.0:
+        node._value_cell_width = 0.0
+        return 0.0
+
+    cell_w = valueCell.clamp_cell_width(widest, h)
+    node._value_cell_width = cell_w
+    return valueCell.reserve_width(cell_w, h)
+
+
 def build_render_config():
     """Build a C++ ``RenderConfig`` from the current ``NoodlesConfig`` values.
 
@@ -356,3 +415,18 @@ class NodeGraph(GraphModel):
             fm.lineHeight = fontMetrics.lineHeight
             fontMetrics = fm
         self.layoutNode(node, calculateTextWidth, fontMetrics, config)
+
+        # Reserve room for the inline value cells, in the ONE chokepoint every
+        # caller goes through, so the width the cells are drawn against and the
+        # width the C++ text pass right-aligns output labels to are the same
+        # number. Solved in closed form (widened_node_width) because the
+        # connection gutter is a fraction of the width: widening by the cell
+        # width alone would let the gutter grow into the space just reserved.
+        reserve = value_cell_reserve(node, calculateTextWidth, config)
+        if reserve > 0.0:
+            from .widgets.valueCell import widened_node_width
+
+            size = node.size
+            node.size = Gf.Vec2d(
+                widened_node_width(float(size[0]), reserve), float(size[1])
+            )

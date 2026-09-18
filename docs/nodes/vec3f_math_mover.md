@@ -165,4 +165,4 @@ python docs/render_media.py --page vec3f_math_mover
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

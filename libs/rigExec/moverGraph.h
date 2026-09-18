@@ -289,9 +289,56 @@ private:
 /// the same revision reached every exec consumer through a value override.
 /// This is the other half of that path: one lookup, consulted first, holding
 /// whatever the current generation has already resolved.
+/// Bake-time record of what the inputs resolved (M1 slice 4).
+///
+/// The runtime replays per-frame input values rather than reading the
+/// stage, so the bake has to capture exactly what the program consumed --
+/// and for the resolved route that is only knowable at resolution time,
+/// while the overlay holds the generation's own values. Armed by the bake
+/// around each Evaluate (null otherwise, when reads cost one predictable
+/// branch), filled from RigExecBakedRead on whatever thread ran the step,
+/// drained per frame by the capture. Keys are input addresses, stable
+/// within the epoch because the bake performs no edit between the
+/// directory walk and the last frame.
+struct RigExecBakeReadRecorder {
+    void Record(const void *input, const VtValue &value) {
+        std::lock_guard<std::mutex> guard(mutex);
+        reads[input] = value;
+    }
+    /// A stage-sourced read from the shared assemblers, keyed by
+    /// (attribute path, was-Default) so a rest/live pair on one attribute
+    /// keeps both values. forceFrame marks connection-following reads,
+    /// whose variance the drain cannot judge from the attribute. An
+    /// invalid value marks a KNOWN-ABSENT attribute (the site read its
+    /// fallback), which the runtime needs told apart from a gap.
+    struct PathRead {
+        VtValue value;
+        bool forceFrame = false;
+    };
+    void RecordPath(const SdfPath &path, bool wasDefault,
+                    const VtValue &value, bool forceFrame) {
+        std::lock_guard<std::mutex> guard(mutex);
+        PathRead &entry = pathReads[std::make_pair(path, wasDefault)];
+        entry.value = value;
+        entry.forceFrame = entry.forceFrame || forceFrame;
+    }
+    void Clear() {
+        std::lock_guard<std::mutex> guard(mutex);
+        reads.clear();
+        pathReads.clear();
+    }
+    std::mutex mutex;
+    std::map<const void *, VtValue> reads;
+    std::map<std::pair<SdfPath, bool>, PathRead> pathReads;
+};
+
 class RigExecResolvedInputs
 {
 public:
+    /// Bake recorder hook, set by the capture around each Evaluate and
+    /// null the rest of the time. Lives here because every input read
+    /// already takes this object, so the funnel needs no new parameter.
+    RigExecBakeReadRecorder *bakeRecorder = nullptr;
     /// Records a property chain's result for \p path.
     void SetProperty(const SdfPath &path, const VtValue &value) {
         _values[path] = value;
@@ -426,6 +473,38 @@ private:
     std::map<SdfPath, VtValue> _values;
     RigExecStaticInputCache *_cache = nullptr;
 };
+
+/// Records one stage-sourced read for the bake. A null recorder or an
+/// empty key records nothing; an invalid attribute records KNOWN-ABSENT
+/// under the caller-built key (the runtime tells absence apart from a
+/// gap; forceFrame is ignored there); an overlay hit records nothing
+/// (the runtime recomputes overlay values by replaying the same steps).
+/// Pass a null resolved for a site that reads the stage directly without
+/// consulting the overlay, so the tier check does not skip a value the
+/// site consumed past the overlay. forceFrame marks the
+/// connection-following reads, whose variance the drain cannot judge
+/// from the attribute.
+inline void
+RigExecRecordStageRead(const RigExecResolvedInputs *resolved,
+                       RigExecBakeReadRecorder *bakeRecorder,
+                       const SdfPath &key, const UsdAttribute &attribute,
+                       UsdTimeCode time, const VtValue &value,
+                       bool forceFrame)
+{
+    if (!bakeRecorder || key.IsEmpty()) {
+        return;
+    }
+    if (!attribute) {
+        bakeRecorder->RecordPath(key, /*wasDefault=*/true, VtValue(),
+                                 /*forceFrame=*/false);
+        return;
+    }
+    if (resolved && resolved->Find(key)) {
+        return;
+    }
+    bakeRecorder->RecordPath(key, time == UsdTimeCode::Default(), value,
+                             forceFrame);
+}
 
 /// What each chain held at each point in the walk.
 ///
@@ -1073,6 +1152,26 @@ RigExecEnvelopeIsFullStrength(const RigExecWeightPacket &envelope)
 /// the application rather than substituting a default (spec §6.6). The one
 /// deliberate exception is weights: null means no weight object was bound,
 /// so inputs:defaultWeight supplies the common envelope.
+/// The Profile Mover bind's inputs, retained for the bake (M1 slice 3b).
+///
+/// The bind itself owns a factorization, which has no by-value form; the
+/// runtime re-binds from these, which are everything RigExecBindProfileMover
+/// takes plus the topology inputs RigExecBuildCurvenetTopology takes. Every
+/// one is read at Default with the resolved inputs bypassed, so the answer
+/// is epoch data however many frames fill it -- and only the first fill
+/// lands, because the arrays are mesh-scale and a second copy per frame per
+/// curvenet revision would be a performance regression for identical bytes.
+struct RigExecCurvenetBindInputs {
+    std::vector<GfVec3f> restNet;
+    std::vector<int> splineIndices;
+    int samplesPerSpline = 5;
+    TfToken basis;
+    std::vector<GfVec3f> meshPoints;
+    std::vector<int> meshCounts;
+    std::vector<int> meshIndices;
+    bool held = false;
+};
+
 struct RigExecProviderValues {
     const GfMatrix4d *transform = nullptr;          ///< computeMatrix
     /// computeMatrix per binding.influences entry, in that order (skin).
@@ -1102,6 +1201,11 @@ struct RigExecProviderValues {
     /// Cache for a skin mover's epoch-fixed per-point layout. Null re-reads
     /// and re-validates the arrays every call, which is what a layout that
     /// is animated, connected, or written by a property chain requires.
+    /// Retention sink for the bind inputs above. Null looks away; set, the
+    /// Curvenet assembly fills it once (see `held`) on whichever path reads
+    /// the inputs -- the baked program points it at the revision's own
+    /// storage, so the bake carries what the runtime re-binds from.
+    RigExecCurvenetBindInputs *curvenetBindInputs = nullptr;
     RigExecSkinTopologyCache *skinTopologyCache = nullptr;
     /// A layout the CALLER already resolved, for a caller that may not take
     /// the cache's lock where it assembles. Set -- even to a shared_ptr

@@ -236,4 +236,4 @@ python docs/render_media.py --page scale_constraint
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

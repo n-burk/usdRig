@@ -179,4 +179,4 @@ python docs/render_media.py --page combine_weight
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

@@ -101,6 +101,18 @@ every application of the atomic mover.
 
 Exactly one GfMatrix4d provider (computeMatrix).
 
+#### `rigExec:transformSpace`
+
+*Relationship.*
+
+Optional second provider the transform is measured against:
+T = M(transform) * inverse(M(transformSpace)), both read at the same
+phase. With the transform nested under the space in the control
+hierarchy, T is the transform's own local motion carried to its rest
+pivot, so the points move by what the handle does inside the space
+and not by the space's motion -- a localized cluster, for geometry
+that is deformed at rest before it is skinned to that space.
+
 #### `rigExec:transformReadPhase`
 
 *Type:* `uniform token`. *Default:* `"base"`.
@@ -142,4 +154,4 @@ python docs/render_media.py --page matrix_mover
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

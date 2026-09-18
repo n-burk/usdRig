@@ -11,7 +11,7 @@ import math
 import os
 import time
 import traceback
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -35,14 +35,14 @@ from UsdNoodles.render import (
 from UsdNoodles.spatial import SpatialIndex
 from OpenGL import GL
 from OpenGL.error import GLError
-from pxr import Gf, Glf, Sdf, Tf
+from pxr import Gf, Glf, Sdf, Tf, Usd
 from pxr.Usdviewq.qt import QGLFormat, QGLWidget, QtCore, QtGui, QtWidgets
 
 from ._schema_pin_names import (
     get_display_pin_name_for_property_name,
     resolve_property_name_for_display_pin,
 )
-from .constants import MAX_RENDER_DEPTH
+from .constants import MAX_RENDER_DEPTH, node_content_depth
 from .linkRenderer import computeLinkCurveBounds, LinkRenderer, sampleLinkCurve
 from .nodeFactory import NodeFactory
 from .nodeGraph import (
@@ -57,6 +57,7 @@ from .nodeGraphJson import NodeGraphJson
 from .nodeLibs.registry import NodeLibraryRegistry
 from .noodlesConfig import NoodlesConfig
 from .noodlesPreferences import NoodlesPreferences
+from . import noodlesValues
 from .pinUtils import (
     arrowhead_points,
     collect_links_for_prim,
@@ -72,6 +73,8 @@ from .textRenderer import TextRenderer
 from .touchPose import collect_graph_prims, is_touch_group
 from .usdNoticeHandler import UsdNoticeHandler
 from .utils import M, MenuBuilder
+from .widgets import valueCell
+from .widgets.selectableList import SelectableList, SelectableListItem
 from .widgets.textInputWidget import TextInputWidget
 from .widgets import (
     GroupStickerRenderer,
@@ -218,6 +221,62 @@ def _make_rename_undo(gv, parent_path, from_name, to_name):
         # Follow the node across, exactly as the forward rename does. Reloading
         # instead would undo the name and lose the graph in the same gesture.
         gv._remapMovedNodes({oldPath: str(newPath)})
+
+    return _fn
+
+
+# One value cell under the cursor. ``rect`` is the SUB-cell (one component of
+# a vector), which is the unit everything downstream edits.
+_ValueHit = namedtuple("_ValueHit", "nodeId primPath propertyName comp rect row")
+
+
+def _frameOf(value):
+    """A ``Usd.TimeCode`` from whatever usdview handed us.
+
+    usdview's ``frame`` is a TimeCode on some paths and a bare float on
+    others; both have to end up as one thing here. Copied from
+    ``rigExecUsdview/avarEditorUI.py:_FrameOf`` so the two agree.
+    """
+    if isinstance(value, Usd.TimeCode):
+        return value
+    try:
+        return Usd.TimeCode(float(value))
+    except (TypeError, ValueError):
+        return Usd.TimeCode.Default()
+
+
+def _make_value_edit(gv, prim_path, property_name, components, time_code, mode):
+    """Return a callable that authors *components* onto one attribute.
+
+    Named by path rather than by a captured ``Usd.Prim``: ``_performUndo``
+    calls ``_reloadCurrentGraph`` afterwards, which rebuilds every node from
+    the stage, so a prim handle captured here would be talking about an
+    object nobody else is looking at any more.
+    """
+
+    def _fn(
+        _path=str(prim_path),
+        _prop=property_name,
+        _components=tuple(components),
+        _time=time_code,
+        _mode=mode,
+    ):
+        stage = gv.nodeGraph.getStage()
+        if not stage:
+            return
+        prim = stage.GetPrimAtPath(_path)
+        if not prim or not prim.IsValid():
+            Tf.Warn("Value undo: no prim at %s" % _path)
+            return
+        ok, reason = noodlesValues.write_value(
+            stage, prim, _prop, _components, _time, mode=_mode
+        )
+        if not ok:
+            Tf.Warn("Value undo failed on %s.%s: %s" % (_path, _prop, reason))
+            return
+        node = gv.nodes.get(_path)
+        if node is not None and hasattr(node, "invalidate_value_row"):
+            node.invalidate_value_row(_prop)
 
     return _fn
 
@@ -551,6 +610,49 @@ class GraphView(QGLWidget):
         self._renamingNodeId = ""
         self._renameInput = TextInputWidget()
         self._renameInput.placeholder = "prim name"
+
+        # Inline attribute value editing. Three mutually exclusive modes, each
+        # gated by its own "is this in progress" state, exactly as the rename
+        # above is gated by a non-empty _renamingNodeId:
+        #   _valueEditTarget  (nodeId, propertyName, componentIndex) -- typing
+        #   _mungState        dict                                   -- dragging
+        #   _tokenPopup       dict                                   -- picking
+        # The editor is a GL-drawn TextInputWidget, not a QLineEdit: this is a
+        # QGLWidget inside usdview's dock, and a child QWidget stacked over a
+        # GL surface has real z-order and repaint problems on Windows (the
+        # same class of problem _onStageReplaced documents below).
+        self._valueEditTarget = None
+        self._valueEditInput = TextInputWidget()
+        self._valueEditInput.placeholder = "value"
+        # The first printable key REPLACES, emulating the select-all a real
+        # line edit does on focus (volumeWeightUI.py:1052 does the same).
+        self._valueEditFresh = True
+        # A rejected value tints the editor outline instead of closing it.
+        self._valueEditError = False
+        self._mungState = None
+        self._mungActive = False
+        self._tokenPopup = None
+        self._tokenPopupList = SelectableList(max_visible_items=8)
+        # usdNoodles had no notion of time before this feature. The frame is
+        # tracked only so a value edit on an already-animated attribute lands
+        # on the frame the user is looking at.
+        self._currentTimeCode = Usd.TimeCode.Default()
+        self._valueCursorSet = None
+        # (nodeId, propertyName, componentIndex) under the pointer, so the
+        # hovered component lights up and the cursor matches what a press
+        # would do there.
+        self._valueHover = None
+        # A short post-commit fill flash, and the error tint a rejected value
+        # leaves on the outline: (nodeId, prop, comp, endTimeSeconds, kind).
+        self._valueFlash = None
+        # Seeded from the schema defaults here and re-read in
+        # _initCachedSettings: _initContextMenu runs FIRST and builds its
+        # checkboxes from these, so they have to exist before then.
+        self._cachedShowAttributeValues = NoodlesConfig.get(
+            "showAttributeValues", True
+        )
+        self._cachedValueWriteMode = NoodlesConfig.get("valueWriteMode", "auto")
+
         self._linkUnderCursor = -1
         # Gate for the per-frame link snapshot sync (see _syncLinksIfNeeded):
         # _linksNeedSync is set whenever a rendered link field (selection,
@@ -1484,6 +1586,56 @@ class GraphView(QGLWidget):
                 )
             if hasattr(dataModel, "signalStageReplaced"):
                 dataModel.signalStageReplaced.connect(self._onStageReplaced)
+            if hasattr(dataModel, "currentFrameChanged"):
+                dataModel.currentFrameChanged.connect(self._onFrameChanged)
+
+        self._currentTimeCode = _frameOf(
+            getattr(usdviewApi, "frame", Usd.TimeCode.Default())
+        )
+
+    def _onFrameChanged(self, frame):
+        """Follow usdview's playhead so time-sampled values read at the frame.
+
+        The SIGNAL's frame, never ``dataModel.currentFrame``: the setter emits
+        before it assigns, so reading the model back here gives the PREVIOUS
+        frame. (The avar editor records the same trap at
+        rigExecUsdview/avarEditorUI.py:573.)
+
+        Guarded explicitly: this is a Qt slot, not a call from inside an
+        already-guarded handler, so an exception escaping it would take the
+        shiboken path @_guardsQtBoundary exists to keep us off.
+        """
+        try:
+            newTime = _frameOf(frame)
+            if newTime == self._currentTimeCode:
+                return
+            self._currentTimeCode = newTime
+            # Only the rows that can change with time need re-reading, but the
+            # per-node dict is cheap and dropping it whole cannot go stale.
+            for node in self.nodes.values():
+                if hasattr(node, "invalidate_value_row"):
+                    node.invalidate_value_row()
+            self.update()
+        except Exception:
+            Tf.Warn(
+                "GraphView._onFrameChanged raised; the frame was ignored:\n%s"
+                % traceback.format_exc()
+            )
+
+    def _clearValueInteractionState(self):
+        """Abandon any value edit / drag / popup without authoring.
+
+        Called wherever the graph underneath is about to be replaced. A mung
+        left live across a stage reload would hold a prim path that no longer
+        means anything and would author onto whatever now sits there.
+        """
+        if self._mungState is not None and self._mungActive:
+            self._noticeHandler.setEnabled(True)
+        self._mungState = None
+        self._mungActive = False
+        self._valueEditTarget = None
+        self._valueEditInput.clear()
+        self._tokenPopup = None
 
     def closeEvent(self, event):
         unsubscribe_edit_target_warning(self._showWarningPopup)
@@ -1501,6 +1653,15 @@ class GraphView(QGLWidget):
 
         self._noticeHandler.unregister()
         self._invalidateBackReferenceLinkDataCache()
+
+        # A value drag / editor / popup pinned to the old stage must not
+        # survive into the new one.
+        self._clearValueInteractionState()
+        self._currentTimeCode = _frameOf(
+            getattr(self._usdviewApi, "frame", Usd.TimeCode.Default())
+            if self._usdviewApi
+            else Usd.TimeCode.Default()
+        )
 
         # Clear state that holds dead Usd.Prim / Usd.Stage references
         self._lastPrimTreeSelection = []
@@ -1907,6 +2068,14 @@ class GraphView(QGLWidget):
         }
         self.nodeIdUnderCursor = _remapId(self.nodeIdUnderCursor)
         self._renamingNodeId = _remapId(self._renamingNodeId)
+        # An open value editor / drag / popup follows the prim it is editing,
+        # for the same reason the rename does: the node is still on screen and
+        # still the one being typed into, only its id changed.
+        self._valueEditTarget = _remapIdInTuple(self._valueEditTarget)
+        for _state in (self._mungState, self._tokenPopup):
+            if _state and _state.get("nodeId") in remap:
+                _state["nodeId"] = remap[_state["nodeId"]]
+                _state["primPath"] = _nodeIdPrimPath(_state["nodeId"])
         self._hoveredPort = _remapIdInTuple(self._hoveredPort)
         self._tooltipProperty = _remapIdInTuple(self._tooltipProperty)
         self._dragLinkSourceNode = _remapId(self._dragLinkSourceNode)
@@ -2048,6 +2217,20 @@ class GraphView(QGLWidget):
                             needsLinkRebuild = True
                     except Exception:
                         pass
+                elif self._valueRowOnlyChange(node, propName):
+                    # A value the node already shows in an inline cell changed.
+                    # Refresh that ONE node's cells and stop.
+                    #
+                    # Deliberately not textChanged: that re-lays out EVERY node
+                    # in the graph (paintNodes, whose own comment records ~2s
+                    # for a dozen nodes). A namespaced attribute like
+                    # rigExec:controlSpace matches _isPinPropertyChange below,
+                    # so without this branch a value drag would pay a full
+                    # graph relayout per mouse-move. Nothing structural can
+                    # have changed here: a type or row-set change is a resync,
+                    # and the resync loop above already invalidated the node.
+                    node.invalidate_value_row(propName)
+                    needsRepaint = True
                 elif self._isPinPropertyChange(propName):
                     # Pin or connection changed (direction-hint, relationship,
                     # or any other namespaced pin such as rig1:space)
@@ -2064,8 +2247,17 @@ class GraphView(QGLWidget):
                     # Some other property - do a full cache invalidation to be safe
                     node.invalidateCache()
                     needsRepaint = True
-                    # Bare attributes may have connections - trigger link rebuild
-                    if ":" not in propName and node._prim:
+                    # Bare attributes may have connections - trigger link rebuild.
+                    #
+                    # ``propName`` is empty when the notice named the PRIM and
+                    # not a property (pathStr had no '.'), and
+                    # ``GetAttribute("")`` is not a miss -- it raises a USD
+                    # coding error from _GetDefiningSpecType. Harmless while
+                    # nothing was watching, but an edit authored inside an
+                    # Sdf.ChangeBlock dispatches its notices at the block's
+                    # close, so the error came back out of attr.Set and made a
+                    # write that had ALREADY landed report failure.
+                    if propName and ":" not in propName and node._prim:
                         attr = node._prim.GetAttribute(propName)
                         if attr and attr.IsValid() and attr.HasAuthoredConnections():
                             needsLinkRebuild = True
@@ -2197,6 +2389,18 @@ class GraphView(QGLWidget):
         self._tooltipTimer.stop()
         self._tooltipProperty = None
         QtWidgets.QToolTip.hideText()
+
+        # The resize cursor belongs to a value cell the pointer has now left.
+        if self._valueCursorSet is not None:
+            self.setCursor(QtCore.Qt.ArrowCursor)
+            self._valueCursorSet = None
+        self._valueHover = None
+        # A drag whose button release happened outside the widget would
+        # otherwise leave _mungState live and the notice handler disabled.
+        if self._mungState is not None and not (
+            QtWidgets.QApplication.mouseButtons() & QtCore.Qt.LeftButton
+        ):
+            self._cancelMung()
 
         super().leaveEvent(event)
 
@@ -2476,6 +2680,38 @@ class GraphView(QGLWidget):
         # Minimap overlay visibility. Off skips both the per-frame minimap draw
         # (which uploads a rect per node) and its mouse hit-testing.
         self._cachedShowMinimap = NoodlesConfig.get("showMinimap", True)
+        # Inline attribute values
+        self._cachedShowAttributeValues = NoodlesConfig.get(
+            "showAttributeValues", True
+        )
+        self._cachedValueMinPixelHeight = NoodlesConfig.get(
+            "valueMinPixelHeight", 9.0
+        )
+        self._cachedMungDragThresholdPx = NoodlesConfig.get(
+            "mungDragThresholdPx", 3.0
+        )
+        self._cachedValueWriteMode = NoodlesConfig.get("valueWriteMode", "auto")
+        self._cachedValueFontScale = NoodlesConfig.get("valueFontScale", 0.9)
+        # Every value-cell colour is derived from the node theme, so a change
+        # to the node background or the selection accent carries through to
+        # the cells without anyone maintaining a second palette.
+        self._cachedValueTheme = valueCell.build_theme(
+            NoodlesConfig.get("nodeBgHigh", 90),
+            NoodlesConfig.get("nodeBgLow", 86),
+            NoodlesConfig.get("selectedNodeStrokeColor", [1.0, 1.0, 0.117, 1.0]),
+            NoodlesConfig.get("portConnectedFillColor", [0.7, 0.8, 0.0, 1.0]),
+            NoodlesConfig.get(
+                "portDisconnectedFillColor", [0.235, 0.235, 0.235, 1.0]
+            ),
+            NoodlesConfig.get("valueConnectedColor", [0.45, 0.62, 0.85, 1.0]),
+            NoodlesConfig.get("valueAnimatedColor", [0.95, 0.72, 0.25, 1.0]),
+            NoodlesConfig.get("valueAuthoredColor", [0.93, 0.93, 0.95, 1.0]),
+            NoodlesConfig.get("valueFallbackColor", [0.93, 0.93, 0.95, 0.42]),
+        )
+        # Digit advances are measured once per font size so numbers are set
+        # TABULAR: a value dragged from 1.9 to 2.0 must not make the whole
+        # number jump sideways because '1' is half the width of '0'.
+        self._valueDigitAdvanceCache = {}
 
     def _toggleDrawLinks(self, checked):
         self.drawLinks = checked
@@ -2488,6 +2724,33 @@ class GraphView(QGLWidget):
     def _toggleDrawText(self, checked):
         self.drawText = checked
         self.update()
+
+    def _toggleShowAttributeValues(self, checked):
+        """Turn the inline value cells on or off.
+
+        Shipped alongside the feature on purpose: the cells WIDEN nodes, so a
+        graph laid out before they existed gets denser, and the user needs one
+        switch rather than an argument.
+        """
+        self._cachedShowAttributeValues = bool(checked)
+        NoodlesConfig.set("showAttributeValues", bool(checked))
+        self._clearValueInteractionState()
+        # The width reserve is decided by the layout pass, so this is a
+        # content change, not a repaint.
+        self.textChanged = True
+        self.linksChanged = True
+        self._nodeRenderManager.invalidateAll()
+        self.update()
+
+    def _setValueWriteMode(self, mode):
+        """Where inline value edits land: auto / default / animation.
+
+        Same three tokens the avar editor and the gizmo toolbar use
+        (gizmoMath.WRITE_DEFAULT / WRITE_ANIMATION), so a user who knows one
+        knows this one.
+        """
+        self._cachedValueWriteMode = mode
+        NoodlesConfig.set("valueWriteMode", mode)
 
     def _toggleLinkDimming(self, checked):
         self.linkDimming.target = 1.0 if checked else 0.0
@@ -3150,6 +3413,13 @@ class GraphView(QGLWidget):
                         self.drawNodes,
                     ),
                     (M.CHECK, "Show Text", None, self._toggleDrawText, self.drawText),
+                    (
+                        M.CHECK,
+                        "Show Attribute Values",
+                        None,
+                        self._toggleShowAttributeValues,
+                        self._cachedShowAttributeValues,
+                    ),
                     (M.SEPARATOR,),
                     (
                         M.CHECK,
@@ -3157,6 +3427,33 @@ class GraphView(QGLWidget):
                         None,
                         self._toggleLinkDimming,
                         self.linkDimming.target > 0.0,
+                    ),
+                ],
+            ),
+            (
+                M.SUBMENU,
+                "Write Values",
+                [
+                    (
+                        M.CHECK,
+                        "Auto (key only if already animated)",
+                        None,
+                        lambda: self._setValueWriteMode("auto"),
+                        self._cachedValueWriteMode == "auto",
+                    ),
+                    (
+                        M.CHECK,
+                        "Default (the rest value)",
+                        None,
+                        lambda: self._setValueWriteMode("default"),
+                        self._cachedValueWriteMode == "default",
+                    ),
+                    (
+                        M.CHECK,
+                        "Animation (key at current frame)",
+                        None,
+                        lambda: self._setValueWriteMode("animation"),
+                        self._cachedValueWriteMode == "animation",
                     ),
                 ],
             ),
@@ -3276,6 +3573,16 @@ class GraphView(QGLWidget):
         actions["Show Links"].setChecked(self.drawLinks)
         actions["Show Nodes"].setChecked(self.drawNodes)
         actions["Show Text"].setChecked(self.drawText)
+        actions["Show Attribute Values"].setChecked(self._cachedShowAttributeValues)
+        actions["Auto (key only if already animated)"].setChecked(
+            self._cachedValueWriteMode == "auto"
+        )
+        actions["Default (the rest value)"].setChecked(
+            self._cachedValueWriteMode == "default"
+        )
+        actions["Animation (key at current frame)"].setChecked(
+            self._cachedValueWriteMode == "animation"
+        )
         actions["Link Dimming"].setChecked(self.linkDimming.target > 0.0)
 
         actions["Frame Selection (F)"].setEnabled(hasSelection)
@@ -3558,6 +3865,36 @@ class GraphView(QGLWidget):
         # Bare attrs (dual pins) and other namespaced attrs have no inherent
         # side here; the caller falls back to the link's own direction.
         return None
+
+    @staticmethod
+    def _valueRowOnlyChange(node, propertyName):
+        """Whether a property change is *only* a value an inline cell shows.
+
+        True means the view can answer it by re-reading one node's value rows
+        -- no cache invalidation, no relayout, no link rebuild. See the call
+        site in ``_handleUsdChanges`` for why that distinction is the single
+        most important performance decision in the value feature.
+
+        A connection-driven attribute is excluded: its links are the thing
+        that changed shape, and the older branches below know how to rebuild
+        them.
+        """
+        if not propertyName:
+            return False
+        has_value_row = getattr(node, "has_value_row", None)
+        if has_value_row is None:
+            return False
+        try:
+            if not has_value_row(propertyName):
+                return False
+            prim = getattr(node, "_prim", None)
+            if prim is not None and prim.IsValid():
+                attr = prim.GetAttribute(propertyName)
+                if attr and attr.IsValid() and attr.HasAuthoredConnections():
+                    return False
+        except Exception:
+            return False
+        return True
 
     @staticmethod
     def _isPinPropertyChange(propertyName):
@@ -4285,6 +4622,14 @@ class GraphView(QGLWidget):
             if self.drawText:
                 self.paintText()
 
+        with _ProfileSection(self._profiler, "Value Cells"):
+            # Inline attribute values. A separate Python pass, because node
+            # text is generated and drawn entirely in C++ by the pinned
+            # external noodles renderer -- there is no hook to add a string to
+            # a row's layout. Same shape as the marquee and status overlay.
+            if self.drawText and self._cachedShowAttributeValues:
+                self._paintValueCells()
+
         with _ProfileSection(self._profiler, "Status Overlay"):
             # status overlay (screen space, on top of everything)
             self.paintStatusOverlay()
@@ -4309,6 +4654,14 @@ class GraphView(QGLWidget):
         with _ProfileSection(self._profiler, "Node Rename"):
             if self._renamingNodeId:
                 self._paintNodeRename()
+
+        with _ProfileSection(self._profiler, "Value Editor"):
+            if self._valueEditTarget:
+                self._paintValueEditor()
+            if self._tokenPopup:
+                self._paintTokenPopup()
+            if self._mungActive:
+                self._paintMungLadder()
 
         self._profiler.endFrame()
         self._printProfilingStatsIfNeeded()
@@ -4769,6 +5122,16 @@ class GraphView(QGLWidget):
         # the rename rather than race it.
         if self._renamingNodeId:
             self._commitRename()
+        # An open token popup owns the click: inside it picks, outside closes.
+        # Either way the press stops here, so a pick cannot also select a node.
+        if self._tokenPopup:
+            self._handleTokenPopupPress(event.position().toPoint())
+            self.update()
+            return
+        # A value editor commits on click-away, the same as the rename above
+        # and as every text field everywhere else.
+        if self._valueEditTarget:
+            self._commitValueEdit()
         self.lastMousePos = event.position().toPoint()
         self.ctrlPressedOnMouseDown = event.modifiers() & QtCore.Qt.ControlModifier
         self.mousePosOnMouseDown = event.position().toPoint()
@@ -4854,6 +5217,26 @@ class GraphView(QGLWidget):
                         self._nodeRenderManager.invalidateAll()
                         self.update()
                         return
+
+            # A value cell claims the press before anything else on the node.
+            #
+            # It is checked ahead of the hovered-port branch and well ahead of
+            # _findRowEdgeDragStart, but the ordering is belt and braces: the
+            # cell rect stops a full PAD short of the connection gutter
+            # (widgets/valueCell.cell_rect), so the two regions cannot both
+            # contain one point. Returning here is what guarantees a press on
+            # a value never degenerates into a connection drag even if a future
+            # layout change broke that inequality.
+            valueHit = self._valueCellAtPoint(
+                (
+                    QtCore.QPointF(event.position().toPoint()) / self.zoom
+                )
+                + QtCore.QPointF(self.panX, self.panY)
+            )
+            if valueHit is not None:
+                self._onValueCellPressed(valueHit, event)
+                self.update()
+                return
 
             # Check if clicking on a port to start link creation
             if self._hoveredPort:
@@ -5012,8 +5395,17 @@ class GraphView(QGLWidget):
             self.spacePressed and bool(event.buttons() & QtCore.Qt.LeftButton)
         )
 
+        # A value drag owns the pointer: no hover work, no node drag, no link
+        # drag. Checked first so none of the scans below run per sample.
+        if self._mungState is not None and (event.buttons() & QtCore.Qt.LeftButton):
+            self._updateMung(event)
+            self.lastMousePos = event.position().toPoint()
+            self.update()
+            return
+
         if not isViewportDrag:
             self._updateNodeUnderCursor(event.position().toPoint())
+            self._updateValueHoverCursor(event.position().toPoint())
 
             if not self.draggingNodes:
                 if self._updateHoveredPort(event.position().toPoint()):
@@ -5113,6 +5505,13 @@ class GraphView(QGLWidget):
                     event.position().toPoint()):
                 self.update()
                 return
+        # Finish a value press: a drag commits as ONE undo entry, a click with
+        # no motion opens the keyboard editor instead. Before the link-drag
+        # branch because a value press never started one.
+        if self._mungState is not None:
+            self._finishMung()
+            self.update()
+            return
         # Handle link drag completion
         if self._draggingLink:
             # Refresh hover state at the release position so that
@@ -5215,6 +5614,60 @@ class GraphView(QGLWidget):
 
     @_guardsQtBoundary
     def keyPressEvent(self, event):
+        # Value interaction is checked FIRST, ahead of even the Tab/hotbox
+        # branch below: Tab moves to the next editable cell while an editor is
+        # open, and Esc abandons a drag. Both keys already mean something else
+        # in this widget, so whoever is in the middle of an interaction has to
+        # be asked before the global meanings get a turn.
+        #
+        # Esc during a value drag restores the value the drag started from and
+        # leaves the undo stack exactly as if the drag had never happened.
+        if self._mungState is not None:
+            if event.key() == QtCore.Qt.Key_Escape:
+                self._cancelMung()
+                self.update()
+                return
+
+        # The token popup owns the keyboard while it is open.
+        if self._tokenPopup:
+            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                self._commitTokenPopup()
+            elif event.key() == QtCore.Qt.Key_Escape:
+                self._closeTokenPopup()
+            elif event.key() == QtCore.Qt.Key_Up:
+                self._tokenPopupList.move_selection(-1)
+            elif event.key() == QtCore.Qt.Key_Down:
+                self._tokenPopupList.move_selection(1)
+            self.update()
+            return
+
+        # A value editor owns ALL of the keyboard, for the same reason the
+        # rename below does: the shortcuts further down are single letters,
+        # and typing 0.5 into a cell must not toggle link dimming.
+        if self._valueEditTarget:
+            key = event.key()
+            if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                self._commitValueEdit()
+            elif key == QtCore.Qt.Key_Escape:
+                self._cancelValueEdit()
+            elif key in (QtCore.Qt.Key_Tab, QtCore.Qt.Key_Backtab):
+                backwards = key == QtCore.Qt.Key_Backtab or bool(
+                    event.modifiers() & QtCore.Qt.ShiftModifier
+                )
+                self._advanceValueEdit(backwards)
+            else:
+                if (
+                    self._valueEditFresh
+                    and event.text()
+                    and event.text().isprintable()
+                ):
+                    # Emulates the select-all a real line edit does on focus.
+                    self._valueEditInput.clear()
+                self._valueEditFresh = False
+                self._valueEditInput.handle_key(event)
+            self.update()
+            return
+
         # Tab key - toggle hotbox
         if event.key() == QtCore.Qt.Key_Tab:
             if self.nodeCreationHotbox.is_showing:
@@ -5373,6 +5826,10 @@ class GraphView(QGLWidget):
             self.update()
             return
 
+        # Every node object is about to be rebuilt, so a value edit or drag
+        # holding one is already talking about the previous graph.
+        self._clearValueInteractionState()
+
         # Save z-order map before reload so restored nodes keep their
         # front-to-back visual ordering (important for undo of deletes).
         savedZOrders = {nid: node.zOrder for nid, node in self.nodes.items()}
@@ -5490,6 +5947,35 @@ class GraphView(QGLWidget):
         # printable character so the check below won't catch it.
         if event.key() == QtCore.Qt.Key_Tab:
             return True
+
+        # An interaction that owns the keyboard owns its NON-PRINTABLE keys
+        # too. Without this, Qt takes the ShortcutOverride we declined as
+        # permission to route the key elsewhere -- Escape goes to the
+        # enclosing QDockWidget and the KeyPress never reaches
+        # keyPressEvent at all, so "Esc cancels" silently does nothing. The
+        # printable-key branch below cannot cover these: none of them
+        # produce text.
+        if (
+            self._renamingNodeId
+            or self._valueEditTarget
+            or self._mungState is not None
+            or self._tokenPopup
+        ):
+            if event.key() in (
+                QtCore.Qt.Key_Escape,
+                QtCore.Qt.Key_Return,
+                QtCore.Qt.Key_Enter,
+                QtCore.Qt.Key_Backtab,
+                QtCore.Qt.Key_Backspace,
+                QtCore.Qt.Key_Delete,
+                QtCore.Qt.Key_Up,
+                QtCore.Qt.Key_Down,
+                QtCore.Qt.Key_Left,
+                QtCore.Qt.Key_Right,
+                QtCore.Qt.Key_Home,
+                QtCore.Qt.Key_End,
+            ):
+                return True
 
         # Intercept unmodified (or Shift-only) printable keys to prevent
         # usdview's ApplicationShortcut-scoped actions from firing while
@@ -9671,6 +10157,1308 @@ class GraphView(QGLWidget):
                 stage, self._usdviewApi.dataModel if self._usdviewApi else None
             )
         return parent_path
+
+    # ------------------------------------------------------------------
+    # Inline attribute values
+    #
+    # Geometry, hit-testing, the drag, the keyboard editor and the token
+    # popup. The invariant the whole group rests on is stated once, in
+    # widgets/valueCell.cell_rect: the value cell and the two connection
+    # gutters are disjoint, so a press can mean exactly one of the two.
+    # ------------------------------------------------------------------
+
+    def _valueRowGeometry(self, node):
+        """Yield ``(row, cellRect, subRects, H)`` for each value-bearing row.
+
+        Row geometry comes from :meth:`_getRowHitMetrics` -- the same function
+        the connection hit-tests use -- so the cells cannot drift away from
+        the rows they belong to (which is the failure
+        ``testUsdNoodlesRowDrift.py`` exists to prevent).
+
+        The four row-level suppressions live here rather than in the value
+        model, because each of them is a fact about the LAYOUT:
+          * a collapsed title has no rows at all;
+          * a group HEADER is not a property row. The C++ row kinds are
+            ``0 = normal, 1 = folded header, 2 = unfolded header, 3 = child``
+            (noodles core/NodeData.h:48), so 1 and 2 are dropped and 3 -- a
+            real property inside an open group, which is where
+            ``rigExec:controlSpace`` lives -- keeps its cell;
+          * a slot shared with an output row has that row's label
+            right-aligned into exactly the space the cell wants;
+          * a vector too narrow to read drops back to today's look.
+        """
+        if not self._cachedShowAttributeValues:
+            return
+        if getattr(node, "_title_collapsed", False):
+            return
+        rows_fn = getattr(node, "value_rows", None)
+        if rows_fn is None:
+            return
+        renderer = node.renderer if node.renderer else self.defaultRenderer
+        if not renderer:
+            return
+        rows = rows_fn(self._currentTimeCode)
+        if not rows:
+            return
+        cell_w = float(getattr(node, "_value_cell_width", 0.0) or 0.0)
+        if cell_w <= 0.0:
+            return
+
+        nx = float(node.position[0])
+        nw = float(node.size[0])
+        if not valueCell.node_is_wide_enough(nw, renderer.getPortWidth()):
+            return
+        port_start_y, h = self._getRowHitMetrics(node, renderer)
+        band = self._valueTextBand(h)
+
+        input_pins = getattr(node, "inputPins", [])
+        in_slots = list(node.inputRowSlots)
+        in_kinds = list(node.inputRowKinds)
+        # Every slot an output-side row occupies. A real output row's label is
+        # right-aligned to the node's right edge -- into exactly the space the
+        # cell wants -- so where the two share a slot, the cell gives way.
+        out_pins = getattr(node, "outputPins", [])
+        out_slots = list(node.outputRowSlots)
+        occupied = set(
+            out_slots[i] if i < len(out_slots) else i for i in range(len(out_pins))
+        )
+
+        for i, pin_name in enumerate(input_pins):
+            row = rows.get((pin_name, False))
+            if row is None:
+                continue
+            kind = in_kinds[i] if i < len(in_kinds) else 0
+            if kind in (1, 2):
+                continue
+            slot = in_slots[i] if i < len(in_slots) else i
+            if slot in occupied:
+                continue
+            row_top = port_start_y + slot * h
+            rect = valueCell.cell_rect(
+                nx,
+                nw,
+                row_top,
+                h,
+                cell_w,
+                top=row_top + band[0],
+                height=band[1],
+            )
+            if rect is None:
+                continue
+            inset = valueCell.swatch_inset(h) if row.has_swatch else 0.0
+            subs = valueCell.sub_rects_fit(rect, row.count, h, inset)
+            if not subs:
+                continue
+            yield row, rect, subs, h
+
+    def _valueCellRectFor(self, node, propertyName, comp=0):
+        """World rect of one component's cell, or None when it has none.
+
+        The paint pass, the hit test and the tests all ask through here, so
+        there is one answer to "where is that cell".
+        """
+        for row, rect, subs, _h in self._valueRowGeometry(node):
+            if row.property_name != propertyName:
+                continue
+            if 0 <= comp < len(subs):
+                return subs[comp]
+            return rect
+        return None
+
+    @staticmethod
+    def _asWorldXY(point):
+        if hasattr(point, "x"):
+            return float(point.x()), float(point.y())
+        return float(point[0]), float(point[1])
+
+    def _valueCellAtPoint(self, worldPoint):
+        """The value cell under a WORLD position, or None."""
+        if not self._cachedShowAttributeValues:
+            return None
+        x, y = self._asWorldXY(worldPoint)
+        nodeId = self.nodeIdUnderCursor
+        if not nodeId or nodeId not in self.nodes:
+            nodeId = self._getNodeIdAtWorldPos(Gf.Vec2d(x, y))
+        if not nodeId or nodeId not in self.nodes:
+            return None
+        node = self.nodes[nodeId]
+        primPath = _nodeIdPrimPath(nodeId)
+        for row, rect, subs, _h in self._valueRowGeometry(node):
+            if not (rect.top <= y <= rect.bottom):
+                continue
+            if not valueCell.rect_contains(rect, x, y):
+                continue
+            # The gaps between sub-cells belong to the cell too: a press that
+            # lands a pixel off a component must not fall through to a node
+            # drag, so it resolves to the nearest component instead.
+            index = min(
+                range(len(subs)),
+                key=lambda i: abs(x - (subs[i].left + subs[i].right) * 0.5),
+            )
+            for i, sub in enumerate(subs):
+                if valueCell.rect_contains(sub, x, y):
+                    index = i
+                    break
+            return _ValueHit(nodeId, primPath, row.property_name, index, subs[index], row)
+        return None
+
+    # Cursor per cell kind: the pointer says what a press will do before it
+    # happens -- drag a number, type into text, open a list, flip a switch.
+    _VALUE_CURSORS = {
+        noodlesValues.KIND_FLOAT: QtCore.Qt.SizeHorCursor,
+        noodlesValues.KIND_INT: QtCore.Qt.SizeHorCursor,
+        noodlesValues.KIND_TEXT: QtCore.Qt.IBeamCursor,
+        noodlesValues.KIND_TOKEN_ENUM: QtCore.Qt.PointingHandCursor,
+        noodlesValues.KIND_BOOL: QtCore.Qt.PointingHandCursor,
+    }
+
+    def _updateValueHoverCursor(self, screenPos):
+        """Track the hovered cell: its fill lifts and the cursor changes."""
+        hit = None
+        if not (self.draggingNodes or self._draggingLink or self.spacePressed):
+            world = (QtCore.QPointF(screenPos) / self.zoom) + QtCore.QPointF(
+                self.panX, self.panY
+            )
+            hit = self._valueCellAtPoint(world)
+
+        hover = None
+        cursor = None
+        if hit is not None:
+            hover = (hit.nodeId, hit.propertyName, hit.comp)
+            if hit.row.editable:
+                cursor = self._VALUE_CURSORS.get(hit.row.kind)
+        if hover != self._valueHover:
+            self._valueHover = hover
+            self.update()
+        if cursor != self._valueCursorSet:
+            self.setCursor(cursor if cursor is not None else QtCore.Qt.ArrowCursor)
+            self._valueCursorSet = cursor
+
+    # ---- drawing -------------------------------------------------------
+
+    def _valueFontSize(self):
+        """Value text size: a little smaller than the row label, never its own.
+
+        Derived from nodePinFontSize so a user who scales the node fonts
+        scales the values with them.
+        """
+        return float(self._cachedNodePinFontSize) * float(
+            self._cachedValueFontScale
+        )
+
+    def _valueTextBand(self, rowHeight):
+        """(top offset, height) of the value pill within a row band.
+
+        The pill is hung off the ROW LABEL's baseline, not centred in the
+        row: the C++ text pass draws the property name and, under it, the
+        ``(type)`` line, and a value floating between the two reads as a
+        separate widget. Sharing the name's baseline is what makes the value
+        look like the end of the same line.
+        """
+        atlas = self.textRenderer.font_atlas if self.textRenderer else None
+        if atlas is None:
+            return (valueCell.CELL_TOP_RATIO * rowHeight,
+                    valueCell.CELL_HEIGHT_RATIO * rowHeight)
+        pinFont = float(self._cachedNodePinFontSize)
+        typeFont = (
+            float(NoodlesConfig.get("nodePinTypeFontSize", 26.0))
+            if NoodlesConfig.get("showPinTypeLabels", True)
+            else 0.0
+        )
+        lineHeight = float(atlas.lineHeight)
+        block = (pinFont + typeFont) * lineHeight
+        baseline = (rowHeight - block) * 0.5 + float(atlas.ascender) * pinFont
+        size = self._valueFontSize()
+        pad = 0.07 * rowHeight
+        top = baseline - float(atlas.ascender) * size - pad
+        height = (float(atlas.ascender) - float(atlas.descender)) * size + 2.0 * pad
+        # Never taller than the row it belongs to.
+        if height > rowHeight:
+            height = rowHeight
+        if top < 0.0:
+            top = 0.0
+        if top + height > rowHeight:
+            top = max(0.0, rowHeight - height)
+        return (top, height)
+
+    def _valueBaselineY(self, rect):
+        """Text baseline inside a value pill."""
+        atlas = self.textRenderer.font_atlas
+        size = self._valueFontSize()
+        blockHeight = (float(atlas.ascender) - float(atlas.descender)) * size
+        top = rect.top + ((rect.bottom - rect.top) - blockHeight) * 0.5
+        return top + float(atlas.ascender) * size
+
+    def _valueDigitAdvance(self, size):
+        """The widest digit at *size*: the cell every digit is set in."""
+        cached = self._valueDigitAdvanceCache.get(size)
+        if cached is None:
+            cached = max(
+                self.textRenderer.calculateTextWidth(d, size)
+                for d in "0123456789"
+            )
+            self._valueDigitAdvanceCache[size] = cached
+        return cached
+
+    def _valueTextWidth(self, text, size, tabular):
+        if not tabular:
+            return self.textRenderer.calculateTextWidth(text, size)
+        advance = self._valueDigitAdvance(size)
+        return sum(
+            advance if ch.isdigit()
+            else self.textRenderer.calculateTextWidth(ch, size)
+            for ch in text
+        )
+
+    def _emitValueText(self, text, x, baselineY, depth, size, out,
+                       tabular=False, italic=0.0):
+        """Append one value string's glyphs to *out*, starting at *x*.
+
+        ``tabular`` sets digits on the widest digit's advance, so a number
+        does not shuffle sideways while it is being dragged. ``italic``
+        shears the glyphs around the baseline -- the atlas has no italic
+        face, and a read-only value has to look different from an editable
+        one at a glance.
+        """
+        if not text:
+            return 0.0
+        renderer = self.textRenderer
+        if not tabular and italic <= 0.0:
+            renderer.generateTextVertices(
+                text, x, baselineY, depth, size, out, node_index=-1.0
+            )
+            return renderer.calculateTextWidth(text, size)
+
+        advance = self._valueDigitAdvance(size) if tabular else 0.0
+        glyph = []
+        cursor = x
+        for ch in text:
+            natural = renderer.calculateTextWidth(ch, size)
+            step = advance if (tabular and ch.isdigit()) else natural
+            del glyph[:]
+            renderer.generateTextVertices(
+                ch,
+                cursor + (step - natural) * 0.5,
+                baselineY,
+                depth,
+                size,
+                glyph,
+                node_index=-1.0,
+            )
+            if italic > 0.0:
+                # Glyph vertices are flat floats, 6 per vertex (x, y, z, u, v,
+                # nodeIndex); leaning them about the baseline is two lines.
+                for i in range(0, len(glyph), 6):
+                    glyph[i] += (baselineY - glyph[i + 1]) * italic
+            out.extend(glyph)
+            cursor += step
+        return cursor - x
+
+    def _valueStateColors(self, row, theme, hovered, active):
+        """(fill, stroke, textColor, italicShear) for one row's pill.
+
+        Fill is None where the state asks for no pill at all: a schema
+        fallback is information the user did not author, so it is shown as
+        dim text on the bare row rather than as a filled field inviting a
+        click.
+        """
+        fill = theme.fillAuthored
+        stroke = theme.hairline
+        text = theme.textNormal
+        italic = 0.0
+        if row.state == noodlesValues.STATE_CONNECTED or not row.editable:
+            fill = None
+            stroke = None
+            text = theme.textConnected if row.state == (
+                noodlesValues.STATE_CONNECTED
+            ) else theme.textDim
+            italic = 0.20
+        elif row.state == noodlesValues.STATE_FALLBACK:
+            fill = None
+            stroke = None
+            text = theme.textDim
+        elif row.state == noodlesValues.STATE_ANIMATED:
+            text = theme.textAnimated
+        if hovered and fill is not None:
+            fill = theme.fillHover
+        if active:
+            fill = theme.fillAccent
+            stroke = theme.accent
+        return fill, stroke, text, italic
+
+    def _findValueRow(self, nodeId, propertyName):
+        node = self.nodes.get(nodeId)
+        if node is None:
+            return None
+        rows_fn = getattr(node, "value_rows", None)
+        if rows_fn is None:
+            return None
+        for row in rows_fn(self._currentTimeCode).values():
+            if row.property_name == propertyName:
+                return row
+        return None
+
+    def _writeValueComponents(self, state, components, warn=True):
+        """Author *components* and refresh just that node's cells."""
+        stage = self.nodeGraph.getStage()
+        if not stage:
+            return False, "no stage"
+        prim = stage.GetPrimAtPath(state["primPath"])
+        ok, reason = noodlesValues.write_value(
+            stage,
+            prim,
+            state["prop"],
+            components,
+            state.get("time"),
+            mode=self._cachedValueWriteMode,
+            warn=warn,
+        )
+        if not ok:
+            return False, reason
+        node = self.nodes.get(state["nodeId"])
+        if node is not None and hasattr(node, "invalidate_value_row"):
+            node.invalidate_value_row(state["prop"])
+        return True, ""
+
+    def _pushValueUndo(self, primPath, propertyName, oldComponents, newComponents,
+                       timeCode):
+        """One undo entry per committed value edit, whatever gesture made it."""
+        gv = self
+        mode = self._cachedValueWriteMode
+        _push_undo_command(
+            "Set %s.%s" % (primPath, propertyName),
+            _make_value_edit(gv, primPath, propertyName, newComponents, timeCode, mode),
+            _make_value_edit(gv, primPath, propertyName, oldComponents, timeCode, mode),
+        )
+
+    def _onValueCellPressed(self, hit, event):
+        """A left press landed on a value cell. Decide what it means."""
+        row = hit.row
+        if not row.editable:
+            # Read-only is answered, not ignored: silence here reads as a
+            # broken cell. It also must NOT fall through to a connection drag.
+            self._showPopupMessage("%s: %s" % (row.property_name, row.reason))
+            return
+        if row.kind == noodlesValues.KIND_BOOL:
+            self._toggleBoolValue(hit)
+            return
+        if row.kind == noodlesValues.KIND_TOKEN_ENUM:
+            self._openTokenPopup(hit)
+            return
+
+        # Numeric or text: nothing is authored yet. The release decides
+        # whether this was a drag (mung) or a click (keyboard editor).
+        mungable = bool(row.mungable)
+        base = row.components[hit.comp] if mungable else 0.0
+        self._mungState = {
+            "nodeId": hit.nodeId,
+            "primPath": hit.primPath,
+            "prop": hit.propertyName,
+            "comp": hit.comp,
+            "baseScreenX": float(event.position().x()),
+            "original": tuple(row.components),
+            "current": tuple(row.components),
+            "base": float(base) if mungable else 0.0,
+            "step": (
+                noodlesValues.ladder_step(base, row.type_name) if mungable else 0.0
+            ),
+            "typeName": row.type_name,
+            "time": self._currentTimeCode,
+            "mungable": mungable,
+        }
+        self._mungActive = False
+
+    def _updateMung(self, event):
+        """Drag a number left/right. Live preview, nothing on the undo stack."""
+        state = self._mungState
+        if state is None or not state["mungable"]:
+            return
+        dx = float(event.position().x()) - state["baseScreenX"]
+        if not self._mungActive:
+            if abs(dx) < float(self._cachedMungDragThresholdPx):
+                return
+            self._mungActive = True
+            # Our own writes must not come back to us as notices -- the same
+            # bracket _finalizeNodeDrag uses, for the same reason. USD still
+            # notifies Hydra, so usdview's viewport updates live.
+            self._noticeHandler.setEnabled(False)
+        mods = event.modifiers()
+        mult = noodlesValues.mung_multiplier(
+            bool(mods & QtCore.Qt.ShiftModifier),
+            bool(mods & QtCore.Qt.ControlModifier),
+        )
+        # Absolute, from the press position and the ORIGINAL value, never
+        # incremental: dragging back to where the press landed then restores
+        # exactly the value it started at, instead of accumulating drift.
+        value = state["base"] + dx * state["step"] * mult
+        components = noodlesValues.apply_delta(
+            state["original"], state["comp"], value, state["typeName"]
+        )
+        if components != state["current"]:
+            state["current"] = components
+            self._writeValueComponents(state, components, warn=False)
+
+    def _finishMung(self):
+        """Release: commit the drag as ONE undo entry, or open the editor."""
+        state = self._mungState
+        self._mungState = None
+        if state is None:
+            return
+        if not self._mungActive:
+            # Never crossed the threshold, so nothing was authored and nothing
+            # is on the undo stack: this was a click, and a click types.
+            self._beginValueEdit(state["nodeId"], state["prop"], state["comp"])
+            return
+
+        self._mungActive = False
+        final = tuple(state["current"])
+        original = tuple(state["original"])
+        try:
+            if final != original:
+                # The last write of the drag, this one with the edit-target
+                # sanity check the per-sample writes skipped.
+                self._writeValueComponents(state, final, warn=True)
+        finally:
+            self._noticeHandler.setEnabled(True)
+        if final == original:
+            return
+        self._pushValueUndo(
+            state["primPath"], state["prop"], original, final, state["time"]
+        )
+        self._startValueFlash(state["nodeId"], state["prop"], "commit")
+
+    def _cancelMung(self):
+        """Esc mid-drag: put the value back, leave the undo stack untouched."""
+        state = self._mungState
+        self._mungState = None
+        if state is None:
+            return
+        if self._mungActive:
+            self._mungActive = False
+            try:
+                self._writeValueComponents(
+                    state, tuple(state["original"]), warn=False
+                )
+            finally:
+                self._noticeHandler.setEnabled(True)
+        self.update()
+
+    def _toggleBoolValue(self, hit):
+        """A checkbox: one click, one write, one undo entry."""
+        old = tuple(hit.row.components)
+        new = (not bool(old[0]),)
+        state = {
+            "nodeId": hit.nodeId,
+            "primPath": hit.primPath,
+            "prop": hit.propertyName,
+            "time": self._currentTimeCode,
+        }
+        ok, reason = self._writeValueComponents(state, new, warn=True)
+        if not ok:
+            self._showWarningPopup("%s: %s" % (hit.propertyName, reason))
+            return
+        self._pushValueUndo(
+            hit.primPath, hit.propertyName, old, new, self._currentTimeCode
+        )
+        self._startValueFlash(hit.nodeId, hit.propertyName, "commit")
+
+    def _beginValueEdit(self, nodeId, propertyName, comp):
+        """Open the keyboard editor on one component, seeded unelided."""
+        row = self._findValueRow(nodeId, propertyName)
+        if row is None or not row.editable:
+            return
+        if row.kind == noodlesValues.KIND_BOOL:
+            return
+        comp = max(0, min(int(comp), row.count - 1))
+        text = noodlesValues.format_component(row.components[comp], row.type_name)
+        self._valueEditTarget = (nodeId, propertyName, comp)
+        self._valueEditInput.text = text
+        self._valueEditInput.cursor_position = len(text)
+        self._valueEditFresh = True
+        self._valueEditError = False
+        self.update()
+
+    def _cancelValueEdit(self):
+        """Close the editor without authoring anything."""
+        self._valueEditTarget = None
+        self._valueEditInput.clear()
+        self._valueEditFresh = True
+        self._valueEditError = False
+        self.update()
+
+    def _commitValueEdit(self):
+        """Parse and author the typed value. False means "still open".
+
+        A recoverable objection -- text that is not a number, a token that is
+        not in ``allowedTokens`` -- leaves the editor open so the typo can be
+        fixed, exactly as ``_commitRename`` does for a fixable name.
+        """
+        target = self._valueEditTarget
+        if target is None:
+            return True
+        nodeId, propertyName, comp = target
+        row = self._findValueRow(nodeId, propertyName)
+        if row is None:
+            self._cancelValueEdit()
+            return True
+
+        text = self._valueEditInput.text
+        ok, value = noodlesValues.parse_component(text, row.type_name)
+        if not ok:
+            # The editor stays open with the error tint on its outline: the
+            # typo is fixable, and closing it would throw away what was typed.
+            self._valueEditError = True
+            self._showWarningPopup(
+                "%r is not a %s" % (text.strip(), row.type_name)
+            )
+            return False
+        if row.kind == noodlesValues.KIND_TOKEN_ENUM and row.tokens:
+            if value not in row.tokens:
+                self._valueEditError = True
+                self._showWarningPopup(
+                    "%s is not one of: %s" % (value, ", ".join(row.tokens))
+                )
+                return False
+
+        old = tuple(row.components)
+        new = noodlesValues.apply_delta(old, comp, value, row.type_name)
+        self._valueEditTarget = None
+        self._valueEditInput.clear()
+        self._valueEditFresh = True
+        self._valueEditError = False
+        if new == old:
+            self.update()
+            return True
+
+        state = {
+            "nodeId": nodeId,
+            "primPath": _nodeIdPrimPath(nodeId),
+            "prop": propertyName,
+            "time": self._currentTimeCode,
+        }
+        written, reason = self._writeValueComponents(state, new, warn=True)
+        if not written:
+            self._showWarningPopup("%s: %s" % (propertyName, reason))
+            self._startValueFlash(nodeId, propertyName, "error")
+            return True
+        self._pushValueUndo(
+            state["primPath"], propertyName, old, new, self._currentTimeCode
+        )
+        self._startValueFlash(nodeId, propertyName, "commit")
+        self.update()
+        return True
+
+    def _editableValueCells(self, nodeId):
+        """Every ``(propertyName, component)`` Tab can reach, in row order."""
+        cells = []
+        node = self.nodes.get(nodeId)
+        if node is None:
+            return cells
+        for row, _rect, subs, _h in self._valueRowGeometry(node):
+            if not row.editable or row.kind == noodlesValues.KIND_BOOL:
+                continue
+            for index in range(len(subs)):
+                cells.append((row.property_name, index))
+        return cells
+
+    def _advanceValueEdit(self, backwards=False):
+        """Tab: commit, then open the next editable cell, wrapping."""
+        target = self._valueEditTarget
+        if target is None:
+            return
+        nodeId, propertyName, comp = target
+        if not self._commitValueEdit():
+            return  # the value did not parse; stay where the typo is
+        cells = self._editableValueCells(nodeId)
+        if not cells:
+            return
+        try:
+            index = cells.index((propertyName, comp))
+        except ValueError:
+            index = -1 if backwards else 0
+        else:
+            index = (index + (-1 if backwards else 1)) % len(cells)
+        nextProp, nextComp = cells[index]
+        self._beginValueEdit(nodeId, nextProp, nextComp)
+
+    def _openTokenPopup(self, hit):
+        """A token with ``allowedTokens``: pick from exactly those, nothing else."""
+        tokens = list(hit.row.tokens)
+        if not tokens:
+            self._beginValueEdit(hit.nodeId, hit.propertyName, 0)
+            return
+        # The popup wears the node's clothes: same fill, same accent for the
+        # current value, same text colours. A native menu here would be the
+        # one part of the interaction that did not belong to the graph.
+        theme = self._cachedValueTheme
+        self._tokenPopupList.font_size = 15.0
+        self._tokenPopupList.background_color = theme.popupBg
+        self._tokenPopupList.item_color = theme.textNormal
+        self._tokenPopupList.selected_color = theme.popupRow
+        self._tokenPopupList.set_items(
+            [SelectableListItem(token) for token in tokens]
+        )
+        current = hit.row.components[0] if hit.row.components else ""
+        self._tokenPopupList.selected_index = (
+            tokens.index(current) if current in tokens else 0
+        )
+        self._tokenPopupList.scroll_selection_into_view()
+        self._tokenPopup = {
+            "nodeId": hit.nodeId,
+            "primPath": hit.primPath,
+            "prop": hit.propertyName,
+            "tokens": tuple(tokens),
+            "rect": hit.rect,
+            "time": self._currentTimeCode,
+            "original": tuple(hit.row.components),
+        }
+        self.update()
+
+    def _closeTokenPopup(self):
+        self._tokenPopup = None
+        self.update()
+
+    def _commitTokenPopup(self):
+        popup = self._tokenPopup
+        self._tokenPopup = None
+        if popup is None:
+            return
+        item = self._tokenPopupList.get_selected_item()
+        if item is None:
+            self.update()
+            return
+        new = (str(item.name),)
+        old = tuple(popup["original"])
+        if new == old:
+            self.update()
+            return
+        ok, reason = self._writeValueComponents(popup, new, warn=True)
+        if not ok:
+            self._showWarningPopup("%s: %s" % (popup["prop"], reason))
+            self.update()
+            return
+        self._pushValueUndo(
+            popup["primPath"], popup["prop"], old, new, popup["time"]
+        )
+        self._startValueFlash(popup["nodeId"], popup["prop"], "commit")
+        self.update()
+
+    def _handleTokenPopupPress(self, screenPos):
+        """Inside the popup picks a token; anywhere else just closes it."""
+        bounds = self._tokenPopupList.bounds
+        if bounds:
+            x, y, width, height = bounds
+            if x <= screenPos.x() <= x + width and y <= screenPos.y() <= y + height:
+                index = self._tokenPopupList.item_index_at_pixel(screenPos.y() - y)
+                if index is not None:
+                    self._tokenPopupList.selected_index = index
+                    self._commitTokenPopup()
+                    return
+        self._closeTokenPopup()
+
+    def focusNextPrevChild(self, nextChild):
+        """Keep Tab inside this widget while a value editor is open.
+
+        Qt's default handling of Tab moves focus BEFORE keyPressEvent sees the
+        key, which would take the cursor out of a half-typed value and into
+        usdview's next widget.
+        """
+        if self._valueEditTarget or self.nodeCreationHotbox.is_showing:
+            return False
+        return super().focusNextPrevChild(nextChild)
+
+    def _paintValueCells(self):
+        """Draw every visible value cell in the node's own visual language.
+
+        A Python pass by necessity: node text is generated and drawn entirely
+        in C++ by the pinned external noodles renderer, so there is no hook to
+        put a value string into a row's own layout. Everything it draws --
+        fills, hairlines, text, the bool switch, the token chevron -- is
+        derived from the node theme (``_cachedValueTheme``), so the cells read
+        as part of the node rather than as a widget stacked on top of it.
+
+        Batched to a handful of draw calls: one per (corner radius, stroke)
+        bucket for the quads, one per colour bucket for the glyphs, so the
+        cost is O(visible value rows) with no per-row GL state changes.
+        """
+        if not self.nodes or not self.shaderLibrary or not self.fontAtlas:
+            return
+        if not self.textRenderer or not self.textRenderer.font_atlas:
+            return
+
+        projection = self._worldSpaceProjectionMatrix()
+        fontSize = self._valueFontSize()
+        if fontSize <= 0.0:
+            return
+        theme = self._cachedValueTheme
+        minPixelHeight = float(self._cachedValueMinPixelHeight)
+        editing = self._valueEditTarget
+        munging = self._mungState if self._mungActive else None
+        hover = self._valueHover
+        flash = self._activeValueFlash()
+
+        quadBatches = defaultdict(list)  # (radius, strokeColor) -> vertices
+        textBatches = defaultdict(list)  # rgba -> glyph floats
+        caretVertices = []
+
+        def measure(text):
+            return self.textRenderer.calculateTextWidth(text, fontSize)
+
+        for nodeId, node in self.nodes.items():
+            rowHeight = float(node.layoutPortLineHeight)
+            # The LOD gate, and it FADES rather than pops: value text is
+            # 0.9x the pin font, so it turns to noise a little before the
+            # labels do, and a cell that vanished between one wheel notch
+            # and the next would read as a bug.
+            if rowHeight <= 0.0:
+                continue
+            pixels = rowHeight * self.zoom
+            if pixels < minPixelHeight:
+                continue
+            lodAlpha = min(1.0, (pixels - minPixelHeight) / max(1e-6, minPixelHeight))
+            lodAlpha = max(0.0, lodAlpha)
+            if lodAlpha <= 0.01:
+                continue
+            try:
+                position = Gf.Vec2d(node.position)
+                bounds = Gf.Range2d(position, position + Gf.Vec2d(node.size))
+            except Exception:
+                continue
+            if not self._isVisible(bounds):
+                continue
+
+            # Cells ride the node's own z-order band, exactly as its text and
+            # icons do, so they raise together when a node is brought forward.
+            depth = node_content_depth(node.zOrder)
+            radius = None
+            for row, rect, subs, h in self._valueRowGeometry(node):
+                if radius is None:
+                    radius = round(valueCell.corner_radius(h), 3)
+                innerPad = valueCell.INNER_PAD_RATIO * h
+                rowHovered = hover is not None and hover[0] == nodeId and (
+                    hover[1] == row.property_name
+                )
+                rowActive = (
+                    editing is not None
+                    and editing[0] == nodeId
+                    and editing[1] == row.property_name
+                ) or (
+                    munging is not None
+                    and munging["nodeId"] == nodeId
+                    and munging["prop"] == row.property_name
+                )
+                fill, stroke, textColor, italic = self._valueStateColors(
+                    row, theme, rowHovered, rowActive
+                )
+                if flash is not None and flash[0] == nodeId and (
+                    flash[1] == row.property_name
+                ):
+                    fill = theme.fillError if flash[3] == "error" else theme.fillAccent
+                    stroke = theme.error if flash[3] == "error" else theme.accent
+
+                if fill is not None:
+                    valueCell.append_quad(
+                        quadBatches[(radius, stroke)],
+                        NodeVertex,
+                        rect,
+                        depth,
+                        fill,
+                        lodAlpha,
+                    )
+                elif stroke is not None:
+                    valueCell.append_quad(
+                        quadBatches[(radius, stroke)],
+                        NodeVertex,
+                        rect,
+                        depth,
+                        (0.0, 0.0, 0.0, 0.0),
+                        lodAlpha,
+                    )
+
+                # A time-sampled value carries the animation tint down its
+                # leading edge: present at a glance, not another word to read.
+                if row.state == noodlesValues.STATE_ANIMATED:
+                    valueCell.append_quad(
+                        quadBatches[(0.0, None)],
+                        NodeVertex,
+                        valueCell.Rect(
+                            rect.left, rect.top, rect.left + 0.05 * h, rect.bottom
+                        ),
+                        depth,
+                        theme.textAnimated,
+                        lodAlpha,
+                    )
+                if row.has_swatch and len(row.components) >= 3:
+                    valueCell.append_quad(
+                        quadBatches[(round(radius * 0.7, 3), theme.hairline)],
+                        NodeVertex,
+                        valueCell.swatch_rect(rect, h),
+                        depth,
+                        (
+                            float(row.components[0]),
+                            float(row.components[1]),
+                            float(row.components[2]),
+                            1.0,
+                        ),
+                        lodAlpha,
+                    )
+
+                baselineY = self._valueBaselineY(rect)
+                tabular = row.kind in (
+                    noodlesValues.KIND_FLOAT,
+                    noodlesValues.KIND_INT,
+                )
+                # One measure for the whole row, and a TABULAR one for
+                # numbers, so the fitted format matches the widths the
+                # glyphs will actually be set at.
+                if tabular:
+                    def rowMeasure(text, _size=fontSize):
+                        return self._valueTextWidth(text, _size, True)
+                else:
+                    rowMeasure = measure
+                axisLabels = (
+                    valueCell.COLOR_AXIS_LABELS
+                    if row.has_swatch
+                    else valueCell.AXIS_LABELS
+                )
+                hairWidth = max(0.6 / max(self.zoom, 1e-3), 0.012 * h)
+
+                # Fit ONCE for the whole value, so every component of a
+                # vector is shown to the same number of decimals.
+                slotWidth = valueCell.text_max_width(subs[0], h)
+                if row.kind == noodlesValues.KIND_TOKEN_ENUM:
+                    slotWidth -= 0.20 * h * 2.2
+                if row.count > 1:
+                    slotWidth -= max(
+                        self.textRenderer.calculateTextWidth(
+                            label, fontSize * 0.8
+                        )
+                        for label in axisLabels[: row.count]
+                    ) + innerPad * 0.5
+                texts = noodlesValues.fit_components(
+                    row.components, row.type_name, max(slotWidth, 1.0), rowMeasure
+                )
+
+                for index, sub in enumerate(subs):
+                    componentHovered = rowHovered and hover[2] == index
+                    # Components of one value live in ONE pill, divided by
+                    # hairlines rather than by gaps, so a vector reads as a
+                    # single value with parts.
+                    if index > 0:
+                        valueCell.append_quad(
+                            quadBatches[(0.0, None)],
+                            NodeVertex,
+                            valueCell.Rect(
+                                sub.left - hairWidth * 0.5,
+                                rect.top + 0.12 * (rect.bottom - rect.top),
+                                sub.left + hairWidth * 0.5,
+                                rect.bottom - 0.12 * (rect.bottom - rect.top),
+                            ),
+                            depth,
+                            theme.hairline,
+                            lodAlpha,
+                        )
+                    if componentHovered and fill is not None and not rowActive:
+                        valueCell.append_quad(
+                            quadBatches[(radius, None)],
+                            NodeVertex,
+                            sub,
+                            depth,
+                            theme.fillHover,
+                            lodAlpha * 0.8,
+                        )
+
+                    if row.kind == noodlesValues.KIND_BOOL:
+                        self._appendBoolSwitch(
+                            quadBatches, sub, h, depth, row, theme, lodAlpha
+                        )
+                        continue
+
+                    available = valueCell.text_max_width(sub, h)
+                    caretSize = 0.20 * h
+                    if row.kind == noodlesValues.KIND_TOKEN_ENUM:
+                        available -= caretSize * 2.2
+                    axisWidth = 0.0
+                    if row.count > 1:
+                        axisWidth = (
+                            self.textRenderer.calculateTextWidth(
+                                axisLabels[min(index, 3)], fontSize * 0.8
+                            )
+                            + innerPad * 0.5
+                        )
+                        available -= axisWidth
+                    if available <= 0.0:
+                        continue
+                    if (
+                        editing is not None
+                        and editing[0] == nodeId
+                        and editing[1] == row.property_name
+                        and editing[2] == index
+                    ):
+                        continue  # the editor is drawing this one
+
+                    if row.count > 1:
+                        axisColor = valueCell.AXIS_COLORS[min(index, 3)]
+                        key = (axisColor[0], axisColor[1], axisColor[2],
+                               0.85 * lodAlpha)
+                        self._emitValueText(
+                            axisLabels[min(index, 3)],
+                            sub.left + innerPad,
+                            baselineY,
+                            depth,
+                            fontSize * 0.8,
+                            textBatches[key],
+                        )
+
+                    text = texts[index] if index < len(texts) else ""
+                    if not text:
+                        continue
+                    if row.kind in (
+                        noodlesValues.KIND_TEXT,
+                        noodlesValues.KIND_TOKEN_ENUM,
+                    ):
+                        textX = sub.left + innerPad
+                    else:
+                        textX = (
+                            sub.right
+                            - innerPad
+                            - self._valueTextWidth(text, fontSize, tabular)
+                        )
+                    key = (textColor[0], textColor[1], textColor[2],
+                           textColor[3] * lodAlpha)
+                    self._emitValueText(
+                        text,
+                        textX,
+                        baselineY,
+                        depth,
+                        fontSize,
+                        textBatches[key],
+                        tabular=tabular,
+                        italic=italic,
+                    )
+                    if row.kind == noodlesValues.KIND_TOKEN_ENUM:
+                        cx = sub.right - innerPad - caretSize * 0.6
+                        cy = (rect.top + rect.bottom) * 0.5
+                        self._appendChevron(
+                            caretVertices, cx, cy, caretSize, depth,
+                            textColor, lodAlpha
+                        )
+
+        for (radius, stroke), vertices in quadBatches.items():
+            if not vertices:
+                continue
+            self._drawNodeVertices(
+                vertices,
+                projection,
+                radius,
+                stroke if stroke is not None else (0.0, 0.0, 0.0, 0.0),
+                generation=-1,
+            )
+        if caretVertices:
+            self._drawNodeVertices(
+                caretVertices, projection, 0.0, (0.0, 0.0, 0.0, 0.0), generation=-1
+            )
+        for color, vertices in textBatches.items():
+            if vertices:
+                self.textRenderer.drawTextVertices(vertices, projection, color)
+
+        if flash is not None:
+            # Keep repainting while the flash is running; it is the only
+            # animation this pass owns.
+            self.update()
+
+    def _appendBoolSwitch(self, quadBatches, sub, h, depth, row, theme, alpha):
+        """A rounded checkbox drawn in the PIN's colours, not its own.
+
+        On is the connected-port fill, off is the disconnected one, so a
+        boolean reads the same way a wired port does two columns to the left.
+        """
+        innerPad = valueCell.INNER_PAD_RATIO * h
+        side = 0.46 * h
+        top = sub.top + ((sub.bottom - sub.top) - side) * 0.5
+        box = valueCell.Rect(
+            sub.right - innerPad - side, top, sub.right - innerPad, top + side
+        )
+        on = bool(row.components[0])
+        radius = round(side * 0.28, 3)
+        valueCell.append_quad(
+            quadBatches[(radius, theme.hairline)],
+            NodeVertex,
+            box,
+            depth,
+            theme.boolOn if on else theme.boolOff,
+            alpha,
+        )
+        if on:
+            inset = side * 0.28
+            valueCell.append_quad(
+                quadBatches[(round(radius * 0.6, 3), None)],
+                NodeVertex,
+                valueCell.Rect(
+                    box.left + inset,
+                    box.top + inset,
+                    box.right - inset,
+                    box.bottom - inset,
+                ),
+                depth,
+                (0.10, 0.11, 0.09, 0.9),
+                alpha,
+            )
+
+    def _appendChevron(self, out, cx, cy, size, depth, color, alpha):
+        """The small downward chevron that says "this opens a list"."""
+        self._appendTriangleVertices(
+            out,
+            [
+                (cx - size * 0.55, cy - size * 0.28),
+                (cx + size * 0.55, cy - size * 0.28),
+                (cx, cy + size * 0.34),
+            ],
+            depth,
+            (color[0], color[1], color[2], color[3] * alpha),
+        )
+
+    def _activeValueFlash(self):
+        """The running commit/error flash, or None once it has expired."""
+        flash = self._valueFlash
+        if flash is None:
+            return None
+        if time.time() >= flash[2]:
+            self._valueFlash = None
+            return None
+        return flash
+
+    def _startValueFlash(self, nodeId, propertyName, kind="commit"):
+        """A short tint on the cell that just committed (or was rejected)."""
+        duration = 0.12 if kind == "commit" else 0.6
+        self._valueFlash = (nodeId, propertyName, time.time() + duration, kind)
+        self.update()
+
+    def _paintValueEditor(self):
+        """Draw the keyboard editor INSIDE the cell it is editing.
+
+        Not the screen-space TextInputWidget the rename uses: an editor that
+        appears somewhere other than the value it edits, in a different font
+        at a different size, is the thing that makes an inline field feel
+        bolted on. This is the same pill, the same radius, the same padding
+        and the same baseline as the cell it replaces, with the node's own
+        selection accent as its outline -- so entering and leaving edit mode
+        moves nothing.
+        """
+        target = self._valueEditTarget
+        if target is None:
+            return
+        node = self.nodes.get(target[0])
+        if node is None:
+            return
+        rect = self._valueCellRectFor(node, target[1], target[2])
+        if rect is None:
+            return
+        if not self.textRenderer or not self.textRenderer.font_atlas:
+            return
+
+        row = self._findValueRow(target[0], target[1])
+        theme = self._cachedValueTheme
+        projection = self._worldSpaceProjectionMatrix()
+        depth = node_content_depth(node.zOrder) + 0.0002
+        rowHeight = float(node.layoutPortLineHeight) or 1.0
+        innerPad = valueCell.INNER_PAD_RATIO * rowHeight
+        fontSize = self._valueFontSize()
+        radius = round(valueCell.corner_radius(rowHeight), 3)
+        error = self._valueEditError
+
+        quads = []
+        valueCell.append_quad(
+            quads,
+            NodeVertex,
+            rect,
+            depth,
+            theme.fillError if error else theme.fillEdit,
+        )
+        self._drawNodeVertices(
+            quads,
+            projection,
+            radius,
+            theme.error if error else theme.accent,
+            generation=-1,
+        )
+
+        text = self._valueEditInput.text
+        tabular = row is not None and row.kind in (
+            noodlesValues.KIND_FLOAT,
+            noodlesValues.KIND_INT,
+        )
+        leftAligned = row is not None and row.kind in (
+            noodlesValues.KIND_TEXT,
+            noodlesValues.KIND_TOKEN_ENUM,
+        )
+        width = self._valueTextWidth(text, fontSize, tabular)
+        if leftAligned:
+            textX = rect.left + innerPad
+        else:
+            textX = rect.right - innerPad - width
+        baselineY = self._valueBaselineY(rect)
+
+        # Select-all on entry, shown the way a text field shows it.
+        overlays = []
+        if self._valueEditFresh and text:
+            valueCell.append_quad(
+                overlays,
+                NodeVertex,
+                valueCell.Rect(
+                    textX - innerPad * 0.25,
+                    rect.top + (rect.bottom - rect.top) * 0.14,
+                    textX + width + innerPad * 0.25,
+                    rect.bottom - (rect.bottom - rect.top) * 0.14,
+                ),
+                depth,
+                theme.selection,
+            )
+
+        cursorText = text[: self._valueEditInput.cursor_position]
+        cursorX = textX + self._valueTextWidth(cursorText, fontSize, tabular)
+        self._valueEditInput._update_cursor_blink()
+        if self._valueEditInput._cursor_visible:
+            caretWidth = max(1.2 / max(self.zoom, 1e-3), 0.015 * rowHeight)
+            valueCell.append_quad(
+                overlays,
+                NodeVertex,
+                valueCell.Rect(
+                    cursorX,
+                    rect.top + (rect.bottom - rect.top) * 0.16,
+                    cursorX + caretWidth,
+                    rect.bottom - (rect.bottom - rect.top) * 0.16,
+                ),
+                depth,
+                theme.caret,
+            )
+        if overlays:
+            self._drawNodeVertices(
+                overlays, projection, 0.0, (0.0, 0.0, 0.0, 0.0), generation=-1
+            )
+
+        glyphs = []
+        self._emitValueText(
+            text, textX, baselineY, depth, fontSize, glyphs, tabular=tabular
+        )
+        if glyphs:
+            self.textRenderer.drawTextVertices(
+                glyphs, projection, theme.textNormal
+            )
+        # The caret blinks, so this pass owns an animation while it is open.
+        self.update()
+
+    def _paintMungLadder(self):
+        """A small readout of the step the drag is currently using.
+
+        Houdini's ladder without the ladder: the multiplier is the only part
+        a user needs while dragging, and it belongs next to the cursor rather
+        than in a status bar on the other side of the window.
+        """
+        state = self._mungState
+        if state is None or not self._mungActive or not state["mungable"]:
+            return
+        if not self.textRenderer or not self.textRenderer.font_atlas:
+            return
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+        multiplier = noodlesValues.mung_multiplier(
+            bool(modifiers & QtCore.Qt.ShiftModifier),
+            bool(modifiers & QtCore.Qt.ControlModifier),
+        )
+        step = state["step"] * multiplier
+        label = "x%g /px" % step
+
+        theme = self._cachedValueTheme
+        projection = self._screenSpaceProjectionMatrix()
+        atlas = self.textRenderer.font_atlas
+        fontSize = 15.0
+        padX, padY = 9.0, 5.0
+        width = self.textRenderer.calculateTextWidth(label, fontSize) + padX * 2.0
+        height = fontSize * (atlas.ascender - atlas.descender) + padY * 2.0
+        # The view's own last mouse position, not QCursor.pos(): the drag is
+        # driven by the events this widget received, and a synthetic one (a
+        # test, a tablet remap) never moved the OS pointer at all.
+        cursor = self.lastMousePos or self.mapFromGlobal(QtGui.QCursor.pos())
+        x = min(max(0.0, float(cursor.x()) + 18.0), max(0.0, self.width() - width))
+        y = min(max(0.0, float(cursor.y()) - height - 12.0),
+                max(0.0, self.height() - height))
+
+        quads = []
+        valueCell.append_quad(
+            quads,
+            NodeVertex,
+            valueCell.Rect(x, y, x + width, y + height),
+            MAX_RENDER_DEPTH,
+            theme.popupBg,
+        )
+        self._drawNodeVertices(quads, projection, 4.0, theme.hairline, generation=-1)
+
+        glyphs = []
+        self.textRenderer.generateTextVertices(
+            label,
+            x + padX,
+            y + padY + atlas.ascender * fontSize,
+            MAX_RENDER_DEPTH,
+            fontSize,
+            glyphs,
+            node_index=-1.0,
+        )
+        if glyphs:
+            self.textRenderer.drawTextVertices(
+                glyphs, projection, theme.accent, disable_depth=True
+            )
+
+    def _paintTokenPopup(self):
+        """Draw the allowedTokens list under the cell, in the node's style."""
+        popup = self._tokenPopup
+        if popup is None:
+            return
+        if not self.textRenderer or not self.textRenderer.font_atlas:
+            return
+
+        theme = self._cachedValueTheme
+        projection = self._screenSpaceProjectionMatrix()
+        rect = popup["rect"]
+        # The list is set in the SAME on-screen size as the cell it dropped
+        # out of, so the token you are choosing looks like the token you are
+        # replacing rather than like an operating-system menu.
+        onScreenFont = self._valueFontSize() * self.zoom
+        self._tokenPopupList.font_size = max(11.0, min(onScreenFont, 30.0))
+        self._tokenPopupList.item_height = (
+            self._tokenPopupList.font_size * 1.55
+        )
+        self._tokenPopupList.padding = self._tokenPopupList.font_size * 0.45
+        width, height = self._tokenPopupList.calculate_size(self.textRenderer)
+        width = max(width, valueCell.rect_width(rect) * self.zoom)
+        x = (rect.left - self.panX) * self.zoom
+        y = (rect.bottom - self.panY) * self.zoom + 3.0
+        # Clamped into the widget, and flipped above the cell rather than
+        # drawn off the bottom edge.
+        x = max(0.0, min(x, max(0.0, float(self.width()) - width)))
+        if y + height > float(self.height()):
+            y = max(0.0, (rect.top - self.panY) * self.zoom - height - 3.0)
+
+        background = []
+        valueCell.append_quad(
+            background,
+            NodeVertex,
+            valueCell.Rect(x, y, x + width, y + height),
+            MAX_RENDER_DEPTH,
+            theme.popupBg,
+        )
+        self._drawNodeVertices(
+            background, projection, 6.0, theme.hairline, generation=-1
+        )
+        self._tokenPopupList.render(
+            self.textRenderer,
+            x,
+            y,
+            MAX_RENDER_DEPTH,
+            width,
+            NodeVertex,
+            self._drawNodeVertices,
+            projection,
+        )
 
     def _beginRename(self, nodeId):
         """Open the inline editor on *nodeId*, seeded with its current name."""

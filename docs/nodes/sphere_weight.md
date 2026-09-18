@@ -456,4 +456,4 @@ python docs/render_media.py --page sphere_weight
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

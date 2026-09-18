@@ -1462,6 +1462,16 @@ _Float(const UsdPrim &prim, const TfToken &attr, float fallback,
     return value;
 }
 
+// Forward declarations: the matrix assembler below predates the hook
+// helpers and consumes the same enabled contract through them.
+RigExecBakeReadRecorder *
+_RecorderOf(const RigExecResolvedInputs *resolved);
+
+bool
+_Enabled(const UsdPrim &prim, UsdTimeCode time,
+         const RigExecResolvedInputs *resolved,
+         RigExecBakeReadRecorder *bakeRecorder);
+
 }  // namespace
 
 std::shared_ptr<const RigExecSkinTopology>
@@ -1787,17 +1797,8 @@ RigExecAssembleMatrixParameters(
     RigExecMoverParameters params;
     params.kind = _kindTokens->matrix;
 
-    bool enabled = true;
-    if (moverPrim) {
-        if (const UsdAttribute a =
-                moverPrim.GetAttribute(_attrTokens->enabled)) {
-            if (!resolved ||
-                !resolved->GetAttribute(a, time, &enabled)) {
-                a.Get(&enabled, time);
-            }
-        }
-    }
-    params.enabled = enabled;
+    params.enabled =
+        _Enabled(moverPrim, time, resolved, _RecorderOf(resolved));
     if (!params.enabled) {
         params.valid = true;  // disabled is an ordinary pass-through
         return params;
@@ -1857,10 +1858,17 @@ namespace {
 // deformation is measured against, so a read phase has nothing to say about
 // them -- and serving one the same phased value as the live read makes the two
 // operands equal and the whole deformation an identity.
+RigExecBakeReadRecorder *
+_RecorderOf(const RigExecResolvedInputs *resolved)
+{
+    return resolved ? resolved->bakeRecorder : nullptr;
+}
+
 template <typename T>
 std::vector<T>
 _Array(const UsdPrim &moverPrim, const SdfPath &path, UsdTimeCode time,
-       const RigExecResolvedInputs *resolved = nullptr)
+       const RigExecResolvedInputs *resolved = nullptr,
+       RigExecBakeReadRecorder *bakeRecorder = nullptr)
 {
     std::vector<T> out;
     if (path.IsEmpty() || !moverPrim) {
@@ -1877,6 +1885,19 @@ _Array(const UsdPrim &moverPrim, const SdfPath &path, UsdTimeCode time,
         // inputs through exec computeValue at the current time, so an
         // animated cage/surface/topology would otherwise silently diverge.
         a.Get(&value, time);
+        // The overlay arm above returns unrecorded: overlay values are
+        // recomputed, not replayed. The stage value records under
+        // (path, was-Default) so a rest/live pair keeps both.
+        if (bakeRecorder) {
+            bakeRecorder->RecordPath(path, time == UsdTimeCode::Default(),
+                                     VtValue(value),
+                                     /*forceFrame=*/false);
+        }
+    } else if (bakeRecorder) {
+        // A dangling binding path reads as the empty array; the runtime
+        // tells that apart from a gap by the absent mark.
+        bakeRecorder->RecordPath(path, time == UsdTimeCode::Default(),
+                                 VtValue(), /*forceFrame=*/false);
     }
     out.assign(value.begin(), value.end());
     return out;
@@ -1884,17 +1905,28 @@ _Array(const UsdPrim &moverPrim, const SdfPath &path, UsdTimeCode time,
 
 bool
 _Enabled(const UsdPrim &prim, UsdTimeCode time,
-         const RigExecResolvedInputs *resolved)
+         const RigExecResolvedInputs *resolved,
+         RigExecBakeReadRecorder *bakeRecorder = nullptr)
 {
     bool enabled = true;
-    if (prim) {
-        if (const UsdAttribute a =
-                prim.GetAttribute(_attrTokens->enabled)) {
-            if (resolved && resolved->GetAttribute(a, time, &enabled)) {
-                return enabled;
-            }
-            a.Get(&enabled, time);
+    const UsdAttribute a =
+        prim ? prim.GetAttribute(_attrTokens->enabled) : UsdAttribute();
+    if (a) {
+        if (resolved && resolved->GetAttribute(a, time, &enabled)) {
+            RigExecRecordStageRead(resolved, bakeRecorder, a.GetPath(), a, time,
+                             VtValue(enabled), /*forceFrame=*/true);
+            return enabled;
         }
+        a.Get(&enabled, time);
+    }
+    if (prim) {
+        // Null resolved: this arm read past the overlay, so the tier
+        // check must not skip what it consumed.
+        RigExecRecordStageRead(
+            nullptr, bakeRecorder,
+            a ? a.GetPath()
+              : prim.GetPath().AppendProperty(_attrTokens->enabled),
+            a, time, VtValue(enabled), /*forceFrame=*/true);
     }
     return enabled;
 }
@@ -1943,6 +1975,11 @@ RigExecResolveSkinTopology(
                     return false;
                 }
             }
+            // No recorder: this build fills the epoch cache (a varying
+            // layout is refused above), so these reads are epoch state
+            // the geometry section carries. Recording them would print
+            // frame-1-only records; the per-frame fallback below records
+            // its own.
             topology->indices =
                 _Array<int>(moverPrim, indicesPath, time, resolved);
             topology->weights =
@@ -1998,7 +2035,8 @@ RigExecAssembleSkinParameters(
 {
     RigExecMoverParameters params;
     params.kind = _kindTokens->skin;
-    params.enabled = _Enabled(moverPrim, time, resolved);
+    params.enabled =
+        _Enabled(moverPrim, time, resolved, _RecorderOf(resolved));
     if (!params.enabled) {
         params.valid = true;  // disabled is an ordinary pass-through
         return params;
@@ -2024,18 +2062,46 @@ RigExecAssembleSkinParameters(
         *out = 1;
         if (const UsdAttribute a =
                 moverPrim.GetAttribute(_attrTokens->elementSize)) {
-            if (!resolved || !resolved->GetAttribute(a, time, out)) {
+            if (resolved && resolved->GetAttribute(a, time, out)) {
+                RigExecRecordStageRead(
+                    resolved, _RecorderOf(resolved), a.GetPath(), a,
+                    time, VtValue(*out), /*forceFrame=*/true);
+            } else {
                 a.Get(out, time);
+                RigExecRecordStageRead(
+                    nullptr, _RecorderOf(resolved), a.GetPath(), a,
+                    time, VtValue(*out), /*forceFrame=*/false);
             }
+        } else {
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(resolved),
+                moverPrim.GetPath().AppendProperty(
+                    _attrTokens->elementSize),
+                UsdAttribute(), time, VtValue(*out),
+                /*forceFrame=*/false);
         }
     };
     params.skinningMethod = _valueTokens->classicLinear;
     if (const UsdAttribute a =
             moverPrim.GetAttribute(_attrTokens->skinningMethod)) {
-        if (!resolved ||
-            !resolved->GetAttribute(a, time, &params.skinningMethod)) {
+        if (resolved &&
+            resolved->GetAttribute(a, time, &params.skinningMethod)) {
+            RigExecRecordStageRead(
+                resolved, _RecorderOf(resolved), a.GetPath(), a, time,
+                VtValue(params.skinningMethod), /*forceFrame=*/true);
+        } else {
             a.Get(&params.skinningMethod, time);
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(resolved), a.GetPath(), a, time,
+                VtValue(params.skinningMethod), /*forceFrame=*/false);
         }
+    } else {
+        RigExecRecordStageRead(
+            nullptr, _RecorderOf(resolved),
+            moverPrim.GetPath().AppendProperty(
+                _attrTokens->skinningMethod),
+            UsdAttribute(), time, VtValue(params.skinningMethod),
+            /*forceFrame=*/false);
     }
 
     if (resolvedTopology) {
@@ -2079,8 +2145,12 @@ RigExecAssembleSkinParameters(
         return params;
     }
 
-    params.skinIndices = _Array<int>(moverPrim, indicesPath, time, resolved);
-    params.skinWeights = _Array<float>(moverPrim, weightsPath, time, resolved);
+    // The cache refused this mover, so the layout reads per frame and
+    // records per frame with it.
+    params.skinIndices = _Array<int>(moverPrim, indicesPath, time, resolved,
+                                     _RecorderOf(resolved));
+    params.skinWeights = _Array<float>(moverPrim, weightsPath, time,
+                                       resolved, _RecorderOf(resolved));
     readElementSize(&params.skinElementSize);
 
     // The point count is not known here, so the layout is checked against
@@ -2266,7 +2336,7 @@ RigExecAssembleParameters(
     // mover semantics from custom attributes with familiar names.
     params.enabled = synthesizedDerived
         ? true
-        : _Enabled(moverPrim, time, values.resolved);
+        : _Enabled(moverPrim, time, values.resolved, _RecorderOf(values.resolved));
 
     switch (op) {
     case RigExecRevisionOp::BlendShape:
@@ -2336,8 +2406,8 @@ RigExecAssembleParameters(
         params.blendSurfaceFrame = space == "surfaceFrame";
         if (params.blendSurfaceFrame) {
             params.restPoints = values.basePoints;
-            params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
-            params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
+            params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved, _RecorderOf(values.resolved));
+            params.topologyIndices = _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved, _RecorderOf(values.resolved));
             if (params.topologyCounts.empty()) break;
         }
         params.valid = !params.blendDeltas.empty();
@@ -2356,9 +2426,9 @@ RigExecAssembleParameters(
 
     case RigExecRevisionOp::Smooth:
         params.strength = 1.0f;
-        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved, _RecorderOf(values.resolved));
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
+            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved, _RecorderOf(values.resolved));
         params.valid = !params.topologyCounts.empty();
         break;
 
@@ -2375,7 +2445,7 @@ RigExecAssembleParameters(
         // The projection pose is the curvenet and the surface as AUTHORED --
         // Default time on both. Everything the cut depends on is read here,
         // and its digest is what decides whether the cache still applies.
-        const std::vector<GfVec3f> restNet = _Array<GfVec3f>(moverPrim, binding.curvenetPoints, UsdTimeCode::Default(), /*resolved=*/nullptr);
+        const std::vector<GfVec3f> restNet = _Array<GfVec3f>(moverPrim, binding.curvenetPoints, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
         std::vector<int> splineIndices;
         if (const UsdAttribute a =
                 netPrim.GetAttribute(_attrTokens->splineIndices)) {
@@ -2391,16 +2461,16 @@ RigExecAssembleParameters(
         const TfToken basisToken =
             _Token(netPrim, _attrTokens->basis, _valueTokens->bezier);
         params.topologyCounts =
-            _Array<int>(moverPrim, binding.topologyCounts, UsdTimeCode::Default(), /*resolved=*/nullptr);
+            _Array<int>(moverPrim, binding.topologyCounts, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, UsdTimeCode::Default(), /*resolved=*/nullptr);
+            _Array<int>(moverPrim, binding.topologyIndices, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
         // The projection surface is the target's points at DEFAULT, not at
         // the evaluated time. It is a fixed neutral pose by definition (§4.1
         // cuts against it once), and reading the animated value instead would
         // put a per-frame quantity in the bind digest -- re-cutting the mesh
         // and re-factorizing its Laplacian on every frame, while also making
         // the cut mean something different at each one.
-        params.restPoints = _Array<GfVec3f>(moverPrim, binding.base, UsdTimeCode::Default(), /*resolved=*/nullptr);
+        params.restPoints = _Array<GfVec3f>(moverPrim, binding.base, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
         if (restNet.empty() || splineIndices.empty() ||
             params.topologyCounts.empty() || params.restPoints.empty()) {
             break;
@@ -2418,6 +2488,20 @@ RigExecAssembleParameters(
             break;  // the pool changed shape under the bind
         }
 
+        // Retain the bind's inputs for the bake, on whichever path read
+        // them: the early path below skips the digest and the cache, but the
+        // reads above already happened, and a remembered failure re-binds
+        // from the same arrays a success did.
+        if (values.curvenetBindInputs && !values.curvenetBindInputs->held) {
+            values.curvenetBindInputs->restNet = restNet;
+            values.curvenetBindInputs->splineIndices = splineIndices;
+            values.curvenetBindInputs->samplesPerSpline = samplesPerSpline;
+            values.curvenetBindInputs->basis = basisToken;
+            values.curvenetBindInputs->meshPoints = params.restPoints;
+            values.curvenetBindInputs->meshCounts = params.topologyCounts;
+            values.curvenetBindInputs->meshIndices = params.topologyIndices;
+            values.curvenetBindInputs->held = true;
+        }
         // A caller that resolved the bind for itself -- because it may not
         // touch the cache where it assembles -- says so here, before the
         // digest, which is the cache's KEY and nothing else. Everything
@@ -2491,11 +2575,21 @@ RigExecAssembleParameters(
         // capture was itself only `a.Get(&v, UsdTimeCode::Default())` on this
         // same attribute -- so reading it here is identical and needs nothing
         // authored. The live cage is the same attribute at the evaluated time.
-        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.cagePoints, UsdTimeCode::Default(), /*resolved=*/nullptr);
-        params.auxPointsB = _Array<GfVec3f>(moverPrim, binding.cagePoints, time, values.resolved);
+        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.cagePoints, UsdTimeCode::Default(), /*resolved=*/nullptr, _RecorderOf(values.resolved));
+        params.auxPointsB = _Array<GfVec3f>(moverPrim, binding.cagePoints, time, values.resolved, _RecorderOf(values.resolved));
         if (const UsdAttribute a =
                 moverPrim.GetAttribute(_attrTokens->divisions)) {
             a.Get(&params.divisions, time);
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved), a.GetPath(), a,
+                time, VtValue(params.divisions), /*forceFrame=*/false);
+        } else {
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved),
+                moverPrim.GetPath().AppendProperty(
+                    _attrTokens->divisions),
+                UsdAttribute(), time, VtValue(params.divisions),
+                /*forceFrame=*/false);
         }
         // Same cardinality contract as the kernel: a cage that does not match
         // the declared lattice resolution fails atomically instead of
@@ -2517,10 +2611,10 @@ RigExecAssembleParameters(
         // inputs:strength, so reading one here silently applied a 0.5
         // default and projected half way.
         params.strength = 1.0f;
-        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.surfacePoints, time, values.resolved);
-        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
+        params.auxPoints = _Array<GfVec3f>(moverPrim, binding.surfacePoints, time, values.resolved, _RecorderOf(values.resolved));
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved, _RecorderOf(values.resolved));
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
+            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved, _RecorderOf(values.resolved));
         params.valid =
             !params.auxPoints.empty() && !params.topologyCounts.empty();
         break;
@@ -2535,7 +2629,7 @@ RigExecAssembleParameters(
         params.frames = *frames;
         if (op == RigExecRevisionOp::Ribbon) {
             params.bindCoords =
-                _Array<GfVec2f>(moverPrim, binding.bindCoords, time, values.resolved);
+                _Array<GfVec2f>(moverPrim, binding.bindCoords, time, values.resolved, _RecorderOf(values.resolved));
             params.valid = !params.bindCoords.empty();
         } else {
             params.valid = true;
@@ -2551,7 +2645,17 @@ RigExecAssembleParameters(
                 binding.driverCurvePoints)) {
             VtVec3fArray rest;
             a.Get(&rest, UsdTimeCode::Default());
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved), a.GetPath(), a,
+                UsdTimeCode::Default(), VtValue(rest),
+                /*forceFrame=*/false);
             params.restPoints.assign(rest.begin(), rest.end());
+        } else if (!binding.driverCurvePoints.IsEmpty()) {
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved),
+                binding.driverCurvePoints, UsdAttribute(),
+                UsdTimeCode::Default(), VtValue(VtVec3fArray()),
+                /*forceFrame=*/false);
         }
         if (binding.driverTransformCount > 0) {
             // Posed control points from the providers: C_j = C0_j +
@@ -2570,10 +2674,25 @@ RigExecAssembleParameters(
                 VtFloatArray out;
                 if (const UsdAttribute a =
                         moverPrim.GetAttribute(TfToken(name))) {
-                    if (!values.resolved ||
-                        !values.resolved->GetAttribute(a, time, &out)) {
+                    if (values.resolved && values.resolved->GetAttribute(
+                                               a, time, &out)) {
+                        RigExecRecordStageRead(
+                            values.resolved,
+                            _RecorderOf(values.resolved), a.GetPath(), a,
+                            time, VtValue(out), /*forceFrame=*/true);
+                    } else {
                         a.Get(&out, time);
+                        RigExecRecordStageRead(
+                            nullptr, _RecorderOf(values.resolved),
+                            a.GetPath(), a, time, VtValue(out),
+                            /*forceFrame=*/false);
                     }
+                } else {
+                    RigExecRecordStageRead(
+                        nullptr, _RecorderOf(values.resolved),
+                        moverPrim.GetPath().AppendProperty(TfToken(name)),
+                        UsdAttribute(), time, VtValue(out),
+                        /*forceFrame=*/false);
                 }
                 return out;
             };
@@ -2613,7 +2732,7 @@ RigExecAssembleParameters(
             }
         } else {
             params.auxPoints = _Array<GfVec3f>(
-                moverPrim, binding.driverCurvePoints, time, values.resolved);
+                moverPrim, binding.driverCurvePoints, time, values.resolved, _RecorderOf(values.resolved));
         }
         if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
                 binding.driverCurveOrder)) {
@@ -2621,18 +2740,48 @@ RigExecAssembleParameters(
             if (a.Get(&order, UsdTimeCode::Default()) && !order.empty()) {
                 params.curveOrder = order[0];
             }
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved), a.GetPath(), a,
+                UsdTimeCode::Default(), VtValue(order),
+                /*forceFrame=*/false);
+        } else if (!binding.driverCurveOrder.IsEmpty()) {
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved),
+                binding.driverCurveOrder, UsdAttribute(),
+                UsdTimeCode::Default(), VtValue(VtIntArray()),
+                /*forceFrame=*/false);
         }
         if (const UsdAttribute a = moverPrim.GetStage()->GetAttributeAtPath(
                 binding.driverCurveKnots)) {
             VtDoubleArray knots;
             a.Get(&knots, UsdTimeCode::Default());
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved), a.GetPath(), a,
+                UsdTimeCode::Default(), VtValue(knots),
+                /*forceFrame=*/false);
             params.curveKnots.assign(knots.begin(), knots.end());
+        } else if (!binding.driverCurveKnots.IsEmpty()) {
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved),
+                binding.driverCurveKnots, UsdAttribute(),
+                UsdTimeCode::Default(), VtValue(VtDoubleArray()),
+                /*forceFrame=*/false);
         }
         if (const UsdAttribute a = moverPrim.GetAttribute(
                 TfToken("inputs:dropoffDistance"))) {
             float dropoff = 0.0f;
             a.Get(&dropoff, time);
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved), a.GetPath(), a,
+                time, VtValue(dropoff), /*forceFrame=*/false);
             params.dropoffDistance = dropoff;
+        } else {
+            RigExecRecordStageRead(
+                nullptr, _RecorderOf(values.resolved),
+                moverPrim.GetPath().AppendProperty(
+                    TfToken("inputs:dropoffDistance")),
+                UsdAttribute(), time, VtValue(0.0f),
+                /*forceFrame=*/false);
         }
         if (!binding.bindCoords.IsEmpty()) {
             if (!values.resolved ||
@@ -2642,6 +2791,17 @@ RigExecAssembleParameters(
                         moverPrim.GetStage()->GetAttributeAtPath(
                             binding.bindCoords)) {
                     a.Get(&params.wireBindCoords, time);
+                    RigExecRecordStageRead(
+                        nullptr, _RecorderOf(values.resolved),
+                        a.GetPath(), a, time,
+                        VtValue(params.wireBindCoords),
+                        /*forceFrame=*/false);
+                } else {
+                    RigExecRecordStageRead(
+                        nullptr, _RecorderOf(values.resolved),
+                        binding.bindCoords, UsdAttribute(), time,
+                        VtValue(params.wireBindCoords),
+                        /*forceFrame=*/false);
                 }
             }
         }
@@ -2658,13 +2818,13 @@ RigExecAssembleParameters(
         // Derived maintenance reads the final same-generation points, which
         // the caller supplies as the base value for this revision.
         params.auxPoints = values.basePoints;
-        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved);
+        params.topologyCounts = _Array<int>(moverPrim, binding.topologyCounts, time, values.resolved, _RecorderOf(values.resolved));
         params.topologyIndices =
-            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved);
+            _Array<int>(moverPrim, binding.topologyIndices, time, values.resolved, _RecorderOf(values.resolved));
         // Authored widths widen the extent bounds; omitting them silently
         // under-reports the bound of a curves/points gprim.
         if (op == RigExecRevisionOp::RecomputeExtent) {
-            params.widths = _Array<float>(moverPrim, binding.widths, time, values.resolved);
+            params.widths = _Array<float>(moverPrim, binding.widths, time, values.resolved, _RecorderOf(values.resolved));
         }
         // Vertex normals need the adjacency; without it the kernel reports
         // MoverFailed rather than emitting garbage normals. Extent needs only

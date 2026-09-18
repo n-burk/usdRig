@@ -106,4 +106,4 @@ bin\launch_usdview.bat docs\examples\picker.usda
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

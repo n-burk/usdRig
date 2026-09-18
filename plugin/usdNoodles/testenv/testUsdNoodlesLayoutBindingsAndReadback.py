@@ -172,9 +172,23 @@ class TestTitleIconPathBinding(unittest.TestCase):
     _has_core and _has_models, "noodles.core or UsdNoodles.models not available"
 )
 class TestSyncIconPathToCpp(unittest.TestCase):
-    """_sync_content_to_cpp mirrors NodeModel._icon_path onto the C++ field."""
+    """NodeModel._icon_path IS the C++ titleIconPath field, not a mirror of it.
 
-    def test_icon_path_synced(self):
+    The icon is authored onto a node (NodeFactory._apply_icon_from_prim) after
+    the pin setters have run their last _sync_content_to_cpp, so a mirror that
+    needed a sync never reached C++ and every node drew the default icon. The
+    write-through is therefore the contract: a bare assignment, with no sync
+    call after it, must be visible to the C++ icon producer.
+    """
+
+    def test_icon_path_reaches_cpp_without_a_sync(self):
+        node = NodeModel()
+        node._icon_path = "/icons/bar.png"
+        self.assertEqual(node.titleIconPath, "/icons/bar.png")
+
+    def test_icon_path_survives_a_later_sync(self):
+        # _sync_content_to_cpp runs on every fold / pin rebuild; it must not
+        # clobber an icon that was authored before it.
         node = NodeModel()
         node._icon_path = "/icons/bar.png"
         node._sync_content_to_cpp()
@@ -185,5 +199,5 @@ class TestSyncIconPathToCpp(unittest.TestCase):
         # would raise in boost.python).
         node = NodeModel()
         node._icon_path = None
-        node._sync_content_to_cpp()
         self.assertEqual(node.titleIconPath, "")
+        self.assertIsNone(node._icon_path)

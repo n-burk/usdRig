@@ -404,4 +404,4 @@ python docs/render_media.py --page pose_interpolator
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)

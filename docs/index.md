@@ -1,4 +1,4 @@
-# RigExec nodes
+# UsdRig
 
 One page per operator: what it does, how to wire it, every
 parameter, and a minimal animated example. Each example stage
@@ -6,6 +6,14 @@ lives in [examples](examples/) and plays in `usdview` via
 `bin\launch_usdview.bat`; the GIF on each page is rendered
 live from that stage by `docs/render_media.py`, an offscreen
 Storm viewport with the rig guides on.
+
+## Concepts
+
+| | Page | About |
+|---|---|---|
+| ![How operators fire](../icons/concept.png) | [How operators fire](concepts/how-operators-fire.md) | The mental model and the evaluation order behind every UsdRig rig — who reads what, who writes what, and when. |
+| ![Baked and dynamic evaluation](../icons/concept.png) | [Baked and dynamic evaluation](concepts/baked-vs-dynamic.md) | The two ways UsdRig computes a frame, how to switch between them, and what each one is for. |
+| ![Tutorial: a rolling ball rig](../icons/concept.png) | [Tutorial: a rolling ball rig](concepts/tutorial-rolling-ball.md) | Build the classic bouncing-ball rig in usdview, node by node, and make the roll a consequence of the travel instead of a channel to key. |
 
 ## Rig
 

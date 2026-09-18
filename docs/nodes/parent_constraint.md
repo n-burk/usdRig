@@ -268,4 +268,4 @@ python docs/render_media.py --page parent_constraint
 
 ---
 
-[RigExec nodes](../index.md)
+[UsdRig](../index.md)
