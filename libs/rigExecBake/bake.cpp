@@ -190,11 +190,33 @@ RigExecBakeToBinary(RigExecRigEvaluator &evaluator,
     }
     writer.AddSection(RigExecBinarySection::Cones, payload);
     payload.clear();
-    if (!RigExecWireEncodeDomainPose(
-            RigExecBakeConvertDomainPose(program, &writer), &payload)) {
+    const RigExecWireDomainPose wirePose =
+        RigExecBakeConvertDomainPose(program, &writer);
+    if (!RigExecWireEncodeDomainPose(wirePose, &payload)) {
         return Fail("cannot encode the pose tables");
     }
     writer.AddSection(RigExecBinarySection::DomainPose, payload);
+    payload.clear();
+    // Sparse: only solvers hanging from a start provider. Absent in
+    // binaries baked before minor 1, which is not an error: those load
+    // with every chain absolute, exactly as before.
+    std::vector<RigExecWireSolverStart> starts;
+    for (size_t i = 0; i < wirePose.solvers.size(); ++i) {
+        const RigExecWireSolver &solver = wirePose.solvers[i];
+        if (solver.start < 0) {
+            continue;
+        }
+        RigExecWireSolverStart entry;
+        entry.solver = uint32_t(i);
+        entry.start = solver.start;
+        entry.rest = solver.startRest;
+        entry.read = solver.startRead;
+        starts.push_back(entry);
+    }
+    if (!RigExecWireEncodeSolverStarts(starts, &payload)) {
+        return Fail("cannot encode the solver starts");
+    }
+    writer.AddSection(RigExecBinarySection::SolverStart, payload);
     payload.clear();
     const RigExecWireDomainGeometry wireGeometry =
         RigExecBakeConvertDomainGeometry(program, &writer);

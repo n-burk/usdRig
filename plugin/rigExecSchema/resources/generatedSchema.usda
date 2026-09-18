@@ -616,6 +616,15 @@ class RigExecFkChain "RigExecFkChain" (
         W_0 = S."""
         }
     )
+    uniform token rigExec:startFramePolicy = "none" (
+        allowedTokens = ["none", "parent"]
+        customData = {
+            string userDocBrief = """Who names the start provider when rigExec:startFrame has no\r
+        authored targets.\r
+\r
+        `none` (the default): nobody."""
+        }
+    )
     token visibility = "inherited" (
         allowedTokens = ["inherited", "invisible"]
         customData = {

@@ -143,6 +143,13 @@ struct RigExecWireSolver {
     std::vector<int32_t> controls;
     bool parentRelative = false;
     std::vector<std::array<RigExecWireVec3d, 4>> controlRests;
+    /// rigExec:startFrame provider slot (-1: absolute), its rest, and the
+    /// bound `fin` version. Memory only: the solver record layout is
+    /// frozen, so these travel in the optional SolverStart section and
+    /// the loader overlays them after decoding the pose domain.
+    int32_t start = -1;
+    std::array<RigExecWireVec3d, 4> startRest{};
+    uint32_t startRead = 0;
     // IK / spline controls
     int32_t root = -1;
     int32_t mid = -1;
@@ -379,6 +386,21 @@ bool RigExecWireEncodeDomainPose(const RigExecWireDomainPose &pose,
 bool RigExecWireDecodeDomainPose(RigExecWireReader *reader,
                                  RigExecWireDomainPose *pose,
                                  std::string *error);
+
+/// One FkChain start provider: sparse, only solvers with start >= 0.
+struct RigExecWireSolverStart {
+    uint32_t solver = 0;
+    int32_t start = -1;
+    std::array<RigExecWireVec3d, 4> rest{};
+    uint32_t read = 0;
+};
+
+bool RigExecWireEncodeSolverStarts(
+    const std::vector<RigExecWireSolverStart> &starts,
+    std::vector<uint8_t> *out);
+bool RigExecWireDecodeSolverStarts(RigExecWireReader *reader,
+                                   std::vector<RigExecWireSolverStart> *starts,
+                                   std::string *error);
 
 }  // namespace rigExec
 

@@ -608,6 +608,13 @@ RigExecBakeConvertDomainPose(const RigExecBakedProgramImpl &program,
             }
             out.controlRests.push_back(wire);
         }
+        // Memory only: the solver record layout is frozen, so the
+        // SolverStart section carries these (see bake.cpp).
+        out.start = int32_t(solver.start);
+        for (size_t i = 0; i < 4; ++i) {
+            out.startRest[i] = _ToVec3d(solver.startRest[i]);
+        }
+        out.startRead = solver.startRead;
         out.root = int32_t(solver.root);
         out.mid = int32_t(solver.mid);
         out.end = int32_t(solver.end);

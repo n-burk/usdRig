@@ -225,6 +225,22 @@ RigExecBakedBuildWalk(RigExecBakedBuildContext *ctx,
                 s.controls.push_back(slot);
                 s.controlRests.push_back(B.restPts[foldRest(slot)]);
             }
+            // rigExec:startFrame: the dynamic computation prepends the
+            // provider's rest-to-pose delta as a synthetic element 0 and
+            // drops its frame from the aggregate. The bake records the
+            // slot and rest here (foldRest registers the refresh/dirty
+            // channels like any other rest read); the Solve arm replays
+            // the synthetic shape. An unwired target, a second target,
+            // or a non-provider target is the computation's answer, not
+            // a degenerate: no frame input, so the chain solves absolute.
+            const auto startTargets = targets(prim, "rigExec:startFrame");
+            if (!startTargets.empty()) {
+                const int slot = providerSlot(startTargets[0]);
+                if (slot >= 0) {
+                    s.start = slot;
+                    s.startRest = B.restPts[foldRest(slot)];
+                }
+            }
         } else if (s.type == "RigExecTwoBoneIk") {
             const auto r = targets(prim, "rigExec:rootControl");
             const auto e = targets(prim, "rigExec:effectorControl");
@@ -1058,6 +1074,7 @@ BindPoseVersions(RigExecBakedProgramImpl *program)
         for (const int control : solver.controls) {
             solver.controlReads.push_back(readFin(control));
         }
+        solver.startRead = readFin(solver.start);
         solver.rootRead = readFin(solver.root);
         solver.midRead = readFin(solver.mid);
         solver.endRead = readFin(solver.end);
@@ -1420,7 +1437,9 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 for (const auto &[slot, element] : solver.outputs) {
                     solver.outPosition.push_back(positionOf(slot));
                 }
-                solver.elements.resize(solver.controls.size());
+                // +1 for the start provider's synthetic base element.
+                solver.elements.resize(solver.controls.size() +
+                                       (solver.start >= 0 ? 1 : 0));
                 RigExecBakedStep &step =
                     AddStep(&B, RigExecBakedStepKind::Solve, si);
                 for (const int control : solver.controls) {
@@ -1435,6 +1454,12 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                         step.reads.push_back(RigExecBakedOne(
                             RigExecBakedSlotDomain::PoseFin, control));
                     }
+                }
+                // The start provider's posed frame: undeclared, the
+                // scheduler is free to run this solve before the write.
+                if (solver.start >= 0) {
+                    step.reads.push_back(RigExecBakedOne(
+                        RigExecBakedSlotDomain::PoseFin, solver.start));
                 }
                 // The LIVE joint rests: a solver whose rest reference is the
                 // frame a pose step below it left READS that slot's PoseFin,
@@ -1724,7 +1749,9 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
     // guide pass is a client of it whether the guides are drawn or not.
     for (const int si : B.guideSolvers) {
         RigExecBakedProgramImpl::Solver &solver = B.solvers[size_t(si)];
-        solver.elements.resize(solver.controls.size());
+        // +1 for the start provider's synthetic base element.
+        solver.elements.resize(solver.controls.size() +
+                               (solver.start >= 0 ? 1 : 0));
         RigExecBakedStep &step =
             AddStep(&B, RigExecBakedStepKind::Solve, si);
         for (const int control : solver.controls) {
@@ -1739,6 +1766,10 @@ RigExecBakedBuildPoseSteps(RigExecBakedProgramImpl *program)
                 step.reads.push_back(RigExecBakedOne(
                     RigExecBakedSlotDomain::PoseFin, control));
             }
+        }
+        if (solver.start >= 0) {
+            step.reads.push_back(RigExecBakedOne(
+                RigExecBakedSlotDomain::PoseFin, solver.start));
         }
         if (!solver.ribbonPointsPath.IsEmpty()) {
             step.reads.push_back(RigExecBakedOne(
@@ -2477,6 +2508,9 @@ RefreshSolverRests(RigExecBakedProgramImpl &B,
         for (size_t k = 0; k < s.controls.size(); ++k) {
             s.controlRests[k] = B.restPts[size_t(s.controls[k])];
         }
+        if (s.start >= 0) {
+            s.startRest = B.restPts[size_t(s.start)];
+        }
     } else if (s.type == "RigExecTwoBoneIk") {
         for (size_t k = 0; k < s.restRefs.size(); ++k) {
             const int slot = s.restRefs[k].first;
@@ -2644,25 +2678,42 @@ RigExecBakedRunPoseStep(RigExecBakedProgramImpl *program,
             const bool jointBasis =
                 s.jointRests.size() == s.controls.size();
             aggregate.rests = s.controlRests;
+            // The dynamic computation's synthetic base element: the start
+            // provider's rest-to-pose delta prepended as element 0, with
+            // every real element parented onto it (parentRelative) or
+            // chained after it (world), and its own frame dropped from
+            // the aggregate so no joint's element index moves.
+            const int base = s.start >= 0 ? 1 : 0;
+            if (base) {
+                s.elements[0].restPoints = s.startRest;
+                s.elements[0].posePoints =
+                    B.fin[size_t(s.startRead)].points;
+                s.elements[0].hasOutRest = false;
+                s.elements[0].parentIndex = -1;
+            }
             for (size_t k = 0; k < s.controls.size(); ++k) {
-                s.elements[k].restPoints = s.controlRests[k];
+                const size_t e = k + size_t(base);
+                s.elements[e].restPoints = s.controlRests[k];
                 // Every entry is a provider: the bake filtered the list
                 // the way the computation's read iterator does.
-                s.elements[k].posePoints =
+                s.elements[e].posePoints =
                     B.fin[size_t(s.controlReads[k])].points;
                 // The dynamic path's RigExecPointFrameLiveRest, per element:
                 // only a joint a step BELOW this chain wrote re-bases it.
                 const bool live = jointBasis && k < s.restIsLive.size() &&
                                   s.restIsLive[k];
-                s.elements[k].hasOutRest = live;
+                s.elements[e].hasOutRest = live;
                 if (live) {
-                    s.elements[k].outRestPoints = s.jointRests[k];
+                    s.elements[e].outRestPoints = s.jointRests[k];
                     aggregate.rests[k] = s.jointRests[k];
                 }
-                s.elements[k].parentIndex =
-                    s.parentRelative ? -1 : int(k) - 1;
+                s.elements[e].parentIndex =
+                    s.parentRelative ? base - 1 : int(k) + base - 1;
             }
             aggregate.frames = RigExecSolveFkChain(s.elements);
+            if (base && !aggregate.frames.empty()) {
+                aggregate.frames.erase(aggregate.frames.begin());
+            }
         } else if (s.type == "RigExecTwoBoneIk") {
             RigExecTwoBoneIkParams params = s.ikParams;
             if (live(s.bend) || live(s.stretch) || live(s.softness) ||

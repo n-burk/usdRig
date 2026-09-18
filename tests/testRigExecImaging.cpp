@@ -4885,6 +4885,43 @@ TestSetTimeDrivenEvaluation(const std::string &examplesDir)
     RigExecImaging_Deactivate();
 }
 
+// A policy-carrying rig activates without taking the registry down.
+//
+// The compile derives rigExec:startFrame targets into the session layer,
+// and the registry registers its ObjectsChanged listener BEFORE Compile
+// and holds a non-recursive mutex across the whole call -- so a notice
+// fired by that derivation re-enters the registry on its own held mutex.
+// Measured as an access violation in _OnObjectsChanged on the first
+// usdview activation of Biped.usda; the derivation now swallows its own
+// notices (TfNotice::Block) and activation survives. This pins that:
+// both policy-carrying biped files activate, publish, retime, and
+// deactivate. (The derived values themselves are pinned by
+// test_rigexec_biped_hand.py; this test pins the activation.)
+static void
+TestPolicyRigActivationSurvivesItsOwnDerivation(
+    const std::string &examplesDir)
+{
+    const char *files[] = {
+        "/biped/Biped.usda",
+        "/biped/Biped_layered.usda",
+    };
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    for (const char *file : files) {
+        UsdStageRefPtr stage = UsdStage::Open(examplesDir + file);
+        CHECK(stage);
+        if (!stage) {
+            continue;
+        }
+        std::vector<std::string> errors;
+        CHECK(registry.Activate(stage, SdfPath("/Biped/Rig"),
+                                UsdTimeCode(1.0), &errors));
+        CHECK(registry.GetStore()->Get());
+        CHECK(registry.SetTime(UsdTimeCode(2.0)));
+        CHECK(registry.GetStore()->Get());
+        registry.Deactivate();
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4950,6 +4987,7 @@ main(int argc, char **argv)
     TestExtentIsPureFunctionOfStageAndTime(examplesDir);
     TestPurposeScopedBounds(examplesDir);
     TestAllPurposeRenderTags(examplesDir);
+    TestPolicyRigActivationSurvivesItsOwnDerivation(examplesDir);
     // Last: it drives the real UsdImaging chain and deactivates on the way
     // out, leaving the process-global registry cleared.
     TestSetTimeDrivenEvaluation(examplesDir);

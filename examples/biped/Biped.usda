@@ -5967,6 +5967,7 @@ def "Biped"
 
         def Scope "Solvers"
         {
+            reorder nameChildren = ["spine_splineIk", "neck_splineIk", "fk_index_l", "fk_middle_l", "fk_pinky_l", "fk_ring_l", "fk_thumb_l", "fk_index_r", "fk_middle_r", "fk_pinky_r", "fk_ring_r", "fk_thumb_r", "arm_l_twoBoneIk", "arm_l_fkChain", "arm_l_ikfk", "arm_r_twoBoneIk", "arm_r_fkChain", "arm_r_ikfk", "leg_l_twoBoneIk", "leg_l_fkChain", "leg_l_ikfk", "leg_r_twoBoneIk", "leg_r_fkChain", "leg_r_ikfk"]
             def RigExecSplineIk "spine_splineIk" (
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
@@ -6218,6 +6219,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk>,
                     </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk>,
@@ -6238,6 +6240,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk>,
                     </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk>,
@@ -6258,6 +6261,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk>,
                     </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk>,
@@ -6280,6 +6284,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk>,
                     </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk>,
@@ -6300,6 +6305,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk>,
                     </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk>,
@@ -6320,6 +6326,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk>,
                     </Biped/Rig/Controls/index_001_r_bind_fk_follow/index_001_r_bind_fk/index_002_r_bind_fk>,
@@ -6340,6 +6347,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk>,
                     </Biped/Rig/Controls/middle_001_r_bind_fk_follow/middle_001_r_bind_fk/middle_002_r_bind_fk>,
@@ -6360,6 +6368,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk>,
                     </Biped/Rig/Controls/pinkyCup_r_bind_fk_follow/pinkyCup_r_bind_fk/pinky_001_r_bind_fk>,
@@ -6382,6 +6391,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk>,
                     </Biped/Rig/Controls/ring_001_r_bind_fk_follow/ring_001_r_bind_fk/ring_002_r_bind_fk>,
@@ -6402,6 +6412,7 @@ def "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk>,
                     </Biped/Rig/Controls/thumbCup_r_bind_fk_follow/thumbCup_r_bind_fk/thumb_001_r_bind_fk>,

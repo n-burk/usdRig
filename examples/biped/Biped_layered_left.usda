@@ -2675,6 +2675,7 @@ over "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk>,
                     </Biped/Rig/Controls/index_001_l_bind_fk_follow/index_001_l_bind_fk/index_002_l_bind_fk>,
@@ -2695,6 +2696,7 @@ over "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk>,
                     </Biped/Rig/Controls/middle_001_l_bind_fk_follow/middle_001_l_bind_fk/middle_002_l_bind_fk>,
@@ -2715,6 +2717,7 @@ over "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk>,
                     </Biped/Rig/Controls/pinkyCup_l_bind_fk_follow/pinkyCup_l_bind_fk/pinky_001_l_bind_fk>,
@@ -2737,6 +2740,7 @@ over "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk>,
                     </Biped/Rig/Controls/ring_001_l_bind_fk_follow/ring_001_l_bind_fk/ring_002_l_bind_fk>,
@@ -2757,6 +2761,7 @@ over "Biped"
                 prepend apiSchemas = ["NodeGraphNodeAPI"]
             )
             {
+                uniform token rigExec:startFramePolicy = "parent"
                 rel rigExec:controls = [
                     </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk>,
                     </Biped/Rig/Controls/thumbCup_l_bind_fk_follow/thumbCup_l_bind_fk/thumb_001_l_bind_fk>,

@@ -1234,6 +1234,49 @@ RigExecWireDecodeDomainPose(RigExecWireReader *reader,
     return true;
 }
 
+bool
+RigExecWireEncodeSolverStarts(
+    const std::vector<RigExecWireSolverStart> &starts,
+    std::vector<uint8_t> *out)
+{
+    RigExecWirePutU32(out, uint32_t(starts.size()));
+    for (const RigExecWireSolverStart &entry : starts) {
+        RigExecWirePutU32(out, entry.solver);
+        RigExecWirePutI32(out, entry.start);
+        _PutLandmarkSet(out, entry.rest);
+        RigExecWirePutU32(out, entry.read);
+    }
+    return true;
+}
+
+bool
+RigExecWireDecodeSolverStarts(RigExecWireReader *reader,
+                              std::vector<RigExecWireSolverStart> *starts,
+                              std::string *error)
+{
+    uint32_t count = 0;
+    if (!reader->ReadU32(&count)) {
+        return _Fail(error);
+    }
+    starts->resize(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        RigExecWireSolverStart &entry = (*starts)[i];
+        if (!reader->ReadU32(&entry.solver) ||
+            !reader->ReadI32(&entry.start) ||
+            !_ReadLandmarkSet(reader, &entry.rest) ||
+            !reader->ReadU32(&entry.read)) {
+            return _Fail(error);
+        }
+    }
+    if (!reader->Exhausted()) {
+        if (error) {
+            *error = "trailing bytes in solver starts";
+        }
+        return false;
+    }
+    return true;
+}
+
 void
 RigExecWirePutInput(std::vector<uint8_t> *out,
                     const RigExecWireInput &input)

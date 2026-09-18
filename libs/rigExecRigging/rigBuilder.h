@@ -204,6 +204,13 @@ public:
     /// control cannot work: a solver-posed joint is an absolute override
     /// and namespace pose does not propagate through it.
     void SetStartFrame(const SdfPath &path);
+    /// none | parent (rigExec:startFramePolicy): who names the start
+    /// provider when rigExec:startFrame has no authored targets. `parent`
+    /// has the compiler derive it from the joint hierarchy -- the
+    /// nearest namespace ancestor of the chain's joints that is a joint
+    /// or control -- instead of authoring the relationship by hand.
+    /// Authored targets always win; anything else is rejected.
+    void SetStartFramePolicy(const TfToken &policy);
 };
 
 /// RigExecTwoBoneIk.

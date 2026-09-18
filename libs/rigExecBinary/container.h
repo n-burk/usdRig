@@ -25,10 +25,11 @@ namespace rigExec {
 /// Magic bytes "REXB" as a little-endian u32.
 inline constexpr uint32_t RigExecBinaryMagic = 0x42584552u;
 
-/// The container version this code writes: major 1, minor 0.
+/// The container version this code writes: major 1, minor 1.
 /// Encoded (minor << 16) | major; the reader requires the major and
-/// tolerates the minor.
-inline constexpr uint32_t RigExecBinaryVersion = 0x00000001u;
+/// tolerates the minor. Minor 1 adds the optional SolverStart section;
+/// files without it load with every chain absolute, exactly as before.
+inline constexpr uint32_t RigExecBinaryVersion = 0x00010001u;
 inline constexpr uint32_t RigExecBinaryMajor(uint32_t version)
 {
     return version & 0xffffu;
@@ -48,6 +49,7 @@ enum class RigExecBinarySection : uint32_t {
     Clusters = 9,     ///< cluster partition (M1 slice 2)
     Cones = 10,       ///< cone closures (M1 slice 4)
     Diagnostics = 11,  ///< embedded diagnostics; the loader skips it
+    SolverStart = 12,  ///< FkChain start providers (minor 1)
 };
 
 /// Builds a .rigexec file in memory.

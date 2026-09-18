@@ -180,20 +180,34 @@ read off `control_positions.data` (`index_001..004`, `pinkyCup` +
 the solver's `rigExec:joints` on purpose and follows its parent by
 namespace.
 
-Each chain names the wrist joint on `rigExec:startFrame`, and that is the
-whole trick. Without it `RigExecFkChain` writes ABSOLUTE world frames --
-measured on a synthetic `a -> b -> c` with a chain over `[b, c]`, posing
-`a` by `avars:rz = 90` left b and c at (10,0,0) and (20,0,0), unmoved --
-so the fingers would stay behind the instant the arm moved. `startFrame`
-prepends the named provider's rest-to-pose delta to the chain, so the
-hand rides whatever poses that joint. The wrist is the right anchor
-because the arm's `RigExecBlendPointFrames` claims it, so it is correct at
-every IK/FK weight: measured, a 20 cm IK effector move carries all 27 hand
-joints 20.00 cm with a rigid error of 4e-14, and an FK shoulder rotation
-of 35 degrees carries them 30.25 cm with 1.4e-13. The arm's FK wrist
-CONTROL would have worked in FK and stood still in IK, which is why it is
-not used. `verify_hand.py` re-proves all of it, including that a finger
-control bends its own finger and nothing else.
+Each chain carries `rigExec:startFramePolicy = "parent"` instead of
+naming the wrist by hand, and that is the whole trick. Without a start
+provider `RigExecFkChain` writes ABSOLUTE world frames -- measured on a
+synthetic `a -> b -> c` with a chain over `[b, c]`, posing `a` by
+`avars:rz = 90` left b and c at (10,0,0) and (20,0,0), unmoved -- so the
+fingers would stay behind the instant the arm moved. At compile the
+policy derives the provider from the JOINT HIERARCHY -- the nearest
+namespace ancestor of the chain's joints that is a joint or control,
+structural, no name matching -- materializes it as a session-layer
+`rigExec:startFrame` target, and the chain prepends that provider's
+rest-to-pose delta: the hand rides whatever poses the wrist. The wrist
+is the right anchor because the arm's `RigExecBlendPointFrames` claims
+it, so it is correct at every IK/FK weight: measured, an FK wrist
+rotation carries all 26 finger joints with worst error 2.4e-13, an IK
+move at half blend carries them the same way, and a finger curl
+composes with the carry rather than fighting it. The arm's FK wrist
+CONTROL would have worked in FK and stood still in IK, which is why the
+joint -- not the control -- is the anchor.
+`test_rigexec_biped_hand.py` re-proves all of it on both layers in both
+paths, and `test_rigexec_fk_start_frame.py` sections 6-9 pin the
+inference, the authored-wins precedence, and the ordering rule below.
+
+Ordering matters as much as the anchor: the read is positional (spec
+section 4.2), so each finger chain executes AFTER the arm blend that
+poses its wrist -- earlier in the file, since siblings execute
+bottom-first -- and the compile warns naming the reorder when one does
+not. A chain left below the blend reads the rest wrist and stays
+frozen.
 
 Not finished: the drawn control GUIDES do not travel with the arm -- the
 joints do, but the gizmos sit at their rest positions (0.00 cm in both IK

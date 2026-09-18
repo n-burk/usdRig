@@ -25,10 +25,14 @@
 #include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/diagnostic.h"
 #include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/pyLock.h"
 #include "pxr/base/tf/stringUtils.h"
+#include "pxr/usd/sdf/changeBlock.h"
+#include "pxr/usd/sdf/layer.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/attributeQuery.h"
+#include "pxr/usd/usd/editContext.h"
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/primRange.h"
 #include "pxr/usd/usd/relationship.h"
@@ -46,9 +50,10 @@
 
 #include <algorithm>
 #include <cmath>
-#include <optional>
 #include <functional>
 #include <limits>
+#include <mutex>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -2527,6 +2532,10 @@ RigExecRigEvaluator::_ComputeStructureDigest() const
             const TfToken stype = solver.GetTypeName();
             if (stype == "RigExecFkChain") {
                 appendRelTargets(solver, "rigExec:controls", false);
+                // The start-frame inference switch: flipping it rewrites
+                // the derived session targets the rel loop above hashed,
+                // so the token joins the digest or no recompile follows.
+                appendToken(solver, "rigExec:startFramePolicy");
             } else if (stype == "RigExecTwistDistribution") {
                 const UsdAttribute ca =
                     solver.GetAttribute(TfToken("rigExec:count"));
@@ -3146,6 +3155,168 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
     }
 }
 
+std::vector<std::string>
+RigExecRigEvaluator::_ApplyDerivedStartFrames()
+{
+    // Process-wide: two evaluators compiling concurrently (two characters
+    // sharing one stage) must not interleave session-layer writes, and USD
+    // layers are not thread-safe. Microseconds per compile.
+    static std::mutex derivedOpinionsMutex;
+    std::lock_guard<std::mutex> lock(derivedOpinionsMutex);
+
+    static const TfToken startFrameRel("rigExec:startFrame");
+    static const TfToken startFramePolicy("rigExec:startFramePolicy");
+    static const TfToken jointsRel("rigExec:joints");
+    static const TfToken jointType("RigExecJoint");
+    static const TfToken controlType("RigExecControl");
+    static const TfToken policyNone("none");
+    static const TfToken policyParent("parent");
+
+    SdfLayerHandle session = _stage->GetSessionLayer();
+    // Collected, not emitted: nothing that can Send -- TF_WARN included --
+    // may run inside the notice block below, so the caller emits these
+    // after this returns (both blocks then closed).
+    std::vector<std::string> warnings;
+    auto warn = [&warnings](const std::string &message) {
+        warnings.push_back(message);
+    };
+
+    // NO NOTICE may leave this function. It runs inside Compile, and the
+    // imaging registry registers its ObjectsChanged listener BEFORE
+    // Compile and holds a non-recursive mutex across the whole call, so a
+    // notice fired here re-enters the registry on its own held mutex
+    // (measured: an access violation in _OnObjectsChanged on the first
+    // usdview activation of a policy-carrying rig). TfNotice::Block
+    // swallows the send while the ChangeBlock still batches the Sdf-side
+    // work. Sound because the in-flight compile is the only reader of
+    // these opinions: the structure digest runs after this returns, and
+    // every Compile rebuilds the epoch (fresh taps) rather than
+    // invalidating the old one, so no cached exec value can strand on the
+    // swallowed send. Block is thread-scoped, and this runs
+    // single-threaded, before the digest dispatch.
+    TfNotice::Block noticeBlock;
+    SdfChangeBlock block;
+    // Retract this evaluator's previous opinions first, surgically: only
+    // OUR tracked provider leaves each session list, so a hand-authored
+    // session opinion on the same relationship survives. Anything still
+    // composed afterwards is not ours, which is exactly the "authored
+    // wins" test the derivation below applies.
+    for (const auto &[solverPath, ourProvider] : _derivedStartFrames) {
+        SdfRelationshipSpecHandle spec = session->GetRelationshipAtPath(
+            solverPath.AppendProperty(startFrameRel));
+        if (!spec) {
+            continue;
+        }
+        bool present = false;
+        // Explicit items only: our writes are SetTargets (explicit), and
+        // a user's prepended/appended opinions are not ours to inspect.
+        const auto explicitItems =
+            spec->GetTargetPathList().GetExplicitItems();
+        for (size_t i = 0, n = explicitItems.size(); i < n; ++i) {
+            if (explicitItems[i] == ourProvider) {
+                present = true;
+                break;
+            }
+        }
+        if (!present) {
+            continue;
+        }
+        spec->RemoveTargetPath(ourProvider);
+        if (!spec->HasTargetPathList()) {
+            if (SdfPrimSpecHandle primSpec =
+                    session->GetPrimAtPath(solverPath)) {
+                primSpec->RemoveProperty(spec);
+            }
+        }
+    }
+    _derivedStartFrames.clear();
+
+    UsdPrim rig = _stage->GetPrimAtPath(_rigPath);
+    if (rig) {
+        UsdEditContext sessionCtx(_stage, session);
+        for (const UsdPrim &prim : UsdPrimRange(rig)) {
+            if (prim.GetTypeName() != "RigExecFkChain") {
+                continue;
+            }
+            TfToken policy;
+            prim.GetAttribute(startFramePolicy).Get(&policy);
+            if (policy.IsEmpty()) {
+                policy = policyNone;
+            }
+            if (policy == policyNone) {
+                continue;
+            }
+            const SdfPath solverPath = prim.GetPath();
+            if (policy != policyParent) {
+                warn(solverPath.GetString() +
+                     " has rigExec:startFramePolicy '" +
+                     policy.GetString() +
+                     "', expected 'none' or 'parent'; solving absolute.");
+                continue;
+            }
+            SdfPathVector composed;
+            prim.GetRelationship(startFrameRel).GetTargets(&composed);
+            if (!composed.empty()) {
+                continue;  // Authored (asset or session) always wins.
+            }
+            SdfPathVector joints;
+            prim.GetRelationship(jointsRel).GetTargets(&joints);
+            if (joints.empty()) {
+                continue;  // A jointless chain hangs from nothing.
+            }
+            // The inference: nearest namespace ancestor of the chain's
+            // joints that is a joint or control. Structural ancestry
+            // only -- GetParentPath, never a name -- so a reparented
+            // chain follows its new parent with no authoring change.
+            UsdPrim first =
+                _stage->GetPrimAtPath(joints[0].GetPrimPath());
+            SdfPath provider;
+            for (SdfPath a = first ? first.GetPath().GetParentPath()
+                                   : SdfPath::EmptyPath();
+                 !a.IsEmpty() && a != SdfPath::AbsoluteRootPath();
+                 a = a.GetParentPath()) {
+                if (a == _rigPath) {
+                    break;
+                }
+                const UsdPrim ancestor = _stage->GetPrimAtPath(a);
+                if (!ancestor) {
+                    continue;
+                }
+                const TfToken type = ancestor.GetTypeName();
+                if (type == jointType || type == controlType) {
+                    provider = a;
+                    break;
+                }
+            }
+            if (provider.IsEmpty()) {
+                warn(solverPath.GetString() +
+                     " has rigExec:startFramePolicy 'parent' but no "
+                     "RigExecJoint/RigExecControl ancestor; solving "
+                     "absolute.");
+                continue;
+            }
+            bool shared = true;
+            for (const SdfPath &j : joints) {
+                const SdfPath jp = j.GetPrimPath();
+                if (jp == provider || !jp.HasPrefix(provider)) {
+                    shared = false;
+                    break;
+                }
+            }
+            if (!shared) {
+                warn(solverPath.GetString() +
+                     " has rigExec:startFramePolicy 'parent' but its "
+                     "joints span providers; solving absolute.");
+                continue;
+            }
+            prim.GetRelationship(startFrameRel)
+                .SetTargets(SdfPathVector{provider});
+            _derivedStartFrames[solverPath] = provider;
+        }
+    }
+    return warnings;
+}
+
 bool
 RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 {
@@ -3207,11 +3378,28 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _bakeRefused = false;
     _bakeRefusalReasons.clear();
     stampCompileRegion("Compile.Prologue");
+    // Derived start-frame targets first, single-threaded, before the digest
+    // dispatch and every parallel stage read below: the inference is a pure
+    // function of the asset state, so the digest then covers it like any
+    // other composed opinion, and the scheduler, exec, and the bake all see
+    // it as authored. Returned warnings are emitted here, past the
+    // derivation's notice block: both channels on purpose, like the
+    // transform-authority pass -- TF_WARN is what a host surfaces to the
+    // author, the errors vector is what a test can read.
+    for (const std::string &message : _ApplyDerivedStartFrames()) {
+        if (errors) {
+            errors->push_back("warning: " + message);
+        }
+        TF_WARN("%s", message.c_str());
+    }
+    stampCompileRegion("Compile.DerivedStartFrames");
 
     // The structure digest is a pure read of the composed stage that boils it
     // down to one number, and that number is not consulted until the epoch is
     // committed far below: nothing in between reads it, and compile authors
-    // nothing to the stage for it to miss. So it runs beside the WHOLE of
+    // nothing to the stage for it to miss past the derived opinions above
+    // (which the digest reads, deterministically, as composed targets). So
+    // it runs beside the WHOLE of
     // compile rather than beside only its tail.
     //
     // MEASURED (biped_stack_anim, 201.3 ms compile): dispatched at the old
@@ -5836,6 +6024,66 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             restorePreviousEpoch();
             return false;
         }
+    }
+    // A startFrame read is positional (spec §4.2): a chain ordered before
+    // its provider's writer reads the pre-write frame, and for a rest
+    // provider that is the rest pose -- the chain then hangs from nothing
+    // and stays frozen with no other diagnostic. Measured on the biped
+    // hand: finger chains below the arm blend read the rest wrist (0.0000
+    // on every joint). Authored and derived targets alike -- the read
+    // does not know which -- so this runs over composed targets.
+    for (const UsdPrim &solver : orderedSolvers) {
+        if (solver.GetTypeName() != "RigExecFkChain") {
+            continue;
+        }
+        static const TfToken startFrameRelTok("rigExec:startFrame");
+        SdfPathVector starts;
+        solver.GetRelationship(startFrameRelTok).GetTargets(&starts);
+        if (starts.empty()) {
+            continue;
+        }
+        const int here = stackOrdinalOf(solver.GetPath());
+        if (here < 0) {
+            continue;  // Guide-only: exec re-derives the order.
+        }
+        const SdfPath provider = starts[0].GetPrimPath();
+        SdfPath culprit;
+        const auto owned = newJointBinding.find(provider);
+        if (owned != newJointBinding.end()) {
+            for (const auto &entry : owned->second) {
+                if (entry.first != solver.GetPath() &&
+                    stackOrdinalOf(entry.first) > here) {
+                    culprit = entry.first;
+                    break;
+                }
+            }
+        }
+        if (culprit.IsEmpty()) {
+            const auto revised = newFrameChains.find(provider);
+            if (revised != newFrameChains.end()) {
+                for (const SdfPath &writer : revised->second) {
+                    if (writer != solver.GetPath() &&
+                        stackOrdinalOf(writer) > here) {
+                        culprit = writer;
+                        break;
+                    }
+                }
+            }
+        }
+        if (culprit.IsEmpty()) {
+            continue;
+        }
+        const std::string message =
+            solver.GetPath().GetString() + " reads startFrame " +
+            provider.GetString() + " but executes before " +
+            culprit.GetString() +
+            ", which poses it, so it reads the pre-write frame. Reorder "
+            "so the chain executes after the writer -- earlier in the "
+            "file, since siblings execute bottom-first (spec §4.2).";
+        if (errors) {
+            errors->push_back("warning: " + message);
+        }
+        TF_WARN("%s", message.c_str());
     }
     // A provider carrying pose revisions that is not a joint needs a base
     // frame from somewhere. A Control has computePointFrame like a joint; a

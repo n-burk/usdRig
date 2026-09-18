@@ -515,11 +515,52 @@ class RigExecFkChain "RigExecFkChain" (
         chain hangs from -- the wrist, claimed by the arm's IK/FK blend --
         follows in BOTH.
 
-        The target is an ordinary frame input, so the compiler already
-        orders this solver after whatever poses the target and rejects a
-        cycle. The start provider's own frame is NOT published as an
-        element: cardinality stays exactly rigExec:controls, and each
+        The target is an ordinary frame input with positional read
+        semantics (spec section 4.2): the chain reads the version
+        standing at its own place in the pose stack, so the chain must
+        execute AFTER whatever poses the target -- later in the stack,
+        i.e. earlier in the file, since siblings execute bottom-first.
+        A chain ordered before the target's writer reads the pre-write
+        frame (measured: a finger chain left below the arm blend reads
+        the rest wrist and stays frozen), and the compiler warns naming
+        the reorder. The start provider's own frame is NOT published as
+        an element: cardinality stays exactly rigExec:controls, and each
         joint's element index is unchanged."""
+    )
+    uniform token rigExec:startFramePolicy = "none" (
+        allowedTokens = ["none", "parent"]
+        doc = """Who names the start provider when rigExec:startFrame has no
+        authored targets.
+
+        `none` (the default): nobody. Unauthored is the historical
+        behaviour, bit for bit -- an absolute solve that ignores
+        whatever the joints hang from.
+
+        `parent`: the compiler derives the provider from the JOINT
+        HIERARCHY, structurally, with no name matching of any kind: the
+        nearest namespace ancestor of the chain's joints that is a
+        RigExecJoint or RigExecControl, which every joint in
+        rigExec:joints must share (descendants count). The chain then
+        hangs from that provider exactly as if rigExec:startFrame named
+        it, in both evaluation paths.
+
+        Authored targets always win over the inference, silently: a
+        chain with both behaves as if the policy were `none`. A chain
+        whose joints span providers, or with no provider ancestor,
+        falls back to the absolute solve with a compile warning -- it
+        never guesses. The positional ordering rule above applies
+        unchanged: the chain must still execute after the provider's
+        writer, and the compiler warns when it does not.
+
+        Mechanics: the inference is compiled, not evaluated. Each
+        compile writes the derived target into the stage session layer
+        (never the asset), where the ordinary relationship machinery
+        picks it up -- scheduling, exec reachability, and the baked
+        program all see it as authored. Session-layer opinions on
+        rigExec:startFrame for a `parent` chain are therefore
+        compiler-managed: hand-authoring targets there while the policy
+        is active may be replaced on recompile. Author them in an
+        asset layer instead, which always wins cleanly."""
     )
     rel rigExec:joints (
         doc = """Ordered output joints this solver poses (view-free

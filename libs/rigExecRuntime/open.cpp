@@ -271,6 +271,28 @@ RigExecRuntimeReader::Open(const uint8_t *bytes, size_t size,
         }
         self->_hasPoses = true;
     }
+    // Optional since minor 1: absent in older binaries, which load with
+    // every chain absolute. Present but dangling or malformed: fail.
+    if (section(RigExecBinarySection::SolverStart, "solver starts", &data,
+                &bytesOut)) {
+        RigExecWireReader cursor(data, bytesOut);
+        std::vector<RigExecWireSolverStart> starts;
+        if (!RigExecWireDecodeSolverStarts(&cursor, &starts, error) ||
+            !cursor.Exhausted()) {
+            return fail("malformed solver-start section");
+        }
+        for (const RigExecWireSolverStart &entry : starts) {
+            if (size_t(entry.solver) >= self->_poses.solvers.size() ||
+                entry.start < 0) {
+                return fail("malformed solver-start section");
+            }
+            RigExecWireSolver &solver =
+                self->_poses.solvers[size_t(entry.solver)];
+            solver.start = entry.start;
+            solver.startRest = entry.rest;
+            solver.startRead = entry.read;
+        }
+    }
     if (section(RigExecBinarySection::DomainGeometry, "geometry domain",
                 &data, &bytesOut)) {
         RigExecWireReader cursor(data, bytesOut);

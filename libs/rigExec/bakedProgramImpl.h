@@ -1547,6 +1547,13 @@ struct RigExecBakedProgramImpl {
         std::vector<int> controls;
         bool parentRelative = false;
         std::vector<std::array<GfVec3d, 4>> controlRests;
+        /// rigExec:startFrame provider slot (-1 when unwired or not a
+        /// provider, the computation's silent absolute path), its rest,
+        /// and the `fin` version bound where this batch begins -- the
+        /// baked mirror of the computation's synthetic base element.
+        int start = -1;
+        std::array<GfVec3d, 4> startRest{};
+        uint32_t startRead = 0;
         // IK / spline controls
         int root = -1, mid = -1, end = -1, pole = -1;
         // TwoBoneIk: rests and the measured bone lengths, both epoch-constant

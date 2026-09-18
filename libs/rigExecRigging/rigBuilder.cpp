@@ -612,6 +612,21 @@ RigExecFkChainHandle::SetStartFrame(const SdfPath &path)
     _SetSingleRel("rigExec:startFrame", path);
 }
 
+void
+RigExecFkChainHandle::SetStartFramePolicy(const TfToken &policy)
+{
+    static const TfToken none("none");
+    static const TfToken parent("parent");
+    if (policy != none && policy != parent) {
+        throw std::invalid_argument(
+            "SetStartFramePolicy expects 'none' or 'parent', got '" +
+            policy.GetString() + "'");
+    }
+    _AuthorAttr(
+        GetPrim(), "rigExec:startFramePolicy", SdfValueTypeNames->Token,
+        VtValue(policy));
+}
+
 void RigExecRibbonHandle::SetDriverCurve(const SdfPath &path)
 { _SetSingleRel("rigExec:driverCurve", path); }
 void RigExecRibbonHandle::SetStartFrame(const SdfPath &path)

@@ -713,6 +713,20 @@ private:
     size_t _ComputeStructureDigest() const;
     void _OnObjectsChanged(const UsdNotice::ObjectsChanged &notice,
                            const UsdStageWeakPtr &sender);
+    /// Derives rigExec:startFrame targets from the joint hierarchy for
+    /// every RigExecFkChain with rigExec:startFramePolicy = "parent" and
+    /// no authored targets, and authors them into the stage session
+    /// layer (never the asset), retracting this evaluator's previous
+    /// opinions first. Runs at the head of Compile, single-threaded,
+    /// before the digest dispatch and every parallel stage read: the
+    /// one exception to "compile authors nothing", so that scheduling,
+    /// exec reachability, and the baked program all see the derived
+    /// targets as authored. Fires no notices (TfNotice::Block): the
+    /// imaging registry holds a non-recursive mutex across Compile and
+    /// a notice here would re-enter it. Returns warnings (spanning
+    /// providers, missing ancestors) for the caller to emit; they never
+    /// fail the compile.
+    std::vector<std::string> _ApplyDerivedStartFrames();
 
     UsdStageRefPtr _stage;
     SdfPath _rigPath;
@@ -1451,6 +1465,14 @@ private:
     TfNotice::Key _noticeKey;
     bool _structureDirty = true;
     bool _compiled = false;
+    /// Solver -> the start provider this compile derived for it from the
+    /// joint hierarchy (rigExec:startFramePolicy = "parent"), as authored
+    /// into the stage session layer. The map is what makes retraction
+    /// exact: a recompile removes precisely these opinions before
+    /// re-deriving, so a removed policy or a reparented chain leaves no
+    /// stale target behind and a hand-authored session opinion is never
+    /// touched.
+    std::map<SdfPath, SdfPath> _derivedStartFrames;
 
     /// Scoped phase timings for Compile and Evaluate. Off unless profiling
     /// is enabled; see SetProfilingEnabled.

@@ -649,6 +649,7 @@ struct RrPoseSplineIkRest {
 struct RrPoseSolverState {
     std::vector<std::array<RrVec3d, 4>> jointRests;
     std::vector<std::array<RrVec3d, 4>> controlRests;
+    std::array<RrVec3d, 4> startRest;
     std::vector<RrPoseFkElement> elements;
     std::array<std::array<RrVec3d, 4>, 3> ikRests;
     RrPoseTwoBoneIkParams ikParams;
@@ -953,15 +954,18 @@ RrPoseSizeScratch(RrProgram *program, std::string *error)
         for (const auto &rest : wire.controlRests) {
             state.controlRests.push_back(_RrWireLandmarks(rest));
         }
-        state.elements.resize(wire.controls.size());
+        state.startRest = _RrWireLandmarks(wire.startRest);
+        const size_t base = wire.start >= 0 ? 1 : 0;
+        state.elements.resize(wire.controls.size() + base);
         for (size_t k = 0; k < wire.controls.size(); ++k) {
+            const size_t e = k + base;
             if (k < state.controlRests.size()) {
-                state.elements[k].restPoints = state.controlRests[k];
+                state.elements[e].restPoints = state.controlRests[k];
             } else {
-                state.elements[k].restPoints = RrIdentityLandmarks();
+                state.elements[e].restPoints = RrIdentityLandmarks();
             }
-            state.elements[k].posePoints = RrIdentityLandmarks();
-            state.elements[k].outRestPoints = RrIdentityLandmarks();
+            state.elements[e].posePoints = RrIdentityLandmarks();
+            state.elements[e].outRestPoints = RrIdentityLandmarks();
         }
         for (size_t k = 0; k < 3; ++k) {
             state.ikRests[k] = _RrWireLandmarks(wire.ikRests[k]);
@@ -2594,6 +2598,16 @@ _RrRefreshSolverRests(RrProgram *program, size_t step, size_t solver,
             s.controlRests[k] =
                 scratch->restPts[size_t(wire.controls[k])];
         }
+        if (wire.start >= 0) {
+            if (size_t(wire.start) >= scratch->restPts.size()) {
+                if (error) {
+                    *error = _RrStepHead(program, step) +
+                             " names no rest slot";
+                }
+                return false;
+            }
+            s.startRest = scratch->restPts[size_t(wire.start)];
+        }
     } else if (type == "RigExecTwoBoneIk") {
         for (size_t k = 0; k < wire.restRefs.size(); ++k) {
             const int slot = wire.restRefs[k].first;
@@ -2783,7 +2797,8 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
     };
     if (ws.degenerate) {
     } else if (type == "RigExecFkChain") {
-        if (s.elements.size() != ws.controls.size() ||
+        const size_t base = ws.start >= 0 ? 1 : 0;
+        if (s.elements.size() != ws.controls.size() + base ||
             ws.controlReads.size() != ws.controls.size()) {
             if (error) {
                 *error = _RrStepHead(program, step) +
@@ -2794,6 +2809,16 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
         const bool jointBasis =
             s.jointRests.size() == ws.controls.size();
         aggregate.rests = s.controlRests;
+        if (base) {
+            s.elements[0].restPoints = s.startRest;
+            const RrPointFrame *startPose = nullptr;
+            if (!finAt(ws.startRead, &startPose)) {
+                return false;
+            }
+            s.elements[0].posePoints = startPose->points;
+            s.elements[0].hasOutRest = false;
+            s.elements[0].parentIndex = -1;
+        }
         for (size_t k = 0; k < ws.controls.size(); ++k) {
             if (k >= s.controlRests.size()) {
                 if (error) {
@@ -2802,15 +2827,16 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                 }
                 return false;
             }
-            s.elements[k].restPoints = s.controlRests[k];
+            const size_t e = k + base;
+            s.elements[e].restPoints = s.controlRests[k];
             const RrPointFrame *pose = nullptr;
             if (!finAt(ws.controlReads[k], &pose)) {
                 return false;
             }
-            s.elements[k].posePoints = pose->points;
+            s.elements[e].posePoints = pose->points;
             const bool live = jointBasis && k < ws.restIsLive.size() &&
                               ws.restIsLive[k];
-            s.elements[k].hasOutRest = live;
+            s.elements[e].hasOutRest = live;
             if (live) {
                 if (k >= s.jointRests.size() ||
                     k >= aggregate.rests.size()) {
@@ -2820,13 +2846,16 @@ _RrRunSolveStep(RrProgram *program, size_t step, std::string *error)
                     }
                     return false;
                 }
-                s.elements[k].outRestPoints = s.jointRests[k];
+                s.elements[e].outRestPoints = s.jointRests[k];
                 aggregate.rests[k] = s.jointRests[k];
             }
-            s.elements[k].parentIndex =
-                ws.parentRelative ? -1 : int(k) - 1;
+            s.elements[e].parentIndex =
+                ws.parentRelative ? int(base) - 1 : int(k) + int(base) - 1;
         }
         aggregate.frames = _RrSolveFkChain(s.elements);
+        if (base && !aggregate.frames.empty()) {
+            aggregate.frames.erase(aggregate.frames.begin());
+        }
     } else if (type == "RigExecTwoBoneIk") {
         RrPoseTwoBoneIkParams params = s.ikParams;
         if (_RrLiveSolver(program, size_t(wire.object),

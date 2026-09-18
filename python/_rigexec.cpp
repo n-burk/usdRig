@@ -1417,7 +1417,12 @@ PYBIND11_MODULE(_rigexec, m) {
              "delta, so the chain rides it -- in whatever poses the provider, "
              "including another solver. Unauthored, or None/empty to clear, "
              "keeps the historical absolute solve, where a chain whose joints "
-             "sit under a solver-posed joint simply does not follow it.");
+             "sit under a solver-posed joint simply does not follow it.")
+        .def("set_start_frame_policy", [](rigExec::RigExecFkChainHandle &h, std::string v) { h.SetStartFramePolicy(TfToken(v)); }, py::arg("policy"),
+             "'none' (only an authored rigExec:startFrame applies) or "
+             "'parent' (the compiler derives the provider from the joint "
+             "hierarchy: nearest namespace ancestor of the chain's joints "
+             "that is a joint or control). Authored targets always win.");
 
     py::class_<rigExec::RigExecTwoBoneIkHandle, rigExec::RigExecSolverHandle>(m, "TwoBoneIk")
         .def("set_root_control", [](rigExec::RigExecTwoBoneIkHandle &h, py::object p) {

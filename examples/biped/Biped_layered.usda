@@ -480,7 +480,7 @@ over "Biped"
 
         over "Solvers"
         {
-            reorder nameChildren = ["spine_splineIk", "neck_splineIk", "arm_l_twoBoneIk", "arm_l_fkChain", "arm_l_ikfk", "arm_r_twoBoneIk", "arm_r_fkChain", "arm_r_ikfk", "leg_l_twoBoneIk", "leg_l_fkChain", "leg_l_ikfk", "leg_r_twoBoneIk", "leg_r_fkChain", "leg_r_ikfk", "fk_index_l", "fk_middle_l", "fk_pinky_l", "fk_ring_l", "fk_thumb_l", "fk_index_r", "fk_middle_r", "fk_pinky_r", "fk_ring_r", "fk_thumb_r"]
+            reorder nameChildren = ["spine_splineIk", "neck_splineIk", "fk_index_l", "fk_middle_l", "fk_pinky_l", "fk_ring_l", "fk_thumb_l", "fk_index_r", "fk_middle_r", "fk_pinky_r", "fk_ring_r", "fk_thumb_r", "arm_l_twoBoneIk", "arm_l_fkChain", "arm_l_ikfk", "arm_r_twoBoneIk", "arm_r_fkChain", "arm_r_ikfk", "leg_l_twoBoneIk", "leg_l_fkChain", "leg_l_ikfk", "leg_r_twoBoneIk", "leg_r_fkChain", "leg_r_ikfk"]
         }
     }
 
