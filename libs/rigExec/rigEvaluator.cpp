@@ -13346,8 +13346,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         if (chainIt == _graphChains.end()) {
             return;
         }
-        RIGEXEC_PROFILE_SCOPE_CAT(
-            _profiler, "Chain " + target.GetString(), "geometry");
         const std::vector<_GraphRevision> &revisions = chainIt->second;
         VtVec3fArray basePoints;
         // Compile created a node for every chain and derived target, so this
@@ -13422,13 +13420,14 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         size_t revisionIndex = 0;
         bool built = true;
         for (const _GraphRevision &revision : revisions) {
-            const UsdPrim moverPrim =
-                _stage->GetPrimAtPath(revision.moverPath);
+            const UsdPrim moverPrim = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "GetPrim", "geometry");
+                return _stage->GetPrimAtPath(revision.moverPath);
+            }();
             if (!moverPrim) {
                 built = false;
                 break;
             }
-            RigExecProviderValues values;
             // One overlay per revision: the generation-wide property results,
             // plus whatever THIS revision's declared phases resolve to. The
             // assembler reads inputs by path and never learns a phase exists
@@ -13462,6 +13461,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         " resolved to nothing; read the authored base");
                 }
             }
+            RigExecProviderValues values;
             values.resolved = resolved;
             GfMatrix4d transform(1.0);
             RigExecWeightPacket weights;
@@ -13601,37 +13601,46 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                             "current-phase weight failed: " + weightError);
                     }
                 }
-            }
-            // Publish the field an authoring tool paints as an influence
-            // overlay. Taken from the packet the mover is about to
-            // consume, so what a rigger sees is exactly what deformed
-            // the geometry -- not a re-derivation that could drift.
-            if (revision.weightTap >= 0 && weights.valid &&
-                _publishWeightFields) {
-                RigExecResolvedWeightField &field =
-                    work.weightFields[revision.binding.weightObject];
-                SdfPathVector declaredTargets;
-                if (const UsdPrim weightPrim = _stage->GetPrimAtPath(
-                        revision.binding.weightObject)) {
-                    if (const UsdRelationship rel =
-                            weightPrim.GetRelationship(
-                                TfToken("rigExec:weightTarget"))) {
-                        rel.GetTargets(&declaredTargets);
+                if (weights.valid && _publishWeightFields) {
+                    RigExecResolvedWeightField &field =
+                        work.weightFields[revision.binding.weightObject];
+                    SdfPathVector declaredTargets;
+                    if (const UsdPrim weightPrim = _stage->GetPrimAtPath(
+                            revision.binding.weightObject)) {
+                        if (const UsdRelationship rel =
+                                weightPrim.GetRelationship(
+                                    TfToken("rigExec:weightTarget"))) {
+                            rel.GetTargets(&declaredTargets);
+                        }
+                    }
+                    const bool operationDomain =
+                        declaredTargets.size() == 1 &&
+                        declaredTargets[0] == revision.moverPath;
+                    field.target = operationDomain ? revision.moverPath : target;
+                    const size_t logicalCount =
+                        operationDomain ? size_t(1) : basePoints.size();
+                    // ResolveAll matches the kernel: O(n+m) scatter for
+                    // sparse packets, range-policy checks, atomic on
+                    // failure -- the same values the mover consumed.
+                    if (!weights.ResolveAll(logicalCount, &field.weights)) {
+                        field.weights.clear();
                     }
                 }
-                const bool operationDomain =
-                    declaredTargets.size() == 1 &&
-                    declaredTargets[0] == revision.moverPath;
-                field.target = operationDomain ? revision.moverPath : target;
-                const size_t logicalCount =
-                    operationDomain ? size_t(1) : basePoints.size();
-                field.weights.assign(logicalCount, 0.0f);
-                for (size_t i = 0; i < logicalCount; ++i) {
-                    const float w = weights.Resolve(i, logicalCount);
-                    field.weights[i] = w < 0.0f ? 0.0f : w;
-                }
             }
-            values.basePoints.assign(basePoints.begin(), basePoints.end());
+            // basePoints is the chain-wide authored base, invariant across
+            // revisions. Only the ops whose assemble path reads
+            // values.basePoints (and the blend-input path below) need it;
+            // every other revision would pay a full base copy for nothing.
+            const bool needsBasePoints =
+                !revision.binding.blendInputs.empty() ||
+                revision.op == RigExecRevisionOp::BlendShape ||
+                revision.op == RigExecRevisionOp::VolumeCorrect ||
+                revision.op == RigExecRevisionOp::Lattice ||
+                revision.op == RigExecRevisionOp::RecomputeNormals ||
+                revision.op == RigExecRevisionOp::RecomputeExtent;
+            if (needsBasePoints) {
+                values.basePoints.assign(basePoints.begin(), basePoints.end());
+            }
             if (revision.op == RigExecRevisionOp::Skin &&
                 revision.skinTopologyFixed) {
                 values.skinTopologyCache = &_skinTopologies;
@@ -13748,9 +13757,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     "envelope; revision passed through");
             }
             head = live->revisions[revisionIndex++];
-            graph.UpdateRevision(
-                head, parameters,
-                RigExecStatusForParameters(parameters, revision.moverPath));
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "UpdateRev", "geometry");
+                graph.UpdateRevision(
+                    head, parameters,
+                    RigExecStatusForParameters(parameters, revision.moverPath));
+            }
             ++work.revisionsBuilt;
 
             // Snapshot only where a phased read named this revision. The
@@ -13760,8 +13772,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             const auto wanted = _snapshotPoints.find(target);
             if (wanted != _snapshotPoints.end() &&
                 wanted->second.count(revision.moverPath)) {
-                RIGEXEC_PROFILE_SCOPE_CAT(
-                    _profiler, "SnapshotEvaluate", "geometry");
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SnapshotEvaluate", "geometry");
                 work.snapshots.Record(target, revision.moverPath,
                                        VtValue(graph.Evaluate(head)));
             }

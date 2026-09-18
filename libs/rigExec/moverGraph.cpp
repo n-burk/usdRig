@@ -2211,10 +2211,29 @@ RigExecSumBlendChannels(
             const std::vector<GfVec3f> *lo =
                 loSample ? &loSample->points : nullptr;
             const std::vector<GfVec3f> &hiPts = hiSample.points;
-            for (size_t i = 0; i < base.size(); ++i) {
-                const GfVec3f dHi = hiPts[i] - base[i];
-                const GfVec3f dLo = lo ? (*lo)[i] - base[i] : GfVec3f(0);
-                (*deltas)[i] += dLo + (dHi - dLo) * t;
+            // Each point is independent and every point's contribution keeps
+            // the original channel-order accumulation, so spreading the point
+            // range across workers is bit-identical to the serial loop. The
+            // per-channel setup above (weights, hi/lo sample pick, t) is cheap
+            // and stays sequential; only the O(points) inner loop parallelises.
+            const GfVec3f *baseData = base.data();
+            const GfVec3f *hiData = hiPts.data();
+            const GfVec3f *loData = lo ? lo->data() : nullptr;
+            GfVec3f *deltaData = deltas->data();
+            const size_t nPts = base.size();
+            auto denseRange = [&](size_t begin, size_t end) {
+                for (size_t i = begin; i < end; ++i) {
+                    const GfVec3f dHi = hiData[i] - baseData[i];
+                    const GfVec3f dLo = loData ? (loData[i] - baseData[i])
+                                               : GfVec3f(0);
+                    deltaData[i] += dLo + (dHi - dLo) * t;
+                }
+            };
+            if (RigExecParallelEvaluationEnabled() &&
+                nPts >= RigExecGeometryParallelThreshold) {
+                WorkParallelForN(nPts, denseRange, RigExecGeometryGrainSize);
+            } else {
+                denseRange(0, nPts);
             }
             continue;
         }
