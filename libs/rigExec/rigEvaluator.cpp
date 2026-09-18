@@ -12129,65 +12129,124 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 }
             }
         }
-        for (const SdfPath &provider : descendants) {
-            const RigExecPointFrame &current = finalFrames.at(provider);
-            SdfPath closest = provider.GetParentPath();
-            for (; !closest.IsEmpty() && !candidates.count(closest);
-                 closest = closest.GetParentPath()) {}
-            if (closest.IsEmpty()) {
-                continue;
-            }
-            // An independently solved joint is an absolute posed override.
-            // Namespace propagation cannot pass through that ownership boundary.
-            const SdfPath blocker = nearestBlocking(provider);
-            if (!blocker.IsEmpty() && blocker != closest &&
-                blocker.HasPrefix(closest)) {
-                continue;
-            }
+        if (candidates.size() == 1) {
+            const SdfPath &closest = candidates.begin()->first;
             const auto before = finalFrames.find(closest);
-            if (solverOutput && (before == finalFrames.end() ||
-                !_IsUsableConstraintFrame(current) ||
-                !_IsUsableConstraintFrame(before->second) ||
-                !_IsUsableConstraintFrame(candidates.at(closest)))) continue;
-            if (before == finalFrames.end() ||
-                !_IsUsableConstraintFrame(current)) {
-                pose.diagnostics.push_back(
-                    moverPath.GetString() +
-                    " could not propagate its pose revision through " +
-                    provider.GetString() + "; constraint passed through");
-                return false;
-            }
-            auto cdIt = closestDelta.find(closest);
-            if (cdIt == closestDelta.end()) {
-                ClosestDelta cd;
-                cd.identity =
-                    (before->second.points == candidates.at(closest).points);
-                if (!cd.identity) {
-                    if (!RigExecPointsToMatrix(before->second.points,
-                                               candidates.at(closest).points,
-                                               &cd.delta)) {
-                        pose.diagnostics.push_back(
-                            moverPath.GetString() +
-                            " produced a singular hierarchy delta; constraint "
-                            "passed through");
-                        return false;
-                    }
+            const RigExecPointFrame &candFrame = candidates.begin()->second;
+            // Single candidate: every descendant maps through the same
+            // closest, so its identity flag and hierarchy delta are shared.
+            GfMatrix4d delta(1.0);
+            bool sharedIdentity = false;
+            bool sharedSingular = false;
+            if (before != finalFrames.end()) {
+                sharedIdentity = (before->second.points == candFrame.points);
+                if (!sharedIdentity &&
+                    !RigExecPointsToMatrix(before->second.points,
+                                           candFrame.points, &delta)) {
+                    sharedSingular = true;
                 }
-                cdIt = closestDelta.emplace(closest, cd).first;
             }
-            if (cdIt->second.identity) {
-                continue;
+            for (const SdfPath &provider : descendants) {
+                const RigExecPointFrame &current = finalFrames.at(provider);
+                // An independently solved joint is an absolute posed
+                // override; namespace propagation cannot pass through it.
+                const SdfPath blocker = nearestBlocking(provider);
+                if (!blocker.IsEmpty() && blocker != closest &&
+                    blocker.HasPrefix(closest)) {
+                    continue;
+                }
+                if (solverOutput && (before == finalFrames.end() ||
+                    !_IsUsableConstraintFrame(current) ||
+                    !_IsUsableConstraintFrame(before->second) ||
+                    !_IsUsableConstraintFrame(candFrame))) continue;
+                if (before == finalFrames.end() ||
+                    !_IsUsableConstraintFrame(current)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " could not propagate its pose revision through " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                if (sharedIdentity) {
+                    continue;
+                }
+                if (sharedSingular) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " produced a singular hierarchy delta; constraint "
+                        "passed through");
+                    return false;
+                }
+                RigExecPointFrame frame =
+                    RigExecMatrixToPoints(current.points, delta);
+                if (!_IsUsableConstraintFrame(frame)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " produced an invalid descendant frame for " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                propagated[provider] = frame;
             }
-            RigExecPointFrame frame =
-                RigExecMatrixToPoints(current.points, cdIt->second.delta);
-            if (!_IsUsableConstraintFrame(frame)) {
-                pose.diagnostics.push_back(
-                    moverPath.GetString() +
-                    " produced an invalid descendant frame for " +
-                    provider.GetString() + "; constraint passed through");
-                return false;
+        } else {
+            for (const SdfPath &provider : descendants) {
+                const RigExecPointFrame &current = finalFrames.at(provider);
+                SdfPath closest = provider.GetParentPath();
+                for (; !closest.IsEmpty() && !candidates.count(closest);
+                     closest = closest.GetParentPath()) {}
+                if (closest.IsEmpty()) {
+                    continue;
+                }
+                const SdfPath blocker = nearestBlocking(provider);
+                if (!blocker.IsEmpty() && blocker != closest &&
+                    blocker.HasPrefix(closest)) {
+                    continue;
+                }
+                const auto before = finalFrames.find(closest);
+                if (solverOutput && (before == finalFrames.end() ||
+                    !_IsUsableConstraintFrame(current) ||
+                    !_IsUsableConstraintFrame(before->second) ||
+                    !_IsUsableConstraintFrame(candidates.at(closest)))) continue;
+                if (before == finalFrames.end() ||
+                    !_IsUsableConstraintFrame(current)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " could not propagate its pose revision through " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                auto cdIt = closestDelta.find(closest);
+                if (cdIt == closestDelta.end()) {
+                    ClosestDelta cd;
+                    cd.identity =
+                        (before->second.points == candidates.at(closest).points);
+                    if (!cd.identity) {
+                        if (!RigExecPointsToMatrix(before->second.points,
+                                                   candidates.at(closest).points,
+                                                   &cd.delta)) {
+                            pose.diagnostics.push_back(
+                                moverPath.GetString() +
+                                " produced a singular hierarchy delta; constraint "
+                                "passed through");
+                            return false;
+                        }
+                    }
+                    cdIt = closestDelta.emplace(closest, cd).first;
+                }
+                if (cdIt->second.identity) {
+                    continue;
+                }
+                RigExecPointFrame frame =
+                    RigExecMatrixToPoints(current.points, cdIt->second.delta);
+                if (!_IsUsableConstraintFrame(frame)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " produced an invalid descendant frame for " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                propagated[provider] = frame;
             }
-            propagated[provider] = frame;
         }
 
         for (const auto &[path, frame] : candidates) {
