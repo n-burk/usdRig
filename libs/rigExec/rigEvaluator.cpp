@@ -1719,6 +1719,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // compute. Any stage edit therefore retires their cached snapshots, the
     // same way it retires the affected solver batches below.
     _firstFramePoseDirty = true;
+    _authSnapshotDirty = true;
     _guideDirty = true;
     _connectedPoseCache.clear();
     for (auto &[target, derived] : _derivedCache) {
@@ -7403,10 +7404,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _connectedPoseCache.clear();
     _poseSteps = std::move(newPoseSteps);
     _firstFramePoseTaps = std::move(newFirstFramePoseTaps);
-    _firstFramePoseInputs.clear();
-    _firstFramePoseTime = UsdTimeCode::Default();
-    _firstFramePoseSnapshot = RigExecSnapshot();
+    _firstFramePoseCache.Clear();
     _firstFramePoseDirty = true;
+    _authSnapshotCache.Clear();
+    _authSnapshotDirty = true;
     _firstFramePoseFrames = std::move(newFirstFramePoseFrames);
     _firstFramePoseRests = std::move(newFirstFramePoseRests);
     _restTaps = std::move(newRestTaps);
@@ -11728,39 +11729,31 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     RigExecSnapshot seedSnapshot;
     if (_firstFramePoseTaps) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "FirstFramePose", "pose");
-        _firstFramePoseDirty = _firstFramePoseTaps->ConsumeDirty() || _firstFramePoseDirty;
-        const bool sameSeedInputs =
-            !_firstFramePoseDirty && _firstFramePoseTime == time &&
-            _firstFramePoseSnapshot.IsValid() && _firstFramePoseSnapshot.IsComplete() &&
-            baseOverrides.size() == _firstFramePoseInputs.size() &&
-            std::equal(baseOverrides.begin(), baseOverrides.end(),
-                       _firstFramePoseInputs.begin(),
-                       [](const RigExecValueOverride &a,
-                          const RigExecValueOverride &b) {
-                           return a.prim == b.prim &&
-                                  a.computation == b.computation &&
-                                  a.attribute == b.attribute &&
-                                  a.value == b.value;
-                       });
-        if (sameSeedInputs) {
-            seedSnapshot = _firstFramePoseSnapshot;
+        // Warm the shared executor before anything else: every override
+        // pull in this evaluator runs in a throwaway sub-executor seeded
+        // from the main one, and a cold main cache makes each such pull
+        // recompute the whole upstream network behind it.
+        _firstFramePoseTaps->Warm(time);
+        // The tap-level dirty flag is drained, never consulted: exec's
+        // time/value callbacks fire across sibling frames sharing this
+        // system and would spuriously veto fresh entries. Genuine stage
+        // edits set _firstFramePoseDirty through the notice handler.
+        _firstFramePoseTaps->ConsumeDirty();
+        _SnapshotCache::Entry *seed =
+            !_firstFramePoseDirty
+                ? _firstFramePoseCache.Find(baseOverrides, time)
+                : nullptr;
+        if (seed != nullptr) {
+            seedSnapshot = seed->snapshot;
         } else {
-            // Warm the shared executor before the override-bearing pull, so
-            // the sub-executor that serves the overrides inherits a populated
-            // cache instead of recomputing the whole network behind every
-            // override.
-            _firstFramePoseTaps->Warm(time);
             seedSnapshot = _firstFramePoseTaps->Evaluate(time, baseOverrides);
             if (!seedSnapshot.IsValid() || !seedSnapshot.IsComplete()) {
                 _firstFramePoseDirty = true;
                 pose.diagnostics.push_back("pose provider input evaluation incomplete");
                 return pose;
             }
-            _firstFramePoseSnapshot = seedSnapshot;
-            _firstFramePoseInputs = baseOverrides;
-            _firstFramePoseTime = time;
+            _firstFramePoseCache.Store(baseOverrides, time, seedSnapshot);
             _firstFramePoseDirty = false;
-            _firstFramePoseTaps->ConsumeDirty();
         }
     }
 
@@ -12392,35 +12385,42 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                       VtValue(rest)});
                 }
             }
-            // USD invalidation is dependency-specific. Retain it locally until a
-            // successful refresh, including when a previous evaluation failed.
-            batch.dirty = batch.taps->ConsumeDirty() || batch.dirty;
-            const bool sameInputs = inputs.size() == batch.inputs.size() &&
-                std::equal(inputs.begin(), inputs.end(), batch.inputs.begin(),
-                    [](const RigExecValueOverride &a, const RigExecValueOverride &b) {
-                        return a.prim == b.prim && a.computation == b.computation &&
-                               a.attribute == b.attribute && a.value == b.value;
-                    });
-            if (batch.dirty || batch.time != time || !sameInputs ||
-                !batch.snapshot.IsValid() || !batch.snapshot.IsComplete()) {
+            // A batch snapshot is a pure function of (time, inputs). Inputs
+            // are themselves assembled from the seed snapshot, prior-level
+            // aggregates, and rest frames -- all deterministic for a given
+            // frame -- so a recently-computed entry is reusable. The tap-level
+            // dirty flag is drained, not consulted (it fires across sibling
+            // frames sharing the system); genuine edits ride batch.dirty.
+            batch.taps->ConsumeDirty();
+            _SnapshotCache::Entry *hit =
+                !batch.dirty ? batch.cache.Find(inputs, time) : nullptr;
+            if (hit != nullptr) {
+                batch.snapshot = hit->snapshot;
+            } else {
                 RIGEXEC_PROFILE_SCOPE_CAT(
                     _profiler, "ExecEvaluate", "exec");
-                const RigExecSnapshot refreshed = batch.taps->Evaluate(time, inputs);
+                const RigExecSnapshot refreshed =
+                    batch.taps->Evaluate(time, inputs);
                 if (!refreshed.IsValid() || !refreshed.IsComplete()) {
                     batch.dirty = true;
                     pose.solverOverridesConverged = false;
-                    pose.diagnostics.push_back("solver dependency level evaluation incomplete");
+                    pose.diagnostics.push_back(
+                        "solver dependency level evaluation incomplete");
                     return pose;
                 }
+                batch.cache.Store(inputs, time, refreshed);
                 batch.snapshot = refreshed;
-                batch.inputs = std::move(inputs);
-                batch.time = time;
                 batch.dirty = false;
                 // ChangeTime/compilation can notify while Evaluate runs. The
                 // successful snapshot already includes those invalidations.
                 batch.taps->ConsumeDirty();
-                pose.solverEvaluations += batch.solvers.size();
             }
+            // Count solver computations the dependency schedule REQUESTED
+            // (spec §4.2 / bakedProgram.h:107), not the exec pulls it
+            // actually performed: the per-batch LRU legitimately skips
+            // recomputation for repeated (time, inputs), and this counter
+            // must stay byte-stable for pose-out comparisons.
+            pose.solverEvaluations += batch.solvers.size();
             const RigExecSnapshot &values = batch.snapshot;
             if (visitedSolverLevels.insert(batch.level).second) {
                 ++pose.solverOverrideRounds;
@@ -12980,10 +12980,31 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // means some computation failed to compile or evaluate; refusing to
     // continue prevents default-constructed values from masquerading as
     // results (spec §6.6).
-    const RigExecSnapshot snapshot = [&]() {
+    RigExecSnapshot snapshot;
+    {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "AuthoritativeSnapshot", "exec");
-        return _taps->Evaluate(time, jointOverrides);
-    }();
+        // The authoritative snapshot is a pure function of (time,
+        // jointOverrides). jointOverrides is assembled from the base/final
+        // joint frames -- deterministic for this frame -- plus the falloff
+        // LUTs, so a recent entry at the same (time, overrides) is reusable.
+        // Genuine stage edits set _authSnapshotDirty through the notice
+        // handler; the tap-level dirty flag is drained, not consulted (it
+        // fires across sibling frames sharing the system).
+        _taps->ConsumeDirty();
+        _SnapshotCache::Entry *hit =
+            !_authSnapshotDirty
+                ? _authSnapshotCache.Find(jointOverrides, time)
+                : nullptr;
+        if (hit != nullptr) {
+            snapshot = hit->snapshot;
+        } else {
+            snapshot = _taps->Evaluate(time, jointOverrides);
+            if (snapshot.IsValid() && snapshot.IsComplete()) {
+                _authSnapshotCache.Store(jointOverrides, time, snapshot);
+                _authSnapshotDirty = false;
+            }
+        }
+    }
     if (!snapshot.IsValid() || !snapshot.IsComplete()) {
         pose.diagnostics.push_back(
             snapshot.IsValid() ? "snapshot incomplete: missing tap values"

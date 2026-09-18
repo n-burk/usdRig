@@ -83,6 +83,11 @@ struct RigExecValueOverride {
     /// the targets, not a named attribute of them.
     TfToken attribute;
     VtValue value;
+
+    bool operator==(const RigExecValueOverride &o) const {
+        return prim == o.prim && computation == o.computation &&
+               attribute == o.attribute && value == o.value;
+    }
 };
 
 /// Immutable extracted generation: one value per tap.
