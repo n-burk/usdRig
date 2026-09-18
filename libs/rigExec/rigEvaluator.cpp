@@ -12108,6 +12108,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
 
         std::map<SdfPath, RigExecPointFrame> propagated;
+        // The hierarchy delta for a descendant depends only on its nearest
+        // candidate ancestor ("closest"): that ancestor's old (before) and new
+        // (candidate) frames are shared by every descendant under it. Compute
+        // the delta once per closest and reuse it; when that delta is the
+        // identity the descendants are unchanged and need no propagation.
+        struct ClosestDelta { GfMatrix4d delta; bool identity; };
+        std::map<SdfPath, ClosestDelta> closestDelta;
         // Only descendants can change. Enumerate disjoint changed subtrees,
         // rather than scanning every provider for each solver dependency level.
         std::vector<SdfPath> descendants;
@@ -12150,18 +12157,29 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     provider.GetString() + "; constraint passed through");
                 return false;
             }
-            GfMatrix4d delta(1.0);
-            if (!RigExecPointsToMatrix(
-                    before->second.points, candidates.at(closest).points,
-                    &delta)) {
-                pose.diagnostics.push_back(
-                    moverPath.GetString() +
-                    " produced a singular hierarchy delta; constraint passed "
-                    "through");
-                return false;
+            auto cdIt = closestDelta.find(closest);
+            if (cdIt == closestDelta.end()) {
+                ClosestDelta cd;
+                cd.identity =
+                    (before->second.points == candidates.at(closest).points);
+                if (!cd.identity) {
+                    if (!RigExecPointsToMatrix(before->second.points,
+                                               candidates.at(closest).points,
+                                               &cd.delta)) {
+                        pose.diagnostics.push_back(
+                            moverPath.GetString() +
+                            " produced a singular hierarchy delta; constraint "
+                            "passed through");
+                        return false;
+                    }
+                }
+                cdIt = closestDelta.emplace(closest, cd).first;
+            }
+            if (cdIt->second.identity) {
+                continue;
             }
             RigExecPointFrame frame =
-                RigExecMatrixToPoints(current.points, delta);
+                RigExecMatrixToPoints(current.points, cdIt->second.delta);
             if (!_IsUsableConstraintFrame(frame)) {
                 pose.diagnostics.push_back(
                     moverPath.GetString() +
