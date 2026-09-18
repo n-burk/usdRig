@@ -2206,7 +2206,15 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
     // reach the graph through the compose step that reads them.
     const size_t bound =
         ConeBound(B, {B.cones.avarCluster[size_t(slot->second)]});
-    CHECK(ran > 0 && ran < clusters);
+    CHECK(ran > 0);
+    // The bound is a property of the rig. On the skinned biped a wrist
+    // avar's compose cone is the whole clustered graph (Linux CI: 38 of 38),
+    // so requiring a proper subset is asking for a skip the cone does not
+    // have. A leak is ran > bound; ran == clusters is fine when bound is
+    // also the whole graph.
+    if (bound < clusters) {
+        CHECK(ran < clusters);
+    }
     if (ran > bound) {
         ++failures;
         std::printf("FAIL leaf-drag: ran %zu cluster(s), and the drag's cone "
