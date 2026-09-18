@@ -1,0 +1,410 @@
+# ============================================================================
+# usdRig CI — first shipping-signal version.
+#
+# Structure follows n-burk/usdGen's .github/workflows/usdgen.yml (OpenUSD
+# prefix cache, Release + Ninja, tarball artifacts so exec bits survive,
+# ninja -j$(nproc) on the product build). The jobs are adapted to this
+# repository rather than copied 1:1:
+#
+#   * OpenUSD v26.08 must include OpenExec. PXR_BUILD_EXEC defaults ON in
+#     26.08; the recipe still passes -DPXR_BUILD_EXEC=ON and sanity-checks
+#     the exec/vdf/esf libraries usdRig links (exec, execUsd, ef, vdf, esf).
+#   * CMAKE_PREFIX_PATH must point at the USD prefix so pxrConfig's
+#     find_dependency(OpenSubdiv) resolves the copy build_usd.py installed,
+#     not some other OpenSubdiv on the runner (see bin/build_rigexec.sh).
+#   * Python bindings need a USD-matched interpreter + pybind11.
+#     usdNoodles needs an OpenUSD built with Python + garch/glf, then
+#     FetchContent of facebookexperimental/noodles. testusdview needs a
+#     display / usdview. None of those are in this first gate.
+#   * CTest has no T0/T1 labels here. The gate is the C++ suite
+#     (`^testRigExec`) minus cone-verify doubles and the example-parity
+#     sweep, which are workstation-scale relative to the 120 s per-test
+#     TIMEOUT in CMakeLists.txt.
+#
+# Jobs:
+#
+#   openusd          OpenUSD v26.08 from the GitHub tag, Release + Ninja,
+#                    imaging + OpenExec, no Python / usdview / MaterialX.
+#                    Cache key = OS + arch + OpenUSD commit + recipe epoch.
+#   configure        cmake configure only (fast red/green for cache vars).
+#   build-release    configure + ninja -j$(nproc) + rigExecPose smoke.
+#                    Uploads the build tree so later jobs do not rebuild.
+#   ctest-cpp        ctest -R '^testRigExec' -E 'Cones_|ExampleParity'.
+#   install-check    cmake --install into a scratch prefix; verify layout
+#                    and that both plugInfo.json files parse.
+#
+# Deliberately not a GitHub job (workstation / manual):
+#
+#   * macOS and MSVC. README records those as locally verified; GitHub-
+#     hosted macOS/Windows + a matching OpenUSD prefix is a later pass.
+#   * Python bindings, usdNoodles (including testUsdNoodles), and every
+#     bin/run_testusdview*.sh harness. Those need Python-enabled OpenUSD,
+#     PySide/usdview, and a display.
+#
+# Host note: GitHub-hosted ubuntu-24.04 is 4 vCPU / 16 GB. OpenUSD is
+# built with --jobs 4; the usdRig ninja line is -j$(nproc). Do not raise
+# OpenUSD parallelism — usdGen saw SIGTERM / exit 143 when oversubscribed.
+# ============================================================================
+
+name: usdRig
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: usdrig-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------------------------------
+  # OpenUSD v26.08 (PixarAnimationStudios/OpenUSD @ tag v26.08).
+  # Cache key = OS + arch + resolved commit + recipe epoch. Bump the epoch
+  # ("exec-usdimg-gl-nopy-v1" -> "...-v2") whenever the build_usd.py
+  # invocation changes so two prefixes from the same commit with different
+  # options never alias.
+  # --------------------------------------------------------------------------
+  openusd:
+    name: OpenUSD v26.08
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      openusd-sha: ${{ steps.openusd-sha.outputs.sha }}
+    steps:
+      - name: Checkout OpenUSD @ v26.08
+        uses: actions/checkout@v4
+        with:
+          repository: PixarAnimationStudios/OpenUSD
+          ref: v26.08
+          fetch-depth: 1
+
+      - name: OpenUSD commit (cache key)
+        id: openusd-sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            python3-dev python3-setuptools \
+            libglew-dev libxrandr-dev libxcursor-dev libxinerama-dev libxi-dev \
+            libgl1-mesa-dev xorg-dev ninja-build
+
+      - name: Restore cached OpenUSD install prefix
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: usd-install
+          key: openusd-${{ runner.os }}-${{ runner.arch }}-${{ steps.openusd-sha.outputs.sha }}-exec-usdimg-gl-nopy-v1
+
+      - name: Build OpenUSD (Release, Ninja, imaging, OpenExec)
+        # build_scripts/build_usd.py is the v26.08 entry point.
+        # --usd-imaging     -> PXR_BUILD_IMAGING=ON + PXR_BUILD_USD_IMAGING=ON
+        # --no-usdview      -> skip PySide/PyOpenGL
+        # --no-python       -> first-gate prefix: C++ tests do not need pxr
+        #                      Python bindings. Python + usdNoodles return
+        #                      when that job is added.
+        # --no-materialx    -> drop MaterialX
+        # --build-args USD  -> keep OpenExec on even if a later OpenUSD
+        #                      default flips (PXR_BUILD_EXEC is ON in 26.08)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          python3 build_scripts/build_usd.py \
+            usd-install \
+            --build usd-build \
+            --generator Ninja \
+            --build-variant release \
+            --jobs 4 \
+            --usd-imaging \
+            --no-usdview \
+            --no-python \
+            --no-tests --no-examples --no-tutorials --no-docs \
+            --no-materialx \
+            --build-args USD,"-DPXR_BUILD_EXEC=ON" \
+            -v
+
+      - name: Drop OpenUSD build tree
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: rm -rf usd-build
+
+      - name: Save OpenUSD install prefix to cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: usd-install
+          key: openusd-${{ runner.os }}-${{ runner.arch }}-${{ steps.openusd-sha.outputs.sha }}-exec-usdimg-gl-nopy-v1
+
+      - name: Sanity - libraries usdRig links are present
+        run: |
+          for lib in \
+            libusd_usd.so libusd_tf.so libusd_sdf.so libusd_gf.so \
+            libusd_arch.so libusd_vt.so libusd_plug.so libusd_work.so \
+            libusd_usdGeom.so libusd_usdSkel.so libusd_usdUtils.so \
+            libusd_usdImaging.so libusd_hd.so \
+            libusd_exec.so libusd_execUsd.so libusd_ef.so \
+            libusd_vdf.so libusd_esf.so libusd_esfUsd.so
+          do
+            test -e "usd-install/lib/$lib" || { echo "missing usd-install/lib/$lib"; exit 1; }
+          done
+          test -d usd-install/plugin/usd
+          test -e usd-install/pxrConfig.cmake \
+            || test -e usd-install/lib/cmake/pxr/pxrConfig.cmake \
+            || { echo "missing pxrConfig.cmake under usd-install"; exit 1; }
+
+      - name: Pack OpenUSD prefix as tarball
+        run: tar -C usd-install -cf usd-install.tar .
+
+      - name: Upload OpenUSD prefix tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: usd-install.tar
+          path: usd-install.tar
+          retention-days: 5
+
+  # --------------------------------------------------------------------------
+  # Configure only. Proves find_package(pxr) + the first-gate cache vars
+  # against a clean runner. FETCHCONTENT is unused while usdNoodles is off,
+  # so this is already an offline configure.
+  # --------------------------------------------------------------------------
+  configure:
+    name: configure
+    runs-on: ubuntu-24.04
+    needs: openusd
+    timeout-minutes: 20
+    steps:
+      - name: Checkout usdRig
+        uses: actions/checkout@v4
+
+      - name: Install configure dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libgl1-mesa-dev xorg-dev
+
+      - name: Download OpenUSD prefix
+        uses: actions/download-artifact@v4
+        with:
+          name: usd-install.tar
+
+      - name: Extract OpenUSD prefix
+        run: |
+          mkdir -p usd-install
+          tar -C usd-install -xf usd-install.tar
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSD_INSTALL_DIR="${GITHUB_WORKSPACE}/usd-install" \
+            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/usd-install" \
+            -DRIGEXEC_BUILD_PYTHON=OFF \
+            -DRIGEXEC_BUILD_USDNOODLES=OFF
+
+  # --------------------------------------------------------------------------
+  # Release build + rigExecPose smoke on the smallest shipped rig.
+  # --------------------------------------------------------------------------
+  build-release:
+    name: usdRig build (Release)
+    runs-on: ubuntu-24.04
+    needs: openusd
+    timeout-minutes: 90
+    steps:
+      - name: Checkout usdRig
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libgl1-mesa-dev xorg-dev
+
+      - name: Download OpenUSD prefix
+        uses: actions/download-artifact@v4
+        with:
+          name: usd-install.tar
+
+      - name: Extract OpenUSD prefix
+        run: |
+          mkdir -p usd-install
+          tar -C usd-install -xf usd-install.tar
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DUSD_INSTALL_DIR="${GITHUB_WORKSPACE}/usd-install" \
+            -DCMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/usd-install" \
+            -DRIGEXEC_BUILD_PYTHON=OFF \
+            -DRIGEXEC_BUILD_USDNOODLES=OFF
+
+      - name: Build
+        run: ninja -C build -j"$(nproc)"
+
+      - name: rigExecPose smoke
+        run: |
+          LD_LIBRARY_PATH="${GITHUB_WORKSPACE}/usd-install/lib:${GITHUB_WORKSPACE}/build:${LD_LIBRARY_PATH:-}" \
+          "${GITHUB_WORKSPACE}/build/rigExecPose" \
+            "${GITHUB_WORKSPACE}/examples/rigexec_flat.usda" \
+            --frames 0,50,100 --joints
+
+      - name: Pack build tree
+        run: tar -C build -cf usdrig-build.tar .
+
+      - name: Upload build tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: usdrig-build.tar
+          path: usdrig-build.tar
+          retention-days: 5
+
+  # --------------------------------------------------------------------------
+  # C++ CTest gate. -R is a regex on the test name; there are no T0/T1
+  # labels in this tree. Cone-verify doubles and the example-parity sweep
+  # stay out of the first gate (TIMEOUT 120 s, 4 vCPU).
+  # --------------------------------------------------------------------------
+  ctest-cpp:
+    name: ctest (C++)
+    runs-on: ubuntu-24.04
+    needs: build-release
+    timeout-minutes: 45
+    steps:
+      - name: Checkout usdRig
+        uses: actions/checkout@v4
+
+      - name: Download OpenUSD prefix
+        uses: actions/download-artifact@v4
+        with:
+          name: usd-install.tar
+
+      - name: Download build tree
+        uses: actions/download-artifact@v4
+        with:
+          name: usdrig-build.tar
+
+      - name: Extract
+        run: |
+          mkdir -p usd-install build
+          tar -C usd-install -xf usd-install.tar
+          tar -C build -xf usdrig-build.tar
+
+      - name: Run C++ tests
+        run: |
+          ctest --test-dir build \
+            -R '^testRigExec' \
+            -E 'Cones_|ExampleParity' \
+            -j"$(nproc)" \
+            --output-on-failure
+
+  # --------------------------------------------------------------------------
+  # Install tree: cmake --install into a scratch prefix, then verify the
+  # layout the README documents (lib/, lib/usd/<plugin>/resources/,
+  # include/, lib/cmake/rigExec).
+  # --------------------------------------------------------------------------
+  install-check:
+    name: usdRig install layout + plugInfo
+    runs-on: ubuntu-24.04
+    needs: build-release
+    timeout-minutes: 20
+    steps:
+      - name: Checkout usdRig
+        uses: actions/checkout@v4
+
+      - name: Download OpenUSD prefix
+        uses: actions/download-artifact@v4
+        with:
+          name: usd-install.tar
+
+      - name: Download build tree
+        uses: actions/download-artifact@v4
+        with:
+          name: usdrig-build.tar
+
+      - name: Extract
+        run: |
+          mkdir -p usd-install build
+          tar -C usd-install -xf usd-install.tar
+          tar -C build -xf usdrig-build.tar
+
+      - name: Install into scratch prefix
+        run: cmake --install build --prefix "${GITHUB_WORKSPACE}/usdrig-install"
+
+      - name: Verify installed layout
+        run: |
+          P="${GITHUB_WORKSPACE}/usdrig-install"
+          for f in \
+            "$P/lib/librigExec.so" \
+            "$P/lib/librigExecImaging.so" \
+            "$P/lib/librigExecStandalone.so" \
+            "$P/lib/librigExecRigging.so" \
+            "$P/lib/usd/rigExecSchema/resources/plugInfo.json" \
+            "$P/lib/usd/rigExecSchema/resources/generatedSchema.usda" \
+            "$P/lib/usd/rigExecImaging/resources/plugInfo.json" \
+            "$P/lib/cmake/rigExec/rigExecConfig.cmake" \
+            "$P/include/rigExec/rigEvaluator.h"
+          do
+            test -e "$f" || { echo "missing: $f"; exit 1; }
+          done
+          test -e "$P/lib/librigExecMath.a" || test -e "$P/lib/librigExecMath.so" \
+            || { echo "missing: $P/lib/librigExecMath.{a,so}"; exit 1; }
+
+      - name: Validate installed plugInfo.json files (python3)
+        run: |
+          python3 - "$GITHUB_WORKSPACE/usdrig-install" <<'PY'
+          import json, os, sys
+
+          prefix = os.path.abspath(sys.argv[1])
+          failures = []
+
+          def check(cond, msg):
+              print(("ok:   " if cond else "FAIL:  ") + msg)
+              if not cond:
+                  failures.append(msg)
+
+          def load_pluginfo(path, name):
+              with open(path) as f:
+                  lines = [l for l in f.readlines() if not l.lstrip().startswith("#")]
+              data = json.loads("".join(lines))
+              for p in data.get("Plugins", []):
+                  if p.get("Name") == name:
+                      return p
+              return None
+
+          def resolved_library(plug, pluginfo_path):
+              root = os.path.normpath(
+                  os.path.join(os.path.dirname(pluginfo_path), plug.get("Root", ".")))
+              return os.path.normpath(os.path.join(root, plug.get("LibraryPath", "")))
+
+          schema_pluginfo = os.path.join(
+              prefix, "lib", "usd", "rigExecSchema", "resources", "plugInfo.json")
+          imaging_pluginfo = os.path.join(
+              prefix, "lib", "usd", "rigExecImaging", "resources", "plugInfo.json")
+
+          s = load_pluginfo(schema_pluginfo, "rigExecSchema")
+          check(s is not None, "schema plugInfo: rigExecSchema plugin entry present")
+          if s:
+              check(s.get("Type") == "library", "schema plugInfo: Type == 'library'")
+              lib = resolved_library(s, schema_pluginfo)
+              check(os.path.isfile(lib),
+                    "schema plugInfo: LibraryPath resolves to an existing library (%s)" % lib)
+              types = s.get("Info", {}).get("Types", {})
+              check("RigExecRoot" in types, "schema plugInfo: RigExecRoot present")
+
+          i = load_pluginfo(imaging_pluginfo, "rigExecImaging")
+          check(i is not None, "imaging plugInfo: rigExecImaging plugin entry present")
+          if i:
+              check(i.get("Type") == "library", "imaging plugInfo: Type == 'library'")
+              lib = resolved_library(i, imaging_pluginfo)
+              check(lib == os.path.join(prefix, "lib", "librigExecImaging.so"),
+                    "imaging plugInfo: LibraryPath resolves to installed librigExecImaging.so (%s)" % lib)
+              check(os.path.isfile(lib), "imaging plugInfo: resolved library exists")
+              types = i.get("Info", {}).get("Types", {})
+              check("RigExecUsdImagingSceneIndexPlugin" in types,
+                    "imaging plugInfo: RigExecUsdImagingSceneIndexPlugin present")
+
+          if failures:
+              print("\n%d failure(s)" % len(failures))
+              sys.exit(1)
+          print("\nall plugInfo checks passed")
+          PY
