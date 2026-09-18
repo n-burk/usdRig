@@ -12117,17 +12117,20 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         std::map<SdfPath, ClosestDelta> closestDelta;
         // Only descendants can change. Enumerate disjoint changed subtrees,
         // rather than scanning every provider for each solver dependency level.
-        std::vector<SdfPath> descendants;
+        std::vector<std::pair<SdfPath, RigExecPointFrame>> descendants;
         SdfPath coveredRoot;
+        {
+            RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfDesc", "pose");
         for (const auto &[target, candidate] : candidates) {
             if (!coveredRoot.IsEmpty() && target.HasPrefix(coveredRoot)) continue;
             coveredRoot = target;
             for (auto it = finalFrames.lower_bound(target);
                  it != finalFrames.end() && it->first.HasPrefix(target); ++it) {
                 if (!candidates.count(it->first) && hierarchicalProviders.count(it->first)) {
-                    descendants.push_back(it->first);
+                    descendants.emplace_back(it->first, it->second);
                 }
             }
+        }
         }
         if (candidates.size() == 1) {
             const SdfPath &closest = candidates.begin()->first;
@@ -12146,8 +12149,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     sharedSingular = true;
                 }
             }
-            for (const SdfPath &provider : descendants) {
-                const RigExecPointFrame &current = finalFrames.at(provider);
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfSingle", "pose");
+            for (const auto &[provider, current] : descendants) {
                 // An independently solved joint is an absolute posed
                 // override; namespace propagation cannot pass through it.
                 const SdfPath blocker = nearestBlocking(provider);
@@ -12188,9 +12192,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 }
                 propagated[provider] = frame;
             }
+            }
         } else {
-            for (const SdfPath &provider : descendants) {
-                const RigExecPointFrame &current = finalFrames.at(provider);
+            for (const auto &[provider, current] : descendants) {
                 SdfPath closest = provider.GetParentPath();
                 for (; !closest.IsEmpty() && !candidates.count(closest);
                      closest = closest.GetParentPath()) {}
@@ -12249,6 +12253,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
         }
 
+        {
+            RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfFinal", "pose");
         for (const auto &[path, frame] : candidates) {
             finalFrames[path] = frame;
             if (!solverOutput && !derivedRefresh) constrainedProviders.insert(path);
@@ -12259,6 +12265,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             if (solverOutput) baseFrames[path] = frame;
         }
         updateVolumePlacements();
+        }
         return true;
     };
 
