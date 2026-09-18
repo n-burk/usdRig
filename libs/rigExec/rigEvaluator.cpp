@@ -12456,24 +12456,30 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // Only direct prerequisites enter this request. Copying all previous
             // joint overrides into every level would itself be quadratic for a
             // deep chain, even if the kernels each executed only once.
-            std::vector<RigExecValueOverride> inputs;
+            // The batch-specific overrides only. baseOverrides is a pure
+            // function of `time`, so (time, tail) uniquely determines the full
+            // exec input; the cache keys on the small tail and a hit skips
+            // materialising the base+tail vector (the 250-entry base copy)
+            // entirely -- which is every repeat-pass frame.
+            std::vector<RigExecValueOverride> tail;
             {
                 RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Inputs", "pose");
-                inputs = baseOverrides;
+                tail.reserve(batch.dependencies.size() + batch.frameInputs.size() +
+                             batch.restInputs.size());
             }
             for (const SdfPath &dependency : batch.dependencies) {
                 const auto aggregate = solvedAggregates.find(dependency);
                 if (aggregate != solvedAggregates.end()) {
-                    inputs.push_back({dependency, _computePointFrameArray, TfToken(),
-                                      VtValue(aggregate->second)});
+                    tail.push_back({dependency, _computePointFrameArray, TfToken(),
+                                    VtValue(aggregate->second)});
                 }
             }
             for (const SdfPath &input : batch.frameInputs) {
                 if (!refreshPoseProvider(input)) return pose;
                 const auto frame = finalFrames.find(input);
                 if (frame != finalFrames.end()) {
-                    inputs.push_back({input, _computePointFrame, TfToken(),
-                                      VtValue(frame->second)});
+                    tail.push_back({input, _computePointFrame, TfToken(),
+                                    VtValue(frame->second)});
                 }
             }
             // "The incoming frame replaces the authored rest" (spec §4.2).
@@ -12505,8 +12511,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     // basis it always had, which is what makes the rule free
                     // on every rig that does not stack.
                     if (live) rest.flags |= RigExecPointFrameLiveRest;
-                    inputs.push_back({joint, _computeRestFrame, TfToken(),
-                                      VtValue(rest)});
+                    tail.push_back({joint, _computeRestFrame, TfToken(),
+                                    VtValue(rest)});
                 }
             }
             // A batch snapshot is a pure function of (time, inputs). Inputs
@@ -12519,13 +12525,17 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             _SnapshotCache::Entry *hit = nullptr;
             {
                 RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Find", "pose");
-                hit = !batch.dirty ? batch.cache.Find(inputs, time) : nullptr;
+                hit = !batch.dirty ? batch.cache.Find(tail, time) : nullptr;
             }
             if (hit != nullptr) {
                 batch.snapshot = hit->snapshot;
             } else {
                 RIGEXEC_PROFILE_SCOPE_CAT(
                     _profiler, "ExecEvaluate", "exec");
+                std::vector<RigExecValueOverride> inputs;
+                inputs.reserve(baseOverrides.size() + tail.size());
+                inputs.insert(inputs.end(), baseOverrides.begin(), baseOverrides.end());
+                inputs.insert(inputs.end(), tail.begin(), tail.end());
                 const RigExecSnapshot refreshed =
                     batch.taps->Evaluate(time, inputs);
                 if (!refreshed.IsValid() || !refreshed.IsComplete()) {
@@ -12535,7 +12545,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         "solver dependency level evaluation incomplete");
                     return pose;
                 }
-                batch.cache.Store(inputs, time, refreshed);
+                batch.cache.Store(tail, time, refreshed);
                 batch.snapshot = refreshed;
                 batch.dirty = false;
                 // ChangeTime/compilation can notify while Evaluate runs. The
