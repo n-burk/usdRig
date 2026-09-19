@@ -11933,8 +11933,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     std::vector<RigExecPointFrame> finalFrames(_providerPaths.size());
     std::vector<char> finalLive(_providerPaths.size(), 0);
     std::map<SdfPath, RigExecPointFrame> restFrames;
-    std::map<SdfPath, GfMatrix4d> xformDerivedBases;
-    std::map<SdfPath, GfMatrix4d> finalMatrices;
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> xformDerivedBases;
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> finalMatrices;
     /// Geometry-domain constraint results: the delta each one produced, the
     /// envelope it carries, and its optional per-element weight field.
     /// Produced by the pose walk below and consumed after it, the same
