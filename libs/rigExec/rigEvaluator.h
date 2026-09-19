@@ -965,6 +965,16 @@ private:
     /// Hierarchical (first-frame-pose) providers, compiled once per epoch.
     /// Replaces the per-frame std::set build in _EvaluateDynamic.
     std::unordered_set<SdfPath, SdfPath::Hash> _hierarchicalProviderSet;
+    /// Dense provider index: SdfPath → index into _providerPaths.
+    /// Built once per epoch from the union of all paths the frame-domain
+    /// maps can hold. _providerPaths is in SdfPath-sorted order so that
+    /// iterating live indices reproduces std::map key order.
+    std::vector<SdfPath> _providerPaths;
+    std::unordered_map<SdfPath, int, SdfPath::Hash> _providerIndex;
+    /// Per provider index: indices of strict hierarchical descendants that
+    /// are seeded providers, in SdfPath order. Replaces the per-candidate
+    /// finalFrames prefix walk in commitConstraintFrames.
+    std::vector<std::vector<int>> _hierDescendants;
     std::vector<RigExecTapId> _jointFrameTaps;
     std::vector<RigExecTapId> _jointFinalFrameTaps;
     std::vector<RigExecTapId> _jointFinalMatrixTaps;
@@ -1021,7 +1031,8 @@ private:
     void _EvaluatePoseInterpolators(
         UsdTimeCode time,
         const std::map<SdfPath, RigExecPointFrame> &restFrames,
-        const std::map<SdfPath, RigExecPointFrame> &finalFrames,
+        const std::vector<RigExecPointFrame> &finalFrames,
+        const std::vector<char> &finalLive,
         RigExecRigPose *pose);
 
     /// Compiled mover-graph input bindings.
@@ -1296,7 +1307,8 @@ private:
         UsdGeomXformCache *xformCache,
         std::map<SdfPath, RigExecPointFrame> *restFrames,
         std::map<SdfPath, RigExecPointFrame> *baseFrames,
-        std::map<SdfPath, RigExecPointFrame> *finalFrames,
+        std::vector<RigExecPointFrame> *finalFrames,
+        std::vector<char> *finalLive,
         RigExecRigPose *pose) const;
 
     /// The frame a plain Xformable contributes to the pose: its transform
