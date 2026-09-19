@@ -11823,13 +11823,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PropertyChains", "property");
         _EvaluatePropertyChains(time, &propertyResults, &baseOverrides,
                                 &pose.diagnostics);
-        // Two delivery routes for one value, and they must not disagree.
+        // Two delivery routes for one value, and they must not disagree:
         // baseOverrides carries it to every exec consumer; _resolvedInputs
-        // carries it to the static reads exec never touches -- packet
-        // assembly and the CPU oracle.
-        for (const auto &[path, value] : propertyResults) {
-            _resolvedInputs.SetProperty(path, value);
-        }
+        // carries it to the static reads exec never touches (packet
+        // assembly, CPU oracle). _EvaluatePropertyChains writes both routes
+        // for every published chain, so no re-sync loop is needed here.
     }
 
     // The second of the two applications described above: after the chains,
