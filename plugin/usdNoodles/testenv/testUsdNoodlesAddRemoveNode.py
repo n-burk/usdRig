@@ -62,10 +62,10 @@ def _make_view(nodes=None, added_count_from_add_prim=1):
         _cppIconRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
         _nodeRenderManager=SimpleNamespace(resetNodeQuadCaches=MagicMock()),
         _nodeTransformFrame=SimpleNamespace(reset=MagicMock()),
-        # addNodesFromPrimTreeSelection grid-places the freshly added nodes; mock
+        # addNodesFromPrimTreeSelection places the freshly added nodes; mock
         # it (returns the placed list) so the unbound call doesn't AttributeError
         # before the cache-reset assertions below.
-        _gridPlaceNodes=MagicMock(return_value=[]),
+        _placeAddedNodes=MagicMock(return_value=[]),
         nodeGraph=SimpleNamespace(syncSelectionToPrimTree=False),
         _showPopupMessage=MagicMock(),
         _frameNodeBounds=MagicMock(),

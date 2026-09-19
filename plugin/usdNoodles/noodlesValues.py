@@ -632,9 +632,19 @@ ValueRow = namedtuple(
     "state editable reason has_swatch mungable",
 )
 
+# The time-INDEPENDENT half of a ValueRow: everything a frame change cannot
+# alter. ``NodeModel`` builds one per value-bearing pin once per
+# ``invalidateCache`` and re-reads only the components on a frame change, so
+# scrubbing costs one ``attr.Get`` per pin instead of a schema walk plus the
+# metadata reads below.
+ValueTemplate = namedtuple(
+    "ValueTemplate",
+    "pin_name property_name type_name kind count tokens has_swatch",
+)
 
-def build_value_row(stage, prim, pin_name, property_name, time_code=None):
-    """A ``ValueRow`` for *property_name*, or None when it gets no cell.
+
+def row_template(prim, pin_name, property_name):
+    """A ``ValueTemplate`` for *property_name*, or None when it gets no cell.
 
     This is the single decision point for "does this row show a value".
     Type suppression lives here; the row-slot / fold / collapse
@@ -653,26 +663,61 @@ def build_value_row(stage, prim, pin_name, property_name, time_code=None):
     kind = cell_kind(type_name, bool(tokens))
     if not kind:
         return None
-    count = component_count(type_name)
-    components = read_components(prim, property_name, time_code)
-    if len(components) != count:
-        return None
-
-    editable, reason = value_is_editable(stage, prim, attr)
-    state = value_state(prim, attr, editable)
-    texts = tuple(format_component(c, type_name) for c in components)
-    return ValueRow(
+    return ValueTemplate(
         pin_name=pin_name,
         property_name=property_name,
         type_name=type_name,
         kind=kind,
-        count=count,
+        count=component_count(type_name),
+        tokens=tuple(tokens),
+        has_swatch=is_color_type(type_name),
+    )
+
+
+def build_value_row_from_template(stage, prim, template, time_code=None):
+    """A ``ValueRow`` for a cached *template*, or None when unreadable.
+
+    The time-DEPENDENT half: components are re-read at *time_code* and the
+    editability/state answers recomputed, while the type, kind and tokens
+    come from the template untouched.
+    """
+    if not prim or not prim.IsValid():
+        return None
+    attr = prim.GetAttribute(template.property_name)
+    if not attr or not attr.IsValid():
+        return None
+    components = read_components(prim, template.property_name, time_code)
+    if len(components) != template.count:
+        return None
+
+    editable, reason = value_is_editable(stage, prim, attr)
+    state = value_state(prim, attr, editable)
+    texts = tuple(format_component(c, template.type_name) for c in components)
+    return ValueRow(
+        pin_name=template.pin_name,
+        property_name=template.property_name,
+        type_name=template.type_name,
+        kind=template.kind,
+        count=template.count,
         components=components,
         texts=texts,
-        tokens=tuple(tokens),
+        tokens=template.tokens,
         state=state,
         editable=editable,
         reason=reason,
-        has_swatch=is_color_type(type_name),
-        mungable=editable and is_mungable(kind),
+        has_swatch=template.has_swatch,
+        mungable=editable and is_mungable(template.kind),
     )
+
+
+def build_value_row(stage, prim, pin_name, property_name, time_code=None):
+    """A ``ValueRow`` for *property_name*, or None when it gets no cell.
+
+    This is the single decision point for "does this row show a value".
+    Type suppression lives here; the row-slot / fold / collapse
+    suppressions are geometry and live with the geometry.
+    """
+    template = row_template(prim, pin_name, property_name)
+    if template is None:
+        return None
+    return build_value_row_from_template(stage, prim, template, time_code)

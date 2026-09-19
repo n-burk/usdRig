@@ -1,12 +1,13 @@
 #
 # TOUCHPOSE IN THE NODE GRAPH, end to end, on the stage usdview composed.
 #
-# The claim under test is the one a rigger makes when they open the
-# editor: every painted region is a node, and the noodle leaving it lands
-# on the control that region actually selects. So this asserts the graph
-# the editor builds -- the same NodeGraphStage.load usdview's Noodles
-# window calls -- over usdviewApi's OWN stage, and it asserts COUNTS and
-# ENDPOINTS, not that a widget came up.
+# The claim under test: the stage loader turns every painted region
+# into a node, and the noodle leaving it lands on the control that region
+# actually selects. So this asserts the graph NodeGraphStage.load builds
+# over usdviewApi's OWN stage, and it asserts COUNTS and ENDPOINTS, not
+# that a widget came up. (The editor window itself opens empty -- prims
+# reach the canvas via 'A' -- so this is the loader primitive's
+# contract, not a picture of what open shows.)
 #
 # Deliberately no GL and no Noodles panel: the graph model is what has to
 # be right, the headless runners must not load an extra panel into the

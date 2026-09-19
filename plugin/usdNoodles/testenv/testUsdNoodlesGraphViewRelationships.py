@@ -745,7 +745,8 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
                 create_node_from_prim=MagicMock(return_value=node),
             ),
             _populateNodeLinksFromPrim=MagicMock(),
-            _positionNodeInViewport=MagicMock(),
+            _placeAddedNodes=MagicMock(return_value=[]),
+            _viewportAnchor=MagicMock(return_value=(10.0, 20.0)),
             _nextZOrder=5,
             fontAtlas=None,
             nodeGraph=SimpleNamespace(
@@ -770,13 +771,211 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
         self.assertTrue(result)
         view._populateNodeLinksFromPrim.assert_called_once_with(node, prim)
         self.assertIn("/Missing", view.nodes)
-        # Match the _addPrimAsNode setup: positioning and z-order are
-        # required for the renderer to compute pin positions reliably,
-        # which in turn lets _rebuildLinks resolve the noodle endpoints
-        # on the next paint instead of leaving them at the dangling stub.
-        view._positionNodeInViewport.assert_called_once_with(node)
+        # Expansion places by connection like the add-node path (not the
+        # viewport center): positioning and z-order are required for the
+        # renderer to compute pin positions reliably, which in turn lets
+        # _rebuildLinks resolve the noodle endpoints on the next paint
+        # instead of leaving them at the dangling stub.
+        view._placeAddedNodes.assert_called_once_with(
+            [node], fallback=(10.0, 20.0)
+        )
         self.assertEqual(view._nextZOrder, 6)
         self.assertEqual(node.zOrder, 6)
+
+    def test_add_node_from_dangling_link_lands_beside_present_node(self):
+        # End to end through the real _placeAddedNodes/place_node: expanding
+        # a relationship target must land one column to the RIGHT of the
+        # double-clicked source node, not at the viewport anchor.
+        present = SimpleNamespace(
+            id="/Mesh",
+            position=[0.0, 0.0],
+            size=[200.0, 100.0],
+            inputLinks=[],
+            outputLinks=[
+                SimpleNamespace(sourceNodeId="/Mesh", targetNodeId="/Mat")
+            ],
+            setDisplayPosition=MagicMock(),
+        )
+        placed = {}
+
+        def _record_position(pos):
+            placed["pos"] = (float(pos[0]), float(pos[1]))
+            node.position = [placed["pos"][0], placed["pos"][1]]
+
+        node = SimpleNamespace(
+            id="/Mat",
+            position=[0.0, 0.0],
+            size=[200.0, 100.0],
+            inputLinks=[
+                SimpleNamespace(sourceNodeId="/Mesh", targetNodeId="/Mat")
+            ],
+            outputLinks=[],
+            setDisplayPosition=MagicMock(side_effect=_record_position),
+        )
+        prim = MagicMock()
+        prim.IsValid.return_value = True
+        prim.GetTypeName.return_value = "Material"
+        prim.GetName.return_value = "Mat"
+        stage = MagicMock()
+        stage.GetPrimAtPath.return_value = prim
+        view = SimpleNamespace(
+            _usdviewApi=SimpleNamespace(stage=stage),
+            _showPopupMessage=MagicMock(),
+            _nodeFactory=SimpleNamespace(
+                create_node_from_prim=MagicMock(return_value=node),
+            ),
+            _populateNodeLinksFromPrim=MagicMock(),
+            _viewportAnchor=MagicMock(return_value=(5000.0, 5000.0)),
+            _nextZOrder=5,
+            fontAtlas=None,
+            nodeGraph=SimpleNamespace(
+                _calculateNodeSize=MagicMock(),
+                syncSelectionToPrimTree=False,
+            ),
+            textRenderer=SimpleNamespace(calculateTextWidth=MagicMock()),
+            nodes={"/Mesh": present},
+            _clearRenderCache=MagicMock(),
+            update=MagicMock(),
+            linksChanged=False,
+            textChanged=False,
+        )
+        # Bind the real placement helper onto the fake view.
+        view._placeAddedNodes = lambda nodes, fallback=None: (
+            GraphView._placeAddedNodes(view, nodes, fallback=fallback)
+        )
+        link = SimpleNamespace(
+            isDangling=True,
+            data_sourceNodeId="/Mesh",
+            data_targetNodeId="/Mat",
+        )
+
+        result = GraphView._addNodeFromDanglingLink(view, link)
+
+        self.assertTrue(result)
+        self.assertIn("pos", placed)
+        # Right of the source's right edge, vertically aligned with it --
+        # and nowhere near the (5000, 5000) viewport-anchor fallback.
+        self.assertGreaterEqual(placed["pos"][0], 200.0)
+        self.assertLess(placed["pos"][0], 5000.0)
+        self.assertLess(abs(placed["pos"][1] - 0.0), 5000.0)
+
+    def test_add_nodes_from_dangling_link_staggers_siblings(self):
+        # A 3-target relationship expansion must stagger the siblings so no
+        # two expanded nodes overlap, via the real placement helper.
+        present = SimpleNamespace(
+            id="/Mesh",
+            position=[0.0, 0.0],
+            size=[200.0, 300.0],
+            inputLinks=[],
+            outputLinks=[
+                SimpleNamespace(
+                    sourceNodeId="/Mesh", targetNodeId=f"/Mat{i}"
+                )
+                for i in range(3)
+            ],
+            setDisplayPosition=MagicMock(),
+        )
+        created = {}
+
+        def _make_node(prim, _stage):
+            name = prim.GetName()
+            node = SimpleNamespace(
+                id=f"/{name}",
+                position=[0.0, 0.0],
+                size=[200.0, 100.0],
+                inputLinks=[
+                    SimpleNamespace(
+                        sourceNodeId="/Mesh", targetNodeId=f"/{name}"
+                    )
+                ],
+                outputLinks=[],
+            )
+            node.setDisplayPosition = MagicMock(
+                side_effect=lambda pos, _n=node: _n.position.__setitem__(
+                    slice(None), [float(pos[0]), float(pos[1])]
+                )
+            )
+            created[node.id] = node
+            return node
+
+        def _prim_at_path(path):
+            prim = MagicMock()
+            prim.IsValid.return_value = True
+            prim.GetTypeName.return_value = "Material"
+            prim.GetName.return_value = str(path).rsplit("/", 1)[-1]
+            return prim
+
+        stage = MagicMock()
+        stage.GetPrimAtPath.side_effect = _prim_at_path
+        view = SimpleNamespace(
+            _usdviewApi=SimpleNamespace(stage=stage),
+            _showPopupMessage=MagicMock(),
+            _nodeFactory=SimpleNamespace(
+                create_node_from_prim=MagicMock(side_effect=_make_node),
+            ),
+            _populateNodeLinksFromPrim=MagicMock(),
+            _viewportAnchor=MagicMock(return_value=(5000.0, 5000.0)),
+            _nextZOrder=5,
+            fontAtlas=None,
+            nodeGraph=SimpleNamespace(
+                _calculateNodeSize=MagicMock(),
+                syncSelectionToPrimTree=False,
+            ),
+            textRenderer=SimpleNamespace(calculateTextWidth=MagicMock()),
+            nodes={"/Mesh": present},
+            links=[],
+            _clearRenderCache=MagicMock(),
+            update=MagicMock(),
+            linksChanged=False,
+            textChanged=False,
+        )
+        view._placeAddedNodes = lambda nodes, fallback=None: (
+            GraphView._placeAddedNodes(view, nodes, fallback=fallback)
+        )
+        view._collectSiblingDanglingLinks = lambda seed: (
+            GraphView._collectSiblingDanglingLinks(view, seed)
+        )
+        view._addNodeFromDanglingLink = lambda link: (
+            GraphView._addNodeFromDanglingLink(view, link)
+        )
+        view.links = [
+            SimpleNamespace(
+                isDangling=True,
+                sourceNodeId="/Mesh",
+                sourcePort="material:binding",
+                sourcePropertyName="material:binding",
+                targetNodeId=f"/Mat{i}",
+                targetPort="",
+                targetPropertyName="",
+                data_sourceNodeId="/Mesh",
+                data_targetNodeId=f"/Mat{i}",
+            )
+            for i in range(3)
+        ]
+
+        result = GraphView._addNodesFromDanglingLink(view, view.links[0])
+
+        self.assertTrue(result)
+        self.assertEqual(len(created), 3)
+        rects = [
+            (n.position[0], n.position[1], n.size[0], n.size[1])
+            for n in created.values()
+        ]
+        for i in range(3):
+            for j in range(i + 1, 3):
+                ax, ay, aw, ah = rects[i]
+                bx, by, bw, bh = rects[j]
+                overlaps = (
+                    ax < bx + bw and ax + aw > bx
+                    and ay < by + bh and ay + ah > by
+                )
+                self.assertFalse(
+                    overlaps, f"sibling {i} overlaps sibling {j}: {rects}"
+                )
+        # All three sit right of the source, not at the viewport fallback.
+        for x, _y, _w, _h in rects:
+            self.assertGreaterEqual(x, 200.0)
+            self.assertLess(x, 5000.0)
 
     def test_collect_sibling_dangling_links_groups_by_present_source_port(self):
         # A USD relationship with three targets becomes three dangling
@@ -1020,9 +1219,9 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
             textRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _nodeRenderManager=SimpleNamespace(resetNodeQuadCaches=MagicMock()),
             _nodeTransformFrame=SimpleNamespace(reset=MagicMock()),
-            # addNodesFromPrimTreeSelection grid-places the freshly added nodes
+            # addNodesFromPrimTreeSelection places the freshly added nodes
             # and resets the text + icon position caches.
-            _gridPlaceNodes=MagicMock(return_value=[]),
+            _placeAddedNodes=MagicMock(return_value=[]),
             _cppIconRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _viewportAnchor=MagicMock(return_value=(0.0, 0.0)),
             _isVisible=MagicMock(return_value=True),
@@ -1083,11 +1282,11 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
             textRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _nodeRenderManager=SimpleNamespace(resetNodeQuadCaches=MagicMock()),
             _nodeTransformFrame=SimpleNamespace(reset=MagicMock()),
-            # addNodesFromPrimTreeSelection grid-places the freshly added nodes
+            # addNodesFromPrimTreeSelection places the freshly added nodes
             # and resets the text + icon position caches. Missing either of
             # these makes production raise inside the method's own try/except,
             # which turns everything below the raise into a vacuous pass.
-            _gridPlaceNodes=MagicMock(return_value=[]),
+            _placeAddedNodes=MagicMock(return_value=[]),
             _cppIconRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _viewportAnchor=MagicMock(return_value=(0.0, 0.0)),
             _isVisible=MagicMock(return_value=True),
@@ -1149,11 +1348,11 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
             textRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _nodeRenderManager=SimpleNamespace(resetNodeQuadCaches=MagicMock()),
             _nodeTransformFrame=SimpleNamespace(reset=MagicMock()),
-            # addNodesFromPrimTreeSelection grid-places the freshly added nodes
+            # addNodesFromPrimTreeSelection places the freshly added nodes
             # and resets the text + icon position caches. Missing either of
             # these makes production raise inside the method's own try/except,
             # which turns everything below the raise into a vacuous pass.
-            _gridPlaceNodes=MagicMock(return_value=[]),
+            _placeAddedNodes=MagicMock(return_value=[]),
             _cppIconRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _viewportAnchor=MagicMock(return_value=(0.0, 0.0)),
             _isVisible=MagicMock(return_value=True),
@@ -1218,10 +1417,10 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
             textRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _nodeRenderManager=SimpleNamespace(resetNodeQuadCaches=MagicMock()),
             _nodeTransformFrame=SimpleNamespace(reset=MagicMock()),
-            _gridPlaceNodes=MagicMock(return_value=[]),
+            _placeAddedNodes=MagicMock(return_value=[]),
             _cppIconRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _viewportAnchor=MagicMock(return_value=(120.0, 240.0)),
-            # The grid-placed batch lands where the camera is looking.
+            # The placed batch lands where the camera is looking.
             _isVisible=MagicMock(return_value=True),
             _frameNodeBounds=MagicMock(),
             update=MagicMock(),
@@ -1242,11 +1441,11 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
         # content that may be an entire screen away.
         view._viewportAnchor.assert_called_once()
         self.assertEqual(
-            view._gridPlaceNodes.call_args.kwargs["anchor"], (120.0, 240.0)
+            view._placeAddedNodes.call_args.kwargs["fallback"], (120.0, 240.0)
         )
 
     def test_a_node_that_lands_off_screen_is_still_framed(self):
-        """Grid placement only moves nodes still at the USD default (0, 0). A
+        """Add placement only moves nodes still at the USD default (0, 0). A
         prim carrying an authored ui:nodegraph:node:pos goes back to wherever
         it was last dropped -- possibly nowhere near the current view -- and
         "the camera never moves" would then mean "added, invisible, and
@@ -1293,7 +1492,7 @@ class GraphViewRelationshipHelpersTest(unittest.TestCase):
             textRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _nodeRenderManager=SimpleNamespace(resetNodeQuadCaches=MagicMock()),
             _nodeTransformFrame=SimpleNamespace(reset=MagicMock()),
-            _gridPlaceNodes=MagicMock(return_value=[]),
+            _placeAddedNodes=MagicMock(return_value=[]),
             _cppIconRenderer=SimpleNamespace(resetPositionCaches=MagicMock()),
             _viewportAnchor=MagicMock(return_value=(0.0, 0.0)),
             # The authored position is outside the viewport.

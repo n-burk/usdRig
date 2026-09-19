@@ -415,6 +415,12 @@ class NodeGraph(GraphModel):
             fm.lineHeight = fontMetrics.lineHeight
             fontMetrics = fm
         self.layoutNode(node, calculateTextWidth, fontMetrics, config)
+        # Layout epoch for the value-row geometry cache (see
+        # NodeModel._row_layout_version): slots and kinds are fresh as of
+        # this call. getattr-guarded for duck-typed nodes in headless tests.
+        _version = getattr(node, "_row_layout_version", None)
+        if _version is not None:
+            node._row_layout_version = _version + 1
 
         # Reserve room for the inline value cells, in the ONE chokepoint every
         # caller goes through, so the width the cells are drawn against and the

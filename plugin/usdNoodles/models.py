@@ -156,6 +156,21 @@ class NodeModel(NodeData):
         self._value_rows = None
         self._value_rows_time = None
         self._value_cell_width = 0.0
+        # The time-independent half of the rows ({(pin_name, False):
+        # ValueTemplate}), shared by every frame so scrubbing re-reads only
+        # components instead of re-walking the schema; and the
+        # {property_name: key} index the notice path looks up in O(1).
+        self._value_row_static = None
+        self._value_rows_by_property = None
+        # One schema walk per cache epoch, shared by the pin getters, the
+        # pin-type getters and the value rows (see _pin_properties).
+        self._pin_properties_cache = None
+        # Layout epoch, bumped by nodeGraph._calculateNodeSize. The value-row
+        # geometry cache keys off it: slots and kinds only change in the C++
+        # layout pass (or are cleared by invalidateCache, which drops the
+        # cache outright), so equal versions mean reusable geometry.
+        self._row_layout_version = 0
+        self._value_row_layout = None
         _sync_cpp_vector(_cpp_inputRowKinds, self, [])
         _sync_cpp_vector(_cpp_outputRowKinds, self, [])
         _sync_cpp_vector(_cpp_inputRowSlots, self, [])
@@ -432,6 +447,21 @@ class NodeModel(NodeData):
         self._dragPosition = None
         # _position still holds the original position
 
+    def _pin_properties(self):
+        """Cached ``get_schema_aware_pin_properties`` for this node's prim.
+
+        The pin getters, the pin-type getters and the value rows all walk
+        the same enumeration; running the schema walk once per
+        ``invalidateCache`` instead of up to five times is the whole point.
+        The entries are frozen dataclasses and every caller only iterates,
+        so sharing the one list is safe.
+        """
+        if self._pin_properties_cache is None and self._prim:
+            self._pin_properties_cache = get_schema_aware_pin_properties(
+                self._prim
+            )
+        return self._pin_properties_cache or []
+
     @property
     def inputPins(self):
         """Get input pins from USD inputs: attributes or cache.
@@ -448,7 +478,7 @@ class NodeModel(NodeData):
             self._dual_pin_names = set()
             prefixed_pins = set()
             relationship_pins = set()
-            for pin_property in get_schema_aware_pin_properties(self._prim):
+            for pin_property in self._pin_properties():
                 if pin_property.side != "input":
                     continue
                 attrName = pin_property.property_name
@@ -523,7 +553,7 @@ class NodeModel(NodeData):
             prefixed_pins = set()
             relationship_pins = set()
             self._output_dual_pin_names = set()
-            for pin_property in get_schema_aware_pin_properties(self._prim):
+            for pin_property in self._pin_properties():
                 if pin_property.side != "output":
                     continue
                 attrName = pin_property.property_name
@@ -579,7 +609,7 @@ class NodeModel(NodeData):
             return self._input_pin_types
         if self._prim:
             self._input_pin_types = {}
-            for pin_property in get_schema_aware_pin_properties(self._prim):
+            for pin_property in self._pin_properties():
                 if pin_property.side != "input" or pin_property.is_relationship:
                     continue
                 attrName = pin_property.property_name
@@ -619,7 +649,7 @@ class NodeModel(NodeData):
             return self._output_pin_types
         if self._prim:
             self._output_pin_types = {}
-            for pin_property in get_schema_aware_pin_properties(self._prim):
+            for pin_property in self._pin_properties():
                 if pin_property.side != "output" or pin_property.is_relationship:
                     continue
                 attrName = pin_property.property_name
@@ -718,8 +748,15 @@ class NodeModel(NodeData):
         # Value rows are derived from the same prim state as the pins, so they
         # go stale for exactly the same reasons. The reserved cell width is
         # kept: it is layout, and the next _calculateNodeSize recomputes it.
+        # The row-geometry cache is dropped: the C++ vectors it mirrors are
+        # cleared below, and the next layout bumps _row_layout_version, so a
+        # rebuild between here and there cannot serve stale slots.
         self._value_rows = None
         self._value_rows_time = None
+        self._value_row_static = None
+        self._value_rows_by_property = None
+        self._pin_properties_cache = None
+        self._value_row_layout = None
         # Clear the C++ struct's row kinds / slots / displayRowKinds so a render
         # between invalidation and the next layout can't show stale rows; the
         # folded maps are part of that struct state and clear with them.
@@ -948,6 +985,10 @@ class NodeModel(NodeData):
         _noodles.buildDisplayPins(self)
         _noodles.assignRowSlots(self)
         self._read_layout_back_from_cpp()
+        # Row-geometry epoch: the C++ passes above rewrote the slots/kinds
+        # (and the readback may have replaced the pin lists), so any cached
+        # value-row geometry derived from them is stale as of here.
+        self._row_layout_version += 1
 
     def _read_layout_back_from_cpp(self):
         """Mirror the C++ display pins + pin types back into the Python caches.
@@ -1029,6 +1070,33 @@ class NodeModel(NodeData):
                     return doc
         return ""
 
+    def _value_row_templates(self):
+        """``{(pin_name, False): ValueTemplate}``, built once per cache epoch.
+
+        The schema walk and every metadata read happen here and nowhere
+        else; :meth:`value_rows` only re-reads components against these, so
+        a frame change costs one ``attr.Get`` per pin instead of a rebuild.
+        """
+        if self._value_row_static is not None:
+            return self._value_row_static
+
+        from . import noodlesValues
+
+        templates = {}
+        prim = self._prim
+        if prim is not None and prim.IsValid():
+            for pin_property in self._pin_properties():
+                if pin_property.is_relationship or pin_property.side != "input":
+                    continue
+                template = noodlesValues.row_template(
+                    prim, pin_property.pin_name, pin_property.property_name
+                )
+                if template is not None:
+                    templates[(pin_property.pin_name, False)] = template
+
+        self._value_row_static = templates
+        return templates
+
     def value_rows(self, time_code=None):
         """``{(pin_name, is_output): ValueRow}`` for every row with a value cell.
 
@@ -1040,7 +1108,9 @@ class NodeModel(NodeData):
         both edges, which is why the ordinary case works.
 
         Cached until :meth:`invalidateCache` or a frame change, because the
-        components are read from USD and the paint pass asks every frame.
+        components are read from USD and the paint pass asks every frame. A
+        frame change only re-reads the components against the cached
+        templates -- no schema walk -- which is what makes scrubbing cheap.
         """
         if (
             self._value_rows is not None
@@ -1054,22 +1124,34 @@ class NodeModel(NodeData):
         prim = self._prim
         if prim is not None and prim.IsValid():
             stage = self._stage
-            for pin_property in get_schema_aware_pin_properties(prim):
-                if pin_property.is_relationship or pin_property.side != "input":
-                    continue
-                row = noodlesValues.build_value_row(
-                    stage,
-                    prim,
-                    pin_property.pin_name,
-                    pin_property.property_name,
-                    time_code,
+            for key, template in self._value_row_templates().items():
+                row = noodlesValues.build_value_row_from_template(
+                    stage, prim, template, time_code
                 )
                 if row is not None:
-                    rows[(pin_property.pin_name, False)] = row
+                    rows[key] = row
 
         self._value_rows = rows
         self._value_rows_time = time_code
+        self._value_rows_by_property = {
+            row.property_name: key for key, row in rows.items()
+        }
         return rows
+
+    def value_row_for_property(self, property_name, time_code=None):
+        """The ``ValueRow`` for *property_name*, or None when it has no cell.
+
+        O(1) through the property index; warms the row cache like
+        :meth:`value_rows` when it is cold. ``time_code=None`` means "the
+        cached frame", matching what the paint pass last asked for.
+        """
+        if time_code is None:
+            time_code = self._value_rows_time
+        rows = self.value_rows(time_code)
+        key = (self._value_rows_by_property or {}).get(property_name)
+        if key is None:
+            return None
+        return rows.get(key)
 
     def has_value_row(self, property_name):
         """Whether *property_name* is shown as a value cell on this node.
@@ -1077,10 +1159,7 @@ class NodeModel(NodeData):
         The USD-notice path asks this to decide whether a property change can
         be answered by refreshing one cell instead of re-laying out the graph.
         """
-        for row in self.value_rows(self._value_rows_time).values():
-            if row.property_name == property_name:
-                return True
-        return False
+        return self.value_row_for_property(property_name) is not None
 
     def invalidate_value_row(self, property_name=None):
         """Drop the cached value rows so the next paint re-reads them.
@@ -1089,10 +1168,40 @@ class NodeModel(NodeData):
         slots or size changed, so this must not make the view set
         ``textChanged`` and re-lay out every node in the graph. That storm --
         once per mouse-move of a value drag -- is the performance failure this
-        method exists to avoid. ``property_name`` is accepted for call-site
-        clarity; the whole per-node dict is cheap to rebuild.
+        method exists to avoid.
+
+        A named property refreshes just that row in place; the rest of the
+        dict is untouched, so one animating attribute does not re-read its
+        thirty quiet neighbours. ``None`` (a frame change, an undo) drops
+        the dynamics whole -- the templates survive, so the rebuild still
+        skips the schema walk.
         """
-        self._value_rows = None
+        if self._value_rows is None:
+            return
+        if property_name is None:
+            self._value_rows = None
+            self._value_rows_by_property = None
+            return
+        key = (self._value_rows_by_property or {}).get(property_name)
+        if key is None:
+            return
+        template = (self._value_row_static or {}).get(key)
+        prim = self._prim
+        if template is None or prim is None or not prim.IsValid():
+            self._value_rows = None
+            self._value_rows_by_property = None
+            return
+
+        from . import noodlesValues
+
+        row = noodlesValues.build_value_row_from_template(
+            self._stage, prim, template, self._value_rows_time
+        )
+        if row is None:
+            del self._value_rows[key]
+            del self._value_rows_by_property[property_name]
+        else:
+            self._value_rows[key] = row
 
     def resolve_pin_name(self, pin_name, is_output: bool | None = None):
         """Resolve a pin name through alias and folded maps.

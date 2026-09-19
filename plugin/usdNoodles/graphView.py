@@ -17,8 +17,6 @@ from pathlib import Path
 
 from UsdNoodles.core import (
     Animator,
-    layoutGraphPositions,
-    LayoutParams,
     LinkData,
     LinkSelectionMode,
     positionWriteGeneration,
@@ -54,6 +52,7 @@ from .nodeGraph import (
 )
 from .nodeGraphBlueprint import NodeGraphBlueprint
 from .nodeGraphJson import NodeGraphJson
+from .nodeLayout import layout_graph, place_node
 from .nodeLibs.registry import NodeLibraryRegistry
 from .noodlesConfig import NoodlesConfig
 from .noodlesPreferences import NoodlesPreferences
@@ -117,6 +116,16 @@ def _guardsQtBoundary(handler):
             return None
 
     return guarded
+
+
+def _nodeRect(node):
+    """``(x, y, w, h)`` floats: a node as layout input."""
+    return (
+        float(node.position[0]),
+        float(node.position[1]),
+        float(node.size[0]),
+        float(node.size[1]),
+    )
 
 
 def _nodeIdPrimPath(nodeId):
@@ -1636,6 +1645,10 @@ class GraphView(QGLWidget):
         self._valueEditTarget = None
         self._valueEditInput.clear()
         self._tokenPopup = None
+        # The fitted-text cache is keyed by node id, so a rebuilt graph must
+        # not inherit it (stale entries would only miss on their component
+        # keys, but clearing bounds the map's growth across reloads).
+        self._valueFitCache.clear()
 
     def closeEvent(self, event):
         unsubscribe_edit_target_warning(self._showWarningPopup)
@@ -2217,9 +2230,14 @@ class GraphView(QGLWidget):
                             needsLinkRebuild = True
                     except Exception:
                         pass
-                elif self._valueRowOnlyChange(node, propName):
+                elif self._cachedShowAttributeValues and self._valueRowOnlyChange(
+                    node, propName
+                ):
                     # A value the node already shows in an inline cell changed.
-                    # Refresh that ONE node's cells and stop.
+                    # Refresh that ONE node's cells and stop. Guarded by the
+                    # feature flag FIRST: with values hidden the row cache is
+                    # cold, and asking it would build every row (a full schema
+                    # walk plus a USD read per pin) only to throw them away.
                     #
                     # Deliberately not textChanged: that re-lays out EVERY node
                     # in the graph (paintNodes, whose own comment records ~2s
@@ -2712,6 +2730,16 @@ class GraphView(QGLWidget):
         # TABULAR: a value dragged from 1.9 to 2.0 must not make the whole
         # number jump sideways because '1' is half the width of '0'.
         self._valueDigitAdvanceCache = {}
+        # Paint-pass caches, recreated here (and only here) so a font change
+        # cannot leave stale glyphs behind: fitted value texts keyed by
+        # (node, property, components, width, font), single-glyph vertices
+        # keyed by (character, size), axis-label widths, and text-band
+        # geometry. Every key carries what the entry depends on, so a value,
+        # layout or font change misses and recomputes instead of going stale.
+        self._valueFitCache = {}
+        self._valueGlyphCache = {}
+        self._valueAxisWidthCache = {}
+        self._valueTextBandCache = {}
 
     def _toggleDrawLinks(self, checked):
         self.drawLinks = checked
@@ -2860,6 +2888,14 @@ class GraphView(QGLWidget):
         # (paintGL needs it current for _paintGLInner)
         self.makeCurrent()
         self.linksChanged = True
+        # The atlas was regenerated, so every cached glyph vertex and every
+        # width-derived fit is suspect. Dropping them only costs one warmup
+        # frame; keeping them risks wrong UVs.
+        self._valueGlyphCache.clear()
+        self._valueFitCache.clear()
+        self._valueAxisWidthCache.clear()
+        self._valueTextBandCache.clear()
+        self._valueDigitAdvanceCache.clear()
 
     def initializeGL(self):
         needsInit = not self.initialized
@@ -3024,10 +3060,14 @@ class GraphView(QGLWidget):
             self.frameAll()
 
     def loadStage(self, stage):
-        """Load all valid graph prims found at the stage root.
+        """Open an EMPTY graph on *stage*: no prims graphed at all.
 
-        Scans root-level children for ExecNode, Container, or Shader types
-        and loads them all into a single graph view.
+        The canvas is the user's, not the loader's: prims arrive via 'A'
+        (``addNodesFromPrimTreeSelection``), node creation, and the
+        notice-driven adoption of newly appearing scope children -- never
+        from an opening scan. ``NodeGraphStage.load`` keeps its
+        root-children scan as the explicit loader primitive; the view
+        simply does not invoke it here.
         """
         from .nodeGraphStage import NodeGraphStage
 
@@ -3035,24 +3075,16 @@ class GraphView(QGLWidget):
 
         self.nodeGraph = NodeGraphStage()
         self.nodeGraph.setStage(stage)
-        self.nodeGraph.load(
-            stage,
-            self.textRenderer.calculateTextWidth,
-            self.fontAtlas,
-            nodeFactory=self._nodeFactory,
-        )
+        self.nodeGraph.syncSelectionToPrimTree = True
+        self.nodeGraph.linksChanged = True
 
         self._seedNodeZOrders()
-        self._gridPlaceNodes(list(self.nodes.values()))
 
         self._resetRenderCachesAfterBulkMove()
         self._noticeHandler.register(stage)
 
         # Attach undo state delegates to track layer edits
         self._initUndoTracking(stage)
-
-        if self.nodes:
-            self.frameAll()
 
     # Auto-layout grid for nodes that have no position of their own, in
     # logical/world coordinates (independent of window size): ~30 columns per
@@ -3203,6 +3235,70 @@ class GraphView(QGLWidget):
             y += max(n.size[1] for n in rowNodes) + self._AUTO_GRID_GAP
         return placeable
 
+    def _placeAddedNodes(self, nodes, fallback=None):
+        """Position freshly added nodes by connection; return the placed ones.
+
+        Only nodes still at the USD default (0, 0) are placed; nodes with
+        their own position (authored ``ui:nodegraph:node:pos`` or loader-set)
+        are left untouched. Each placed node lands beside the neighbors it
+        wires to -- one column past its inputs, else one column before its
+        outputs -- and slides to a slot that overlaps nothing; unconnected
+        nodes take *fallback* (world origin into an empty canvas, else the
+        caller's viewport anchor). Only the new nodes move. Placement is
+        display-only (no USD authoring), like the grid this replaces on the
+        add path.
+        """
+        placeable = [n for n in nodes if n.position[0] == 0.0 and n.position[1] == 0.0]
+        if not placeable:
+            return []
+        fx, fy = (
+            (0.0, 0.0)
+            if fallback is None
+            else (float(fallback[0]), float(fallback[1]))
+        )
+        # Edges come from the node link lists, not self.links: the graph
+        # link list rebuilds on the next paint, but the added nodes' lists
+        # were populated when they were added and everyone else's are
+        # current. Attribute and relationship links place alike: any noodle
+        # touching the new node tells it where to stand.
+        preds_of = {}
+        succs_of = {}
+        for node in self.nodes.values():
+            preds_of[node.id] = [
+                link.sourceNodeId for link in getattr(node, "inputLinks", [])
+            ]
+            succs_of[node.id] = [
+                link.targetNodeId for link in getattr(node, "outputLinks", [])
+            ]
+        batch_ids = {n.id for n in placeable}
+        positioned = {
+            nid: n for nid, n in self.nodes.items() if nid not in batch_ids
+        }
+        placed = []
+        for node in placeable:
+            preds = [
+                _nodeRect(positioned[pid])
+                for pid in preds_of.get(node.id, [])
+                if pid in positioned
+            ]
+            succs = [
+                _nodeRect(positioned[sid])
+                for sid in succs_of.get(node.id, [])
+                if sid in positioned
+            ]
+            occupants = [_nodeRect(n) for n in positioned.values()]
+            x, y = place_node(
+                (float(node.size[0]), float(node.size[1])),
+                preds,
+                succs,
+                occupants,
+                (fx, fy),
+            )
+            node.setDisplayPosition(Gf.Vec2d(x, y))
+            positioned[node.id] = node
+            placed.append(node)
+        return placed
+
     def _seedNodeZOrders(self):
         """Give each freshly loaded node a distinct, increasing zOrder.
 
@@ -3229,16 +3325,29 @@ class GraphView(QGLWidget):
             pass
 
     def _autoLayoutNodes(self):
-        """Arrange every node with the Sugiyama auto-layout (L / context menu).
+        """Arrange every node left-to-right by connection (L / context menu).
 
-        Only data-flow links drive the layout; relationship links keep their
-        top-center anchors and are re-drawn over the placed nodes by the link
-        rebuild. The new positions are authored to USD as a single undo step.
+        Layered layout over every rendered link (see :mod:`nodeLayout`):
+        sources left, sinks right, cycles sharing a column, over-tall
+        layers wrapped into staggered sub-columns, components tiled into
+        rows. Attribute and relationship links rank alike -- any noodle
+        on the canvas is a connection the user reads, so all of them lay
+        out. Only dangling links (an endpoint off the canvas) are skipped.
+        The new positions are authored to USD as a single undo step.
         """
         if not self.nodes:
             return
 
-        positions = layoutGraphPositions(self.nodes, self.links, LayoutParams())
+        sizes = {
+            node_id: (float(node.size[0]), float(node.size[1]))
+            for node_id, node in self.nodes.items()
+        }
+        edges = [
+            (link.sourceNodeId, link.targetNodeId)
+            for link in self.links
+            if link.sourceNodeId in sizes and link.targetNodeId in sizes
+        ]
+        positions = layout_graph(sizes, edges)
         if not positions:
             return
 
@@ -4961,14 +5070,17 @@ class GraphView(QGLWidget):
                 node, self.textRenderer.calculateTextWidth, self.fontAtlas
             )
 
-        # Position the new node in the viewport (avoids USD default position
-        # leaving the node at (0,0)) and assign a z-order, matching the
-        # _addPrimAsNode setup so the renderer can compute pin positions
-        # consistently before _rebuildLinks runs on the next paint.
-        self._positionNodeInViewport(node)
+        # Register first, then place by connection exactly like the add-node
+        # path: the expanded node lands one column beside the node it wires
+        # to (inputs left, dependents right), staggered clear of siblings,
+        # so double-clicking a relationship/property reads like the L
+        # layout instead of dropping the node at the viewport center. The
+        # placement doubles as the position setup the renderer needs to
+        # compute pin positions before _rebuildLinks runs on the next paint.
         self.nodes[node.id] = node
         self._nextZOrder += 1
         node.zOrder = self._nextZOrder
+        self._placeAddedNodes([node], fallback=self._viewportAnchor())
 
         # Enable prim tree syncing since we now have nodes with valid USD paths
         self.nodeGraph.syncSelectionToPrimTree = True
@@ -5815,8 +5927,9 @@ class GraphView(QGLWidget):
         memory and that no loader can re-derive. Those nodes are re-added
         afterwards, along with the positions they were placed at when nothing
         authored ``ui:nodegraph:node:pos`` to read back. Without that, an
-        unrelated undo answers by wiping the canvas down to the loader's idea of
-        it, which for a single-root stage is one node.
+        unrelated undo answers by wiping the canvas: stage graphs open
+        empty, so the loader contributes nothing and the re-add loop below
+        is the whole membership.
         """
         from .nodeGraphBpContainer import NodeGraphBpContainer
         from .nodeGraphStage import NodeGraphStage
@@ -5857,14 +5970,14 @@ class GraphView(QGLWidget):
                     nodeFactory=self._nodeFactory,
                 )
             elif isinstance(self.nodeGraph, NodeGraphStage):
+                # No loader scan: stage graphs open empty, so a reload
+                # preserves exactly the curated membership the loop below
+                # re-adds rather than re-deriving the loader's idea of the
+                # graph (which would graph root prims the user never asked
+                # for after the first undo).
                 self.nodeGraph = NodeGraphStage()
                 self.nodeGraph.setStage(stage)
-                self.nodeGraph.load(
-                    stage,
-                    self.textRenderer.calculateTextWidth,
-                    self.fontAtlas,
-                    nodeFactory=self._nodeFactory,
-                )
+                self.nodeGraph.syncSelectionToPrimTree = True
             else:
                 self.nodeGraph = NodeGraphBlueprint()
                 self.nodeGraph.setStage(stage)
@@ -9759,15 +9872,17 @@ class GraphView(QGLWidget):
 
             if addedCount > 0 or selectedExistingCount > 0:
                 if addedCount > 0:
-                    # Grid-place the newly added nodes. Into an empty canvas
-                    # that is the world origin and the view is framed onto it
-                    # below; into a graph the user is already working in it is
-                    # the viewport they are looking at, because the camera is
-                    # about to stay exactly where they left it and a batch
-                    # gridded below far-off content would simply never be seen.
-                    self._gridPlaceNodes(
+                    # Place the newly added nodes by connection: each lands
+                    # beside the neighbors it wires to, and only the new
+                    # nodes move. Unconnected additions fall back to the
+                    # world origin into an empty canvas (framed onto below)
+                    # and to the viewport the user is looking at otherwise,
+                    # because the camera is about to stay exactly where
+                    # they left it and a node placed below far-off content
+                    # would simply never be seen.
+                    self._placeAddedNodes(
                         [self.nodes[nid] for nid in addedNodeIds if nid in self.nodes],
-                        anchor=None if graphWasEmpty else self._viewportAnchor(),
+                        fallback=None if graphWasEmpty else self._viewportAnchor(),
                     )
                     self.linksChanged = True
                     self.textChanged = True
@@ -10167,6 +10282,43 @@ class GraphView(QGLWidget):
     # gutters are disjoint, so a press can mean exactly one of the two.
     # ------------------------------------------------------------------
 
+    def _valueRowLayout(self, node):
+        """``(input_pins, in_slots, in_kinds, occupied)`` for the value rows.
+
+        The C++ slot/kind vectors are copied out of the bindings ONCE per
+        layout epoch instead of once per node per frame: they only change in
+        the C++ layout passes (which bump ``node._row_layout_version``) or
+        are cleared by ``invalidateCache`` (which drops this cache), so an
+        equal version means reusable geometry.
+        """
+        version = getattr(node, "_row_layout_version", None)
+        cached = getattr(node, "_value_row_layout", None)
+        if version is not None and cached is not None and cached[0] == version:
+            return cached[1], cached[2], cached[3], cached[4]
+        input_pins = list(getattr(node, "inputPins", []))
+        in_slots = list(node.inputRowSlots)
+        in_kinds = list(node.inputRowKinds)
+        # Every slot an output-side row occupies. A real output row's label is
+        # right-aligned to the node's right edge -- into exactly the space the
+        # cell wants -- so where the two share a slot, the cell gives way.
+        out_pins = getattr(node, "outputPins", [])
+        out_slots = list(node.outputRowSlots)
+        occupied = set(
+            out_slots[i] if i < len(out_slots) else i for i in range(len(out_pins))
+        )
+        if version is not None:
+            try:
+                node._value_row_layout = (
+                    version,
+                    input_pins,
+                    in_slots,
+                    in_kinds,
+                    occupied,
+                )
+            except AttributeError:
+                pass
+        return input_pins, in_slots, in_kinds, occupied
+
     def _valueRowGeometry(self, node):
         """Yield ``(row, cellRect, subRects, H)`` for each value-bearing row.
 
@@ -10211,17 +10363,7 @@ class GraphView(QGLWidget):
         port_start_y, h = self._getRowHitMetrics(node, renderer)
         band = self._valueTextBand(h)
 
-        input_pins = getattr(node, "inputPins", [])
-        in_slots = list(node.inputRowSlots)
-        in_kinds = list(node.inputRowKinds)
-        # Every slot an output-side row occupies. A real output row's label is
-        # right-aligned to the node's right edge -- into exactly the space the
-        # cell wants -- so where the two share a slot, the cell gives way.
-        out_pins = getattr(node, "outputPins", [])
-        out_slots = list(node.outputRowSlots)
-        occupied = set(
-            out_slots[i] if i < len(out_slots) else i for i in range(len(out_pins))
-        )
+        input_pins, in_slots, in_kinds, occupied = self._valueRowLayout(node)
 
         for i, pin_name in enumerate(input_pins):
             row = rows.get((pin_name, False))
@@ -10282,6 +10424,14 @@ class GraphView(QGLWidget):
         if not nodeId or nodeId not in self.nodes:
             return None
         node = self.nodes[nodeId]
+        # The paint pass skips cells below _cachedValueMinPixelHeight; testing
+        # what is not drawn would arm invisible cells, and costs a full
+        # row-geometry walk per mouse-move for nothing.
+        if (
+            float(node.layoutPortLineHeight) * self.zoom
+            < float(self._cachedValueMinPixelHeight)
+        ):
+            return None
         primPath = _nodeIdPrimPath(nodeId)
         for row, rect, subs, _h in self._valueRowGeometry(node):
             if not (rect.top <= y <= rect.bottom):
@@ -10365,10 +10515,24 @@ class GraphView(QGLWidget):
             if NoodlesConfig.get("showPinTypeLabels", True)
             else 0.0
         )
+        size = self._valueFontSize()
+        # Pure function of (row height, fonts, atlas metrics): one entry per
+        # distinct row height, recomputed only when a dependency changes.
+        key = (
+            round(float(rowHeight), 3),
+            pinFont,
+            typeFont,
+            size,
+            float(atlas.lineHeight),
+            float(atlas.ascender),
+            float(atlas.descender),
+        )
+        band = self._valueTextBandCache.get(key)
+        if band is not None:
+            return band
         lineHeight = float(atlas.lineHeight)
         block = (pinFont + typeFont) * lineHeight
         baseline = (rowHeight - block) * 0.5 + float(atlas.ascender) * pinFont
-        size = self._valueFontSize()
         pad = 0.07 * rowHeight
         top = baseline - float(atlas.ascender) * size - pad
         height = (float(atlas.ascender) - float(atlas.descender)) * size + 2.0 * pad
@@ -10379,7 +10543,9 @@ class GraphView(QGLWidget):
             top = 0.0
         if top + height > rowHeight:
             top = max(0.0, rowHeight - height)
-        return (top, height)
+        band = (top, height)
+        self._valueTextBandCache[key] = band
+        return band
 
     def _valueBaselineY(self, rect):
         """Text baseline inside a value pill."""
@@ -10400,15 +10566,38 @@ class GraphView(QGLWidget):
             self._valueDigitAdvanceCache[size] = cached
         return cached
 
+    def _valueGlyph(self, ch, size):
+        """``(vertices, width)`` for one character, generated at the origin.
+
+        A value is the same dozen glyphs every frame, so each character is
+        generated once per size at (0, 0, 0) and translated by the caller --
+        the two C++ calls per glyph per frame this replaces were the
+        single largest cost in the value paint pass. Cleared with the other
+        paint caches when the atlas is regenerated.
+        """
+        key = (ch, size)
+        cached = self._valueGlyphCache.get(key)
+        if cached is None:
+            renderer = self.textRenderer
+            glyph = []
+            renderer.generateTextVertices(
+                ch, 0.0, 0.0, 0.0, size, glyph, node_index=-1.0
+            )
+            cached = (tuple(glyph), renderer.calculateTextWidth(ch, size))
+            self._valueGlyphCache[key] = cached
+        return cached
+
     def _valueTextWidth(self, text, size, tabular):
         if not tabular:
             return self.textRenderer.calculateTextWidth(text, size)
         advance = self._valueDigitAdvance(size)
-        return sum(
-            advance if ch.isdigit()
-            else self.textRenderer.calculateTextWidth(ch, size)
-            for ch in text
-        )
+        total = 0.0
+        for ch in text:
+            if ch.isdigit():
+                total += advance
+            else:
+                total += self._valueGlyph(ch, size)[1]
+        return total
 
     def _emitValueText(self, text, x, baselineY, depth, size, out,
                        tabular=False, italic=0.0):
@@ -10430,27 +10619,33 @@ class GraphView(QGLWidget):
             return renderer.calculateTextWidth(text, size)
 
         advance = self._valueDigitAdvance(size) if tabular else 0.0
-        glyph = []
         cursor = x
         for ch in text:
-            natural = renderer.calculateTextWidth(ch, size)
+            verts, natural = self._valueGlyph(ch, size)
             step = advance if (tabular and ch.isdigit()) else natural
-            del glyph[:]
-            renderer.generateTextVertices(
-                ch,
-                cursor + (step - natural) * 0.5,
-                baselineY,
-                depth,
-                size,
-                glyph,
-                node_index=-1.0,
-            )
+            ox = cursor + (step - natural) * 0.5
+            oy = baselineY
+            # Glyph vertices are flat floats, 6 per vertex (x, y, z, u, v,
+            # nodeIndex); the cached glyph is translated into place, and an
+            # italic lean is two lines about the baseline.
             if italic > 0.0:
-                # Glyph vertices are flat floats, 6 per vertex (x, y, z, u, v,
-                # nodeIndex); leaning them about the baseline is two lines.
-                for i in range(0, len(glyph), 6):
-                    glyph[i] += (baselineY - glyph[i + 1]) * italic
-            out.extend(glyph)
+                for i in range(0, len(verts), 6):
+                    gx = verts[i] + ox
+                    gy = verts[i + 1] + oy
+                    out.append(gx + (baselineY - gy) * italic)
+                    out.append(gy)
+                    out.append(verts[i + 2] + depth)
+                    out.append(verts[i + 3])
+                    out.append(verts[i + 4])
+                    out.append(verts[i + 5])
+            else:
+                for i in range(0, len(verts), 6):
+                    out.append(verts[i] + ox)
+                    out.append(verts[i + 1] + oy)
+                    out.append(verts[i + 2] + depth)
+                    out.append(verts[i + 3])
+                    out.append(verts[i + 4])
+                    out.append(verts[i + 5])
             cursor += step
         return cursor - x
 
@@ -10490,6 +10685,9 @@ class GraphView(QGLWidget):
         node = self.nodes.get(nodeId)
         if node is None:
             return None
+        lookup = getattr(node, "value_row_for_property", None)
+        if lookup is not None:
+            return lookup(propertyName, self._currentTimeCode)
         rows_fn = getattr(node, "value_rows", None)
         if rows_fn is None:
             return None
@@ -10867,6 +11065,41 @@ class GraphView(QGLWidget):
             return False
         return super().focusNextPrevChild(nextChild)
 
+    def _valueAxisWidth(self, label, size):
+        """Width of one axis hint (``x``/``y``/``z``/``r``/...) at *size*.
+
+        A handful of constant single characters measured once each instead
+        of once per vector row per frame.
+        """
+        key = (label, size)
+        width = self._valueAxisWidthCache.get(key)
+        if width is None:
+            width = self.textRenderer.calculateTextWidth(label, size)
+            self._valueAxisWidthCache[key] = width
+        return width
+
+    def _valueFittedTexts(self, nodeId, row, slotWidth, fontSize, rowMeasure):
+        """Display texts for one row's components, fitted once per value.
+
+        The fit is pure arithmetic over (components, width, font): refitting
+        it every frame re-measures every candidate format through C++, so
+        the answer is cached until one of those changes.
+        """
+        key = (
+            row.components,
+            round(float(slotWidth), 2),
+            row.type_name,
+            fontSize,
+        )
+        entry = self._valueFitCache.get((nodeId, row.property_name))
+        if entry is not None and entry[0] == key:
+            return entry[1]
+        texts = noodlesValues.fit_components(
+            row.components, row.type_name, max(slotWidth, 1.0), rowMeasure
+        )
+        self._valueFitCache[(nodeId, row.property_name)] = (key, texts)
+        return texts
+
     def _paintValueCells(self):
         """Draw every visible value cell in the node's own visual language.
 
@@ -11024,19 +11257,18 @@ class GraphView(QGLWidget):
                 hairWidth = max(0.6 / max(self.zoom, 1e-3), 0.012 * h)
 
                 # Fit ONCE for the whole value, so every component of a
-                # vector is shown to the same number of decimals.
+                # vector is shown to the same number of decimals -- and once
+                # per value, not once per frame (see _valueFittedTexts).
                 slotWidth = valueCell.text_max_width(subs[0], h)
                 if row.kind == noodlesValues.KIND_TOKEN_ENUM:
                     slotWidth -= 0.20 * h * 2.2
                 if row.count > 1:
                     slotWidth -= max(
-                        self.textRenderer.calculateTextWidth(
-                            label, fontSize * 0.8
-                        )
+                        self._valueAxisWidth(label, fontSize * 0.8)
                         for label in axisLabels[: row.count]
                     ) + innerPad * 0.5
-                texts = noodlesValues.fit_components(
-                    row.components, row.type_name, max(slotWidth, 1.0), rowMeasure
+                texts = self._valueFittedTexts(
+                    nodeId, row, slotWidth, fontSize, rowMeasure
                 )
 
                 for index, sub in enumerate(subs):
@@ -11081,7 +11313,7 @@ class GraphView(QGLWidget):
                     axisWidth = 0.0
                     if row.count > 1:
                         axisWidth = (
-                            self.textRenderer.calculateTextWidth(
+                            self._valueAxisWidth(
                                 axisLabels[min(index, 3)], fontSize * 0.8
                             )
                             + innerPad * 0.5

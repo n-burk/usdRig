@@ -14,10 +14,14 @@ Two surfaces:
 1. The Python binding ``noodles.layoutGraphPositions`` (and ``LayoutParams``) —
    tested directly against ``_noodles.NodeData`` / ``LinkData`` with no GL / no
    USD, locking in the data-edges-only relationship seam at the Python boundary.
+   (The binding stays for compatibility; the view arranges through
+   ``nodeLayout`` now.)
 2. The ``GraphView`` auto-layout action (``_autoLayoutNodes`` /
    ``_applyNodePositions`` / ``_authorNodePosition`` and the "L" key) — tested as
    unbound methods on ``SimpleNamespace`` fakes with USD/notice/update mocked,
-   mirroring testUsdNoodlesGraphViewRelationships.py.
+   mirroring testUsdNoodlesGraphViewRelationships.py. The layout core itself
+   (``nodeLayout.layout_graph`` / ``place_node``) is covered in
+   testUsdNoodlesNodeLayout.py.
 """
 
 from __future__ import annotations
@@ -125,9 +129,10 @@ class TestLayoutGraphPositionsBinding(unittest.TestCase):
         self.assertNotEqual(result["A"][1], result["B"][1])
 
 
-def _fake_node(position):
+def _fake_node(position, size=(200.0, 100.0)):
     return SimpleNamespace(
         position=position,
+        size=Gf.Vec2d(size[0], size[1]),
         _writePositionToUsdRaw=MagicMock(),
         setDisplayPosition=MagicMock(),
     )
@@ -239,11 +244,11 @@ class TestAutoLayoutAction(unittest.TestCase):
             _applyNodePositions=MagicMock(),
             frameAll=MagicMock(),
         )
-        positions = {"A": Gf.Vec2d(100.0, 0.0), "B": Gf.Vec2d(300.0, 0.0)}
+        positions = {"A": (100.0, 0.0), "B": (300.0, 0.0)}
         with (
             patch(
-                "UsdNoodles.graphView.layoutGraphPositions", return_value=positions
-            ),
+                "UsdNoodles.graphView.layout_graph", return_value=positions
+            ) as layout,
             patch("UsdNoodles.graphView._push_undo_command") as push,
         ):
             GraphView._autoLayoutNodes(view)
@@ -254,10 +259,13 @@ class TestAutoLayoutAction(unittest.TestCase):
         push.assert_called_once()
         self.assertEqual(push.call_args[0][0], "Auto Layout")
         view.frameAll.assert_called_once()
+        sizes, edges = layout.call_args[0]
+        self.assertEqual(set(sizes.keys()), {"A", "B"})
+        self.assertEqual(edges, [])
 
     def test_auto_layout_empty_graph_is_noop(self):
         view = SimpleNamespace(nodes={})
-        with patch("UsdNoodles.graphView.layoutGraphPositions") as layout:
+        with patch("UsdNoodles.graphView.layout_graph") as layout:
             GraphView._autoLayoutNodes(view)
         layout.assert_not_called()
 
@@ -269,13 +277,78 @@ class TestAutoLayoutAction(unittest.TestCase):
             frameAll=MagicMock(),
         )
         with (
-            patch("UsdNoodles.graphView.layoutGraphPositions", return_value={}),
+            patch("UsdNoodles.graphView.layout_graph", return_value={}),
             patch("UsdNoodles.graphView._push_undo_command") as push,
         ):
             GraphView._autoLayoutNodes(view)
         view._applyNodePositions.assert_not_called()
         push.assert_not_called()
         view.frameAll.assert_not_called()
+
+    def test_auto_layout_passes_every_rendered_link(self):
+        # Attribute and relationship links rank alike: filtering either
+        # leaves connected nodes stacked in one column instead of ranked
+        # left to right. Only links naming nodes off the canvas are
+        # dropped, since there is nothing to rank them against.
+        view = SimpleNamespace(
+            nodes={
+                "A": _fake_node(Gf.Vec2d(0.0, 0.0)),
+                "B": _fake_node(Gf.Vec2d(0.0, 0.0)),
+            },
+            links=[
+                SimpleNamespace(
+                    sourceNodeId="A",
+                    targetNodeId="B",
+                    is_relationship_link=False,
+                ),
+                SimpleNamespace(
+                    sourceNodeId="B",
+                    targetNodeId="A",
+                    is_relationship_link=True,
+                ),
+                SimpleNamespace(
+                    sourceNodeId="A",
+                    targetNodeId="gone",
+                    is_relationship_link=False,
+                ),
+            ],
+            _applyNodePositions=MagicMock(),
+            frameAll=MagicMock(),
+        )
+        with (
+            patch(
+                "UsdNoodles.graphView.layout_graph",
+                return_value={"A": (0.0, 0.0), "B": (1.0, 1.0)},
+            ) as layout,
+            patch("UsdNoodles.graphView._push_undo_command"),
+        ):
+            GraphView._autoLayoutNodes(view)
+        _sizes, edges = layout.call_args[0]
+        self.assertEqual(edges, [("A", "B"), ("B", "A")])
+
+    def test_auto_layout_ranks_relationship_connected_nodes(self):
+        # The reported bug, headless, through the real layout core: two
+        # nodes joined only by a relationship noodle must rank left to
+        # right, not stack in one column.
+        view = SimpleNamespace(
+            nodes={
+                "A": _fake_node(Gf.Vec2d(0.0, 0.0)),
+                "B": _fake_node(Gf.Vec2d(0.0, 0.0)),
+            },
+            links=[
+                SimpleNamespace(
+                    sourceNodeId="A",
+                    targetNodeId="B",
+                    is_relationship_link=True,
+                ),
+            ],
+            _applyNodePositions=MagicMock(),
+            frameAll=MagicMock(),
+        )
+        with patch("UsdNoodles.graphView._push_undo_command"):
+            GraphView._autoLayoutNodes(view)
+        applied = view._applyNodePositions.call_args[0][0]
+        self.assertLess(applied["A"][0], applied["B"][0])
 
     def test_l_key_triggers_auto_layout(self):
         view = SimpleNamespace(

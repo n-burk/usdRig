@@ -607,5 +607,53 @@ class TestBuildValueRow(unittest.TestCase):
         self.assertAlmostEqual(row.components[0], 5.0, places=4)
 
 
+@unittest.skipUnless(_HAS_VALUES, "UsdNoodles.noodlesValues unavailable")
+class TestValueTemplateSplit(unittest.TestCase):
+    """``row_template`` + ``build_value_row_from_template`` equal ``build_value_row``.
+
+    The split exists so a frame change re-reads only components against a
+    cached template; these lock in that the two halves compose to exactly
+    the historical single call.
+    """
+
+    def test_template_then_refresh_matches_direct_build(self):
+        stage = Usd.Stage.CreateInMemory()
+        prim = stage.DefinePrim("/Values", "Scope")
+        prim.CreateAttribute("f", Sdf.ValueTypeNames.Float).Set(1.5)
+        prim.CreateAttribute("v", Sdf.ValueTypeNames.Float3).Set((1, 2, 3))
+        enum_attr = prim.CreateAttribute("space", Sdf.ValueTypeNames.Token)
+        enum_attr.SetMetadata("allowedTokens", ["world", "parentRelative"])
+        enum_attr.Set("world")
+        for name in ("f", "v", "space"):
+            direct = nv.build_value_row(stage, prim, name, name)
+            template = nv.row_template(prim, name, name)
+            self.assertIsNotNone(template, name)
+            refreshed = nv.build_value_row_from_template(
+                stage, prim, template
+            )
+            self.assertEqual(refreshed, direct, name)
+
+    def test_refresh_at_new_time_updates_animated_components_only(self):
+        stage, prim = _stage_with({"f": ("float", None)})
+        attr = prim.GetAttribute("f")
+        attr.Set(0.0, Usd.TimeCode(1.0))
+        attr.Set(10.0, Usd.TimeCode(11.0))
+        template = nv.row_template(prim, "f", "f")
+        early = nv.build_value_row_from_template(
+            stage, prim, template, Usd.TimeCode(1.0)
+        )
+        late = nv.build_value_row_from_template(
+            stage, prim, template, Usd.TimeCode(11.0)
+        )
+        self.assertEqual(early.components, (0.0,))
+        self.assertEqual(late.components, (10.0,))
+        for field in ("type_name", "kind", "count", "tokens", "has_swatch"):
+            self.assertEqual(getattr(late, field), getattr(early, field), field)
+
+    def test_unsupported_types_get_no_template(self):
+        stage, prim = _stage_with({"m": ("matrix4d", Gf.Matrix4d(1.0))})
+        self.assertIsNone(nv.row_template(prim, "m", "m"))
+
+
 if __name__ == "__main__":
     unittest.main()
