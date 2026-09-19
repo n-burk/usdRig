@@ -423,7 +423,7 @@ public:
     void SetStaticCache(RigExecStaticInputCache *cache) { _cache = cache; }
 
 private:
-    std::map<SdfPath, VtValue> _values;
+    std::unordered_map<SdfPath, VtValue, SdfPath::Hash> _values;
     RigExecStaticInputCache *_cache = nullptr;
 };
 
