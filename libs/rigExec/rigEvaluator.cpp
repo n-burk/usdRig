@@ -11797,7 +11797,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // internally and the authored mover meaning nothing.
     //
     // No cycle is possible: nothing in a property chain reads a computation.
-    std::map<SdfPath, VtValue> propertyResults;
     _resolvedInputs.Clear();
     _chainSnapshots.Clear();
 
@@ -11821,7 +11820,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
     if (!_propertyChains.empty()) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PropertyChains", "property");
-        _EvaluatePropertyChains(time, &propertyResults, &baseOverrides,
+        _EvaluatePropertyChains(time, &pose.movedProperties, &baseOverrides,
                                 &pose.diagnostics);
         // Two delivery routes for one value, and they must not disagree:
         // baseOverrides carries it to every exec consumer; _resolvedInputs
@@ -11837,7 +11836,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     if (!_interactiveOverrides.empty()) {
         _ApplyInteractiveOverrides(
             _interactiveOverrides, &baseOverrides, &_resolvedInputs,
-            &propertyResults);
+            &pose.movedProperties);
     }
 
     for (const auto &[ribbonPath, pointsPath] : _ribbonDriverPoints) {
@@ -13542,13 +13541,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
     }
 
-    // Property-domain results, computed above and already consumed by exec
-    // as overrides. Published in the same map as the point chains: a
-    // consumer distinguishes them by the type the VtValue holds, not by
-    // which mover domain produced them.
-    for (const auto &[target, value] : propertyResults) {
-        pose.movedProperties[target] = value;
-    }
+    // Property-domain results are published directly into
+    // pose.movedProperties by _EvaluatePropertyChains (and amended by the
+    // post-chain interactive-override pass), so no separate copy is needed.
+    // They share the map with the point chains below; a consumer distinguishes
+    // them by the type the VtValue holds, not by which mover domain produced
+    // them.
 
     // 3c. THE POSE-INTERPOLATOR PHASE.
     //
