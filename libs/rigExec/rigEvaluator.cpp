@@ -7404,6 +7404,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _connectedPoseTaps = std::move(newConnectedPoseTaps);
     _connectedPoseCache.clear();
     _namespaceInheritsCache.clear();
+    _nearestBlockingCache.clear();
     _poseSteps = std::move(newPoseSteps);
     _firstFramePoseTaps = std::move(newFirstFramePoseTaps);
     _firstFramePoseCache.Clear();
@@ -12097,7 +12098,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     //
     // The climb closes over every path element, not only the known providers:
     // a provider's parent need not itself be a provider.
-    std::unordered_map<SdfPath, SdfPath, SdfPath::Hash> nearestBlockingCache;
     const auto ownsItsPose = [&](const SdfPath &path) {
         return _jointSolverBinding.count(path) ||
             (hierarchicalProviders.count(path) && !inheritsNamespacePose(path));
@@ -12107,20 +12107,20 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         SdfPath walk = path;
         SdfPath owner;
         for (; !walk.IsEmpty(); walk = walk.GetParentPath()) {
-            const auto cached = nearestBlockingCache.find(walk);
-            if (cached != nearestBlockingCache.end()) {
+            const auto cached = _nearestBlockingCache.find(walk);
+            if (cached != _nearestBlockingCache.end()) {
                 owner = cached->second;
                 break;
             }
             if (ownsItsPose(walk)) {
-                nearestBlockingCache[walk] = walk;
+                _nearestBlockingCache[walk] = walk;
                 owner = walk;
                 break;
             }
             pending.push_back(walk);
         }
         for (const SdfPath &seen : pending) {
-            nearestBlockingCache[seen] = owner;
+            _nearestBlockingCache[seen] = owner;
         }
         return owner;
     };
@@ -12882,6 +12882,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
         const RigExecEulerOrder order =
             _ParseConstraintEulerOrder(orderToken);
+
 
         // The kernel-backed operators solve through the registry: one row
         // per operator, so adding an operator is a table entry rather than

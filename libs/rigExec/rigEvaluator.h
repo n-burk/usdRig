@@ -955,6 +955,12 @@ private:
     /// _connectedPoseCache. A time-sampled parent:space stays out of this
     /// cache and is re-read every frame.
     std::unordered_map<SdfPath, bool, SdfPath::Hash> _namespaceInheritsCache;
+    /// Nearest pose-owning ancestor-or-self per provider path. The owner
+    /// mapping depends only on epoch-static structure (_jointSolverBinding,
+    /// _hierarchicalProviderSet, stage-constant namespace-pose answers), so
+    /// it is valid across every evaluation until the epoch rebuilds.
+    /// Cleared on epoch change with _namespaceInheritsCache.
+    std::unordered_map<SdfPath, SdfPath, SdfPath::Hash> _nearestBlockingCache;
     /// Hierarchical (first-frame-pose) providers, compiled once per epoch.
     /// Replaces the per-frame std::set build in _EvaluateDynamic.
     std::unordered_set<SdfPath, SdfPath::Hash> _hierarchicalProviderSet;
