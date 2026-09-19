@@ -19,6 +19,7 @@
 #include "types.h"
 
 #include "rigExecMath/rbf.h"
+#include "rigExecMath/solvers.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/functionRef.h"
@@ -1224,6 +1225,15 @@ private:
         /// point; the transform domain resolves one logical element. Empty
         /// means the constant synthesized from inputs:defaultWeight.
         SdfPath weightObject;
+        /// Precomputed axis masks, authoritative only while `masksStatic`
+        /// holds: no property chain revises a mask attribute, none is
+        /// connected, and each is a single authored opinion. When it holds
+        /// the per-frame mask reads are skipped; when it does not the values
+        /// are ignored and the live read runs exactly as before.
+        bool masksStatic = false;
+        RigExecConstraintAxisMask precompTranslation;
+        RigExecConstraintAxisMask precompRotation;
+        RigExecConstraintAxisMask precompScale;
     };
 
     /// One property-domain revision: a float/vec3f/matrix math mover's

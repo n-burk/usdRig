@@ -218,6 +218,10 @@ struct _ConstraintSolveContext {
     RigExecConstraintAxisMask affect;
     RigExecEulerOrder order = RigExecEulerOrder::XYZ;
     double weight = 1.0;
+    bool masksStatic = false;
+    RigExecConstraintAxisMask precompTranslation;
+    RigExecConstraintAxisMask precompRotation;
+    RigExecConstraintAxisMask precompScale;
 };
 
 using _ConstraintSolveFn =
@@ -429,17 +433,23 @@ RigExecPointFrame
 _SolveParentConstraint(const _ConstraintSolveContext &c)
 {
     RigExecParentConstraintParams params;
-    params.translationAxes = _ReadConstraintAxisMask(
-        *c.resolved, c.prim, "inputs:affectTranslationX",
-        "inputs:affectTranslationY", "inputs:affectTranslationZ", c.time);
-    params.rotationAxes = _ReadConstraintAxisMask(
-        *c.resolved, c.prim, "inputs:affectRotationX",
-        "inputs:affectRotationY", "inputs:affectRotationZ", c.time);
-    // FBX disables scale by default; the explicit false fallback is the
-    // authored contract, not an oversight (schema.usda:769-771).
-    params.scaleAxes = _ReadConstraintAxisMask(
-        *c.resolved, c.prim, "inputs:affectScaleX", "inputs:affectScaleY",
-        "inputs:affectScaleZ", c.time, false);
+    if (c.masksStatic) {
+        params.translationAxes = c.precompTranslation;
+        params.rotationAxes = c.precompRotation;
+        params.scaleAxes = c.precompScale;
+    } else {
+        params.translationAxes = _ReadConstraintAxisMask(
+            *c.resolved, c.prim, "inputs:affectTranslationX",
+            "inputs:affectTranslationY", "inputs:affectTranslationZ", c.time);
+        params.rotationAxes = _ReadConstraintAxisMask(
+            *c.resolved, c.prim, "inputs:affectRotationX",
+            "inputs:affectRotationY", "inputs:affectRotationZ", c.time);
+        // FBX disables scale by default; the explicit false fallback is the
+        // authored contract, not an oversight (schema.usda:769-771).
+        params.scaleAxes = _ReadConstraintAxisMask(
+            *c.resolved, c.prim, "inputs:affectScaleX",
+            "inputs:affectScaleY", "inputs:affectScaleZ", c.time, false);
+    }
     params.rotationOrder = c.order;
     params.weight = c.weight;
     return RigExecApplyParentConstraint(c.inputFrame, *c.sources, params);
@@ -5577,6 +5587,20 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         return false;
     };
 
+    // Every property-domain target a math mover revises. A mask attribute in
+    // this set is not static: its live read must still see the chain's
+    // result, so a constraint whose mask lands here keeps masksStatic false.
+    std::set<SdfPath> propertyRevisedTargets;
+    for (const RigExecMoverRecord &mover : newMovers) {
+        if (mover.schemaType != "RigExecFloatMathMover" &&
+            mover.schemaType != "RigExecVec3fMathMover" &&
+            mover.schemaType != "RigExecMatrixMathMover") {
+            continue;
+        }
+        for (const SdfPath &target : mover.targets) {
+            propertyRevisedTargets.insert(target);
+        }
+    }
     for (const RigExecMoverRecord &mover : newMovers) {
         if (!_IsFrameConstraintType(mover.schemaType)) {
             continue;
@@ -5760,6 +5784,62 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     }
                     constraint.poleObjects.push_back(binding);
                 }
+            }
+        }
+        // Precompute the axis masks when provably static for this mover: no
+        // property chain revises a mask attribute, none is connected, and each
+        // is a single authored opinion. Fallbacks mirror the live read:
+        // translation/rotation default on, scale defaults off (FBX).
+        {
+            const char *kMaskNames[3][3] = {
+                {"inputs:affectTranslationX", "inputs:affectTranslationY",
+                 "inputs:affectTranslationZ"},
+                {"inputs:affectRotationX", "inputs:affectRotationY",
+                 "inputs:affectRotationZ"},
+                {"inputs:affectScaleX", "inputs:affectScaleY",
+                 "inputs:affectScaleZ"}};
+            const bool kMaskFallback[3] = {true, true, false};
+            auto groupStatic = [&](int group) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    const char *name = kMaskNames[group][axis];
+                    if (propertyRevisedTargets.count(
+                            constraint.moverPath.AppendPath(SdfPath(name)))) {
+                        return false;
+                    }
+                    const UsdAttribute a = moverPrim.GetAttribute(TfToken(name));
+                    if (a) {
+                        if (!_AuthoredConnections(a).empty()) {
+                            return false;  // connected -> driven
+                        }
+                        std::vector<double> timeSamples;
+                        if (a.GetTimeSamples(&timeSamples) > 1) {
+                            return false;  // animated
+                        }
+                    }
+                    // absent -> schema default -> static
+                }
+                return true;
+            };
+            constraint.masksStatic =
+                groupStatic(0) && groupStatic(1) && groupStatic(2);
+            if (constraint.masksStatic) {
+                auto readGroup = [&](int group) {
+                    RigExecConstraintAxisMask m;
+                    bool *out = &m.x;
+                    for (int axis = 0; axis < 3; ++axis, ++out) {
+                        bool v = kMaskFallback[group];
+                        const UsdAttribute a =
+                            moverPrim.GetAttribute(TfToken(kMaskNames[group][axis]));
+                        if (a) {
+                            a.Get(&v);
+                        }
+                        *out = v;
+                    }
+                    return m;
+                };
+                constraint.precompTranslation = readGroup(0);
+                constraint.precompRotation = readGroup(1);
+                constraint.precompScale = readGroup(2);
             }
         }
 
@@ -12871,10 +12951,31 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // each.
         const _ConstraintHandler *solveHandler =
             _FindConstraintHandler(constraint.schemaType);
-        const RigExecConstraintAxisMask affect = _ReadGroupMask(
-            _resolvedInputs, prim,
-            solveHandler ? solveHandler->maskGroup : _ChannelGroup::None,
-            time);
+        RigExecConstraintAxisMask affect;
+        if (constraint.masksStatic) {
+            switch (solveHandler ? solveHandler->maskGroup
+                                 : _ChannelGroup::None) {
+            case _ChannelGroup::Translation:
+                affect = constraint.precompTranslation;
+                break;
+            case _ChannelGroup::Rotation:
+                affect = constraint.precompRotation;
+                break;
+            case _ChannelGroup::Scale:
+                affect = constraint.precompScale;
+                break;
+            case _ChannelGroup::All:
+            case _ChannelGroup::None:
+            default:
+                affect = RigExecConstraintAxisMask();
+                break;
+            }
+        } else {
+            affect = _ReadGroupMask(
+                _resolvedInputs, prim,
+                solveHandler ? solveHandler->maskGroup : _ChannelGroup::None,
+                time);
+        }
         TfToken orderToken("XYZ");
         if (const UsdAttribute a =
                 prim.GetAttribute(TfToken("rigExec:rotationOrder"))) {
@@ -12898,6 +12999,10 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             solveContext.affect = affect;
             solveContext.order = order;
             solveContext.weight = solveWeight;
+            solveContext.masksStatic = constraint.masksStatic;
+            solveContext.precompTranslation = constraint.precompTranslation;
+            solveContext.precompRotation = constraint.precompRotation;
+            solveContext.precompScale = constraint.precompScale;
             candidate = solveHandler->solve(solveContext);
         } else {
             // Aim uses the same weighted source set, reduced to the target
