@@ -909,6 +909,11 @@ private:
     /// _authSnapshotDirty, which the stage-notice handler sets on any edit.
     _SnapshotCache _authSnapshotCache;
     bool _authSnapshotDirty = true;
+    /// Time-keyed authoritative snapshot cache. jointOverrides is a pure
+    /// function of (epoch, time), so a repeat evaluation of the same frame
+    /// reuses the snapshot without rebuilding the 800+ element override
+    /// vector or re-hashing it. Cleared on any genuine stage edit.
+    std::map<UsdTimeCode, RigExecSnapshot> _authSnapTimeKeyed;
     std::map<SdfPath, RigExecTapId> _firstFramePoseFrames;
     /// Per-frame rest taps, used only when some provider's rest inputs can
     /// vary with time; otherwise the rests are evaluated once per epoch into

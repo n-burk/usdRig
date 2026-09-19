@@ -1720,6 +1720,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // same way it retires the affected solver batches below.
     _firstFramePoseDirty = true;
     _authSnapshotDirty = true;
+    _authSnapTimeKeyed.clear();
     _guideDirty = true;
     _connectedPoseCache.clear();
     for (auto &[target, derived] : _derivedCache) {
@@ -7408,6 +7409,7 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _firstFramePoseCache.Clear();
     _firstFramePoseDirty = true;
     _authSnapshotCache.Clear();
+    _authSnapTimeKeyed.clear();
     _authSnapshotDirty = true;
     _firstFramePoseFrames = std::move(newFirstFramePoseFrames);
     _hierarchicalProviderSet.clear();
@@ -11732,7 +11734,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 std::fprintf(stderr, "  type %-28s count=%zu\n", tn.c_str(), c);
         }
     }
-    std::vector<RigExecValueOverride> jointOverrides = baseOverrides;
     // Joints whose solver published no element for them (an incomplete
     // solver: its required inputs are unwired, so the kernel returned an
     // empty aggregate). They keep their natural rest-chain frame below, so
@@ -13072,18 +13073,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         if (!refreshPoseProvider(provider)) return pose;
     }
 
-    // Materialize the authoritative base-phase request only after the pose
-    // DAG has completed. Aggregate outputs include their constrained inputs;
-    // provider base frames remain distinct from later constraint revisions.
-    for (const auto &[solver, aggregate] : solvedAggregates) {
-        jointOverrides.push_back({solver, _computePointFrameArray, TfToken(),
-                                  VtValue(aggregate)});
-    }
-    for (const auto &[provider, tap] : _firstFramePoseFrames) {
-        jointOverrides.push_back({provider, _computePointFrame, TfToken(),
-                                  VtValue(baseFrames.at(provider))});
-    }
-
     // An incomplete solver is an authoring gap, not a silent one: name every
     // writer that published nothing so a rig mid-edit explains itself.
     // Accumulated in walk order, stable-sorted by joint path, so the lines
@@ -13105,14 +13094,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                        " left"));
     }
 
-    // Baked falloff tables ride along with the joint overrides. They are
-    // epoch-constant, so this replays the same values Compile produced
-    // until the next epoch -- exec has no accessor for an attribute's
-    // spline, and a falloff curve is the whole function rather than one
-    // resolved value (see RigExecFalloffLut in types.h).
-    jointOverrides.insert(jointOverrides.end(), _falloffLutOverrides.begin(),
-                          _falloffLutOverrides.end());
-
     // 1. Transforms and solvers through OpenExec. An incomplete snapshot
     // means some computation failed to compile or evaluate; refusing to
     // continue prevents default-constructed values from masquerading as
@@ -13120,24 +13101,40 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     RigExecSnapshot snapshot;
     {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "AuthoritativeSnapshot", "exec");
-        // The authoritative snapshot is a pure function of (time,
-        // jointOverrides). jointOverrides is assembled from the base/final
-        // joint frames -- deterministic for this frame -- plus the falloff
-        // LUTs, so a recent entry at the same (time, overrides) is reusable.
-        // Genuine stage edits set _authSnapshotDirty through the notice
-        // handler; the tap-level dirty flag is drained, not consulted (it
-        // fires across sibling frames sharing the system).
         _taps->ConsumeDirty();
-        _SnapshotCache::Entry *hit =
-            !_authSnapshotDirty
-                ? _authSnapshotCache.Find(jointOverrides, time)
-                : nullptr;
-        if (hit != nullptr) {
-            snapshot = hit->snapshot;
-        } else {
+        // jointOverrides is a pure function of (epoch, time): the solver
+        // aggregates, base frames, and falloff LUTs are all deterministic
+        // given the time. A time-keyed entry therefore skips the 800+
+        // element build on every repeat evaluation. Genuine stage edits set
+        // _authSnapshotDirty; the tap-level dirty flag is drained, not
+        // consulted (it fires across sibling frames sharing the system).
+        bool authResolved = false;
+        if (!_authSnapshotDirty) {
+            const auto tk = _authSnapTimeKeyed.find(time);
+            if (tk != _authSnapTimeKeyed.end()) {
+                snapshot = tk->second;
+                authResolved = true;
+            }
+        }
+        if (!authResolved) {
+            std::vector<RigExecValueOverride> jointOverrides = baseOverrides;
+            for (const auto &[solver, aggregate] : solvedAggregates) {
+                jointOverrides.push_back({solver, _computePointFrameArray,
+                                          TfToken(), VtValue(aggregate)});
+            }
+            for (const auto &[provider, tap] : _firstFramePoseFrames) {
+                jointOverrides.push_back({provider, _computePointFrame,
+                                          TfToken(),
+                                          VtValue(baseFrames.at(provider))});
+            }
+            jointOverrides.insert(jointOverrides.end(),
+                                  _falloffLutOverrides.begin(),
+                                  _falloffLutOverrides.end());
             snapshot = _taps->Evaluate(time, jointOverrides);
             if (snapshot.IsValid() && snapshot.IsComplete()) {
-                _authSnapshotCache.Store(jointOverrides, time, snapshot);
+                if (_authSnapTimeKeyed.size() >= 4)
+                    _authSnapTimeKeyed.erase(_authSnapTimeKeyed.begin());
+                _authSnapTimeKeyed.emplace(time, snapshot);
                 _authSnapshotDirty = false;
             }
         }
