@@ -15,9 +15,14 @@ in order of how much it would cost to get wrong:
 
   * data flows left to right: every edge's source sits left of its
     target unless a cycle forbids it;
+  * the layout lines up PINS, not boxes: a lone edge levels its two
+    endpoints exactly, a fan-out centres on its stem, and the column gap
+    opens up when a link has to drop;
+  * a source stands beside what it feeds instead of in column zero;
   * cycles are best effort: members share one column, ordering stays
     deterministic, and nothing hangs or explodes;
   * nothing ever overlaps, on hand-built graphs and seeded fuzz;
+  * unwired nodes park in a grid below the flow rather than inside it;
   * ``place_node`` lands one new node beside its neighbors (or the
     fallback), sliding only it to a free slot;
   * ``GraphView._placeAddedNodes`` moves only (0, 0) additions and never
@@ -29,6 +34,7 @@ in order of how much it would cost to get wrong:
 import time
 import unittest
 from random import Random
+from statistics import median
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -157,71 +163,175 @@ class TestLayoutGraph(unittest.TestCase):
         tops = sorted({pos["A"][1], pos["C"][1]})
         self.assertEqual(len(tops), 2)
 
-    def test_wide_fan_in_staggers_across_columns(self):
-        # The spine-solver shape: many dependencies feeding one node. They
-        # must wrap into readable staggered columns, not one pile.
-        # 25 100px rows hit the count cap first: [12, 12, 1].
-        sources = ["s%d" % i for i in range(25)]
-        sizes = _sizes("sink", *sources)
+
+@unittest.skipUnless(_has_layout, "UsdNoodles.nodeLayout unavailable")
+class TestPinAlignment(unittest.TestCase):
+    """The point of the whole exercise: what lines up is the pins."""
+
+    def test_one_edge_levels_its_two_pins_exactly(self):
+        # A 100px-down output feeding a 2500px-down input: centering the
+        # boxes would leave the noodle sweeping the height of the target,
+        # so the pins, not the boxes, are what agree.
+        sizes = {"A": (200.0, 1000.0), "B": (200.0, 3000.0)}
+        pos = nl.layout_graph(sizes, [("A", "B", 100.0, 2500.0)])
+        self.assertEqual(pos["A"][1] + 100.0, pos["B"][1] + 2500.0)
+
+    def test_two_tuple_edges_aim_at_the_centres(self):
+        # No offsets given: each end defaults to its own half height, so
+        # the boxes centre on each other exactly as they used to.
+        sizes = {"A": (200.0, 1000.0), "B": (200.0, 3000.0)}
+        pos = nl.layout_graph(sizes, [("A", "B")])
+        self.assertEqual(pos["A"][1] + 500.0, pos["B"][1] + 1500.0)
+
+    def test_mixed_tuple_lengths_lay_out_together(self):
+        sizes = _sizes("A", "B", "C")
+        pos = nl.layout_graph(sizes, [("A", "B", 10.0, 90.0), ("B", "C")])
+        self.assertEqual(pos["A"][1] + 10.0, pos["B"][1] + 90.0)
+        self.assertLess(pos["A"][0], pos["B"][0])
+        self.assertLess(pos["B"][0], pos["C"][0])
+
+    def test_fan_out_is_contiguous_and_centred_on_its_stem(self):
+        # Three outputs of one node: they stack unbroken in the column
+        # beside it, and the middle one is level with the stem's pin.
+        sizes = {"A": (2000.0, 200.0)}
+        sizes.update({n: (2000.0, 1000.0) for n in "BCD"})
+        pos = nl.layout_graph(
+            sizes, [("A", "B"), ("A", "C"), ("A", "D")]
+        )
+        self.assertEqual(len({pos[n][0] for n in "BCD"}), 1)
+        self.assertGreater(pos["B"][0], pos["A"][0])
+        self.assertEqual(
+            median(pos[n][1] + 500.0 for n in "BCD"), pos["A"][1] + 100.0
+        )
+        _assert_no_overlap(self, sizes, pos)
+
+    def test_two_fans_in_one_column_stay_unbroken(self):
+        # Two stems feeding one column: each fan is a contiguous run, so
+        # neither is interleaved with the other's rows.
+        sizes = {n: (2000.0, 600.0) for n in ("S", "A", "X")}
+        sizes.update({n: (2000.0, 600.0) for n in ("B", "C", "Y", "Z")})
+        pos = nl.layout_graph(
+            sizes,
+            [
+                ("S", "A"), ("S", "X"),
+                ("A", "B"), ("A", "C"), ("X", "Y"), ("X", "Z"),
+            ],
+        )
+        column = sorted(("B", "C", "Y", "Z"), key=lambda n: pos[n][1])
+        self.assertEqual(len({pos[n][0] for n in column}), 1)
+        self.assertIn(
+            "".join(column),
+            ("BCYZ", "CBYZ", "BCZY", "CBZY", "YZBC", "ZYBC", "YZCB", "ZYCB"),
+            "fans interleaved: %s" % "".join(column),
+        )
+
+    def test_source_is_pulled_beside_its_consumer(self):
+        # S feeds only the last node of a chain: it belongs one column
+        # left of that node, not back at the start with A.
+        sizes = _sizes("A", "B", "C", "D", "S")
+        pos = nl.layout_graph(
+            sizes, [("A", "B"), ("B", "C"), ("C", "D"), ("S", "D")]
+        )
+        self.assertEqual(pos["S"][0], pos["C"][0])
+        self.assertLess(pos["S"][0], pos["D"][0])
+
+    def test_column_gap_opens_up_for_a_steep_link(self):
+        # Two tall outputs cannot both be level with their stem, so the
+        # links have to drop; the gap grows so the bezier has the run to
+        # do it in, while a level pair keeps the tight minimum.
+        level = {"A": (2000.0, 2000.0), "B": (2000.0, 2000.0)}
+        level_pos = nl.layout_graph(level, [("A", "B")])
+        tight = level_pos["B"][0] - (level_pos["A"][0] + 2000.0)
+        self.assertEqual(tight, nl.COLUMN_GAP)
+
+        steep = {"A": (2000.0, 200.0), "B": (2000.0, 2000.0), "C": (2000.0, 2000.0)}
+        steep_pos = nl.layout_graph(steep, [("A", "B"), ("A", "C")])
+        opened = steep_pos["B"][0] - (steep_pos["A"][0] + 2000.0)
+        self.assertGreater(opened, tight)
+        self.assertLessEqual(opened, 6.0 * nl.COLUMN_GAP)
+
+
+@unittest.skipUnless(_has_layout, "UsdNoodles.nodeLayout unavailable")
+class TestColumnWrapping(unittest.TestCase):
+    def test_pile_taller_than_the_flow_is_wide_wraps(self):
+        # Six 2000px rows feeding one node stack 12000px high against a
+        # flow barely 4000px wide: that is a tower, not a column, so it
+        # wraps into sub-columns left of the sink.
+        sources = ["s%d" % i for i in range(6)]
+        sizes = {"sink": (2000.0, 400.0)}
+        sizes.update({s: (2000.0, 2000.0) for s in sources})
         pos = nl.layout_graph(sizes, [(s, "sink") for s in sources])
         source_xs = sorted({pos[s][0] for s in sources})
-        self.assertEqual(len(source_xs), 3)
+        self.assertGreater(len(source_xs), 1)
         self.assertLess(max(source_xs), pos["sink"][0])
         _assert_no_overlap(self, sizes, pos)
 
+    def test_a_pile_that_fits_is_left_whole(self):
+        # The same six rows in a graph wide enough to carry them: no
+        # wrap, because the column is no taller than the flow is wide.
+        sources = ["s%d" % i for i in range(6)]
+        sizes = {"sink": (9000.0, 400.0)}
+        sizes.update({s: (9000.0, 2000.0) for s in sources})
+        pos = nl.layout_graph(sizes, [(s, "sink") for s in sources])
+        self.assertEqual(len({pos[s][0] for s in sources}), 1)
+        _assert_no_overlap(self, sizes, pos)
+
     def test_wrap_chunks_the_ordered_layer_contiguously(self):
-        # Indistinguishable sources keep insertion order, so the wrap is
-        # [0:12], [12:24], [24:] and the singleton is the last source.
+        # Indistinguishable sources keep insertion order, so each wrapped
+        # sub-column is a run of neighbors, never a shuffle.
         sources = ["s%d" % i for i in range(25)]
         sizes = _sizes("sink", *sources)
         pos = nl.layout_graph(sizes, [(s, "sink") for s in sources])
-        last_x = pos["s24"][0]
-        self.assertEqual(
-            [s for s in sources if pos[s][0] == last_x], ["s24"]
-        )
-        self.assertEqual(
-            len([s for s in sources if pos[s][0] == pos["s0"][0]]),
-            nl.MAX_COLUMN_NODES,
-        )
-
-    def test_tall_fan_wraps_by_height_not_count(self):
-        # Six 1500px rows are only six nodes but 9000+ units: each must
-        # take its own column, forming a readable row beside the sink.
-        # (A count cap alone would pile them into one column.)
-        sources = ["s%d" % i for i in range(6)]
-        sizes = {"sink": (200.0, 100.0)}
-        sizes.update({s: (200.0, 1500.0) for s in sources})
-        pos = nl.layout_graph(sizes, [(s, "sink") for s in sources])
-        self.assertEqual(len({pos[s][0] for s in sources}), 6)
-        self.assertLess(
-            max(pos[s][0] for s in sources), pos["sink"][0]
-        )
-        _assert_no_overlap(self, sizes, pos)
-
-    def test_wrapped_slices_cascade_down_right(self):
-        # Equal-height slices recenter identically, so their origins differ
-        # by exactly one cascade step: the wrapped layer reads diagonal.
-        sources = ["s%d" % i for i in range(24)]
-        sizes = _sizes("sink", *sources)
-        pos = nl.layout_graph(sizes, [(s, "sink") for s in sources])
-        first_x, second_x = sorted({pos[s][0] for s in sources})
-        y0 = min(pos[s][1] for s in sources if pos[s][0] == first_x)
-        y1 = min(pos[s][1] for s in sources if pos[s][0] == second_x)
-        self.assertEqual(y1 - y0, nl.CASCADE_DY)
+        by_column = {}
+        for source in sources:
+            by_column.setdefault(pos[source][0], []).append(source)
+        self.assertGreater(len(by_column), 1)
+        seen = 0
+        for x in sorted(by_column):
+            chunk = by_column[x]
+            self.assertEqual(chunk, sources[seen:seen + len(chunk)])
+            seen += len(chunk)
+        self.assertEqual(seen, len(sources))
 
     def test_zero_height_rows_fall_back_to_the_count_cap(self):
-        # Never-laid-out rows report height 0 and would absorb any height
-        # cap whole; the count cap bounds the slice instead: [12, 12, 6].
+        # Never-laid-out rows report height 0, so no height cap can bound
+        # them; the count cap does: [12, 12, 6].
         sources = ["s%d" % i for i in range(30)]
         sizes = {"sink": (200.0, 100.0)}
         sizes.update({s: (200.0, 0.0) for s in sources})
         pos = nl.layout_graph(sizes, [(s, "sink") for s in sources])
         self.assertEqual(len({pos[s][0] for s in sources}), 3)
+        self.assertEqual(
+            len([s for s in sources if pos[s][0] == pos["s0"][0]]),
+            nl.MAX_COLUMN_NODES,
+        )
         self.assertEqual(len(pos), 31)
 
-    def test_many_components_tile_into_rows(self):
-        # A hundred isolated nodes must flow into a grid, not one strip:
-        # 200-wide pieces against a ~1400 target row fit four across.
+
+@unittest.skipUnless(_has_layout, "UsdNoodles.nodeLayout unavailable")
+class TestSingletons(unittest.TestCase):
+    def test_singletons_park_below_the_connected_block(self):
+        sizes = _sizes("A", "B", "x", "y", "z")
+        pos = nl.layout_graph(sizes, [("A", "B")])
+        flow_bottom = max(pos[n][1] + sizes[n][1] for n in ("A", "B"))
+        for node_id in ("x", "y", "z"):
+            self.assertGreaterEqual(
+                pos[node_id][1], flow_bottom + 2.0 * nl.ROW_GAP
+            )
+        _assert_no_overlap(self, sizes, pos)
+
+    def test_singletons_never_widen_the_flow(self):
+        # Parked underneath, the grid costs the flow no horizontal room:
+        # the wired pair sits exactly where it would with no scopes at all.
+        sizes = _sizes("A", "B", *["s%d" % i for i in range(20)])
+        pos = nl.layout_graph(sizes, [("A", "B")])
+        bare = nl.layout_graph(_sizes("A", "B"), [("A", "B")])
+        self.assertEqual(pos["A"], bare["A"])
+        self.assertEqual(pos["B"], bare["B"])
+
+    def test_many_singletons_tile_into_rows(self):
+        # A hundred unwired nodes must flow into a grid, not one strip:
+        # 200-wide nodes against a ~1400 target row fit four across.
         ids = ["n%d" % i for i in range(100)]
         pos = nl.layout_graph(_sizes(*ids), [])
         self.assertEqual(len(pos), 100)
@@ -232,6 +342,9 @@ class TestLayoutGraph(unittest.TestCase):
         self.assertEqual(len(rows), 25)
         _assert_no_overlap(self, _sizes(*ids), pos)
 
+
+@unittest.skipUnless(_has_layout, "UsdNoodles.nodeLayout unavailable")
+class TestDeterminism(unittest.TestCase):
     def test_deterministic_under_edge_reorder(self):
         sizes = {n: (200.0, 100.0) for n in "ABCDEFGH"}
         edges = [
@@ -241,6 +354,41 @@ class TestLayoutGraph(unittest.TestCase):
         first = nl.layout_graph(sizes, edges)
         second = nl.layout_graph(sizes, list(reversed(edges)))
         self.assertEqual(first, second)
+
+    def test_shuffled_edges_lay_out_identically(self):
+        rng = Random(20260918)
+        ids = ["n%d" % i for i in range(40)]
+        sizes = {n: (200.0 + 40.0 * (i % 4), 100.0 + 30.0 * (i % 5))
+                 for i, n in enumerate(ids)}
+        edges = []
+        for i in range(39):
+            edges.append((ids[i], ids[i + 1], 10.0 * (i % 3), 20.0 * (i % 4)))
+        for i in range(0, 36, 3):
+            edges.append((ids[i], ids[i + 3], 5.0, 15.0))
+        expected = nl.layout_graph(sizes, edges)
+        for _ in range(5):
+            shuffled = list(edges)
+            rng.shuffle(shuffled)
+            self.assertEqual(nl.layout_graph(sizes, shuffled), expected)
+
+    def test_shuffled_nodes_still_place_everything(self):
+        # Node insertion order IS the tie-break, so the picture may
+        # differ; what may not differ is that every node is placed, once,
+        # without overlap, and without blowing up.
+        rng = Random(4242)
+        ids = ["n%d" % i for i in range(40)]
+        sizes = {n: (200.0, 100.0 + 20.0 * (i % 6)) for i, n in enumerate(ids)}
+        edges = [(ids[i], ids[i + 1]) for i in range(39)]
+        edges += [(ids[i], ids[i + 5]) for i in range(0, 30, 5)]
+        for _ in range(5):
+            order = list(ids)
+            rng.shuffle(order)
+            shuffled_sizes = {n: sizes[n] for n in order}
+            shuffled_edges = list(edges)
+            rng.shuffle(shuffled_edges)
+            pos = nl.layout_graph(shuffled_sizes, shuffled_edges)
+            self.assertEqual(set(pos), set(ids))
+            _assert_no_overlap(self, sizes, pos)
 
     def test_fuzz_never_overlaps_and_places_everything(self):
         rng = Random(20260918)
@@ -252,7 +400,8 @@ class TestLayoutGraph(unittest.TestCase):
                 for node_id in ids
             }
             edges = [
-                (rng.choice(ids), rng.choice(ids)) for _ in range(count * 3)
+                (rng.choice(ids), rng.choice(ids), rng.randrange(80), rng.randrange(80))
+                for _ in range(count * 3)
             ]
             pos = nl.layout_graph(sizes, edges)
             self.assertEqual(set(pos), set(ids), "trial %d" % trial)
@@ -272,7 +421,7 @@ class TestLayoutGraph(unittest.TestCase):
         pos = nl.layout_graph(sizes, edges)
         elapsed = time.time() - started
         self.assertEqual(len(pos), layers * width)
-        # ~30ms measured; the bound only catches algorithmic blowups.
+        # ~60ms measured; the bound only catches algorithmic blowups.
         self.assertLess(elapsed, 5.0, "3000-node layout took %.2fs" % elapsed)
 
 

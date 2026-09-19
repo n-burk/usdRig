@@ -3328,12 +3328,20 @@ class GraphView(QGLWidget):
         """Arrange every node left-to-right by connection (L / context menu).
 
         Layered layout over every rendered link (see :mod:`nodeLayout`):
-        sources left, sinks right, cycles sharing a column, over-tall
-        layers wrapped into staggered sub-columns, components tiled into
-        rows. Attribute and relationship links rank alike -- any noodle
-        on the canvas is a connection the user reads, so all of them lay
-        out. Only dangling links (an endpoint off the canvas) are skipped.
-        The new positions are authored to USD as a single undo step.
+        sources left, sinks right, cycles sharing a column, over-full
+        layers wrapped into sub-columns, components tiled into rows and
+        unwired nodes parked in a grid below. Attribute and relationship
+        links rank alike -- any noodle on the canvas is a connection the
+        user reads, so all of them lay out. Only dangling links (an
+        endpoint off the canvas) are skipped. The new positions are
+        authored to USD as a single undo step.
+
+        Each link also carries the y offset of its own two endpoints,
+        taken from the endpoints the renderer already resolved: on a node
+        two thousand pixels tall, "line the boxes up" still leaves the
+        noodle sweeping the whole height, so the layout lines up the
+        PINS. A link whose endpoints are not resolved yet falls back to
+        the plain pair, which aims at the node centres instead.
         """
         if not self.nodes:
             return
@@ -3342,11 +3350,30 @@ class GraphView(QGLWidget):
             node_id: (float(node.size[0]), float(node.size[1]))
             for node_id, node in self.nodes.items()
         }
-        edges = [
-            (link.sourceNodeId, link.targetNodeId)
-            for link in self.links
-            if link.sourceNodeId in sizes and link.targetNodeId in sizes
-        ]
+        edges = []
+        for link in self.links:
+            src = link.sourceNodeId
+            dst = link.targetNodeId
+            if src not in sizes or dst not in sizes:
+                continue
+            start = getattr(link, "start", None)
+            end = getattr(link, "end", None)
+            try:
+                start_y = float(start[1])
+                end_y = float(end[1])
+            except (TypeError, IndexError, ValueError):
+                edges.append((src, dst))
+                continue
+            source_node = self.nodes[src]
+            target_node = self.nodes[dst]
+            edges.append(
+                (
+                    src,
+                    dst,
+                    start_y - float(source_node.position[1]),
+                    end_y - float(target_node.position[1]),
+                )
+            )
         positions = layout_graph(sizes, edges)
         if not positions:
             return

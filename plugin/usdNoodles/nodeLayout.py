@@ -6,14 +6,15 @@
 #
 
 
-"""Layered left-to-right auto-layout for the node graph.
+"""Outline-tree auto-layout for the node graph.
 
 Two entry points, both pure (plain dicts and tuples in and out -- no Qt,
-no GL, no USD), deterministic (no jitter, stable tie-breaks), and linear:
+no GL, no USD), deterministic (no jitter, stable tie-breaks) and linear
+in the graph plus the skyline merges:
 
-* :func:`layout_graph` arranges a whole graph: connections run left to
-  right, cycles share a layer, over-tall layers wrap into staggered
-  sub-columns, and disconnected components tile into rows.
+* :func:`layout_graph` arranges a whole graph: every node hangs off the
+  node that feeds it, grouped by WHICH ROW of that node feeds it, cycles
+  share a column, and unwired nodes park in a grid underneath.
 * :func:`place_node` positions ONE new node beside the neighbors it wires
   to, for the add-node path where everything else must stay put.
 
@@ -23,11 +24,36 @@ is a connection the layout should respect. Only dangling endpoints (a
 node off the canvas) are dropped, by the caller, since there is nothing
 to rank them against.
 
+The shape is an outline, not a set of layers. A rig node is a list of
+rows, and the rows are the meaning: the joints driven by one solver hang
+off a single row of it, and the reader wants that answer to the question
+"what does this row drive" to be one horizontal sweep of the eye. So:
+
+* dependents fed by the SAME row of a node run left to right, one per
+  column, at one height -- a row of nodes for a row of the parent;
+* dependents fed by DIFFERENT rows stack vertically in the order the rows
+  appear in the parent, so scanning down the parent is scanning down the
+  picture;
+* a node sits vertically centred on the children it feeds, so the fan of
+  links leaves its pin column and opens out symmetrically;
+* a node that also depends on something deeper is pushed right past it,
+  since a column is a depth and depth is what puts a node after its
+  inputs.
+
+Three things follow, and they are why this is not a layered layout with
+extra rules. Each node takes exactly ONE parent, the first one that
+feeds it, because an outline needs a single home per entry and that home
+is the row it was introduced in; every other in-edge is drawn but places
+nothing beyond pushing the node further right. Blocks are kept apart by a
+per-column SKYLINE rather than a bounding box, so one tall sink at the
+end of a row does not shove the unrelated block below it down by its
+whole height. And a child's column is its parent's plus its position in
+its row, which is what turns "same row" into "consecutive columns".
+
 Cycles are best effort by construction: strongly connected components are
-condensed before layering, so no feedback edge can stretch the layering
-or loop it -- cycle members share one layer and are ordered as a block,
-which keeps the contending groups adjacent instead of smeared across
-columns.
+condensed first, so no feedback edge can loop the recursion or stretch
+the columns. A cycle is one entry of the outline, its members stacked in
+one column.
 """
 
 from __future__ import annotations
@@ -39,105 +65,98 @@ from statistics import median
 COLUMN_GAP = 150.0
 ROW_GAP = 60.0
 
-# A layer taller than this wraps into staggered sub-columns instead of
-# one unreadable pile: same logical layer (no ordering is implied between
-# the sub-columns), consecutive x positions, each packed and relaxed on
-# its own. The cap is a HEIGHT, not a count, because readability is
-# height: twelve 100px rows are a fine column, but rig nodes run 500 to
-# 3000px tall, and a handful of those already needs staggering. Tall fans
-# land one-per-column and relax into a readable row beside their node.
-MAX_COLUMN_HEIGHT = 3000.0
-
-# Second wrap cap, whichever bites first: past twelve rows a slice wraps
-# even when short, so small-node fans stay narrow, while the height cap
-# above wraps tall fans sooner. Zero-height (never laid out) rows would
-# absorb any height cap whole, which is what makes the count cap load
-# bearing rather than redundant.
+# Kept for callers and tests that import it. The outline tree has no
+# use for it: a row of dependents is as long as the row of the parent
+# that feeds it, and cutting that run in half would hide exactly the
+# relationship the layout exists to show.
 MAX_COLUMN_NODES = 12
 
-# Down-right step per wrapped slice: after relaxation centers each slice
-# on its neighbors, slice origins cascade one row-gap each, so a wrapped
-# layer reads as a diagonal staircase instead of aligned stripes. Uniform
-# per-slice shifts over x-disjoint slices cannot overlap anything.
-CASCADE_DY = ROW_GAP
-
-# Barycenter crossing-reduction sweeps and vertical-relaxation passes for
-# the full layout. Small constants: each sweep is O(edges), and two is
-# where the visible gain stops.
-_BARYCENTER_SWEEPS = 2
-_RELAX_PASSES = 2
+# Column gap as a fraction of the steepest link crossing it, clamped into
+# ``[COLUMN_GAP, _MAX_GAP_FACTOR * COLUMN_GAP]``. Only links between
+# NEIGHBORING columns count: a link that reaches across several columns
+# already has all the horizontal run its curve could want, while a fan
+# from one pin down to the next column over is the case that renders as a
+# vertical stripe unless the gap opens up.
+_GAP_SLOPE = 0.35
+_MAX_GAP_FACTOR = 6.0
 
 
 def layout_graph(sizes, edges):
     """``{node_id: (x, y)}`` for every id in *sizes*.
 
-    *sizes* maps each id to its ``(width, height)``; *edges* is an
-    iterable of ``(source_id, target_id)`` data-flow pairs. Edges with an
-    endpoint missing from *sizes* and self-loops are ignored. Runs in
-    O(V + E) with small constants.
+    *sizes* maps each id to its ``(width, height)``. *edges* is an
+    iterable of ``(source_id, target_id)`` data-flow pairs, or of
+    ``(source_id, target_id, source_dy, target_dy)`` where the offsets
+    locate each end of the noodle relative to its own node's top edge.
+    ``source_dy`` is what groups a node's dependents into rows; a 2-tuple
+    defaults both offsets to the node's half height, which puts every
+    dependent of that node in one row.
+
+    Edges with an endpoint missing from *sizes* and self-loops are
+    ignored. Nodes left with no edge at all lay out as a grid below
+    everything that is wired.
     """
     ids = list(sizes)
     if not ids:
         return {}
     index_of = {node_id: i for i, node_id in enumerate(ids)}
-    succ, pred = _adjacency(ids, edges, index_of)
+    succ, pred, incident, pin_dy = _adjacency(ids, edges, index_of, sizes)
 
-    pieces = []
-    for component in _components(ids, succ, pred, index_of):
-        local = _layout_component(component, sizes, succ, pred, index_of)
-        if not local:
-            continue
-        left = min(x for x, _y in local.values())
-        top = min(y for _x, y in local.values())
-        right = max(x + sizes[n][0] for n, (x, _y) in local.items())
-        bottom = max(y + sizes[n][1] for n, (_x, y) in local.items())
-        pieces.append((local, right - left, bottom - top))
-    return _tile_components(pieces)
-
-
-def _tile_components(pieces):
-    """``{node_id: (x, y)}`` with components flowed into rows.
-
-    Every component lays out from its own origin; stacking them all in
-    one strip piles hundreds of graphs into the same x band, which reads
-    as one giant column. Instead they shelf-pack left to right, wrapping
-    to a new row past a square-ish target width, largest first (the order
-    they arrive in). A single component is one row and never moves.
-    """
-    if not pieces:
-        return {}
-    if len(pieces) == 1:
-        (local, _w, _h), = pieces
-        left = min(x for x, _y in local.values())
-        top = min(y for _x, y in local.values())
-        return {n: (x - left, y - top) for n, (x, y) in local.items()}
-
-    total_area = sum(w * h for _local, w, h in pieces)
-    row_target = max(
-        max(w for _local, w, _h in pieces), total_area**0.5
-    )
-    rows = [[]]
-    row_widths = [0.0]
-    for piece in pieces:
-        _local, w, _h = piece
-        if rows[-1] and row_widths[-1] + COLUMN_GAP + w > row_target:
-            rows.append([])
-            row_widths.append(0.0)
-        rows[-1].append(piece)
-        row_widths[-1] += (COLUMN_GAP if row_widths[-1] else 0.0) + w
+    wired = [node_id for node_id in ids if incident[node_id]]
+    # Scopes and other unwired prims: they have no place in the outline,
+    # so the outline should not have to make room for them.
+    singletons = [node_id for node_id in ids if not incident[node_id]]
 
     positions = {}
-    y_cursor = 0.0
+    if wired:
+        positions = _layout_outline(
+            wired, sizes, succ, incident, pin_dy, index_of
+        )
+    _place_singletons(positions, singletons, sizes)
+    return positions
+
+
+def _place_singletons(positions, singletons, sizes):
+    """Shelf-pack the unwired nodes into a grid below *positions*.
+
+    A rig is mostly scopes: unwired prims outnumber the operators and,
+    threaded into the outline, they wedge between the trees and push the
+    flow apart. Parked underneath in reading order they stay findable and
+    cost the outline no room at all. The grid is as wide as the wired
+    block (or square, whichever is wider), so it reads as a footer rather
+    than as a second graph. A graph with nothing wired is just the grid.
+    """
+    if not singletons:
+        return positions
+    if positions:
+        left = min(x for x, _y in positions.values())
+        right = max(x + sizes[n][0] for n, (x, _y) in positions.items())
+        bottom = max(y + sizes[n][1] for n, (_x, y) in positions.items())
+        width = right - left
+        top = bottom + 2.0 * ROW_GAP
+    else:
+        left, width, top = 0.0, 0.0, 0.0
+
+    area = sum(sizes[n][0] * sizes[n][1] for n in singletons)
+    row_target = max(width, area**0.5)
+    rows = [[]]
+    row_widths = [0.0]
+    for node_id in singletons:
+        node_width = sizes[node_id][0]
+        if rows[-1] and row_widths[-1] + COLUMN_GAP + node_width > row_target:
+            rows.append([])
+            row_widths.append(0.0)
+        rows[-1].append(node_id)
+        row_widths[-1] += (COLUMN_GAP if row_widths[-1] else 0.0) + node_width
+
+    y_cursor = top
     for row in rows:
-        x_cursor = 0.0
+        x_cursor = left
         row_height = 0.0
-        for local, w, h in row:
-            left = min(x for x, _y in local.values())
-            top = min(y for _x, y in local.values())
-            for node_id, (x, y) in local.items():
-                positions[node_id] = (x - left + x_cursor, y - top + y_cursor)
-            x_cursor += w + COLUMN_GAP
-            row_height = max(row_height, h)
+        for node_id in row:
+            positions[node_id] = (x_cursor, y_cursor)
+            x_cursor += sizes[node_id][0] + COLUMN_GAP
+            row_height = max(row_height, sizes[node_id][1])
         y_cursor += row_height + ROW_GAP
     return positions
 
@@ -169,57 +188,45 @@ def place_node(size, predecessors, successors, occupants, fallback):
     return (x, _first_free_y(x, width, preferred_y, height, occupants))
 
 
-def _adjacency(ids, edges, index_of):
-    """Deduplicated ``(successors, predecessors)`` maps over *ids*.
+def _adjacency(ids, edges, index_of, sizes):
+    """``(successors, predecessors, incident, pin_dy)`` over *ids*.
+
+    The first two are deduplicated per node pair. *incident* keeps every
+    edge, both ways round, as ``(other, other_dy, own_dy)``, which is
+    what the column gaps measure their steepness from. *pin_dy* maps each
+    ``(source, target)`` pair to the SMALLEST source offset that joins
+    them, so a target wired to two rows of one source hangs off the upper
+    row and appears in the outline once.
 
     Self-loops and edges naming ids outside *sizes* are dropped: a loop
-    is not a layering constraint, and a dangling endpoint names a node
-    that is not on the canvas.
+    is not a depth constraint, and a dangling endpoint names a node that
+    is not on the canvas.
     """
     succ = {node_id: set() for node_id in ids}
     pred = {node_id: set() for node_id in ids}
-    for src, dst in edges:
+    incident = {node_id: [] for node_id in ids}
+    pin_dy = {}
+    for edge in edges:
+        src, dst = edge[0], edge[1]
         if src == dst or src not in pred or dst not in pred:
             continue
-        if dst not in succ[src]:
-            succ[src].add(dst)
-            pred[dst].add(src)
+        if len(edge) >= 4:
+            src_dy, dst_dy = float(edge[2]), float(edge[3])
+        else:
+            src_dy = sizes[src][1] * 0.5
+            dst_dy = sizes[dst][1] * 0.5
+        incident[src].append((dst, dst_dy, src_dy))
+        incident[dst].append((src, src_dy, dst_dy))
+        pair = (src, dst)
+        if pair not in pin_dy or src_dy < pin_dy[pair]:
+            pin_dy[pair] = src_dy
+        succ[src].add(dst)
+        pred[dst].add(src)
     # Sorted neighbor lists keep every downstream traversal deterministic.
     for node_id in ids:
         succ[node_id] = sorted(succ[node_id], key=index_of.__getitem__)
         pred[node_id] = sorted(pred[node_id], key=index_of.__getitem__)
-    return succ, pred
-
-
-def _components(ids, succ, pred, index_of):
-    """Undirected connected components, largest first.
-
-    Order is ``(-size, min member index)`` so repeated layouts of the
-    same graph stack components identically.
-    """
-    parent = {node_id: node_id for node_id in ids}
-
-    def find(node_id):
-        root = node_id
-        while parent[root] != root:
-            root = parent[root]
-        while parent[node_id] != root:
-            parent[node_id], node_id = root, parent[node_id]
-        return root
-
-    for node_id in ids:
-        for other in succ[node_id]:
-            ra, rb = find(node_id), find(other)
-            if ra != rb:
-                parent[max(ra, rb, key=index_of.__getitem__)] = min(
-                    ra, rb, key=index_of.__getitem__
-                )
-    groups = {}
-    for node_id in ids:
-        groups.setdefault(find(node_id), []).append(node_id)
-    return sorted(
-        groups.values(), key=lambda g: (-len(g), index_of[g[0]])
-    )
+    return succ, pred, incident, pin_dy
 
 
 def _strongly_connected(component, succ):
@@ -275,224 +282,321 @@ def _strongly_connected(component, succ):
     return member_to_group, groups
 
 
-def _layering(component, succ, pred, index_of):
-    """``(columns, block_of, block_rank)`` by longest path over condensed SCCs.
+def _row_groups(group, members, succ, group_of, pin_dy, index_of, min_index):
+    """The group's dependents, bucketed by the row that feeds them.
 
-    Condensing first is what makes cycles best effort instead of fatal:
-    every feedback edge stays inside one group, so layering sees a DAG
-    and cycle members land in one column however tangled they are.
-    ``block_of`` maps each node to its cycle group and ``block_rank`` each
-    group to its lowest member index, for block-aware ordering.
+    Returns a list of lists: one list per source row, rows top to bottom,
+    dependents within a row in input order. A dependent reached from
+    several rows belongs to the topmost one only, so it appears in the
+    outline exactly once. A cycle's rows are read member by member, in
+    member order, which keeps a condensed group's outline as stable as a
+    plain node's.
     """
-    member_to_group, groups = _strongly_connected(component, succ)
-    dag_succ = [set() for _ in groups]
-    indegree = [0] * len(groups)
-    for node_id in component:
-        here = member_to_group[node_id]
-        for nxt in succ[node_id]:
-            there = member_to_group[nxt]
-            if there != here and there not in dag_succ[here]:
-                dag_succ[here].add(there)
-                indegree[there] += 1
-    # Kahn's algorithm, deterministic: the ready group with the lowest
-    # member index lays out first.
-    ready = [
-        (min(index_of[m] for m in groups[g]), g)
-        for g in range(len(groups))
-        if indegree[g] == 0
-    ]
+    best = {}
+    for position, member in enumerate(members):
+        for nxt in succ[member]:
+            target = group_of[nxt]
+            if target == group:
+                continue
+            key = (position, pin_dy[(member, nxt)])
+            if target not in best or key < best[target]:
+                best[target] = key
+    buckets = {}
+    for target, key in best.items():
+        buckets.setdefault(key, []).append(target)
+    rows = []
+    for key in sorted(buckets):
+        rows.append(sorted(buckets[key], key=min_index.__getitem__))
+    return rows
+
+
+def _columns(rows_of, predecessors_of, groups, index_of):
+    """Depth of every group, in columns, by longest weighted path.
+
+    The weight is what makes a row a row: the i-th dependent of a row
+    sits at least ``i + 1`` columns past its parent, so the row runs left
+    to right instead of stacking. Every other in-edge still pushes its
+    target right, which is how a node that also depends on something
+    deeper lands past it.
+
+    Sources are then pulled right, to the tightest column their own rows
+    allow. Longest path leaves every source in column zero, which strands
+    a constant used once, deep in the graph, the whole width of the
+    canvas from its only consumer. Only sources move, and only right, so
+    no node can overtake a predecessor -- it has none.
+    """
+    count = len(groups)
+    min_index = [min(index_of[m] for m in members) for members in groups]
+    indegree = [len(predecessors_of[g]) for g in range(count)]
+    ready = [(min_index[g], g) for g in range(count) if not indegree[g]]
     heapq.heapify(ready)
-    group_layer = [0] * len(groups)
+    columns = [0] * count
     while ready:
         _, group = heapq.heappop(ready)
-        for nxt in dag_succ[group]:
-            if group_layer[nxt] < group_layer[group] + 1:
-                group_layer[nxt] = group_layer[group] + 1
-            indegree[nxt] -= 1
-            if indegree[nxt] == 0:
-                heapq.heappush(
-                    ready, (min(index_of[m] for m in groups[nxt]), nxt)
-                )
-    layers = {}
-    for node_id in component:
-        layers[node_id] = group_layer[member_to_group[node_id]]
-    columns = {}
-    for node_id in component:
-        columns.setdefault(layers[node_id], []).append(node_id)
-    ordered = [columns[k] for k in sorted(columns)]
-    block_rank = {
-        group: min(index_of[m] for m in members)
-        for group, members in enumerate(groups)
-    }
-    return ordered, member_to_group, block_rank
+        for row in rows_of[group]:
+            for i, target in enumerate(row):
+                if columns[target] < columns[group] + 1 + i:
+                    columns[target] = columns[group] + 1 + i
+                indegree[target] -= 1
+                if not indegree[target]:
+                    heapq.heappush(ready, (min_index[target], target))
+    for group in range(count):
+        if predecessors_of[group]:
+            continue
+        tightest = None
+        for row in rows_of[group]:
+            for i, target in enumerate(row):
+                slot = columns[target] - 1 - i
+                if tightest is None or slot < tightest:
+                    tightest = slot
+        if tightest is not None:
+            columns[group] = tightest
+    base = min(columns)
+    return [column - base for column in columns], min_index
 
 
-def _order_layers(columns, succ, pred, index_of, block_of, block_rank):
-    """Barycenter crossing reduction, two sweeps, in place.
+def _tree_parents(predecessors_of, columns, min_index):
+    """One home per node: the first thing that feeds it.
 
-    Cycle members order as one block (shared barycenter key), so a
-    feedback pair is never split apart by an unrelated row sliding
-    between its members. Each sweep is O(edges in the layer pair).
+    An outline entry sits under one heading, and of everything that feeds
+    a node the earliest -- leftmost -- is the one whose row it belongs
+    to. Every other in-edge stays drawn but places nothing: it has
+    already had its say, by pushing this node further right.
+
+    Filing a node under its NEAREST feeder instead would read as well on
+    paper and keeps the tree links shorter, but it moves a node out of
+    the row that introduced it: a joint chain's last link would adopt the
+    node the source also drives, lifting it out of the source's bottom
+    row and into the joint row. Ties go to the earliest input, so the
+    choice never depends on set order.
     """
-    for sweep in range(_BARYCENTER_SWEEPS):
-        if sweep % 2 == 0:
-            pairs = [
-                (moving, fixed, pred)
-                for fixed, moving in zip(columns[:-1], columns[1:])
-            ]
+    parents = []
+    for group, feeders in enumerate(predecessors_of):
+        best = None
+        for feeder in feeders:
+            key = (columns[feeder], min_index[feeder])
+            if best is None or key < best[0]:
+                best = (key, feeder)
+        parents.append(best[1] if best else None)
+    return parents
+
+
+def _clearance(base, incoming):
+    """Smallest downward shift that drops *incoming* clear of *base*.
+
+    Both are skylines: ``{column: (top, bottom)}``. Only shared columns
+    can collide, which is the whole point of keeping a skyline instead of
+    a bounding box -- a block only pays for the columns it actually
+    occupies, so a tall sink at the end of one row does not push the next
+    row down past its own height.
+    """
+    if not base or not incoming:
+        return 0.0
+    shift = 0.0
+    if len(incoming) <= len(base):
+        for column, span in incoming.items():
+            other = base.get(column)
+            if other is not None and other[1] + ROW_GAP - span[0] > shift:
+                shift = other[1] + ROW_GAP - span[0]
+    else:
+        for column, span in base.items():
+            other = incoming.get(column)
+            if other is not None and span[1] + ROW_GAP - other[0] > shift:
+                shift = span[1] + ROW_GAP - other[0]
+    return shift
+
+
+def _merge(base, incoming, shift):
+    """*base* widened to cover *incoming* moved down by *shift*.
+
+    An empty base with nothing to shift adopts the incoming skyline whole
+    rather than copying it, which keeps a long chain of only children
+    linear instead of quadratic. Every skyline is consumed exactly once,
+    by its parent, so there is nobody left to notice.
+    """
+    if not base and not shift:
+        return incoming
+    for column, (top, bottom) in incoming.items():
+        top += shift
+        bottom += shift
+        current = base.get(column)
+        if current is None:
+            base[column] = (top, bottom)
         else:
-            pairs = [
-                (moving, fixed, succ)
-                for fixed, moving in zip(
-                    reversed(columns[1:]), reversed(columns[:-1])
-                )
-            ]
-        for moving, fixed, neighbors in pairs:
-            if not fixed or not moving:
-                continue
-            rank = {node_id: i for i, node_id in enumerate(fixed)}
-            bary = {
-                node_id: _mean(
-                    rank[n] for n in neighbors[node_id] if n in rank
-                )
-                for node_id in moving
-            }
-            sums = {}
-            counts = {}
-            for node_id in moving:
-                value = bary[node_id]
-                if value is None:
-                    continue
-                group = block_of[node_id]
-                sums[group] = sums.get(group, 0.0) + value
-                counts[group] = counts.get(group, 0) + 1
-
-            def _key(node_id):
-                group = block_of[node_id]
-                if group not in counts:
-                    return (True, 0.0, block_rank[group], index_of[node_id])
-                return (
-                    False,
-                    sums[group] / counts[group],
-                    block_rank[group],
-                    index_of[node_id],
-                )
-
-            moving.sort(key=_key)
+            base[column] = (
+                top if top < current[0] else current[0],
+                bottom if bottom > current[1] else current[1],
+            )
+    return base
 
 
-def _mean(values):
-    total = 0.0
-    count = 0
-    for value in values:
-        total += value
-        count += 1
-    return total / count if count else None
+def _layout_outline(wired, sizes, succ, incident, pin_dy, index_of):
+    """``{node_id: (x, y)}`` for every wired node."""
+    group_of, groups = _strongly_connected(wired, succ)
+    # A cycle is one outline entry: its members share a column and stack
+    # inside it, so the block is as wide as its widest member and as tall
+    # as all of them.
+    widths = [max(sizes[m][0] for m in members) for members in groups]
+    heights = [
+        sum(sizes[m][1] for m in members) + ROW_GAP * (len(members) - 1)
+        for members in groups
+    ]
 
+    min_index = [min(index_of[m] for m in members) for members in groups]
+    rows_of = [
+        _row_groups(g, members, succ, group_of, pin_dy, index_of, min_index)
+        for g, members in enumerate(groups)
+    ]
+    predecessors_of = [set() for _ in groups]
+    for group, rows in enumerate(rows_of):
+        for row in rows:
+            for target in row:
+                predecessors_of[target].add(group)
 
-def _layout_component(component, sizes, succ, pred, index_of):
-    """``{node_id: (x, y)}`` for one connected component at local origin."""
-    columns, block_of, block_rank = _layering(component, succ, pred, index_of)
-    _order_layers(columns, succ, pred, index_of, block_of, block_rank)
+    columns, min_index = _columns(rows_of, predecessors_of, groups, index_of)
+    parents = _tree_parents(predecessors_of, columns, min_index)
+    children_of = []
+    for group, rows in enumerate(rows_of):
+        kept_rows = []
+        for row in rows:
+            kept = [t for t in row if parents[t] == group]
+            if kept:
+                kept_rows.append(kept)
+        children_of.append(kept_rows)
 
-    # Over-tall layers wrap into staggered sub-columns: contiguous chunks
-    # of the ordered layer, so barycenter-adjacent rows stay neighbors.
-    # Each sub-column gets its own x slot, packing and relaxation.
-    # ``slice_index`` counts slices within their layer (reset per layer)
-    # for the diagonal cascade below.
-    sub_columns = []
-    slice_index = []
-    for column in columns:
-        for index, chunk in enumerate(_wrap_column(column, sizes)):
-            sub_columns.append(chunk)
-            slice_index.append(index)
-    home_of = {}
-    for slot, sub in enumerate(sub_columns):
-        for node_id in sub:
-            home_of[node_id] = slot
+    roots = sorted(
+        (g for g in range(len(groups)) if parents[g] is None),
+        key=min_index.__getitem__,
+    )
+    # Post-order without recursion: a rig chain can be deeper than the
+    # interpreter's stack allows, and an arrange must never raise.
+    visit = list(reversed(roots))
+    post = []
+    while visit:
+        group = visit.pop()
+        post.append(group)
+        for row in children_of[group]:
+            visit.extend(row)
+    post.reverse()
 
-    widths = [max(sizes[n][0] for n in sub) for sub in sub_columns]
-    xs = []
-    cursor = 0.0
-    for width in widths:
-        xs.append(cursor)
-        cursor += width + COLUMN_GAP
+    own_y = [0.0] * len(groups)
+    child_dy = [0.0] * len(groups)
+    skyline = [None] * len(groups)
+    for group in post:
+        block = {}
+        first = last = None
+        for row in children_of[group]:
+            # One row of dependents, left to right at one height -- each
+            # only pushed down if its own subtree would land on the one
+            # before it in a column they share.
+            row_block = {}
+            placed = []
+            for target in row:
+                shift = _clearance(row_block, skyline[target])
+                placed.append((target, shift))
+                row_block = _merge(row_block, skyline[target], shift)
+                skyline[target] = None
+            drop = _clearance(block, row_block)
+            for target, shift in placed:
+                child_dy[target] = drop + shift
+            block = _merge(block, row_block, drop)
+            if first is None:
+                first = row[0]
+            last = row[-1]
+        if first is None:
+            own_y[group] = 0.0
+        else:
+            # Centred on the children themselves, not on their subtrees:
+            # what the fan of links has to look balanced against is the
+            # nodes it actually reaches.
+            top = child_dy[first] + own_y[first]
+            bottom = child_dy[last] + own_y[last] + heights[last]
+            own_y[group] = (top + bottom) * 0.5 - heights[group] * 0.5
+        block = _merge(
+            block,
+            {columns[group]: (own_y[group], own_y[group] + heights[group])},
+            0.0,
+        )
+        skyline[group] = block
+
+    origin = [0.0] * len(groups)
+    stacked = {}
+    for root in roots:
+        drop = _clearance(stacked, skyline[root])
+        if drop:
+            # Two trees that share columns read as one picture unless the
+            # gap between them is plainly bigger than the gap inside them.
+            drop += ROW_GAP
+        origin[root] = drop
+        stacked = _merge(stacked, skyline[root], drop)
+        skyline[root] = None
+    for group in reversed(post):
+        for row in children_of[group]:
+            for target in row:
+                origin[target] = origin[group] + child_dy[target]
+
+    tops = [origin[g] + own_y[g] for g in range(len(groups))]
+    xs = _column_positions(
+        columns, widths, groups, group_of, incident, tops, sizes
+    )
 
     positions = {}
-    for slot, sub in enumerate(sub_columns):
-        y = 0.0
-        for node_id in sub:
-            positions[node_id] = [xs[slot], y]
-            y += sizes[node_id][1] + ROW_GAP
-
-    # Vertical relaxation: shift whole sub-columns (never reorder) toward
-    # the median of their wired neighbors, so fans center on their stems.
-    # Uniform shifts cannot overlap a sub-column with itself, and
-    # sub-columns are disjoint in x, so no pass can introduce an overlap.
-    for _ in range(_RELAX_PASSES):
-        for slot, sub in enumerate(sub_columns):
-            column_center = median(
-                positions[node_id][1] + sizes[node_id][1] * 0.5
-                for node_id in sub
-            )
-            neighbor_centers = []
-            for node_id in sub:
-                for other in succ[node_id]:
-                    if home_of[other] != slot:
-                        neighbor_centers.append(
-                            positions[other][1] + sizes[other][1] * 0.5
-                        )
-                for other in pred[node_id]:
-                    if home_of[other] != slot:
-                        neighbor_centers.append(
-                            positions[other][1] + sizes[other][1] * 0.5
-                        )
-            if not neighbor_centers:
-                continue
-            shift = median(neighbor_centers) - column_center
-            if shift:
-                for node_id in sub:
-                    positions[node_id][1] += shift
-
-    # Diagonal cascade, AFTER relaxation (which would erase it: slices
-    # sharing one neighbor median recenter identically). Slice origins
-    # step down-right per slice, so a wrapped layer reads as a staircase.
-    # Uniform per-slice shifts over x-disjoint slices cannot overlap.
-    for slot, sub in enumerate(sub_columns):
-        step = slice_index[slot] * CASCADE_DY
-        if step:
-            for node_id in sub:
-                positions[node_id][1] += step
-    return {node_id: (x, y) for node_id, (x, y) in positions.items()}
+    for group, members in enumerate(groups):
+        cursor = tops[group]
+        for member in members:
+            positions[member] = (xs[columns[group]], cursor)
+            cursor += sizes[member][1] + ROW_GAP
+    top = min(y for _x, y in positions.values())
+    return {n: (x, y - top) for n, (x, y) in positions.items()}
 
 
-def _wrap_column(column, sizes):
-    """Contiguous row-chunks of *column* within both caps.
+def _column_positions(columns, widths, groups, group_of, incident, tops, sizes):
+    """x of every column, the gap widening for the steepest link.
 
-    Rows accumulate until the next would exceed MAX_COLUMN_HEIGHT or the
-    chunk reaches MAX_COLUMN_NODES; every chunk holds at least one row.
-    Chunk height counts packed rows plus the gaps between them (no
-    trailing gap), exactly as the packing above lays them out.
+    A bezier is drawn with horizontal tangents, so its rise has to fit
+    inside its run: at the 150px minimum a link that drops a thousand
+    pixels renders as a vertical stripe through whatever is behind it. A
+    row of dependents hangs off one pin and drops away from it, so this
+    is the common case, not the exception.
     """
-    chunks = []
-    current = []
-    current_height = 0.0
-    for node_id in column:
-        row = sizes[node_id][1]
-        if current and (
-            len(current) >= MAX_COLUMN_NODES
-            or current_height + ROW_GAP + row > MAX_COLUMN_HEIGHT
-        ):
-            chunks.append(current)
-            current = []
-            current_height = 0.0
-        if current:
-            current_height += ROW_GAP
-        current.append(node_id)
-        current_height += row
-    if current:
-        chunks.append(current)
-    return chunks
+    count = max(columns) + 1 if columns else 0
+    column_width = [0.0] * count
+    for group, width in enumerate(widths):
+        if width > column_width[columns[group]]:
+            column_width[columns[group]] = width
+
+    member_top = {}
+    for group, members in enumerate(groups):
+        cursor = tops[group]
+        for member in members:
+            member_top[member] = cursor
+            cursor += sizes[member][1] + ROW_GAP
+
+    spans = [0.0] * max(count - 1, 0)
+    for node_id in member_top:
+        here = columns[group_of[node_id]]
+        for other, other_dy, own_dy in incident[node_id]:
+            there = columns[group_of[other]]
+            # Only the step to the very next column: a link reaching
+            # further already has all the run its curve could want, and
+            # charging every gap it crosses would inflate the whole page.
+            if there != here + 1:
+                continue
+            rise = abs(
+                (member_top[node_id] + own_dy) - (member_top[other] + other_dy)
+            )
+            if rise > spans[here]:
+                spans[here] = rise
+
+    xs = []
+    cursor = 0.0
+    for column in range(count):
+        xs.append(cursor)
+        cursor += column_width[column]
+        if column < count - 1:
+            gap = _GAP_SLOPE * spans[column]
+            cursor += min(max(gap, COLUMN_GAP), _MAX_GAP_FACTOR * COLUMN_GAP)
+    return xs
 
 
 def _first_free_y(x, width, preferred_y, height, occupants):
