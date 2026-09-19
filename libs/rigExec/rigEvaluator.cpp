@@ -3028,7 +3028,8 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
 void
 RigExecRigEvaluator::_EvaluatePoseInterpolators(
     UsdTimeCode time,
-    const std::map<SdfPath, RigExecPointFrame> &restFrames,
+    const std::vector<RigExecPointFrame> &restFrames,
+    const std::vector<char> &restLive,
     const std::vector<RigExecPointFrame> &finalFrames,
     const std::vector<char> &finalLive,
     RigExecRigPose *pose)
@@ -3056,10 +3057,12 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
     // published FINAL frame has not been posed, and its interpolator
     // diagnoses and publishes zeros rather than quietly measuring a rest.
     const auto rotationOf =
-        [](const std::map<SdfPath, RigExecPointFrame> &frames,
-           const SdfPath &path, GfQuatd *out) {
-            const auto it = frames.find(path);
-            return it != frames.end() && RigExecFrameRotation(it->second, out);
+        [&](const SdfPath &path, GfQuatd *out) {
+            const auto fi = _providerIndex.find(path);
+            if (fi == _providerIndex.end() || !restLive[fi->second]) {
+                return false;
+            }
+            return RigExecFrameRotation(restFrames[fi->second], out);
         };
     const auto rotationOfFinal =
         [&](const SdfPath &path, GfQuatd *out) {
@@ -3105,11 +3108,11 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
         GfQuatd driverFinal(1.0), driverRest(1.0);
         GfQuatd parentFinal(1.0), parentRest(1.0);
         if (!rotationOfFinal(interpolator.driver, &driverFinal) ||
-            !rotationOf(restFrames, interpolator.driver, &driverRest) ||
+            !rotationOf(interpolator.driver, &driverRest) ||
             (!interpolator.driverParent.IsEmpty() &&
              (!rotationOfFinal(interpolator.driverParent,
                           &parentFinal) ||
-              !rotationOf(restFrames, interpolator.driverParent,
+              !rotationOf(interpolator.driverParent,
                           &parentRest)))) {
             pose->diagnostics.push_back(
                 "pose interpolator " + interpolator.prim.GetString() +
@@ -10581,7 +10584,8 @@ bool
 RigExecRigEvaluator::_ComposeInterveningXforms(
     const UsdPrim &assetRoot,
     UsdGeomXformCache *xformCache,
-    std::map<SdfPath, RigExecPointFrame> *restFrames,
+    std::vector<RigExecPointFrame> *restFrames,
+    std::vector<char> *restLive,
     std::map<SdfPath, RigExecPointFrame> *baseFrames,
     std::vector<RigExecPointFrame> *finalFrames,
     std::vector<char> *finalLive,
@@ -10666,19 +10670,49 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
     std::map<SdfPath, GfMatrix4d> execRest, execBase;
     for (const SdfPath &provider : ordered) {
         GfMatrix4d m(1.0);
-        if (toMatrix(restFrames->at(provider), &m)) execRest[provider] = m;
+        {
+            const auto ri = _providerIndex.find(provider);
+            if (ri != _providerIndex.end() && (*restLive)[ri->second] &&
+                toMatrix((*restFrames)[ri->second], &m))
+                execRest[provider] = m;
+        }
         m = GfMatrix4d(1.0);
         if (toMatrix(baseFrames->at(provider), &m)) execBase[provider] = m;
     }
 
+    auto correctDense = [&](std::vector<RigExecPointFrame> *frames,
+                            std::vector<char> *live,
+                            const std::map<SdfPath, GfMatrix4d> &exec,
+                            const SdfPath &provider) {
+        const auto own = exec.find(provider);
+        if (own == exec.end()) {
+            return;
+        }
+        const int fi = _providerIndex.at(provider);
+        const SdfPath &anchorPath = anchorOf.at(provider);
+        GfMatrix4d anchorExec(1.0), anchorTrue(1.0);
+        if (!anchorPath.IsEmpty()) {
+            const auto execIt = exec.find(anchorPath);
+            if (execIt != exec.end()) {
+                anchorExec = execIt->second;
+            }
+            const auto ai = _providerIndex.find(anchorPath);
+            GfMatrix4d corrected(1.0);
+            if (ai != _providerIndex.end() && (*live)[ai->second] &&
+                toMatrix((*frames)[ai->second], &corrected)) {
+                anchorTrue = corrected;
+            }
+        }
+        (*frames)[fi] = RigExecFrameFromMatrix(
+            own->second * anchorExec.GetInverse() *
+            intervening.at(provider) * anchorTrue);
+        (*live)[fi] = 1;
+    };
     auto correct = [&](std::map<SdfPath, RigExecPointFrame> *frames,
                        const std::map<SdfPath, GfMatrix4d> &exec,
                        const SdfPath &provider) {
         const auto own = exec.find(provider);
         if (own == exec.end()) {
-            // Degenerate on the way in stays degenerate: a collapsed frame
-            // laundered through a matrix round trip would come back as a
-            // plausible identity and hide the failure.
             return;
         }
         const SdfPath &anchorPath = anchorOf.at(provider);
@@ -10693,21 +10727,13 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
                 anchorTrue = corrected;
             }
         }
-        // frame_true(P) = frame_exec(P) . frame_exec(anchor)^-1 . X(P)
-        //                 . frame_true(anchor)
-        //
-        // The inverse recovers P's own local factor from the composed exec
-        // frame, so X(P) lands BETWEEN P and its anchor rather than after
-        // both. A uniform right-multiply is the same thing only while every
-        // intervening Xform sits above every chain root; put one between two
-        // joints and it applies in the wrong order.
         (*frames)[provider] = RigExecFrameFromMatrix(
             own->second * anchorExec.GetInverse() *
             intervening.at(provider) * anchorTrue);
     };
 
     for (const SdfPath &provider : ordered) {
-        correct(restFrames, execRest, provider);
+        correctDense(restFrames, restLive, execRest, provider);
         correct(baseFrames, execBase, provider);
         // base and final are the same frame at seeding time; final is
         // reassigned rather than corrected again so the two cannot drift.
@@ -11932,7 +11958,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     std::map<SdfPath, RigExecPointFrame> baseFrames;
     std::vector<RigExecPointFrame> finalFrames(_providerPaths.size());
     std::vector<char> finalLive(_providerPaths.size(), 0);
-    std::map<SdfPath, RigExecPointFrame> restFrames;
+    std::vector<RigExecPointFrame> restFrames(_providerPaths.size());
+    std::vector<char> restLive(_providerPaths.size(), 0);
     std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> xformDerivedBases;
     std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> finalMatrices;
     /// Geometry-domain constraint results: the delta each one produced, the
@@ -11997,10 +12024,16 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 return pose;
             }
             for (const auto &[provider, tap] : _restTapIds) {
-                restFrames[provider] = rests.Get<RigExecPointFrame>(tap);
+                const int fi = _providerIndex.at(provider);
+                restFrames[fi] = rests.Get<RigExecPointFrame>(tap);
+                restLive[fi] = 1;
             }
         } else {
-            restFrames = _epochRestFrames;
+            for (const auto &kv : _epochRestFrames) {
+                const int fi = _providerIndex.at(kv.first);
+                restFrames[fi] = kv.second;
+                restLive[fi] = 1;
+            }
         }
     }
     // Everything from here to the pose walk rebuilds the per-provider frame
@@ -12017,9 +12050,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         finalFrames[fi] = frame;
         finalLive[fi] = 1;
         if (!_firstFramePoseRests.empty()) {
-            restFrames.emplace_hint(restFrames.end(), provider,
-                seedSnapshot.Get<RigExecPointFrame>(
-                    _firstFramePoseRests.at(provider)));
+            restFrames[fi] = seedSnapshot.Get<RigExecPointFrame>(
+                _firstFramePoseRests.at(provider));
+            restLive[fi] = 1;
         }
     }
     // Compose the transform of any plain Xformable lying between the asset
@@ -12030,8 +12063,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // authored: the rig follows the Xform the author wrote, wherever they
     // wrote it, and no layer is rewritten.
     if (!_ComposeInterveningXforms(assetRoot, &constraintXformCache,
-                                   &restFrames, &baseFrames, &finalFrames,
-                                   &finalLive, &pose)) {
+                                   &restFrames, &restLive, &baseFrames,
+                                   &finalFrames, &finalLive, &pose)) {
         return pose;
     }
     for (const SdfPath &provider : _xformDerivedProviders) {
@@ -12043,9 +12076,10 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             return pose;
         }
         xformDerivedBases[provider] = matrix;
-        restFrames[provider] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
-        baseFrames[provider] = base;
         const int fi = _providerIndex.at(provider);
+        restFrames[fi] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
+        restLive[fi] = 1;
+        baseFrames[provider] = base;
         finalFrames[fi] = base;
         finalLive[fi] = 1;
     }
@@ -12166,10 +12200,10 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             !finalFrames[fi->second].IsValid()) {
             return;
         }
-        const auto rest = restFrames.find(provider);
+        const auto &restFrame = restFrames[fi->second];
         const auto &landmarks =
-            rest != restFrames.end() && rest->second.IsValid()
-                ? rest->second.points
+            restLive[fi->second] && restFrame.IsValid()
+                ? restFrame.points
                 : RigExecIdentityLandmarks();
         GfMatrix4d matrix(1.0);
         if (RigExecPointsToMatrix(landmarks, finalFrames[fi->second].points, &matrix)) {
@@ -12684,9 +12718,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         haveRest = true;
                     }
                 } else {
-                    const auto frame = restFrames.find(joint);
-                    if (frame != restFrames.end()) {
-                        rest = frame->second;
+                    const auto fi = _providerIndex.find(joint);
+                    if (fi != _providerIndex.end() && restLive[fi->second]) {
+                        rest = restFrames[fi->second];
                         haveRest = true;
                     }
                 }
@@ -12989,12 +13023,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         rest.push_back(chain[i]);
                         continue;
                     }
-                    const auto frame = restFrames.find(joint);
-                    if (frame == restFrames.end()) {
+                    const auto fi = _providerIndex.find(joint);
+                    if (fi == _providerIndex.end() || !restLive[fi->second]) {
                         inputsValid = false;
                         break;
                     }
-                    rest.push_back(frame->second);
+                    rest.push_back(restFrames[fi->second]);
                 }
                 if (!inputsValid ||
                     !RigExecPrepareRestDerivedIkChain(
@@ -13395,12 +13429,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     xformDerivedBases[provider];
             }
         }
-        const auto rest = restFrames.find(provider);
-        if (rest != restFrames.end() &&
-            _IsUsableConstraintFrame(rest->second) &&
+        if (restLive[i] &&
+            _IsUsableConstraintFrame(restFrames[i]) &&
             _IsUsableConstraintFrame(frame)) {
             GfMatrix4d matrix(1.0);
-            if (RigExecPointsToMatrix(rest->second.points, frame.points,
+            if (RigExecPointsToMatrix(restFrames[i].points, frame.points,
                                       &matrix)) {
                 finalMatrices[provider] = matrix;
                 _chainSnapshots.RecordFinal(provider, VtValue(matrix));
@@ -13556,7 +13589,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // consume, so it runs before them. It is not a mover and cannot be one:
     // a mover's inputs are resolved by the property chains, which run before
     // exec does and therefore cannot see the pose at all.
-    _EvaluatePoseInterpolators(time, restFrames, finalFrames, finalLive, &pose);
+    _EvaluatePoseInterpolators(time, restFrames, restLive, finalFrames, finalLive, &pose);
 
     // The independent CPU parity path must consume the same declared
     // provider phase as the graph while resolving it independently.  Capture

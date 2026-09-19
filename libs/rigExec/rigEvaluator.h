@@ -1030,7 +1030,8 @@ private:
     /// _resolvedInputs and into \p pose->movedProperties.
     void _EvaluatePoseInterpolators(
         UsdTimeCode time,
-        const std::map<SdfPath, RigExecPointFrame> &restFrames,
+        const std::vector<RigExecPointFrame> &restFrames,
+        const std::vector<char> &restLive,
         const std::vector<RigExecPointFrame> &finalFrames,
         const std::vector<char> &finalLive,
         RigExecRigPose *pose);
@@ -1305,7 +1306,8 @@ private:
     bool _ComposeInterveningXforms(
         const UsdPrim &assetRoot,
         UsdGeomXformCache *xformCache,
-        std::map<SdfPath, RigExecPointFrame> *restFrames,
+        std::vector<RigExecPointFrame> *restFrames,
+        std::vector<char> *restLive,
         std::map<SdfPath, RigExecPointFrame> *baseFrames,
         std::vector<RigExecPointFrame> *finalFrames,
         std::vector<char> *finalLive,
