@@ -8856,11 +8856,11 @@ RigExecRigEvaluator::_EvaluateChain(
     const SdfPath &target,
     const std::vector<const RigExecMoverRecord *> &chain,
     const RigExecRigPose &pose,
-    const std::map<SdfPath, GfMatrix4d> &baseProviderMatrices,
-    const std::map<SdfPath, GfMatrix4d> &finalProviderMatrices,
+    const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &baseProviderMatrices,
+    const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &finalProviderMatrices,
     UsdTimeCode time,
     std::vector<std::string> *diagnostics,
-    const std::map<SdfPath, GfMatrix4d> &geometryConstraintDeltas) const
+    const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &geometryConstraintDeltas) const
 {
     // The oracle resolves a read phase ITSELF, from the authored metadata,
     // and reads the same recorded snapshots. That keeps it independent of
@@ -11966,7 +11966,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     /// envelope it carries, and its optional per-element weight field.
     /// Produced by the pose walk below and consumed after it, the same
     /// in-memory hand-off finalMatrices performs for a "final" read phase.
-    std::map<SdfPath, GfMatrix4d> constraintDeltas;
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> constraintDeltas;
     const UsdPrim assetRoot =
         _stage->GetPrimAtPath(_rigPath.GetParentPath());
     UsdGeomXformCache constraintXformCache(time);
@@ -13595,35 +13595,39 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // provider phase as the graph while resolving it independently.  Capture
     // every matrix provider the graph taps (controls as well as joints), then
     // overlay the evaluator-side frame revisions for final-phase reads.
-    std::map<SdfPath, GfMatrix4d> baseProviderMatrices;
-    for (const auto &[target, revisions] : _graphChains) {
-        for (const _GraphRevision &revision : revisions) {
-            if (revision.transformTap >= 0 &&
-                !revision.binding.transform.IsEmpty() &&
-                !baseProviderMatrices.count(revision.binding.transform)) {
-                baseProviderMatrices[revision.binding.transform] =
-                    snapshot.Get<GfMatrix4d>(revision.transformTap);
-            }
-            if (revision.transformSpaceTap >= 0 &&
-                !baseProviderMatrices.count(
-                    revision.binding.transformSpace)) {
-                baseProviderMatrices[revision.binding.transformSpace] =
-                    snapshot.Get<GfMatrix4d>(revision.transformSpaceTap);
-            }
-            for (size_t k = 0; k < revision.influenceTaps.size() &&
-                               k < revision.binding.influences.size(); ++k) {
-                const SdfPath &provider = revision.binding.influences[k];
-                if (!baseProviderMatrices.count(provider)) {
-                    baseProviderMatrices[provider] =
-                        snapshot.Get<GfMatrix4d>(revision.influenceTaps[k]);
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> baseProviderMatrices;
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> finalProviderMatrices;
+    // Consumed only by the cpuParityMode _EvaluateChain oracle, so skip
+    // populating them on the hot dynamic path.
+    if (cpuParityMode) {
+        for (const auto &[target, revisions] : _graphChains) {
+            for (const _GraphRevision &revision : revisions) {
+                if (revision.transformTap >= 0 &&
+                    !revision.binding.transform.IsEmpty() &&
+                    !baseProviderMatrices.count(revision.binding.transform)) {
+                    baseProviderMatrices[revision.binding.transform] =
+                        snapshot.Get<GfMatrix4d>(revision.transformTap);
+                }
+                if (revision.transformSpaceTap >= 0 &&
+                    !baseProviderMatrices.count(
+                        revision.binding.transformSpace)) {
+                    baseProviderMatrices[revision.binding.transformSpace] =
+                        snapshot.Get<GfMatrix4d>(revision.transformSpaceTap);
+                }
+                for (size_t k = 0; k < revision.influenceTaps.size() &&
+                                   k < revision.binding.influences.size(); ++k) {
+                    const SdfPath &provider = revision.binding.influences[k];
+                    if (!baseProviderMatrices.count(provider)) {
+                        baseProviderMatrices[provider] =
+                            snapshot.Get<GfMatrix4d>(revision.influenceTaps[k]);
+                    }
                 }
             }
         }
-    }
-    std::map<SdfPath, GfMatrix4d> finalProviderMatrices =
-        baseProviderMatrices;
-    for (const auto &[provider, matrix] : finalMatrices) {
-        finalProviderMatrices[provider] = matrix;
+        finalProviderMatrices = baseProviderMatrices;
+        for (const auto &[provider, matrix] : finalMatrices) {
+            finalProviderMatrices[provider] = matrix;
+        }
     }
 
     // 3. Geometry point chains from the generated applications: the chain

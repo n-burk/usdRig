@@ -616,11 +616,11 @@ private:
         const SdfPath &target,
         const std::vector<const RigExecMoverRecord *> &chain,
         const RigExecRigPose &pose,
-        const std::map<SdfPath, GfMatrix4d> &baseProviderMatrices,
-        const std::map<SdfPath, GfMatrix4d> &finalProviderMatrices,
+        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &baseProviderMatrices,
+        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &finalProviderMatrices,
         UsdTimeCode time,
         std::vector<std::string> *diagnostics,
-        const std::map<SdfPath, GfMatrix4d> &geometryConstraintDeltas) const;
+        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &geometryConstraintDeltas) const;
 
     /// CPU-side resolution of one weight object's field, the parity
     /// oracle's mirror of the exec computeWeightPacket kernels.
