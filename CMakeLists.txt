@@ -1307,6 +1307,9 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testRigExecBakedAvarPatch COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_baked_avar_patch.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    add_test(NAME testRigExecPxrHygiene COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_pxr_import_hygiene.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     # The schema half of rigExec:baked (the registry's own answer for its
     # type, variability and fallback -- which is what a stale
     # generatedSchema.usda would get wrong) and the path usdview takes to it.
@@ -1389,6 +1392,7 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testRestLocal testRestMigration
                          testInterveningXform testRigExecEpochConstants
                          testRigExecBakedAvarPatch testRigExecWireMover
+                         testRigExecPxrHygiene
                          testRigExecMatrixSpace
                          testRigExecFloatCurveOp
                          testRigExecUndo testGizmoMath testGizmoScreen
@@ -1422,6 +1426,11 @@ if (RIGEXEC_BUILD_USDNOODLES AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testUsdNoodles
         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s . -p "test*.py"
         WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/python/UsdNoodles/testenv")
+    # Single value, so ENVIRONMENT takes it (unlike the lists below, which
+    # need ENVIRONMENT_MODIFICATION). The testenv sitecustomize reads it
+    # to find this USD install without guessing.
+    set_tests_properties(testUsdNoodles PROPERTIES ENVIRONMENT
+        "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
     file(GLOB _rigexec_usd_site_dirs LIST_DIRECTORIES true
         "${USD_INSTALL_DIR}/Lib/site-packages"
         "${USD_INSTALL_DIR}/lib/python*/site-packages"
@@ -1435,6 +1444,15 @@ if (RIGEXEC_BUILD_USDNOODLES AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     endforeach()
     set_property(TEST testUsdNoodles APPEND PROPERTY ENVIRONMENT_MODIFICATION
         "PYTHONPATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/python")
+    # The testenv directory itself: it carries a sitecustomize.py that
+    # points pxr at this USD install and registers the native DLL
+    # directories. It must be reachable through PYTHONPATH rather than
+    # the working directory: sys.path[0] is added after site.py runs,
+    # so a cwd-local sitecustomize is never imported -- while a
+    # PYTHONPATH one also reaches the child interpreters, which
+    # inherit the environment.
+    set_property(TEST testUsdNoodles APPEND PROPERTY ENVIRONMENT_MODIFICATION
+        "PYTHONPATH=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/python/UsdNoodles/testenv")
 endif()
 
 # ---------------------------------------------------------------------------

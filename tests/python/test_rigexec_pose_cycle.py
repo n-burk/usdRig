@@ -1,37 +1,36 @@
-"""A follower of solved joints is not a cycle; a solver reading its own
-follower is -- and the compiler has to say WHICH.
+"""A follower of solved joints reads the version at its own stack place.
 
 The shape under test is the conventional per-limb param node: a control under
 <rig>/Controls, parent-constrained from the limb's end joint, whose scalar
 `avars:ikfk` is what the limb's blend solver reads through
-`inputs:weight.connect`. Authored on the biped it was rejected with a
-"pose dependency cycle among:" followed by sixty constraints and four
-solvers, and that list was read as a prim-granular false cycle -- the
-blend reading the param control, the control written by a constraint that
-reads the ankle, the ankle written by the blend. Bisecting it showed the
-scalar read was never an edge at all: retargeting the constraint at a
-fresh control nothing reads, or disconnecting the weight, changed nothing.
+`inputs:weight.connect`. Authored on the biped, the follower-at-the-bottom
+arrangement was once rejected with a "pose dependency cycle among:"
+naming sixty constraints and four solvers -- the blend reading the param
+control, the control written by a constraint that reads the ankle, the
+ankle written by the blend.
 
-What actually closed the loop is the Movers STACK. Its namespace executes
-bottom-up (rigEvaluator.cpp, _GetMoverExecutionOrder), constraints keep
-that authored order, and a chain the builder appends lands at the bottom
--- so the follower ran FIRST, before the reverse-foot constraints the leg
-IK's effector sits under. Follower waits on the blend, the blend on the
-IK, the IK on the foot constraint, and the foot constraint, by stack
-order, on the follower. The arms never cycled because nothing constrained
-sits above their effector. The same rig with the follower chain at the top
-of the stack compiles and tracks to 0.000000 cm.
+That rejection belonged to the two-phase compiler. Under the unified
+pose stack (spec 4.2) a FRAME read is positional: a step reads the
+version standing at its own place in the stack, so a reader below a
+writer sees the earlier version and that is not a contradiction. The
+follower below the solvers reads the pre-solve ankle; the same follower
+after the solvers reads the final ankle. Neither arrangement cycles,
+and neither does the shape that used to be the genuine loop -- the IK's
+effector constrained from the IK's own joint -- because every one of
+its reads is positional too.
 
 So this asserts three things on a minimal leg with a reverse foot:
 
-  1. the follower at the BOTTOM of the stack is reported as a cycle, and
-     the report names the loop -- follower, blend, IK, foot constraint --
-     and NOT the unrelated step downstream of it;
-  2. the follower at the TOP compiles, the blend still reads the scalar
-     the constraint's target carries, and the param control tracks the
-     ankle in FK and in IK;
-  3. a genuine loop -- the IK's effector control itself constrained from
-     the IK's own joint -- fails in either order, and the report names it.
+  1. the follower at the BOTTOM of the Movers stack compiles, and the
+     param control tracks the REST ankle -- the version standing where
+     the follower runs, before the solvers -- while the solved ankle
+     demonstrably moves on without it;
+  2. the same rig with the Solvers scope reordered last -- solvers
+     first, then the constraints -- compiles, the blend still reads the
+     scalar, and the param control tracks the solved ankle in FK and
+     in IK;
+  3. the former genuine loop compiles and evaluates valid in either
+     Movers order.
 
 Usage:
     python test_rigexec_pose_cycle.py [schema_resources_dir]
@@ -44,15 +43,12 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_rigexec_python import _setup_environment  # noqa: E402
 
 RIG = "/Rig"
-FOLLOWER = RIG + "/Movers/param_follow/params_to_ankle"
-FOOT_CONSTRAINT = RIG + "/Movers/foot/pivot_from_bank"
-TAIL_CONSTRAINT = RIG + "/Movers/tail/tail_from_ankle"
-EFFECTOR_CONSTRAINT = RIG + "/Movers/foot/foot_from_ankle"
 BLEND = RIG + "/Solvers/IkFk"
-IK = RIG + "/Solvers/Ik"
-FK = RIG + "/Solvers/Fk"
 PARAMS = RIG + "/Controls/Params"
 ANKLE = RIG + "/Joints/Thigh/Knee/Ankle"
+# Ankle rest from _build's chain: thigh at 0, knee -3 below it, ankle -3
+# below that.
+ANKLE_REST = (0.0, -6.0, 0.0)
 
 
 def _at(y):
@@ -160,13 +156,6 @@ def _compile_error(rig):
     return None
 
 
-def _loop_part(message):
-    """The named loop, without the parenthetical that counts the rest."""
-    line = next(l for l in message.splitlines()
-                if "pose dependency cycle" in l)
-    return line.split(" (each step", 1)[0]
-
-
 def main():
     plugin_dir = sys.argv[1] if len(sys.argv) > 1 else None
     _setup_environment()
@@ -176,28 +165,34 @@ def main():
 
     rigexec.load_schema_plugin(plugin_dir)
 
-    # --- 1. follower at the bottom of the stack: a cycle, named -----------
+    # --- 1. follower below the solvers: compiles, reads the rest --------
     stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=False,
                         effector_constrained=False)
     message = _compile_error(rig)
-    assert message and "pose dependency cycle" in message, message
-    for member in (FOLLOWER, BLEND, IK, FOOT_CONSTRAINT):
-        assert member in message, "%s missing from: %s" % (member, message)
-    assert FK not in message, "the FK chain has no wait: %s" % message
-    loop = _loop_part(message)
-    assert " -> " in loop, "the report walks the loop: %s" % message
-    assert TAIL_CONSTRAINT not in loop, (
-        "the tail constraint waits on the loop but is not on it: %s"
+    assert message is None, (
+        "a frame read from below its writer is positional, not a cycle: %s"
         % message)
-    assert "1 further pose step waits on the loop" in message, message
-    print("bottom of the stack: %s" % loop.strip())
+    pose = rig.evaluate(1.0)
+    assert pose.valid
+    params = _origin(pose.control_frame(PARAMS))
+    ankle = _origin(pose.joint_frame(ANKLE))
+    assert _distance(params, ANKLE_REST) < 1e-6, (
+        "the follower runs before the solvers, so it tracks the rest "
+        "ankle: %s" % (params,))
+    gap = _distance(params, ankle)
+    assert gap > 0.5, (
+        "the solved ankle moved on without it: gap %.6f" % gap)
+    print("bottom of the stack: compiles; params tracks rest %s, gap to "
+          "solved %.4f" % (params, gap))
 
-    # --- 2. follower at the top: compiles, reads the scalar, tracks -------
+    # --- 2. solvers first: the follower tracks the solved ankle ---------
     stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=True,
                         effector_constrained=False)
+    stage.GetPrimAtPath(RIG).SetChildrenReorder(
+        ["Joints", "Controls", "Movers", "Solvers"])
     message = _compile_error(rig)
     assert message is None, (
-        "the same rig with the follower executing last: %s" % message)
+        "the solvers-first ordering should compile: %s" % message)
     dial = stage.GetPrimAtPath(PARAMS).GetAttribute("avars:ikfk")
     weight = stage.GetPrimAtPath(BLEND).GetAttribute("inputs:weight")
     assert weight.GetConnections() == [dial.GetPath()], (
@@ -219,18 +214,17 @@ def main():
     print("top of the stack: compiles; gap FK %.6f, IK %.6f; the ankle "
           "moved %.4f between the two" % (gaps[0.0], gaps[1.0], moved))
 
-    # --- 3. a genuine loop fails in either order, and is named ------------
+    # --- 3. the former genuine loop: ordered reads, valid pose ---------
     for on_top in (False, True):
         stage, rig = _build(rigexec, Usd, Sdf, follower_on_top=on_top,
                             effector_constrained=True)
         message = _compile_error(rig)
-        assert message and "pose dependency cycle" in message, (
-            "an effector constrained from its own IK's joint compiled "
-            "(follower on top: %s)" % on_top)
-        loop = _loop_part(message)
-        for member in (EFFECTOR_CONSTRAINT, BLEND, IK):
-            assert member in loop, "%s missing from: %s" % (member, message)
-    print("genuine loop: rejected in both orders; %s" % loop.strip())
+        assert message is None, (
+            "positional reads resolve the old loop (follower on top: %s): "
+            "%s" % (on_top, message))
+        pose = rig.evaluate(1.0)
+        assert pose.valid, "follower on top: %s" % on_top
+    print("former loop: compiles and evaluates valid in both orders")
     print("OK")
 
 

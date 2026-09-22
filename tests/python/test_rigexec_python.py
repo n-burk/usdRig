@@ -102,6 +102,12 @@ def _setup_environment():
             except OSError:
                 pass  # already registered or unsupported; harmless
 
+    # Meta-path finders outrank the sys.path order above, so drop the
+    # ones that would claim pxr from anywhere but this install.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    import rigexec_test_env
+    rigexec_test_env.ScrubForeignPxrFinders(usd_install)
+
 
 def main():
     plugin_dir = sys.argv[1] if len(sys.argv) > 1 else None

@@ -104,6 +104,12 @@ def _setup_environment():
             except OSError:
                 pass
 
+    # Meta-path finders outrank the sys.path order above, so drop the
+    # ones that would claim pxr from anywhere but this install.
+    sys.path.insert(0, str(_THIS_FILE.parent))
+    import rigexec_test_env
+    rigexec_test_env.ScrubForeignPxrFinders(usd_install)
+
     return resources
 
 

@@ -39,12 +39,55 @@ def _Prepend(path):
         sys.path.insert(0, text)
 
 
-def SetupPluginTest():
+def ScrubForeignPxrFinders(usdInstall):
+    """Drop meta-path finders that claim `pxr` from outside `usdInstall`.
+
+    sys.path order cannot beat a meta-path finder: finders run before
+    PathFinder, so an unrelated editable install's redirect hook (on one
+    machine, NanoUSD's) claims top-level `pxr` for another tree no
+    matter what sys.path says. A finder whose `pxr` spec points
+    outside the install is removed; one pointing inside -- or not
+    claiming `pxr` at all -- is kept, as is a finder whose probe
+    raises. As a backstop, a `pxr` already in sys.modules from
+    outside the install (with its submodules) is evicted so the next
+    import re-resolves. Call before the first `pxr` import.
+    """
+    home = os.path.normcase(os.path.normpath(str(usdInstall)))
+
+    def _is_outside(spec):
+        locations = getattr(spec, "submodule_search_locations", None) or []
+        claimed = os.path.normcase((spec.origin or "") + "\n".join(locations))
+        return home not in claimed
+
+    for finder in list(sys.meta_path):
+        find_spec = getattr(finder, "find_spec", None)
+        if find_spec is None:
+            continue
+        try:
+            spec = finder.find_spec("pxr", None)
+        except Exception:  # noqa: BLE001 -- a raising finder keeps its place
+            continue
+        if spec is not None and _is_outside(spec):
+            sys.meta_path.remove(finder)
+    module = sys.modules.get("pxr")
+    spec = getattr(module, "__spec__", None)
+    if (module is not None and spec is not None and
+            _is_outside(spec)):
+        for name in [n for n in sys.modules
+                     if n == "pxr" or n.startswith("pxr.")]:
+            del sys.modules[name]
+
+
+def SetupPluginTest(buildRoot=None):
     """
     Make pxr and the plugin/rigExecUsdview modules importable.
 
     Idempotent: every step is a no-op when the ambient environment
     already carries the entry.
+
+    `buildRoot` overrides the unittest-unfriendly argv derivation of the
+    build directory (the noodle suite's sitecustomize passes its staged
+    build explicitly).
     """
     # This file lives at <siblings>/usdRig/tests/python/, and the USD
     # install and the venv are siblings of the checkout (see bin/_env.sh).
@@ -69,10 +112,14 @@ def SetupPluginTest():
     # Python 3.8+ on Windows does not search PATH for extension-module
     # dependencies; register the native directories explicitly and retain
     # the handles (releasing one drops the directory from the search path).
+    if buildRoot is None:
+        if len(sys.argv) > 1:
+            buildRoot = pathlib.Path(sys.argv[1]).parents[2]
+        else:
+            buildRoot = repoRoot / "build"
+    else:
+        buildRoot = pathlib.Path(buildRoot)
     if hasattr(os, "add_dll_directory"):
-        buildRoot = (
-            pathlib.Path(sys.argv[1]).parents[2] if len(sys.argv) > 1
-            else repoRoot / "build")
         dllDirs = [usdInstall / "lib", usdInstall / "bin", buildRoot]
         # Multi-config generators (Visual Studio) place the native libs
         # in a per-configuration subdirectory of the build root.
@@ -89,3 +136,7 @@ def SetupPluginTest():
 
     # The modules under test are plain files, not an installed package.
     _Prepend(repoRoot / "plugin" / "rigExecUsdview")
+
+    # Meta-path finders outrank the sys.path order above, so scrub the
+    # ones that would claim pxr from anywhere but this install.
+    ScrubForeignPxrFinders(usdInstall)
