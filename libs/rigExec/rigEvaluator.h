@@ -19,6 +19,7 @@
 #include "types.h"
 
 #include "rigExecMath/rbf.h"
+#include "rigExecMath/solvers.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/functionRef.h"
@@ -30,8 +31,11 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 
+#include <list>
 #include <map>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -663,11 +667,11 @@ private:
         const SdfPath &target,
         const std::vector<const RigExecMoverRecord *> &chain,
         const RigExecRigPose &pose,
-        const std::map<SdfPath, GfMatrix4d> &baseProviderMatrices,
-        const std::map<SdfPath, GfMatrix4d> &finalProviderMatrices,
+        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &baseProviderMatrices,
+        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &finalProviderMatrices,
         UsdTimeCode time,
         std::vector<std::string> *diagnostics,
-        const std::map<SdfPath, GfMatrix4d> &geometryConstraintDeltas) const;
+        const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &geometryConstraintDeltas) const;
 
     /// CPU-side resolution of one weight object's field, the parity
     /// oracle's mirror of the exec computeWeightPacket kernels.
@@ -854,6 +858,71 @@ private:
     /// wrong -- so every count() user of this map is unaffected by the
     /// stack and must stay a membership test.
     std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _jointSolverBinding;
+    /// Small time-keyed LRU of authoritative exec snapshots.
+    ///
+    /// A frame is fully determined by (time, input overrides). Repeated
+    /// evaluation of recently-seen frames should not re-pull the upstream
+    /// network: a single-entry cache thrashed on every interleave between
+    /// distinct frames, forcing full recomputation on each pass. This LRU
+    /// holds a handful of (time, inputs, snapshot) entries so that a frame
+    /// visited within the last few distinct-frame cycles hits instead of
+    /// missing. Genuine stage edits set the caller's dirty flag, which
+    /// vetoes the hit independently of this cache; the tap-level
+    /// ConsumeDirty is no longer consulted here because exec's time/value
+    /// callbacks fire across sibling frames that share the system and
+    /// would spuriously invalidate the entry just computed.
+    struct _SnapshotCache {
+        static constexpr std::size_t capacity = 4;
+        struct Entry {
+            UsdTimeCode time;
+            std::vector<RigExecValueOverride> inputs;
+            RigExecSnapshot snapshot;
+        };
+        /// Most-recently-used first.
+        std::list<Entry> lru;
+        std::map<UsdTimeCode, std::list<Entry>::iterator> index;
+
+        /// Returns the live entry whose time AND inputs match, or null.
+        Entry *Find(const std::vector<RigExecValueOverride> &inputs,
+                    UsdTimeCode time)
+        {
+            if (lru.empty()) return nullptr;
+            auto it = index.find(time);
+            if (it == index.end()) return nullptr;
+            auto pos = it->second;
+            Entry &e = *pos;
+            if (e.inputs == inputs) {
+                lru.splice(lru.begin(), lru, pos);
+                return &e;
+            }
+            return nullptr;
+        }
+
+        void Store(std::vector<RigExecValueOverride> inputs, UsdTimeCode time,
+                   const RigExecSnapshot &snap)
+        {
+            auto existing = index.find(time);
+            if (existing != index.end()) {
+                Entry &e = *existing->second;
+                e.inputs = std::move(inputs);
+                e.snapshot = snap;
+                lru.splice(lru.begin(), lru, existing->second);
+                return;
+            }
+            lru.push_front(Entry{time, std::move(inputs), snap});
+            index[time] = lru.begin();
+            if (lru.size() > capacity) {
+                index.erase(lru.back().time);
+                lru.pop_back();
+            }
+        }
+
+        void Clear()
+        {
+            lru.clear();
+            index.clear();
+        }
+    };
     /// Each dependency level evaluates once. Earlier aggregate and joint
     /// outputs are supplied as overrides, so downstream requests reuse them.
     struct _SolverBatch {
@@ -869,9 +938,8 @@ private:
         /// the batch pushes no computeRestFrame override at all.
         std::map<SdfPath, SdfPath> restInputs;
         size_t level = 0;
+        _SnapshotCache cache;
         RigExecSnapshot snapshot;
-        std::vector<RigExecValueOverride> inputs;
-        UsdTimeCode time = UsdTimeCode::Default();
         bool dirty = true;
     };
     std::vector<_SolverBatch> _solverBatches;
@@ -901,10 +969,17 @@ private:
     /// Seed only transform providers before solving; geometry/aggregate taps
     /// are evaluated after the complete pose dependency schedule.
     std::unique_ptr<RigExecTapSet> _firstFramePoseTaps;
-    std::vector<RigExecValueOverride> _firstFramePoseInputs;
-    UsdTimeCode _firstFramePoseTime = UsdTimeCode::Default();
-    RigExecSnapshot _firstFramePoseSnapshot;
+    _SnapshotCache _firstFramePoseCache;
     bool _firstFramePoseDirty = true;
+    /// Authoritative snapshot (full exec network) cache. Vetoes a hit when
+    /// _authSnapshotDirty, which the stage-notice handler sets on any edit.
+    _SnapshotCache _authSnapshotCache;
+    bool _authSnapshotDirty = true;
+    /// Time-keyed authoritative snapshot cache. jointOverrides is a pure
+    /// function of (epoch, time), so a repeat evaluation of the same frame
+    /// reuses the snapshot without rebuilding the 800+ element override
+    /// vector or re-hashing it. Cleared on any genuine stage edit.
+    std::map<UsdTimeCode, RigExecSnapshot> _authSnapTimeKeyed;
     std::map<SdfPath, RigExecTapId> _firstFramePoseFrames;
     /// Per-frame rest taps, used only when some provider's rest inputs can
     /// vary with time; otherwise the rests are evaluated once per epoch into
@@ -940,6 +1015,31 @@ private:
         bool cached = false;
     };
     std::map<SdfPath, _ConnectedPoseResult> _connectedPoseCache;
+    /// Namespace-pose predicate answers that are stage-constant: parent:space
+    /// has no time samples, so the answer does not vary with evaluation time.
+    /// Populated lazily on cache miss; cleared on epoch change with
+    /// _connectedPoseCache. A time-sampled parent:space stays out of this
+    /// cache and is re-read every frame.
+    std::unordered_map<SdfPath, bool, SdfPath::Hash> _namespaceInheritsCache;
+    /// Nearest pose-owning ancestor-or-self per provider path. The owner
+    /// mapping depends only on epoch-static structure (_jointSolverBinding,
+    /// _hierarchicalProviderSet, stage-constant namespace-pose answers), so
+    /// it is valid across every evaluation until the epoch rebuilds.
+    /// Cleared on epoch change with _namespaceInheritsCache.
+    std::unordered_map<SdfPath, SdfPath, SdfPath::Hash> _nearestBlockingCache;
+    /// Hierarchical (first-frame-pose) providers, compiled once per epoch.
+    /// Replaces the per-frame std::set build in _EvaluateDynamic.
+    std::unordered_set<SdfPath, SdfPath::Hash> _hierarchicalProviderSet;
+    /// Dense provider index: SdfPath → index into _providerPaths.
+    /// Built once per epoch from the union of all paths the frame-domain
+    /// maps can hold. _providerPaths is in SdfPath-sorted order so that
+    /// iterating live indices reproduces std::map key order.
+    std::vector<SdfPath> _providerPaths;
+    std::unordered_map<SdfPath, int, SdfPath::Hash> _providerIndex;
+    /// Per provider index: indices of strict hierarchical descendants that
+    /// are seeded providers, in SdfPath order. Replaces the per-candidate
+    /// finalFrames prefix walk in commitConstraintFrames.
+    std::vector<std::vector<int>> _hierDescendants;
     std::vector<RigExecTapId> _jointFrameTaps;
     std::vector<RigExecTapId> _jointFinalFrameTaps;
     std::vector<RigExecTapId> _jointFinalMatrixTaps;
@@ -995,8 +1095,10 @@ private:
     /// _resolvedInputs and into \p pose->movedProperties.
     void _EvaluatePoseInterpolators(
         UsdTimeCode time,
-        const std::map<SdfPath, RigExecPointFrame> &restFrames,
-        const std::map<SdfPath, RigExecPointFrame> &finalFrames,
+        const std::vector<RigExecPointFrame> &restFrames,
+        const std::vector<char> &restLive,
+        const std::vector<RigExecPointFrame> &finalFrames,
+        const std::vector<char> &finalLive,
         RigExecRigPose *pose);
 
     /// Compiled mover-graph input bindings.
@@ -1200,6 +1302,15 @@ private:
         /// point; the transform domain resolves one logical element. Empty
         /// means the constant synthesized from inputs:defaultWeight.
         SdfPath weightObject;
+        /// Precomputed axis masks, authoritative only while `masksStatic`
+        /// holds: no property chain revises a mask attribute, none is
+        /// connected, and each is a single authored opinion. When it holds
+        /// the per-frame mask reads are skipped; when it does not the values
+        /// are ignored and the live read runs exactly as before.
+        bool masksStatic = false;
+        RigExecConstraintAxisMask precompTranslation;
+        RigExecConstraintAxisMask precompRotation;
+        RigExecConstraintAxisMask precompScale;
     };
 
     /// One property-domain revision: a float/vec3f/matrix math mover's
@@ -1260,9 +1371,11 @@ private:
     bool _ComposeInterveningXforms(
         const UsdPrim &assetRoot,
         UsdGeomXformCache *xformCache,
-        std::map<SdfPath, RigExecPointFrame> *restFrames,
+        std::vector<RigExecPointFrame> *restFrames,
+        std::vector<char> *restLive,
         std::map<SdfPath, RigExecPointFrame> *baseFrames,
-        std::map<SdfPath, RigExecPointFrame> *finalFrames,
+        std::vector<RigExecPointFrame> *finalFrames,
+        std::vector<char> *finalLive,
         RigExecRigPose *pose) const;
 
     /// The frame a plain Xformable contributes to the pose: its transform

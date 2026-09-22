@@ -223,6 +223,10 @@ struct _ConstraintSolveContext {
     RigExecConstraintAxisMask affect;
     RigExecEulerOrder order = RigExecEulerOrder::XYZ;
     double weight = 1.0;
+    bool masksStatic = false;
+    RigExecConstraintAxisMask precompTranslation;
+    RigExecConstraintAxisMask precompRotation;
+    RigExecConstraintAxisMask precompScale;
 };
 
 using _ConstraintSolveFn =
@@ -434,17 +438,23 @@ RigExecPointFrame
 _SolveParentConstraint(const _ConstraintSolveContext &c)
 {
     RigExecParentConstraintParams params;
-    params.translationAxes = _ReadConstraintAxisMask(
-        *c.resolved, c.prim, "inputs:affectTranslationX",
-        "inputs:affectTranslationY", "inputs:affectTranslationZ", c.time);
-    params.rotationAxes = _ReadConstraintAxisMask(
-        *c.resolved, c.prim, "inputs:affectRotationX",
-        "inputs:affectRotationY", "inputs:affectRotationZ", c.time);
-    // FBX disables scale by default; the explicit false fallback is the
-    // authored contract, not an oversight (schema.usda:769-771).
-    params.scaleAxes = _ReadConstraintAxisMask(
-        *c.resolved, c.prim, "inputs:affectScaleX", "inputs:affectScaleY",
-        "inputs:affectScaleZ", c.time, false);
+    if (c.masksStatic) {
+        params.translationAxes = c.precompTranslation;
+        params.rotationAxes = c.precompRotation;
+        params.scaleAxes = c.precompScale;
+    } else {
+        params.translationAxes = _ReadConstraintAxisMask(
+            *c.resolved, c.prim, "inputs:affectTranslationX",
+            "inputs:affectTranslationY", "inputs:affectTranslationZ", c.time);
+        params.rotationAxes = _ReadConstraintAxisMask(
+            *c.resolved, c.prim, "inputs:affectRotationX",
+            "inputs:affectRotationY", "inputs:affectRotationZ", c.time);
+        // FBX disables scale by default; the explicit false fallback is the
+        // authored contract, not an oversight (schema.usda:769-771).
+        params.scaleAxes = _ReadConstraintAxisMask(
+            *c.resolved, c.prim, "inputs:affectScaleX",
+            "inputs:affectScaleY", "inputs:affectScaleZ", c.time, false);
+    }
     params.rotationOrder = c.order;
     params.weight = c.weight;
     return RigExecApplyParentConstraint(c.inputFrame, *c.sources, params);
@@ -1776,6 +1786,8 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // compute. Any stage edit therefore retires their cached snapshots, the
     // same way it retires the affected solver batches below.
     _firstFramePoseDirty = true;
+    _authSnapshotDirty = true;
+    _authSnapTimeKeyed.clear();
     _guideDirty = true;
     _connectedPoseCache.clear();
     for (auto &[target, derived] : _derivedCache) {
@@ -3077,8 +3089,10 @@ RigExecRigEvaluator::_CompilePoseInterpolators(
 void
 RigExecRigEvaluator::_EvaluatePoseInterpolators(
     UsdTimeCode time,
-    const std::map<SdfPath, RigExecPointFrame> &restFrames,
-    const std::map<SdfPath, RigExecPointFrame> &finalFrames,
+    const std::vector<RigExecPointFrame> &restFrames,
+    const std::vector<char> &restLive,
+    const std::vector<RigExecPointFrame> &finalFrames,
+    const std::vector<char> &finalLive,
     RigExecRigPose *pose)
 {
     if (_poseInterpolators.empty()) {
@@ -3104,10 +3118,20 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
     // published FINAL frame has not been posed, and its interpolator
     // diagnoses and publishes zeros rather than quietly measuring a rest.
     const auto rotationOf =
-        [](const std::map<SdfPath, RigExecPointFrame> &frames,
-           const SdfPath &path, GfQuatd *out) {
-            const auto it = frames.find(path);
-            return it != frames.end() && RigExecFrameRotation(it->second, out);
+        [&](const SdfPath &path, GfQuatd *out) {
+            const auto fi = _providerIndex.find(path);
+            if (fi == _providerIndex.end() || !restLive[fi->second]) {
+                return false;
+            }
+            return RigExecFrameRotation(restFrames[fi->second], out);
+        };
+    const auto rotationOfFinal =
+        [&](const SdfPath &path, GfQuatd *out) {
+            const auto fi = _providerIndex.find(path);
+            if (fi == _providerIndex.end() || !finalLive[fi->second]) {
+                return false;
+            }
+            return RigExecFrameRotation(finalFrames[fi->second], out);
         };
 
     std::vector<double> weights;
@@ -3144,12 +3168,12 @@ RigExecRigEvaluator::_EvaluatePoseInterpolators(
 
         GfQuatd driverFinal(1.0), driverRest(1.0);
         GfQuatd parentFinal(1.0), parentRest(1.0);
-        if (!rotationOf(finalFrames, interpolator.driver, &driverFinal) ||
-            !rotationOf(restFrames, interpolator.driver, &driverRest) ||
+        if (!rotationOfFinal(interpolator.driver, &driverFinal) ||
+            !rotationOf(interpolator.driver, &driverRest) ||
             (!interpolator.driverParent.IsEmpty() &&
-             (!rotationOf(finalFrames, interpolator.driverParent,
+             (!rotationOfFinal(interpolator.driverParent,
                           &parentFinal) ||
-              !rotationOf(restFrames, interpolator.driverParent,
+              !rotationOf(interpolator.driverParent,
                           &parentRest)))) {
             pose->diagnostics.push_back(
                 "pose interpolator " + interpolator.prim.GetString() +
@@ -5815,6 +5839,20 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
         return false;
     };
 
+    // Every property-domain target a math mover revises. A mask attribute in
+    // this set is not static: its live read must still see the chain's
+    // result, so a constraint whose mask lands here keeps masksStatic false.
+    std::set<SdfPath> propertyRevisedTargets;
+    for (const RigExecMoverRecord &mover : newMovers) {
+        if (mover.schemaType != "RigExecFloatMathMover" &&
+            mover.schemaType != "RigExecVec3fMathMover" &&
+            mover.schemaType != "RigExecMatrixMathMover") {
+            continue;
+        }
+        for (const SdfPath &target : mover.targets) {
+            propertyRevisedTargets.insert(target);
+        }
+    }
     for (const RigExecMoverRecord &mover : newMovers) {
         if (!_IsFrameConstraintType(mover.schemaType)) {
             continue;
@@ -5998,6 +6036,62 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                     }
                     constraint.poleObjects.push_back(binding);
                 }
+            }
+        }
+        // Precompute the axis masks when provably static for this mover: no
+        // property chain revises a mask attribute, none is connected, and each
+        // is a single authored opinion. Fallbacks mirror the live read:
+        // translation/rotation default on, scale defaults off (FBX).
+        {
+            const char *kMaskNames[3][3] = {
+                {"inputs:affectTranslationX", "inputs:affectTranslationY",
+                 "inputs:affectTranslationZ"},
+                {"inputs:affectRotationX", "inputs:affectRotationY",
+                 "inputs:affectRotationZ"},
+                {"inputs:affectScaleX", "inputs:affectScaleY",
+                 "inputs:affectScaleZ"}};
+            const bool kMaskFallback[3] = {true, true, false};
+            auto groupStatic = [&](int group) {
+                for (int axis = 0; axis < 3; ++axis) {
+                    const char *name = kMaskNames[group][axis];
+                    if (propertyRevisedTargets.count(
+                            constraint.moverPath.AppendPath(SdfPath(name)))) {
+                        return false;
+                    }
+                    const UsdAttribute a = moverPrim.GetAttribute(TfToken(name));
+                    if (a) {
+                        if (!_AuthoredConnections(a).empty()) {
+                            return false;  // connected -> driven
+                        }
+                        std::vector<double> timeSamples;
+                        if (a.GetTimeSamples(&timeSamples) > 1) {
+                            return false;  // animated
+                        }
+                    }
+                    // absent -> schema default -> static
+                }
+                return true;
+            };
+            constraint.masksStatic =
+                groupStatic(0) && groupStatic(1) && groupStatic(2);
+            if (constraint.masksStatic) {
+                auto readGroup = [&](int group) {
+                    RigExecConstraintAxisMask m;
+                    bool *out = &m.x;
+                    for (int axis = 0; axis < 3; ++axis, ++out) {
+                        bool v = kMaskFallback[group];
+                        const UsdAttribute a =
+                            moverPrim.GetAttribute(TfToken(kMaskNames[group][axis]));
+                        if (a) {
+                            a.Get(&v);
+                        }
+                        *out = v;
+                    }
+                    return m;
+                };
+                constraint.precompTranslation = readGroup(0);
+                constraint.precompRotation = readGroup(1);
+                constraint.precompScale = readGroup(2);
             }
         }
 
@@ -7701,13 +7795,20 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
     _poseProviderInputs = std::move(newPoseProviderInputs);
     _connectedPoseTaps = std::move(newConnectedPoseTaps);
     _connectedPoseCache.clear();
+    _namespaceInheritsCache.clear();
+    _nearestBlockingCache.clear();
     _poseSteps = std::move(newPoseSteps);
     _firstFramePoseTaps = std::move(newFirstFramePoseTaps);
-    _firstFramePoseInputs.clear();
-    _firstFramePoseTime = UsdTimeCode::Default();
-    _firstFramePoseSnapshot = RigExecSnapshot();
+    _firstFramePoseCache.Clear();
     _firstFramePoseDirty = true;
+    _authSnapshotCache.Clear();
+    _authSnapTimeKeyed.clear();
+    _authSnapshotDirty = true;
     _firstFramePoseFrames = std::move(newFirstFramePoseFrames);
+    _hierarchicalProviderSet.clear();
+    _hierarchicalProviderSet.reserve(_firstFramePoseFrames.size());
+    for (const auto &[provider, tap] : _firstFramePoseFrames)
+        _hierarchicalProviderSet.insert(provider);
     _firstFramePoseRests = std::move(newFirstFramePoseRests);
     _restTaps = std::move(newRestTaps);
     _restTapIds = std::move(newRestTapIds);
@@ -8022,6 +8123,59 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
 
     stampCompileRegion("Compile.ChainOrderValidate");
     _compiled = true;
+    // Build the dense provider universe once per compile epoch. _providerPaths
+    // is SdfPath-sorted, so ascending live-index iteration reproduces the
+    // std::map key order the frame-domain publish loops previously relied on.
+    {
+        std::set<SdfPath> universe;
+        auto addU = [&](const SdfPath &p) { if (!p.IsEmpty()) universe.insert(p); };
+        for (const auto &kv : _firstFramePoseFrames) addU(kv.first);
+        for (const auto &p : _xformDerivedProviders) addU(p);
+        for (const auto &p : _interveningXformProviders) addU(p);
+        for (const _FrameConstraint &fc : _frameConstraints) {
+            addU(fc.moverPath);
+            for (const auto &t : fc.targets) addU(t);
+            for (const auto &s : fc.sources) addU(s.sourcePath);
+            addU(fc.worldUpObject.sourcePath);
+            addU(fc.effector.sourcePath);
+            for (const auto &po : fc.poleObjects) addU(po.sourcePath);
+            for (const auto &ik : fc.ikChain) addU(ik);
+            addU(fc.pointsTarget);
+            addU(fc.weightObject);
+        }
+        for (const auto &kv : _solverJoints) {
+            addU(kv.first);
+            for (const auto &p : kv.second) addU(p.first);
+        }
+        for (const _SolverBatch &b : _solverBatches) {
+            for (const auto &d : b.dependencies) addU(d);
+            for (const auto &d : b.frameInputs) addU(d);
+            for (const auto &kv : b.restInputs) { addU(kv.first); addU(kv.second); }
+            for (const auto &kv : b.solvers) addU(kv.first);
+        }
+        for (const auto &kv : _poseProviderInputs) {
+            addU(kv.first);
+            for (const auto &v : kv.second) addU(v);
+        }
+        for (const auto &kv : _snapshotPoints) {
+            addU(kv.first);
+            for (const auto &v : kv.second) addU(v);
+        }
+        _providerPaths.assign(universe.begin(), universe.end());
+        _providerIndex.clear();
+        _providerIndex.reserve(_providerPaths.size());
+        for (std::size_t i = 0; i < _providerPaths.size(); ++i)
+            _providerIndex.emplace(_providerPaths[i], static_cast<int>(i));
+        _hierDescendants.assign(_providerPaths.size(), {});
+        for (std::size_t i = 0; i < _providerPaths.size(); ++i) {
+            if (_firstFramePoseFrames.count(_providerPaths[i]) == 0) continue;
+            for (std::size_t j = i + 1;
+                 j < _providerPaths.size() &&
+                 _providerPaths[j].HasPrefix(_providerPaths[i]); ++j)
+                if (_firstFramePoseFrames.count(_providerPaths[j]))
+                    _hierDescendants[i].push_back(static_cast<int>(j));
+        }
+    }
     // Remove targets that no longer publish an output. Existing target graphs
     // survive a new binding epoch and are spliced lazily on the next pull.
     std::set<SdfPath> retainedTargets;
@@ -9002,11 +9156,11 @@ RigExecRigEvaluator::_EvaluateChain(
     const SdfPath &target,
     const std::vector<const RigExecMoverRecord *> &chain,
     const RigExecRigPose &pose,
-    const std::map<SdfPath, GfMatrix4d> &baseProviderMatrices,
-    const std::map<SdfPath, GfMatrix4d> &finalProviderMatrices,
+    const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &baseProviderMatrices,
+    const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &finalProviderMatrices,
     UsdTimeCode time,
     std::vector<std::string> *diagnostics,
-    const std::map<SdfPath, GfMatrix4d> &geometryConstraintDeltas) const
+    const std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> &geometryConstraintDeltas) const
 {
     // The oracle resolves a read phase ITSELF, from the authored metadata,
     // and reads the same recorded snapshots. That keeps it independent of
@@ -10730,9 +10884,11 @@ bool
 RigExecRigEvaluator::_ComposeInterveningXforms(
     const UsdPrim &assetRoot,
     UsdGeomXformCache *xformCache,
-    std::map<SdfPath, RigExecPointFrame> *restFrames,
+    std::vector<RigExecPointFrame> *restFrames,
+    std::vector<char> *restLive,
     std::map<SdfPath, RigExecPointFrame> *baseFrames,
-    std::map<SdfPath, RigExecPointFrame> *finalFrames,
+    std::vector<RigExecPointFrame> *finalFrames,
+    std::vector<char> *finalLive,
     RigExecRigPose *pose) const
 {
     if (!assetRoot || !xformCache) {
@@ -10814,19 +10970,49 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
     std::map<SdfPath, GfMatrix4d> execRest, execBase;
     for (const SdfPath &provider : ordered) {
         GfMatrix4d m(1.0);
-        if (toMatrix(restFrames->at(provider), &m)) execRest[provider] = m;
+        {
+            const auto ri = _providerIndex.find(provider);
+            if (ri != _providerIndex.end() && (*restLive)[ri->second] &&
+                toMatrix((*restFrames)[ri->second], &m))
+                execRest[provider] = m;
+        }
         m = GfMatrix4d(1.0);
         if (toMatrix(baseFrames->at(provider), &m)) execBase[provider] = m;
     }
 
+    auto correctDense = [&](std::vector<RigExecPointFrame> *frames,
+                            std::vector<char> *live,
+                            const std::map<SdfPath, GfMatrix4d> &exec,
+                            const SdfPath &provider) {
+        const auto own = exec.find(provider);
+        if (own == exec.end()) {
+            return;
+        }
+        const int fi = _providerIndex.at(provider);
+        const SdfPath &anchorPath = anchorOf.at(provider);
+        GfMatrix4d anchorExec(1.0), anchorTrue(1.0);
+        if (!anchorPath.IsEmpty()) {
+            const auto execIt = exec.find(anchorPath);
+            if (execIt != exec.end()) {
+                anchorExec = execIt->second;
+            }
+            const auto ai = _providerIndex.find(anchorPath);
+            GfMatrix4d corrected(1.0);
+            if (ai != _providerIndex.end() && (*live)[ai->second] &&
+                toMatrix((*frames)[ai->second], &corrected)) {
+                anchorTrue = corrected;
+            }
+        }
+        (*frames)[fi] = RigExecFrameFromMatrix(
+            own->second * anchorExec.GetInverse() *
+            intervening.at(provider) * anchorTrue);
+        (*live)[fi] = 1;
+    };
     auto correct = [&](std::map<SdfPath, RigExecPointFrame> *frames,
                        const std::map<SdfPath, GfMatrix4d> &exec,
                        const SdfPath &provider) {
         const auto own = exec.find(provider);
         if (own == exec.end()) {
-            // Degenerate on the way in stays degenerate: a collapsed frame
-            // laundered through a matrix round trip would come back as a
-            // plausible identity and hide the failure.
             return;
         }
         const SdfPath &anchorPath = anchorOf.at(provider);
@@ -10841,25 +11027,19 @@ RigExecRigEvaluator::_ComposeInterveningXforms(
                 anchorTrue = corrected;
             }
         }
-        // frame_true(P) = frame_exec(P) . frame_exec(anchor)^-1 . X(P)
-        //                 . frame_true(anchor)
-        //
-        // The inverse recovers P's own local factor from the composed exec
-        // frame, so X(P) lands BETWEEN P and its anchor rather than after
-        // both. A uniform right-multiply is the same thing only while every
-        // intervening Xform sits above every chain root; put one between two
-        // joints and it applies in the wrong order.
         (*frames)[provider] = RigExecFrameFromMatrix(
             own->second * anchorExec.GetInverse() *
             intervening.at(provider) * anchorTrue);
     };
 
     for (const SdfPath &provider : ordered) {
-        correct(restFrames, execRest, provider);
+        correctDense(restFrames, restLive, execRest, provider);
         correct(baseFrames, execBase, provider);
         // base and final are the same frame at seeding time; final is
         // reassigned rather than corrected again so the two cannot drift.
-        (*finalFrames)[provider] = baseFrames->at(provider);
+        const int fi = _providerIndex.at(provider);
+        (*finalFrames)[fi] = baseFrames->at(provider);
+        (*finalLive)[fi] = 1;
     }
     return true;
 }
@@ -11943,7 +12123,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // internally and the authored mover meaning nothing.
     //
     // No cycle is possible: nothing in a property chain reads a computation.
-    std::map<SdfPath, VtValue> propertyResults;
     _resolvedInputs.Clear();
     _chainSnapshots.Clear();
 
@@ -11967,15 +12146,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
     if (!_propertyChains.empty()) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PropertyChains", "property");
-        _EvaluatePropertyChains(time, &propertyResults, &baseOverrides,
+        _EvaluatePropertyChains(time, &pose.movedProperties, &baseOverrides,
                                 &pose.diagnostics);
-        // Two delivery routes for one value, and they must not disagree.
+        // Two delivery routes for one value, and they must not disagree:
         // baseOverrides carries it to every exec consumer; _resolvedInputs
-        // carries it to the static reads exec never touches -- packet
-        // assembly and the CPU oracle.
-        for (const auto &[path, value] : propertyResults) {
-            _resolvedInputs.SetProperty(path, value);
-        }
+        // carries it to the static reads exec never touches (packet
+        // assembly, CPU oracle). _EvaluatePropertyChains writes both routes
+        // for every published chain, so no re-sync loop is needed here.
     }
 
     // The second of the two applications described above: after the chains,
@@ -11985,7 +12162,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     if (!_interactiveOverrides.empty()) {
         _ApplyInteractiveOverrides(
             _interactiveOverrides, &baseOverrides, &_resolvedInputs,
-            &propertyResults);
+            &pose.movedProperties);
     }
 
     for (const auto &[ribbonPath, pointsPath] : _ribbonDriverPoints) {
@@ -12008,7 +12185,24 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     }
 
 
-    std::vector<RigExecValueOverride> jointOverrides = baseOverrides;
+    {
+        static bool measured = false;
+        if (!measured) {
+            measured = true;
+            std::map<std::string, size_t> typeCount;
+            size_t vecBytes = 0;
+            for (const auto &o : baseOverrides) {
+                std::string tn = o.value.GetTypeName();
+                typeCount[tn]++;
+            }
+            std::fprintf(stderr,
+                "RIGEXEC_MEASURE baseOverrides=%zu solverBatches=%zu connectedPoseTaps=%zu firstFramePose=%zu\n",
+                baseOverrides.size(), _solverBatches.size(),
+                _connectedPoseTaps.size(), _firstFramePoseFrames.size());
+            for (const auto &[tn, c] : typeCount)
+                std::fprintf(stderr, "  type %-28s count=%zu\n", tn.c_str(), c);
+        }
+    }
     // Joints whose solver published no element for them (an incomplete
     // solver: its required inputs are unwired, so the kernel returned an
     // empty aggregate). They keep their natural rest-chain frame below, so
@@ -12028,39 +12222,31 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     RigExecSnapshot seedSnapshot;
     if (_firstFramePoseTaps) {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "FirstFramePose", "pose");
-        _firstFramePoseDirty = _firstFramePoseTaps->ConsumeDirty() || _firstFramePoseDirty;
-        const bool sameSeedInputs =
-            !_firstFramePoseDirty && _firstFramePoseTime == time &&
-            _firstFramePoseSnapshot.IsValid() && _firstFramePoseSnapshot.IsComplete() &&
-            baseOverrides.size() == _firstFramePoseInputs.size() &&
-            std::equal(baseOverrides.begin(), baseOverrides.end(),
-                       _firstFramePoseInputs.begin(),
-                       [](const RigExecValueOverride &a,
-                          const RigExecValueOverride &b) {
-                           return a.prim == b.prim &&
-                                  a.computation == b.computation &&
-                                  a.attribute == b.attribute &&
-                                  a.value == b.value;
-                       });
-        if (sameSeedInputs) {
-            seedSnapshot = _firstFramePoseSnapshot;
+        // Warm the shared executor before anything else: every override
+        // pull in this evaluator runs in a throwaway sub-executor seeded
+        // from the main one, and a cold main cache makes each such pull
+        // recompute the whole upstream network behind it.
+        _firstFramePoseTaps->Warm(time);
+        // The tap-level dirty flag is drained, never consulted: exec's
+        // time/value callbacks fire across sibling frames sharing this
+        // system and would spuriously veto fresh entries. Genuine stage
+        // edits set _firstFramePoseDirty through the notice handler.
+        _firstFramePoseTaps->ConsumeDirty();
+        _SnapshotCache::Entry *seed =
+            !_firstFramePoseDirty
+                ? _firstFramePoseCache.Find(baseOverrides, time)
+                : nullptr;
+        if (seed != nullptr) {
+            seedSnapshot = seed->snapshot;
         } else {
-            // Warm the shared executor before the override-bearing pull, so
-            // the sub-executor that serves the overrides inherits a populated
-            // cache instead of recomputing the whole network behind every
-            // override.
-            _firstFramePoseTaps->Warm(time);
             seedSnapshot = _firstFramePoseTaps->Evaluate(time, baseOverrides);
             if (!seedSnapshot.IsValid() || !seedSnapshot.IsComplete()) {
                 _firstFramePoseDirty = true;
                 pose.diagnostics.push_back("pose provider input evaluation incomplete");
                 return pose;
             }
-            _firstFramePoseSnapshot = seedSnapshot;
-            _firstFramePoseInputs = baseOverrides;
-            _firstFramePoseTime = time;
+            _firstFramePoseCache.Store(baseOverrides, time, seedSnapshot);
             _firstFramePoseDirty = false;
-            _firstFramePoseTaps->ConsumeDirty();
         }
     }
 
@@ -12070,15 +12256,17 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // one-provider constraints still chain in exactly the same order as every
     // points/property revision.
     std::map<SdfPath, RigExecPointFrame> baseFrames;
-    std::map<SdfPath, RigExecPointFrame> finalFrames;
-    std::map<SdfPath, RigExecPointFrame> restFrames;
-    std::map<SdfPath, GfMatrix4d> xformDerivedBases;
-    std::map<SdfPath, GfMatrix4d> finalMatrices;
+    std::vector<RigExecPointFrame> finalFrames(_providerPaths.size());
+    std::vector<char> finalLive(_providerPaths.size(), 0);
+    std::vector<RigExecPointFrame> restFrames(_providerPaths.size());
+    std::vector<char> restLive(_providerPaths.size(), 0);
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> xformDerivedBases;
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> finalMatrices;
     /// Geometry-domain constraint results: the delta each one produced, the
     /// envelope it carries, and its optional per-element weight field.
     /// Produced by the pose walk below and consumed after it, the same
     /// in-memory hand-off finalMatrices performs for a "final" read phase.
-    std::map<SdfPath, GfMatrix4d> constraintDeltas;
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> constraintDeltas;
     const UsdPrim assetRoot =
         _stage->GetPrimAtPath(_rigPath.GetParentPath());
     UsdGeomXformCache constraintXformCache(time);
@@ -12136,10 +12324,16 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 return pose;
             }
             for (const auto &[provider, tap] : _restTapIds) {
-                restFrames[provider] = rests.Get<RigExecPointFrame>(tap);
+                const int fi = _providerIndex.at(provider);
+                restFrames[fi] = rests.Get<RigExecPointFrame>(tap);
+                restLive[fi] = 1;
             }
         } else {
-            restFrames = _epochRestFrames;
+            for (const auto &kv : _epochRestFrames) {
+                const int fi = _providerIndex.at(kv.first);
+                restFrames[fi] = kv.second;
+                restLive[fi] = 1;
+            }
         }
     }
     // Everything from here to the pose walk rebuilds the per-provider frame
@@ -12152,11 +12346,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     for (const auto &[provider, tap] : _firstFramePoseFrames) {
         const RigExecPointFrame frame = seedSnapshot.Get<RigExecPointFrame>(tap);
         baseFrames.emplace_hint(baseFrames.end(), provider, frame);
-        finalFrames.emplace_hint(finalFrames.end(), provider, frame);
+        const int fi = _providerIndex.at(provider);
+        finalFrames[fi] = frame;
+        finalLive[fi] = 1;
         if (!_firstFramePoseRests.empty()) {
-            restFrames.emplace_hint(restFrames.end(), provider,
-                seedSnapshot.Get<RigExecPointFrame>(
-                    _firstFramePoseRests.at(provider)));
+            restFrames[fi] = seedSnapshot.Get<RigExecPointFrame>(
+                _firstFramePoseRests.at(provider));
+            restLive[fi] = 1;
         }
     }
     // Compose the transform of any plain Xformable lying between the asset
@@ -12167,8 +12363,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // authored: the rig follows the Xform the author wrote, wherever they
     // wrote it, and no layer is rewritten.
     if (!_ComposeInterveningXforms(assetRoot, &constraintXformCache,
-                                   &restFrames, &baseFrames, &finalFrames,
-                                   &pose)) {
+                                   &restFrames, &restLive, &baseFrames,
+                                   &finalFrames, &finalLive, &pose)) {
         return pose;
     }
     for (const SdfPath &provider : _xformDerivedProviders) {
@@ -12180,9 +12376,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             return pose;
         }
         xformDerivedBases[provider] = matrix;
-        restFrames[provider] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
+        const int fi = _providerIndex.at(provider);
+        restFrames[fi] = RigExecFrameFromMatrix(GfMatrix4d(1.0));
+        restLive[fi] = 1;
         baseFrames[provider] = base;
-        finalFrames[provider] = base;
+        finalFrames[fi] = base;
+        finalLive[fi] = 1;
     }
     stampRegion("FrameSeed");
     // The walk's frame store, in the two shapes the routines it shares with
@@ -12191,20 +12390,22 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // walk has left them -- the store is never copied into a third shape in
     // order to be read.
     auto finalFrameOf = [&](const SdfPath &path, RigExecPointFrame *frame) {
-        const auto found = finalFrames.find(path);
-        if (found == finalFrames.end()) {
+        const auto fi = _providerIndex.find(path);
+        if (fi == _providerIndex.end() || !finalLive[fi->second]) {
             return false;
         }
-        *frame = found->second;
+        *frame = finalFrames[fi->second];
         return true;
     };
     auto enumerateProviderFrames = [&](const RigExecPoseFrameVisitor &visit) {
-        for (const auto &[provider, current] : finalFrames) {
+        for (std::size_t i = 0; i < _providerPaths.size(); ++i) {
+            if (!finalLive[i]) continue;
+            const SdfPath &provider = _providerPaths[i];
             const auto base = baseFrames.find(provider);
             if (base == baseFrames.end()) {
                 continue;
             }
-            visit(provider, base->second, current);
+            visit(provider, base->second, finalFrames[i]);
         }
     };
     auto updateVolumePlacements = [&]() {
@@ -12221,9 +12422,9 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // observes every earlier revision of the provider while a reference to
         // a provider written later still sees its current (normally base)
         // value. This is deterministic and cannot create an evaluation cycle.
-        if (const auto revised = finalFrames.find(binding.sourcePath);
-            revised != finalFrames.end()) {
-            *out = revised->second;
+        if (const auto revised = _providerIndex.find(binding.sourcePath);
+            revised != _providerIndex.end() && finalLive[revised->second]) {
+            *out = finalFrames[revised->second];
             return out->IsValid();
         }
         if (!binding.xformPath.IsEmpty()) {
@@ -12291,51 +12492,58 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     auto recordFrame = [&](const SdfPath &provider,
                            const SdfPath &afterMover) {
         const auto wanted = _snapshotPoints.find(provider);
-        const auto frame = finalFrames.find(provider);
+        const auto fi = _providerIndex.find(provider);
+        const bool haveFrame =
+            fi != _providerIndex.end() && finalLive[fi->second];
         if (wanted == _snapshotPoints.end() ||
-            !wanted->second.count(afterMover) || frame == finalFrames.end() ||
-            !frame->second.IsValid()) {
+            !wanted->second.count(afterMover) || !haveFrame ||
+            !finalFrames[fi->second].IsValid()) {
             return;
         }
-        const auto rest = restFrames.find(provider);
+        const auto &restFrame = restFrames[fi->second];
         const auto &landmarks =
-            rest != restFrames.end() && rest->second.IsValid()
-                ? rest->second.points
+            restLive[fi->second] && restFrame.IsValid()
+                ? restFrame.points
                 : RigExecIdentityLandmarks();
         GfMatrix4d matrix(1.0);
-        if (RigExecPointsToMatrix(landmarks, frame->second.points, &matrix)) {
+        if (RigExecPointsToMatrix(landmarks, finalFrames[fi->second].points, &matrix)) {
             _chainSnapshots.Record(provider, afterMover, VtValue(matrix));
         }
     };
 
-    const std::set<SdfPath> hierarchicalProviders(
-        [&]() {
-            std::set<SdfPath> result;
-            for (const auto &[path, tap] : _firstFramePoseFrames) result.insert(path);
-            return result;
-        }());
+    const std::unordered_set<SdfPath, SdfPath::Hash> &hierarchicalProviders =
+        _hierarchicalProviderSet;
 
     // MEASURED 2026-09-13, biped: 3003 calls per frame, 8.1 us each -- 24 ms
     // of a 49 ms evaluate -- because commitConstraintFrames asks this once per
     // descendant joint per constraint, and the same handful of joints are
     // walked again for every constraint in the rig.
     //
-    // The cache is a LOCAL of this Evaluate call, not compiled state. That is
-    // what makes it safe: the predicate reads parent:space AT A TIME, and
-    // parent:space may carry time samples, so a compile-time answer would be
-    // wrong on any frame but the one it was baked at -- and this predicate
-    // decides whether a constraint's pose propagates through a joint, so a
-    // wrong answer moves joints by centimetres (see verify_spine.py). Within
-    // one Evaluate, `time` is fixed and the stage cannot change, so a memo is
-    // byte-identical to recomputing.
-    std::map<SdfPath, bool> namespacePoseCache;
+    // The predicate reads parent:space AT A TIME, and parent:space may carry
+    // time samples, so a compile-time answer would be wrong on any frame but
+    // the one it was baked at -- and this predicate decides whether a
+    // constraint's pose propagates through a joint, so a wrong answer moves
+    // joints by centimetres (see verify_spine.py). Within one Evaluate,
+    // `time` is fixed and the stage cannot change, so a memo is byte-identical
+    // to recomputing.
+    //
+    // Two tiers: _namespaceInheritsCache is a persistent member, cleared on
+    // epoch change, that records only stage-constant answers (parent:space
+    // with no time samples). Time-sampled attributes stay in the per-Evaluate
+    // namespacePoseCache and are re-read every frame.
+    std::unordered_map<SdfPath, bool, SdfPath::Hash> namespacePoseCache;
     const auto inheritsNamespacePose = [&](const SdfPath &path) {
+        const auto persistCached = _namespaceInheritsCache.find(path);
+        if (persistCached != _namespaceInheritsCache.end()) {
+            return persistCached->second;
+        }
         const auto cached = namespacePoseCache.find(path);
         if (cached != namespacePoseCache.end()) {
             return cached->second;
         }
         const UsdPrim prim = _stage->GetPrimAtPath(path);
         bool inherits = true;
+        bool stageConstant = true;
         for (const char *name : {"parent:space"}) {
             const UsdAttribute attribute = prim.GetAttribute(TfToken(name));
             SdfPathVector connections;
@@ -12346,10 +12554,18 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 attribute.GetConnections(&connections) &&
                 !connections.empty()) { inherits = false; break; }
             GfMatrix4d authored(1.0);
-            if (attribute && attribute.Get(&authored, time) &&
-                authored != GfMatrix4d(1.0)) { inherits = false; break; }
+            if (attribute) {
+                if (attribute.GetNumTimeSamples() > 0) {
+                    stageConstant = false;
+                }
+                if (attribute.Get(&authored, time) &&
+                    authored != GfMatrix4d(1.0)) { inherits = false; break; }
+            }
         }
         namespacePoseCache.emplace(path, inherits);
+        if (stageConstant) {
+            _namespaceInheritsCache.emplace(path, inherits);
+        }
         return inherits;
     };
 
@@ -12367,7 +12583,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     //
     // The climb closes over every path element, not only the known providers:
     // a provider's parent need not itself be a provider.
-    std::map<SdfPath, SdfPath> nearestBlockingCache;
     const auto ownsItsPose = [&](const SdfPath &path) {
         return _jointSolverBinding.count(path) ||
             (hierarchicalProviders.count(path) && !inheritsNamespacePose(path));
@@ -12377,20 +12592,20 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         SdfPath walk = path;
         SdfPath owner;
         for (; !walk.IsEmpty(); walk = walk.GetParentPath()) {
-            const auto cached = nearestBlockingCache.find(walk);
-            if (cached != nearestBlockingCache.end()) {
+            const auto cached = _nearestBlockingCache.find(walk);
+            if (cached != _nearestBlockingCache.end()) {
                 owner = cached->second;
                 break;
             }
             if (ownsItsPose(walk)) {
-                nearestBlockingCache[walk] = walk;
+                _nearestBlockingCache[walk] = walk;
                 owner = walk;
                 break;
             }
             pending.push_back(walk);
         }
         for (const SdfPath &seen : pending) {
-            nearestBlockingCache[seen] = owner;
+            _nearestBlockingCache[seen] = owner;
         }
         return owner;
     };
@@ -12414,81 +12629,186 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             }
         }
 
-        std::map<SdfPath, RigExecPointFrame> propagated;
+        std::vector<std::pair<int, RigExecPointFrame>> propagated;
+        // The hierarchy delta for a descendant depends only on its nearest
+        // candidate ancestor ("closest"): that ancestor's old (before) and new
+        // (candidate) frames are shared by every descendant under it. Compute
+        // the delta once per closest and reuse it; when that delta is the
+        // identity the descendants are unchanged and need no propagation.
+        struct ClosestDelta { GfMatrix4d delta; bool identity; };
+        std::map<SdfPath, ClosestDelta> closestDelta;
         // Only descendants can change. Enumerate disjoint changed subtrees,
         // rather than scanning every provider for each solver dependency level.
-        std::vector<SdfPath> descendants;
+        std::vector<int> descendants;
         SdfPath coveredRoot;
+        {
+            RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfDesc", "pose");
         for (const auto &[target, candidate] : candidates) {
             if (!coveredRoot.IsEmpty() && target.HasPrefix(coveredRoot)) continue;
             coveredRoot = target;
-            for (auto it = finalFrames.lower_bound(target);
-                 it != finalFrames.end() && it->first.HasPrefix(target); ++it) {
-                if (!candidates.count(it->first) && hierarchicalProviders.count(it->first)) {
-                    descendants.push_back(it->first);
+            const auto ti = _providerIndex.find(target);
+            if (ti == _providerIndex.end()) continue;
+            if (!_hierDescendants[ti->second].empty()) {
+                for (int di : _hierDescendants[ti->second]) {
+                    if (!candidates.count(_providerPaths[di]))
+                        descendants.push_back(di);
+                }
+            } else {
+                for (std::size_t j = static_cast<std::size_t>(ti->second) + 1;
+                     j < _providerPaths.size() &&
+                     _providerPaths[j].HasPrefix(target); ++j) {
+                    if (candidates.count(_providerPaths[j])) continue;
+                    if (!hierarchicalProviders.count(_providerPaths[j])) continue;
+                    descendants.push_back(static_cast<int>(j));
                 }
             }
         }
-        for (const SdfPath &provider : descendants) {
-            const RigExecPointFrame &current = finalFrames.at(provider);
-            SdfPath closest = provider.GetParentPath();
-            for (; !closest.IsEmpty() && !candidates.count(closest);
-                 closest = closest.GetParentPath()) {}
-            if (closest.IsEmpty()) {
-                continue;
-            }
-            // An independently solved joint is an absolute posed override.
-            // Namespace propagation cannot pass through that ownership boundary.
-            const SdfPath blocker = nearestBlocking(provider);
-            if (!blocker.IsEmpty() && blocker != closest &&
-                blocker.HasPrefix(closest)) {
-                continue;
-            }
-            const auto before = finalFrames.find(closest);
-            if (solverOutput && (before == finalFrames.end() ||
-                !_IsUsableConstraintFrame(current) ||
-                !_IsUsableConstraintFrame(before->second) ||
-                !_IsUsableConstraintFrame(candidates.at(closest)))) continue;
-            if (before == finalFrames.end() ||
-                !_IsUsableConstraintFrame(current)) {
-                pose.diagnostics.push_back(
-                    moverPath.GetString() +
-                    " could not propagate its pose revision through " +
-                    provider.GetString() + "; constraint passed through");
-                return false;
-            }
+        }
+        if (candidates.size() == 1) {
+            const SdfPath &closest = candidates.begin()->first;
+            const auto beforeIt = _providerIndex.find(closest);
+            const bool haveBefore = beforeIt != _providerIndex.end() &&
+                                    finalLive[beforeIt->second];
+            const RigExecPointFrame &candFrame = candidates.begin()->second;
+            // Single candidate: every descendant maps through the same
+            // closest, so its identity flag and hierarchy delta are shared.
             GfMatrix4d delta(1.0);
-            if (!RigExecPointsToMatrix(
-                    before->second.points, candidates.at(closest).points,
-                    &delta)) {
-                pose.diagnostics.push_back(
-                    moverPath.GetString() +
-                    " produced a singular hierarchy delta; constraint passed "
-                    "through");
-                return false;
+            bool sharedIdentity = false;
+            bool sharedSingular = false;
+            if (haveBefore) {
+                sharedIdentity = (finalFrames[beforeIt->second].points == candFrame.points);
+                if (!sharedIdentity &&
+                    !RigExecPointsToMatrix(finalFrames[beforeIt->second].points,
+                                           candFrame.points, &delta)) {
+                    sharedSingular = true;
+                }
             }
-            RigExecPointFrame frame =
-                RigExecMatrixToPoints(current.points, delta);
-            if (!_IsUsableConstraintFrame(frame)) {
-                pose.diagnostics.push_back(
-                    moverPath.GetString() +
-                    " produced an invalid descendant frame for " +
-                    provider.GetString() + "; constraint passed through");
-                return false;
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfSingle", "pose");
+            for (int di : descendants) {
+                const SdfPath &provider = _providerPaths[di];
+                const RigExecPointFrame &current = finalFrames[di];
+                // An independently solved joint is an absolute posed
+                // override; namespace propagation cannot pass through it.
+                const SdfPath blocker = nearestBlocking(provider);
+                if (!blocker.IsEmpty() && blocker != closest &&
+                    blocker.HasPrefix(closest)) {
+                    continue;
+                }
+                if (solverOutput && (!haveBefore ||
+                    !_IsUsableConstraintFrame(current) ||
+                    !_IsUsableConstraintFrame(finalFrames[beforeIt->second]) ||
+                    !_IsUsableConstraintFrame(candFrame))) continue;
+                if (!haveBefore ||
+                    !_IsUsableConstraintFrame(current)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " could not propagate its pose revision through " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                if (sharedIdentity) {
+                    continue;
+                }
+                if (sharedSingular) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " produced a singular hierarchy delta; constraint "
+                        "passed through");
+                    return false;
+                }
+                RigExecPointFrame frame =
+                    RigExecMatrixToPoints(current.points, delta);
+                if (!_IsUsableConstraintFrame(frame)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " produced an invalid descendant frame for " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                propagated.emplace_back(di, frame);
             }
-            propagated[provider] = frame;
+            }
+        } else {
+            for (int di : descendants) {
+                const SdfPath &provider = _providerPaths[di];
+                const RigExecPointFrame &current = finalFrames[di];
+                SdfPath closest = provider.GetParentPath();
+                for (; !closest.IsEmpty() && !candidates.count(closest);
+                     closest = closest.GetParentPath()) {}
+                if (closest.IsEmpty()) {
+                    continue;
+                }
+                const SdfPath blocker = nearestBlocking(provider);
+                if (!blocker.IsEmpty() && blocker != closest &&
+                    blocker.HasPrefix(closest)) {
+                    continue;
+                }
+                const auto beforeIt = _providerIndex.find(closest);
+                const bool haveBefore = beforeIt != _providerIndex.end() &&
+                                        finalLive[beforeIt->second];
+                if (solverOutput && (!haveBefore ||
+                    !_IsUsableConstraintFrame(current) ||
+                    !_IsUsableConstraintFrame(finalFrames[beforeIt->second]) ||
+                    !_IsUsableConstraintFrame(candidates.at(closest)))) continue;
+                if (!haveBefore ||
+                    !_IsUsableConstraintFrame(current)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " could not propagate its pose revision through " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                auto cdIt = closestDelta.find(closest);
+                if (cdIt == closestDelta.end()) {
+                    ClosestDelta cd;
+                    cd.identity =
+                        (finalFrames[beforeIt->second].points == candidates.at(closest).points);
+                    if (!cd.identity) {
+                        if (!RigExecPointsToMatrix(finalFrames[beforeIt->second].points,
+                                                   candidates.at(closest).points,
+                                                   &cd.delta)) {
+                            pose.diagnostics.push_back(
+                                moverPath.GetString() +
+                                " produced a singular hierarchy delta; constraint "
+                                "passed through");
+                            return false;
+                        }
+                    }
+                    cdIt = closestDelta.emplace(closest, cd).first;
+                }
+                if (cdIt->second.identity) {
+                    continue;
+                }
+                RigExecPointFrame frame =
+                    RigExecMatrixToPoints(current.points, cdIt->second.delta);
+                if (!_IsUsableConstraintFrame(frame)) {
+                    pose.diagnostics.push_back(
+                        moverPath.GetString() +
+                        " produced an invalid descendant frame for " +
+                        provider.GetString() + "; constraint passed through");
+                    return false;
+                }
+                propagated.emplace_back(di, frame);
+            }
         }
 
+        {
+            RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfFinal", "pose");
         for (const auto &[path, frame] : candidates) {
-            finalFrames[path] = frame;
+            const int fi = _providerIndex.at(path);
+            finalFrames[fi] = frame;
+            finalLive[fi] = 1;
             if (!solverOutput && !derivedRefresh) constrainedProviders.insert(path);
             if (solverOutput) baseFrames[path] = frame;
         }
-        for (const auto &[path, frame] : propagated) {
-            finalFrames[path] = frame;
-            if (solverOutput) baseFrames[path] = frame;
+        for (const auto &[idx, frame] : propagated) {
+            finalFrames[idx] = frame;
+            finalLive[idx] = 1;
+            if (solverOutput) baseFrames[_providerPaths[idx]] = frame;
         }
         updateVolumePlacements();
+        }
         return true;
     };
 
@@ -12542,10 +12862,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             std::vector<RigExecValueOverride> finalInputs = baseOverrides;
             if (dependencies != _poseProviderInputs.end()) {
                 for (const SdfPath &input : dependencies->second) {
-                    const auto base = baseFrames.find(input), current = finalFrames.find(input);
-                    if (base == baseFrames.end() || current == finalFrames.end()) continue;
+                    const auto base = baseFrames.find(input);
+                    const auto currentIt = _providerIndex.find(input);
+                    if (base == baseFrames.end() || currentIt == _providerIndex.end() ||
+                        !finalLive[currentIt->second]) continue;
                     baseInputs.push_back({input, _computePointFrame, TfToken(), VtValue(base->second)});
-                    finalInputs.push_back({input, _computePointFrame, TfToken(), VtValue(current->second)});
+                    finalInputs.push_back({input, _computePointFrame, TfToken(), VtValue(finalFrames[currentIt->second])});
                 }
             }
             std::vector<RigExecValueOverride> identity = baseInputs;
@@ -12643,20 +12965,30 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // Only direct prerequisites enter this request. Copying all previous
             // joint overrides into every level would itself be quadratic for a
             // deep chain, even if the kernels each executed only once.
-            std::vector<RigExecValueOverride> inputs = baseOverrides;
+            // The batch-specific overrides only. baseOverrides is a pure
+            // function of `time`, so (time, tail) uniquely determines the full
+            // exec input; the cache keys on the small tail and a hit skips
+            // materialising the base+tail vector (the 250-entry base copy)
+            // entirely -- which is every repeat-pass frame.
+            std::vector<RigExecValueOverride> tail;
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Inputs", "pose");
+                tail.reserve(batch.dependencies.size() + batch.frameInputs.size() +
+                             batch.restInputs.size());
+            }
             for (const SdfPath &dependency : batch.dependencies) {
                 const auto aggregate = solvedAggregates.find(dependency);
                 if (aggregate != solvedAggregates.end()) {
-                    inputs.push_back({dependency, _computePointFrameArray, TfToken(),
-                                      VtValue(aggregate->second)});
+                    tail.push_back({dependency, _computePointFrameArray, TfToken(),
+                                    VtValue(aggregate->second)});
                 }
             }
             for (const SdfPath &input : batch.frameInputs) {
                 if (!refreshPoseProvider(input)) return pose;
-                const auto frame = finalFrames.find(input);
-                if (frame != finalFrames.end()) {
-                    inputs.push_back({input, _computePointFrame, TfToken(),
-                                      VtValue(frame->second)});
+                const auto fi = _providerIndex.find(input);
+                if (fi != _providerIndex.end() && finalLive[fi->second]) {
+                    tail.push_back({input, _computePointFrame, TfToken(),
+                                    VtValue(finalFrames[fi->second])});
                 }
             }
             // "The incoming frame replaces the authored rest" (spec §4.2).
@@ -12677,10 +13009,22 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // a solver pushes nothing here at all.
             for (const auto &[joint, predecessor] : batch.restInputs) {
                 const bool live = !predecessor.IsEmpty();
-                const auto &source = live ? finalFrames : restFrames;
-                const auto frame = source.find(joint);
-                if (frame != source.end()) {
-                    RigExecPointFrame rest = frame->second;
+                RigExecPointFrame rest;
+                bool haveRest = false;
+                if (live) {
+                    const auto fi = _providerIndex.find(joint);
+                    if (fi != _providerIndex.end() && finalLive[fi->second]) {
+                        rest = finalFrames[fi->second];
+                        haveRest = true;
+                    }
+                } else {
+                    const auto fi = _providerIndex.find(joint);
+                    if (fi != _providerIndex.end() && restLive[fi->second]) {
+                        rest = restFrames[fi->second];
+                        haveRest = true;
+                    }
+                }
+                if (haveRest) {
                     // A solver with a basis of its own -- an FK chain
                     // composing control deltas -- switches to the joint's
                     // rest reference only where this flag says a step below
@@ -12688,39 +13032,53 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     // basis it always had, which is what makes the rule free
                     // on every rig that does not stack.
                     if (live) rest.flags |= RigExecPointFrameLiveRest;
-                    inputs.push_back({joint, _computeRestFrame, TfToken(),
-                                      VtValue(rest)});
+                    tail.push_back({joint, _computeRestFrame, TfToken(),
+                                    VtValue(rest)});
                 }
             }
-            // USD invalidation is dependency-specific. Retain it locally until a
-            // successful refresh, including when a previous evaluation failed.
-            batch.dirty = batch.taps->ConsumeDirty() || batch.dirty;
-            const bool sameInputs = inputs.size() == batch.inputs.size() &&
-                std::equal(inputs.begin(), inputs.end(), batch.inputs.begin(),
-                    [](const RigExecValueOverride &a, const RigExecValueOverride &b) {
-                        return a.prim == b.prim && a.computation == b.computation &&
-                               a.attribute == b.attribute && a.value == b.value;
-                    });
-            if (batch.dirty || batch.time != time || !sameInputs ||
-                !batch.snapshot.IsValid() || !batch.snapshot.IsComplete()) {
+            // A batch snapshot is a pure function of (time, inputs). Inputs
+            // are themselves assembled from the seed snapshot, prior-level
+            // aggregates, and rest frames -- all deterministic for a given
+            // frame -- so a recently-computed entry is reusable. The tap-level
+            // dirty flag is drained, not consulted (it fires across sibling
+            // frames sharing the system); genuine edits ride batch.dirty.
+            batch.taps->ConsumeDirty();
+            _SnapshotCache::Entry *hit = nullptr;
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Find", "pose");
+                hit = !batch.dirty ? batch.cache.Find(tail, time) : nullptr;
+            }
+            if (hit != nullptr) {
+                batch.snapshot = hit->snapshot;
+            } else {
                 RIGEXEC_PROFILE_SCOPE_CAT(
                     _profiler, "ExecEvaluate", "exec");
-                const RigExecSnapshot refreshed = batch.taps->Evaluate(time, inputs);
+                std::vector<RigExecValueOverride> inputs;
+                inputs.reserve(baseOverrides.size() + tail.size());
+                inputs.insert(inputs.end(), baseOverrides.begin(), baseOverrides.end());
+                inputs.insert(inputs.end(), tail.begin(), tail.end());
+                const RigExecSnapshot refreshed =
+                    batch.taps->Evaluate(time, inputs);
                 if (!refreshed.IsValid() || !refreshed.IsComplete()) {
                     batch.dirty = true;
                     pose.solverOverridesConverged = false;
-                    pose.diagnostics.push_back("solver dependency level evaluation incomplete");
+                    pose.diagnostics.push_back(
+                        "solver dependency level evaluation incomplete");
                     return pose;
                 }
+                batch.cache.Store(tail, time, refreshed);
                 batch.snapshot = refreshed;
-                batch.inputs = std::move(inputs);
-                batch.time = time;
                 batch.dirty = false;
                 // ChangeTime/compilation can notify while Evaluate runs. The
                 // successful snapshot already includes those invalidations.
                 batch.taps->ConsumeDirty();
-                pose.solverEvaluations += batch.solvers.size();
             }
+            // Count solver computations the dependency schedule REQUESTED
+            // (spec §4.2 / bakedProgram.h:107), not the exec pulls it
+            // actually performed: the per-batch LRU legitimately skips
+            // recomputation for repeated (time, inputs), and this counter
+            // must stay byte-stable for pose-out comparisons.
+            pose.solverEvaluations += batch.solvers.size();
             const RigExecSnapshot &values = batch.snapshot;
             if (visitedSolverLevels.insert(batch.level).second) {
                 ++pose.solverOverrideRounds;
@@ -12852,15 +13210,15 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             chain.reserve(constraint.ikChain.size());
             bool inputsValid = true;
             for (const SdfPath &joint : constraint.ikChain) {
-                const auto frame = finalFrames.find(joint);
-                if (frame == finalFrames.end()) {
+                const auto fi = _providerIndex.find(joint);
+                if (fi == _providerIndex.end() || !finalLive[fi->second]) {
                     pose.diagnostics.push_back(
                         constraint.moverPath.GetString() +
                         " has no current frame for " + joint.GetString());
                     inputsValid = false;
                     break;
                 }
-                chain.push_back(frame->second);
+                chain.push_back(finalFrames[fi->second]);
             }
             RigExecPointFrame effector;
             if (inputsValid &&
@@ -12965,12 +13323,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         rest.push_back(chain[i]);
                         continue;
                     }
-                    const auto frame = restFrames.find(joint);
-                    if (frame == restFrames.end()) {
+                    const auto fi = _providerIndex.find(joint);
+                    if (fi == _providerIndex.end() || !restLive[fi->second]) {
                         inputsValid = false;
                         break;
                     }
-                    rest.push_back(frame->second);
+                    rest.push_back(restFrames[fi->second]);
                 }
                 if (!inputsValid ||
                     !RigExecPrepareRestDerivedIkChain(
@@ -13022,8 +13380,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             recordFrame(constraint.targets[0], constraint.moverPath);
             continue;
         }
+        const auto inputIt = _providerIndex.find(constraint.targets[0]);
         const RigExecPointFrame inputFrame =
-            finalFrames[constraint.targets[0]];
+            (inputIt != _providerIndex.end() && finalLive[inputIt->second])
+                ? finalFrames[inputIt->second]
+                : RigExecPointFrame();
         RigExecPointFrame candidate = inputFrame;
         bool candidateReady = true;
         // Which mask triple this operator reads is a table property: masks
@@ -13033,10 +13394,31 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         // each.
         const _ConstraintHandler *solveHandler =
             _FindConstraintHandler(constraint.schemaType);
-        const RigExecConstraintAxisMask affect = _ReadGroupMask(
-            _resolvedInputs, prim,
-            solveHandler ? solveHandler->maskGroup : _ChannelGroup::None,
-            time);
+        RigExecConstraintAxisMask affect;
+        if (constraint.masksStatic) {
+            switch (solveHandler ? solveHandler->maskGroup
+                                 : _ChannelGroup::None) {
+            case _ChannelGroup::Translation:
+                affect = constraint.precompTranslation;
+                break;
+            case _ChannelGroup::Rotation:
+                affect = constraint.precompRotation;
+                break;
+            case _ChannelGroup::Scale:
+                affect = constraint.precompScale;
+                break;
+            case _ChannelGroup::All:
+            case _ChannelGroup::None:
+            default:
+                affect = RigExecConstraintAxisMask();
+                break;
+            }
+        } else {
+            affect = _ReadGroupMask(
+                _resolvedInputs, prim,
+                solveHandler ? solveHandler->maskGroup : _ChannelGroup::None,
+                time);
+        }
         TfToken orderToken("XYZ");
         if (const UsdAttribute a =
                 prim.GetAttribute(TfToken("rigExec:rotationOrder"))) {
@@ -13044,6 +13426,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
         const RigExecEulerOrder order =
             _ParseConstraintEulerOrder(orderToken);
+
 
         // The kernel-backed operators solve through the registry: one row
         // per operator, so adding an operator is a table entry rather than
@@ -13059,6 +13442,10 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             solveContext.affect = affect;
             solveContext.order = order;
             solveContext.weight = solveWeight;
+            solveContext.masksStatic = constraint.masksStatic;
+            solveContext.precompTranslation = constraint.precompTranslation;
+            solveContext.precompRotation = constraint.precompRotation;
+            solveContext.precompScale = constraint.precompScale;
             candidate = solveHandler->solve(solveContext);
         } else {
             // Aim uses the same weighted source set, reduced to the target
@@ -13235,18 +13622,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         if (!refreshPoseProvider(provider)) return pose;
     }
 
-    // Materialize the authoritative base-phase request only after the pose
-    // DAG has completed. Aggregate outputs include their constrained inputs;
-    // provider base frames remain distinct from later constraint revisions.
-    for (const auto &[solver, aggregate] : solvedAggregates) {
-        jointOverrides.push_back({solver, _computePointFrameArray, TfToken(),
-                                  VtValue(aggregate)});
-    }
-    for (const auto &[provider, tap] : _firstFramePoseFrames) {
-        jointOverrides.push_back({provider, _computePointFrame, TfToken(),
-                                  VtValue(baseFrames.at(provider))});
-    }
-
     // An incomplete solver is an authoring gap, not a silent one: name every
     // writer that published nothing so a rig mid-edit explains itself.
     // Accumulated in walk order, stable-sorted by joint path, so the lines
@@ -13268,22 +13643,51 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                        " left"));
     }
 
-    // Baked falloff tables ride along with the joint overrides. They are
-    // epoch-constant, so this replays the same values Compile produced
-    // until the next epoch -- exec has no accessor for an attribute's
-    // spline, and a falloff curve is the whole function rather than one
-    // resolved value (see RigExecFalloffLut in types.h).
-    jointOverrides.insert(jointOverrides.end(), _falloffLutOverrides.begin(),
-                          _falloffLutOverrides.end());
-
     // 1. Transforms and solvers through OpenExec. An incomplete snapshot
     // means some computation failed to compile or evaluate; refusing to
     // continue prevents default-constructed values from masquerading as
     // results (spec §6.6).
-    const RigExecSnapshot snapshot = [&]() {
+    RigExecSnapshot snapshot;
+    {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "AuthoritativeSnapshot", "exec");
-        return _taps->Evaluate(time, jointOverrides);
-    }();
+        _taps->ConsumeDirty();
+        // jointOverrides is a pure function of (epoch, time): the solver
+        // aggregates, base frames, and falloff LUTs are all deterministic
+        // given the time. A time-keyed entry therefore skips the 800+
+        // element build on every repeat evaluation. Genuine stage edits set
+        // _authSnapshotDirty; the tap-level dirty flag is drained, not
+        // consulted (it fires across sibling frames sharing the system).
+        bool authResolved = false;
+        if (!_authSnapshotDirty) {
+            const auto tk = _authSnapTimeKeyed.find(time);
+            if (tk != _authSnapTimeKeyed.end()) {
+                snapshot = tk->second;
+                authResolved = true;
+            }
+        }
+        if (!authResolved) {
+            std::vector<RigExecValueOverride> jointOverrides = baseOverrides;
+            for (const auto &[solver, aggregate] : solvedAggregates) {
+                jointOverrides.push_back({solver, _computePointFrameArray,
+                                          TfToken(), VtValue(aggregate)});
+            }
+            for (const auto &[provider, tap] : _firstFramePoseFrames) {
+                jointOverrides.push_back({provider, _computePointFrame,
+                                          TfToken(),
+                                          VtValue(baseFrames.at(provider))});
+            }
+            jointOverrides.insert(jointOverrides.end(),
+                                  _falloffLutOverrides.begin(),
+                                  _falloffLutOverrides.end());
+            snapshot = _taps->Evaluate(time, jointOverrides);
+            if (snapshot.IsValid() && snapshot.IsComplete()) {
+                if (_authSnapTimeKeyed.size() >= 4)
+                    _authSnapTimeKeyed.erase(_authSnapTimeKeyed.begin());
+                _authSnapTimeKeyed.emplace(time, snapshot);
+                _authSnapshotDirty = false;
+            }
+        }
+    }
     if (!snapshot.IsValid() || !snapshot.IsComplete()) {
         pose.diagnostics.push_back(
             snapshot.IsValid() ? "snapshot incomplete: missing tap values"
@@ -13306,7 +13710,10 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // 2026-09-13-sparse-evaluation-design.md, Gate 3).
     {
     RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PublishProviders", "publish");
-    for (const auto &[provider, frame] : finalFrames) {
+    for (std::size_t i = 0; i < _providerPaths.size(); ++i) {
+        if (!finalLive[i]) continue;
+        const SdfPath &provider = _providerPaths[i];
+        const RigExecPointFrame &frame = finalFrames[i];
         if (_xformDerivedProviders.count(provider)) {
             if (!_IsUsableConstraintFrame(frame)) {
                 pose.diagnostics.push_back(
@@ -13322,12 +13729,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     xformDerivedBases[provider];
             }
         }
-        const auto rest = restFrames.find(provider);
-        if (rest != restFrames.end() &&
-            _IsUsableConstraintFrame(rest->second) &&
+        if (restLive[i] &&
+            _IsUsableConstraintFrame(restFrames[i]) &&
             _IsUsableConstraintFrame(frame)) {
             GfMatrix4d matrix(1.0);
-            if (RigExecPointsToMatrix(rest->second.points, frame.points,
+            if (RigExecPointsToMatrix(restFrames[i].points, frame.points,
                                       &matrix)) {
                 finalMatrices[provider] = matrix;
                 _chainSnapshots.RecordFinal(provider, VtValue(matrix));
@@ -13346,10 +13752,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     for (size_t i = 0; i < _jointPaths.size(); ++i) {
         const RigExecPointFrame baseFrame =
             snapshot.Get<RigExecPointFrame>(_jointFrameTaps[i]);
-        const auto revisedIt = finalFrames.find(_jointPaths[i]);
+        const auto revisedIt = _providerIndex.find(_jointPaths[i]);
+        const bool haveRevised = revisedIt != _providerIndex.end() &&
+                                 finalLive[revisedIt->second];
         const RigExecPointFrame finalFrame =
-            revisedIt != finalFrames.end()
-                ? revisedIt->second
+            haveRevised
+                ? finalFrames[revisedIt->second]
                 : snapshot.Get<RigExecPointFrame>(_jointFinalFrameTaps[i]);
         pose.jointFramesBase[_jointPaths[i]] = baseFrame;
         pose.jointFramesFinal[_jointPaths[i]] = finalFrame;
@@ -13396,10 +13804,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     {
     RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "PublishControls", "publish");
     for (size_t i = 0; i < _controlPaths.size(); ++i) {
-        const auto revised = finalFrames.find(_controlPaths[i]);
+        const auto revised = _providerIndex.find(_controlPaths[i]);
+        const bool haveRevised = revised != _providerIndex.end() &&
+                                 finalLive[revised->second];
         pose.controlFrames[_controlPaths[i]] =
-            revised != finalFrames.end()
-                ? revised->second
+            haveRevised
+                ? finalFrames[revised->second]
                 : snapshot.Get<RigExecPointFrame>(_controlFrameTaps[i]);
     }
     }
@@ -13418,7 +13828,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
         for (const auto &[provider, tap] : _firstFramePoseFrames) {
             guideOverrides.push_back({provider, _computePointFrame, TfToken(),
-                                      VtValue(finalFrames.at(provider))});
+                                      VtValue(finalFrames[_providerIndex.at(provider)])});
         }
         _guideDirty = _guideTaps->ConsumeDirty() || _guideDirty;
         const bool sameGuideInputs =
@@ -13464,13 +13874,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         }
     }
 
-    // Property-domain results, computed above and already consumed by exec
-    // as overrides. Published in the same map as the point chains: a
-    // consumer distinguishes them by the type the VtValue holds, not by
-    // which mover domain produced them.
-    for (const auto &[target, value] : propertyResults) {
-        pose.movedProperties[target] = value;
-    }
+    // Property-domain results are published directly into
+    // pose.movedProperties by _EvaluatePropertyChains (and amended by the
+    // post-chain interactive-override pass), so no separate copy is needed.
+    // They share the map with the point chains below; a consumer distinguishes
+    // them by the type the VtValue holds, not by which mover domain produced
+    // them.
 
     // 3c. THE POSE-INTERPOLATOR PHASE.
     //
@@ -13480,41 +13889,45 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // consume, so it runs before them. It is not a mover and cannot be one:
     // a mover's inputs are resolved by the property chains, which run before
     // exec does and therefore cannot see the pose at all.
-    _EvaluatePoseInterpolators(time, restFrames, finalFrames, &pose);
+    _EvaluatePoseInterpolators(time, restFrames, restLive, finalFrames, finalLive, &pose);
 
     // The independent CPU parity path must consume the same declared
     // provider phase as the graph while resolving it independently.  Capture
     // every matrix provider the graph taps (controls as well as joints), then
     // overlay the evaluator-side frame revisions for final-phase reads.
-    std::map<SdfPath, GfMatrix4d> baseProviderMatrices;
-    for (const auto &[target, revisions] : _graphChains) {
-        for (const _GraphRevision &revision : revisions) {
-            if (revision.transformTap >= 0 &&
-                !revision.binding.transform.IsEmpty() &&
-                !baseProviderMatrices.count(revision.binding.transform)) {
-                baseProviderMatrices[revision.binding.transform] =
-                    snapshot.Get<GfMatrix4d>(revision.transformTap);
-            }
-            if (revision.transformSpaceTap >= 0 &&
-                !baseProviderMatrices.count(
-                    revision.binding.transformSpace)) {
-                baseProviderMatrices[revision.binding.transformSpace] =
-                    snapshot.Get<GfMatrix4d>(revision.transformSpaceTap);
-            }
-            for (size_t k = 0; k < revision.influenceTaps.size() &&
-                               k < revision.binding.influences.size(); ++k) {
-                const SdfPath &provider = revision.binding.influences[k];
-                if (!baseProviderMatrices.count(provider)) {
-                    baseProviderMatrices[provider] =
-                        snapshot.Get<GfMatrix4d>(revision.influenceTaps[k]);
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> baseProviderMatrices;
+    std::unordered_map<SdfPath, GfMatrix4d, SdfPath::Hash> finalProviderMatrices;
+    // Consumed only by the cpuParityMode _EvaluateChain oracle, so skip
+    // populating them on the hot dynamic path.
+    if (cpuParityMode) {
+        for (const auto &[target, revisions] : _graphChains) {
+            for (const _GraphRevision &revision : revisions) {
+                if (revision.transformTap >= 0 &&
+                    !revision.binding.transform.IsEmpty() &&
+                    !baseProviderMatrices.count(revision.binding.transform)) {
+                    baseProviderMatrices[revision.binding.transform] =
+                        snapshot.Get<GfMatrix4d>(revision.transformTap);
+                }
+                if (revision.transformSpaceTap >= 0 &&
+                    !baseProviderMatrices.count(
+                        revision.binding.transformSpace)) {
+                    baseProviderMatrices[revision.binding.transformSpace] =
+                        snapshot.Get<GfMatrix4d>(revision.transformSpaceTap);
+                }
+                for (size_t k = 0; k < revision.influenceTaps.size() &&
+                                   k < revision.binding.influences.size(); ++k) {
+                    const SdfPath &provider = revision.binding.influences[k];
+                    if (!baseProviderMatrices.count(provider)) {
+                        baseProviderMatrices[provider] =
+                            snapshot.Get<GfMatrix4d>(revision.influenceTaps[k]);
+                    }
                 }
             }
         }
-    }
-    std::map<SdfPath, GfMatrix4d> finalProviderMatrices =
-        baseProviderMatrices;
-    for (const auto &[provider, matrix] : finalMatrices) {
-        finalProviderMatrices[provider] = matrix;
+        finalProviderMatrices = baseProviderMatrices;
+        for (const auto &[provider, matrix] : finalMatrices) {
+            finalProviderMatrices[provider] = matrix;
+        }
     }
 
     // 3. Geometry point chains from the generated applications: the chain
@@ -13646,8 +14059,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         if (chainIt == _graphChains.end()) {
             return;
         }
-        RIGEXEC_PROFILE_SCOPE_CAT(
-            _profiler, "Chain " + target.GetString(), "geometry");
         const std::vector<_GraphRevision> &revisions = chainIt->second;
         VtVec3fArray basePoints;
         // Compile created a node for every chain and derived target, so this
@@ -13722,13 +14133,14 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         size_t revisionIndex = 0;
         bool built = true;
         for (const _GraphRevision &revision : revisions) {
-            const UsdPrim moverPrim =
-                _stage->GetPrimAtPath(revision.moverPath);
+            const UsdPrim moverPrim = [&]() {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "GetPrim", "geometry");
+                return _stage->GetPrimAtPath(revision.moverPath);
+            }();
             if (!moverPrim) {
                 built = false;
                 break;
             }
-            RigExecProviderValues values;
             // One overlay per revision: the generation-wide property results,
             // plus whatever THIS revision's declared phases resolve to. The
             // assembler reads inputs by path and never learns a phase exists
@@ -13762,6 +14174,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         " resolved to nothing; read the authored base");
                 }
             }
+            RigExecProviderValues values;
             values.resolved = resolved;
             GfMatrix4d transform(1.0);
             RigExecWeightPacket weights;
@@ -13901,37 +14314,46 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                             "current-phase weight failed: " + weightError);
                     }
                 }
-            }
-            // Publish the field an authoring tool paints as an influence
-            // overlay. Taken from the packet the mover is about to
-            // consume, so what a rigger sees is exactly what deformed
-            // the geometry -- not a re-derivation that could drift.
-            if (revision.weightTap >= 0 && weights.valid &&
-                _publishWeightFields) {
-                RigExecResolvedWeightField &field =
-                    work.weightFields[revision.binding.weightObject];
-                SdfPathVector declaredTargets;
-                if (const UsdPrim weightPrim = _stage->GetPrimAtPath(
-                        revision.binding.weightObject)) {
-                    if (const UsdRelationship rel =
-                            weightPrim.GetRelationship(
-                                TfToken("rigExec:weightTarget"))) {
-                        rel.GetTargets(&declaredTargets);
+                if (weights.valid && _publishWeightFields) {
+                    RigExecResolvedWeightField &field =
+                        work.weightFields[revision.binding.weightObject];
+                    SdfPathVector declaredTargets;
+                    if (const UsdPrim weightPrim = _stage->GetPrimAtPath(
+                            revision.binding.weightObject)) {
+                        if (const UsdRelationship rel =
+                                weightPrim.GetRelationship(
+                                    TfToken("rigExec:weightTarget"))) {
+                            rel.GetTargets(&declaredTargets);
+                        }
+                    }
+                    const bool operationDomain =
+                        declaredTargets.size() == 1 &&
+                        declaredTargets[0] == revision.moverPath;
+                    field.target = operationDomain ? revision.moverPath : target;
+                    const size_t logicalCount =
+                        operationDomain ? size_t(1) : basePoints.size();
+                    // ResolveAll matches the kernel: O(n+m) scatter for
+                    // sparse packets, range-policy checks, atomic on
+                    // failure -- the same values the mover consumed.
+                    if (!weights.ResolveAll(logicalCount, &field.weights)) {
+                        field.weights.clear();
                     }
                 }
-                const bool operationDomain =
-                    declaredTargets.size() == 1 &&
-                    declaredTargets[0] == revision.moverPath;
-                field.target = operationDomain ? revision.moverPath : target;
-                const size_t logicalCount =
-                    operationDomain ? size_t(1) : basePoints.size();
-                field.weights.assign(logicalCount, 0.0f);
-                for (size_t i = 0; i < logicalCount; ++i) {
-                    const float w = weights.Resolve(i, logicalCount);
-                    field.weights[i] = w < 0.0f ? 0.0f : w;
-                }
             }
-            values.basePoints.assign(basePoints.begin(), basePoints.end());
+            // basePoints is the chain-wide authored base, invariant across
+            // revisions. Only the ops whose assemble path reads
+            // values.basePoints (and the blend-input path below) need it;
+            // every other revision would pay a full base copy for nothing.
+            const bool needsBasePoints =
+                !revision.binding.blendInputs.empty() ||
+                revision.op == RigExecRevisionOp::BlendShape ||
+                revision.op == RigExecRevisionOp::VolumeCorrect ||
+                revision.op == RigExecRevisionOp::Lattice ||
+                revision.op == RigExecRevisionOp::RecomputeNormals ||
+                revision.op == RigExecRevisionOp::RecomputeExtent;
+            if (needsBasePoints) {
+                values.basePoints.assign(basePoints.begin(), basePoints.end());
+            }
             if (revision.op == RigExecRevisionOp::Skin &&
                 revision.skinTopologyFixed) {
                 values.skinTopologyCache = &_skinTopologies;
@@ -14048,9 +14470,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                     "envelope; revision passed through");
             }
             head = live->revisions[revisionIndex++];
-            graph.UpdateRevision(
-                head, parameters,
-                RigExecStatusForParameters(parameters, revision.moverPath));
+            {
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "UpdateRev", "geometry");
+                graph.UpdateRevision(
+                    head, parameters,
+                    RigExecStatusForParameters(parameters, revision.moverPath));
+            }
             ++work.revisionsBuilt;
 
             // Snapshot only where a phased read named this revision. The
@@ -14060,8 +14485,7 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             const auto wanted = _snapshotPoints.find(target);
             if (wanted != _snapshotPoints.end() &&
                 wanted->second.count(revision.moverPath)) {
-                RIGEXEC_PROFILE_SCOPE_CAT(
-                    _profiler, "SnapshotEvaluate", "geometry");
+                RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SnapshotEvaluate", "geometry");
                 work.snapshots.Record(target, revision.moverPath,
                                        VtValue(graph.Evaluate(head)));
             }
