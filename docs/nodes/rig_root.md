@@ -105,6 +105,24 @@ including =dynamic, which the parity suites rely on being able to
 force onto any stage they open). Absent or false, and with neither
 of those set, the rig evaluates dynamically.
 
+#### `rigExec:asset`
+
+*Type:* `uniform asset`. *Default:* `@@`.
+
+Baked-playback selector: when set, hosts that can play a
+.rigexec file (usdview through rigExecImaging, the Godot player)
+answer this rig from the binary instead of evaluating it, and when
+unset the rig evaluates live. The path resolves like any asset
+attribute -- relative to the layer that authors it -- and names a
+single .rigexec file with no sidecar.
+
+Uniform because it is a decision about the whole rig -- which
+source answers it -- and not a channel an animator keys. Setting
+it can change how fast a frame arrives and not what the frame is:
+the binary is bit-identical to the baked path by construction, and
+a host that cannot open the file it names evaluates live and says
+so, rather than rendering a rig it did not evaluate.
+
 ## Example
 
 Every shipped example is one of these: `two_bone_ik.usda` puts a

@@ -2072,10 +2072,10 @@ _ExpectedToDeclineIndex(const std::string &name)
 // examples are authored over 1001-1048, so all three reads held the first
 // key and the sweep compared one static pose three times -- it had never
 // compared an interpolated frame of any of them. Start, middle and end of
-// the authored range instead, and 1-3 for a stage with no authored range
-// (the biped, which is keyed over 1-8), so a newly added example is swept at
-// frames that differ the day it lands rather than the day someone adds it to
-// a table.
+// the authored range instead, and 1-3 for a stage with no authored range,
+// so a newly added example is swept at frames that differ the day it lands
+// rather than the day someone adds it to a table. The biped overlay authors
+// 1-200, so it sweeps start, middle and end like the numbered examples.
 static std::vector<double>
 _SweepFrames(const UsdStageRefPtr &stage)
 {

@@ -1541,6 +1541,96 @@ RigExecRigEvaluator::~RigExecRigEvaluator()
     _taps.reset();
 }
 
+namespace {
+
+// Whether \p notice is provably nothing but new VALUES on the numeric avar
+// channels (see _OnObjectsChanged): the gate for the in-place patch path.
+// Shared by the notice handler and ClassifyNoticeDisposition, so the two
+// can never disagree about which branch a notice takes.
+bool
+_NoticeIsAvarValuesOnly(const UsdNotice::ObjectsChanged &notice)
+{
+    if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
+        return false;
+    }
+    static const TfToken kDefault("default");
+    static const TfToken kTimeSamples("timeSamples");
+    static const TfToken kSpline("spline");
+    static const TfToken kTypeName("typeName");
+    // The numeric channels only. avars:defaultSpace and
+    // avars:rotationOrder are tokens that choose how a frame is
+    // composed, which is structure, so they are not in this list.
+    static const TfToken kChannels[] = {
+        TfToken("avars:tx"), TfToken("avars:ty"), TfToken("avars:tz"),
+        TfToken("avars:sx"), TfToken("avars:sy"), TfToken("avars:sz"),
+        TfToken("avars:rx"), TfToken("avars:ry"), TfToken("avars:rz"),
+        TfToken("avars:rspin"), TfToken("avars:unitScaleFactor")};
+    const auto isChannel = [](const TfToken &name) {
+        for (const TfToken &avar : kChannels) {
+            if (name == avar) {
+                return true;
+            }
+        }
+        return false;
+    };
+    bool sawAvar = false;
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        if (!path.IsPropertyPath() || !isChannel(path.GetNameToken())) {
+            return false;
+        }
+        for (const TfToken &field : notice.GetChangedFields(path)) {
+            if (field != kTypeName && field != kDefault &&
+                field != kTimeSamples && field != kSpline) {
+                return false;
+            }
+        }
+        sawAvar = true;
+    }
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        if (path.IsPrimPath()) {
+            continue;  // ancestor info around the edit
+        }
+        if (!isChannel(path.GetNameToken())) {
+            return false;
+        }
+        for (const TfToken &field : notice.GetChangedFields(path)) {
+            if (field != kDefault && field != kTimeSamples &&
+                field != kSpline) {
+                return false;
+            }
+        }
+        sawAvar = true;
+    }
+    return sawAvar;
+}
+
+}  // namespace
+
+RigExecNoticeDisposition
+RigExecRigEvaluator::ClassifyNoticeDisposition(
+    const UsdNotice::ObjectsChanged &notice,
+    std::vector<SdfPath> *patchedPaths) const
+{
+    if (patchedPaths) {
+        patchedPaths->clear();
+    }
+    if (!_bakedProgram) {
+        return RigExecNoticeDisposition::None;
+    }
+    std::vector<SdfPath> paths;
+    if (_NoticeIsAvarValuesOnly(notice) &&
+        _bakedProgram->DryRunAvarValueEdits(notice, &paths)) {
+        if (patchedPaths) {
+            *patchedPaths = std::move(paths);
+        }
+        return RigExecNoticeDisposition::Patched;
+    }
+    if (_bakedProgram->IsInvalidatedBy(notice)) {
+        return RigExecNoticeDisposition::Stale;
+    }
+    return RigExecNoticeDisposition::StampBumped;
+}
+
 void
 RigExecRigEvaluator::_OnObjectsChanged(
     const UsdNotice::ObjectsChanged &notice, const UsdStageWeakPtr &)
@@ -1567,60 +1657,7 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // Every released gizmo drag and its undo is exactly that pair, and
     // treating it as structure rebaked the program for ~250 ms per release.
     // A prim resync is never a value edit and keeps the conservative path.
-    const bool avarValuesOnly = [&notice]() {
-        if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
-            return false;
-        }
-        static const TfToken kDefault("default");
-        static const TfToken kTimeSamples("timeSamples");
-        static const TfToken kSpline("spline");
-        static const TfToken kTypeName("typeName");
-        // The numeric channels only. avars:defaultSpace and
-        // avars:rotationOrder are tokens that choose how a frame is
-        // composed, which is structure, so they are not in this list.
-        static const TfToken kChannels[] = {
-            TfToken("avars:tx"), TfToken("avars:ty"), TfToken("avars:tz"),
-            TfToken("avars:sx"), TfToken("avars:sy"), TfToken("avars:sz"),
-            TfToken("avars:rx"), TfToken("avars:ry"), TfToken("avars:rz"),
-            TfToken("avars:rspin"), TfToken("avars:unitScaleFactor")};
-        const auto isChannel = [](const TfToken &name) {
-            for (const TfToken &avar : kChannels) {
-                if (name == avar) {
-                    return true;
-                }
-            }
-            return false;
-        };
-        bool sawAvar = false;
-        for (const SdfPath &path : notice.GetResyncedPaths()) {
-            if (!path.IsPropertyPath() || !isChannel(path.GetNameToken())) {
-                return false;
-            }
-            for (const TfToken &field : notice.GetChangedFields(path)) {
-                if (field != kTypeName && field != kDefault &&
-                    field != kTimeSamples && field != kSpline) {
-                    return false;
-                }
-            }
-            sawAvar = true;
-        }
-        for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
-            if (path.IsPrimPath()) {
-                continue;  // ancestor info around the edit
-            }
-            if (!isChannel(path.GetNameToken())) {
-                return false;
-            }
-            for (const TfToken &field : notice.GetChangedFields(path)) {
-                if (field != kDefault && field != kTimeSamples &&
-                    field != kSpline) {
-                    return false;
-                }
-            }
-            sawAvar = true;
-        }
-        return sawAvar;
-    }();
+    const bool avarValuesOnly = _NoticeIsAvarValuesOnly(notice);
     if (!avarValuesOnly) {
         _structureDirty = true;
     }
@@ -1674,13 +1711,25 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // the program standing, which is what keeps an edit elsewhere in the
     // scene from degrading the rig to the dynamic path.
     if (_bakedProgram) {
-        if (avarValuesOnly && _bakedProgram->ApplyAvarValueEdits(notice)) {
+        // Classified first, through the same query the registry's notice
+        // adapter consumes: the branch below and the adapter's
+        // retire/re-resolve decision read one verdict.
+        _lastNoticeDisposition =
+            ClassifyNoticeDisposition(notice, &_lastNoticePatchedPaths);
+        if (_lastNoticeDisposition == RigExecNoticeDisposition::Patched) {
             // Patched in place: the program's avar table already holds the
             // new constants, and its by-value slot comparison re-runs only
             // their cone. No rebuild, and no stamp bump -- the bump would
             // mark the whole program dirty for one run to find what the
-            // comparison already finds.
-        } else if (_bakedProgram->IsInvalidatedBy(notice)) {
+            // comparison already finds. The dry run inside the
+            // classification already passed, so this applies; a refusal
+            // (impossible on this thread, but fail-closed) falls back to
+            // the stamp bump.
+            if (!_bakedProgram->ApplyAvarValueEdits(notice)) {
+                _bakedProgram->BumpProgramStamp();
+            }
+        } else if (_lastNoticeDisposition ==
+                   RigExecNoticeDisposition::Stale) {
             _bakedProgramStale = true;
             // The rebuild is allowed to refuse where the standing program did
             // not, and a refusal remembered from before this notice would
@@ -1698,6 +1747,9 @@ RigExecRigEvaluator::_OnObjectsChanged(
             // sources by value from then on.
             _bakedProgram->BumpProgramStamp();
         }
+    } else {
+        _lastNoticeDisposition = RigExecNoticeDisposition::None;
+        _lastNoticePatchedPaths.clear();
     }
     // rigExec:baked is a VALUE on the rig root, so the epoch digest is blind
     // to it and _SettleEpoch will not recompile for it: this is the only

@@ -1198,10 +1198,31 @@ RigExecProgramAvarPatch(RigExecBakedProgramImpl *B, size_t bindingIndex,
 }  // namespace
 
 bool
-RigExecBakedProgram::ApplyAvarValueEdits(
-    const UsdNotice::ObjectsChanged &notice)
+RigExecBakedProgram::IsPatchableAvarPath(const SdfPath &path) const
 {
-    RigExecBakedProgramImpl &B = *_impl;
+    return _impl->patchableAvars.find(path) != _impl->patchableAvars.end();
+}
+
+namespace {
+
+// One decided patch: the binding to write, the value to write, and the
+// property path the notice named. Decided by _DryRunAvarPatches without
+// writing anything, so the dry-run query and ApplyAvarValueEdits share
+// every check by construction.
+struct _AvarPatch {
+    size_t binding = 0;
+    double value = 0.0;
+    bool animated = false;
+    SdfPath path;
+};
+
+// Decide EVERYTHING before writing anything: a notice this cannot fully
+// absorb must leave the table exactly as the rebuild path expects it.
+bool
+_DryRunAvarPatches(const RigExecBakedProgramImpl &B,
+                   const UsdNotice::ObjectsChanged &notice,
+                   std::vector<_AvarPatch> *patches)
+{
     if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
         return false;
     }
@@ -1209,14 +1230,7 @@ RigExecBakedProgram::ApplyAvarValueEdits(
     static const TfToken kTypeName("typeName");
     static const TfToken kSpline("spline");
 
-    // Decide EVERYTHING before writing anything: a notice this cannot fully
-    // absorb must leave the table exactly as the rebuild path expects it.
-    struct _Patch {
-        size_t binding;
-        double value;
-        bool animated;
-    };
-    std::vector<_Patch> patches;
+    std::vector<_AvarPatch> decided;
     // A property resync is a spec appearing or going away under a value:
     // the first value a layer authors for an avar, and the undo that
     // removes it. Only the property itself may resync (a prim resync is
@@ -1287,7 +1301,7 @@ RigExecBakedProgram::ApplyAvarValueEdits(
             return false;
         }
         if (attribute.HasSpline()) {
-            patches.push_back({found->second, 0.0, true});
+            decided.push_back({found->second, 0.0, true, path});
             continue;
         }
         if (attribute.ValueMightBeTimeVarying()) {
@@ -1297,12 +1311,47 @@ RigExecBakedProgram::ApplyAvarValueEdits(
         // the fallback the bake captures for an attribute with no value.
         double value = RigExecBakedAvarDefaults[binding.slot % 11];
         attribute.Get(&value, UsdTimeCode::Default());
-        patches.push_back({found->second, value, false});
+        decided.push_back({found->second, value, false, path});
     }
-    if (patches.empty()) {
+    if (decided.empty()) {
         return false;
     }
-    for (const _Patch &patch : patches) {
+    if (patches) {
+        *patches = std::move(decided);
+    }
+    return true;
+}
+
+}  // namespace
+
+bool
+RigExecBakedProgram::DryRunAvarValueEdits(
+    const UsdNotice::ObjectsChanged &notice,
+    std::vector<SdfPath> *patchedPaths) const
+{
+    std::vector<_AvarPatch> patches;
+    if (!_DryRunAvarPatches(*_impl, notice, &patches)) {
+        return false;
+    }
+    if (patchedPaths) {
+        patchedPaths->clear();
+        for (const _AvarPatch &patch : patches) {
+            patchedPaths->push_back(patch.path);
+        }
+    }
+    return true;
+}
+
+bool
+RigExecBakedProgram::ApplyAvarValueEdits(
+    const UsdNotice::ObjectsChanged &notice)
+{
+    RigExecBakedProgramImpl &B = *_impl;
+    std::vector<_AvarPatch> patches;
+    if (!_DryRunAvarPatches(B, notice, &patches)) {
+        return false;
+    }
+    for (const _AvarPatch &patch : patches) {
         RigExecProgramAvarPatch(&B, patch.binding, patch.value,
                                 patch.animated);
     }
@@ -1707,7 +1756,8 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             }
         }
     };
-    if (RigExecParallelEvaluationEnabled() && N > 1) {
+    if (RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
+        N > 1) {
         WorkParallelForN(size_t(N), resolveLadderSlots);
     } else {
         resolveLadderSlots(0, size_t(N));
@@ -1891,7 +1941,8 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             }
         }
     };
-    if (RigExecParallelEvaluationEnabled() && N > 1) {
+    if (RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
+        N > 1) {
         WorkParallelForN(size_t(N), resolveSlots);
     } else {
         resolveSlots(0, size_t(N));
@@ -2721,6 +2772,67 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         ++B.timedFrames;
         RigExecBakedStepTimingReport(&B);
     }
+    return true;
+}
+
+bool
+RigExecBakedProgram::SampleStageFrameSeeds(
+    UsdTimeCode time, RigExecStageFrameSeeds *seeds,
+    std::string *error) const
+{
+    if (!seeds) {
+        if (error) {
+            *error = "no seeds to sample into";
+        }
+        return false;
+    }
+    const RigExecBakedProgramImpl &B = *_impl;
+    const RigExecRigEvaluator &E = *B.evaluator;
+    // The stageFrames of Run, read-only: one cache fresh for the frame (a
+    // retained cache would keep a UsdGeomXformQuery per prim across
+    // SetTime, stale where the prologue it mirrors has none), the same
+    // reader over the same slots and paths, the same failure semantics --
+    // an unresolvable target declines the sample as Run declines the run,
+    // while native and delta misses record per entry.
+    UsdGeomXformCache cache(time);
+    RigExecStageFrameSeeds sampled;
+    sampled.xformBase.reserve(B.xformSlots.size());
+    sampled.xformFrames.reserve(B.xformSlots.size());
+    for (size_t k = 0; k < B.xformSlots.size(); ++k) {
+        const size_t slot = size_t(B.xformSlots[k]);
+        RigExecPointFrame frame;
+        GfMatrix4d matrix(1.0);
+        if (!E._FrameFromXformRelativeToAsset(B.assetRoot, &cache,
+                                              B.paths[slot], &frame,
+                                              &matrix)) {
+            if (error) {
+                *error = "could not resolve constraint target " +
+                         B.paths[slot].GetString() +
+                         " relative to the asset root";
+            }
+            return false;
+        }
+        sampled.xformBase.push_back(matrix);
+        sampled.xformFrames.push_back(frame);
+    }
+    sampled.deltaOk.reserve(B.deltaBasePaths.size());
+    sampled.deltaBase.reserve(B.deltaBasePaths.size());
+    for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
+        GfMatrix4d matrix(1.0);
+        sampled.deltaOk.push_back(E._FrameFromXformRelativeToAsset(
+            B.assetRoot, &cache, B.deltaBasePaths[k], nullptr, &matrix));
+        sampled.deltaBase.push_back(matrix);
+    }
+    sampled.nativeOk.reserve(B.nativeSources.size());
+    sampled.nativeFrames.reserve(B.nativeSources.size());
+    for (size_t k = 0; k < B.nativeSources.size(); ++k) {
+        RigExecPointFrame frame;
+        const bool ok = E._FrameFromXformRelativeToAsset(
+            B.assetRoot, &cache, B.nativeSources[k].path, &frame, nullptr);
+        sampled.nativeOk.push_back(ok);
+        sampled.nativeFrames.push_back(ok ? frame : RigExecPointFrame());
+    }
+    *seeds = sampled;
     return true;
 }
 

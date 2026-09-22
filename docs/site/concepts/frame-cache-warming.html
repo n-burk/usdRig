@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>What warming does &mdash; UsdRig</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@300;400;600;700&amp;family=Source+Code+Pro&amp;display=swap">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" type="image/svg+xml" href="../icons/favicon.svg">
+<link rel="alternate icon" href="../icons/favicon.ico">
+<link rel="apple-touch-icon" href="../icons/favicon.png">
+</head>
+<body>
+<nav id="topnav" role="navigation">
+<span class="brandname"><a href="../index.html">UsdRig</a><span class="brandsub">&nbsp;node reference</span></span>
+<span id="navsearch"><input id="q" type="search" placeholder="Filter nodes"
+ aria-label="Filter nodes" oninput="rigFilter(this.value)"></span>
+<span class="barlinks">
+<a href="../examples/">Examples</a>
+<a href="../specs/">Specs</a>
+</span>
+</nav>
+<input class="toc-switch" id="toc-switch" type="checkbox">
+<label class="toc-toggle" for="toc-switch">Contents</label>
+<div id="toc"><div id="toc-body">
+<a class="tochome" href="../index.html">UsdRig</a>
+<div class="navgroup">
+<h3>Concepts</h3>
+<ul>
+<li class="node" data-title="how operators fire"><a href="../concepts/how-operators-fire.html"><img src="../icons/concept.png" alt=""><span>How operators fire</span></a></li>
+<li class="node" data-title="baked and dynamic evaluation"><a href="../concepts/baked-vs-dynamic.html"><img src="../icons/concept.png" alt=""><span>Baked and dynamic evaluation</span></a></li>
+<li class="node here" data-title="what warming does"><a href="../concepts/frame-cache-warming.html"><img src="../icons/concept.png" alt=""><span>What warming does</span></a></li>
+<li class="node" data-title="tutorial: a rolling ball rig"><a href="../concepts/tutorial-rolling-ball.html"><img src="../icons/concept.png" alt=""><span>Tutorial: a rolling ball rig</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Rig</h3>
+<ul>
+<li class="node" data-title="rig root"><a href="../nodes/rig_root.html"><img src="../icons/rig_root.png" alt=""><span>Rig Root</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Transform providers</h3>
+<ul>
+<li class="node" data-title="control"><a href="../nodes/control.html"><img src="../icons/control.png" alt=""><span>Control</span></a></li>
+<li class="node" data-title="joint"><a href="../nodes/joint.html"><img src="../icons/joint.png" alt=""><span>Joint</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Solvers</h3>
+<ul>
+<li class="node" data-title="fk chain"><a href="../nodes/fk_chain.html"><img src="../icons/fk_chain.png" alt=""><span>FK Chain</span></a></li>
+<li class="node" data-title="two-bone ik"><a href="../nodes/two_bone_ik.html"><img src="../icons/two_bone_ik.png" alt=""><span>Two-Bone IK</span></a></li>
+<li class="node" data-title="spline ik"><a href="../nodes/spline_ik.html"><img src="../icons/spline_ik.png" alt=""><span>Spline IK</span></a></li>
+<li class="node" data-title="blend point frames"><a href="../nodes/blend_point_frames.html"><img src="../icons/blend_point_frames.png" alt=""><span>Blend Point Frames</span></a></li>
+<li class="node" data-title="twist distribution"><a href="../nodes/twist_distribution.html"><img src="../icons/twist_distribution.png" alt=""><span>Twist Distribution</span></a></li>
+<li class="node" data-title="ribbon"><a href="../nodes/ribbon.html"><img src="../icons/ribbon.png" alt=""><span>Ribbon</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Constraints</h3>
+<ul>
+<li class="node" data-title="aim constraint"><a href="../nodes/aim_constraint.html"><img src="../icons/aim_constraint.png" alt=""><span>Aim Constraint</span></a></li>
+<li class="node" data-title="position constraint"><a href="../nodes/position_constraint.html"><img src="../icons/position_constraint.png" alt=""><span>Position Constraint</span></a></li>
+<li class="node" data-title="rotation constraint"><a href="../nodes/rotation_constraint.html"><img src="../icons/rotation_constraint.png" alt=""><span>Rotation Constraint</span></a></li>
+<li class="node" data-title="scale constraint"><a href="../nodes/scale_constraint.html"><img src="../icons/scale_constraint.png" alt=""><span>Scale Constraint</span></a></li>
+<li class="node" data-title="parent constraint"><a href="../nodes/parent_constraint.html"><img src="../icons/parent_constraint.png" alt=""><span>Parent Constraint</span></a></li>
+<li class="node" data-title="single-chain ik constraint"><a href="../nodes/single_chain_ik_constraint.html"><img src="../icons/single_chain_ik_constraint.png" alt=""><span>Single-Chain IK Constraint</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Geometry movers</h3>
+<ul>
+<li class="node" data-title="matrix mover"><a href="../nodes/matrix_mover.html"><img src="../icons/matrix_mover.png" alt=""><span>Matrix Mover</span></a></li>
+<li class="node" data-title="skin mover"><a href="../nodes/skin_mover.html"><img src="../icons/skin_mover.png" alt=""><span>Skin Mover</span></a></li>
+<li class="node" data-title="blendshape mover"><a href="../nodes/blendshape_mover.html"><img src="../icons/blendshape_mover.png" alt=""><span>Blendshape Mover</span></a></li>
+<li class="node" data-title="curve mover"><a href="../nodes/curve_mover.html"><img src="../icons/curve_mover.png" alt=""><span>Curve Mover</span></a></li>
+<li class="node" data-title="lattice mover"><a href="../nodes/lattice_mover.html"><img src="../icons/lattice_mover.png" alt=""><span>Lattice Mover</span></a></li>
+<li class="node" data-title="surface mover"><a href="../nodes/surface_mover.html"><img src="../icons/surface_mover.png" alt=""><span>Surface Mover</span></a></li>
+<li class="node" data-title="smooth mover"><a href="../nodes/smooth_mover.html"><img src="../icons/smooth_mover.png" alt=""><span>Smooth Mover</span></a></li>
+<li class="node" data-title="volume correct mover"><a href="../nodes/volume_correct_mover.html"><img src="../icons/volume_correct_mover.png" alt=""><span>Volume Correct Mover</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Curvenet</h3>
+<ul>
+<li class="node" data-title="curvenet"><a href="../nodes/curvenet.html"><img src="../icons/curvenet.png" alt=""><span>Curvenet</span></a></li>
+<li class="node" data-title="curvenet adjustment"><a href="../nodes/curvenet_adjustment.html"><img src="../icons/curvenet_adjustment.png" alt=""><span>Curvenet Adjustment</span></a></li>
+<li class="node" data-title="curvenet adjuster mover"><a href="../nodes/curvenet_adjuster_mover.html"><img src="../icons/curvenet_adjuster_mover.png" alt=""><span>Curvenet Adjuster Mover</span></a></li>
+<li class="node" data-title="curvenet mover"><a href="../nodes/curvenet_mover.html"><img src="../icons/curvenet_mover.png" alt=""><span>Curvenet Mover</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Blend channels</h3>
+<ul>
+<li class="node" data-title="blend input"><a href="../nodes/blend_input.html"><img src="../icons/blend_input.png" alt=""><span>Blend Input</span></a></li>
+<li class="node" data-title="blend sample"><a href="../nodes/blend_sample.html"><img src="../icons/blend_sample.png" alt=""><span>Blend Sample</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Pose space</h3>
+<ul>
+<li class="node" data-title="pose interpolator"><a href="../nodes/pose_interpolator.html"><img src="../icons/pose_interpolator.png" alt=""><span>Pose Interpolator</span></a></li>
+<li class="node" data-title="pose"><a href="../nodes/pose.html"><img src="../icons/pose.png" alt=""><span>Pose</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Weights</h3>
+<ul>
+<li class="node" data-title="static weight"><a href="../nodes/static_weight.html"><img src="../icons/static_weight.png" alt=""><span>Static Weight</span></a></li>
+<li class="node" data-title="dynamic weight"><a href="../nodes/dynamic_weight.html"><img src="../icons/dynamic_weight.png" alt=""><span>Dynamic Weight</span></a></li>
+<li class="node" data-title="sphere weight"><a href="../nodes/sphere_weight.html"><img src="../icons/sphere_weight.png" alt=""><span>Sphere Weight</span></a></li>
+<li class="node" data-title="plane weight"><a href="../nodes/plane_weight.html"><img src="../icons/plane_weight.png" alt=""><span>Plane Weight</span></a></li>
+<li class="node" data-title="curve weight"><a href="../nodes/curve_weight.html"><img src="../icons/curve_weight.png" alt=""><span>Curve Weight</span></a></li>
+<li class="node" data-title="combine weight"><a href="../nodes/combine_weight.html"><img src="../icons/combine_weight.png" alt=""><span>Combine Weight</span></a></li>
+<li class="node" data-title="curvenet weight"><a href="../nodes/curvenet_weight.html"><img src="../icons/curvenet_weight.png" alt=""><span>Curvenet Weight</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Property math</h3>
+<ul>
+<li class="node" data-title="float math mover"><a href="../nodes/float_math_mover.html"><img src="../icons/float_math_mover.png" alt=""><span>Float Math Mover</span></a></li>
+<li class="node" data-title="vec3f math mover"><a href="../nodes/vec3f_math_mover.html"><img src="../icons/vec3f_math_mover.png" alt=""><span>Vec3f Math Mover</span></a></li>
+<li class="node" data-title="matrix math mover"><a href="../nodes/matrix_math_mover.html"><img src="../icons/matrix_math_mover.png" alt=""><span>Matrix Math Mover</span></a></li>
+</ul></div>
+<div class="navgroup">
+<h3>Interface</h3>
+<ul>
+<li class="node" data-title="picker"><a href="../nodes/picker.html"><img src="../icons/picker.png" alt=""><span>Picker</span></a></li>
+<li class="node" data-title="picker panel"><a href="../nodes/picker_panel.html"><img src="../icons/picker_panel.png" alt=""><span>Picker Panel</span></a></li>
+<li class="node" data-title="picker button"><a href="../nodes/picker_button.html"><img src="../icons/picker_button.png" alt=""><span>Picker Button</span></a></li>
+<li class="node" data-title="touch regions"><a href="../nodes/touch_regions.html"><img src="../icons/touch_regions.png" alt=""><span>Touch Regions</span></a></li>
+<li class="node" data-title="touch region"><a href="../nodes/touch_region.html"><img src="../icons/touch_region.png" alt=""><span>Touch Region</span></a></li>
+</ul></div>
+</div></div>
+<script>
+(function () {
+    try {
+        var toc = document.getElementById('toc');
+        if (!toc) { return; }
+        var KEY = 'usdrig.toc.scroll';
+        var stored = null;
+        try { stored = window.sessionStorage.getItem(KEY); } catch (e) {}
+        var save = function () {
+            try {
+                window.sessionStorage.setItem(KEY, String(toc.scrollTop));
+            } catch (e) {}
+        };
+        var restore = function () {
+            if (stored !== null && stored !== '') {
+                toc.scrollTop = parseInt(stored, 10) || 0;
+                return;
+            }
+            // First visit of the session: show where we are instead.
+            var here = toc.querySelector('li.here');
+            if (here && here.scrollIntoView) {
+                try { here.scrollIntoView({block: 'center'}); }
+                catch (e) { here.scrollIntoView(); }
+            }
+        };
+        restore();
+        // The fixed TOC has no height until layout runs; re-apply once it
+        // does, in case the first assignment was clamped to 0.
+        window.addEventListener('DOMContentLoaded', restore);
+        var pending = 0;
+        toc.addEventListener('scroll', function () {
+            if (pending) { return; }
+            pending = window.setTimeout(function () {
+                pending = 0;
+                save();
+            }, 150);
+        });
+        var links = toc.getElementsByTagName('a');
+        for (var i = 0; i < links.length; i++) {
+            links[i].addEventListener('click', save);
+        }
+        window.addEventListener('beforeunload', save);
+    } catch (e) {}
+}());
+</script>
+
+<main>
+<header>
+<div id="title" class="title-content with-icon">
+<p class="ancestors"><a href="../index.html">UsdRig</a><i class="pathsep">&rsaquo;</i><a href="../index.html#concepts">Concepts</a><i class="pathsep">&rsaquo;</i></p>
+<div class="pageicon"><img src="../icons/concept.png" alt=""></div>
+<h1 class="title"><span class="nodename">What warming does</span><span class="subtitle"> </span></h1>
+<p class="summary">The per-frame cache in one page: what warms, what you see, what it costs, and the switches.</p>
+</div>
+</header>
+<div id="content">
+<table id="premeta" class="metatable">
+<tr><td class="label">On this page</td><td class="content"><ul class="minitoc"><li><a href="#what-you-see">What you see</a></li> <li><a href="#what-warming-never-does">What warming never does</a></li> <li><a href="#what-it-costs">What it costs</a></li> <li><a href="#switches">Switches</a></li> <li><a href="#limits-worth-knowing">Limits worth knowing</a></li> <li><a href="#sources">Sources</a></li></ul></td></tr>
+<tr><td class="label">Section</td><td class="content"><a href="../index.html#concepts">Concepts</a></td></tr>
+<tr><td class="label">Source</td><td class="content"><code>docs/concepts/frame-cache-warming.md</code></td></tr>
+</table>
+<div class="content"><p>Scrubbing and playback read cached frames; the frame under your cursor
+always evaluates live. That sentence is the whole contract. Warming is the
+background work that keeps the cache full around the playhead, so a scrub
+back over a range you already visited is instant instead of a
+re-evaluation.</p></div>
+<section class="heading">
+<h2 class="label heading" id="what-you-see">What you see <span class="headerlink"><a href="#what-you-see" title="Link to this section">&para;</a></span></h2>
+<div class="content" id="what-you-see-body">
+<ul>
+<li><strong>First scrub over a cold range</strong> computes each frame live, exactly as
+  today, and keeps the poses it computed.</li>
+<li><strong>Scrub back</strong> over a warmed range serves frames from the cache with no
+  re-evaluation — that is the speedup (about 4× a cold scrub on the biped
+  in the default mode; <code>reports/frame-cache-measurements.md</code> §6 has the
+  numbers).</li>
+<li><strong>Drag a control</strong> and the frame under the cursor evaluates live on every
+  tick, as today; warming never serves a neighboring frame's pose in place
+  of the requested one, and it never makes a drag laggier. When you release
+  (edit-commit), the neighbors re-warm in the background.</li>
+<li><strong>During playback</strong> warming gets out of the way: the sweep skips frames
+  the playhead already passed.</li>
+</ul>
+</div>
+</section>
+<section class="heading">
+<h2 class="label heading" id="what-warming-never-does">What warming never does <span class="headerlink"><a href="#what-warming-never-does" title="Link to this section">&para;</a></span></h2>
+<div class="content" id="what-warming-never-does-body">
+<ul>
+<li><strong>Never shows the wrong frame.</strong> A cached pose is bit-identical to a live
+  evaluation of the same inputs, or it is not served at all — an unevaluated
+  result is recoverable, a plausible wrong one is not. A new edit cancels
+  in-flight warming for that rig, and stale results are dropped, never
+  published.</li>
+<li><strong>Never blocks the viewport.</strong> Cache fill and warming run on low-priority
+  background threads; the UI thread never waits on them.</li>
+<li><strong>Never serves the playhead from the pool.</strong> A miss at the requested frame
+  evaluates live on the calling thread and is never slower than with the
+  cache off.</li>
+</ul>
+</div>
+</section>
+<section class="heading">
+<h2 class="label heading" id="what-it-costs">What it costs <span class="headerlink"><a href="#what-it-costs" title="Link to this section">&para;</a></span></h2>
+<div class="content" id="what-it-costs-body">
+<ul>
+<li><strong>Memory, bounded per rig:</strong> 256 MiB by default — about 80 full biped
+  frames (the ±8 neighborhood plus a ±32 sweep) — with least-recently-used
+  eviction past the cap. Long sessions cannot grow it.</li>
+<li><strong>CPU:</strong> two background workers at below-normal priority. They run hot
+  while the UI is idle and yield while it is busy.</li>
+<li><strong>One short burst per edit:</strong> sampling the ±8 neighborhood's inputs at
+  enqueue costs about 1.2 ms on the heaviest measured rig, then the pool
+  drains it in about 25 ms.</li>
+</ul>
+</div>
+</section>
+<section class="heading">
+<h2 class="label heading" id="switches">Switches <span class="headerlink"><a href="#switches" title="Link to this section">&para;</a></span></h2>
+<div class="content" id="switches-body">
+<div class="table-scroll"><table class="table">
+<thead>
+<tr>
+<th>variable</th>
+<th>default</th>
+<th>what it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RIGEXEC_FRAME_CACHE</code></td>
+<td><code>on</code></td>
+<td><code>on</code>, <code>off</code>, or <code>warm-off</code> (serve cached frames, but fill nothing in the background). <code>off</code> restores exact current behavior — the rollback is one variable.</td>
+</tr>
+<tr>
+<td><code>RIGEXEC_ENABLE_PARALLEL_EVAL=0</code></td>
+<td>unset</td>
+<td>Cache reads are still served; background fill is disabled.</td>
+</tr>
+<tr>
+<td><code>RIGEXEC_FRAME_CACHE_VERIFY=1</code></td>
+<td>off</td>
+<td>Shadow mode: every cache hit is also live-evaluated and compared, and mismatches are reported as diagnostics. For debugging, not for production.</td>
+</tr>
+</tbody>
+</table></div>
+</div>
+</section>
+<section class="heading">
+<h2 class="label heading" id="limits-worth-knowing">Limits worth knowing <span class="headerlink"><a href="#limits-worth-knowing" title="Link to this section">&para;</a></span></h2>
+<div class="content" id="limits-worth-knowing-body">
+<ul>
+<li><strong>Rigs that decline the bake</strong> (see <a href="baked-vs-dynamic.md">Baked and dynamic
+  evaluation</a>) still benefit: frames you
+  scrubbed yourself are remembered and served back. But there is no
+  background warming for them, because the dynamic path cannot run off the
+  UI thread.</li>
+<li><strong><code>.rigexec</code> playback sessions</strong> are unchanged and never consult the
+  frame cache.</li>
+<li>The cache is <strong>in memory only</strong> — there is no on-disk persistence, so
+  restarting the session starts cold.</li>
+</ul>
+</div>
+</section>
+<section class="heading">
+<h2 class="label heading" id="sources">Sources <span class="headerlink"><a href="#sources" title="Link to this section">&para;</a></span></h2>
+<div class="content" id="sources-body">
+<p><code>reports/frame-cache-measurements.md</code> (the measured numbers behind the
+defaults above); <code>docs/plans/per-frame-caching-system.md</code> (the full plan);
+<code>docs/specs/baked-step-graph.md</code> (the cache-interaction appendix, for the
+engineering detail).</p>
+</div>
+</section>
+<section class="heading">
+<h2 class="label heading" id="more">More concepts <span class="headerlink"><a href="#more" title="Link to this section">&para;</a></span></h2>
+<div class="content" id="more-body">
+<ul class="catlist">
+<li><img src="../icons/concept.png" alt=""><a class="t" href="how-operators-fire.html">How operators fire</a><p class="d">The mental model and the evaluation order behind every UsdRig rig — who reads what, who writes what, and when.</p></li>
+<li><img src="../icons/concept.png" alt=""><a class="t" href="baked-vs-dynamic.html">Baked and dynamic evaluation</a><p class="d">The two ways UsdRig computes a frame, how to switch between them, and what each one is for.</p></li>
+<li><img src="../icons/concept.png" alt=""><a class="t" href="tutorial-rolling-ball.html">Tutorial: a rolling ball rig</a><p class="d">Build the classic bouncing-ball rig in usdview, node by node, and make the roll a consequence of the travel instead of a channel to key.</p></li>
+</ul>
+</div>
+</section>
+<p class="footer"><a href="../index.html">UsdRig</a> node reference</p>
+</div>
+</main>
+<script>
+function rigFilter(q) {
+    q = q.toLowerCase();
+    var nodes = document.querySelectorAll('#toc li.node');
+    for (var i = 0; i < nodes.length; i++) {
+        var li = nodes[i];
+        li.style.display = li.getAttribute('data-title').indexOf(q) >= 0
+            ? '' : 'none';
+    }
+    var groups = document.querySelectorAll('#toc .navgroup');
+    for (var g = 0; g < groups.length; g++) {
+        var items = groups[g].querySelectorAll('li.node');
+        var any = false;
+        for (var k = 0; k < items.length; k++) {
+            if (items[k].style.display !== 'none') { any = true; break; }
+        }
+        groups[g].style.display = any ? '' : 'none';
+    }
+    var sw = document.getElementById('toc-switch');
+    if (sw && q) { sw.checked = true; }
+}
+function rigTab(id) {
+    var labels = document.querySelectorAll('.tab-heading > .label');
+    var hit = false;
+    for (var i = 0; i < labels.length; i++) {
+        var on = labels[i].getAttribute('href') === '#' + id;
+        labels[i].className = on ? 'label selected' : 'label';
+        hit = hit || on;
+    }
+    if (!hit && labels.length) { labels[0].className = 'label selected'; }
+}
+window.addEventListener('hashchange', function () {
+    rigTab(location.hash.replace('#', ''));
+});
+</script>
+
+</body>
+</html>

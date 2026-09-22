@@ -32,6 +32,7 @@
 <ul>
 <li class="node" data-title="how operators fire"><a href="../concepts/how-operators-fire.html"><img src="../icons/concept.png" alt=""><span>How operators fire</span></a></li>
 <li class="node" data-title="baked and dynamic evaluation"><a href="../concepts/baked-vs-dynamic.html"><img src="../icons/concept.png" alt=""><span>Baked and dynamic evaluation</span></a></li>
+<li class="node" data-title="what warming does"><a href="../concepts/frame-cache-warming.html"><img src="../icons/concept.png" alt=""><span>What warming does</span></a></li>
 <li class="node" data-title="tutorial: a rolling ball rig"><a href="../concepts/tutorial-rolling-ball.html"><img src="../icons/concept.png" alt=""><span>Tutorial: a rolling ball rig</span></a></li>
 </ul></div>
 <div class="navgroup">
@@ -280,6 +281,22 @@ RIGEXEC_EVALUATION_MODE in the environment (a session-wide override,
 including =dynamic, which the parity suites rely on being able to
 force onto any stage they open). Absent or false, and with neither
 of those set, the rig evaluates dynamically.</p>
+</div></div>
+<div class="parameter sbs-item" id="parm-rigexec-asset">
+<p class="label"><code class="pname">rigExec:asset</code><span class="sig">uniform asset, default @@</span></p>
+<div class="content">
+<p>Baked-playback selector: when set, hosts that can play a
+.rigexec file (usdview through rigExecImaging, the Godot player)
+answer this rig from the binary instead of evaluating it, and when
+unset the rig evaluates live. The path resolves like any asset
+attribute -- relative to the layer that authors it -- and names a
+single .rigexec file with no sidecar.</p>
+<p>Uniform because it is a decision about the whole rig -- which
+source answers it -- and not a channel an animator keys. Setting
+it can change how fast a frame arrives and not what the frame is:
+the binary is bit-identical to the baked path by construction, and
+a host that cannot open the file it names evaluates live and says
+so, rather than rendering a rig it did not evaluate.</p>
 </div></div>
 </div></div>
 </div></div>

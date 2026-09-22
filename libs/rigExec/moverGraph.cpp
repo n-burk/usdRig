@@ -283,6 +283,14 @@ _RevisionNode::Compute(const VdfContext &ctx) const
 
 }  // namespace
 
+// Public alias of the table above: the frozen assembler stamps the same
+// kind tokens onto worker-assembled packets.
+const TfToken &
+RigExecRevisionKindToken(RigExecRevisionOp op)
+{
+    return _RevisionKindToken(op);
+}
+
 // The matrix kernel, shared by the mover-graph revision node and by the
 // baked program. Unlike the point3f[] ops the envelope is NOT a separate
 // blend here: the weighted-matrix rule folds it into the movement itself
@@ -460,7 +468,7 @@ RigExecBlendEnvelopeAll(const GfVec3f *preceding, const float *envelope,
     // Per point, reading two arrays and writing a third at the same index: a
     // point range is an independent sub-problem, so splitting it changes
     // nothing about the arithmetic -- only who performs it.
-    if (RigExecParallelEvaluationEnabled() &&
+    if (RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
         count >= RigExecGeometryParallelThreshold) {
         WorkParallelForN(
             count,
@@ -684,7 +692,7 @@ RigExecApplySkinKernelWithTransforms(
     // measured on a 26,276-point body, that was the single largest cost in
     // a drag.
     const bool splittable =
-        RigExecParallelEvaluationEnabled() &&
+        RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
         count >= RigExecGeometryParallelThreshold &&
         (p.skinningMethod == "classicLinear" ||
          p.skinningMethod == "dualQuaternion");
@@ -804,7 +812,7 @@ RigExecApplyBlendShapeKernel(const RigExecMoverParameters &p,
                 preceding, preceding + delta[i], weight[i]);
         }
     };
-    if (RigExecParallelEvaluationEnabled() &&
+    if (RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
         count >= RigExecGeometryParallelThreshold) {
         WorkParallelForN(count, blendRange, RigExecGeometryGrainSize);
         return true;
@@ -972,7 +980,8 @@ RigExecApplyRevisionKernel(RigExecRevisionOp op,
         // Per-point and independent, so the range splits across threads;
         // a small mesh stays on this thread.
         bool ok = true;
-        if (RigExecParallelEvaluationEnabled() && pts->size() >= 4096) {
+        if (RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
+            pts->size() >= 4096) {
             std::atomic<bool> good(true);
             WorkParallelForN(pts->size(), [&](size_t b, size_t e) {
                 if (!RigExecApplyWire(pts, rest, posed,

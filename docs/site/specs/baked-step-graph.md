@@ -940,6 +940,162 @@ rework has to decide about deliberately. After that: the geometry kernels' grain
 remaining 315KB copies of a derived revision's input, and the `VolumePlacements`/`SnapshotFinals`
 cost rows, which are still one-sample fits through the origin.
 
+### Appendix: the per-frame cache and the step graph
+
+The step graph is unchanged by the per-frame cache: the cache is a pose-level memo *above* the
+graph, keyed by what a pose is a function of, filled by the same serial executor the graph already
+runs. Three pieces, in `libs/rigExec/frameCache.h`, `backgroundScheduler.h` and `frozenContext.h`:
+the store, the queue in front of it, and the isolated per-job state that lets background threads
+evaluate without touching live state. The full plan is `docs/plans/per-frame-caching-system.md`;
+every number below is measured in `reports/frame-cache-measurements.md`.
+
+**The key is what the frame read, not when it was asked (D1).** One entry per
+`(epochDigest, controlDigest)`: the epoch half is the binding epoch digest folded with the
+program's build count and its avar-region digest (`RigExecFrameCacheEpochDigest`), because the
+epoch digest is blind to values and two value edits leave it standing while changing every frame --
+an avar value edit patches the program in place, a captured-value edit rebuilds it -- and neither
+reaches the sampled vector, since epoch constants are not per-frame inputs; the control half is a
+hash over every source value the frame actually read -- authored controls, time-varying inputs, AND
+the evaluator's interactive overrides, which never reach the stage and are folded in explicitly. Time is carried on
+the entry as a warming hint and for stats, never as key material, so a scrub between identical
+control states hits across times. The digest is order-independent and first-wins per path, folds
+floating point bitwise (`+0.0` versus `-0.0` digest different), and digests a valueless source
+distinctly from every valued one; a held type it cannot fold exactly makes the frame bypass the
+cache rather than risk two frames sharing one key. Because the digest is recomputed from the stage
+at lookup, an edit to a control's curve changes the digest at every affected frame by construction:
+stale entries become unreachable and LRU reclaims them, with no frame-level invalidation
+bookkeeping needed for correctness. The affected-frame computation exists only to decide what to
+re-warm.
+
+**The playhead is always live; the pool only warms (D5).** A frame change to an evaluated frame
+publishes the stored generation through the existing atomic snapshot without running the evaluator;
+a miss, and every evaluation during an edit at the playhead, runs the sparse baked run on the
+calling thread exactly as today and publishes the result into both the snapshot and the cache. The
+playhead frame is never enqueued. Background completions publish only into the cache behind the
+generation fence, never into the snapshot, and stale completions are dropped. Routing UI misses
+through the pool with "show last good meanwhile" was rejected: each drag tick would bump the
+generation, cancel, re-enqueue on deprioritized workers and lag the mouse -- and frame T-1's pose
+displayed at frame T is a plausible wrong answer, not a recoverable unevaluated one.
+
+**Frozen contexts are everything a worker may read, sampled up front (D3).** The UI thread samples
+one input vector per enqueued time at enqueue time (`RigExecSampleFrameInputs`): every varying
+binding through the same route the baked frame path reads it -- the retained query, or the
+generation's resolved inputs when a property chain stands on the walk -- plus the prologue reads
+(blend channels, constraint operator arrays, ribbon drivers, chain base points) and the standing
+overrides. The context itself is digests and counts only -- epoch, generation, slot count, a
+program digest that drops the job if the program was rebuilt under the same epoch, the sampled
+input count (a vector/context count mismatch drops the job rather than running against a truncated
+set), and the per-run toggles plus the D7 refusal flag -- trivially copyable, with no `Usd*`
+handle, no evaluator pointer, nothing a worker must not name. The worker runs the baked *serial*
+executor end to end into a private, thread-confined arena sized from the context (an absurd count
+refuses rather than allocating the machine), with the serial kernel variants forced per context
+through a thread-local scope -- a process-wide switch cannot give the UI thread and a worker
+different answers at the same moment -- and never calls `Work*`/TBB, which would leak the work
+back onto the shared arena at normal priority. The step runner's parameter list (context, inputs,
+arena, pose) IS the worker's input surface: a runner needing anything else must capture it at the
+call site, where the audit can see it. Anything unprovable -- refused rig, inconsistent vector,
+null or declining runner, generation stale at start or still stale before publish -- answers an
+invalid pose and the caller evaluates live. One caveat is recorded on the sampler: a chain-resolved
+input's value is the property chain's output at the sampled time, so until the chain-sampling hook
+lands, enqueue samples the neighborhood from the standing resolved state and a job whose chains
+moved under it fails its digest comparison and is dropped, never served wrong.
+
+**The scheduler is a small deprioritized pool behind a generation fence (D4/D5).** Two workers at
+below-normal OS thread priority by default; order is scrub neighbors (+-1..8 of the playhead) then
+the Premonition-style sweep of the surrounding range; duplicate times coalesce and each rig has an
+in-flight cap. Every rig-affecting edit bumps the rig's generation and the edit-commit trigger
+(drag release / value commit, with an idle signal only secondary) enqueues fresh jobs under the new
+token; a job checks its generation before it runs and again before it publishes, and a mismatch
+drops the result and frees its arena promptly. During active playback the sweep deprioritizes and
+skips frames the playhead already passed.
+
+**Cross-frame sparse reuse keeps the cone machinery and adds the retained state (D2: GO), as a
+library the imaging path calls only for epoch invalidation.** A full biped frame is 3.05 MiB (430,258 B of pose
+maps plus 2,767,505 B of slot arena), so the 256 MiB cap holds ~80 of them -- the +-8 neighborhood
+plus a +-32 sweep -- which is what let Stream D build cone reuse rather than stop at whole-pose
+memo. The machinery lives in `frameCacheSparsity.h`, `outputAffectedIndex.h` and
+`taskListCache.h` and is held to account by `testRigExecFrameCacheSparsity`; what the bridge
+serves today is the whole-pose memo (a hit is the stored pose, a miss is a full live run), and the
+edit-commit trigger re-warms a fixed neighbor band plus sweep rather than the index's affected
+frames. The notice path does route through the baked capture index
+(`RigExecImagingBridge::NoteCaptureIndex`): a hit drops the epoch eagerly while its half still
+names it, a miss drops nothing. Wiring the planner into the lookup path and the index into
+re-warm selection is the open follow-up. When wired: a cached frame retains its source values
+plus its slot/cluster state; on
+lookup the request's sources are compared by value, an empty cone is a hit, and a partial cone
+re-runs only affected clusters against the otherwise-retained slots, reusing the `bakedSchedule`
+cone and edge data rather than deriving dependencies twice. New work is the cross-frame retention
+(the `Publish`/`Lookup` overloads carrying the retained bytes and an opaque retained handle beside
+the pose; a null handle with nonzero bytes is declined, and a pose-only entry answers a null
+handle) and the cluster-granularity output-affected (downstream) index the gap analysis flags as
+missing, which selects which cached frames to re-warm after an edit. The affected-set computation
+is memoized per (control, epoch) -- the brief's task-list cache -- so repeated edits of one control
+re-run the cached selection without rewalking, with topology change invalidating the memo; dirty
+intersecting affecting(requested) is bit arrays over clusters. Epoch-level admission still goes
+through the baked capture index: a notice that hits it drops the epoch's frames (`EvictEpoch`), a
+miss leaves every cached frame standing for their digests to decide.
+
+**How this maps onto the Premo brief.** The brief's sentence "Graph System manages LibEE through
+interfaces and caches" is these three pieces -- `FrameCache`, `BackgroundScheduler`, and the frozen
+contexts: the store, the queue in front of it, and the isolated per-job state. Its "subscription"
+metaphor is the publish fence above: background completions publish into the cache only, behind a
+generation check, and never into the snapshot the viewport reads -- a subscription that can deliver
+fresh results but never a stale frame. The frame-order policy (playhead always live, scrub neighbors
+first, then the Premonition-style sweep, triggered by edit-commit rather than idle) is original
+design: the brief's Gaps #4 confirms frame order, interruption, and memory budgeting are
+unpublished, so there was no public policy to match.
+
+**The lock rule designs priority inversion out (Stream A).** Sixteen key shards behind sixteen
+locks plus lock-free counters, so lookup runs concurrently with background publish without touching
+the registry mutex; every lock is held only for a pointer swap or a map edit, never across
+evaluation, payload allocation, pose copying, or digest computation. Lookup copies a shared handle
+under the shard lock and the pose outside it; publish builds the entry before taking the lock. The
+LRU clock is an atomic tick per touch, approximate across threads by design: a race only evicts a
+recently-used entry early, which is a miss, never a wrong pose.
+
+**Cached joins the parity gate; refusal rigs memoize only (D7).** Every cached pose is
+bit-identical to a live evaluation of the same inputs, extending `dynamic == baked == reference`
+to `cached == live`, and `RIGEXEC_FRAME_CACHE_VERIFY=1` is the `RIGEXEC_BAKED_VERIFY_CONES`
+analogue: every hit is also live-evaluated and diffed via `RigExecComparePoses`, with mismatches
+reported as diagnostics (the shadow suites carry `Cones_` in their names so the existing CI
+exclusion catches them). The Stream B purity audit ships as data beside the context -- each kernel,
+solver, cache and live-state holder verdict as Pure, EpochPinned (safe only as an enqueue-time
+copy), or LiveOnly (bypassed by construction, with the bypass named). A rig that refused the bake
+memoizes its UI-thread live evaluations through the same publish path but is never backgrounded: a
+context carrying the refusal flag is declined by the worker, because the dynamic path drives
+OpenExec against the live stage and cannot run off the UI thread.
+
+| default | value | in code | measured as |
+|---|---|---|---|
+| per-rig byte cap | 256 MiB | `kRigExecFrameCacheDefaultByteCap` (`frameCache.h`) | ~80 full biped frames at 3.05 MiB each -- the +-8 neighborhood plus a +-32 sweep -- or ~119 full 9mesh frames (2.14 MiB), or 600+ pose-only frames (420 KiB) |
+| background workers | 2 | `kRigExecBackgroundSchedulerDefaultWorkers` (`backgroundScheduler.h`) | the biped +-8 neighborhood (16 x 3.1 ms / 2) drains in ~25 ms; the 9mesh neighborhood in ~1.4 ms |
+| neighbor radius | +-8 (16 frames) | `kRigExecFrameCacheDefaultNeighborRadius` (`backgroundScheduler.h`) | one 1.2 ms UI sampling burst at enqueue on the biped (74.4 us/frame), ~18 us on 9mesh |
+
+| variable | default | what it does |
+|---|---|---|
+| `RIGEXEC_FRAME_CACHE` | `on` | `on`, `off`, or `warm-off` (serve reads, fill nothing); `off` restores exact current behavior |
+| `RIGEXEC_ENABLE_PARALLEL_EVAL=0` | unset | cache reads still served; background fill disabled |
+| `RIGEXEC_FRAME_CACHE_VERIFY` | off | `=1` shadow-compares every hit against live eval |
+
+**Benches and profiler lanes (Stream F).** `benchFrameCacheWarm`
+(`tests/benchFrameCacheWarm.cpp`, built but never a ctest gate) measures
+cold-vs-warm scrub, edit recompute cost, UI-eval latency with warming
+on/off (median and p95), memory under the cap, an N-second UI-vs-warming
+stress for TSAN runs, and a lane demo that writes `frame-cache-warm.trace`.
+Measured 2026-09-19 (`reports/frame-cache-measurements.md` §6): warmed
+scrub is 3.7x cold on the biped in parallel mode, 7.3x serial -- the >=10x
+done criterion is missed, and the warm anatomy says why: D1 recomputes the
+digest from the stage at every lookup, so re-hashing 11,500 inputs costs
+~410 us of the ~583 us warm frame. The follow-up (memoized per-input
+hashes) is recorded in the report, not in this branch. The profiler
+(`libs/rigExec/profiler.h`) writes two new Chrome Trace Event kinds beside
+the "X" scopes -- "I" instants and "C" counters -- with lane helpers:
+`cacheHit`/`cacheMiss` instants on `frameCache`, `warmQueue` counters
+(queued depth, running, cancels) and `warmCancel` instants on `scheduler`,
+all covered by `testRigExecProfiler`. The gate stays deterministic: the
+p95 comparison and the TSAN stress report as benches, and the shadow suite
+keeps its `Cones_` name under the existing CI exclusion.
+
 ---
 
 *Everything below this line is the specification as it was written, before any of it existed.

@@ -22,6 +22,9 @@
 
 #include "tapSet.h"
 
+#include "rigExecMath/pointFrame.h"
+
+#include "pxr/base/gf/matrix4d.h"
 #include "pxr/usd/usd/notice.h"
 #include "pxr/usd/usd/timeCode.h"
 
@@ -115,6 +118,45 @@ enum class RigExecEvaluationModeSource {
 void RigExecComparePoses(const RigExecRigPose &reference,
                          const RigExecRigPose &baked, RigExecRigPose *out);
 
+/// One frame's stage-derived constraint seeds, in program order.
+///
+/// The stage-frame prologue of Run reads three things off the stage per
+/// frame: the relative transforms seeding the XformDerived provider slots,
+/// the ok/frame pair per native Xformable constraint source, and the
+/// ok/matrix pair per geometry-domain delta base. A frozen worker cannot
+/// read the stage, so the UI thread samples this struct through
+/// SampleStageFrameSeeds and the seeds travel with the job, parallel to
+/// xformSlots, nativeSources, and deltaBasePaths. Fresh stage data, not a
+/// pure function of the sampled attribute values, so the control-state
+/// digest folds it -- unlike the revision packets and the other transports.
+struct RigExecStageFrameSeeds {
+    /// Per xformSlots entry: the relative transform and the frame, the
+    /// pose's two currencies of the same seed. Sampling declines rather
+    /// than recording a failure: live gives the whole generation back when
+    /// a target does not resolve, so a frame with an unresolvable target
+    /// has no frozen job.
+    std::vector<GfMatrix4d> xformBase;
+    std::vector<RigExecPointFrame> xformFrames;
+    /// Per nativeSources entry: whether the stage answered, and the frame
+    /// (default when it did not -- a source the stage cannot answer for is
+    /// recorded and carried into the step, never a bail, as live).
+    std::vector<char> nativeOk;
+    std::vector<RigExecPointFrame> nativeFrames;
+    /// Per deltaBasePaths entry: whether the stage answered, and the base
+    /// matrix the geometry-domain delta is measured against.
+    std::vector<char> deltaOk;
+    std::vector<GfMatrix4d> deltaBase;
+
+    bool operator==(const RigExecStageFrameSeeds &o) const {
+        return xformBase == o.xformBase && xformFrames == o.xformFrames &&
+               nativeOk == o.nativeOk && nativeFrames == o.nativeFrames &&
+               deltaOk == o.deltaOk && deltaBase == o.deltaBase;
+    }
+    bool operator!=(const RigExecStageFrameSeeds &o) const {
+        return !(*this == o);
+    }
+};
+
 /// One compiled epoch, flattened.
 class RigExecBakedProgram {
 public:
@@ -145,6 +187,22 @@ public:
     /// Returns false having published diagnostics when the program could not
     /// complete; the caller is expected to fall back to the dynamic path.
     bool Run(UsdTimeCode time, RigExecRigPose *pose);
+
+    /// Samples the stage-frame prologue's reads at \p time into \p seeds.
+    ///
+    /// The same three loops Run's stageFrames runs -- one UsdGeomXformCache
+    /// built fresh for the frame, the same shared reader over the same
+    /// slots and paths -- but writing into \p seeds instead of the
+    /// program's per-frame state, which is untouched. UI thread only: the
+    /// reader walks the live stage.
+    ///
+    /// False, naming the target, when a constraint target does not resolve
+    /// at all; live gives the generation back at the same point, so the
+    /// frame has no frozen job and evaluates live. Native and delta misses
+    /// record per entry, as live.
+    bool SampleStageFrameSeeds(UsdTimeCode time,
+                               RigExecStageFrameSeeds *seeds,
+                               std::string *error = nullptr) const;
 
     /// Whether \p notice can have moved anything the bake captured.
     ///
@@ -177,6 +235,21 @@ public:
     /// through a connection, or one that has just become animated. The
     /// caller then takes the rebuild path exactly as before.
     bool ApplyAvarValueEdits(const UsdNotice::ObjectsChanged &notice);
+
+    /// Whether \p path is one of the patchable avar properties: a constant
+    /// binding whose value a notice can PATCH rather than rebuild (see
+    /// RigExecBakedProgramImpl::patchableAvars).
+    bool IsPatchableAvarPath(const SdfPath &path) const;
+
+    /// The read-only half of ApplyAvarValueEdits (plan 2.1): decides the
+    /// patch without writing anything, answering whether the notice is
+    /// nothing but patchable avar default values and, in \p patchedPaths,
+    /// the property paths it would patch. ApplyAvarValueEdits answers
+    /// true exactly when this does; the evaluator's per-notice
+    /// disposition query classifies through this, so the classification
+    /// and the mutation can never disagree.
+    bool DryRunAvarValueEdits(const UsdNotice::ObjectsChanged &notice,
+                              std::vector<SdfPath> *patchedPaths) const;
 
     /// Tells the program that a notice it was NOT invalidated by still
     /// reached the stage.
