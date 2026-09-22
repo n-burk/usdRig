@@ -384,6 +384,72 @@ def _AssertTimelineOverlay(appController):
         raise AssertionError("the cleared overlay is still visible")
 
 
+def _AssertFrameTickYieldsToTickingDriver():
+    """A frame change skips its sync sweep while the driver ticks.
+
+    The recurring timer sweeps the same budgeted band within 120 ms,
+    so a synchronous sweep on every playback frame would serialize
+    its sampling into the scrub for jobs already about to enqueue.
+    A pending edit-commit never yields: it re-centers warming on the
+    playhead the artist just chose.
+    """
+    from pxr.Usdviewq.qt import QtCore
+    from rigExecUsdview import RigExecUsdviewContainer
+
+    class _SweepLibrary:
+        def __init__(self):
+            self.setTimes = 0
+            self.idles = 0
+            self.commits = 0
+
+        def RigExecImaging_SetTime(self, frame):
+            self.setTimes += 1
+
+        def RigExecImaging_OnIdle(self):
+            self.idles += 1
+
+        def RigExecImaging_OnEditCommitted(self):
+            self.commits += 1
+
+    container = RigExecUsdviewContainer.__new__(RigExecUsdviewContainer)
+    container._active = True
+    container._lib = _SweepLibrary()
+    container._warmingCommitPending = False
+    # No GetFrameStates on the double, so the wake at the end of each
+    # frame tick never arms a real driver: the timer below is the only
+    # ticking driver, planted by hand.
+    timer = QtCore.QTimer()
+    timer.setSingleShot(False)
+    try:
+        timer.start(120)
+        container._warmingIdleTimer = timer
+        container._OnFrameChanged(2.0)
+        if container._lib.setTimes != 1:
+            raise AssertionError("the yielding tick published nothing")
+        if container._lib.idles != 0:
+            raise AssertionError("the tick swept while the driver ticks")
+
+        # A stopped driver stops yielding: the synchronous sweep is
+        # the whole story again.
+        timer.stop()
+        container._OnFrameChanged(3.0)
+        if container._lib.idles != 1:
+            raise AssertionError("the tick swept nothing with no driver")
+
+        # A pending commit runs even while the driver ticks.
+        timer.start(120)
+        container._warmingCommitPending = True
+        container._OnFrameChanged(4.0)
+        if container._lib.commits != 1:
+            raise AssertionError("the commit yielded to the driver")
+        if container._warmingCommitPending:
+            raise AssertionError("the tick left the commit pending")
+        if container._lib.idles != 1:
+            raise AssertionError("the commit tick swept idle too")
+    finally:
+        timer.stop()
+
+
 def testUsdviewInputFunction(appController):
     # The plugin owns the platform naming (.dll/.dylib/.so) and the
     # installed-vs-build search order; asking it keeps this script working on
@@ -450,6 +516,7 @@ def testUsdviewInputFunction(appController):
     _AssertWarmingCommitDeferred()
     _AssertWarmRangeRepushOnRangeChange()
     _AssertTimelineOverlay(appController)
+    _AssertFrameTickYieldsToTickingDriver()
 
     print("RIGEXEC_USDVIEW_OK generations %d -> %d, frame 1024 published "
           "the frame 1024 pose" % (generation0, generation1))

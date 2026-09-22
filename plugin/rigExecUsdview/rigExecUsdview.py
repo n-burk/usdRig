@@ -1270,6 +1270,20 @@ class RigExecUsdviewContainer(PluginContainer):
             return
         self._NotifyStripTick(True, states)
 
+    def _WarmingDriverTicking(self):
+        # Whether the recurring driver timer is armed right now. While
+        # it ticks, frame changes skip their synchronous idle sweep
+        # below: the tick sweeps the same budgeted band within 120 ms,
+        # so a second sweep on the frame would serialize its sampling
+        # into the scrub for jobs already about to enqueue. Bare
+        # containers (no timer attribute at all) answer False --
+        # without a driver the synchronous sweep is the whole story.
+        try:
+            timer = getattr(self, "_warmingIdleTimer", None)
+            return timer is not None and bool(timer.isActive())
+        except Exception:
+            return False
+
     def _OnFrameChanged(self, frame):
         # The SIGNAL's frame, never dataModel.currentFrame -- see
         # _FrameValue. Reading the property here published the previous
@@ -1283,14 +1297,18 @@ class RigExecUsdviewContainer(PluginContainer):
         self._lib.RigExecImaging_SetTime(self._FrameValue(frame))
         # Warming, from the frame loop: an edit since the last tick commits
         # (neighbors plus sweep re-center on the playhead), otherwise the
-        # tick is an idle sweep. Optional in an older library; a drag
-        # release with no following frame change normally warms on the
-        # notice flush already, and this tick is its fallback without Qt.
+        # tick is an idle sweep -- unless the recurring driver is already
+        # ticking, in which case the frame yields to it instead of
+        # serializing a second budgeted sweep into the scrub. Commits
+        # never yield: they re-center warming on the playhead the artist
+        # just chose. Optional in an older library; a drag release with
+        # no following frame change normally warms on the notice flush
+        # already, and this tick is its fallback without Qt.
         try:
             if self._warmingCommitPending:
                 self._warmingCommitPending = False
                 self._lib.RigExecImaging_OnEditCommitted()
-            else:
+            elif not self._WarmingDriverTicking():
                 self._lib.RigExecImaging_OnIdle()
         except AttributeError:
             pass
