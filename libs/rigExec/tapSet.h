@@ -83,6 +83,20 @@ struct RigExecValueOverride {
     /// the targets, not a named attribute of them.
     TfToken attribute;
     VtValue value;
+
+    /// Exact equality: the burst cache validates its prepared overrides
+    /// against the caller's per frame, and a differing override list means
+    /// differing placement, differing samples, and a differing digest.
+    bool operator==(const RigExecValueOverride &other) const
+    {
+        return prim == other.prim && computation == other.computation &&
+               attribute == other.attribute && value == other.value;
+    }
+
+    bool operator!=(const RigExecValueOverride &other) const
+    {
+        return !(*this == other);
+    }
 };
 
 /// Immutable extracted generation: one value per tap.

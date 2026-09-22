@@ -890,12 +890,20 @@ struct RigExecBakedClusterSet {
             Set(int(c));
         }
     }
-    /// Whether anything was added, which is the fixpoint test.
+    /// Whether anything was added, which is the fixpoint test. Widths may
+    /// differ: a narrower other reads as zero past its end (the
+    /// RigExecIntersectClusterSets rule), and a wider one grows this set
+    /// rather than dropping its high members.
     bool Union(const RigExecBakedClusterSet &other) {
         bool grew = false;
+        if (words.size() < other.words.size()) {
+            words.resize(other.words.size(), 0);
+        }
         for (size_t w = 0; w < words.size(); ++w) {
+            const uint64_t o =
+                w < other.words.size() ? other.words[w] : 0;
             const uint64_t before = words[w];
-            words[w] |= other.words[w];
+            words[w] |= o;
             grew = grew || words[w] != before;
         }
         return grew;
@@ -1968,6 +1976,10 @@ struct RigExecBakedProgramImpl {
             SdfPath samplePath;
             /// `rigExec:activation` on the RigExecBlendSample prim.
             UsdAttribute activation;
+            /// The activation attribute's path, beside the handle: the frozen
+            /// worker keys the sampled activation by this, because it may
+            /// not touch the cloned handle -- not even GetPath.
+            SdfPath activationPath;
             /// The sample's target-shape points, and the path a declared
             /// read phase looks that array up under. Dense form only.
             UsdAttribute points;

@@ -25,14 +25,14 @@ below.
 | `Biped_eyes.usda` | the eyes, over the face |
 | `Biped_face.usda` | the face's skeleton controls, over the rig |
 | `Biped.usda` | the same rig flat, in one file, if you want to read it |
-| `Biped_anim.usda` | an 8-frame animated overlay on `Biped.usda`, for timing and for testing the animated evaluate path |
+| `Biped_anim.usda` | a 200-frame animated overlay on `Biped.usda`, for timing and for testing the animated evaluate path |
 
 `Biped_anim.usda` sublayers `Biped.usda` and keys six controls over frames
-1-8. A static stage never re-reads a time sample, so it cannot show what an
+1-200. A static stage never re-reads a time sample, so it cannot show what an
 animated frame costs or whether the evaluator handles a time change
 correctly; that is what this overlay is for:
 
-    build\rigExecPose examples\biped\Biped_anim.usda --frames 1,2,3,4,5,6,7,8 --joints
+    build\rigExecPose examples\biped\Biped_anim.usda --frames 1,50,100,150,200 --joints
 
 The layered and flat forms evaluate identically -- 576 prims, 110 movers in
 the same order, and all 252 joint frames matching to 0.000e+00 cm at rest

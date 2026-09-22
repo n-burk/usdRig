@@ -852,6 +852,10 @@ std::optional<RigExecRevisionOp> RigExecRevisionOpForSchema(
 /// pulled through a tap set on the authored stage. A null transform fails the
 /// application. Null weights mean no object is bound, so the assembler reads
 /// inputs:defaultWeight and synthesizes the common constant envelope.
+/// The kind token an assembled packet carries for op (the table the
+/// revision guard and kernel entry read).
+const TfToken &RigExecRevisionKindToken(RigExecRevisionOp op);
+
 RigExecMoverParameters RigExecAssembleMatrixParameters(
     const UsdPrim &moverPrim,
     const GfMatrix4d *transform,

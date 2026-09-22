@@ -3,6 +3,7 @@
 //
 #include <fstream>
 #include "registry.h"
+#include "rigExec/frameCacheSparsity.h"
 
 #include "rigExecMath/avarScale.h"
 
@@ -114,6 +115,35 @@ _CollectReadRoots(const UsdStageRefPtr &stage,
     return compact;
 }
 
+// The injected runner, or the production one when none was given. Null used
+// to mean "skip every frame"; since the production runner factory exists it
+// means "warm for real", which is what the C-API triggers run under.
+RigExecFrozenStepRunner
+_ProductionRunner(const RigExecFrozenStepRunner &runner)
+{
+    return runner ? runner : RigExecMakeProductionStepRunner();
+}
+
+// The Premonition-style sweep around \p playhead: closest-first, skipping
+// the neighbor band the commit trigger already covers (+-1..N) and the
+// playhead itself. 64 frames: one full commit burst (16 neighbors + 64
+// sweep) fits the default per-rig in-flight cap with room to spare.
+std::vector<UsdTimeCode>
+_SweepTimes(UsdTimeCode playhead)
+{
+    std::vector<UsdTimeCode> times;
+    if (playhead.IsDefault() || !std::isfinite(playhead.GetValue())) {
+        return times;
+    }
+    const double center = playhead.GetValue();
+    for (int i = kRigExecFrameCacheDefaultNeighborRadius + 1;
+         i <= kRigExecFrameCacheDefaultNeighborRadius + 32; ++i) {
+        times.push_back(UsdTimeCode(center - double(i)));
+        times.push_back(UsdTimeCode(center + double(i)));
+    }
+    return times;
+}
+
 }  // namespace
 
 RigExecImagingRegistry &
@@ -125,7 +155,17 @@ RigExecImagingRegistry::GetInstance()
 
 RigExecImagingRegistry::RigExecImagingRegistry()
     : _store(std::make_shared<RigExecSnapshotStore>())
+    , _scheduler(std::make_unique<RigExecBackgroundScheduler>())
+    , _warmIndex(std::make_shared<RigExecWarmFrameIndex>())
 {
+    // The hook holds the index shared: transitions record into shared
+    // state past whatever the sessions do next, and a shutdown purge
+    // during destruction still lands (the hook keeps the index alive).
+    std::shared_ptr<RigExecWarmFrameIndex> index = _warmIndex;
+    _scheduler->SetTransitionHook(
+        [index](const RigExecWarmTransition &transition) {
+            index->NoteTransition(transition);
+        });
 }
 
 void
@@ -152,6 +192,280 @@ RigExecImagingRegistry::RegisterChain(
     if (!_generatedScopes.empty()) {
         pruning->SetOwnedScopes(_generatedScopes);
     }
+}
+
+void
+RigExecImagingRegistry::_RefreshFrozenSnapshot(RigSession *session)
+{
+    if (!session || session->playback || !session->bridge) {
+        return;
+    }
+    const RigExecRigEvaluator &evaluator = session->bridge->GetEvaluator();
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    const uint64_t epoch = evaluator.GetBindingEpochDigest();
+    const uint64_t serial = evaluator.GetStageEditSerial();
+    // The pins, rebound when only they moved. A constant edited mid-epoch
+    // moves no digest, so the comparison is by value, not by key.
+    const auto refreshPins = [&]() {
+        if (session->chainBindingsValid &&
+            RigExecChainSampleBindingsStillCurrent(session->chainBindings,
+                                                   evaluator)) {
+            return;
+        }
+        session->chainBindingsValid = false;
+        RigExecChainSampleBindings rebound;
+        if (RigExecBindChainSampleInputs(evaluator, &rebound)) {
+            session->chainBindings = std::move(rebound);
+            session->chainBindingsValid = true;
+        }
+    };
+    if (session->frozenValid && session->frozenProgram == program &&
+        session->frozenEpoch == epoch) {
+        // Still serial, same program and epoch, valid pins: no notice
+        // moved the bindings or the avar region since the standing
+        // snapshot verified, so there is nothing to re-walk or
+        // re-digest. (The burst pins, including overrides, compare
+        // after the refresh regardless.) Failed pins still retry
+        // every trigger -- only verified pins skip. During
+        // notice-free playback this skips the refresh floor (~15 ms
+        // on the stack) on every tick.
+        if (session->frozenSerial == serial &&
+            session->chainBindingsValid) {
+            return;
+        }
+        refreshPins();
+        if (!program) {
+            session->frozen.reset();
+            session->frozenAvarDigest = 0;
+            session->frozenError.clear();
+            session->frozenSerial = serial;
+            return;
+        }
+        // Same program, same epoch: only ApplyAvarValueEdits may have
+        // moved, and it moves only the avar region -- which carries onto a
+        // copy without re-cloning the epoch. A refused patch (a shape
+        // change wearing a patch's clothes) falls through to a re-freeze.
+        const uint64_t avarDigest =
+            RigExecFrozenAvarRegionDigest(*program);
+        if (avarDigest == session->frozenAvarDigest) {
+            session->frozenSerial = serial;
+            return;
+        }
+        if (session->frozen) {
+            std::shared_ptr<const RigExecFrozenProgram> patched;
+            std::string ignored;
+            if (RigExecPatchFrozenAvarConstants(*session->frozen, *program,
+                                                &patched, &ignored)) {
+                session->frozen = std::move(patched);
+                session->frozenAvarDigest = avarDigest;
+                session->frozenSerial = serial;
+                return;
+            }
+        }
+    }
+    // A new program, a new epoch, or a patch that refused: re-freeze from
+    // the live state. A refusal parks a validly empty entry -- production
+    // jobs decline and the frame evaluates live when asked.
+    session->frozen.reset();
+    session->frozenProgram = program;
+    session->frozenEpoch = epoch;
+    session->frozenAvarDigest = 0;
+    session->frozenValid = true;
+    session->frozenSerial = serial;
+    refreshPins();
+    if (!program) {
+        session->frozenError.clear();
+        return;
+    }
+    session->frozenAvarDigest = RigExecFrozenAvarRegionDigest(*program);
+    std::shared_ptr<const RigExecFrozenProgram> fresh;
+    std::string frozenError;
+    if (RigExecFreezeProgram(evaluator, &fresh, &frozenError)) {
+        session->frozen = std::move(fresh);
+        session->frozenError.clear();
+    } else {
+        session->frozenError = std::move(frozenError);
+    }
+}
+
+RigExecBurstSampleCache *
+RigExecImagingRegistry::_PrepareWarmBurst(RigSession *session)
+{
+    if (!session || session->playback || !session->bridge) {
+        return nullptr;
+    }
+    RigExecProfileScope prepScope(session->bridge->MutableProfiler(),
+                                  "Imaging.PrepareWarmBurst", "imaging");
+    _RefreshFrozenSnapshot(session);
+    const RigExecRigEvaluator &evaluator = session->bridge->GetEvaluator();
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (!program) {
+        session->standingBurst.Clear();
+        session->burstProgram = nullptr;
+        session->burstEpochDigest = 0;
+        session->burstOverrides.clear();
+        session->burstOverrun = false;
+        session->burstDeclined = false;
+        // Session-level verdict: no factory means no per-frame verdicts,
+        // so prep names the cause instead of spinning silently.
+        session->lastWarmSkip = RigExecWarmSkipReason::D7Exempt;
+        session->lastWarmSkipDetail = "no baked program (D7)";
+        return &session->standingBurst;
+    }
+    const uint64_t epochDigest = RigExecFrameCacheEpochDigest(evaluator);
+    const std::vector<RigExecValueOverride> overrides =
+        session->bridge->GetInteractiveOverrides();
+    // Pins current and the standing burst usable: serve it, with no
+    // rebuild. The burst embeds its own pins copy, so the session's
+    // re-verified bindings need no second check -- identical pins mean
+    // identical inputs, which would build an identical burst.
+    const bool pinsCurrent =
+        session->burstProgram == program &&
+        session->burstEpochDigest == epochDigest &&
+        session->burstOverrides == overrides;
+    if (pinsCurrent && session->standingBurst.usable) {
+        return &session->standingBurst;
+    }
+    // The refresh above verified the pins, rebinding or invalidating
+    // them; valid here means verified-current, and no notice can move
+    // them before the burst's last frame samples. A burst is never
+    // rebuilt onto unverified pins; the standing pins stay, so the next
+    // trigger retries. The Clear parks neither latch flag, so the retry
+    // is a rebuild, not a latched serve.
+    if (!session->chainBindingsValid) {
+        session->standingBurst.Clear();
+        session->burstOverrun = false;
+        session->burstDeclined = false;
+        // Session-level verdict, as above (same words as the factory's).
+        session->lastWarmSkip = RigExecWarmSkipReason::Unsampleable;
+        session->lastWarmSkipDetail = "chain-bind";
+        return &session->standingBurst;
+    }
+    // A pins-determined unusable outcome under the current pins:
+    // re-serve it without paying for the doomed rebuild that produced
+    // it. The latch sits past the transient check above, so a failed
+    // bindings refresh never latches.
+    if (pinsCurrent &&
+        (session->burstOverrun || session->burstDeclined)) {
+        return &session->standingBurst;
+    }
+    RigExecBurstSampleCache rebuilt;
+    std::string buildError;
+    const uint64_t buildStartUs = RigExecProfiler::NowUs();
+    const bool built = RigExecBuildBurstSampleCache(
+        *program, session->chainBindings, overrides, epochDigest, &rebuilt,
+        &buildError);
+    const double buildMs =
+        double(RigExecProfiler::NowUs() - buildStartUs) / 1000.0;
+    session->burstProgram = program;
+    session->burstEpochDigest = epochDigest;
+    session->burstOverrides = overrides;
+    if (buildMs > _warmBurstPrepSliceMs) {
+        // Past the slice: park unusable and mark the overrun, so this
+        // tick and every tick until the pins move take the plain
+        // per-frame route instead of paying for another doomed build.
+        session->standingBurst.Clear();
+        session->burstOverrun = true;
+        session->burstDeclined = false;
+    } else {
+        session->standingBurst = std::move(rebuilt);
+        session->standingBurst.usable =
+            built && session->standingBurst.usable;
+        session->burstOverrun = false;
+        session->burstDeclined = !session->standingBurst.usable;
+        if (session->burstDeclined) {
+            // Session-level verdict, as above; the latched serve below
+            // re-records nothing (this verdict stands while it latches).
+            session->lastWarmSkip = RigExecWarmSkipReason::Unsampleable;
+            session->lastWarmSkipDetail = "burst-declined: " + buildError;
+        }
+    }
+    session->bridge->MutableProfiler()->RecordInstant(
+        "warmBurstRebuild", "imaging", RigExecProfiler::NowUs(),
+        {{"usable", session->standingBurst.usable ? "1" : "0"},
+         {"overrun", session->burstOverrun ? "1" : "0"},
+         {"ms", std::to_string(buildMs)}});
+    return &session->standingBurst;
+}
+
+bool
+RigExecImagingRegistry::GetWarmBurstUsable(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rig) {
+            return session.standingBurst.usable;
+        }
+    }
+    return false;
+}
+
+void
+RigExecImagingRegistry::SetWarmBurstPrepSliceMs(double ms)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _warmBurstPrepSliceMs = ms;
+    // A new slice re-times every verdict: an overrun latched under the
+    // old slice unlatches (the next trigger retries the build), while a
+    // usable burst stands -- the slice guards rebuild cost, not standing
+    // bursts -- and a shape decline, which no slice forgives, stays.
+    for (RigSession &session : _sessions) {
+        session.burstOverrun = false;
+    }
+}
+
+double
+RigExecImagingRegistry::GetWarmBurstPrepSliceMs()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _warmBurstPrepSliceMs;
+}
+
+RigExecWarmSkipReason
+RigExecImagingRegistry::GetLastWarmSkipReason(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rig) {
+            return session.lastWarmSkip;
+        }
+    }
+    return RigExecWarmSkipReason::None;
+}
+
+std::string
+RigExecImagingRegistry::GetLastWarmSkipDetail(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rig) {
+            return session.lastWarmSkipDetail;
+        }
+    }
+    return std::string();
+}
+
+void
+RigExecImagingRegistry::SetWarmSamplingBudget(size_t maxFactoryInvocations,
+                                              double maxMs)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _warmSamplingMaxInvocations = maxFactoryInvocations;
+    _warmSamplingMaxMs = maxMs;
+}
+
+size_t
+RigExecImagingRegistry::GetWarmSamplingMaxInvocations()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _warmSamplingMaxInvocations;
+}
+
+double
+RigExecImagingRegistry::GetWarmSamplingMaxMs()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _warmSamplingMaxMs;
 }
 
 bool
@@ -181,7 +495,11 @@ RigExecImagingRegistry::_EvaluateSessions(
                 session.playback
                     ? session.playback->EvaluateAndPublishResult(time)
                     : session.bridge->EvaluateAndPublishResult(time);
-            ++session.evaluationCount;
+            // A cache hit is not an evaluator pull: the count is what the
+            // scrub tests hold to zero over a warmed range.
+            if (!result.cacheHit) {
+                ++session.evaluationCount;
+            }
             if (!result.ok) {
                 if (errors) {
                     errors->push_back(
@@ -194,6 +512,11 @@ RigExecImagingRegistry::_EvaluateSessions(
             session.dirty = false;
             rigSnapshot = session.store->Get();
         }
+        // No frozen-snapshot refresh here: only warming reads the snapshot,
+        // so BuildWarmWork refreshes it lazily at warm-build time. Refreshing
+        // eagerly on this per-frame path made every SetTime -- evaluated or
+        // cache-hit, drag tick or scrub -- pay a chain-currency walk plus an
+        // avar-region digest for state nobody on this path consumes.
 
         if (!rigSnapshot || !rigSnapshot->Describes(stage, time)) {
             if (errors) {
@@ -316,6 +639,13 @@ RigExecImagingRegistry::Activate(
     std::sort(rigPaths.begin(), rigPaths.end());
     rigPaths.erase(std::unique(rigPaths.begin(), rigPaths.end()),
                    rigPaths.end());
+    // A (re-)activation never inherits another stage's warming: the records
+    // name the old stage's keys. Reset BEFORE the candidates evaluate, so
+    // the initial evaluation's own memos survive; a failed activation below
+    // leaves uncached records, which re-warm on demand.
+    for (const SdfPath &path : rigPaths) {
+        _warmIndex->ResetRig(path);
+    }
     if (rigPaths.empty()) {
         if (errors) {
             errors->push_back("no RigExecRoot prim found");
@@ -416,6 +746,28 @@ RigExecImagingRegistry::Activate(
         if (!session.playback) {
             session.bridge = std::make_unique<RigExecImagingBridge>(
                 stage, path, session.store);
+            session.bridge->SetWarmFrameIndex(_warmIndex);
+            if (std::shared_ptr<RigExecFrameCache> cache =
+                    session.bridge->GetFrameCache()) {
+                // Evictions retire the index's completions: the strip never
+                // shows cached for a drained entry. The callback holds the
+                // index shared and the rig by value, so a drop for a dead
+                // session lands in a live index under a dead rig.
+                std::shared_ptr<RigExecWarmFrameIndex> index = _warmIndex;
+                const SdfPath rigPath = path;
+                cache->SetEvictionCallback(
+                    [index, rigPath](
+                        const std::vector<RigExecFrameCacheEviction>
+                            &evicted) {
+                        for (const RigExecFrameCacheEviction &entry :
+                             evicted) {
+                            if (entry.time.IsNumeric()) {
+                                index->NoteEvicted(rigPath, entry.key,
+                                                   entry.time.GetValue());
+                            }
+                        }
+                    });
+            }
             // A selection made before this rig was activated applies to it: the
             // overlay is a viewer mode, not a property of one bridge. Set before
             // the first evaluation so the initial generation already carries it.
@@ -441,6 +793,18 @@ RigExecImagingRegistry::Activate(
     TfNotice::Revoke(_changeKey);
     _changeKey = candidateChangeKey;
     _sessions = std::move(candidate);
+    // Fresh sessions retire every queued or running job for their rigs:
+    // a completion holds its sampled cache, so this drops work, never
+    // results, and a re-activation never inherits another stage's warming.
+    for (const RigSession &session : _sessions) {
+        // Fresh sessions retire in-flight jobs for their rigs -- but only
+        // when any are in flight: an idle bump retires nothing and would
+        // orphan the initial evaluation's memos, which stamped the
+        // pre-commit generation.
+        if (_scheduler->InFlightCount(session.rigPath) > 0) {
+            _CancelGenerationLocked(session.rigPath);
+        }
+    }
     _stage = stage;
     {
         // Nested _mutex -> _notedMutex: the documented lock order.
@@ -600,7 +964,24 @@ RigExecImagingRegistry::SetTime(UsdTimeCode time)
         _Broadcast(cleared);
         return false;
     }
+    const UsdTimeCode previousTime = _lastTime;
     _lastTime = time;
+    // During active playback the sweep jobs the playhead already passed are
+    // dead weight: the live path serves those frames now. Neighbors stay --
+    // the frames ahead still warm the imminent scrub path. Only a FORWARD
+    // step sheds: a backward scrub is heading into exactly the frames at or
+    // behind the new playhead, and purging those would strip the warming
+    // the scrub is about to use.
+    const bool advanced =
+        previousTime.IsNumeric() && time.IsNumeric() &&
+        time.GetValue() > previousTime.GetValue();
+    if (advanced) {
+        for (const RigSession &session : _sessions) {
+            if (!session.playback) {
+                _scheduler->NotePlaybackAdvanced(session.rigPath, time);
+            }
+        }
+    }
     // Recorded into the first rig's profiler, so one summary holds the whole
     // update: the rig (Imaging.EvaluateAndPublish, per session, inside
     // _EvaluateSessions above) and then the COMBINED generation's publish
@@ -647,10 +1028,991 @@ RigExecImagingRegistry::GetSessionEvaluationCount(const SdfPath &rigPath)
     return 0;
 }
 
+RigExecWarmFactoryResult
+RigExecImagingRegistry::BuildWarmWork(
+    const SdfPath &rig, UsdTimeCode time,
+    RigExecFrameGeneration generation, RigExecFrozenStepRunner runner,
+    RigExecBurstSampleCache *burst)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    // Production-ness is read BEFORE the runner resolves: a null runner
+    // means "warm for real", and real execution needs the session's
+    // snapshot, while an injected test runner brings its own answers and
+    // runs without one.
+    const bool production = !runner;
+    runner = _ProductionRunner(runner);
+    if (!runner || time.IsDefault() || !std::isfinite(time.GetValue())) {
+        return RigExecWarmFactoryResult();
+    }
+    // Non-const: a built job records its freshness proof on the bridge.
+    RigSession *session = nullptr;
+    for (RigSession &candidate : _sessions) {
+        if (candidate.rigPath == rig) {
+            session = &candidate;
+            break;
+        }
+    }
+    // Unknown rigs, playback rigs (a .rigexec never warms), and anything
+    // without a bridge take no job: the frame evaluates live when asked.
+    if (!session || session->playback || !session->bridge) {
+        return RigExecWarmFactoryResult();
+    }
+    // A reasoned skip: records the session's last skip (the named cause a
+    // test or the strip reads back) and returns it with the empty work.
+    const auto skip = [&](RigExecWarmSkipReason reason,
+                          const std::string &detail) {
+        session->lastWarmSkip = reason;
+        session->lastWarmSkipDetail = detail;
+        // A reasoned skip is a non-publish signal toward un-warmable.
+        _warmIndex->NoteSkipped(rig, time.GetValue());
+        RigExecWarmFactoryResult result;
+        result.skip = reason;
+        result.detail = detail;
+        return result;
+    };
+    if (!_scheduler->IsGenerationCurrent(rig, generation)) {
+        return RigExecWarmFactoryResult();
+    }
+    const RigExecRigEvaluator &evaluator = session->bridge->GetEvaluator();
+    // The cached route, when the burst prepared one for this rig's
+    // program: prepared pins, visit sets, and epoch digest, with static
+    // reads and digests served from the burst maps. Anything else takes
+    // the plain per-frame route below, which re-derives everything
+    // exactly as before.
+    const bool cached = burst && burst->usable &&
+        evaluator.GetBakedProgram() == burst->program;
+    const std::vector<RigExecValueOverride> overrides =
+        session->bridge->GetInteractiveOverrides();
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    if (program == nullptr) {
+        // D7: a rig with no baked program evaluates dynamically against
+        // the live stage, which a worker must never touch. No job, ever;
+        // the rig still memoizes its own UI-thread results.
+        return skip(RigExecWarmSkipReason::D7Exempt,
+                    "no baked program (D7)");
+    }
+    if (!cached) {
+        // Refreshed here -- lazily, at warm-build time -- and not on the
+        // per-frame path: only warming reads the snapshot. The live state
+        // a refresh pins is the last evaluated frame's either way (no
+        // evaluation runs between that frame and this build), so warming
+        // sees the same history it did under the eager refresh, including
+        // after cache hits, which evaluate nothing on either path.
+        _RefreshFrozenSnapshot(session);
+        // The session's epoch-pinned chain bindings, verified at use and
+        // rebound when a mid-epoch edit moved them. A rig that cannot bind
+        // takes no job: the sampler would mark its chains stale and decline
+        // anyway, but declining here skips the doomed sample.
+        if (!session->chainBindingsValid ||
+            !RigExecChainSampleBindingsStillCurrent(session->chainBindings,
+                                                    evaluator)) {
+            session->chainBindingsValid = false;
+            RigExecChainSampleBindings rebound;
+            if (!RigExecBindChainSampleInputs(evaluator, &rebound)) {
+                return skip(RigExecWarmSkipReason::Unsampleable,
+                            "chain-bind");
+            }
+            session->chainBindings = std::move(rebound);
+            session->chainBindingsValid = true;
+        }
+    }
+    // No snapshot, no job -- checked BEFORE sampling on both routes (the
+    // cached route's refresh ran in burst prep), so a refusing rig skips
+    // every sweep time without paying for doomed samples. Production
+    // execution runs from the session's snapshot; an injected test runner
+    // brings its own answers and runs without one.
+    if (production && !session->frozen) {
+        return skip(RigExecWarmSkipReason::FreezeRefused,
+                    session->frozenError.empty()
+                        ? "freeze refused"
+                        : session->frozenError);
+    }
+    RigExecFrameInputs inputs;
+    if (cached) {
+        if (!RigExecSampleFrameInputsWithBurstCache(
+                evaluator, time, overrides, burst, &inputs)) {
+            return skip(RigExecWarmSkipReason::Unsampleable,
+                        "burst-sample");
+        }
+    } else {
+        // Sampled here, on the UI thread: the worker receives values, never
+        // live state, stage handles, or queries. The chains evaluate through
+        // the session's pins -- the same values a fresh bind would read, held
+        // to account sample by sample by the equivalence test.
+        if (!RigExecSampleFrameInputsWithChainBindings(
+                evaluator, time, overrides, session->chainBindings,
+                &inputs)) {
+            return skip(RigExecWarmSkipReason::Unsampleable,
+                        "chain-sample");
+        }
+    }
+    // A declined hook (a chain binding a weight object) samples the
+    // standing resolved state -- the chain outputs at whatever time the
+    // evaluator last ran, not at this job's time -- and marks it viaChain.
+    // No job is built from such a vector; the frame evaluates live when
+    // asked and still memoizes through the live path.
+    if (inputs.HasChainResolvedInputs()) {
+        return skip(RigExecWarmSkipReason::Unsampleable, "chain-resolved");
+    }
+    if (!RigExecControlStateDigestible(inputs, overrides)) {
+        return skip(RigExecWarmSkipReason::Unsampleable, "undigestible");
+    }
+    RigExecFrozenEvalContext context;
+    context.epochDigest = evaluator.GetBindingEpochDigest();
+    context.generation = generation;
+    context.slotCount = program->GetProviderCount();
+    context.programDigest =
+        context.epochDigest ^
+        (uint64_t(program->GetBoundInputCount()) * 1099511628211ull) ^
+        (uint64_t(program->GetVaryingInputCount()) * 16777619ull);
+    context.varyingInputCount = inputs.values.size();
+    uint32_t flags = 0;
+    if (evaluator.GetPublishWeightFields()) {
+        flags |= kRigExecFrozenPublishWeightFields;
+    }
+    if (evaluator.GetSolverGuidesEnabled()) {
+        flags |= kRigExecFrozenSolverGuidesEnabled;
+    }
+    context.flags = flags;
+    // The session's snapshot, bound per job; the existence check ran
+    // before sampling above (the lock never dropped between, so the
+    // session cannot have swapped it out from under this build).
+    context.frozen = session->frozen.get();
+    RigExecFrameCacheKey key;
+    // The same epoch half the bridge's lookup computes (epoch structure +
+    // build count), so a completion lands where the UI thread will look.
+    // The context keeps the bare binding epoch: that is what the frozen
+    // snapshot pins and cross-checks against. The cached route reads the
+    // prepared halves; the digests agree by construction (the same level-1s
+    // over the same served values). The constant digest folds beside the
+    // sampled one on both routes (plan D3): the session's frozen avar
+    // digest IS the epoch-constant digest, refreshed by
+    // _RefreshFrozenSnapshot above, so a value patch opens a new key
+    // namespace while the epoch half stands.
+    const uint64_t constantDigest = session->frozenAvarDigest;
+    uint64_t unfoldedDigest = 0;
+    if (cached) {
+        key.epochDigest = burst->epochDigest;
+        unfoldedDigest = RigExecControlStateDigestWithBurstCache(
+            inputs, overrides, burst);
+        key.controlDigest =
+            RigExecFoldConstantDigest(unfoldedDigest, constantDigest);
+    } else {
+        key.epochDigest = RigExecFrameCacheEpochDigest(evaluator);
+        unfoldedDigest =
+            RigExecControlStateDigest(inputs, overrides);
+        key.controlDigest =
+            RigExecFoldConstantDigest(unfoldedDigest, constantDigest);
+    }
+    // Recorded at enqueue, on this thread: a warmed entry with no proof is
+    // unreachable (lookups serve only under one), and the worker cannot
+    // record it -- the bridge is UI-thread state. Hook-refreshed by the
+    // checks above (or chainless to begin with), so the digest names fresh
+    // values and proves them.
+    session->bridge->NoteWarmingEnqueued(time, key.controlDigest,
+                                        unfoldedDigest, inputs);
+    // Dynamic-override bootstrapping (plan 2.1): an override identity the
+    // epoch index never learned would answer every plan as foreign (all
+    // clusters). Admission is exact -- the seeds mirror SetOverrides'
+    // placement -- and a no-op for identities already known.
+    session->bridge->AdmitOverrideControls(overrides);
+    std::shared_ptr<RigExecFrameCache> cache =
+        session->bridge->GetFrameCache();
+    RigExecBackgroundScheduler *scheduler = _scheduler.get();
+    std::shared_ptr<RigExecWarmFrameIndex> warmIndex = _warmIndex;
+    // Only sampled values cross the thread boundary, plus the snapshot the
+    // context points at: the job's own shared_ptr keeps it alive past a
+    // deactivation or a refresh that swaps the session's entry out. The
+    // cache is shared (a completion for a dead session lands in a dead
+    // cache); the scheduler outlives the pool (registry singleton).
+    std::shared_ptr<const RigExecFrozenProgram> frozen = session->frozen;
+    // Retained-state publish (plan 2.0): the source snapshot and the
+    // dependency record ride with the pose. Built here, on the UI thread:
+    // only values cross into the closure. The wider half -- the pose-domain
+    // slots a partial cone re-runs against -- is taken from the worker's
+    // thread-local after the run, inside the closure below.
+    RigExecRetainedFrameState retainedState = RigExecCaptureRetainedState(
+        inputs, overrides, key.epochDigest,
+        program->GetStepGraph().clustering.clusters.size(),
+        constantDigest);
+    auto retained = std::make_shared<RigExecRetainedFrameState>(
+        std::move(retainedState));
+    const size_t retainedBytes = retained->RetainedBytes();
+    RigExecEntryProvenance provenance =
+        RigExecFullEvalProvenance(program->GetStepGraph(), time);
+    provenance.unfoldedControlDigest = unfoldedDigest;
+    RigExecWarmWork work = [inputs, context, key, cache, scheduler, rig,
+                              runner, frozen, warmIndex, retained,
+                              retainedBytes, provenance](
+                                 const RigExecWarmRequest &request) {
+        const RigExecRigPose pose = RigExecEvaluateFrozen(
+            context, inputs, runner, scheduler, rig);
+        // Stale at publish means an edit landed mid-run -- a generation
+        // bump or a scoped purge that moved this time's fence token (the
+        // frame requeues under the live generation); anything else that
+        // fails to publish is a genuine decline (the frame evaluates live
+        // when asked). The fence is re-read per failure -- never trusted
+        // across the evaluate/publish calls -- so a purge between them
+        // still lands DeclinedGeneration.
+        const auto stale = [&]() {
+            return scheduler && !scheduler->IsWarmRequestCurrent(
+                                    rig, request.generation, request.time,
+                                    request.fenceToken);
+        };
+        if (!pose.valid) {
+            return stale() ? RigExecWarmOutcome::DeclinedGeneration
+                           : RigExecWarmOutcome::DeclinedInvalid;
+        }
+        // The wider retained half (plan 2.0): the production run captured
+        // its pose-domain slots into this worker's thread-local; take them
+        // here, on the same worker, and publish a copy of the retained
+        // state carrying both halves. An injected test kernel captures
+        // nothing, so the take fails and the sources-only handle publishes
+        // exactly as before.
+        std::shared_ptr<const void> retainedHandle = retained;
+        size_t publishBytes = retainedBytes;
+        std::shared_ptr<RigExecRetainedFrameState> slotted;
+        std::shared_ptr<const void> slots;
+        size_t slotBytes = 0;
+        if (RigExecTakeLastFrozenSlots(&slots, &slotBytes) && slots &&
+            slotBytes > 0) {
+            slotted =
+                std::make_shared<RigExecRetainedFrameState>(*retained);
+            slotted->slots = std::move(slots);
+            slotted->slotBytes = slotBytes;
+            publishBytes = slotted->RetainedBytes();
+            retainedHandle = slotted;
+        }
+        const bool pubOk = RigExecPublishBackgroundCompletion(
+            cache, key, request.time, pose, request.generation,
+            scheduler, rig, request.fenceToken, retainedHandle,
+            publishBytes, &provenance);
+        if (!pubOk) {
+            return stale() ? RigExecWarmOutcome::DeclinedGeneration
+                           : RigExecWarmOutcome::DeclinedInvalid;
+        }
+        // Publish-confirmed: the frame is cached (and visited, for the
+        // cursor) under the generation it ran in -- stamped explicit, so
+        // a bump between the publish and this record cannot misfile it.
+        warmIndex->NoteCompleted(rig, request.time.GetValue(), key,
+                                 request.generation);
+        return RigExecWarmOutcome::Published;
+    };
+    return RigExecWarmFactoryResult{std::move(work)};
+}
+
+RigExecProfiler *
+RigExecImagingRegistry::MutableSchedulerProfiler()
+{
+    return _scheduler ? _scheduler->MutableProfiler() : nullptr;
+}
+
+RigExecProfiler *
+RigExecImagingRegistry::MutableBridgeProfiler(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (RigSession &session : _sessions) {
+        if (session.rigPath == rig && !session.playback && session.bridge) {
+            return session.bridge->MutableProfiler();
+        }
+    }
+    return nullptr;
+}
+
+std::vector<UsdTimeCode>
+RigExecImagingRegistry::_CursorSweepTimes(const RigSession &session,
+                                          UsdTimeCode playhead)
+{
+    if (!session.warmRangeActive || !session.bridge || !_scheduler ||
+        !_warmIndex) {
+        return _SweepTimes(playhead);
+    }
+    const RigExecFrameGeneration generation =
+        _scheduler->CurrentGeneration(session.rigPath);
+    const uint64_t epoch =
+        RigExecFrameCacheEpochDigest(session.bridge->GetEvaluator());
+    const double center = playhead.GetValue();
+    std::vector<std::pair<double, double>> scored;
+    for (const double time : session.warmRange) {
+        // The playhead is never queued, however it arises (the scheduler
+        // enforces this too; skipping here keeps the vector honest).
+        if (time == center) {
+            continue;
+        }
+        if (!_warmIndex->IsVisitable(session.rigPath, time, generation,
+                                     epoch)) {
+            continue;
+        }
+        scored.emplace_back(std::abs(time - center), time);
+    }
+    // Closest first; ties prefer the future (playback warms ahead).
+    std::sort(scored.begin(), scored.end(),
+              [](const std::pair<double, double> &a,
+                 const std::pair<double, double> &b) {
+                  if (a.first != b.first) {
+                      return a.first < b.first;
+                  }
+                  return a.second > b.second;
+              });
+    std::vector<UsdTimeCode> times;
+    times.reserve(scored.size());
+    for (const std::pair<double, double> &entry : scored) {
+        times.emplace_back(entry.second);
+    }
+    return times;
+}
+
+size_t
+RigExecImagingRegistry::OnEditCommitted(RigExecFrozenStepRunner runner)
+{
+    // Snapshot the rigs and the playhead under a short lock; the triggers
+    // below sample outside it (their factories re-resolve each session, so
+    // a Deactivate mid-trigger only skips frames, never dangles).
+    std::vector<SdfPath> rigs;
+    UsdTimeCode playhead;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_sessions.empty() || !_scheduler) {
+            return 0;
+        }
+        for (const RigSession &session : _sessions) {
+            if (!session.playback) {
+                rigs.push_back(session.rigPath);
+            }
+        }
+        playhead = _lastTime;
+    }
+    if (rigs.empty() || playhead.IsDefault() ||
+        !std::isfinite(playhead.GetValue())) {
+        return 0;
+    }
+    // The runner passes through unresolved: BuildWarmWork reads
+    // production-ness off the null before resolving it to the production
+    // runner itself.
+    size_t enqueued = 0;
+    for (const SdfPath &rig : rigs) {
+        const RigExecFrameGeneration generation =
+            _scheduler->CurrentGeneration(rig);
+        // The session's standing burst: rebuilt when its pins moved,
+        // served across ticks while current. Usable takes the cached
+        // route; overrun takes the plain per-frame route (null burst),
+        // since frames can still sample; shape-declined takes no
+        // factory -- no frame could sample. The pointer names session
+        // storage, captured for synchronous same-thread use inside the
+        // trigger only (no session can activate or deactivate under it).
+        RigExecBurstSampleCache *burst = nullptr;
+        bool useCachedRoute = false;
+        bool allowPlainRoute = false;
+        std::vector<UsdTimeCode> sweepTimes;
+        RigExecWarmSamplingBudget budget;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            for (RigSession &session : _sessions) {
+                if (session.rigPath == rig && !session.playback &&
+                    session.bridge) {
+                    burst = _PrepareWarmBurst(&session);
+                    useCachedRoute = burst && burst->usable;
+                    allowPlainRoute =
+                        burst && !burst->usable && session.burstOverrun;
+                    sweepTimes = _CursorSweepTimes(session, playhead);
+                    // Retired frames re-warm FIRST (plan 2.2/2.4): the
+                    // affected-time set replaces the fixed sweep for the
+                    // edit, so a release re-warms what it retired before
+                    // the cursor wanders on.
+                    _PrependPendingRewarm(&session, playhead, &sweepTimes);
+                    budget.maxFactoryInvocations =
+                        _warmSamplingMaxInvocations;
+                    budget.maxMs = _warmSamplingMaxMs;
+                    // Stamped after prep: the stop bounds factory sampling,
+                    // not the burst prep above (frozen refresh + rebuild),
+                    // which runs outside the factory budget under its own
+                    // slice (plan 1.1). Measuring from the tick's start let
+                    // a slow prep -- the stack's refresh floor is ~15 ms --
+                    // trip the 8 ms stop before the first sample on every
+                    // tick, so the rig never warmed.
+                    budget.startUs = RigExecProfiler::NowUs();
+                    break;
+                }
+            }
+        }
+        RigExecWarmJobFactory factory;
+        if (useCachedRoute || allowPlainRoute) {
+            RigExecBurstSampleCache *route = useCachedRoute ? burst : nullptr;
+            factory = [this, rig, generation, runner, route](
+                          UsdTimeCode time) {
+                return BuildWarmWork(rig, time, generation, runner, route);
+            };
+        }
+        enqueued += _scheduler->OnEditCommitted(
+            rig, playhead, generation, std::move(sweepTimes),
+            std::move(factory), kRigExecFrameCacheDefaultNeighborRadius,
+            budget);
+    }
+    return enqueued;
+}
+
+size_t
+RigExecImagingRegistry::OnIdle(RigExecFrozenStepRunner runner)
+{
+    std::vector<SdfPath> rigs;
+    UsdTimeCode playhead;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_sessions.empty() || !_scheduler) {
+            return 0;
+        }
+        for (const RigSession &session : _sessions) {
+            if (!session.playback) {
+                rigs.push_back(session.rigPath);
+            }
+        }
+        playhead = _lastTime;
+    }
+    if (rigs.empty() || playhead.IsDefault() ||
+        !std::isfinite(playhead.GetValue())) {
+        return 0;
+    }
+    // The runner passes through unresolved: BuildWarmWork reads
+    // production-ness off the null before resolving it to the production
+    // runner itself.
+    size_t enqueued = 0;
+    for (const SdfPath &rig : rigs) {
+        const RigExecFrameGeneration generation =
+            _scheduler->CurrentGeneration(rig);
+        // The standing burst, as in OnEditCommitted: cached route when
+        // usable, plain per-frame route on overrun, no factory on a
+        // shape decline.
+        RigExecBurstSampleCache *burst = nullptr;
+        bool useCachedRoute = false;
+        bool allowPlainRoute = false;
+        std::vector<UsdTimeCode> sweepTimes;
+        RigExecWarmSamplingBudget budget;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            for (RigSession &session : _sessions) {
+                if (session.rigPath == rig && !session.playback &&
+                    session.bridge) {
+                    burst = _PrepareWarmBurst(&session);
+                    useCachedRoute = burst && burst->usable;
+                    allowPlainRoute =
+                        burst && !burst->usable && session.burstOverrun;
+                    sweepTimes = _CursorSweepTimes(session, playhead);
+                    // Retired frames first here too: without-Qt the idle
+                    // tick is the only recurring driver.
+                    _PrependPendingRewarm(&session, playhead, &sweepTimes);
+                    budget.maxFactoryInvocations =
+                        _warmSamplingMaxInvocations;
+                    budget.maxMs = _warmSamplingMaxMs;
+                    // Stamped after prep: the stop bounds factory sampling,
+                    // not the burst prep above (frozen refresh + rebuild),
+                    // which runs outside the factory budget under its own
+                    // slice (plan 1.1). Measuring from the tick's start let
+                    // a slow prep -- the stack's refresh floor is ~15 ms --
+                    // trip the 8 ms stop before the first sample on every
+                    // tick, so the rig never warmed.
+                    budget.startUs = RigExecProfiler::NowUs();
+                    break;
+                }
+            }
+        }
+        RigExecWarmJobFactory factory;
+        if (useCachedRoute || allowPlainRoute) {
+            RigExecBurstSampleCache *route = useCachedRoute ? burst : nullptr;
+            factory = [this, rig, generation, runner, route](
+                          UsdTimeCode time) {
+                return BuildWarmWork(rig, time, generation, runner, route);
+            };
+        }
+        enqueued += _scheduler->OnIdle(
+            rig, playhead, generation, std::move(sweepTimes),
+            std::move(factory), budget);
+    }
+    return enqueued;
+}
+
+RigExecFrameGeneration
+RigExecImagingRegistry::CurrentFrameGeneration(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_sessions.empty() || !_scheduler) {
+        return 0;
+    }
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rig) {
+            return _scheduler->CurrentGeneration(rig);
+        }
+    }
+    return 0;
+}
+
+RigExecWarmFenceToken
+RigExecImagingRegistry::CurrentFenceToken(const SdfPath &rig, UsdTimeCode time)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_sessions.empty() || !_scheduler) {
+        return 0;
+    }
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rig) {
+            return _scheduler->CurrentFenceToken(rig, time);
+        }
+    }
+    return 0;
+}
+
+void
+RigExecImagingRegistry::_CancelGenerationLocked(const SdfPath &rig)
+{
+    if (_scheduler) {
+        _scheduler->CancelGeneration(rig);
+        _warmIndex->NoteGeneration(rig, _scheduler->CurrentGeneration(rig));
+    }
+}
+
+void
+RigExecImagingRegistry::_CancelGenerationTimesLocked(const SdfPath &rig)
+{
+    if (!_scheduler) {
+        return;
+    }
+    // The unpartitioned affected set: completions the warm index holds
+    // plus queued times the scheduler holds. No generation bump and no
+    // index generation push: unaffected times keep their tokens and
+    // their running jobs publish normally, while affected times get
+    // fresh fence tokens and dirty flags. The partitioned path
+    // (_RetireAffectedTimesLocked) narrows this by entry provenance;
+    // this stays as its no-oracle fallback.
+    std::vector<UsdTimeCode> times = _warmIndex->CompletedTimes(rig);
+    const std::vector<UsdTimeCode> queued = _scheduler->QueuedTimes(rig);
+    times.insert(times.end(), queued.begin(), queued.end());
+    _scheduler->CancelGenerationTimes(rig, times);
+    for (const UsdTimeCode &time : times) {
+        _warmIndex->NoteDirtied(
+            rig, time.IsDefault() ? 0.0 : time.GetValue());
+    }
+}
+
+void
+RigExecImagingRegistry::_NotePendingRewarm(RigSession *session,
+                                           const std::vector<double> &times)
+{
+    if (!session) {
+        return;
+    }
+    // De-duplicated against the standing list; capped past which the
+    // overflow is dropped (dirtied frames stay visitable, so the cursor
+    // sweep covers them when a range is set, and every frame still
+    // evaluates live on visit when none is).
+    static constexpr size_t kPendingRewarmCap = 4096;
+    for (const double time : times) {
+        if (!std::isfinite(time)) {
+            continue;
+        }
+        if (session->pendingRewarm.size() >= kPendingRewarmCap) {
+            break;
+        }
+        if (std::find(session->pendingRewarm.begin(),
+                      session->pendingRewarm.end(), time) ==
+            session->pendingRewarm.end()) {
+            session->pendingRewarm.push_back(time);
+        }
+    }
+}
+
+void
+RigExecImagingRegistry::_PrependPendingRewarm(
+    RigSession *session, UsdTimeCode playhead,
+    std::vector<UsdTimeCode> *sweepTimes)
+{
+    if (!session || !sweepTimes || session->pendingRewarm.empty() ||
+        !session->bridge || !_scheduler || !_warmIndex) {
+        return;
+    }
+    const double center =
+        playhead.IsNumeric() ? playhead.GetValue() : 0.0;
+    // One batched read, no sampling on the query path.
+    const RigExecFrameGeneration generation =
+        _scheduler->CurrentGeneration(session->rigPath);
+    const uint64_t epoch =
+        RigExecFrameCacheEpochDigest(session->bridge->GetEvaluator());
+    const std::vector<RigExecWarmFrameState> states = _warmIndex->States(
+        session->rigPath, session->pendingRewarm, generation, epoch);
+    std::vector<std::pair<double, double>> scored;
+    std::vector<double> keep;
+    for (size_t i = 0; i < session->pendingRewarm.size(); ++i) {
+        const double time = session->pendingRewarm[i];
+        const RigExecWarmFrameState state =
+            i < states.size() ? states[i]
+                              : RigExecWarmFrameState::Uncached;
+        if (state == RigExecWarmFrameState::Cached) {
+            continue;
+        }
+        keep.push_back(time);
+        if (state == RigExecWarmFrameState::Warming) {
+            continue;
+        }
+        scored.emplace_back(std::abs(time - center), time);
+    }
+    session->pendingRewarm.swap(keep);
+    std::sort(scored.begin(), scored.end(),
+              [](const std::pair<double, double> &a,
+                 const std::pair<double, double> &b) {
+                  if (a.first != b.first) {
+                      return a.first < b.first;
+                  }
+                  return a.second > b.second;
+              });
+    std::vector<UsdTimeCode> first;
+    first.reserve(scored.size());
+    for (const auto &entry : scored) {
+        // The playhead is never queued, however it arises (the scheduler
+        // enforces this too; skipping here keeps the vector honest).
+        if (playhead.IsNumeric() && entry.second == center) {
+            continue;
+        }
+        first.emplace_back(entry.second);
+    }
+    sweepTimes->insert(sweepTimes->begin(), first.begin(), first.end());
+}
+
+void
+RigExecImagingRegistry::_RetireAffectedTimesLocked(
+    RigSession *session, const UsdNotice::ObjectsChanged &notice,
+    RigExecNoticeDisposition disposition,
+    const std::vector<SdfPath> &patchedPaths)
+{
+    if (!session || !session->bridge || session->playback || !_scheduler ||
+        !_warmIndex) {
+        return;
+    }
+    const SdfPath &rig = session->rigPath;
+    RigExecImagingBridge *bridge = session->bridge.get();
+    const RigExecBakedProgram *program =
+        bridge->GetEvaluator().GetBakedProgram();
+    const RigExecOutputAffectedIndex *index = bridge->GetAffectedIndex();
+    if (!program || !index || index->Empty()) {
+        // No oracle: every completed time is affected, as before. Queued
+        // times purge (their provenance publishes later); proofs retire
+        // by the notice's paths.
+        _CancelGenerationTimesLocked(rig);
+        const std::vector<UsdTimeCode> completed =
+            _warmIndex->CompletedTimes(rig);
+        std::vector<double> rewarm;
+        for (const UsdTimeCode &time : completed) {
+            rewarm.push_back(time.IsDefault() ? 0.0 : time.GetValue());
+        }
+        _NotePendingRewarm(session, rewarm);
+        bridge->RetireProofsForControls(RigExecNoticeControlIds(notice));
+        return;
+    }
+    // The edit's controls: the evaluator's exact patched set for a
+    // patch (no notice noise -- a Patched notice carries nothing but
+    // patchable values and their ancestors), the full adapter for a
+    // stamp bump.
+    std::vector<RigExecControlId> controls;
+    if (disposition == RigExecNoticeDisposition::Patched) {
+        std::set<RigExecControlId> ids;
+        for (const SdfPath &path : patchedPaths) {
+            if (path.IsEmpty()) {
+                continue;
+            }
+            ids.insert(path.GetString());
+            if (path.IsPropertyPath()) {
+                ids.insert(path.GetPrimPath().GetString());
+            }
+        }
+        controls.assign(ids.begin(), ids.end());
+    } else {
+        controls = RigExecNoticeControlIds(notice);
+    }
+    const RigExecBakedClusterSet dirty =
+        index->AffectedByControls(controls);
+    // Weight-object edits: a notice path at or under a weight object an
+    // entry read (WeightPacket steps resolve through step.object, outside
+    // the avar-only index, so the provenance read set is the oracle).
+    std::vector<SdfPath> noticePaths;
+    for (const SdfPath &path : notice.GetResyncedPaths()) {
+        noticePaths.push_back(path);
+    }
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        noticePaths.push_back(path);
+        if (path.IsPropertyPath()) {
+            noticePaths.push_back(path.GetPrimPath());
+        }
+    }
+    for (const SdfPath &path :
+         notice.GetResolvedAssetPathsResyncedPaths()) {
+        noticePaths.push_back(path);
+    }
+    const uint64_t newConstants = RigExecEpochConstantDigest(*program);
+    const std::shared_ptr<RigExecFrameCache> cache =
+        bridge->GetFrameCache();
+    const std::vector<std::pair<UsdTimeCode, RigExecFrameCacheKey>> done =
+        _warmIndex->CompletedKeys(rig);
+    std::vector<UsdTimeCode> purge;
+    std::vector<double> rewarm;
+    for (const auto &entry : done) {
+        const UsdTimeCode time = entry.first;
+        const RigExecFrameCacheKey &oldKey = entry.second;
+        const double stamped =
+            time.IsDefault() ? 0.0 : time.GetValue();
+        RigExecEntryProvenance provenance;
+        bool affected = true;
+        if (cache && cache->LookupProvenance(oldKey, &provenance)) {
+            // The affected test is the executor's own dirtiness rule
+            // (bakedSchedule §7): an entry's pose moved exactly when a
+            // dirty cluster reaches its computation, or an edited weight
+            // object feeds it. Constant regions are recorded in the
+            // provenance but deliberately NOT consulted: the patchable
+            // binding's compose-cluster cone is the exact oracle (a
+            // seedless binding dirties nothing and carries), while
+            // regions over-approximate by stride.
+            affected = false;
+            for (const int cluster : provenance.clusters) {
+                // Bounded by hand: ClusterSet::Test guards negative
+                // only, and provenance is publisher-controlled.
+                if (cluster >= 0 &&
+                    size_t(cluster) < dirty.words.size() * 64 &&
+                    dirty.Test(cluster)) {
+                    affected = true;
+                    break;
+                }
+            }
+            for (size_t i = 0; !affected && i < provenance.weightReads.size();
+                 ++i) {
+                const SdfPath weight(provenance.weightReads[i]);
+                if (weight.IsEmpty()) {
+                    continue;
+                }
+                for (const SdfPath &path : noticePaths) {
+                    if (path == weight || path.HasPrefix(weight)) {
+                        affected = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!affected) {
+            // Lane a/b: the entry's computation touches nothing dirty.
+            // Across a namespace move it carries (re-keyed, re-pointed,
+            // zero recompute); otherwise it stands untouched -- no purge,
+            // no dirty flag, no requeue. A failed carry degrades to
+            // lane c rather than stranding the frame.
+            if (cache && bridge->CarryEntry(time, oldKey, newConstants)) {
+                // The new key holds the row now: old-key jobs queued or
+                // running for this time must drop, not resurrect it.
+                purge.push_back(time);
+                continue;
+            }
+            if (cache) {
+                RigExecEntryProvenance carried;
+                if (cache->LookupProvenance(oldKey, &carried) &&
+                    carried.unfoldedControlDigest != 0 &&
+                    RigExecFoldConstantDigest(
+                        carried.unfoldedControlDigest, newConstants) !=
+                        oldKey.controlDigest) {
+                    // A namespace move the carry declined (evicted base,
+                    // pose-only entry, over-cap re-publish): retire and
+                    // re-warm rather than serve stale.
+                    purge.push_back(time);
+                    rewarm.push_back(stamped);
+                    _warmIndex->NoteDirtied(rig, stamped);
+                    continue;
+                }
+            }
+            continue;
+        }
+        // Lane c: retire the time. The stale entry strands under its old
+        // key (unreachable by construction -- the digest backstop -- and
+        // drained by LRU); the row goes dirty and the frame requeues for
+        // a full re-warm. (Cone-granular re-execution waits on slot
+        // capture: sources-only retained state plans but cannot run a
+        // Partial, so the planner's verdict here would only restate this
+        // partition at higher cost.)
+        purge.push_back(time);
+        rewarm.push_back(stamped);
+        _warmIndex->NoteDirtied(rig, stamped);
+    }
+    // Queued times are always affected: their provenance publishes with
+    // their completion, so nothing partitions them yet.
+    const std::vector<UsdTimeCode> queued = _scheduler->QueuedTimes(rig);
+    purge.insert(purge.end(), queued.begin(), queued.end());
+    _scheduler->CancelGenerationTimes(rig, purge);
+    _NotePendingRewarm(session, rewarm);
+    bridge->RetireProofsForControls(controls);
+}
+
+void
+RigExecImagingRegistry::CancelFrameGeneration(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _CancelGenerationLocked(rig);
+}
+
+RigExecBackgroundSchedulerStats
+RigExecImagingRegistry::GetBackgroundStats()
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (!_scheduler) {
+        return RigExecBackgroundSchedulerStats();
+    }
+    return _scheduler->Stats();
+}
+
+void
+RigExecImagingRegistry::WaitUntilBackgroundIdle()
+{
+    RigExecBackgroundScheduler *scheduler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        scheduler = _scheduler.get();
+    }
+    // Outside _mutex: workers never take it, but idleness can outlast a
+    // caller's patience for holding it.
+    if (scheduler) {
+        scheduler->WaitUntilIdle();
+    }
+}
+
+RigExecFrameCacheStats
+RigExecImagingRegistry::GetFrameCacheStats(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rig && session.bridge) {
+            return session.bridge->GetFrameCacheStats();
+        }
+    }
+    return RigExecFrameCacheStats();
+}
+
+void
+RigExecImagingRegistry::ClearFrameCache(const SdfPath &rig)
+{
+    // The fence is outermost: read the scheduler under a short lock, then
+    // hold the fence across the whole cancel-THEN-clear below. Lock order
+    // fence, then registry, then scheduler, then cache shards, then the
+    // warm index -- never inverted.
+    RigExecBackgroundScheduler *scheduler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        scheduler = _scheduler.get();
+    }
+    std::unique_lock<std::mutex> fenceLock;
+    if (scheduler) {
+        fenceLock = std::unique_lock<std::mutex>(scheduler->FenceMutex());
+    }
+    // Cancel in its own scope BEFORE locking for the clear: the registry
+    // mutex is non-recursive, so cancel-under-clear-lock self-deadlocks.
+    CancelFrameGeneration(rig);
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        for (RigSession &session : _sessions) {
+            if (session.rigPath == rig && session.bridge) {
+                session.bridge->ClearFrameCache();
+            }
+        }
+        _warmIndex->ResetRig(rig);
+        for (RigSession &session : _sessions) {
+            if (session.rigPath == rig) {
+                session.warmRangeActive = false;
+                session.warmRange.clear();
+            }
+        }
+    }
+}
+
+bool
+RigExecImagingRegistry::SetWarmRange(const SdfPath &rig,
+                                     const std::vector<double> &frames)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (RigSession &session : _sessions) {
+        if (session.rigPath == rig && !session.playback && session.bridge) {
+            session.warmRange.clear();
+            for (const double time : frames) {
+                if (std::isfinite(time)) {
+                    session.warmRange.push_back(time);
+                }
+            }
+            std::sort(session.warmRange.begin(), session.warmRange.end());
+            session.warmRange.erase(
+                std::unique(session.warmRange.begin(), session.warmRange.end()),
+                session.warmRange.end());
+            session.warmRangeActive = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<RigExecWarmFrameState>
+RigExecImagingRegistry::GetFrameStates(const SdfPath &rig,
+                                       const std::vector<double> &frames)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (frames.empty() || frames.size() > 100000) {
+        return {};
+    }
+    const RigSession *session = nullptr;
+    for (const RigSession &candidate : _sessions) {
+        if (candidate.rigPath == rig && !candidate.playback &&
+            candidate.bridge) {
+            session = &candidate;
+            break;
+        }
+    }
+    if (!session || !_scheduler || !_warmIndex) {
+        return {};
+    }
+    const RigExecFrameGeneration generation =
+        _scheduler->CurrentGeneration(rig);
+    const uint64_t epoch =
+        RigExecFrameCacheEpochDigest(session->bridge->GetEvaluator());
+    return _warmIndex->States(rig, frames, generation, epoch);
+}
+
+RigExecImagingBridge *
+RigExecImagingRegistry::GetBridge(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (RigSession &session : _sessions) {
+        if (session.rigPath == rig && !session.playback && session.bridge) {
+            return session.bridge.get();
+        }
+    }
+    return nullptr;
+}
+
+std::vector<std::pair<UsdTimeCode, RigExecFrameCacheKey>>
+RigExecImagingRegistry::GetCompletedKeys(const SdfPath &rig)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const RigSession &session : _sessions) {
+        if (session.rigPath == rig && !session.playback && session.bridge &&
+            _warmIndex) {
+            return _warmIndex->CompletedKeys(rig);
+        }
+    }
+    return {};
+}
+
 bool
 RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
 {
     UsdTimeCode time;
+    // Fenced cancel-THEN-clear like ClearFrameCache (plan 3.3): the fence
+    // is outermost, so it is taken before the registry lock below and held
+    // across every session's cancel plus clear.
+    RigExecBackgroundScheduler *scheduler = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        scheduler = _scheduler.get();
+    }
+    std::unique_lock<std::mutex> fenceLock;
+    if (scheduler) {
+        fenceLock = std::unique_lock<std::mutex>(scheduler->FenceMutex());
+    }
     {
         std::lock_guard<std::mutex> lock(_mutex);
         SdfPath resolved;
@@ -679,6 +2041,13 @@ RigExecImagingRegistry::SetWeightOverlay(const std::string &weightPrimPath)
             if (session.playback) {
                 session.playback->SetWeightOverlay(resolved);
             } else {
+                // Cancel BEFORE the bridge clears (plan 3.3): the overlay
+                // flag rides to workers in context.flags and changes pose
+                // content without moving the key, so the old clear-then-
+                // cancel order let a worker publish a stale-overlay pose
+                // into the cleared cache between the two. Retired jobs
+                // re-enqueue fresh on the next commit.
+                _CancelGenerationLocked(session.rigPath);
                 session.bridge->SetWeightOverlay(resolved);
             }
             session.dirty = true;
@@ -998,6 +2367,12 @@ RigExecImagingRegistry::UpdatePreview(const double *values, size_t count)
                 session.bridge->SetInteractiveOverrides(found->second);
                 needsRigPublish = true;
             }
+            // D5: any new edit bumps the generation and cancels the rig's
+            // in-flight jobs. A job sampled before this tick would land
+            // under an unreachable key anyway (the digest folds the
+            // overrides), but it would still burn a worker on a pose no
+            // lookup can reach; the commit trigger re-enqueues fresh.
+            _CancelGenerationLocked(session.rigPath);
             session.dirty = true;
         }
         time = _lastTime;
@@ -1114,6 +2489,18 @@ RigExecImagingRegistry::_OnObjectsChanged(
             }
         }
     }
+    if (!relevant) {
+        // Resolved-asset resyncs: the evaluator honors them (they break
+        // the avar-only fast path and hit the capture index), so the
+        // registry scan reads them too.
+        for (const SdfPath &path :
+             notice.GetResolvedAssetPathsResyncedPaths()) {
+            if (touchesInput(path)) {
+                relevant = true;
+                break;
+            }
+        }
+    }
     if (relevant) {
         UsdTimeCode time;
         {
@@ -1163,6 +2550,11 @@ RigExecImagingRegistry::_OnObjectsChanged(
                     }
                 }
             }
+            // A resolved asset arriving from a new file can reveal a new
+            // external input the cached regions never named.
+            if (!notice.GetResolvedAssetPathsResyncedPaths().empty()) {
+                _readRootsDirty = true;
+            }
             for (RigSession &session : _sessions) {
                 const auto affects = [&session](const SdfPath &path) {
                     const SdfPath prim = path.GetPrimPath();
@@ -1176,6 +2568,9 @@ RigExecImagingRegistry::_OnObjectsChanged(
                     affected = affected || affects(path);
                 for (const SdfPath &path : notice.GetChangedInfoOnlyPaths())
                     affected = affected || affects(path);
+                for (const SdfPath &path :
+                     notice.GetResolvedAssetPathsResyncedPaths())
+                    affected = affected || affects(path);
                 // A playback session never dirties: the binary is static,
                 // so no stage edit changes what it publishes. Picking up
                 // a new asset (or a new file behind it) needs a
@@ -1187,6 +2582,42 @@ RigExecImagingRegistry::_OnObjectsChanged(
                     // colour, purpose...) across generations; an edit that
                     // reaches the rig is the only thing that can move it.
                     session.bridge->InvalidateGuideCaches();
+                    // Outcome-driven retirement (plan 2.1/2.2): the
+                    // evaluator classifies this notice (patched plus
+                    // paths, stamp-bumped, or stale) through a read-only
+                    // query, so the verdict holds whatever order the two
+                    // notice handlers ran in. Patch/stamp edits partition
+                    // completions by entry provenance -- clean entries
+                    // stand or carry, dirty ones retire -- and purge
+                    // affected times only, without bumping the
+                    // generation, so other times' queued and running jobs
+                    // still publish; a stale program (or no program)
+                    // keeps the global cancel plus the capture-index
+                    // epoch retirement.
+                    std::vector<SdfPath> patchedPaths;
+                    const RigExecNoticeDisposition disposition =
+                        session.bridge->GetEvaluator()
+                            .ClassifyNoticeDisposition(notice,
+                                                       &patchedPaths);
+                    if (disposition == RigExecNoticeDisposition::Patched ||
+                        disposition ==
+                            RigExecNoticeDisposition::StampBumped) {
+                        _RetireAffectedTimesLocked(&session, notice,
+                                                   disposition,
+                                                   patchedPaths);
+                    } else {
+                        // A new edit bumps the warming generation and
+                        // cancels in-flight jobs for the rig; the commit
+                        // trigger re-enqueues fresh jobs under the new
+                        // token.
+                        _CancelGenerationLocked(session.rigPath);
+                        // The baked capture index retires cached frames
+                        // eagerly: a notice that hits it drops the epoch
+                        // now, while its half still names it (the
+                        // evaluator rebuilds lazily); a miss drops
+                        // nothing and D1 reachability decides.
+                        session.bridge->NoteCaptureIndex(notice);
+                    }
                 }
             }
             time = _lastTime;
@@ -1208,6 +2639,12 @@ RigExecImagingRegistry::Deactivate()
     _readRoots.clear();
     _readRootsDirty = false;
     _generatedScopes.clear();
+    for (const RigSession &session : _sessions) {
+        _warmIndex->ResetRig(session.rigPath);
+        if (_scheduler) {
+            _scheduler->ResetRig(session.rigPath);
+        }
+    }
     _sessions.clear();
     _stage.Reset();
     {
@@ -2038,6 +3475,30 @@ RigExecImaging_Deactivate()
     RigExecImagingRegistry::GetInstance().Deactivate();
 }
 
+int
+RigExecImaging_OnEditCommitted()
+{
+    RigExecImagingRegistry &registry =
+        RigExecImagingRegistry::GetInstance();
+    if (!registry.IsActive()) {
+        return 1;
+    }
+    registry.OnEditCommitted();
+    return 0;
+}
+
+int
+RigExecImaging_OnIdle()
+{
+    RigExecImagingRegistry &registry =
+        RigExecImagingRegistry::GetInstance();
+    if (!registry.IsActive()) {
+        return 1;
+    }
+    registry.OnIdle();
+    return 0;
+}
+
 long long
 RigExecImaging_GetGeneration()
 {
@@ -2154,6 +3615,79 @@ RigExecImaging_SetWeightOverlay(const char *weightPrimPath)
     return RigExecImagingRegistry::GetInstance().SetWeightOverlay(
                weightPrimPath ? std::string(weightPrimPath) : std::string())
         ? 0 : 1;
+}
+
+int
+RigExecImaging_GetFrameStates(const char *rigPath, const double *frames,
+                              int *statesOut, int count)
+{
+    if (!rigPath || !frames || !statesOut || count < 0) {
+        return -1;
+    }
+    if (!SdfPath::IsValidPathString(rigPath)) {
+        return -1;
+    }
+    std::vector<double> times;
+    times.reserve(size_t(count));
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(frames[i])) {
+            return -1;
+        }
+        times.push_back(frames[i]);
+    }
+    const std::vector<rigExec::RigExecWarmFrameState> states =
+        RigExecImagingRegistry::GetInstance().GetFrameStates(
+            SdfPath(rigPath), times);
+    if (states.empty() && count > 0) {
+        return -1;
+    }
+    for (size_t i = 0; i < states.size(); ++i) {
+        statesOut[i] = int(states[i]);
+    }
+    return int(states.size());
+}
+
+int
+RigExecImaging_ClearFrameCache(const char *rigPath)
+{
+    if (!rigPath) {
+        return -1;
+    }
+    if (!SdfPath::IsValidPathString(rigPath)) {
+        return -1;
+    }
+    RigExecImagingRegistry::GetInstance().ClearFrameCache(SdfPath(rigPath));
+    return 0;
+}
+
+int
+RigExecImaging_WarmRange(const char *rigPath, const double *frames, int count)
+{
+    if (!rigPath || count < 0 || (!frames && count > 0)) {
+        return -1;
+    }
+    if (!SdfPath::IsValidPathString(rigPath)) {
+        return -1;
+    }
+    std::vector<double> times;
+    times.reserve(size_t(count));
+    for (int i = 0; i < count; ++i) {
+        if (!std::isfinite(frames[i])) {
+            return -1;
+        }
+        times.push_back(frames[i]);
+    }
+    return RigExecImagingRegistry::GetInstance().SetWarmRange(
+               SdfPath(rigPath), times)
+        ? 0
+        : -1;
+}
+
+long long
+RigExecImaging_GetWarmingCompletedCount()
+{
+    return static_cast<long long>(
+        RigExecImagingRegistry::GetInstance().GetBackgroundStats().completed);
 }
 
 // Manipulation preview (docs/superpowers/specs/

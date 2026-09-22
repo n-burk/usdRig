@@ -269,6 +269,105 @@ main()
         std::remove(path.c_str());
     }
 
+    // Instant points: a hit, a miss, a cancel. Disabled records nothing;
+    // enabled records zero-duration points on their own categories.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.RecordInstant("cacheHit", "frameCache", 100, {});
+        CHECK(profiler.GetEventCount() == 0);
+        profiler.SetEnabled(true);
+        profiler.RecordInstant("cacheHit", "frameCache", 100,
+                               {{"frame", "3"}});
+        profiler.RecordInstant("cacheMiss", "frameCache", 200);
+        const auto events = profiler.GetEvents();
+        CHECK(events.size() == 2);
+        CHECK(events[0].kind == rigExec::RigExecProfileEventKind::Instant);
+        CHECK(events[0].durationUs == 0);
+        CHECK(events[0].startUs == 100);
+        CHECK(events[0].args.at("frame") == "3");
+        CHECK(events[1].name == "cacheMiss");
+        CHECK(events[1].args.empty());
+    }
+
+    // Counter samples: queue depth, running jobs, cancel counts as JSON
+    // numbers, not strings.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.RecordCounter("warmQueue", "scheduler", 50,
+                               {{"queuedDepth", 16}});
+        CHECK(profiler.GetEventCount() == 0);
+        profiler.SetEnabled(true);
+        profiler.RecordCounter("warmQueue", "scheduler", 50,
+                               {{"queuedDepth", 16},
+                                {"running", 2},
+                                {"canceled", 0}});
+        const auto events = profiler.GetEvents();
+        CHECK(events.size() == 1);
+        CHECK(events[0].kind == rigExec::RigExecProfileEventKind::Counter);
+        CHECK(events[0].counters.size() == 3);
+        CHECK(events[0].counters.at("queuedDepth") == 16.0);
+        const std::string path = "testRigExecProfilerCounters.trace";
+        CHECK(profiler.WriteChromeTrace(path, nullptr));
+        const std::string text = ReadFile(path);
+        CHECK(text.find("\"ph\":\"C\"") != std::string::npos);
+        CHECK(text.find("\"queuedDepth\":16") != std::string::npos);
+        CHECK(text.find("\"running\":2") != std::string::npos);
+        // No quoted numbers: counters are JSON numbers, not strings.
+        CHECK(text.find("\"queuedDepth\":\"") == std::string::npos);
+        std::remove(path.c_str());
+    }
+
+    // The lane helpers: cache lookups on "frameCache", scheduler state on
+    // "scheduler", all as instant/counter events in the trace.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.SetEnabled(true);
+        profiler.RecordCacheLookup(true, 3.0);
+        profiler.RecordCacheLookup(false, 4.0);
+        profiler.RecordSchedulerQueue(16, 2, 1);
+        profiler.RecordSchedulerCancel(5, "edit");
+        const auto events = profiler.GetEvents();
+        CHECK(events.size() == 4);
+        CHECK(events[0].name == "cacheHit");
+        CHECK(events[0].category ==
+              rigExec::kRigExecProfileCategoryFrameCache);
+        CHECK(events[0].kind == rigExec::RigExecProfileEventKind::Instant);
+        CHECK(events[1].name == "cacheMiss");
+        CHECK(events[2].name == "warmQueue");
+        CHECK(events[2].category ==
+              rigExec::kRigExecProfileCategoryScheduler);
+        CHECK(events[2].kind == rigExec::RigExecProfileEventKind::Counter);
+        CHECK(events[2].counters.at("canceled") == 1.0);
+        CHECK(events[3].name == "warmCancel");
+        CHECK(events[3].args.at("cause") == "edit");
+        CHECK(events[3].args.at("purged") == "5");
+        const std::string path = "testRigExecProfilerLanes.trace";
+        CHECK(profiler.WriteChromeTrace(path, nullptr));
+        const std::string text = ReadFile(path);
+        CHECK(text.find("\"ph\":\"I\"") != std::string::npos);
+        CHECK(text.find("\"cat\":\"frameCache\"") != std::string::npos);
+        CHECK(text.find("\"cat\":\"scheduler\"") != std::string::npos);
+        CHECK(text.find("\"name\":\"cacheHit\"") != std::string::npos);
+        CHECK(text.find("\"name\":\"warmCancel\"") != std::string::npos);
+        CHECK(text.find("\"s\":\"t\"") != std::string::npos);
+        std::remove(path.c_str());
+    }
+
+    // The summary counts complete scopes only: instants and counters carry
+    // no duration to attribute.
+    {
+        rigExec::RigExecProfiler profiler;
+        profiler.SetEnabled(true);
+        profiler.Record("a", "rig", 0, 10);
+        profiler.RecordInstant("cacheHit", "frameCache", 5);
+        profiler.RecordCounter("warmQueue", "scheduler", 6,
+                               {{"queuedDepth", 3}});
+        const auto summary = profiler.Summarize();
+        CHECK(summary.size() == 1);
+        CHECK(summary[0].name == "a");
+        CHECK(summary[0].totalUs == 10);
+    }
+
     if (failures == 0) {
         std::printf("testRigExecProfiler: all checks passed\n");
     }

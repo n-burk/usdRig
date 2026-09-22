@@ -277,6 +277,7 @@ RigExecBakedBuildGeometry(RigExecBakedBuildContext *ctx,
                     B.named.insert(activationPath);
                     sample.activation =
                         B.stage->GetAttributeAtPath(activationPath);
+                    sample.activationPath = activationPath;
                     sample.samplePath = binding.sample;
                     sample.pointsPath = binding.points;
                     sample.phase = binding.phase;

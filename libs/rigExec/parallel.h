@@ -20,6 +20,14 @@ namespace rigExec {
 /// differs from the one being diagnosed in more ways than the one under test.
 bool RigExecParallelEvaluationEnabled();
 
+/// Whether this thread is running a frozen frame inside a frozen serial
+/// scope. Frozen workers take the serial variant of every parallel region
+/// (see the four per-point kernels in moverGraph.cpp): a background job
+/// must never dispatch TBB work past the host's own scheduling, and the
+/// host's main thread means the wait differently anyway. Defined by the
+/// frozen-context TU; declared here because the kernels gate on it.
+bool RigExecFrozenSerialActive();
+
 /// Points per task in the per-point geometry kernels.
 ///
 /// Large enough that a task is worth its dispatch, small enough that the

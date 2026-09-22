@@ -66,6 +66,42 @@ def _LoadRigExecImaging():
     lib.RigExecImaging_Activate.restype = ctypes.c_int
     lib.RigExecImaging_SetTime.argtypes = [ctypes.c_double]
     lib.RigExecImaging_SetTime.restype = ctypes.c_int
+    # Frame-cache warming is optional like the preview below: a session
+    # without it evaluates live on every frame change exactly as before.
+    try:
+        lib.RigExecImaging_OnEditCommitted.argtypes = []
+        lib.RigExecImaging_OnEditCommitted.restype = ctypes.c_int
+        lib.RigExecImaging_OnIdle.argtypes = []
+        lib.RigExecImaging_OnIdle.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    # The frame-cache strip and its driver are optional the same way:
+    # WarmRange sets the persistent warm range, GetFrameStates reports
+    # per-frame cached/warming/dirty/uncached, and ClearFrameCache
+    # drops one rig's cached frames. An older library without them
+    # warms on frame changes only, exactly as before.
+    try:
+        lib.RigExecImaging_WarmRange.argtypes = [
+            ctypes.c_char_p, ctypes.POINTER(ctypes.c_double),
+            ctypes.c_int]
+        lib.RigExecImaging_WarmRange.restype = ctypes.c_int
+        lib.RigExecImaging_GetFrameStates.argtypes = [
+            ctypes.c_char_p, ctypes.POINTER(ctypes.c_double),
+            ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+        lib.RigExecImaging_GetFrameStates.restype = ctypes.c_int
+        lib.RigExecImaging_ClearFrameCache.argtypes = [
+            ctypes.c_char_p]
+        lib.RigExecImaging_ClearFrameCache.restype = ctypes.c_int
+    except AttributeError:
+        pass
+    # The strip's repaint gate is optional with them: without the
+    # completions counter the panel repaints on states alone.
+    try:
+        lib.RigExecImaging_GetWarmingCompletedCount.argtypes = []
+        lib.RigExecImaging_GetWarmingCompletedCount.restype = (
+            ctypes.c_longlong)
+    except AttributeError:
+        pass
     lib.RigExecImaging_Deactivate.argtypes = []
     lib.RigExecImaging_Deactivate.restype = None
     try:
@@ -117,13 +153,31 @@ def _LoadRigExecImaging():
 #   Reactivate RigExec Evaluation   0
 #   Viewport            10: Viewport Tools 10, View Cube 20
 #   General Editors     20: Avar Editor 10, Layer Opinions 20,
-#                           Execution Stack 30, Profiler 40
+#                           Execution Stack 30, Profiler 40,
+#                           Cache Strip 50
 #   Animation Editors   30: Graph Editor 10, Shape Editor 20,
 #                           Control Picker 30, TouchPose 40,
 #                           Volume Weight Editor 50, Curvenet Authoring 60
 _SUBMENU_RANKS = {"Viewport": 10, "General Editors": 20,
                   "Animation Editors": 30}
 _MENU_RANK = "rigExecMenuRank"
+
+# How long a notice burst must be quiet before the pending edit-commit
+# warms. The flush samples the whole neighbor+sweep band synchronously on
+# the UI thread (benchCommitLag: ~136 ms on the biped, ~121 ms of it the
+# per-frame sampling), so firing it on the next event-loop turn put that
+# freeze inside every gizmo release and every undo/redo. A short idle
+# delay keeps the gesture responsive -- the release's own repaint lands
+# first -- while a pause in editing still warms the held playhead with no
+# scrub. Must stay positive: zero puts the burst back inside the gesture.
+_WARMING_COMMIT_DELAY_MS = 120
+
+
+# How often the recurring idle driver re-queries the warm range at a held
+# playhead. Same 120 ms discipline as the commit burst: each tick is one
+# batched state query plus at most one budgeted OnIdle sweep, and the
+# driver sleeps as soon as every frame reads cached.
+_WARMING_IDLE_TICK_MS = 120
 
 
 def _PlaceByRank(qMenu, action, rank):
@@ -174,6 +228,14 @@ class RigExecUsdviewContainer(PluginContainer):
         self._api = plugCtx
         self._lib = None
         self._active = False
+        self._warmingCommitPending = False
+        self._warmingFlushArmed = False
+        self._warmingTimer = None
+        self._warmingIdleTimer = None
+        self._warmingIdleLastStates = None
+        self._warmRangeFrames = []
+        self._stripPanel = None
+        self._timelineOverlay = None
         self._rigPaths = []
         self._cachedStage = None
         self._stageNoticeKey = None
@@ -278,6 +340,14 @@ class RigExecUsdviewContainer(PluginContainer):
             "Profiler",
             lambda api: self._OpenProfilerPanel(api))
 
+        # The cache strip: per-frame warming states over the stage
+        # range, with clear-cache and warm-range actions. Same
+        # lazy-import reasoning as the panels above.
+        self._cacheStrip = plugRegistry.registerCommandPlugin(
+            "RigExecUsdviewContainer.cacheStrip",
+            "Cache Strip",
+            lambda api: self._OpenCacheStripPanel(api))
+
         dataModel = self._api.dataModel
         # Plugins load before the stage opens: bind stage observation on
         # replacement, discover roots added later by authoring, and
@@ -302,6 +372,8 @@ class RigExecUsdviewContainer(PluginContainer):
                          self._execStack, 30)
         AddToRigExecMenu(plugUIBuilder, "General Editors",
                          self._profiler, 40)
+        AddToRigExecMenu(plugUIBuilder, "General Editors",
+                         self._cacheStrip, 50)
         AddToRigExecMenu(plugUIBuilder, "Animation Editors",
                          self._graphEditor, 10)
         # Shape Editor (20) and TouchPose (40) come from their own
@@ -410,6 +482,35 @@ class RigExecUsdviewContainer(PluginContainer):
             import profilerUI
 
         return profilerUI.OpenProfilerPanel(usdviewApi or self._api)
+
+    def _OpenCacheStripPanel(self, usdviewApi=None):
+        # Same lazy sibling import as _OpenProfilerPanel: cacheStripUI
+        # pulls in Qt, and this container must stay importable headless.
+        # cacheStripPanel beside it does not, which is what lets the
+        # headless tests drive the same poll/skip/action logic.
+        try:
+            import cacheStripUI
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import cacheStripUI
+
+        panel = cacheStripUI.OpenCacheStripPanel(
+            usdviewApi or self._api, self)
+        self._stripPanel = panel
+        return panel
+
+    def StripLibrary(self):
+        """The imaging library, or None before activation."""
+        return self._lib
+
+    def StripRigs(self):
+        """Active rig paths as strings, for the strip chooser."""
+        return [str(path) for path in self._rigPaths]
+
+    def StripWakeDriver(self):
+        """Restart the recurring driver after a strip action."""
+        self._WakeWarmingDriver()
 
     def _OpenExecStackPanel(self, usdviewApi=None):
         # Same lazy sibling import as _OpenVolumeWeightPanel: execStackUI
@@ -676,7 +777,18 @@ class RigExecUsdviewContainer(PluginContainer):
                 self._lib.RigExecImaging_Deactivate()
         except Exception:
             pass
+        try:
+            for _name in ("_warmingTimer", "_warmingIdleTimer"):
+                timer = getattr(self, _name, None)
+                if timer is not None:
+                    timer.stop()
+        except Exception:
+            pass
         self._active = False
+        try:
+            self._ClearTimelineOverlay()
+        except Exception:
+            pass
         self._RevokeStageNotice()
         try:
             self._ReleaseCachedStage()
@@ -758,6 +870,16 @@ class RigExecUsdviewContainer(PluginContainer):
         """
         if getattr(self, "_activating", False):
             return
+        # Any edit re-centers warming: an idle delay after the burst commits
+        # (neighbors plus sweep around the playhead) instead of idling, so
+        # an edit at a held playhead warms without waiting for a scrub. Set
+        # for every notice -- gizmo releases, undo/redo, panel commits --
+        # and consumed by the flush (or the next frame tick without Qt), so
+        # a burst of notices warms once, not per edit. The delay keeps the
+        # synchronous sampling burst off the gesture (see
+        # _WARMING_COMMIT_DELAY_MS).
+        self._warmingCommitPending = True
+        self._ScheduleWarmingFlush()
         rigPaths = self._FindRigPaths(stage)
         if not (rigPaths != self._rigPaths or
                 (rigPaths and not self._active)):
@@ -855,6 +977,9 @@ class RigExecUsdviewContainer(PluginContainer):
                         vs.displayGuide = True
                 except Exception:
                     pass
+                self._PushWarmRangeFromStage()
+                self._EnsureTimelineOverlay()
+                self._WakeWarmingDriver()
             else:
                 Tf.Warn("rigExecUsdview: activation failed (%d)" % status)
                 # The cache is the current stage's strong owner. Retain it so
@@ -863,6 +988,301 @@ class RigExecUsdviewContainer(PluginContainer):
                 # it. A later edit notice retries the compile.
         finally:
             self._activating = False
+
+    def _ScheduleWarmingFlush(self):
+        # Coalesced like the pending flag, and deferred past the gesture.
+        # The timer restarts on every notice, so a burst -- or a sustained
+        # notice stream, whose single-shots would otherwise fire mid-stream
+        # -- warms once, when it stops. Without Qt (or without usdview's
+        # shim) this degrades to the pending flag, which the next frame
+        # change consumes as before.
+        timer = getattr(self, "_warmingTimer", None)
+        if getattr(self, "_warmingFlushArmed", False):  # bare test containers skip __init__
+            if timer is not None:
+                try:
+                    timer.start(_WARMING_COMMIT_DELAY_MS)
+                except Exception:
+                    pass
+            return
+        try:
+            from pxr.Usdviewq.qt import QtCore
+        except Exception:
+            return
+        self._warmingFlushArmed = True
+        try:
+            if timer is None:
+                timer = QtCore.QTimer()
+                timer.setSingleShot(True)
+                timer.timeout.connect(self._FlushWarmingCommit)
+                self._warmingTimer = timer
+            timer.start(_WARMING_COMMIT_DELAY_MS)
+        except Exception:
+            self._warmingFlushArmed = False
+
+    def _FlushWarmingCommit(self):
+        # The release path: consume a pending edit-commit at the held
+        # playhead. Fires from the idle timer, so the synchronous sampling
+        # burst runs after the gesture, not inside it. AttributeError-
+        # tolerant like _OnFrameChanged: older shims may name the trigger
+        # differently.
+        self._warmingFlushArmed = False
+        if not self._warmingCommitPending:
+            return
+        if not (self._active and self._lib):
+            return
+        self._warmingCommitPending = False
+        try:
+            self._lib.RigExecImaging_OnEditCommitted()
+        except AttributeError:
+            pass
+        self._WakeWarmingDriver()
+
+    @staticmethod
+    def _CacheStripModel():
+        # Lazy sibling import like the panels: cacheStripModel is Qt-free
+        # and pxr-free, but the plugin directory reaches sys.path only
+        # through the loader that found this module.
+        try:
+            import cacheStripModel
+        except ImportError:
+            sys.path.insert(
+                0, os.path.dirname(os.path.abspath(__file__)))
+            import cacheStripModel
+        return cacheStripModel
+
+    def _HasFrameStates(self):
+        # The recurring driver needs the per-frame state query: without
+        # it there is nothing to sleep on, so an older library stays on
+        # frame-change-only warming rather than spinning a blind timer.
+        if self._lib is None:
+            return False
+        return getattr(self._lib, "RigExecImaging_GetFrameStates",
+                        None) is not None
+
+    def _WarmRangeFrames(self, stage):
+        try:
+            model = self._CacheStripModel()
+        except Exception:
+            return []
+        try:
+            start = stage.GetStartTimeCode()
+            end = stage.GetEndTimeCode()
+        except Exception:
+            return []
+        return model.FrameListForRange(start, end)
+
+    def _PushWarmRangeFromStage(self):
+        # SetWarmRange from the stage range on activation, so the
+        # full-range cursor visits the timeline instead of the default
+        # playhead-relative sweep. A stage with no whole frames, or an
+        # older library without the binding, leaves the default sweep.
+        stage = self._cachedStage
+        if stage is None or self._lib is None:
+            return
+        frames = self._WarmRangeFrames(stage)
+        self._warmRangeFrames = frames
+        if not frames:
+            return
+        try:
+            model = self._CacheStripModel()
+        except Exception:
+            return
+        for rigPath in self._rigPaths:
+            model.PushWarmRange(self._lib, str(rigPath), frames)
+
+    def _RepushWarmRangeIfChanged(self):
+        # A stage-range edit leaves the pushed warm range stale: the
+        # full-range cursor would sweep the old timeline while new
+        # frames stay uncached. Every driver wake re-pushes when the
+        # stage range drifted, so activation, edit-commit, frame-change,
+        # and strip-action wakes all pick up range changes. Runs before
+        # the Qt/timer checks below on purpose: without Qt there is no
+        # recurring tick, but the wake still refreshes the native range
+        # for the synchronous frame-change sweeps. getattr-tolerant:
+        # bare test containers skip __init__ and carry no stage at all.
+        stage = getattr(self, "_cachedStage", None)
+        if stage is None or getattr(self, "_lib", None) is None:
+            return
+        try:
+            start = stage.GetStartTimeCode()
+            end = stage.GetEndTimeCode()
+            model = self._CacheStripModel()
+            drifted = model.WarmRangeDrifted(
+                getattr(self, "_warmRangeFrames", None), start, end)
+        except Exception:
+            return
+        if drifted:
+            self._PushWarmRangeFromStage()
+
+    def _WakeWarmingDriver(self):
+        # Start (or keep) the recurring idle driver: it ticks OnIdle
+        # while unwarm frames remain in range and sleeps otherwise.
+        # Wakes on SetTime, edit commit, and range change; the range
+        # re-push runs first so a stale timeline never starts the tick.
+        # Without Qt there is no recurring tick at all -- frame changes
+        # warm synchronously as before.
+        if not (self._active and self._lib):
+            return
+        self._RepushWarmRangeIfChanged()
+        if not self._HasFrameStates():
+            return
+        try:
+            from pxr.Usdviewq.qt import QtCore
+        except Exception:
+            return
+        try:
+            timer = getattr(self, "_warmingIdleTimer", None)
+            if timer is None:
+                timer = QtCore.QTimer()
+                timer.setSingleShot(False)
+                timer.timeout.connect(self._TickWarmingDriver)
+                self._warmingIdleTimer = timer
+            self._warmingIdleLastStates = None
+            if not timer.isActive():
+                timer.start(_WARMING_IDLE_TICK_MS)
+        except Exception:
+            pass
+
+    def _SleepWarmingDriver(self):
+        try:
+            timer = getattr(self, "_warmingIdleTimer", None)
+            if timer is not None:
+                timer.stop()
+        except Exception:
+            pass
+        self._warmingIdleLastStates = None
+
+    def _NotifyStripTick(self, mayHaveEnqueued, states=None):
+        # Forward one recurring tick to the open strip panel, with
+        # the tick's own enqueue knowledge: sleep paths pass False
+        # (no sweep ran, so no enqueue could have flipped states
+        # behind the completions counter), sweeps pass True. A dead
+        # panel detaches rather than breaking the driver tick. Ticks
+        # that queried states also paint the timeline overlay with
+        # them -- no second C call.
+        panel = getattr(self, "_stripPanel", None)
+        if panel is not None:
+            try:
+                panel.PollTick(mayHaveEnqueued)
+            except Exception:
+                self._stripPanel = None
+        if states is not None:
+            self._UpdateTimelineOverlay(states)
+
+    def _EnsureTimelineOverlay(self):
+        # The timeline overlay, installed once per window over
+        # usdview's own slider. Headless-safe: without Qt, without a
+        # main window (as in bare test containers), or without a
+        # findable slider, there is no overlay and every update below
+        # is a no-op.
+        if getattr(self, "_timelineOverlay", None) is not None:
+            return
+        try:
+            try:
+                import cacheTimelineOverlay
+            except ImportError:
+                sys.path.insert(
+                    0, os.path.dirname(os.path.abspath(__file__)))
+                import cacheTimelineOverlay
+            self._timelineOverlay =                 cacheTimelineOverlay.InstallTimelineOverlay(
+                    self._api.qMainWindow)
+        except Exception:
+            self._timelineOverlay = None
+
+    def _UpdateTimelineOverlay(self, states):
+        # Paints one driver tick's states over the timeline slider.
+        # The band shows the first rig's frames; multi-rig sessions
+        # still sleep and wake on every rig, only the overlay is
+        # single-rig. A dead widget detaches like the strip panel.
+        widget = getattr(self, "_timelineOverlay", None)
+        if widget is None:
+            return
+        frames = getattr(self, "_warmRangeFrames", None) or []
+        rigStates = list(states)
+        if len(rigStates) > len(frames):
+            rigStates = rigStates[:len(frames)]
+        try:
+            widget.Update(rigStates, frames)
+        except Exception:
+            self._timelineOverlay = None
+
+    def _ClearTimelineOverlay(self):
+        widget = getattr(self, "_timelineOverlay", None)
+        if widget is None:
+            return
+        try:
+            widget.Clear()
+        except Exception:
+            self._timelineOverlay = None
+
+    def _TickWarmingDriver(self):
+        # One recurring tick at a held playhead: query every rig's
+        # states over the warm range and idle-sweep while any frame
+        # is unwarm, else sleep until the next wake. Sleeps too when a
+        # tick changes nothing with nothing in flight -- un-warmable
+        # frames (refusals, D7 rigs) read Uncached forever, and
+        # ticking OnIdle at them would spin the timer with no work to
+        # do. The next SetTime, edit, or range change wakes it again.
+        if not (self._active and self._lib):
+            self._SleepWarmingDriver()
+            self._ClearTimelineOverlay()
+            self._NotifyStripTick(False)
+            return
+        # A range edit that lands mid-warm re-centers the sweep from
+        # here, so the tick below queries the timeline the stage has,
+        # not the one activation pushed.
+        self._RepushWarmRangeIfChanged()
+        try:
+            model = self._CacheStripModel()
+        except Exception:
+            self._SleepWarmingDriver()
+            self._NotifyStripTick(False)
+            return
+        frames = getattr(self, "_warmRangeFrames", None) or []
+        if not frames:
+            self._SleepWarmingDriver()
+            self._NotifyStripTick(False)
+            return
+        states = []
+        for rigPath in self._rigPaths:
+            one = model.FetchFrameStates(self._lib, str(rigPath),
+                                       frames)
+            if one is None:
+                self._SleepWarmingDriver()
+                self._NotifyStripTick(False)
+                return
+            states.extend(one)
+        if not model.AnyUnwarm(states):
+            self._SleepWarmingDriver()
+            self._NotifyStripTick(False, states)
+            return
+        last = getattr(self, "_warmingIdleLastStates", None)
+        if last == states and not model.AnyWarming(states):
+            self._SleepWarmingDriver()
+            self._NotifyStripTick(False, states)
+            return
+        self._warmingIdleLastStates = states
+        try:
+            self._lib.RigExecImaging_OnIdle()
+        except AttributeError:
+            self._SleepWarmingDriver()
+            self._NotifyStripTick(False)
+            return
+        self._NotifyStripTick(True, states)
+
+    def _WarmingDriverTicking(self):
+        # Whether the recurring driver timer is armed right now. While
+        # it ticks, frame changes skip their synchronous idle sweep
+        # below: the tick sweeps the same budgeted band within 120 ms,
+        # so a second sweep on the frame would serialize its sampling
+        # into the scrub for jobs already about to enqueue. Bare
+        # containers (no timer attribute at all) answer False --
+        # without a driver the synchronous sweep is the whole story.
+        try:
+            timer = getattr(self, "_warmingIdleTimer", None)
+            return timer is not None and bool(timer.isActive())
+        except Exception:
+            return False
 
     def _OnFrameChanged(self, frame):
         # The SIGNAL's frame, never dataModel.currentFrame -- see
@@ -875,6 +1295,28 @@ class RigExecUsdviewContainer(PluginContainer):
         if not (self._active and self._lib):
             return
         self._lib.RigExecImaging_SetTime(self._FrameValue(frame))
+        # Warming, from the frame loop: an edit since the last tick commits
+        # (neighbors plus sweep re-center on the playhead), otherwise the
+        # tick is an idle sweep -- unless the recurring driver is already
+        # ticking, in which case the frame yields to it instead of
+        # serializing a second budgeted sweep into the scrub. Commits
+        # never yield: they re-center warming on the playhead the artist
+        # just chose. Optional in an older library; a drag release with
+        # no following frame change normally warms on the notice flush
+        # already, and this tick is its fallback without Qt.
+        try:
+            if self._warmingCommitPending:
+                self._warmingCommitPending = False
+                self._lib.RigExecImaging_OnEditCommitted()
+            elif not self._WarmingDriverTicking():
+                self._lib.RigExecImaging_OnIdle()
+        except AttributeError:
+            pass
+        # The recurring driver continues at the held playhead from here:
+        # it re-ticks OnIdle while unwarm frames remain and sleeps once
+        # the range reads cached. Without Qt (or an older library) this
+        # is a no-op and the synchronous tick above is the whole story.
+        self._WakeWarmingDriver()
 
 
 Tf.Type.Define(RigExecUsdviewContainer)

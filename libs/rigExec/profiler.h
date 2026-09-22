@@ -9,7 +9,8 @@
 // chain opens a child span, so the Chrome trace shows the critical path
 // directly.
 //
-// The output is the Chrome Trace Event format ("X" complete events), which
+// The output is the Chrome Trace Event format ("X" complete scopes, plus "I"
+// instant points and "C" counters for the per-frame cache lanes), which
 // Perfetto (ui.perfetto.dev) and chrome://tracing both open. Timestamps are
 // microseconds, normalized so the first recorded event starts at zero.
 //
@@ -34,7 +35,18 @@
 
 namespace rigExec {
 
-/// One completed scope: a named interval with a category and string args.
+/// The Chrome Trace Event kinds the profiler writes.
+enum class RigExecProfileEventKind {
+    /// A named interval ("X"): the cost rows Summarize aggregates.
+    Complete,
+    /// A point in time ("I"): a cache hit, a miss, a cancel.
+    Instant,
+    /// A sampled value ("C"): queue depth, running jobs, cancel counts.
+    Counter,
+};
+
+/// One recorded event: a named interval, instant point, or counter sample
+/// with a category and string args.
 struct RigExecProfileEvent {
     std::string name;
     std::string category;
@@ -42,6 +54,10 @@ struct RigExecProfileEvent {
     uint64_t durationUs = 0;
     uint64_t threadIndex = 0;
     std::map<std::string, std::string> args;
+    RigExecProfileEventKind kind = RigExecProfileEventKind::Complete;
+    /// Counter samples, for Counter events only; empty otherwise. Written
+    /// as JSON numbers, not strings.
+    std::map<std::string, double> counters;
 };
 
 /// Aggregated cost of one (category, name) pair across a run.
@@ -52,6 +68,13 @@ struct RigExecProfileSummaryRow {
     uint64_t totalUs = 0;
     uint64_t maxUs = 0;
 };
+
+/// Trace categories for the per-frame cache lanes (Stream F). Lookup hits
+/// and misses record on "frameCache"; scheduler queue depth, running jobs,
+/// and cancels on "scheduler". Perfetto groups by category, so each renders
+/// as its own lane.
+constexpr const char *kRigExecProfileCategoryFrameCache = "frameCache";
+constexpr const char *kRigExecProfileCategoryScheduler = "scheduler";
 
 /// Collects RigExecProfileEvents. Not copyable; Record/Summarize/Write are
 /// safe to call from any thread.
@@ -140,6 +163,85 @@ public:
         _events.push_back(std::move(event));
     }
 
+    /// Records one instant point (a hit, a miss, a cancel) at \p timeUs,
+    /// attributed to the calling thread. No-op unless enabled.
+    void RecordInstant(std::string name, std::string category,
+                       uint64_t timeUs,
+                       std::map<std::string, std::string> args = {}) const
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_enabled) {
+            return;
+        }
+        RigExecProfileEvent event;
+        event.name = std::move(name);
+        event.category = std::move(category);
+        event.startUs = timeUs;
+        event.durationUs = 0;
+        event.kind = RigExecProfileEventKind::Instant;
+        event.threadIndex = _ThreadIndexLocked(std::this_thread::get_id());
+        event.args = std::move(args);
+        _events.push_back(std::move(event));
+    }
+
+    /// Records one counter sample (queue depth, running jobs, cancel
+    /// counts) at \p timeUs, attributed to the calling thread. No-op unless
+    /// enabled. The values write as JSON numbers.
+    void RecordCounter(std::string name, std::string category,
+                       uint64_t timeUs,
+                       std::map<std::string, double> counters) const
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_enabled) {
+            return;
+        }
+        RigExecProfileEvent event;
+        event.name = std::move(name);
+        event.category = std::move(category);
+        event.startUs = timeUs;
+        event.durationUs = 0;
+        event.kind = RigExecProfileEventKind::Counter;
+        event.threadIndex = _ThreadIndexLocked(std::this_thread::get_id());
+        event.counters = std::move(counters);
+        _events.push_back(std::move(event));
+    }
+
+    /// The per-frame cache lane: one instant point per lookup on the
+    /// "frameCache" category. \p hit true records "cacheHit", false
+    /// "cacheMiss"; \p frame is the requested time value, carried as a
+    /// string arg for the trace reader. No-op unless enabled.
+    void RecordCacheLookup(bool hit, double frame) const
+    {
+        RecordInstant(hit ? "cacheHit" : "cacheMiss",
+                      kRigExecProfileCategoryFrameCache, NowUs(),
+                      {{"frame", std::to_string(frame)}});
+    }
+
+    /// The scheduler lane: one counter sample on the "scheduler" category
+    /// with the queue depth, running jobs, and lifetime cancels. No-op
+    /// unless enabled.
+    void RecordSchedulerQueue(size_t queuedDepth, size_t running,
+                              size_t canceled) const
+    {
+        RecordCounter("warmQueue", kRigExecProfileCategoryScheduler,
+                      NowUs(),
+                      {{"queuedDepth", double(queuedDepth)},
+                       {"running", double(running)},
+                       {"canceled", double(canceled)}});
+    }
+
+    /// The scheduler lane: one instant point per purge on the "scheduler"
+    /// category, with the purged count and the cause ("edit", "playback",
+    /// or "shutdown"). No-op unless enabled.
+    void RecordSchedulerCancel(size_t purged,
+                               const std::string &cause) const
+    {
+        RecordInstant("warmCancel", kRigExecProfileCategoryScheduler,
+                      NowUs(),
+                      {{"purged", std::to_string(purged)},
+                       {"cause", cause}});
+    }
+
     /// A copy of every recorded event, in completion order.
     std::vector<RigExecProfileEvent> GetEvents() const
     {
@@ -171,6 +273,11 @@ public:
                  RigExecProfileSummaryRow>
             rows;
         for (const RigExecProfileEvent &event : _events) {
+            // Costs only: instants and counters have no duration to
+            // attribute, so the summary leaves them out.
+            if (event.kind != RigExecProfileEventKind::Complete) {
+                continue;
+            }
             RigExecProfileSummaryRow &row =
                 rows[{event.category, event.name}];
             row.name = event.name;
@@ -237,12 +344,20 @@ public:
             }
             first = false;
             out << "{\"name\":\"" << _EscapeJson(event.name)
-                << "\",\"cat\":\"" << _EscapeJson(event.category)
-                << "\",\"ph\":\"X\",\"ts\":"
-                << (event.startUs - origin) << ",\"dur\":"
-                << event.durationUs << ",\"pid\":1,\"tid\":"
-                << event.threadIndex;
-            if (!event.args.empty()) {
+                << "\",\"cat\":\"" << _EscapeJson(event.category) << "\",";
+            if (event.kind == RigExecProfileEventKind::Instant) {
+                out << "\"ph\":\"I\",\"ts\":" << (event.startUs - origin)
+                    << ",\"pid\":1,\"tid\":" << event.threadIndex
+                    << ",\"s\":\"t\"";
+            } else if (event.kind == RigExecProfileEventKind::Counter) {
+                out << "\"ph\":\"C\",\"ts\":" << (event.startUs - origin)
+                    << ",\"pid\":1,\"tid\":" << event.threadIndex;
+            } else {
+                out << "\"ph\":\"X\",\"ts\":" << (event.startUs - origin)
+                    << ",\"dur\":" << event.durationUs
+                    << ",\"pid\":1,\"tid\":" << event.threadIndex;
+            }
+            if (!event.args.empty() || !event.counters.empty()) {
                 out << ",\"args\":{";
                 bool firstArg = true;
                 for (const auto &[key, value] : event.args) {
@@ -252,6 +367,14 @@ public:
                     firstArg = false;
                     out << "\"" << _EscapeJson(key)
                         << "\":\"" << _EscapeJson(value) << "\"";
+                }
+                for (const auto &[key, value] : event.counters) {
+                    if (!firstArg) {
+                        out << ",";
+                    }
+                    firstArg = false;
+                    out << "\"" << _EscapeJson(key)
+                        << "\":" << _FormatCounter(value);
                 }
                 out << "}";
             }
@@ -284,6 +407,16 @@ private:
     {
         const auto inserted = _threadIds.insert({id, _threadIds.size()});
         return inserted.first->second;
+    }
+
+    /// Formats one counter sample as a JSON number: integers print
+    /// without a decimal point, the way a trace reader expects queue
+    /// depths to.
+    static std::string _FormatCounter(double value)
+    {
+        char buffer[32];
+        std::snprintf(buffer, sizeof(buffer), "%.17g", value);
+        return std::string(buffer);
     }
 
     static std::string _EscapeJson(const std::string &text)

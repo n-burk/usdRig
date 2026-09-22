@@ -102,6 +102,12 @@ add_library(rigExec SHARED
     libs/rigExec/bakedGeometry.cpp
     libs/rigExec/bakedWeights.cpp
     libs/rigExec/bakedVerify.cpp
+    libs/rigExec/frameCache.cpp
+    libs/rigExec/frozenContext.cpp
+    libs/rigExec/backgroundScheduler.cpp
+    libs/rigExec/outputAffectedIndex.cpp
+    libs/rigExec/taskListCache.cpp
+    libs/rigExec/frameCacheSparsity.cpp
 )
 target_include_directories(rigExec PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -156,6 +162,8 @@ add_library(rigExecImaging SHARED
     libs/rigExecImaging/touchPoseMesh.cpp
     libs/rigExecImaging/touchPoseHighlight.cpp
     libs/rigExecImaging/touchPoseApi.cpp
+    # The 1.4 warm-frame index: shared-owned per-frame completions.
+    libs/rigExecImaging/warmIndex.cpp
 )
 target_include_directories(rigExecImaging PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/libs>
@@ -487,6 +495,14 @@ foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
     endif()
 endforeach()
 
+# The stack anim, dedicated: a fixture row would multiply it across every
+# parity/binary/verify consumer (plus the in-process table sweeps), and a
+# 200-frame layered rig belongs only where its weight is wanted. These two
+# entries plus the frozen stack tests in testRigExecFrozenContext are the
+# 0.7 stack coverage: baked-vs-dynamic parity and the binary round trip.
+rigexec_add_example_parity_test(NAME biped_Biped_stack_anim
+    RIG biped/Biped_stack_anim.usda FRAMES 1,50,100,150,200 GUIDES)
+
 # The other half of the same table, in process: every fixture that bakes is
 # compiled under the parity check, evaluated across its frames, then dragged
 # on its control avar and on an operator input. A drag the program cannot
@@ -669,6 +685,11 @@ foreach(_fixture IN LISTS RIGEXEC_EXAMPLE_FIXTURES)
             RIG ${_fixture_stage} FRAMES ${_fixture_frames})
     endif()
 endforeach()
+
+# The stack's binary round trip; see the parity entry above for why the
+# stack stays out of the shared fixture table.
+rigexec_add_verify_binary_test(NAME biped_Biped_stack_anim
+    RIG biped/Biped_stack_anim.usda FRAMES 1,50,100,150,200)
 
 add_executable(testRigExecPack tests/testRigExecPack.cpp)
 target_link_libraries(testRigExecPack PRIVATE rigExecStandalone)
@@ -954,6 +975,113 @@ add_test(NAME testRigExecProfiler COMMAND testRigExecProfiler)
 # is built but deliberately NOT registered with ctest.
 add_executable(benchPathLookup tests/benchPathLookup.cpp)
 target_link_libraries(benchPathLookup PRIVATE rigExec)
+
+# Stream 0 (per-frame caching plan): the frame-store, frozen-context and
+# scheduler skeletons. The tests assert the final key/fence semantics plus
+# the documented empty-impl behavior; Streams A-C replace the stub halves.
+add_executable(testRigExecFrameCache tests/testRigExecFrameCache.cpp)
+target_link_libraries(testRigExecFrameCache PRIVATE rigExec)
+add_test(NAME testRigExecFrameCache COMMAND testRigExecFrameCache)
+
+add_executable(testRigExecFrozenContext tests/testRigExecFrozenContext.cpp)
+target_link_libraries(testRigExecFrozenContext PRIVATE rigExec rigExecRigging)
+add_test(NAME testRigExecFrozenContext COMMAND testRigExecFrozenContext "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+add_executable(testRigExecBackgroundScheduler tests/testRigExecBackgroundScheduler.cpp)
+target_link_libraries(testRigExecBackgroundScheduler PRIVATE rigExec)
+add_test(NAME testRigExecBackgroundScheduler COMMAND testRigExecBackgroundScheduler)
+
+# Stream D (per-frame caching plan): sparse cross-frame reuse -- the
+# output-affected index, task-list cache, retained-frame planning, and the
+# RIGEXEC_FRAME_CACHE_VERIFY shadow suite. The shadow suite's Cones_ name
+# keeps it under the existing CI exclusion pattern without edits.
+add_executable(testRigExecFrameCacheSparsity tests/testRigExecFrameCacheSparsity.cpp)
+target_link_libraries(testRigExecFrameCacheSparsity PRIVATE rigExec)
+target_compile_definitions(testRigExecFrameCacheSparsity PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecFrameCacheSparsity COMMAND testRigExecFrameCacheSparsity)
+
+add_executable(testRigExecFrameCacheCones_Verify tests/testRigExecFrameCacheCones_Verify.cpp)
+target_link_libraries(testRigExecFrameCacheCones_Verify PRIVATE rigExec)
+add_test(NAME testRigExecFrameCacheCones_Verify COMMAND testRigExecFrameCacheCones_Verify "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# Stream E (per-frame caching plan): imaging integration -- scrub-from-cache,
+# live fallback, edit fencing, and cache-only background completions. A plain
+# testRigExec* name, so the default CI gate runs it; its scratch playback
+# file lives under the temp directory. It takes the examples directory so the
+# full-range stack cursor test can open Biped_stack_anim.usda (without it
+# that test skips).
+add_executable(testRigExecImagingFrameCache tests/testRigExecImagingFrameCache.cpp)
+target_link_libraries(testRigExecImagingFrameCache PRIVATE rigExecImaging rigExecBake)
+target_include_directories(testRigExecImagingFrameCache PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(testRigExecImagingFrameCache PRIVATE
+    ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
+add_test(NAME testRigExecImagingFrameCache COMMAND testRigExecImagingFrameCache
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# The cache tests that evaluate rigs need the generated plugins: frozen
+# contexts sample a live baked program, and the imaging test drives the
+# registry, so unknown schema types fail the run long before any cache
+# assertion. ctest does not put the generated resources on
+# PXR_PLUGINPATH_NAME by itself, and these two build their rigs without
+# registering them in-process (the testRigExecImaging convention), so the
+# registration carries the path instead. Per-test, not global:
+# testRigExecSchemaAuthoringMissing asserts the missing-plugin behavior and
+# must keep its empty path. ENVIRONMENT_MODIFICATION, not ENVIRONMENT:
+# ctest splits an ENVIRONMENT value on ';', which is exactly the separator
+# a Windows path list uses.
+foreach(_rigexec_plugin_test testRigExecFrameCacheCones_Verify
+        testRigExecFrozenContext
+        testRigExecImagingFrameCache)
+    set_property(TEST ${_rigexec_plugin_test} APPEND PROPERTY
+        ENVIRONMENT_MODIFICATION
+        "PXR_PLUGINPATH_NAME=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources"
+        "PXR_PLUGINPATH_NAME=path_list_prepend:${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecImaging/resources")
+endforeach()
+
+# The Stream 0 measurement bench (reports/frame-cache-measurements.md).
+# Like benchPathLookup it prints numbers and asserts nothing, so it is built
+# but deliberately NOT registered with ctest.
+add_executable(benchFrameCache tests/benchFrameCache.cpp)
+target_link_libraries(benchFrameCache PRIVATE rigExec)
+target_compile_definitions(benchFrameCache PRIVATE
+    ${_rigexec_schema_resource_define})
+
+# The Stream F warming benches (reports/frame-cache-measurements.md section
+# 6): cold-vs-warm scrub, edit recompute cost, UI-eval latency with warming
+# on/off (median and p95), memory under cap, an N-second UI-vs-warming stress
+# for TSAN runs, and a Chrome-trace lane demo. Like benchFrameCache it prints
+# numbers and asserts nothing, so it is built but deliberately NOT registered
+# with ctest: wall-clock comparisons flake on shared CI runners, so the
+# benches report and the gate stays deterministic.
+add_executable(benchFrameCacheWarm tests/benchFrameCacheWarm.cpp)
+target_link_libraries(benchFrameCacheWarm PRIVATE rigExec)
+target_compile_definitions(benchFrameCacheWarm PRIVATE
+    ${_rigexec_schema_resource_define})
+
+# The release-commit bench: what a manipulation release (or undo/redo) costs
+# at a held playhead with warming on -- the edit half plus the release
+# flush's OnEditCommitted burst, with a per-frame-ingredient breakdown. Like
+# the benches above it prints numbers and asserts nothing, so it is built
+# but deliberately NOT registered with ctest.
+add_executable(benchCommitLag tests/benchCommitLag.cpp)
+target_link_libraries(benchCommitLag PRIVATE rigExecImaging rigExecBake)
+target_include_directories(benchCommitLag PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(benchCommitLag PRIVATE
+    ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
+
+# benchPlayback: paced first-play plus unpaced replay on the biped -- the
+# SetTime + OnIdle tick the plugin runs per playback frame, with pulls,
+# hits/misses, and scheduler completions. Prints numbers and asserts
+# nothing, so it is built but deliberately NOT registered with ctest.
+add_executable(benchPlayback tests/benchPlayback.cpp)
+target_link_libraries(benchPlayback PRIVATE rigExecImaging rigExecBake)
+target_include_directories(benchPlayback PRIVATE
+    "${CMAKE_CURRENT_BINARY_DIR}/tests")
+target_compile_definitions(benchPlayback PRIVATE
+    ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 
 add_executable(testRigExecInteractive tests/testRigExecInteractive.cpp)
 target_link_libraries(testRigExecInteractive PRIVATE rigExec)
@@ -1241,6 +1369,12 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     add_test(NAME testGizmoMarquee
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_gizmo_marquee.py")
+    add_test(NAME testCacheStripModel
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_cache_strip_model.py")
+    add_test(NAME testCacheStripPanel
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_cache_strip_panel.py")
 
     # set_tests_properties takes exactly ONE value per property, so extra
     # assignments go through APPEND; ctest then splits the resulting list on
@@ -1263,7 +1397,8 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
                          testGizmoPreview
                          testGizmoSettings testGizmoDrag testGizmoSnap
                          testViewCubeMath testRigExecStageEdits
-                         testGraphModel testGraphScreen)
+                         testGraphModel testGraphScreen testCacheStripModel
+                         testCacheStripPanel)
         set_tests_properties(${_python_test} PROPERTIES ENVIRONMENT
             "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR}/python")
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT

@@ -94,7 +94,7 @@ set(RIGEXEC_EXAMPLE_FIXTURES
     "spider_legs_assembly_ref.usda|1,2,3|/World/RigExecRoot1/Xform1/Controller/hip|avars:ry|/World/RigExecRoot1/Xform1/Solvers/RigExecTwoBoneIk1|inputs:softness|YES|-"
     "biped/Biped.usda|1,2,3|/Biped/Rig/Controls/hips_ctl|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim|inputs:defaultWeight|YES|-"
     "biped/Biped_layered.usda|1,2,3|/Biped/Rig/Controls/hips_ctl|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim|inputs:defaultWeight|YES|-"
-    "biped/Biped_anim.usda|1,2,3,4,5,6,7,8|/Biped/Rig/Controls/hips_ctl|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim|inputs:defaultWeight|YES|-"
+    "biped/Biped_anim.usda|1,50,100,150,200|/Biped/Rig/Controls/hips_ctl|avars:ty|/Biped/Rig/Movers/twist_aims/elbowTwist_l_bind_aim|inputs:defaultWeight|YES|-"
 )
 
 # The C++ half of the single source of truth: the same records, as the rows

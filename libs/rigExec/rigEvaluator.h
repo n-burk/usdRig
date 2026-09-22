@@ -258,6 +258,30 @@ bool RigExecPrepareRestDerivedIkChain(
 /// only the routine that fills it should be able to reach.
 struct RigExecPropertyChainBindings;
 
+/// What one stage notice did to the baked program (plan 2.1): the
+/// evaluator's per-notice disposition, classifying the three branches of
+/// its notice handler so the registry's notice adapter can retire and
+/// re-resolve at the granularity the branch allows instead of cancelling
+/// the warming generation wholesale.
+enum class RigExecNoticeDisposition {
+    /// No baked program stood to classify against (D7, or dynamic mode):
+    /// the notice reached no program at all.
+    None,
+    /// Default-only avar value edits, patched in place (plus the patched
+    /// property paths): the program already re-runs only their cone live,
+    /// with no stamp bump. Retire exactly the patched avars' clusters.
+    Patched,
+    /// A value edit the capture index missed: the program is still right
+    /// about its structure and its stamp was bumped, so the next
+    /// generation runs everything once. Retire affected clusters and
+    /// re-resolve.
+    StampBumped,
+    /// The notice hit the capture index: the program is stale and will be
+    /// rebuilt, the epoch moves, and epoch-half eviction plus generation
+    /// cancel stand.
+    Stale,
+};
+
 class RigExecRigEvaluator : public TfWeakBase {
 public:
     RigExecRigEvaluator(const UsdStageRefPtr &stage, const SdfPath &rigPath);
@@ -570,6 +594,29 @@ public:
     /// cannot miss an edit, because it is bumped by the very notice handler
     /// the evaluator's own caches are dropped from.
     uint64_t GetStageEditSerial() const { return _stageEditSerial; }
+
+    /// Classifies \p notice against the standing baked program without
+    /// mutating anything: Patched (plus the property paths a patch would
+    /// write, in \p patchedPaths) when the notice is nothing but
+    /// patchable avar default values, Stale when it hits the capture
+    /// index, StampBumped for any other value edit, None when no program
+    /// stands. The notice handler branches on this same classification,
+    /// so the query and the mutation can never disagree.
+    RigExecNoticeDisposition ClassifyNoticeDisposition(
+        const UsdNotice::ObjectsChanged &notice,
+        std::vector<SdfPath> *patchedPaths = nullptr) const;
+
+    /// The last notice's disposition and patched paths, as classified when
+    /// the notice handler ran. None/empty before any notice, or when the
+    /// last notice found no program.
+    RigExecNoticeDisposition GetLastNoticeDisposition() const
+    {
+        return _lastNoticeDisposition;
+    }
+    const std::vector<SdfPath> &GetLastNoticePatchedPaths() const
+    {
+        return _lastNoticePatchedPaths;
+    }
 
     /// The timing harness. Events accumulate across evaluations until
     /// ClearProfile, so one trace can hold a whole multi-frame scrub.
@@ -1462,6 +1509,13 @@ private:
     size_t _structureDigest = 0;
     /// See GetStageEditSerial.
     uint64_t _stageEditSerial = 0;
+    /// The last notice's disposition and patched paths. Written by the
+    /// notice handler on its own thread; read by the registry's notice
+    /// adapter on the same thread (USD delivers notices synchronously),
+    /// so no lock guards them.
+    RigExecNoticeDisposition _lastNoticeDisposition =
+        RigExecNoticeDisposition::None;
+    std::vector<SdfPath> _lastNoticePatchedPaths;
     TfNotice::Key _noticeKey;
     bool _structureDirty = true;
     bool _compiled = false;
