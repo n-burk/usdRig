@@ -1785,7 +1785,14 @@ RigExecRigEvaluator::_OnObjectsChanged(
     // rest attribute, a weight, a goal transform) still changes what they
     // compute. Any stage edit therefore retires their cached snapshots, the
     // same way it retires the affected solver batches below.
+    //
+    // Retire means CLEAR, not just flagging: the seed and batch caches
+    // are time-keyed LRUs, and the dirty flag only forces the FIRST
+    // post-edit call to recompute. Once it clears, the other times would
+    // hit pre-edit entries whose override tuple still matches -- the edit
+    // changed the stage beneath an identical key.
     _firstFramePoseDirty = true;
+    _firstFramePoseCache.Clear();
     _authSnapshotDirty = true;
     _authSnapTimeKeyed.clear();
     _guideDirty = true;
@@ -1796,6 +1803,10 @@ RigExecRigEvaluator::_OnObjectsChanged(
     const auto dirty = [this](const std::set<size_t> &batches) {
         for (size_t index : batches) {
             _solverBatches[index].dirty = true;
+            // Beside the flag: the per-batch cache is a time-keyed LRU,
+            // and the flag alone only forces the first post-edit call to
+            // recompute -- the other times would hit pre-edit entries.
+            _solverBatches[index].cache.Clear();
         }
     };
     for (const SdfPath &property : notice.GetChangedInfoOnlyPaths()) {
@@ -6054,8 +6065,14 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
             auto groupStatic = [&](int group) {
                 for (int axis = 0; axis < 3; ++axis) {
                     const char *name = kMaskNames[group][axis];
+                    // A property path, not a child path: the names carry the
+                    // inputs: namespace, which is not path syntax, and the
+                    // revised targets are property paths. AppendPath here
+                    // builds an invalid path that can never match, silently
+                    // freezing every chain-driven mask at its epoch value.
                     if (propertyRevisedTargets.count(
-                            constraint.moverPath.AppendPath(SdfPath(name)))) {
+                            constraint.moverPath.AppendProperty(
+                                TfToken(name)))) {
                         return false;
                     }
                     const UsdAttribute a = moverPrim.GetAttribute(TfToken(name));
@@ -6064,7 +6081,10 @@ RigExecRigEvaluator::Compile(std::vector<std::string> *errors)
                             return false;  // connected -> driven
                         }
                         std::vector<double> timeSamples;
-                        if (a.GetTimeSamples(&timeSamples) > 1) {
+                        // GetTimeSamples answers success, not a count: the
+                        // comparison must be against the samples it filled.
+                        if (a.GetTimeSamples(&timeSamples) &&
+                            timeSamples.size() > 1) {
                             return false;  // animated
                         }
                     }
@@ -12632,11 +12652,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
         std::vector<std::pair<int, RigExecPointFrame>> propagated;
         // The hierarchy delta for a descendant depends only on its nearest
         // candidate ancestor ("closest"): that ancestor's old (before) and new
-        // (candidate) frames are shared by every descendant under it. Compute
-        // the delta once per closest and reuse it; when that delta is the
-        // identity the descendants are unchanged and need no propagation.
-        struct ClosestDelta { GfMatrix4d delta; bool identity; };
-        std::map<SdfPath, ClosestDelta> closestDelta;
+        // (candidate) frames are shared by every descendant under it, so the
+        // delta is computed once per closest and reused. It is ALWAYS
+        // applied, even when before and candidate are exactly equal: the
+        // baked program applies unconditionally, and skipping the multiply
+        // differs from applying an almost-identity by rounding dust --
+        // which is exactly what the parity comparisons forbid.
+        std::map<SdfPath, GfMatrix4d> closestDelta;
         // Only descendants can change. Enumerate disjoint changed subtrees,
         // rather than scanning every provider for each solver dependency level.
         std::vector<int> descendants;
@@ -12671,17 +12693,13 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                     finalLive[beforeIt->second];
             const RigExecPointFrame &candFrame = candidates.begin()->second;
             // Single candidate: every descendant maps through the same
-            // closest, so its identity flag and hierarchy delta are shared.
+            // closest, so one shared hierarchy delta serves them all.
             GfMatrix4d delta(1.0);
-            bool sharedIdentity = false;
             bool sharedSingular = false;
-            if (haveBefore) {
-                sharedIdentity = (finalFrames[beforeIt->second].points == candFrame.points);
-                if (!sharedIdentity &&
-                    !RigExecPointsToMatrix(finalFrames[beforeIt->second].points,
-                                           candFrame.points, &delta)) {
-                    sharedSingular = true;
-                }
+            if (haveBefore &&
+                !RigExecPointsToMatrix(finalFrames[beforeIt->second].points,
+                                       candFrame.points, &delta)) {
+                sharedSingular = true;
             }
             {
                 RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "ccfSingle", "pose");
@@ -12706,9 +12724,6 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         " could not propagate its pose revision through " +
                         provider.GetString() + "; constraint passed through");
                     return false;
-                }
-                if (sharedIdentity) {
-                    continue;
                 }
                 if (sharedSingular) {
                     pose.diagnostics.push_back(
@@ -12761,27 +12776,20 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                 }
                 auto cdIt = closestDelta.find(closest);
                 if (cdIt == closestDelta.end()) {
-                    ClosestDelta cd;
-                    cd.identity =
-                        (finalFrames[beforeIt->second].points == candidates.at(closest).points);
-                    if (!cd.identity) {
-                        if (!RigExecPointsToMatrix(finalFrames[beforeIt->second].points,
-                                                   candidates.at(closest).points,
-                                                   &cd.delta)) {
-                            pose.diagnostics.push_back(
-                                moverPath.GetString() +
-                                " produced a singular hierarchy delta; constraint "
-                                "passed through");
-                            return false;
-                        }
+                    GfMatrix4d delta(1.0);
+                    if (!RigExecPointsToMatrix(finalFrames[beforeIt->second].points,
+                                               candidates.at(closest).points,
+                                               &delta)) {
+                        pose.diagnostics.push_back(
+                            moverPath.GetString() +
+                            " produced a singular hierarchy delta; constraint "
+                            "passed through");
+                        return false;
                     }
-                    cdIt = closestDelta.emplace(closest, cd).first;
-                }
-                if (cdIt->second.identity) {
-                    continue;
+                    cdIt = closestDelta.emplace(closest, delta).first;
                 }
                 RigExecPointFrame frame =
-                    RigExecMatrixToPoints(current.points, cdIt->second.delta);
+                    RigExecMatrixToPoints(current.points, cdIt->second);
                 if (!_IsUsableConstraintFrame(frame)) {
                     pose.diagnostics.push_back(
                         moverPath.GetString() +
@@ -12966,10 +12974,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             // joint overrides into every level would itself be quadratic for a
             // deep chain, even if the kernels each executed only once.
             // The batch-specific overrides only. baseOverrides is a pure
-            // function of `time`, so (time, tail) uniquely determines the full
-            // exec input; the cache keys on the small tail and a hit skips
-            // materialising the base+tail vector (the 250-entry base copy)
-            // entirely -- which is every repeat-pass frame.
+            // function of `time` -- and (time, tail) uniquely determines the
+            // full exec input -- only while no interactive overrides are
+            // held: a held drag rides into baseOverrides beside the chains,
+            // so a tail hit under a drag would answer with another override
+            // set's base. The Find and the Store below both stand down then;
+            // the repeat-pass frames the cache exists for carry no overrides.
             std::vector<RigExecValueOverride> tail;
             {
                 RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Inputs", "pose");
@@ -13046,7 +13056,12 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
             _SnapshotCache::Entry *hit = nullptr;
             {
                 RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "SolverBatch.Find", "pose");
-                hit = !batch.dirty ? batch.cache.Find(tail, time) : nullptr;
+                // No cache under a held drag: the key is (tail, time) but
+                // the result depends on baseOverrides too, which the drag
+                // is part of. See the note where the tail is assembled.
+                hit = (!batch.dirty && _interactiveOverrides.empty())
+                    ? batch.cache.Find(tail, time)
+                    : nullptr;
             }
             if (hit != nullptr) {
                 batch.snapshot = hit->snapshot;
@@ -13066,19 +13081,23 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                         "solver dependency level evaluation incomplete");
                     return pose;
                 }
-                batch.cache.Store(tail, time, refreshed);
+                if (_interactiveOverrides.empty()) {
+                    batch.cache.Store(tail, time, refreshed);
+                    // Cleared only beside the store: an edit that dirtied
+                    // the batch ahead of a drag must still force a
+                    // re-resolve once the drag releases.
+                    batch.dirty = false;
+                }
                 batch.snapshot = refreshed;
-                batch.dirty = false;
                 // ChangeTime/compilation can notify while Evaluate runs. The
                 // successful snapshot already includes those invalidations.
                 batch.taps->ConsumeDirty();
+                // Count the exec pulls actually performed, not the batches
+                // the schedule visited: a cache hit reuses the stored
+                // snapshot without evaluating, and the counter is how the
+                // suite proves it (an unchanged pull evaluates nothing).
+                pose.solverEvaluations += batch.solvers.size();
             }
-            // Count solver computations the dependency schedule REQUESTED
-            // (spec §4.2 / bakedProgram.h:107), not the exec pulls it
-            // actually performed: the per-batch LRU legitimately skips
-            // recomputation for repeated (time, inputs), and this counter
-            // must stay byte-stable for pose-out comparisons.
-            pose.solverEvaluations += batch.solvers.size();
             const RigExecSnapshot &values = batch.snapshot;
             if (visitedSolverLevels.insert(batch.level).second) {
                 ++pose.solverOverrideRounds;
@@ -13651,14 +13670,17 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     {
         RIGEXEC_PROFILE_SCOPE_CAT(_profiler, "AuthoritativeSnapshot", "exec");
         _taps->ConsumeDirty();
-        // jointOverrides is a pure function of (epoch, time): the solver
+        // jointOverrides is a pure function of (epoch, time) -- the solver
         // aggregates, base frames, and falloff LUTs are all deterministic
-        // given the time. A time-keyed entry therefore skips the 800+
-        // element build on every repeat evaluation. Genuine stage edits set
-        // _authSnapshotDirty; the tap-level dirty flag is drained, not
-        // consulted (it fires across sibling frames sharing the system).
+        // given the time -- while no interactive overrides are held. A held
+        // drag rides into baseOverrides beside the chains, so a time-keyed
+        // hit under a drag would answer with another override set's
+        // snapshot. The find and the store below both stand down then.
+        // Genuine stage edits set _authSnapshotDirty; the tap-level dirty
+        // flag is drained, not consulted (it fires across sibling frames
+        // sharing the system).
         bool authResolved = false;
-        if (!_authSnapshotDirty) {
+        if (!_authSnapshotDirty && _interactiveOverrides.empty()) {
             const auto tk = _authSnapTimeKeyed.find(time);
             if (tk != _authSnapTimeKeyed.end()) {
                 snapshot = tk->second;
@@ -13680,7 +13702,8 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
                                   _falloffLutOverrides.begin(),
                                   _falloffLutOverrides.end());
             snapshot = _taps->Evaluate(time, jointOverrides);
-            if (snapshot.IsValid() && snapshot.IsComplete()) {
+            if (snapshot.IsValid() && snapshot.IsComplete() &&
+                _interactiveOverrides.empty()) {
                 if (_authSnapTimeKeyed.size() >= 4)
                     _authSnapTimeKeyed.erase(_authSnapTimeKeyed.begin());
                 _authSnapTimeKeyed.emplace(time, snapshot);

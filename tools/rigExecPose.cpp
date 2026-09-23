@@ -1183,6 +1183,11 @@ main(int argc, char **argv)
     for (UsdTimeCode frame : frames) {
         (void)evaluator.Evaluate(frame);
     }
+    // The baseline for the --require-baked accounting below: the warmup
+    // served a generation per frame before the counted loops ran, the same
+    // generations-before snapshot the drag section takes for its own steps.
+    const size_t generationsBeforeCounted =
+        evaluator.GetBakedGenerationCount();
 
     // The silent passes. They are the same call the reporting loop makes,
     // so they cost what a frame costs -- including the pose the evaluator
@@ -1282,9 +1287,11 @@ main(int argc, char **argv)
         // frames.size() * repeat, which is frames.size() itself unless
         // --repeat asked for more: the line a reader has always seen.
         const size_t evaluated = frames.size() * size_t(repeat);
+        const size_t bakedGenerations =
+            evaluator.GetBakedGenerationCount() - generationsBeforeCounted;
         std::printf("\n  baked: %zu/%zu generation(s), %zu build(s), "
                     "%zu attempt(s)\n",
-                    evaluator.GetBakedGenerationCount(), evaluated,
+                    bakedGenerations, evaluated,
                     evaluator.GetBakedProgramBuildCount(),
                     evaluator.GetBakedProgramBuildAttemptCount());
         // Asked after the loop rather than per frame: an in-epoch rebuild is
@@ -1292,11 +1299,10 @@ main(int argc, char **argv)
         // the half that catches a fallback which is NOT a refusal -- an
         // override the program cannot place, or a Run that declined -- since
         // neither of those makes IsBakeable false.
-        if (requireBaked &&
-            evaluator.GetBakedGenerationCount() != evaluated) {
+        if (requireBaked && bakedGenerations != evaluated) {
             std::printf("  FAIL: only %zu of %zu generation(s) came from the "
                         "program\n",
-                        evaluator.GetBakedGenerationCount(), evaluated);
+                        bakedGenerations, evaluated);
             status = 1;
         }
     }
