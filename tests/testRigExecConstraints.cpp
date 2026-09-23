@@ -4345,6 +4345,125 @@ TestAuthoredPosedSpaceBakesAndAnimatedOneFollows()
     CHECK(named);
 }
 
+// A value edit the structure digest does not name must still move the pose.
+//
+// parent:space matrices and static constraint axis masks are cached for the
+// epoch. The digest hashes connections and types, not those values, so
+// changing one leaves the epoch standing. A long-lived evaluator has to
+// match one compiled after the edit: the stale cache keeps the pre-edit
+// answer, and that answer moves joints.
+static void
+TestValueEditRetiresStageConstantPoseCaches()
+{
+    const auto translationOf = [](const RigExecRigPose &pose, const char *path) {
+        const auto it = pose.providerXforms.find(SdfPath(path));
+        CHECK(pose.valid);
+        CHECK(it != pose.providerXforms.end());
+        return it == pose.providerXforms.end()
+            ? GfVec3d(std::numeric_limits<double>::quiet_NaN())
+            : it->second.ExtractTranslation();
+    };
+    const auto jointOrigin = [](const RigExecRigPose &pose, const SdfPath &path) {
+        const auto it = pose.jointFramesFinal.find(path);
+        CHECK(pose.valid);
+        CHECK(it != pose.jointFramesFinal.end());
+        return it == pose.jointFramesFinal.end()
+            ? GfVec3d(std::numeric_limits<double>::quiet_NaN())
+            : it->second.Origin();
+    };
+    const auto report = [](const char *label, const GfVec3d &got,
+                           const GfVec3d &expected) {
+        if (Near(got, expected)) {
+            return;
+        }
+        std::printf(
+            "FAIL %s: got (%.6g, %.6g, %.6g), expected (%.6g, %.6g, %.6g)\n",
+            label, got[0], got[1], got[2], expected[0], expected[1],
+            expected[2]);
+    };
+
+    // Axis mask. The position blend with X on is (3.5, 9.5, 5)
+    // (TestEvaluatorSemantics). Turning X off keeps the target's X.
+    {
+        UsdPrim position;
+        const UsdStageRefPtr stage = BuildConstraintStage(&position);
+        std::vector<std::string> errors;
+        RigExecRigEvaluator warm(stage, SdfPath("/Asset/Rig"));
+        CHECK(warm.Compile(&errors));
+        const RigExecRigPose before =
+            warm.Evaluate(UsdTimeCode::Default());
+        const GfVec3d beforeTranslation =
+            translationOf(before, "/Asset/Targets/Position");
+        report("mask before edit", beforeTranslation, GfVec3d(3.5, 9.5, 5));
+        CHECK(Near(beforeTranslation, GfVec3d(3.5, 9.5, 5)));
+
+        position.GetAttribute(TfToken("inputs:affectTranslationX")).Set(false);
+        const RigExecRigPose edited =
+            warm.Evaluate(UsdTimeCode::Default());
+        RigExecRigEvaluator cold(stage, SdfPath("/Asset/Rig"));
+        errors.clear();
+        CHECK(cold.Compile(&errors));
+        const RigExecRigPose oracle =
+            cold.Evaluate(UsdTimeCode::Default());
+        const GfVec3d warmTranslation =
+            translationOf(edited, "/Asset/Targets/Position");
+        const GfVec3d coldTranslation =
+            translationOf(oracle, "/Asset/Targets/Position");
+        report("mask after edit", warmTranslation, GfVec3d(1, 9.5, 5));
+        CHECK(Near(warmTranslation, coldTranslation));
+        CHECK(Near(warmTranslation, GfVec3d(1, 9.5, 5)));
+    }
+
+    // parent:space. An identity opinion inherits, so the child rides the
+    // group's constraint delta (rest 10 + driver 4). A later non-identity
+    // matrix makes the child own its pose. The warm evaluator must follow
+    // a freshly compiled one, and must leave the ridden origin behind.
+    {
+        const UsdStageRefPtr stage = UsdStage::CreateInMemory();
+        MakeXform(stage, SdfPath("/Asset"), Matrix());
+        MakeXform(stage, SdfPath("/Asset/Driver"), Matrix(GfVec3d(4, 0, 0)));
+        stage->DefinePrim(SdfPath("/Asset/Rig"), TfToken("RigExecRoot"));
+        const UsdPrim group = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Controls/Group"), TfToken("RigExecControl"));
+        group.GetAttribute(TfToken("rest:tx")).Set(0.0);
+        group.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        const UsdPrim child = stage->DefinePrim(
+            SdfPath("/Asset/Rig/Controls/Group/Child"),
+            TfToken("RigExecJoint"));
+        child.GetAttribute(TfToken("rest:tx")).Set(10.0);
+        child.GetAttribute(TfToken("purpose")).Set(TfToken("guide"));
+        child.GetAttribute(TfToken("parent:space")).Set(GfMatrix4d(1.0));
+        const UsdPrim constraint = MakeConstraint(
+            stage, "MoveGroup", "RigExecPositionConstraint",
+            {group.GetPath()});
+        constraint.GetRelationship(TfToken("rigExec:sources"))
+            .SetTargets({SdfPath("/Asset/Driver")});
+
+        std::vector<std::string> errors;
+        RigExecRigEvaluator warm(stage, SdfPath("/Asset/Rig"));
+        CHECK(warm.Compile(&errors));
+        const RigExecRigPose ridden =
+            warm.Evaluate(UsdTimeCode::Default());
+        const GfVec3d riddenOrigin = jointOrigin(ridden, child.GetPath());
+        report("namespace before edit", riddenOrigin, GfVec3d(14, 0, 0));
+        CHECK(Near(riddenOrigin, GfVec3d(14, 0, 0)));
+
+        child.GetAttribute(TfToken("parent:space"))
+            .Set(Matrix(GfVec3d(1, 0, 0)));
+        const RigExecRigPose edited =
+            warm.Evaluate(UsdTimeCode::Default());
+        RigExecRigEvaluator cold(stage, SdfPath("/Asset/Rig"));
+        errors.clear();
+        CHECK(cold.Compile(&errors));
+        const RigExecRigPose oracle =
+            cold.Evaluate(UsdTimeCode::Default());
+        const GfVec3d warmOrigin = jointOrigin(edited, child.GetPath());
+        const GfVec3d coldOrigin = jointOrigin(oracle, child.GetPath());
+        CHECK(Near(warmOrigin, coldOrigin));
+        CHECK(!Near(warmOrigin, GfVec3d(14, 0, 0)));
+    }
+}
+
 int
 main()
 {
@@ -4399,6 +4518,7 @@ main()
     TestConstraintSolverDependencySchedule();
     TestConstrainedSolverInputAncestor();
     TestSolverOwnedJointBlocksNamespacePropagation();
+    TestValueEditRetiresStageConstantPoseCaches();
     TestConnectedParentSpaceSolverInputs();
     TestSolverGuidesGate();
     TestSolverBatchLevelAudit();
