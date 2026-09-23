@@ -1017,15 +1017,18 @@ private:
     std::map<SdfPath, _ConnectedPoseResult> _connectedPoseCache;
     /// Namespace-pose predicate answers that are stage-constant: parent:space
     /// has no time samples, so the answer does not vary with evaluation time.
-    /// Populated lazily on cache miss; cleared on epoch change with
-    /// _connectedPoseCache. A time-sampled parent:space stays out of this
-    /// cache and is re-read every frame.
+    /// Populated lazily on cache miss. Cleared when the epoch rebuilds, and
+    /// also when a stage edit leaves the epoch standing: the structure digest
+    /// hashes parent:space connections and types, not the matrix or its
+    /// sample count, so a value edit would otherwise keep the previous bool.
+    /// A time-sampled parent:space stays out of this cache and is re-read
+    /// every frame.
     std::unordered_map<SdfPath, bool, SdfPath::Hash> _namespaceInheritsCache;
     /// Nearest pose-owning ancestor-or-self per provider path. The owner
     /// mapping depends only on epoch-static structure (_jointSolverBinding,
-    /// _hierarchicalProviderSet, stage-constant namespace-pose answers), so
-    /// it is valid across every evaluation until the epoch rebuilds.
-    /// Cleared on epoch change with _namespaceInheritsCache.
+    /// _hierarchicalProviderSet, stage-constant namespace-pose answers).
+    /// Cleared with _namespaceInheritsCache: on epoch change, and on a stage
+    /// edit that does not rebuild the epoch.
     std::unordered_map<SdfPath, SdfPath, SdfPath::Hash> _nearestBlockingCache;
     /// Hierarchical (first-frame-pose) providers, compiled once per epoch.
     /// Replaces the per-frame std::set build in _EvaluateDynamic.
@@ -1306,7 +1309,10 @@ private:
         /// holds: no property chain revises a mask attribute, none is
         /// connected, and each is a single authored opinion. When it holds
         /// the per-frame mask reads are skipped; when it does not the values
-        /// are ignored and the live read runs exactly as before.
+        /// are ignored and the live read runs exactly as before. A stage
+        /// edit the digest does not name refreshes these in place, or drops
+        /// `masksStatic` when a mask is now connected, time-sampled, or
+        /// property-chain revised.
         bool masksStatic = false;
         RigExecConstraintAxisMask precompTranslation;
         RigExecConstraintAxisMask precompRotation;
@@ -1505,6 +1511,10 @@ private:
     /// covered. Returns false when the request could not produce them,
     /// which is what an incomplete per-frame rest tap used to mean.
     bool _RefreshEpochRestFrames();
+    /// Re-reads static constraint axis masks after a stage edit the digest
+    /// does not name. Drops `masksStatic` when a mask is now connected,
+    /// time-sampled, or property-chain revised, so the live read runs.
+    void _RefreshStaticConstraintMasks();
     bool _EpochRestsMightVary() const;
 
     /// Providers whose base frame comes from their own USD transform rather

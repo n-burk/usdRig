@@ -10900,6 +10900,76 @@ RigExecRigEvaluator::_RefreshEpochRestFrames()
     return true;
 }
 
+void
+RigExecRigEvaluator::_RefreshStaticConstraintMasks()
+{
+    // The same rules Compile uses when it first sets masksStatic. A mask
+    // that has since grown a connection, a second time sample, or a property
+    // chain is no longer a compile-time constant: drop the flag so the live
+    // read runs. A mask that is still static is re-read, because the digest
+    // never saw the bool change.
+    static const char *kMaskNames[3][3] = {
+        {"inputs:affectTranslationX", "inputs:affectTranslationY",
+         "inputs:affectTranslationZ"},
+        {"inputs:affectRotationX", "inputs:affectRotationY",
+         "inputs:affectRotationZ"},
+        {"inputs:affectScaleX", "inputs:affectScaleY",
+         "inputs:affectScaleZ"}};
+    static const bool kMaskFallback[3] = {true, true, false};
+    for (_FrameConstraint &constraint : _frameConstraints) {
+        if (!constraint.masksStatic) {
+            continue;
+        }
+        const UsdPrim prim = _stage
+            ? _stage->GetPrimAtPath(constraint.moverPath) : UsdPrim();
+        auto groupStatic = [&](int group) {
+            for (int axis = 0; axis < 3; ++axis) {
+                const SdfPath prop = constraint.moverPath.AppendProperty(
+                    TfToken(kMaskNames[group][axis]));
+                if (_propertyChains.count(prop)) {
+                    return false;
+                }
+                const UsdAttribute a = prim
+                    ? prim.GetAttribute(TfToken(kMaskNames[group][axis]))
+                    : UsdAttribute();
+                if (!a) {
+                    continue;
+                }
+                if (!_AuthoredConnections(a).empty()) {
+                    return false;
+                }
+                std::vector<double> timeSamples;
+                if (a.GetTimeSamples(&timeSamples) &&
+                    timeSamples.size() > 1) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!prim || !(groupStatic(0) && groupStatic(1) && groupStatic(2))) {
+            constraint.masksStatic = false;
+            continue;
+        }
+        auto readGroup = [&](int group) {
+            RigExecConstraintAxisMask m;
+            bool *out = &m.x;
+            for (int axis = 0; axis < 3; ++axis, ++out) {
+                bool v = kMaskFallback[group];
+                const UsdAttribute a = prim.GetAttribute(
+                    TfToken(kMaskNames[group][axis]));
+                if (a) {
+                    a.Get(&v);
+                }
+                *out = v;
+            }
+            return m;
+        };
+        constraint.precompTranslation = readGroup(0);
+        constraint.precompRotation = readGroup(1);
+        constraint.precompScale = readGroup(2);
+    }
+}
+
 bool
 RigExecRigEvaluator::_ComposeInterveningXforms(
     const UsdPrim &assetRoot,
@@ -12023,6 +12093,16 @@ RigExecRigEvaluator::_SettleEpoch(std::vector<std::string> *diagnostics)
         // Otherwise the kind is unchanged and only the VALUES can have
         // moved. A recompile has just pulled fresh rests; anything else that
         // edited the stage has to.
+        //
+        // parent:space matrices and static constraint masks are epoch-cached,
+        // and the structure digest does not hash those values (connections
+        // and types only). A default-value or time-sample edit leaves the
+        // digest unchanged, so the epoch stands and these answers would
+        // otherwise stay at whatever Compile or the first Evaluate stored.
+        // The rest-might-vary recompile above already drops them.
+        _namespaceInheritsCache.clear();
+        _nearestBlockingCache.clear();
+        _RefreshStaticConstraintMasks();
         if (!_RefreshEpochRestFrames()) {
             diagnostics->push_back("rest frame evaluation incomplete");
             return false;
@@ -12547,9 +12627,11 @@ RigExecRigEvaluator::_EvaluateDynamic(UsdTimeCode time,
     // `time` is fixed and the stage cannot change, so a memo is byte-identical
     // to recomputing.
     //
-    // Two tiers: _namespaceInheritsCache is a persistent member, cleared on
-    // epoch change, that records only stage-constant answers (parent:space
-    // with no time samples). Time-sampled attributes stay in the per-Evaluate
+    // Two tiers: _namespaceInheritsCache is a persistent member that records
+    // only stage-constant answers (parent:space with no time samples). It is
+    // cleared when the epoch rebuilds and when a notice edits the stage
+    // without changing the digest, because that digest does not hash the
+    // matrix. Time-sampled attributes stay in the per-Evaluate
     // namespacePoseCache and are re-read every frame.
     std::unordered_map<SdfPath, bool, SdfPath::Hash> namespacePoseCache;
     const auto inheritsNamespacePose = [&](const SdfPath &path) {
