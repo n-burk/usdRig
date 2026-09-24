@@ -215,7 +215,7 @@ RigExecSparsePlan RigExecPlanSparseReuse(
 /// (the runner's caller live-evals instead).
 using RigExecClusterRunner = std::function<bool(int cluster)>;
 
-/// What a plan's execution ran, in increasing cluster order.
+/// What a plan's execution ran, in the order it ran.
 struct RigExecSparseExecution {
     size_t executed = 0;
     std::vector<int> executedClusters;
@@ -223,11 +223,16 @@ struct RigExecSparseExecution {
     bool completed = true;
 };
 
-/// Executes \p plan's clusters through \p runner. A Miss executes nothing
-/// and reports incomplete: there is no retained base to run against, so the
-/// caller live-evals. A null runner also executes nothing.
-RigExecSparseExecution RigExecRunSparsePlan(const RigExecSparsePlan &plan,
-                                           RigExecClusterRunner runner);
+/// Executes \p plan's clusters through \p runner, one at a time, in
+/// \p clusterOrder -- the program's `clustering.topologicalOrder`, so that
+/// every planned cluster runs after its planned predecessors. A Miss
+/// executes nothing and reports incomplete: there is no retained base to
+/// run against, so the caller live-evals. A null runner, or an order that
+/// leaves out a planned cluster, also executes nothing and reports
+/// incomplete: running fewer clusters than the plan names is never correct.
+RigExecSparseExecution RigExecRunSparsePlan(
+    const RigExecSparsePlan &plan, const std::vector<int> &clusterOrder,
+    RigExecClusterRunner runner);
 
 // ---------------------------------------------------------------------------
 // Entry provenance and retained-state rebind (plan 2.0).

@@ -205,11 +205,12 @@ TestTheAttributeCompilesIntoTheProgram()
     CHECK(referenceStage);
     if (!referenceStage) return;
     RigExecRigEvaluator referenceRig(referenceStage, kRigPath);
-    referenceRig.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    referenceRig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
     if (!CompileOrReport(what, &referenceRig)) return;
-    // The reference asked for nothing and authored nothing, so it is the
-    // rig this feature has to leave alone.
-    CHECK(referenceRig.GetEvaluationMode() == RigExecEvaluationMode::Dynamic);
+    // The reference authored nothing and pinned the oracle, so it is the rig
+    // this feature has to leave alone.
+    CHECK(referenceRig.GetEvaluationMode() ==
+          RigExecEvaluationMode::ExecReference);
 
     for (double frame = 1; frame <= 4; ++frame) {
         const RigExecRigPose reference =
@@ -398,7 +399,7 @@ TestAnUnbakeableRigWithTheAttributeSaysSo()
     CHECK(referenceStage);
     if (!referenceStage) return;
     RigExecRigEvaluator referenceRig(referenceStage, kRigPath);
-    referenceRig.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    referenceRig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
     if (!CompileOrReport(what, &referenceRig)) return;
 
     for (double frame = 1; frame <= 4; ++frame) {

@@ -2426,7 +2426,9 @@ TestEvaluatorBranchesDriveRetirement()
         registry.Deactivate();
     }
 
-    // Stamp-bumped: affected retire plus re-resolve; the generation stands.
+    // Routed (a time sample on a keyed avar is a per-frame input's value,
+    // edited in place): affected retire plus re-resolve; the generation
+    // stands.
     {
         std::vector<std::string> errors;
         UsdStageRefPtr stage = MakeTinyRig();
@@ -2448,7 +2450,7 @@ TestEvaluatorBranchesDriveRetirement()
         CHECK(bridge != nullptr);
         if (bridge) {
             CHECK(bridge->GetEvaluator().GetLastNoticeDisposition() ==
-                  RigExecNoticeDisposition::StampBumped);
+                  RigExecNoticeDisposition::Edited);
         }
         CHECK(registry.CurrentFrameGeneration(rig) == gen);
         {
@@ -2468,6 +2470,43 @@ TestEvaluatorBranchesDriveRetirement()
                             _CaptureGeometry(registry.GetStore()->Get()))) {
             std::printf("healed frame 1 differs from pre-edit content\n");
             CHECK(false);
+        }
+        registry.Deactivate();
+    }
+
+    // Routed to nothing: a value on a prim inside the rig that nothing the
+    // program reads. No completed frame retires and the generation stands,
+    // where a stamp bump named the property as a foreign control and
+    // retired them all.
+    {
+        std::vector<std::string> errors;
+        UsdStageRefPtr stage = MakeTinyRig();
+        const UsdAttribute note =
+            stage->DefinePrim(SdfPath("/Asset/Rig/Notes"), TfToken("Scope"))
+                .CreateAttribute(TfToken("note:weight"),
+                                 SdfValueTypeNames->Float);
+        CHECK(note.Set(0.0f));
+        CHECK(registry.Activate(stage, rig, UsdTimeCode(1.0), &errors));
+        CHECK(registry.SetTime(UsdTimeCode(2.0)));
+        const RigExecFrameGeneration gen =
+            registry.CurrentFrameGeneration(rig);
+        CHECK(note.Set(1.0f));
+        RigExecImagingBridge *bridge = registry.GetBridge(rig);
+        CHECK(bridge != nullptr);
+        if (bridge) {
+            CHECK(bridge->GetEvaluator().GetLastNoticeDisposition() ==
+                  RigExecNoticeDisposition::Edited);
+            CHECK(bridge->GetEvaluator().GetLastNoticePatchedPaths().empty());
+        }
+        CHECK(registry.CurrentFrameGeneration(rig) == gen);
+        {
+            const std::vector<RigExecWarmFrameState> got =
+                registry.GetFrameStates(rig, {1.0, 2.0});
+            CHECK(got.size() == 2);
+            if (got.size() == 2) {
+                CHECK(got[0] == cached);
+                CHECK(got[1] == cached);
+            }
         }
         registry.Deactivate();
     }
@@ -2921,6 +2960,78 @@ TestProofScopingRetiresOnlyIntersecting()
     }
 }
 
+// ROUTED THROUGH A CONNECTION. A property-chain mover's input connected to a
+// value on a prim the bake never recorded: the chain reads it through the
+// resolved inputs, so the edit is routed (Edited) and names that value as a
+// read path. A path the affected index does not know is a foreign control,
+// so the completed frames the edit moved retire -- where a routing that
+// reported nothing would have kept them cached with the pre-edit result.
+void
+TestConnectedChainSourceRetiresFrames(const std::string &examplesDir)
+{
+    std::printf("progress: TestConnectedChainSourceRetiresFrames\n");
+    std::fflush(stdout);
+    SetEnv("RIGEXEC_FRAME_CACHE", "on");
+    SetEnv("RIGEXEC_FRAME_CACHE_VERIFY", "0");
+    if (RigExecFrameCacheModeFromEnvironment() ==
+        RigExecFrameCacheMode::Off) {
+        return;
+    }
+    if (examplesDir.empty()) {
+        std::printf("SKIP TestConnectedChainSourceRetiresFrames: "
+                    "no examples dir\n");
+        return;
+    }
+    UsdStageRefPtr stage =
+        UsdStage::Open(examplesDir + "/09_PropertyMathMovers.usda");
+    CHECK(static_cast<bool>(stage));
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/PropMathAsset/Rig");
+    const UsdAttribute gain =
+        stage->DefinePrim(SdfPath("/PropMathAsset/Rig/Settings"),
+                          TfToken("Scope"))
+            .CreateAttribute(TfToken("maxGain"), SdfValueTypeNames->Float);
+    CHECK(gain.Set(1.0f));
+    CHECK(stage->GetPrimAtPath(SdfPath("/PropMathAsset/Rig/Movers/ClampGain"))
+              .GetAttribute(TfToken("inputs:max"))
+              .SetConnections({gain.GetPath()}));
+    RigExecImagingRegistry &registry = RigExecImagingRegistry::GetInstance();
+    std::vector<std::string> errors;
+    CHECK(registry.Activate(stage, rig, UsdTimeCode(1001.0), &errors));
+    CHECK(registry.SetTime(UsdTimeCode(1002.0)));
+    {
+        const std::vector<RigExecWarmFrameState> got =
+            registry.GetFrameStates(rig, {1001.0, 1002.0});
+        CHECK(got.size() == 2);
+        if (got.size() == 2) {
+            CHECK(got[0] == RigExecWarmFrameState::Cached);
+            CHECK(got[1] == RigExecWarmFrameState::Cached);
+        }
+    }
+    CHECK(gain.Set(0.25f));
+    RigExecImagingBridge *bridge = registry.GetBridge(rig);
+    CHECK(bridge != nullptr);
+    if (bridge) {
+        CHECK(bridge->GetEvaluator().GetLastNoticeDisposition() ==
+              RigExecNoticeDisposition::Edited);
+        CHECK(bridge->GetEvaluator().GetLastNoticePatchedPaths() ==
+              std::vector<SdfPath>{gain.GetPath()});
+    }
+    {
+        const std::vector<RigExecWarmFrameState> got =
+            registry.GetFrameStates(rig, {1001.0});
+        CHECK(got.size() == 1);
+        if (got.size() == 1 && got[0] != RigExecWarmFrameState::Dirty) {
+            std::printf("frame 1001 stayed cached across a connected "
+                        "source edit\n");
+            CHECK(false);
+        }
+    }
+    registry.Deactivate();
+}
+
 // DRAG. A drag keeps the interactive bypass; building warm work under its
 // standing overrides admits the override identities to the epoch index
 // (the MapControl production caller); on release the commit burst
@@ -2988,7 +3099,7 @@ TestDragReleaseRewarmsAffected()
     stage->GetPrimAtPath(alongX).GetAttribute(TfToken("avars:tx")).Set(
         10.5, UsdTimeCode(2.0));
     CHECK(bridge->GetEvaluator().GetLastNoticeDisposition() ==
-          RigExecNoticeDisposition::StampBumped);
+          RigExecNoticeDisposition::Edited);
     CHECK(registry.CurrentFrameGeneration(rig) == gen);
     {
         const std::vector<RigExecWarmFrameState> got =
@@ -3302,6 +3413,7 @@ main(int argc, char **argv)
     TestCachedServeSkipsLookupSample();
     TestStackFullRangeCursorWarmsEveryFrame(examplesDir);
     TestEvaluatorBranchesDriveRetirement();
+    TestConnectedChainSourceRetiresFrames(examplesDir);
     TestCarryOverRekeysCleanEntries();
     TestScopedCancelDropsOldJobsOnTokenMismatch();
     TestEditOneControlRetiresAndRewarms();

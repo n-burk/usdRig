@@ -84,6 +84,9 @@ DefaultEvaluationMode()
         if (requested == "parity") {
             return RigExecEvaluationMode::BakedWithParityCheck;
         }
+        if (requested == "reference") {
+            return RigExecEvaluationMode::ExecReference;
+        }
         return RigExecEvaluationMode::Dynamic;
     }();
     return mode;
@@ -149,7 +152,7 @@ WithoutTheBakeRequiredLine(const std::vector<std::string> &diagnostics,
 static size_t
 ExpectedBakeRequiredLines(RigExecEvaluationMode mode)
 {
-    return BakeRequired() && mode != RigExecEvaluationMode::Dynamic ? 1 : 0;
+    return BakeRequired() && RigExecEvaluationModeWantsProgram(mode) ? 1 : 0;
 }
 
 // "The same published generation" is defined once, in the shared header, so
@@ -365,16 +368,17 @@ TestDynamicModeIsTheDefault(const std::string &examplesDir)
               RigExecEvaluationModeSource::Environment);
     }
     // Switching after a compile builds the program without a recompile, and
-    // switching back drops it.
+    // switching to the oracle drops it.
     rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
     const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(1.0));
     CHECK(baked.valid);
-    rig.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
-    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::Dynamic);
-    const RigExecRigPose dynamic = rig.Evaluate(UsdTimeCode(1.0));
-    CHECK(dynamic.valid);
-    CompareMaps("final joint frame", "mode toggle", dynamic.jointFramesFinal,
-                baked.jointFramesFinal, SameFrame);
+    rig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    CHECK(rig.GetEvaluationMode() == RigExecEvaluationMode::ExecReference);
+    const RigExecRigPose reference = rig.Evaluate(UsdTimeCode(1.0));
+    CHECK(reference.valid);
+    CompareMaps("final joint frame", "mode toggle",
+                reference.jointFramesFinal, baked.jointFramesFinal,
+                SameFrame);
 }
 
 // The program captures values, and nothing in the epoch digest would say that
@@ -465,6 +469,96 @@ TestAnEditAfterTheBakeIsFollowed(const std::string &examplesDir)
         if (!SameFrame(frame, JointFrame(before, path))) { moved = true; break; }
     }
     CHECK(moved);
+}
+
+// An epoch compiled for the program commits its solver batches without the
+// solver-input index, and the first dynamic generation builds it -- so the
+// index a dynamic session routes edits through is, after a mode switch, one
+// built long after the compile, from what the compile handed over. The two
+// edits below cover both sides of that build. The first lands while the
+// index is still absent, when the handler takes every batch as reached and
+// no batch has an answer to lose yet, so it pins only that the switch itself
+// comes out right. The second lands after the build and has to reach its
+// batch through the index, and that is the one a missing index entry fails.
+//
+// A rest edit on a joint the leg IK names, because it is the kind of edit
+// only the index can deliver: it does not recompile the epoch (the digest
+// hashes no rest channel), and what the batch reads of it comes off the
+// stage rather than through the overrides its cache is keyed on -- so a
+// batch the handler failed to dirty would hand back its cached, pre-edit
+// answer, and the comparison with an evaluator that only ever ran
+// dynamically would say so.
+static void
+TestASolverInputEditIsRoutedAfterADeferredCompile(
+    const std::string &examplesDir)
+{
+    const SdfPath knee(
+        "/Biped/Rig/Joints/hips_bind/pelvis_l_bind/thigh_l_bind/knee_l_bind");
+    const SdfPath ankle = knee.AppendChild(TfToken("ankle_l_bind"));
+    const TfToken restTx("rest:tx");
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/biped/Biped.usda");
+    CHECK(stage);
+    if (!stage) return;
+    const SdfPath rigPath = FindRig(stage);
+    if (rigPath.IsEmpty()) { ++failures; return; }
+    CHECK(stage->GetPrimAtPath(knee) && stage->GetPrimAtPath(ankle));
+    if (!stage->GetPrimAtPath(knee) || !stage->GetPrimAtPath(ankle)) return;
+    double kneeRest = 0, ankleRest = 0;
+    stage->GetPrimAtPath(knee).GetAttribute(restTx).Get(&kneeRest);
+    stage->GetPrimAtPath(ankle).GetAttribute(restTx).Get(&ankleRest);
+
+    // What each edit should produce, from an evaluator that never deferred.
+    const auto reference = [&](double kneeDelta, double ankleDelta) {
+        UsdStageRefPtr referenceStage =
+            UsdStage::Open(examplesDir + "/biped/Biped.usda");
+        referenceStage->SetEditTarget(
+            UsdEditTarget(referenceStage->GetSessionLayer()));
+        CHECK(referenceStage->GetPrimAtPath(knee).GetAttribute(restTx)
+                  .Set(kneeRest + kneeDelta));
+        CHECK(referenceStage->GetPrimAtPath(ankle).GetAttribute(restTx)
+                  .Set(ankleRest + ankleDelta));
+        RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+        MakeItTheReference(&referenceRig);
+        std::vector<std::string> errors;
+        CHECK(referenceRig.Compile(&errors));
+        return referenceRig.Evaluate(UsdTimeCode(1.0));
+    };
+
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    const RigExecRigPose baked = rig.Evaluate(UsdTimeCode(1.0));
+    CHECK(baked.valid);
+
+    stage->SetEditTarget(UsdEditTarget(stage->GetSessionLayer()));
+    CHECK(stage->GetPrimAtPath(knee).GetAttribute(restTx)
+              .Set(kneeRest + 1.5));
+    rig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    const RigExecRigPose first = rig.Evaluate(UsdTimeCode(1.0));
+    CHECK(first.valid);
+    CompareMaps("final joint frame, edit before the index", "Biped.usda",
+                reference(1.5, 0.0).jointFramesFinal, first.jointFramesFinal,
+                SameFrame);
+
+    CHECK(stage->GetPrimAtPath(ankle).GetAttribute(restTx)
+              .Set(ankleRest + 1.0));
+    const RigExecRigPose second = rig.Evaluate(UsdTimeCode(1.0));
+    CHECK(second.valid);
+    CompareMaps("final joint frame, edit after the index", "Biped.usda",
+                reference(1.5, 1.0).jointFramesFinal, second.jointFramesFinal,
+                SameFrame);
+    // Both edits moved something, so neither comparison passes because
+    // nothing happened.
+    const auto movedFrom = [](const RigExecRigPose &a,
+                              const RigExecRigPose &b) {
+        for (const auto &[path, frame] : b.jointFramesFinal) {
+            if (!SameFrame(frame, JointFrame(a, path))) return true;
+        }
+        return false;
+    };
+    CHECK(movedFrom(baked, first));
+    CHECK(movedFrom(first, second));
 }
 
 static void
@@ -1242,7 +1336,7 @@ TestAnArrayOverrideOnACurvenetWeightFallsBack()
         // is the authored field: the override reaches neither side.
         UsdStageRefPtr referenceStage = MakeACurvenetWeightRig();
         RigExecRigEvaluator reference(referenceStage, rigPath);
-        reference.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+        reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
         CHECK(reference.Compile(&errors));
         reference.SetInteractiveOverrides({override});
         const RigExecRigPose expected = reference.Evaluate(UsdTimeCode(1.0));
@@ -2217,11 +2311,12 @@ TestAConstrainedVolumeWeightFallsBack()
         }
     }
 
-    // And the fallback is a real generation, identical to a plain dynamic
-    // evaluator's: a refusal that also changed the answer would be worse
-    // than the divergence it exists to avoid.
+    // And the fallback is a real generation, identical to the oracle's: a
+    // refusal that also changed the answer would be worse than the
+    // divergence it exists to avoid.
     UsdStageRefPtr referenceStage = MakeAConstrainedVolumeRig();
     RigExecRigEvaluator referenceRig(referenceStage, rigPath);
+    referenceRig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
     errors.clear();
     CHECK(referenceRig.Compile(&errors));
     for (double frame = 1; frame <= 2; ++frame) {
@@ -2946,6 +3041,7 @@ main(int argc, char **argv)
     }
     TestDynamicModeIsTheDefault(examplesDir);
     TestAnEditAfterTheBakeIsFollowed(examplesDir);
+    TestASolverInputEditIsRoutedAfterADeferredCompile(examplesDir);
     TestAnInteractiveOverrideAfterTheBakeIsFollowed(examplesDir);
     TestAnOverrideOnAConstraintWeightIsFollowed(examplesDir);
     TestAnUnplaceableOverrideFallsBack(examplesDir);

@@ -32,7 +32,7 @@ chain's joints that is a joint or control -- and hangs the chain from
 it exactly as if the relationship named it:
 
   6. derived is bit-identical to authored, in every mode, scenario and
-     start pose, in dynamic, baked and parity evaluation;
+     start pose, in reference, baked and parity evaluation;
   7. authored targets win silently: policy plus the relationship is the
      relationship alone, never applied twice;
   8. a chain whose joints span providers, or with no provider ancestor,
@@ -113,7 +113,7 @@ START_POSES = {
 
 
 def _build(mode, avars, start_avars, with_start, policy=None,
-           chain=CHAIN, evaluation_mode="dynamic", precompile=True):
+           chain=CHAIN, evaluation_mode="reference", precompile=True):
     """Author, pose, compile and evaluate one chain.
 
     mode: None leaves rigExec:controlSpace unauthored; 'parentRelative'

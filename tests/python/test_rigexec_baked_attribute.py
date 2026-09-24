@@ -132,6 +132,8 @@ def TestAnAuthoredTrueOpensThroughTheProgram():
     reference.compile()
     _Check(reference.evaluation_mode == "dynamic",
            "the reference is in %s" % reference.evaluation_mode)
+    # Asked for nothing, so it defaults to dynamic; compared as the oracle.
+    reference.evaluation_mode = "reference"
     referencePose = reference.evaluate(1.0)
     _Check(referencePose.valid, "the reference generation is not valid")
     _Check(pose.joint_paths() == referencePose.joint_paths(),

@@ -2056,6 +2056,46 @@ ConeBound(const RigExecBakedProgramImpl &B,
     return closed.Count();
 }
 
+/// The steps a run may touch when \p dirty (step indices) is what moved.
+///
+/// ConeBound's twin at the grain a live run closes at: the forward step
+/// closure of the seeds, plus the steps that read outside the graph and the
+/// steps a standing override names.
+RigExecBakedClusterSet
+StepConeBound(const RigExecBakedProgramImpl &B,
+              const std::vector<int> &dirty)
+{
+    const size_t steps = B.steps.size();
+    const size_t words = B.cones.stepWords;
+    RigExecBakedClusterSet seeds;
+    seeds.Resize(steps);
+    seeds.Union(B.cones.alwaysSteps);
+    for (const int index : dirty) {
+        seeds.Set(index);
+    }
+    for (const int index : B.cones.overrideSteps) {
+        const RigExecBakedStep &step = B.steps[size_t(index)];
+        for (const int input : step.overrideInputs) {
+            if (size_t(input) < B.overridden.size() &&
+                B.overridden[size_t(input)]) {
+                seeds.Set(index);
+                break;
+            }
+        }
+    }
+    RigExecBakedClusterSet closed;
+    closed.Resize(steps);
+    for (size_t s = 0; s < steps; ++s) {
+        if (!seeds.Test(int(s))) {
+            continue;
+        }
+        for (size_t w = 0; w < words && w < closed.words.size(); ++w) {
+            closed.words[w] |= B.cones.stepCone[s * words + w];
+        }
+    }
+    return closed;
+}
+
 /// A constraint dirtied while its target's compose is clean re-runs its own
 /// cone and nothing else (§3.1).
 ///
@@ -2100,9 +2140,9 @@ TestAConstraintDragRunsOnlyItsCone(const std::string &stagePath,
     // frame's values to keep.
     const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
     // The path that never skips, and never baked: one evaluator, one
-    // generation, the whole dynamic walk.
+    // generation, the whole exec walk.
     const LiveRig reference =
-        OpenRig(stagePath, RigExecEvaluationMode::Dynamic);
+        OpenRig(stagePath, RigExecEvaluationMode::ExecReference);
     if (!baked.evaluator || !reference.evaluator) {
         ++failures;
         std::printf("FAIL constraint-drag: does not compile\n");
@@ -2169,7 +2209,7 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
 
     const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
     const LiveRig reference =
-        OpenRig(stagePath, RigExecEvaluationMode::Dynamic);
+        OpenRig(stagePath, RigExecEvaluationMode::ExecReference);
     if (!baked.evaluator || !reference.evaluator) {
         ++failures;
         std::printf("FAIL leaf-drag: does not compile\n");
@@ -2224,6 +2264,45 @@ TestALeafControlDragRunsOnlyItsCone(const std::string &stagePath,
     // because nothing happened.
     CHECK(moved.moverGraphRevisionsExecuted > 0);
 
+    // And per STEP, which is the grain the run closed at: the steps it ran
+    // are the drag's step cone and no more, and a clean step packed into a
+    // cluster the run dispatched was skipped rather than run beside its
+    // dirty cluster-mate. The count survives the cone verifier's forced
+    // second pass (RigExecBakedRunStatistics puts it back); the sets do not,
+    // so they are read only when that pass did not run.
+    const RigExecBakedClusterSet stepBound =
+        StepConeBound(B, {B.cones.avarStep[size_t(slot->second)]});
+    const size_t stepsRan = B.lastClosedSteps;
+    CHECK(stepsRan > 0);
+    if (stepsRan > stepBound.Count()) {
+        ++failures;
+        std::printf("FAIL leaf-drag: closed %zu step(s), and the drag's "
+                    "step cone is %zu\n", stepsRan, stepBound.Count());
+    }
+    if (!RigExecBakedVerifyConesRequested()) {
+        size_t packed = 0;
+        for (size_t s = 0; s < B.steps.size(); ++s) {
+            const bool stepClosed = B.closedSteps.Test(int(s));
+            CHECK(!stepClosed || stepBound.Test(int(s)));
+            CHECK(!stepClosed || B.closed.Test(B.steps[s].cluster));
+            packed += B.closed.Test(B.steps[s].cluster) ? 1 : 0;
+        }
+        // Every dispatched cluster holds a closed step.
+        for (size_t c = 0; c < B.clustering.clusters.size(); ++c) {
+            if (!B.closed.Test(int(c))) {
+                continue;
+            }
+            bool holds = false;
+            for (const int member : B.clustering.clusters[c].members) {
+                holds = holds || B.closedSteps.Test(member);
+            }
+            CHECK(holds);
+        }
+        std::printf("  leaf control drag: closed %zu of %zu step(s) "
+                    "(step cone %zu); the clusters holding them pack %zu\n",
+                    stepsRan, B.steps.size(), stepBound.Count(), packed);
+    }
+
     reference.evaluator->SetInteractiveOverrides(overrides);
     const RigExecRigPose expected =
         reference.evaluator->Evaluate(UsdTimeCode(1));
@@ -2261,7 +2340,7 @@ TestANonFiniteValueIsNotAConeMismatch(const std::string &stagePath,
 {
     const LiveRig baked = OpenRig(stagePath, RigExecEvaluationMode::Baked);
     const LiveRig reference =
-        OpenRig(stagePath, RigExecEvaluationMode::Dynamic);
+        OpenRig(stagePath, RigExecEvaluationMode::ExecReference);
     if (!baked.evaluator || !reference.evaluator) {
         ++failures;
         std::printf("FAIL non-finite cone: does not compile\n");

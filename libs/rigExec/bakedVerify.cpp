@@ -831,6 +831,7 @@ RigExecBakedRunStatistics::RigExecBakedRunStatistics(
     const RigExecBakedProgramImpl &program)
 {
     closedClusters = program.lastClosedClusters;
+    closedSteps = program.lastClosedSteps;
     timed = program.clustering.lastRunTimed;
     clusters.resize(program.clustering.clusters.size());
     for (size_t c = 0; c < clusters.size(); ++c) {
@@ -851,6 +852,7 @@ RigExecBakedRunStatistics::Restore(RigExecBakedProgramImpl *program) const
 {
     RigExecBakedProgramImpl &B = *program;
     B.lastClosedClusters = closedClusters;
+    B.lastClosedSteps = closedSteps;
     B.clustering.lastRunTimed = timed;
     for (size_t c = 0;
          c < B.clustering.clusters.size() && c < clusters.size(); ++c) {

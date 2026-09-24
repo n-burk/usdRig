@@ -1,16 +1,21 @@
 // Public computed spaces and mutable default-pose channels.
+#include "rigExec/rigEvaluator.h"
 #include "rigExec/tapSet.h"
 #include "rigExec/types.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/base/plug/registry.h"
+#include "pxr/base/tf/setenv.h"
 #include "pxr/usd/sdf/types.h"
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/relationship.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <map>
 #include <limits>
+#include <string>
+#include <vector>
 
 using namespace rigExec;
 static int failures = 0;
@@ -192,9 +197,57 @@ static void TestAnimatedTwistTurns()
     if (changed.GetSize() == 4) CHECK(Near(changed.frames.back().Y(), GfVec3d(0, -1, 0)));
 }
 
+// Two controls whose default:spaces are connected to each other. The compile's
+// pose-input closure follows connections and the default-space chain, so the
+// pair is one cycle of that graph, and the closure has to come back from it
+// with everything the cycle reaches: through B, the parent's default chain,
+// and through A's rest channel, a connected parent:space that names another
+// control as a pose provider and makes the pose connected. main() turns on
+// RIGEXEC_VERIFY_POSEINFO, under which every such closure is also walked prim
+// by prim and a difference is fatal; what this checks on top is that the
+// compile got as far as computing them. Nothing here asks the cycle to
+// evaluate -- only that it is read -- so the exec cycle reports the compile's
+// tap prepares print on the way are expected.
+static void TestMutualDefaultSpaceCycleClosure()
+{
+    const auto stage = UsdStage::CreateInMemory();
+    const SdfPath rigPath("/Rig");
+    stage->DefinePrim(rigPath, TfToken("RigExecRoot"));
+    stage->DefinePrim(SdfPath("/Rig/Controls"), TfToken("Scope"));
+    const auto parent = stage->DefinePrim(SdfPath("/Rig/Controls/P"),
+                                          TfToken("RigExecControl"));
+    const auto a = stage->DefinePrim(SdfPath("/Rig/Controls/P/A"),
+                                     TfToken("RigExecControl"));
+    const auto b = stage->DefinePrim(SdfPath("/Rig/Controls/P/B"),
+                                     TfToken("RigExecControl"));
+    stage->DefinePrim(SdfPath("/Rig/Controls/Q"), TfToken("RigExecControl"));
+    const auto c = stage->DefinePrim(SdfPath("/Rig/Controls/Q/C"),
+                                     TfToken("RigExecControl"));
+    parent.GetAttribute(TfToken("rest:space")).Set(Translate(1));
+    const TfToken defaultSpace("default:space");
+    CHECK(a.GetAttribute(defaultSpace).SetConnections(
+        {b.GetPath().AppendProperty(defaultSpace)}));
+    CHECK(b.GetAttribute(defaultSpace).SetConnections(
+        {a.GetPath().AppendProperty(defaultSpace)}));
+    CHECK(a.GetAttribute(TfToken("rest:tx")).SetConnections(
+        {c.GetPath().AppendProperty(TfToken("parent:space"))}));
+
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetProfilingEnabled(true);
+    std::vector<std::string> errors;
+    rig.Compile(&errors);
+    const auto events = rig.GetProfiler().GetEvents();
+    CHECK(std::any_of(events.begin(), events.end(), [](const auto &event) {
+        return event.name == "PoseInfoPrefetch";
+    }));
+}
+
 int main()
 {
+    // Before the first compile: the verifier reads its switch once.
+    TfSetenv("RIGEXEC_VERIFY_POSEINFO", "1");
     PlugRegistry::GetInstance().RegisterPlugins(RIGEXEC_SCHEMA_RESOURCE_DIR);
+    TestMutualDefaultSpaceCycleClosure();
     TestDefaultChannels();
     TestDefaultHierarchyAndOverrides();
     TestInvalidSpacesPropagate();

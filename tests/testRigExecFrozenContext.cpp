@@ -2576,6 +2576,186 @@ TestVolumeConstrainedSweepWarmsBitIdentical(const std::string &examplesDir)
         /*expectNative=*/1, /*expectDelta=*/1, /*expectSeedMotion=*/true);
 }
 
+// A value edit the live program routed but has not yet run travels into the
+// snapshot. The edit here is a time sample of a constraint's per-frame input
+// at the held time, which only its edited bit can route: the time does not
+// move. The generation right after it is answered by the dynamic path (an
+// override the program cannot place stands for one frame), so the program
+// never consumes the bit, and a snapshot taken then has to carry it -- its
+// first run is at its own lastTime, where nothing else dirties the
+// constraint, and without the bit it would republish the pre-edit pose.
+void
+TestAFrozenRewarmAfterAFallbackCarriesTheEdit(const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/aimtest.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/World/RigRoot");
+    const SdfPath aim("/World/RigRoot/Movers/RigExecAimConstraint1");
+    const UsdAttribute weight = stage->GetPrimAtPath(aim).CreateAttribute(
+        TfToken("inputs:defaultWeight"), SdfValueTypeNames->Float);
+    CHECK(weight.Set(1.0f, UsdTimeCode(1.0)));
+    CHECK(weight.Set(0.5f, UsdTimeCode(100.0)));
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    const UsdTimeCode held(50.0);
+    CHECK(evaluator.Evaluate(held).valid);
+    const RigExecRigPose before = evaluator.Evaluate(held);
+    CHECK(before.valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    // An override on a folded value, restating the value it already has:
+    // the program cannot place it, so the generation falls back, and the
+    // dynamic path it falls back to answers the same pose.
+    RigExecValueOverride unplaceable;
+    bool found = false;
+    for (const SdfPath &path : program->GetStepGraph().folded) {
+        const UsdAttribute a = stage->GetAttributeAtPath(path);
+        VtValue value;
+        if (a && a.Get(&value) && !value.IsEmpty()) {
+            unplaceable.prim = path.GetPrimPath();
+            unplaceable.attribute = path.GetNameToken();
+            unplaceable.value = value;
+            found = true;
+            break;
+        }
+    }
+    CHECK(found);
+    if (!found) {
+        return;
+    }
+
+    CHECK(weight.Set(0.25f, UsdTimeCode(100.0)));
+    CHECK(evaluator.GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Edited);
+    const size_t generations = evaluator.GetBakedGenerationCount();
+    evaluator.SetInteractiveOverrides({unplaceable});
+    CHECK(evaluator.Evaluate(held).valid);
+    CHECK(evaluator.GetBakedGenerationCount() == generations);
+    evaluator.SetInteractiveOverrides({});
+    CHECK(evaluator.GetBakedProgram()->GetStepGraph().anyEdited);
+
+    std::shared_ptr<const RigExecFrozenProgram> frozen;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &frozen, &error));
+    CHECK(frozen != nullptr);
+    if (!frozen) {
+        std::printf("freeze refused: %s\n", error.c_str());
+        return;
+    }
+    CHECK(frozen->program.anyEdited);
+    CHECK(frozen->program.lastTime == held);
+    RigExecFrameInputs at;
+    CHECK(RigExecSampleFrameInputs(evaluator, held, {}, &at, &error));
+    RigExecBackgroundScheduler scheduler;
+    bool ran = false;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, frozen, at, &scheduler, &ran);
+    CHECK(ran);
+    const RigExecRigPose live = evaluator.Evaluate(held);
+    CHECK(live.valid);
+    CheckPosesBitIdentical("rewarm at the snapshot's lastTime after a "
+                           "fallback",
+                           live, warmed);
+    // Sensitivity: the edit moved the pose, so a snapshot that skipped the
+    // constraint would have been caught above.
+    RigExecRigPose moved;
+    RigExecComparePoses(before, live, &moved);
+    CHECK(moved.bakedParityMismatches != 0);
+}
+
+// A snapshot frozen BEFORE a routed value edit, which the live program has
+// since run and consumed: the snapshot's own history never saw the edit, and
+// the live program's pending flags are gone, so only the per-index edit
+// counts can say which steps a job cloned from it owes. The registry keeps
+// such a snapshot while the avar region is unchanged and asks
+// RigExecFrozenSnapshotOwesLiveEdits; the patch it then takes re-runs the
+// constraint in the job, at the snapshot's own lastTime where nothing else
+// would dirty it.
+void
+TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(
+    const std::string &examplesDir)
+{
+    UsdStageRefPtr stage = UsdStage::Open(examplesDir + "/aimtest.usda");
+    CHECK(stage);
+    if (!stage) {
+        return;
+    }
+    const SdfPath rig("/World/RigRoot");
+    const SdfPath aim("/World/RigRoot/Movers/RigExecAimConstraint1");
+    const UsdAttribute weight = stage->GetPrimAtPath(aim).CreateAttribute(
+        TfToken("inputs:defaultWeight"), SdfValueTypeNames->Float);
+    CHECK(weight.Set(1.0f, UsdTimeCode(1.0)));
+    CHECK(weight.Set(0.5f, UsdTimeCode(100.0)));
+    RigExecRigEvaluator evaluator(stage, rig);
+    std::vector<std::string> errors;
+    CHECK(evaluator.Compile(&errors));
+    evaluator.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    const UsdTimeCode held(50.0);
+    CHECK(evaluator.Evaluate(held).valid);
+    CHECK(evaluator.Evaluate(held).valid);
+    const RigExecBakedProgram *program = evaluator.GetBakedProgram();
+    CHECK(program != nullptr);
+    if (!program) {
+        return;
+    }
+    std::shared_ptr<const RigExecFrozenProgram> standing;
+    std::string error;
+    CHECK(RigExecFreezeProgram(evaluator, &standing, &error));
+    if (!standing) {
+        std::printf("freeze refused: %s\n", error.c_str());
+        return;
+    }
+    CHECK(!RigExecFrozenSnapshotOwesLiveEdits(*standing, *program));
+    const uint64_t avarDigest = RigExecFrozenAvarRegionDigest(*program);
+
+    CHECK(weight.Set(0.25f, UsdTimeCode(100.0)));
+    CHECK(evaluator.GetLastNoticeDisposition() ==
+          RigExecNoticeDisposition::Edited);
+    const RigExecRigPose live = evaluator.Evaluate(held);
+    CHECK(live.valid);
+    CHECK(!program->GetStepGraph().anyEdited);
+    // The edit moved no avar: the digest alone would keep the snapshot.
+    CHECK(RigExecFrozenAvarRegionDigest(*program) == avarDigest);
+    CHECK(RigExecFrozenSnapshotOwesLiveEdits(*standing, *program));
+
+    RigExecFrameInputs at;
+    CHECK(RigExecSampleFrameInputs(evaluator, held, {}, &at, &error));
+    RigExecBackgroundScheduler scheduler;
+    // Sensitivity: the unpatched snapshot skips the constraint and warms
+    // the pre-edit pose.
+    bool ran = false;
+    const RigExecRigPose unpatched =
+        RunWarmingJob(&evaluator, rig, standing, at, &scheduler, &ran);
+    CHECK(ran);
+    RigExecRigPose stale;
+    RigExecComparePoses(live, unpatched, &stale);
+    CHECK(stale.bakedParityMismatches != 0);
+
+    std::shared_ptr<const RigExecFrozenProgram> patched;
+    CHECK(RigExecPatchFrozenAvarConstants(*standing, *program, &patched,
+                                          &error));
+    CHECK(patched != nullptr);
+    if (!patched) {
+        return;
+    }
+    CHECK(patched->program.anyEdited);
+    CHECK(!RigExecFrozenSnapshotOwesLiveEdits(*patched, *program));
+    ran = false;
+    const RigExecRigPose warmed =
+        RunWarmingJob(&evaluator, rig, patched, at, &scheduler, &ran);
+    CHECK(ran);
+    CheckPosesBitIdentical("patched standing snapshot after a live run",
+                           evaluator.Evaluate(held), warmed);
+}
+
 // Freezing into no snapshot refuses and says so.
 void
 TestFreezeIntoNullSnapshotRefuses()
@@ -3038,6 +3218,8 @@ main(int argc, char **argv)
         TestRotParComboWarmsBitIdentical(argv[1]);
         TestAimParComboFlattenedWarmsBitIdentical(argv[1]);
         TestVolumeConstrainedSweepWarmsBitIdentical(argv[1]);
+        TestAFrozenRewarmAfterAFallbackCarriesTheEdit(argv[1]);
+        TestAStandingSnapshotPatchedAfterALiveRunCarriesTheEdit(argv[1]);
         TestVolumeWeightsBurstMatchesPlain(argv[1]);
         TestUnresolvableTargetDeclinesSampling(argv[1]);
     } else {

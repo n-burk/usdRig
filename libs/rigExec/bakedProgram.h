@@ -50,14 +50,43 @@ struct RigExecBakedProgramImpl;
 /// whenever it is not, so setting it can never change an answer -- only how
 /// fast it arrives.
 enum class RigExecEvaluationMode {
-    /// OpenExec plus the in-memory pose walk. The reference path.
+    /// The product default. OpenExec plus the in-memory pose walk -- unless
+    /// RIGEXEC_DYNAMIC_RUNS_PROGRAM is set, in which case the program
+    /// answers whenever the epoch has one and the walk answers otherwise,
+    /// exactly as under Baked but with nothing announced when it falls back
+    /// (see RigExecEvaluationModeRunsProgram).
     Dynamic,
     /// The baked program when the epoch allows it, Dynamic otherwise.
     Baked,
     /// Both, in one generation, compared with exact equality. Every
     /// disagreement is a diagnostic and a count on the published pose.
     BakedWithParityCheck,
+    /// The exec-authoritative walk and nothing else: no program is built,
+    /// asked for, or reported on. It is the oracle every other path is
+    /// judged against, named for that job so that a test comparing against
+    /// it keeps comparing against the oracle whatever Dynamic comes to run.
+    /// With RIGEXEC_DYNAMIC_RUNS_PROGRAM off it answers exactly what Dynamic
+    /// answers; with it on, Dynamic runs the program and this is what that
+    /// program is held to.
+    ExecReference,
 };
+
+/// Whether \p mode ASKS for the baked program.
+///
+/// Asking is what makes a fallback worth announcing: RIGEXEC_BAKE_REQUIRED's
+/// mismatch and the attribute's artist-facing line are said only for a mode
+/// that asked and was answered by the walk instead. Dynamic and ExecReference
+/// never ask, so both are silent. Whether a program is BUILT and RUN is a
+/// wider question -- Dynamic may run one without asking for it -- and is
+/// RigExecEvaluationModeRunsProgram's. Asked through here rather than as
+/// `!= Dynamic` so that a mode added later has to be placed on one side of
+/// that line on purpose.
+inline bool
+RigExecEvaluationModeWantsProgram(RigExecEvaluationMode mode)
+{
+    return mode == RigExecEvaluationMode::Baked ||
+        mode == RigExecEvaluationMode::BakedWithParityCheck;
+}
 
 /// WHO chose the evaluation mode an evaluator is in.
 ///
@@ -81,6 +110,43 @@ enum class RigExecEvaluationModeSource {
     /// RigExecRigEvaluator::SetEvaluationMode.
     Explicit,
 };
+
+/// Whether Dynamic runs the baked program: RIGEXEC_DYNAMIC_RUNS_PROGRAM set to
+/// a true value (TfGetenvBool). Read ONCE per process, at its first call, and
+/// fixed from then on, like RIGEXEC_EVALUATION_MODE: every evaluator of a
+/// session must dispatch Dynamic the same way, or two rigs of one stage would
+/// answer the same question from different paths.
+///
+/// Off by default. With it off Dynamic is the exec walk and nothing else,
+/// which is what every in-tree stage that does not author rigExec:baked, and
+/// usdview, run today.
+bool RigExecDynamicRunsProgram();
+
+/// Whether an evaluator in \p mode, chosen by \p source, builds the baked
+/// program and answers from it whenever the epoch has one.
+///
+/// Every gate that exists because a program might answer asks this: the
+/// build at Compile, the lazy build in Evaluate, the dispatch, the rebuild's
+/// early return, the rigExec:baked notice drop, and whether Compile may
+/// defer the walk-only exec preparations. Baked and BakedWithParityCheck
+/// always do; ExecReference never does -- it is the oracle, and an oracle
+/// that could answer from the program would be judging itself.
+///
+/// Dynamic is the one mode with a choice, and it reaches here from four
+/// sources, each mapped on purpose rather than by falling through: nobody
+/// asking (the default), an authored `rigExec:baked = false`, a
+/// RIGEXEC_EVALUATION_MODE=dynamic session, and SetEvaluationMode(Dynamic).
+/// All four follow RigExecDynamicRunsProgram today. An authored false is the
+/// one whose meaning is an open product question -- it may come to mean
+/// ExecReference -- which is why the source is an argument at all.
+///
+/// A Dynamic generation that the program cannot answer (a refused bake, an
+/// unplaceable override, cpuParityMode, a program bail) runs the walk, as a
+/// Baked one does, but never ANNOUNCES it: Dynamic did not ask for the
+/// program (RigExecEvaluationModeWantsProgram), so the walk is its answer
+/// rather than a substitute for one.
+bool RigExecEvaluationModeRunsProgram(RigExecEvaluationMode mode,
+                                      RigExecEvaluationModeSource source);
 
 /// Appends one diagnostic per exact-equality disagreement between \p baked
 /// and \p reference, counting them on \p out->bakedParityMismatches.
@@ -157,6 +223,30 @@ struct RigExecStageFrameSeeds {
     }
 };
 
+/// Why RigExecBakedProgram::Run gave a generation back, if it did.
+///
+/// The caller answers each cause differently (unified-program spec rule
+/// D3), because the dynamic walk does different things at the three points:
+///   * StageFrames: a constraint target's stage transform could not be
+///     resolved. The walk gives up at exactly that point with the same line,
+///     so the pose Run leaves -- invalid, carrying the settle's lines, the
+///     property chains' lines and the target's -- IS the walk's answer and is
+///     published as it stands. The program stays: nothing the region owns was
+///     touched, and the next run runs everything once.
+///   * Step: a step gave the generation back mid-region -- a solver commit
+///     whose descendant's closest candidate published nothing. The walk
+///     re-picks the closest candidate that did publish and returns a valid
+///     pose, so the caller drops the program and asks the walk.
+///   * Publish: a joint's final or rest frame is unusable at publication. The
+///     walk keeps such a joint on its rest chain, so this too is the walk's to
+///     answer.
+enum class RigExecBakedBail {
+    None,
+    StageFrames,
+    Step,
+    Publish,
+};
+
 /// One compiled epoch, flattened.
 class RigExecBakedProgram {
 public:
@@ -184,9 +274,14 @@ public:
 
     /// Runs the whole program at \p time and publishes into \p pose.
     ///
-    /// Returns false having published diagnostics when the program could not
-    /// complete; the caller is expected to fall back to the dynamic path.
+    /// Returns false when the program could not complete, and GetLastBail
+    /// then says why: after a StageFrames bail \p pose is the generation's
+    /// (invalid) answer, after any other the caller falls back to the dynamic
+    /// path and drops the program.
     bool Run(UsdTimeCode time, RigExecRigPose *pose);
+
+    /// Why the last Run returned false; None after one that returned true.
+    RigExecBakedBail GetLastBail() const { return _lastBail; }
 
     /// Samples the stage-frame prologue's reads at \p time into \p seeds.
     ///
@@ -213,7 +308,10 @@ public:
     /// that misses it -- a value on an input the program re-reads every
     /// frame, or anything on a prim the bake never looked at -- leaves the
     /// program standing, which is the whole point of having an index rather
-    /// than dropping the program on every notice.
+    /// than dropping the program on every notice. Anything but a value on a
+    /// property the bake named -- a connection or a target retargeted --
+    /// hits it: the walk the bake recorded for that property is what routes
+    /// later value edits (ApplyValueEdits), and only a rebuild re-records it.
     bool IsInvalidatedBy(const UsdNotice::ObjectsChanged &notice) const;
 
     /// Absorbs \p notice without a rebuild when it is nothing but new
@@ -264,6 +362,33 @@ public:
     /// everything once. Interactive overrides do NOT call this: an override
     /// is a source value like any other and is compared like one.
     void BumpProgramStamp();
+
+    /// Routes \p notice to the per-frame inputs it reached, when it is
+    /// nothing but new VALUES the program can place, and says whether it
+    /// did (unified-program spec rules S2, S3).
+    ///
+    /// An edit on an input a step reads every frame is answered the way the
+    /// run after a drag is lifted is: the input's override number is marked
+    /// edited, and the next run re-runs the steps that declare it and their
+    /// cone -- instead of BumpProgramStamp's one run of everything. An edit
+    /// on a property the program reads through a value-compared source (a
+    /// property chain, a mover assembled by RevisionStatic, a stage
+    /// transform) needs nothing, because the source compares it, and an
+    /// edit on a property nothing reads needs nothing at all.
+    ///
+    /// All-or-nothing, and to be asked only of a notice IsInvalidatedBy
+    /// declined: returns false, having changed NOTHING, for any resync, for
+    /// layer metadata, for a field other than a value, for a property the
+    /// bake named but no step declares, and for an input no reader re-reads.
+    /// The caller then bumps the stamp.
+    bool ApplyValueEdits(const UsdNotice::ObjectsChanged &notice);
+
+    /// The read-only half of ApplyValueEdits: whether it would route
+    /// \p notice, and in \p readPaths the property paths the notice names
+    /// that anything in the program can read -- the paths a frame cache must
+    /// still retire for. A path read by nothing is left out.
+    bool DryRunValueEdits(const UsdNotice::ObjectsChanged &notice,
+                          std::vector<SdfPath> *readPaths) const;
 
     /// Places the standing interactive overrides for the generations that
     /// follow, returning false when one of them names something the program
@@ -323,6 +448,18 @@ public:
     /// \p previous is left empty of the state it handed over.
     void AdoptGeometryStateFrom(RigExecBakedProgram &previous);
 
+    /// Drops every reference the program holds that keeps the stage alive:
+    /// the stage pointer itself and the blend-sample resolver, which
+    /// captured a copy of it.
+    ///
+    /// For a RETIRING program only, which runs nothing afterwards: its prims,
+    /// attributes and queries stay, and they do not own the stage. The
+    /// evaluator calls this on its own thread before handing the program to
+    /// a detached destroy, so the last reference to a stage can never be
+    /// dropped -- and the stage torn down -- on a worker behind the host's
+    /// back.
+    void ReleaseStageReferences();
+
     /// The step graph this program runs.
     ///
     /// The graph IS the program's structure, so the suite that asserts its
@@ -335,6 +472,7 @@ public:
 private:
     explicit RigExecBakedProgram(std::unique_ptr<RigExecBakedProgramImpl> impl);
     std::unique_ptr<RigExecBakedProgramImpl> _impl;
+    RigExecBakedBail _lastBail = RigExecBakedBail::None;
 };
 
 }  // namespace rigExec

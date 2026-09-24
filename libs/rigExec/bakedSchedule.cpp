@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -359,6 +360,32 @@ MeasureGeometry(const RigExecBakedProgramImpl &B)
     return sizes;
 }
 
+/// MeasureGeometry, deferred to the first step whose size asks for it.
+///
+/// Measuring reads every chain's points off the stage, and Build costs the
+/// pose half before the geometry half exists: none of those steps asks, so
+/// the read happens once, when the geometry steps are costed, and not once
+/// per pass.
+class LazyGeometrySizes {
+public:
+    explicit LazyGeometrySizes(const RigExecBakedProgramImpl &program)
+        : _program(program)
+    {
+    }
+
+    const GeometrySizes &Get()
+    {
+        if (!_sizes) {
+            _sizes = MeasureGeometry(_program);
+        }
+        return *_sizes;
+    }
+
+private:
+    const RigExecBakedProgramImpl &_program;
+    std::optional<GeometrySizes> _sizes;
+};
+
 /// How many slots of \p domain \p step declares it writes.
 double
 WrittenSlots(const RigExecBakedStep &step, RigExecBakedSlotDomain domain)
@@ -373,7 +400,7 @@ WrittenSlots(const RigExecBakedStep &step, RigExecBakedSlotDomain domain)
 }
 
 double
-StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
+StepSize(const RigExecBakedProgramImpl &B, LazyGeometrySizes &geometry,
          const RigExecBakedStep &step)
 {
     const size_t object = size_t(step.object);
@@ -430,7 +457,7 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
                           .influenceSlots.size());
     }
     case RigExecBakedStepKind::RevisionStatic:
-        return geometry.revisionPoints[object];
+        return geometry.Get().revisionPoints[object];
     case RigExecBakedStepKind::RevisionChunk: {
         // The chunk's OWN vertex range, not the revision's: the partition
         // divides the work between the chunks, so sizing each of them by the
@@ -447,17 +474,17 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
             const RigExecBakedProgramImpl::GeomChunk &chunk =
                 geom.chunks[size_t(step.part)];
             return double(chunk.end - chunk.begin) *
-                   geometry.revisionElementSize[object];
+                   geometry.Get().revisionElementSize[object];
         }
-        return geometry.revisionUnits[object];
+        return geometry.Get().revisionUnits[object];
     }
     case RigExecBakedStepKind::ChainStatus:
         // The chain's points, not its revisions: the body copies the
         // published array whole (bakedGeometry.cpp), and the MoverFailed
         // sweep over the revisions costs a branch each.
-        return geometry.chainPoints[object];
+        return geometry.Get().chainPoints[object];
     case RigExecBakedStepKind::Derived:
-        return geometry.derivedPoints[object];
+        return geometry.Get().derivedPoints[object];
     }
     return 1;
 }
@@ -465,11 +492,12 @@ StepSize(const RigExecBakedProgramImpl &B, const GeometrySizes &geometry,
 }  // namespace
 
 void
-RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program)
+RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
+                            size_t firstStep)
 {
     RigExecBakedProgramImpl &B = *program;
-    const GeometrySizes geometry = MeasureGeometry(B);
-    for (int index = 0; index < int(B.steps.size()); ++index) {
+    LazyGeometrySizes geometry(B);
+    for (int index = int(firstStep); index < int(B.steps.size()); ++index) {
         RigExecBakedStep &step = B.steps[size_t(index)];
         const StepCostConstants &constants = kStepCosts[size_t(step.kind)];
         step.sizeUnits = StepSize(B, geometry, step);
@@ -765,11 +793,7 @@ RigExecBakedBuildClusters(const RigExecBakedProgramImpl &B, double grainUs)
 
 namespace {
 
-/// A half-open run of one domain's slots, and the step it belongs to.
-struct SlotInterval {
-    uint32_t begin = 0, end = 0;
-    int step = 0;
-};
+using SlotInterval = RigExecBakedSlotInterval;
 
 /// Removes [\p begin, \p end) from every interval of \p intervals, splitting
 /// one that straddles it. This is what "update lastWriter for the range"
@@ -812,9 +836,13 @@ std::string StepLabel(const RigExecBakedProgramImpl &B,
 }  // namespace
 
 void
-RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program)
+RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
+                           RigExecBakedEdgeSweep *sweep)
 {
     RigExecBakedProgramImpl &B = *program;
+    // Where the previous pass stopped. Everything below walks only the steps
+    // from here on; the tables carry what the earlier ones contributed.
+    const int first = sweep->swept;
     if (B.phasedReads) {
         // The run's phased-read store is ONE container, and a step's records
         // reach it through a fold the executor performs. Slot-per-step
@@ -827,7 +855,7 @@ RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program)
         // an upper bound, so widening one is always sound; it is only ever
         // paid for by a rig that declares a read phase, and nothing else
         // about the schedule changes.
-        for (int index = 0; index < int(B.steps.size()); ++index) {
+        for (int index = first; index < int(B.steps.size()); ++index) {
             for (RigExecBakedSlotRange &range :
                      B.steps[size_t(index)].writes) {
                 if (range.domain == RigExecBakedSlotDomain::Snapshots) {
@@ -838,8 +866,8 @@ RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program)
         }
     }
     std::array<std::vector<SlotInterval>, RigExecBakedSlotDomainCount>
-        writers, readers;
-    for (int index = 0; index < int(B.steps.size()); ++index) {
+        &writers = sweep->writers, &readers = sweep->readers;
+    for (int index = first; index < int(B.steps.size()); ++index) {
         RigExecBakedStep &step = B.steps[size_t(index)];
         SortRanges(&step.reads);
         SortRanges(&step.writes);
@@ -901,32 +929,45 @@ RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program)
                       index, pred);
         }
     }
-    for (RigExecBakedStep &step : B.steps) {
+    // Successors are appended in increasing successor index, so an earlier
+    // step's list, extended by this pass, is the list one sweep over the
+    // whole program would have built: every step this pass adds is later
+    // than every successor the earlier pass recorded.
+    for (int index = first; index < int(B.steps.size()); ++index) {
+        RigExecBakedStep &step = B.steps[size_t(index)];
         step.succs.clear();
         step.label = std::string(RigExecBakedStepKindName(step.kind)) + " " +
                      StepLabel(B, step);
     }
-    for (int index = 0; index < int(B.steps.size()); ++index) {
+    for (int index = first; index < int(B.steps.size()); ++index) {
         for (const int pred : B.steps[size_t(index)].preds) {
             B.steps[size_t(pred)].succs.push_back(index);
         }
     }
+    sweep->swept = int(B.steps.size());
 }
 
 void
-RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
+RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program,
+                          RigExecBakedEdgeSweep *sweep)
 {
     RigExecBakedProgramImpl &B = *program;
-    // Re-run rather than assumed done: Build calls the sweep once over the
-    // pose half alone, so that the partition rule (§6) can read the pose
-    // steps' levels before it decides where to cut, and the geometry steps
-    // it then appends need edges of their own.
-    RigExecBakedBuildStepEdges(&B);
+    // Where the time goes, part by part, under Build's Bake.the_step_graph.
+    RigExecProfilePhases phases(B.profiler, "compile");
+    phases.Next("Bake.the_step_graph.geometry_edges");
+    // Extended rather than re-run: Build swept the pose half alone, so that
+    // the partition rule (§6) could read the pose steps' levels before it
+    // decided where to cut, and the geometry steps it then appended need
+    // edges of their own. The pose steps' edges, costs and levels are final
+    // already; see RigExecBakedEdgeSweep.
+    const size_t firstGeometryStep = size_t(sweep->swept);
+    RigExecBakedBuildStepEdges(&B, sweep);
 
     // The schedule the parallel executor runs, chosen once here so that a
     // frame costs it nothing: the cost model, the packing, and one padded
     // counter per cluster.
-    RigExecBakedAssignStepCosts(&B);
+    RigExecBakedAssignStepCosts(&B, firstGeometryStep);
+    phases.Next("Bake.the_step_graph.clusters");
     B.clustering = RigExecBakedBuildClusters(
         B, RigExecBakedScheduleGrainUs(
                std::accumulate(B.steps.begin(), B.steps.end(), 0.0,
@@ -938,7 +979,9 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
     }
     B.clusterCounters = std::make_unique<RigExecBakedClusterCounter[]>(
         std::max<size_t>(B.clustering.clusters.size(), 1));
+    phases.Next("Bake.the_step_graph.input_dependencies");
     RigExecBakedDeclareInputDependencies(&B);
+    phases.Next("Bake.the_step_graph.cones");
     RigExecBakedBuildCones(&B);
 }
 
@@ -946,9 +989,17 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
 // Cone re-execution (§7).
 //
 // What a frame may skip, and why skipping it is not an approximation. ONE
-// closure decides it, computed once at Build:
+// closure decides it, computed once at Build, at two grains:
 //
-//   cone[c]    -- run c and you have to run all of this
+//   stepCone[s] -- run step s and you have to run all of this
+//   cone[c]     -- the same over clusters
+//
+// A live run decides with the first: a cluster is how the parallel executor
+// packs work, not a unit of change, so a dirty step re-runs its own forward
+// closure and never the clean steps packed beside it. The cluster closure is
+// kept for the readers that answer per cluster -- the output-affected index,
+// the sparse frame-cache planner, the frozen clone -- and a run's closed
+// clusters are the ones holding a closed step.
 //
 // There used to be a second, the restore closure: "run c and all of THIS had
 // to have run first, because c reads a slot version the end of a run does not
@@ -967,16 +1018,8 @@ RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program)
 // none of them.
 // ---------------------------------------------------------------------------
 
-namespace {
-
-/// The clusters of \p program, in an order in which every cluster follows
-/// its predecessors.
-///
-/// Cluster ids come out of the level packing, which numbers bins and not
-/// dependencies -- cluster 6 can perfectly well have cluster 10 among its
-/// predecessors -- so a closure over the cluster graph needs its own order.
 std::vector<int>
-ClusterTopologicalOrder(const RigExecBakedClustering &clustering)
+RigExecBakedClusterTopologicalOrder(const RigExecBakedClustering &clustering)
 {
     const size_t count = clustering.clusters.size();
     std::vector<int> remaining(count, 0), order;
@@ -1004,16 +1047,20 @@ ClusterTopologicalOrder(const RigExecBakedClustering &clustering)
     return order;
 }
 
-}  // namespace
-
 void
 RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
 {
     RigExecBakedProgramImpl &B = *program;
     RigExecBakedCones &cones = B.cones;
     const size_t count = B.clustering.clusters.size();
+    const size_t stepCount = B.steps.size();
     cones = RigExecBakedCones();
     B.closed.Resize(count);
+    B.closedSteps.Resize(stepCount);
+    // Cached on the clustering: the forward closure below walks it
+    // backwards, and a partial cone re-run walks it forwards.
+    B.clustering.topologicalOrder =
+        RigExecBakedClusterTopologicalOrder(B.clustering);
     if (count == 0) {
         return;
     }
@@ -1023,6 +1070,8 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     for (size_t c = 0; c < count; ++c) {
         cones.cone[c].Resize(count);
     }
+    cones.alwaysSteps.Resize(stepCount);
+    cones.poseSteps.Resize(stepCount);
 
     // ---- which steps read outside the graph ---------------------------------
     //
@@ -1093,11 +1142,14 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             // -- so it can be neither a source nor a pure function of slots.
             step.externalReads = true;
         }
+        const int index = int(&step - B.steps.data());
         if (step.externalReads) {
             cones.always.Set(step.cluster);
+            cones.alwaysSteps.Set(index);
         }
         if (!RigExecBakedIsGeometryStep(step.kind)) {
             cones.poseClusters.Set(step.cluster);
+            cones.poseSteps.Set(index);
         }
         if (step.varyingInputs || step.resolvedInputReads) {
             cones.varyingSteps.push_back(int(&step - B.steps.data()));
@@ -1107,18 +1159,57 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
         }
     }
 
+    // ---- who re-reads an input a stage value edit reached --------------------
+    //
+    // An edit on a per-frame input is routed like the run after a drag is
+    // lifted (unified-program spec rule S2), so it is only as good as the
+    // reader it reaches. Three readers qualify: a step that declares the
+    // input (the closure's override rule re-runs it), the avar table (the
+    // prologue re-reads every varying binding and compares the table by
+    // value), and the provider ladder -- but only a ladder the prologue
+    // recomposes every frame; a ladder composed once holds what Build read.
+    // An index with none of the three is answered by a stamp bump.
+    cones.editRoute.assign(B.overridden.size(), 0);
+    const auto route = [&cones](int index, uint8_t reader) {
+        if (index >= 0 && size_t(index) < cones.editRoute.size()) {
+            cones.editRoute[size_t(index)] |= reader;
+        }
+    };
+    for (const RigExecBakedStep &step : B.steps) {
+        for (const int input : step.overrideInputs) {
+            route(input, kEditRouteStep);
+        }
+    }
+    for (const auto *bindings : {&B.avarBindings, &B.avarConstantBindings}) {
+        for (const RigExecBakedProgramImpl::AvarBinding &binding : *bindings) {
+            route(binding.input.overrideIndex, kEditRouteAvar);
+        }
+    }
+    if (B.ladderVarying) {
+        for (const int input : B.ladderOverrides) {
+            route(input, kEditRouteLadder);
+        }
+    }
+
     // ---- what a changed source makes dirty ----------------------------------
     cones.avarCluster.assign(B.paths.size(), -1);
     cones.chainBaseClusters.assign(B.chains.size(), {});
     cones.solverPointsClusters.assign(B.solvers.size(), {});
     cones.revisionClusters.assign(B.revisionIndex.size(), {});
     cones.revisionStaticCluster.assign(B.revisionIndex.size(), -1);
+    cones.avarStep.assign(B.paths.size(), -1);
+    cones.chainBaseSteps.assign(B.chains.size(), {});
+    cones.solverPointsSteps.assign(B.solvers.size(), {});
+    cones.revisionSteps.assign(B.revisionIndex.size(), {});
+    cones.revisionStaticStep.assign(B.revisionIndex.size(), -1);
     for (const RigExecBakedStep &step : B.steps) {
+        const int index = int(&step - B.steps.data());
         if (step.kind == RigExecBakedStepKind::ComposeSubtree) {
             const RigExecBakedComposeGroup &group =
                 B.composeGroups[size_t(step.object)];
             for (int slot = group.begin; slot < group.end; ++slot) {
                 cones.avarCluster[size_t(slot)] = step.cluster;
+                cones.avarStep[size_t(slot)] = index;
             }
         }
         for (const RigExecBakedSlotRange &range : step.reads) {
@@ -1127,6 +1218,7 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
                      c < range.end && c < cones.chainBaseClusters.size();
                      ++c) {
                     cones.chainBaseClusters[c].push_back(step.cluster);
+                    cones.chainBaseSteps[c].push_back(index);
                 }
             } else if (range.domain ==
                        RigExecBakedSlotDomain::SolverPoints) {
@@ -1134,18 +1226,21 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
                      si < range.end && si < cones.solverPointsClusters.size();
                      ++si) {
                     cones.solverPointsClusters[si].push_back(step.cluster);
+                    cones.solverPointsSteps[si].push_back(index);
                 }
             }
         }
         switch (step.kind) {
         case RigExecBakedStepKind::RevisionStatic:
             cones.revisionStaticCluster[size_t(step.object)] = step.cluster;
+            cones.revisionStaticStep[size_t(step.object)] = index;
             [[fallthrough]];
         case RigExecBakedStepKind::InfluenceFold:
         case RigExecBakedStepKind::RevisionChunk:
         case RigExecBakedStepKind::RevisionFuse:
             cones.revisionClusters[size_t(step.object)].push_back(
                 step.cluster);
+            cones.revisionSteps[size_t(step.object)].push_back(index);
             break;
         default:
             break;
@@ -1156,10 +1251,14 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     cones.nativeSourceClusters.assign(B.nativeSources.size(), {});
     cones.deltaBaseClusters.assign(B.deltaBasePaths.size(), {});
     cones.constraintArrayClusters.assign(B.constraintArrays.size(), {});
+    cones.nativeSourceSteps.assign(B.nativeSources.size(), {});
+    cones.deltaBaseSteps.assign(B.deltaBasePaths.size(), {});
+    cones.constraintArraySteps.assign(B.constraintArrays.size(), {});
     for (const RigExecBakedStep &step : B.steps) {
         if (step.kind != RigExecBakedStepKind::Constraint) {
             continue;
         }
+        const int index = int(&step - B.steps.data());
         const RigExecBakedProgramImpl::WalkStep &walk =
             B.walkSteps[size_t(step.object)];
         if (walk.solverBatch || walk.index < 0) {
@@ -1171,19 +1270,26 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
             if (native >= 0) {
                 cones.nativeSourceClusters[size_t(native)].push_back(
                     step.cluster);
+                cones.nativeSourceSteps[size_t(native)].push_back(index);
             }
         }
         if (constraint.worldUpNative >= 0) {
             cones.nativeSourceClusters[size_t(constraint.worldUpNative)]
                 .push_back(step.cluster);
+            cones.nativeSourceSteps[size_t(constraint.worldUpNative)]
+                .push_back(index);
         }
         if (constraint.deltaBase >= 0) {
             cones.deltaBaseClusters[size_t(constraint.deltaBase)].push_back(
                 step.cluster);
+            cones.deltaBaseSteps[size_t(constraint.deltaBase)].push_back(
+                index);
         }
         if (constraint.arrays >= 0) {
             cones.constraintArrayClusters[size_t(constraint.arrays)]
                 .push_back(step.cluster);
+            cones.constraintArraySteps[size_t(constraint.arrays)].push_back(
+                index);
         }
     }
     for (std::vector<int> &clusters : cones.nativeSourceClusters) {
@@ -1208,13 +1314,39 @@ RigExecBakedBuildCones(RigExecBakedProgramImpl *program)
     }
 
     // ---- the forward closure ------------------------------------------------
-    const std::vector<int> order = ClusterTopologicalOrder(B.clustering);
+    const std::vector<int> &order = B.clustering.topologicalOrder;
     for (size_t k = order.size(); k-- > 0;) {
         const int cluster = order[k];
         RigExecBakedClusterSet &cone = cones.cone[size_t(cluster)];
         cone.Set(cluster);
         for (const int succ : B.clustering.clusters[size_t(cluster)].succs) {
             cone.Union(cones.cone[size_t(succ)]);
+        }
+    }
+
+    // ---- and over steps -----------------------------------------------------
+    //
+    // In reverse program order, which needs no sort: every step edge points
+    // forward in program order (§4.1), so each successor's row is final
+    // before any predecessor reads it.
+    const size_t words = (stepCount + 63) / 64;
+    cones.stepWords = words;
+    cones.stepCone.assign(stepCount * words, 0);
+    for (size_t s = stepCount; s-- > 0;) {
+        uint64_t *row = cones.stepCone.data() + s * words;
+        row[s >> 6] |= uint64_t(1) << (s & 63);
+        for (const int succ : B.steps[s].succs) {
+            if (!TF_VERIFY(size_t(succ) > s && size_t(succ) < stepCount,
+                           "rigExec: baked step %zu has successor %d, "
+                           "which is not after it in program order",
+                           s, succ)) {
+                continue;
+            }
+            const uint64_t *other =
+                cones.stepCone.data() + size_t(succ) * words;
+            for (size_t w = 0; w < words; ++w) {
+                row[w] |= other[w];
+            }
         }
     }
 }
@@ -1226,12 +1358,19 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     RigExecBakedProgramImpl &B = *program;
     RigExecBakedCones &cones = B.cones;
     const size_t count = B.clustering.clusters.size();
+    const size_t stepCount = B.steps.size();
     B.closed.Resize(count);
+    B.closedSteps.Resize(stepCount);
     if (count == 0) {
         return;
     }
+    // The STEPS a change starts from (rule C2 of the unified-program spec).
+    // Every seed below names the step that reads the moved source, never its
+    // cluster: a cluster is how the parallel executor packs work, and
+    // dirtying a whole one for a single member re-ran every clean step
+    // packed beside it.
     RigExecBakedClusterSet dirty;
-    dirty.Resize(count);
+    dirty.Resize(stepCount);
 
     // What makes a run trust NOTHING it holds: the caller forcing one (the
     // cone verifier's second pass); a program stamp that moved, which is the
@@ -1253,7 +1392,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                                    B.hasPropertyChains &&
                                    B.propertyResults != B.lastPropertyResults;
     if (full) {
-        dirty.SetAll(count);
+        // Everything; the closure below is not consulted.
     } else if (!B.everRan) {
         // The FIRST run of this program -- §7's other dirty set [S28].
         //
@@ -1272,13 +1411,13 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // every source whose cone reaches one of them -- its own
         // RevisionStatic, its chain's base, the matrices of its influences
         // -- reaches the rest of the revision as well.
-        dirty.Union(cones.poseClusters);
-        dirty.Union(cones.always);
+        dirty.Union(cones.poseSteps);
+        dirty.Union(cones.alwaysSteps);
         for (const int index : cones.varyingSteps) {
-            dirty.Set(B.steps[size_t(index)].cluster);
+            dirty.Set(index);
         }
         for (const int index : cones.overrideSteps) {
-            dirty.Set(B.steps[size_t(index)].cluster);
+            dirty.Set(index);
         }
         for (size_t r = 0; r < B.revisionIndex.size(); ++r) {
             const auto &[chainIndex, revisionIndex] = B.revisionIndex[r];
@@ -1293,16 +1432,16 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
             // already compared the two this run -- it is a source, so it
             // runs before this set is computed -- and `staticDirty` is that
             // comparison. Read the same way the steady-state branch reads
-            // it, and dirtied the same way: the static cluster, whose cone
+            // it, and dirtied the same way: the static step, whose cone
             // carries the rest of the revision.
             if (revision.staticDirty) {
-                dirty.Set(cones.revisionStaticCluster[r]);
+                dirty.Set(cones.revisionStaticStep[r]);
             }
             if (revision.ran) {
                 continue;
             }
-            for (const int cluster : cones.revisionClusters[r]) {
-                dirty.Set(cluster);
+            for (const int index : cones.revisionSteps[r]) {
+                dirty.Set(index);
             }
         }
         // And the chains whose AUTHORED points moved with the same edit, or
@@ -1316,12 +1455,12 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
             if (chain.haveBase && !chain.baseDirty) {
                 continue;
             }
-            for (const int cluster : cones.chainBaseClusters[c]) {
-                dirty.Set(cluster);
+            for (const int index : cones.chainBaseSteps[c]) {
+                dirty.Set(index);
             }
         }
     } else {
-        dirty.Union(cones.always);
+        dirty.Union(cones.alwaysSteps);
         // Avars, per provider: eleven doubles compared, not a flag consulted.
         for (size_t i = 0; i < B.paths.size(); ++i) {
             const size_t base = i * 11;
@@ -1330,18 +1469,18 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 moved = B.avars[base + k] != B.lastAvars[base + k];
             }
             if (moved) {
-                dirty.Set(cones.avarCluster[i]);
+                dirty.Set(cones.avarStep[i]);
             }
         }
         // The transforms the prologue read off the stage for the plain
         // Xformables a constraint targets: sixteen numbers per slot compared
         // by VALUE, exactly as the avars above are, because "the time moved"
         // is never the predicate for a source. The compose group covering
-        // the slot is what declares a write of its frame, so its cluster is
+        // the slot is what declares a write of its frame, so its step is
         // the one every reader of that frame hangs off.
         for (size_t k = 0; k < B.xformSlots.size(); ++k) {
             if (B.xformBase[k] != B.lastXformBase[k]) {
-                dirty.Set(cones.avarCluster[size_t(B.xformSlots[k])]);
+                dirty.Set(cones.avarStep[size_t(B.xformSlots[k])]);
             }
         }
         // The provider ladder, where the prologue recomposed it and found a
@@ -1350,7 +1489,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         // declares the write every reader of that frame -- and of the
         // rest -> pose matrices beside it -- hangs off.
         for (const int slot : B.ladderMovedSlots) {
-            dirty.Set(cones.avarCluster[size_t(slot)]);
+            dirty.Set(cones.avarStep[size_t(slot)]);
         }
         // A constraint's own authored tables, which the prologue re-reads
         // at the frame's time. Compared by value, values and diagnostic
@@ -1374,8 +1513,8 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 arrays.poleDiagnostics == arrays.lastPoleDiagnostics) {
                 continue;
             }
-            for (const int cluster : cones.constraintArrayClusters[k]) {
-                dirty.Set(cluster);
+            for (const int index : cones.constraintArraySteps[k]) {
+                dirty.Set(index);
             }
         }
         // And the transform each geometry-domain constraint measures its
@@ -1383,8 +1522,8 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         for (size_t k = 0; k < B.deltaBasePaths.size(); ++k) {
             if (B.deltaBaseOk[k] != B.lastDeltaBaseOk[k] ||
                 B.deltaBaseMatrix[k] != B.lastDeltaBaseMatrix[k]) {
-                for (const int cluster : cones.deltaBaseClusters[k]) {
-                    dirty.Set(cluster);
+                for (const int index : cones.deltaBaseSteps[k]) {
+                    dirty.Set(index);
                 }
             }
         }
@@ -1395,8 +1534,8 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         for (size_t k = 0; k < B.nativeSources.size(); ++k) {
             if (B.nativeFrameOk[k] != B.lastNativeFrameOk[k] ||
                 B.nativeFrames[k].points != B.lastNativeFrames[k].points) {
-                for (const int cluster : cones.nativeSourceClusters[k]) {
-                    dirty.Set(cluster);
+                for (const int index : cones.nativeSourceSteps[k]) {
+                    dirty.Set(index);
                 }
             }
         }
@@ -1407,8 +1546,8 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 chain.haveBase == (B.lastHaveBase[c] != 0)) {
                 continue;
             }
-            for (const int cluster : cones.chainBaseClusters[c]) {
-                dirty.Set(cluster);
+            for (const int index : cones.chainBaseSteps[c]) {
+                dirty.Set(index);
             }
         }
         // Each ribbon's driver curve, which the prologue has already read
@@ -1418,8 +1557,8 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
             if (!B.solvers[si].ribbonPointsDirty) {
                 continue;
             }
-            for (const int cluster : cones.solverPointsClusters[si]) {
-                dirty.Set(cluster);
+            for (const int index : cones.solverPointsSteps[si]) {
+                dirty.Set(index);
             }
         }
         // Each skin revision's static packet, which its own source step has
@@ -1430,50 +1569,81 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
                 B.chains[size_t(chainIndex)]
                     .revisions[size_t(revisionIndex)];
             if (revision.staticDirty) {
-                dirty.Set(cones.revisionStaticCluster[r]);
+                dirty.Set(cones.revisionStaticStep[r]);
             }
             if (!revision.ran) {
                 // Geometry state that a rebuild did not carry over: the
                 // revision holds no answer to re-publish, so it is not a
                 // candidate for skipping whatever its packet says.
-                for (const int cluster : cones.revisionClusters[r]) {
-                    dirty.Set(cluster);
+                for (const int index : cones.revisionSteps[r]) {
+                    dirty.Set(index);
                 }
             }
         }
         // The inputs a Solve and a Constraint read off the stage per frame.
-        // Two tests, and both are about the VALUE that reaches the step: an
+        // Three tests, and all are about the VALUE that reaches the step: an
         // input that is a function of time can only have moved if the time
-        // did, and an input an override stands on moved when the override
-        // was placed and again when it was lifted.
+        // did; an input an override stands on moved when the override was
+        // placed and again when it was lifted; and an input whose stage
+        // value an edit reached moved once, at the edit (`edited`).
         if (time != B.lastTime) {
             for (const int index : cones.varyingSteps) {
-                dirty.Set(B.steps[size_t(index)].cluster);
+                dirty.Set(index);
             }
         } else if (chainResultsMoved) {
             for (const int index : cones.varyingSteps) {
-                const RigExecBakedStep &step = B.steps[size_t(index)];
-                if (step.resolvedInputReads) {
-                    dirty.Set(step.cluster);
+                if (B.steps[size_t(index)].resolvedInputReads) {
+                    dirty.Set(index);
                 }
             }
         }
+        const bool edited = B.anyEdited;
         for (const int index : cones.overrideSteps) {
             const RigExecBakedStep &step = B.steps[size_t(index)];
             for (const int input : step.overrideInputs) {
                 if (B.overridden[size_t(input)] ||
-                    B.lastOverridden[size_t(input)]) {
-                    dirty.Set(step.cluster);
+                    B.lastOverridden[size_t(input)] ||
+                    (edited && size_t(input) < B.edited.size() &&
+                     B.edited[size_t(input)])) {
+                    dirty.Set(index);
                     break;
                 }
             }
         }
     }
 
-    B.closed.Clear();
-    for (size_t c = 0; c < count; ++c) {
-        if (dirty.Test(int(c))) {
-            B.closed.Union(cones.cone[c]);
+    if (full) {
+        B.closedSteps.SetAll(stepCount);
+        B.closed.SetAll(count);
+    } else {
+        // The forward closure of the dirty steps, one row per dirty step.
+        const size_t words = cones.stepWords;
+        B.closedSteps.Clear();
+        uint64_t *closedWords = B.closedSteps.words.data();
+        for (size_t w = 0; w < dirty.words.size(); ++w) {
+            const uint64_t bits = dirty.words[w];
+            if (!bits) {
+                continue;
+            }
+            for (size_t b = 0; b < 64; ++b) {
+                if (!((bits >> b) & 1)) {
+                    continue;
+                }
+                const uint64_t *row =
+                    cones.stepCone.data() + (w * 64 + b) * words;
+                for (size_t k = 0; k < words; ++k) {
+                    closedWords[k] |= row[k];
+                }
+            }
+        }
+        // And the clusters that hold one, which is all a cluster-grain
+        // reader of the closure -- the parallel executor's dispatch, the
+        // frozen serial runner -- is told.
+        B.closed.Clear();
+        for (size_t index = 0; index < stepCount; ++index) {
+            if (B.closedSteps.Test(int(index))) {
+                B.closed.Set(B.steps[index].cluster);
+            }
         }
     }
     // And that is the whole closure. Nothing is added to it to RESTORE a
@@ -1502,6 +1672,12 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
         arrays.lastPoleDiagnostics = arrays.poleDiagnostics;
     }
     B.lastOverridden = B.overridden;
+    // Consumed by this closure whichever branch took it: a full run and a
+    // first run re-read every input the bits could name.
+    if (B.anyEdited) {
+        std::fill(B.edited.begin(), B.edited.end(), 0);
+        B.anyEdited = false;
+    }
     B.lastPropertyResults = B.propertyResults;
     B.lastHaveBase.resize(B.chains.size());
     for (size_t c = 0; c < B.chains.size(); ++c) {
@@ -1511,6 +1687,7 @@ RigExecBakedComputeClosure(RigExecBakedProgramImpl *program, UsdTimeCode time,
     B.lastProgramStamp = B.programStamp;
     B.everRan = true;
     B.lastClosedClusters = B.closed.Count();
+    B.lastClosedSteps = B.closedSteps.Count();
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,7 +1757,8 @@ RunStepsSerial(RigExecBakedProgramImpl *program, UsdTimeCode time)
         // A source already ran, before the dirty set that decided the rest
         // could be computed; a step outside the closed set is this run's
         // skip, and its slots, its lines and its structural counters stand.
-        if (step.isSource || !B.closed.Test(step.cluster)) {
+        if (step.isSource ||
+            !B.closedSteps.Test(int(&step - B.steps.data()))) {
             continue;
         }
         // A PAIR around the body, the same interval the parallel executor
@@ -1684,6 +1862,12 @@ ParallelRun::RunFrom(int start)
             if (step.isSource) {
                 continue;  // ran before the region, with every other source
             }
+            if (!B.closedSteps.Test(index)) {
+                // A clean member of a cluster that holds a dirty one: the
+                // closure is per step, and the cluster is only the unit this
+                // task runs. Skipped exactly as the serial executor skips it.
+                continue;
+            }
             const uint64_t began = profiling ? RigExecProfiler::NowUs() : 0;
             const uint64_t beganNs = measuring ? NowNs() : 0;
             RunStepBody(&B, &step, time);
@@ -1716,6 +1900,15 @@ ParallelRun::RunFrom(int start)
         }
         // Release what this cluster wrote to whoever picks its successors
         // up, and acquire it on the thread that sees the last decrement.
+        //
+        // The counters stay per CLUSTER and count every closed predecessor on
+        // the unreduced cluster edges. That is what makes a step closure safe
+        // to dispatch: the clusters holding a closed step are not a union of
+        // cluster cones and so not path-convex in general, but every edge
+        // between two closed steps is an edge between their clusters, and a
+        // path of step edges from one closed step to another runs through
+        // closed steps only. A transitively reduced cluster graph would lose
+        // exactly the edges that carry that order.
         int next = -1;
         for (const int succ : cluster.succs) {
             if (!B.closed.Test(succ)) {
@@ -1858,8 +2051,13 @@ RigExecBakedRunSteps(RigExecBakedProgramImpl *program, UsdTimeCode time,
         }
     }
     RigExecBakedComputeClosure(program, time, force);
+    // Per STEP, as the executors skip: a clean step inside a dispatched
+    // cluster is skipped too, so it has to drop last run's observation
+    // counters and deltas like any other skipped step, or the epilogue would
+    // replay a revision count and an "influences moved" this run never saw.
     for (RigExecBakedStep &step : program->steps) {
-        if (step.isSource || program->closed.Test(step.cluster)) {
+        if (step.isSource ||
+            program->closedSteps.Test(int(&step - program->steps.data()))) {
             continue;
         }
         step.MarkSkipped();

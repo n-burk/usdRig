@@ -18,9 +18,14 @@
 
 #include "pxr/usd/usd/timeCode.h"
 
+#include <array>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace rigExec {
+
+struct RigExecBakedEdgeSweep;
 
 /// Which executor a run uses.
 enum class RigExecBakedScheduleMode {
@@ -51,30 +56,71 @@ RigExecBakedScheduleMode RigExecBakedScheduleModeFromEnvironment();
 /// the previous write -- a step reading a slot no earlier step wrote is
 /// reading last run's value, and the step that overwrites it must still
 /// follow).
-void RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program);
-
-/// The edge sweep alone, over the steps built so far.
 ///
-/// Re-runnable, and run twice by Build: once over the pose half by itself,
-/// so that the vertex partition can ask what LEVEL a chunk's joints land at
-/// before it decides whether cutting the revision buys anything, and again
-/// from RigExecBakedBuildSchedule once the geometry steps are appended. The
-/// second sweep is not an increment on the first -- it clears every step's
-/// predecessors and successors and derives them again -- which is what makes
-/// running it twice produce exactly the graph running it once would have.
-///
-/// Sound only because a geometry step never precedes a pose step: the pose
-/// steps' edges, and therefore their levels, are the same in both sweeps.
-void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program);
+/// \p sweep carries the edge sweep Build started over the pose half; this
+/// extends it over the steps appended since (see RigExecBakedEdgeSweep).
+void RigExecBakedBuildSchedule(RigExecBakedProgramImpl *program,
+                               RigExecBakedEdgeSweep *sweep);
 
-/// Assigns every step its size, its cost and its longest-path level.
+/// One half-open run of a domain's slots, and the step it belongs to: the
+/// unit the edge sweep's writer and reader tables are kept in.
+struct RigExecBakedSlotInterval {
+    uint32_t begin = 0, end = 0;
+    int step = 0;
+};
+
+/// The edge sweep's running state, which is everything a step's edges
+/// depend on besides its own declarations: per domain, which step still
+/// holds the last write of each slot, and which steps have read each slot
+/// since that write.
+///
+/// Kept between the two halves of Build rather than rebuilt, because the
+/// sweep is a fold over the steps in program order and a step appended
+/// later can change nothing an earlier step's edges were derived from. So
+/// extending the tables over the geometry steps produces exactly the edges a
+/// single sweep over the finished program would have -- the pose steps' own
+/// edges, and with them the levels the vertex partition was cut from, are
+/// never revisited and cannot move.
+///
+/// Sound only while the program GROWS BY APPENDING: a step at or below
+/// `swept` must not have its declared ranges changed, nor a step be inserted
+/// before it. Build's two halves obey that (the geometry half appends, and
+/// reads the pose half's levels without writing them).
+struct RigExecBakedEdgeSweep {
+    std::array<std::vector<RigExecBakedSlotInterval>,
+               RigExecBakedSlotDomainCount>
+        writers, readers;
+    /// Steps [0, swept) carry their final predecessors and labels, and
+    /// successors among themselves; a later sweep only appends to those.
+    int swept = 0;
+};
+
+/// The edge sweep over the steps appended since \p sweep last ran, and
+/// checks that every new edge points forward.
+///
+/// Run twice by Build, over one \p sweep: once over the pose half by
+/// itself, so that the vertex partition can ask what LEVEL a chunk's joints
+/// land at before it decides whether cutting the revision buys anything, and
+/// again from RigExecBakedBuildSchedule over the geometry steps appended
+/// since. See RigExecBakedEdgeSweep for why the two passes together are the
+/// one sweep.
+void RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
+                                RigExecBakedEdgeSweep *sweep);
+
+/// Assigns every step from \p firstStep on its size, its cost and its
+/// longest-path level.
 ///
 /// The cost model is `a[kind] + b[kind] x size`, with the constants in the
 /// table at the head of bakedSchedule.cpp and the sizes §5.1 names. It is
 /// evaluated at Build from the program's own shape and never from a
 /// measurement -- see RigExecBakedScheduleCalibrationRequested for how the
 /// table is replaced when the shape stops predicting the machine.
-void RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program);
+///
+/// A step's cost reads nothing a later step adds, and its level only its
+/// predecessors', which are earlier -- so the steps before \p firstStep keep
+/// what an earlier call gave them, and Build costs each half once.
+void RigExecBakedAssignStepCosts(RigExecBakedProgramImpl *program,
+                                 size_t firstStep = 0);
 
 /// Partitions \p program's steps into clusters at \p grainUs microseconds.
 ///
@@ -96,12 +142,26 @@ RigExecBakedClustering RigExecBakedBuildClusters(
 /// otherwise `clamp(total cost / (4 x concurrency), 5us, 50us)`.
 double RigExecBakedScheduleGrainUs(double totalCost);
 
-/// Computes the cone closure of \p program's clusters (§7).
+/// The clusters of \p clustering, each after all of its predecessors.
 ///
-/// Once, at Build, from the edges and the clustering: `cone[c]` is every
-/// cluster that has to run when c does, and the lookup tables beside it are
-/// what a frame maps a changed source onto. Nothing here measures anything
-/// and nothing depends on a run.
+/// Cluster ids come out of the level packing, which numbers bins and not
+/// dependencies -- cluster 6 can perfectly well have cluster 10 among its
+/// predecessors -- so anything that walks the cluster graph one cluster at a
+/// time needs this order and not increasing id. A cycle is a coding error
+/// and leaves the clusters on it out of the answer. Build caches the result
+/// as `RigExecBakedClustering::topologicalOrder`.
+std::vector<int> RigExecBakedClusterTopologicalOrder(
+    const RigExecBakedClustering &clustering);
+
+/// Computes the cone closure of \p program's steps and clusters (§7).
+///
+/// Once, at Build, from the edges and the clustering: `stepCone` holds every
+/// step that has to run when a given step does, `cone[c]` every cluster that
+/// has to run when c does, and the lookup tables beside each are what a
+/// frame maps a changed source onto, at that grain. Nothing here measures
+/// anything and nothing depends on a run. The cluster closure walks the
+/// clusters in topological order, which it caches on `program->clustering`;
+/// the step closure walks program order backwards.
 ///
 /// There is no second closure. A cluster never has to run so that another
 /// can read what it wrote LAST run -- versioned pose storage (§3.1) leaves
@@ -114,9 +174,11 @@ void RigExecBakedBuildCones(RigExecBakedProgramImpl *program);
 /// Sources -- the avar table, each chain's base points, each skin
 /// revision's static packet, the property-chain results -- have already been
 /// evaluated when this is called, and are compared by VALUE. The result is
-/// left in `program->closed`; `force` asks for the whole program, which is
-/// what the first run of an epoch, a bumped program stamp and the verifier's
-/// second pass all want.
+/// left in `program->closedSteps`, the forward step closure of the steps a
+/// moved source reaches, and in `program->closed`, the clusters holding one
+/// of them; `force` asks for the whole program, which is what the first run
+/// of an epoch, a bumped program stamp and the verifier's second pass all
+/// want.
 void RigExecBakedComputeClosure(RigExecBakedProgramImpl *program,
                                UsdTimeCode time, bool force);
 

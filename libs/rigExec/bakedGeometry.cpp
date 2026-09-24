@@ -10,7 +10,6 @@
 //
 #include "bakedProgramImpl.h"
 
-#include "curvenetAdjuster.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
 #include "parallel.h"

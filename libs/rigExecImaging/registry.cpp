@@ -241,13 +241,19 @@ RigExecImagingRegistry::_RefreshFrozenSnapshot(RigSession *session)
             session->frozenSerial = serial;
             return;
         }
-        // Same program, same epoch: only ApplyAvarValueEdits may have
-        // moved, and it moves only the avar region -- which carries onto a
-        // copy without re-cloning the epoch. A refused patch (a shape
-        // change wearing a patch's clothes) falls through to a re-freeze.
+        // Same program, same epoch: what may have moved is the avar region
+        // (ApplyAvarValueEdits), the inputs a routed value edit marked
+        // (ApplyValueEdits), and the program stamp. None re-clones the
+        // epoch: all three carry onto a copy. The last two move no digest,
+        // and the snapshot's history predates them either way, so they are
+        // asked of the snapshot itself. A refused patch (a shape change
+        // wearing a patch's clothes) falls through to a re-freeze.
         const uint64_t avarDigest =
             RigExecFrozenAvarRegionDigest(*program);
-        if (avarDigest == session->frozenAvarDigest) {
+        if (avarDigest == session->frozenAvarDigest &&
+            !(session->frozen &&
+              RigExecFrozenSnapshotOwesLiveEdits(*session->frozen,
+                                                 *program))) {
             session->frozenSerial = serial;
             return;
         }
@@ -1708,9 +1714,26 @@ RigExecImagingRegistry::_RetireAffectedTimesLocked(
     // The edit's controls: the evaluator's exact patched set for a
     // patch (no notice noise -- a Patched notice carries nothing but
     // patchable values and their ancestors), the full adapter for a
-    // stamp bump.
+    // stamp bump. A routed edit names only the properties the program
+    // reads, so a property nothing reads retires nothing; each named one
+    // stands for itself where the index knows it -- an overridable input,
+    // seeded as an override on it is -- and brings its prim along where
+    // it does not, which is the adapter's own answer for it.
     std::vector<RigExecControlId> controls;
-    if (disposition == RigExecNoticeDisposition::Patched) {
+    if (disposition == RigExecNoticeDisposition::Edited) {
+        std::set<RigExecControlId> ids;
+        for (const SdfPath &path : patchedPaths) {
+            if (path.IsEmpty()) {
+                continue;
+            }
+            const RigExecControlId id = RigExecControlIdForPath(path);
+            ids.insert(id);
+            if (path.IsPropertyPath() && !index->IsKnownControl(id)) {
+                ids.insert(RigExecControlIdForPath(path.GetPrimPath()));
+            }
+        }
+        controls.assign(ids.begin(), ids.end());
+    } else if (disposition == RigExecNoticeDisposition::Patched) {
         std::set<RigExecControlId> ids;
         for (const SdfPath &path : patchedPaths) {
             if (path.IsEmpty()) {
@@ -2407,7 +2430,9 @@ RigExecImagingRegistry::WriteProfileSummary(const std::string &path)
         const std::string mode =
             requested == RigExecEvaluationMode::Dynamic ? "dynamic"
             : requested == RigExecEvaluationMode::Baked ? "baked"
-                                                        : "parity";
+            : requested == RigExecEvaluationMode::ExecReference
+                ? "reference"
+                : "parity";
         for (const RigExecProfileSummaryRow &row :
              session.bridge->GetProfiler().Summarize()) {
             out << session.rigPath.GetString() << '\t' << row.name << '\t'
@@ -2584,9 +2609,10 @@ RigExecImagingRegistry::_OnObjectsChanged(
                     session.bridge->InvalidateGuideCaches();
                     // Outcome-driven retirement (plan 2.1/2.2): the
                     // evaluator classifies this notice (patched plus
-                    // paths, stamp-bumped, or stale) through a read-only
-                    // query, so the verdict holds whatever order the two
-                    // notice handlers ran in. Patch/stamp edits partition
+                    // paths, routed plus the paths it reads, stamp-bumped,
+                    // or stale) through a read-only query, so the verdict
+                    // holds whatever order the two notice handlers ran in.
+                    // Patch/routed/stamp edits partition
                     // completions by entry provenance -- clean entries
                     // stand or carry, dirty ones retire -- and purge
                     // affected times only, without bumping the
@@ -2600,6 +2626,7 @@ RigExecImagingRegistry::_OnObjectsChanged(
                             .ClassifyNoticeDisposition(notice,
                                                        &patchedPaths);
                     if (disposition == RigExecNoticeDisposition::Patched ||
+                        disposition == RigExecNoticeDisposition::Edited ||
                         disposition ==
                             RigExecNoticeDisposition::StampBumped) {
                         _RetireAffectedTimesLocked(&session, notice,

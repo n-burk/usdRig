@@ -14,6 +14,7 @@
 #include "frameExtraction.h"
 #include "solverKernels.h"
 #include "weightPackets.h"
+#include "movers/moverExecCommon.h"
 
 #include "rigExecMath/pointFrame.h"
 #include "rigExecMath/envelope.h"
@@ -435,146 +436,11 @@ _BuildBlendChannel(const VdfContext &ctx)
 // the rigExec:resolved* relationships in the generated session layer,
 // binding each declared dependency to exactly one catalogued provider.
 
-bool
-_SetCommonMoverEnvelope(
-    const VdfContext &ctx, RigExecMoverParameters *params)
-{
-    const RigExecWeightPacket *weights =
-        ctx.GetInputValuePtr<RigExecWeightPacket>(_tokens->weightPacket);
-    const float *defaultWeight =
-        ctx.GetInputValuePtr<float>(_tokens->inputsDefaultWeight);
-    params->weights = weights
-        ? *weights
-        : RigExecWeightPacket::Constant(defaultWeight ? *defaultWeight : 1.0f);
-    return params->weights.valid;
-}
+// The matrix mover builder and registration live in
+// movers/matrixMover.cpp with the rest of the matrix mover.
 
-RigExecMoverParameters
-_BuildMatrixMoverParameters(const VdfContext &ctx)
-{
-    RigExecMoverParameters params;
-    params.kind = TfToken("matrix");
-    const bool *enabled = ctx.GetInputValuePtr<bool>(_tokens->enabled);
-    params.enabled = enabled ? *enabled : true;
-    if (!params.enabled) {
-        params.valid = true;  // disabled is an ordinary pass-through
-        return params;
-    }
-
-    const GfMatrix4d *transform =
-        ctx.GetInputValuePtr<GfMatrix4d>(_tokens->transform);
-    if (!transform || !_SetCommonMoverEnvelope(ctx, &params)) {
-        return params;  // MoverFailed
-    }
-    // The matrix must be finite and affine (spec §7.4).
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            if (!std::isfinite((*transform)[i][j])) {
-                return params;
-            }
-        }
-    }
-    if ((*transform)[0][3] != 0 || (*transform)[1][3] != 0 ||
-        (*transform)[2][3] != 0 || (*transform)[3][3] != 1) {
-        return params;
-    }
-    params.transform = *transform;
-    params.valid = true;
-    return params;
-}
-
-RigExecMoverParameters
-_BuildBlendMoverParameters(const VdfContext &ctx)
-{
-    RigExecMoverParameters params;
-    params.kind = TfToken("blendShape");
-    const bool *enabled = ctx.GetInputValuePtr<bool>(_tokens->enabled);
-    params.enabled = enabled ? *enabled : true;
-    if (!params.enabled) {
-        params.valid = true;
-        return params;
-    }
-
-    // Base points for delta derivation (spec §7.3): deltas derive against
-    // the authored base, never the preceding revision.
-    std::vector<GfVec3f> base;
-    {
-        VdfReadIterator<GfVec3f> it(ctx, _tokens->basePoints);
-        base.reserve(it.ComputeSize());
-        for (; !it.IsAtEnd(); ++it) {
-            base.push_back(*it);
-        }
-    }
-    if (base.empty()) {
-        return params;
-    }
-    const TfToken *deltaSpace = ctx.GetInputValuePtr<TfToken>(_tokens->deltaSpace);
-    if (deltaSpace && *deltaSpace != "target" && *deltaSpace != "surfaceFrame") return params;
-    params.blendSurfaceFrame = deltaSpace && *deltaSpace == "surfaceFrame";
-    if (params.blendSurfaceFrame) {
-        params.restPoints = base;
-        for (VdfReadIterator<int> it(ctx, _tokens->topologyCounts); !it.IsAtEnd(); ++it)
-            params.topologyCounts.push_back(*it);
-        for (VdfReadIterator<int> it(ctx, _tokens->topologyIndices); !it.IsAtEnd(); ++it)
-            params.topologyIndices.push_back(*it);
-        if (params.topologyCounts.empty()) return params;
-    }
-    // Summed by the shared kernel (moverGraph.h): RigExecRigEvaluator builds
-    // the same packet from tapped channels with no derived stage, and the two
-    // must agree exactly.
-    std::vector<RigExecBlendChannel> channelValues;
-    {
-        VdfReadIterator<RigExecBlendChannel> channels(
-            ctx, _tokens->blendChannels);
-        channelValues.reserve(channels.ComputeSize());
-        for (; !channels.IsAtEnd(); ++channels) {
-            channelValues.push_back(*channels);
-        }
-    }
-    if (!rigExec::RigExecSumBlendChannels(channelValues, base,
-                                          &params.blendDeltas)) {
-        return params;  // structural error: fails atomically
-    }
-    // Common MoverAPI envelope. A bound object supersedes the scalar.
-    if (!_SetCommonMoverEnvelope(ctx, &params)) {
-        return params;
-    }
-    params.valid = true;
-    return params;
-}
-
-// computeMoverStatus (spec §7.1): validates parameters and reports
-// success, disabled, or MoverFailed; the property application consumes
-// this scalar status and preserves the preceding vector when it does not
-// allow applying.
-rigExec::RigExecMoverStatus
-_BuildMoverStatus(const VdfContext &ctx)
-{
-    rigExec::RigExecMoverStatus status;
-    const RigExecMoverParameters *params =
-        ctx.GetInputValuePtr<RigExecMoverParameters>(
-            _tokens->computeMoverParameters);
-    if (!params) {
-        status.state = TfToken("moverFailed");
-        return status;
-    }
-    if (!params->enabled) {
-        status.state = TfToken("disabled");
-    } else if (params->valid) {
-        status.state = TfToken("ok");
-    } else {
-        status.state = TfToken("moverFailed");
-        // First bad canonical public address (spec §6.6). v0.1 reports
-        // the failed mover's own canonical path; per-input attribution
-        // is future diagnostic work.
-        const SdfPath *path =
-            ctx.GetInputValuePtr<SdfPath>(_tokens->moverPath);
-        if (path) {
-            status.firstBadAddress = path->GetString();
-        }
-    }
-    return status;
-}
+// The blend-shape mover builder and registration live in
+// movers/blendShapeMover.cpp with the rest of the blend-shape mover.
 
 // The stock v26.08 callback form for a point3f[] application (spec §12.1):
 // reads the preceding vector with VdfReadIterator, allocates/writes the
@@ -677,160 +543,20 @@ _EvaluateBlendPointArrayExpression(const VdfContext &ctx)
     }
 }
 
-// Collects a vectorized element input into transient scratch
-// (spec §6.5 ephemeral-scratch rule).
-template <typename T>
-std::vector<T>
-_Collect(const VdfContext &ctx, const TfToken &name)
-{
-    VdfReadIterator<T> it(ctx, name);
-    std::vector<T> out;
-    out.reserve(it.ComputeSize());
-    for (; !it.IsAtEnd(); ++it) {
-        out.push_back(*it);
-    }
-    return out;
-}
+// The smooth mover builder and registration live in
+// movers/smoothMover.cpp with the rest of the smooth mover.
 
-// RigExecSmoothMover parameters: fixed-adjacency Laplacian smoothing of
-// the destination's standard topology (spec §7.6 revised).
-RigExecMoverParameters
-_BuildSmoothMoverParameters(const VdfContext &ctx)
-{
-    RigExecMoverParameters params;
-    params.kind = TfToken("smooth");
-    const bool *enabled = ctx.GetInputValuePtr<bool>(_tokens->enabled);
-    params.enabled = enabled ? *enabled : true;
-    if (!params.enabled) {
-        params.valid = true;
-        return params;
-    }
-    if (!_SetCommonMoverEnvelope(ctx, &params)) {
-        return params;
-    }
-    params.strength = 1.0f;
-    params.topologyCounts = _Collect<int>(ctx, _tokens->topologyCounts);
-    params.topologyIndices = _Collect<int>(ctx, _tokens->topologyIndices);
-    params.valid = !params.topologyCounts.empty();
-    return params;
-}
+// The volume-correct mover builder and registration live in
+// movers/volumeCorrectMover.cpp with the rest of the volume-correct mover.
 
-// RigExecVolumeCorrectMover parameters: the correction reference is the
-// authored base bound volume (spec §7.6 revised).
-RigExecMoverParameters
-_BuildVolumeCorrectMoverParameters(const VdfContext &ctx)
-{
-    RigExecMoverParameters params;
-    params.kind = TfToken("volumeCorrect");
-    const bool *enabled = ctx.GetInputValuePtr<bool>(_tokens->enabled);
-    params.enabled = enabled ? *enabled : true;
-    if (!params.enabled) {
-        params.valid = true;
-        return params;
-    }
-    if (!_SetCommonMoverEnvelope(ctx, &params)) {
-        return params;
-    }
-    params.strength = 1.0f;
-    const std::vector<GfVec3f> base =
-        _Collect<GfVec3f>(ctx, _tokens->basePoints);
-    if (base.empty()) {
-        return params;
-    }
-    params.referenceVolume =
-        rigExec::RigExecBoundVolume(base.data(), base.size());
-    params.valid = true;
-    return params;
-}
+// The lattice mover builder and registration live in
+// movers/latticeMover.cpp with the rest of the lattice mover.
 
-// Synthesized derived-maintenance parameters (spec §7.6 revised): the
-// hosts are compiler-authored with no authored mover and no enable; the
-// rig-level derived policy gates synthesis at compile time.
-RigExecMoverParameters
-_BuildLatticeMoverParameters(const VdfContext &ctx)
-{
-    RigExecMoverParameters params;
-    params.kind = TfToken("lattice");
-    const bool *enabled = ctx.GetInputValuePtr<bool>(_tokens->enabled);
-    params.enabled = enabled ? *enabled : true;
-    if (!params.enabled) {
-        params.valid = true;
-        return params;
-    }
-    if (!_SetCommonMoverEnvelope(ctx, &params)) {
-        return params;
-    }
-    const GfVec3i *divisions =
-        ctx.GetInputValuePtr<GfVec3i>(_tokens->divisionsAttr);
-    params.divisions = divisions ? *divisions : GfVec3i(0);
-    params.restPoints = _Collect<GfVec3f>(ctx, _tokens->basePoints);
-    params.auxPoints = _Collect<GfVec3f>(ctx, _tokens->restCagePointsAttr);
-    params.auxPointsB = _Collect<GfVec3f>(ctx, _tokens->cagePoints);
-    const size_t cageCount = size_t(params.divisions[0]) *
-                             size_t(params.divisions[1]) *
-                             size_t(params.divisions[2]);
-    params.valid = params.divisions[0] >= 2 && params.divisions[1] >= 2 &&
-                   params.divisions[2] >= 2 &&
-                   params.auxPoints.size() == cageCount &&
-                   params.auxPointsB.size() == cageCount &&
-                   !params.restPoints.empty();
-    return params;
-}
+// The surface mover builder and registration live in
+// movers/surfaceMover.cpp with the rest of the surface mover.
 
-RigExecMoverParameters
-_BuildSurfaceMoverParameters(const VdfContext &ctx)
-{
-    RigExecMoverParameters params;
-    params.kind = TfToken("surfaceProject");
-    const bool *enabled = ctx.GetInputValuePtr<bool>(_tokens->enabled);
-    params.enabled = enabled ? *enabled : true;
-    if (!params.enabled) {
-        params.valid = true;
-        return params;
-    }
-    if (!_SetCommonMoverEnvelope(ctx, &params)) {
-        return params;
-    }
-    params.strength = 1.0f;  // v0.1 attach/project maps fully
-    params.auxPoints = _Collect<GfVec3f>(ctx, _tokens->surfacePoints);
-    params.topologyCounts = _Collect<int>(ctx, _tokens->topologyCounts);
-    params.topologyIndices = _Collect<int>(ctx, _tokens->topologyIndices);
-    params.valid = !params.auxPoints.empty() &&
-                   !params.topologyCounts.empty();
-    return params;
-}
-
-RigExecMoverParameters
-_BuildCurveMoverParameters(const VdfContext &ctx)
-{
-    RigExecMoverParameters params;
-    static const TfToken ribbon("ribbon");
-    const TfToken *mode = ctx.GetInputValuePtr<TfToken>(_tokens->modeAttr);
-    params.kind = mode ? *mode : ribbon;
-    const bool *enabled = ctx.GetInputValuePtr<bool>(_tokens->enabled);
-    params.enabled = enabled ? *enabled : true;
-    if (!params.enabled) {
-        params.valid = true;
-        return params;
-    }
-    if (!_SetCommonMoverEnvelope(ctx, &params)) {
-        return params;
-    }
-    const RigExecPointFrameArray *frames =
-        ctx.GetInputValuePtr<RigExecPointFrameArray>(_tokens->driverFrames);
-    if (!frames || frames->IsEmpty() ||
-        frames->rests.size() != frames->GetSize()) {
-        return params;
-    }
-    params.frames = *frames;
-    if (params.kind == "ribbon") {
-        params.bindCoords = _Collect<GfVec2f>(ctx, _tokens->bindCoords);
-        params.valid = !params.bindCoords.empty();
-    } else if (params.kind == "emitGuidePoints") {
-        params.valid = true;
-    }
-    return params;
-}
+// The curve mover builder and registration live in
+// movers/curveMover.cpp with the rest of the curve mover.
 
 // Shared scratch-collect / kernel / write-back body for point3f[] hosts
 // (spec §6.5: transient scratch is released before the callback returns).
@@ -1102,75 +828,6 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendInput)
 }
 
 // ---------------------------------------------------------------------------
-// Mover-owned parameter/status computations (spec §4.1): each concrete
-// mover schema statically registers computeMoverParameters over its own
-// declared attributes/relationships, plus the scalar computeMoverStatus.
-// The rigExec:resolved* relationships are authored by the compiler's
-// the compiler (spec §12.1 RigExecResolvedMatrix and friends), binding the
-// declared read phase to exactly one catalogued provider.
-// ---------------------------------------------------------------------------
-
-#define RIGEXEC_MOVER_COMMON_INPUTS                                         \
-    AttributeValue<bool>(_tokens->inputsEnabled),                           \
-        AttributeValue<float>(_tokens->inputsDefaultWeight),                \
-        Relationship(_tokens->weightObjectRel)                              \
-            .TargetedObjects<RigExecWeightPacket>(                          \
-                _tokens->computeWeightPacket)                               \
-            .InputName(_tokens->weightPacket)
-
-EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecMatrixMover)
-{
-    self.PrimComputation(_tokens->computeMoverParameters)
-        .Callback<RigExecMoverParameters>(&_BuildMatrixMoverParameters)
-        .Inputs(
-            RIGEXEC_MOVER_COMMON_INPUTS,
-            Relationship(_tokens->resolvedTransform)
-                .TargetedObjects<GfMatrix4d>(_tokens->computeMatrix)
-                .InputName(_tokens->transform));
-
-    self.PrimComputation(_tokens->computeMoverStatus)
-        .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
-        .Inputs(
-            Computation<RigExecMoverParameters>(
-                _tokens->computeMoverParameters)
-                .Required(),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath)
-                .InputName(_tokens->moverPath));
-}
-
-EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecBlendShapeMover)
-{
-    self.PrimComputation(_tokens->computeMoverParameters)
-        .Callback<RigExecMoverParameters>(&_BuildBlendMoverParameters)
-        .Inputs(
-            RIGEXEC_MOVER_COMMON_INPUTS,
-            AttributeValue<TfToken>(_tokens->deltaSpace),
-            Relationship(_tokens->resolvedTopologyCounts)
-                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->topologyCounts),
-            Relationship(_tokens->resolvedTopologyIndices)
-                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->topologyIndices),
-            Relationship(_tokens->resolvedBlendInputs)
-                .TargetedObjects<RigExecBlendChannel>(
-                    _tokens->computeBlendChannel)
-                .InputName(_tokens->blendChannels),
-            Relationship(_tokens->resolvedBase)
-                .TargetedObjects<GfVec3f>(
-                    ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->basePoints));
-
-    self.PrimComputation(_tokens->computeMoverStatus)
-        .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
-        .Inputs(
-            Computation<RigExecMoverParameters>(
-                _tokens->computeMoverParameters)
-                .Required(),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath)
-                .InputName(_tokens->moverPath));
-}
-
-// ---------------------------------------------------------------------------
 // Operation/type-specific property applications (spec §4.1, §7.2): each
 // host's frozen signature consumes the preceding exact-typed vector, the
 // realizing mover's computeMoverParameters, and computeMoverStatus.
@@ -1229,139 +886,6 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecRibbon)
             Computation<RigExecPointsPacket>(_tokens->computeDriverPoints)
                 .InputName(_tokens->driverPoints));
 }
-
-// ---------------------------------------------------------------------------
-// Mover-owned parameter/status computations for the Phase 3 operations
-// (spec §4.1): each concrete mover schema statically declares its exact
-// inputs; the compiler authors the rigExec:resolved* wiring.
-// ---------------------------------------------------------------------------
-
-EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSmoothMover)
-{
-    self.PrimComputation(_tokens->computeMoverParameters)
-        .Callback<RigExecMoverParameters>(&_BuildSmoothMoverParameters)
-        .Inputs(
-            RIGEXEC_MOVER_COMMON_INPUTS,
-            Relationship(_tokens->resolvedTopologyCounts)
-                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->topologyCounts),
-            Relationship(_tokens->resolvedTopologyIndices)
-                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->topologyIndices));
-
-    self.PrimComputation(_tokens->computeMoverStatus)
-        .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
-        .Inputs(
-            Computation<RigExecMoverParameters>(
-                _tokens->computeMoverParameters)
-                .Required(),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath)
-                .InputName(_tokens->moverPath));
-}
-
-EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecVolumeCorrectMover)
-{
-    self.PrimComputation(_tokens->computeMoverParameters)
-        .Callback<RigExecMoverParameters>(
-            &_BuildVolumeCorrectMoverParameters)
-        .Inputs(
-            RIGEXEC_MOVER_COMMON_INPUTS,
-            Relationship(_tokens->resolvedBase)
-                .TargetedObjects<GfVec3f>(
-                    ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->basePoints));
-
-    self.PrimComputation(_tokens->computeMoverStatus)
-        .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
-        .Inputs(
-            Computation<RigExecMoverParameters>(
-                _tokens->computeMoverParameters)
-                .Required(),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath)
-                .InputName(_tokens->moverPath));
-}
-
-EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecLatticeMover)
-{
-    self.PrimComputation(_tokens->computeMoverParameters)
-        .Callback<RigExecMoverParameters>(&_BuildLatticeMoverParameters)
-        .Inputs(
-            RIGEXEC_MOVER_COMMON_INPUTS,
-            AttributeValue<GfVec3i>(_tokens->divisionsAttr),
-            AttributeValue<GfVec3f>(_tokens->restCagePointsAttr),
-            Relationship(_tokens->resolvedBase)
-                .TargetedObjects<GfVec3f>(
-                    ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->basePoints),
-            Relationship(_tokens->resolvedCagePoints)
-                .TargetedObjects<GfVec3f>(
-                    ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->cagePoints));
-
-    self.PrimComputation(_tokens->computeMoverStatus)
-        .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
-        .Inputs(
-            Computation<RigExecMoverParameters>(
-                _tokens->computeMoverParameters)
-                .Required(),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath)
-                .InputName(_tokens->moverPath));
-}
-
-EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecSurfaceMover)
-{
-    self.PrimComputation(_tokens->computeMoverParameters)
-        .Callback<RigExecMoverParameters>(&_BuildSurfaceMoverParameters)
-        .Inputs(
-            RIGEXEC_MOVER_COMMON_INPUTS,
-            Relationship(_tokens->resolvedSurfacePoints)
-                .TargetedObjects<GfVec3f>(
-                    ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->surfacePoints),
-            Relationship(_tokens->resolvedTopologyCounts)
-                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->topologyCounts),
-            Relationship(_tokens->resolvedTopologyIndices)
-                .TargetedObjects<int>(ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->topologyIndices));
-
-    self.PrimComputation(_tokens->computeMoverStatus)
-        .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
-        .Inputs(
-            Computation<RigExecMoverParameters>(
-                _tokens->computeMoverParameters)
-                .Required(),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath)
-                .InputName(_tokens->moverPath));
-}
-
-EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecCurveMover)
-{
-    self.PrimComputation(_tokens->computeMoverParameters)
-        .Callback<RigExecMoverParameters>(&_BuildCurveMoverParameters)
-        .Inputs(
-            RIGEXEC_MOVER_COMMON_INPUTS,
-            AttributeValue<TfToken>(_tokens->modeAttr),
-            Relationship(_tokens->resolvedBindCoords)
-                .TargetedObjects<GfVec2f>(
-                    ExecBuiltinComputations->computeValue)
-                .InputName(_tokens->bindCoords),
-            Relationship(_tokens->resolvedDriverFrames)
-                .TargetedObjects<rigExec::RigExecPointFrameArray>(
-                    _tokens->computePointFrameArray)
-                .InputName(_tokens->driverFrames));
-
-    self.PrimComputation(_tokens->computeMoverStatus)
-        .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)
-        .Inputs(
-            Computation<RigExecMoverParameters>(
-                _tokens->computeMoverParameters)
-                .Required(),
-            Computation<SdfPath>(ExecBuiltinComputations->computePath)
-                .InputName(_tokens->moverPath));
-}
-
-#undef RIGEXEC_MOVER_COMMON_INPUTS
 
 // ---------------------------------------------------------------------------
 // Operation/type-specific Phase 3 property applications (spec §4.1, §7.2):
@@ -1435,7 +959,7 @@ EXEC_REGISTER_COMPUTATIONS_FOR_SCHEMA(RigExecCurveMover)
                     .InputName(_tokens->widthsInput));                       \
                                                                              \
         self.PrimComputation(_tokens->computeMoverStatus)                    \
-            .Callback<rigExec::RigExecMoverStatus>(&_BuildMoverStatus)       \
+            .Callback<rigExec::RigExecMoverStatus>(&rigExec::RigExecMoverBuildStatus)       \
             .Inputs(                                                         \
                 Computation<RigExecMoverParameters>(                         \
                     _tokens->computeMoverParameters)                         \

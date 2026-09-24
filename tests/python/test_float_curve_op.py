@@ -105,7 +105,7 @@ def TestDrivenAvar():
     # Movers run bottom to top: the add first, then the curve.
     stage.GetPrimAtPath("/Asset/Rig/Movers").SetChildrenReorder(
         ["lid_to_rx", "lid_to_rx_0_add"])
-    for mode in ("dynamic", "parity"):
+    for mode in ("reference", "parity"):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
         rig.evaluation_mode = mode
@@ -154,7 +154,7 @@ def TestHermite():
     stage.GetPrimAtPath("/Asset/Rig/Movers/blink").GetAttribute(
         "inputs:tangents").Set(Vt.Vec2fArray(
             [Gf.Vec2f(*t) for t in tangents]))
-    for mode in ("dynamic", "parity"):
+    for mode in ("reference", "parity"):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
         rig.evaluation_mode = mode
@@ -179,7 +179,7 @@ def main():
     _Check(abs(_Reference(-40.0) + 30.0) < 1e-6, "reference extrapolates")
 
     stage, dialPath = _Stage()
-    for mode in ("dynamic", "parity"):
+    for mode in ("reference", "parity"):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
         rig.evaluation_mode = mode

@@ -822,6 +822,12 @@ struct RigExecBakedClustering {
     /// cluster graph by cost. Their ratio is the speed-up this schedule can
     /// reach with threads to spare.
     double serialCost = 0, criticalPathCost = 0;
+    /// Every cluster once, each after all of its predecessors. Cluster ids
+    /// number level-packing bins, not dependencies, so increasing id is NOT
+    /// such an order; anything that walks a subset of clusters one at a time
+    /// (a partial cone re-run) walks this instead. RigExecBakedBuildCones
+    /// fills it, which is where Build first needs it.
+    std::vector<int> topologicalOrder;
     /// Whether the last run stamped the per-cluster times above. Only the
     /// parallel executor has clusters to time: a serial run walks the steps
     /// and never asks which cluster they are in, so its run report says so
@@ -923,6 +929,13 @@ struct RigExecBakedClusterSet {
     }
 };
 
+/// The readers RigExecBakedCones::editRoute names per override index.
+enum : uint8_t {
+    kEditRouteStep = 1,
+    kEditRouteAvar = 2,
+    kEditRouteLadder = 4,
+};
+
 /// What Build knows about re-running part of a program (§7).
 ///
 /// Both families are closures computed once, over clusters rather than over
@@ -969,6 +982,48 @@ struct RigExecBakedCones {
     std::vector<std::vector<int>> constraintArrayClusters;
     /// Steps whose dirtiness depends on time or on a standing override.
     std::vector<int> varyingSteps, overrideSteps;
+    /// Override index -> what re-reads an input of that number when the
+    /// stage value under it moves: a step that lists it in its
+    /// `overrideInputs` (kEditRouteStep), the prologue's avar table
+    /// (kEditRouteAvar), or the provider ladder (kEditRouteLadder). Zero
+    /// where nothing does -- a value read into the prologue and handed to a
+    /// step no dirty set can name -- and an edit there bumps the program
+    /// stamp instead of being routed (unified-program spec rules S2, S3).
+    std::vector<uint8_t> editRoute;
+
+    // ---- the same tables over STEPS ----------------------------------------
+    //
+    // What a live run decides with. A cluster is the unit a task runs, not
+    // the unit that moved: one dirty step does not make its cluster-mates
+    // dirty, because they read exactly what they read last run and versioned
+    // storage (§3.1) left it where it was. So the live closure is taken over
+    // `step.succs` and a run skips every step outside it, including the clean
+    // members of a cluster it does dispatch.
+    //
+    // The per-cluster tables above are KEPT beside these rather than derived
+    // from them on demand: the output-affected index, the sparse frame-cache
+    // planner and the frozen clone read them, and each wants a cluster
+    // answer. Every entry below is the step-grain twin of the entry of the
+    // same name above; a seed added to one family belongs in both.
+
+    /// Forward closure of each step over `step.succs`, including itself: row
+    /// s is `stepWords` words starting at `stepCone[s * stepWords]`. Flat, so
+    /// that a copy of the cones is one allocation and a frame's union is a
+    /// word loop over rows.
+    size_t stepWords = 0;
+    std::vector<uint64_t> stepCone;
+    /// Steps that read outside the graph (dirty every run), and steps that
+    /// are not geometry steps (dirty on a program's first run).
+    RigExecBakedClusterSet alwaysSteps, poseSteps;
+    /// Provider slot -> the compose step that reads its avars, or -1.
+    std::vector<int> avarStep;
+    std::vector<std::vector<int>> chainBaseSteps;
+    std::vector<std::vector<int>> solverPointsSteps;
+    std::vector<std::vector<int>> revisionSteps;
+    std::vector<int> revisionStaticStep;
+    std::vector<std::vector<int>> nativeSourceSteps;
+    std::vector<std::vector<int>> deltaBaseSteps;
+    std::vector<std::vector<int>> constraintArraySteps;
 };
 
 /// One contiguous group of provider slots the compose pass runs as one step.
@@ -1812,8 +1867,14 @@ struct RigExecBakedProgramImpl {
     // drag, a cleared topology cache and a moved keyframe all reach the graph
     // through one test (§7).
     RigExecBakedCones cones;
-    /// The clusters this run decided to run. Every step of a cluster outside
-    /// it keeps its slots, its diagnostics and its structural counters.
+    /// The steps this run decided to run. Every step outside it keeps its
+    /// slots, its diagnostics and its structural counters, whether or not
+    /// its cluster runs.
+    RigExecBakedClusterSet closedSteps;
+    /// The clusters that hold a step of `closedSteps`: what the parallel
+    /// executor dispatches and counts. The frozen serial runner and a
+    /// partial cone re-run still run whole clusters of it, which is a
+    /// superset of the closed steps and so the same answer.
     RigExecBakedClusterSet closed;
     /// The avar table as the last run left it, for the per-provider compare.
     std::vector<double> lastAvars;
@@ -1822,6 +1883,24 @@ struct RigExecBakedProgramImpl {
     /// The override flags as the last run left them, so that the run AFTER a
     /// drag is released re-runs what the drag was holding.
     std::vector<char> lastOverridden;
+    /// One flag per override index whose input a stage VALUE edit reached
+    /// since the last run: set by RigExecBakedProgram::ApplyValueEdits,
+    /// OR-ed across notices, and consumed only by the closure's override
+    /// rule, beside `lastOverridden` -- the step that reads such an input
+    /// re-runs once, exactly as it does for the run after a drag is lifted.
+    /// Pending bits survive a generation the program did not answer (a
+    /// dynamic fallback), and a frozen clone carries them, because the
+    /// clone's first run is the one that owes them.
+    std::vector<char> edited;
+    bool anyEdited = false;
+    /// How many notices ApplyValueEdits has marked inputs for, and, per
+    /// override index, the count at the last one that marked it. Unlike
+    /// `edited`, nothing consumes these: a frozen snapshot records the count
+    /// it was taken or patched at, and a later patch marks every index
+    /// edited since -- including edits the live program has already run
+    /// and cleared, which the snapshot's own state has never seen.
+    uint64_t valueEditSerial = 0;
+    std::vector<uint64_t> editSerial;
     /// Whether each chain's base read at all last run.
     std::vector<char> lastHaveBase;
     UsdTimeCode lastTime = UsdTimeCode::Default();
@@ -1836,6 +1915,9 @@ struct RigExecBakedProgramImpl {
     /// How many clusters the last run ran, and how many there are, for the
     /// schedule run report.
     size_t lastClosedClusters = 0;
+    /// How many steps the last run's closure held, sources it seeded from
+    /// included.
+    size_t lastClosedSteps = 0;
 
     /// Program constants the epilogue adds to the generation's counters.
     ///
@@ -2539,6 +2621,26 @@ struct RigExecBakedProgramImpl {
     /// inputs (property-chain movers, geometry movers), so an override on
     /// any of their properties reaches them with nothing else to do.
     std::set<SdfPath> resolvedRoutedPrims;
+    /// Every attribute (and any other target) a read through the resolved
+    /// inputs can reach by following authored connections out of a
+    /// `resolvedRoutedPrims` prim, hop by hop. The bake records the prims of
+    /// those readers and never the sources their connections name, so a
+    /// source on a prim nothing else reads would otherwise look read by
+    /// nothing: the program itself is still right (the reader re-resolves
+    /// and compares by value), but the frame cache would be told no read
+    /// path moved and keep frames the edit changed.
+    ///
+    /// Filled on the notice thread, only when a notice names a property the
+    /// rest of the index does not place, and answered for the program stamp
+    /// it was filled under. Every change that can move a connection -- a
+    /// connection or target field, a resync, layer metadata -- is refused by
+    /// the value-edit routing or rebuilds the program, and a refusal bumps
+    /// the stamp, so a stamp that has not moved is a connection graph that
+    /// has not either. Nothing in a run reads it, and a frozen clone never
+    /// routes a notice, so it is not cloned.
+    mutable std::set<SdfPath> connectedSources;
+    mutable uint64_t connectedSourcesStamp = 0;
+    mutable bool connectedSourcesFilled = false;
     /// True while the dense avar table still holds a value written for a
     /// drag; see the input block in Run.
     bool avarsDisturbed = false;
@@ -2559,50 +2661,181 @@ struct RigExecBakedProgramImpl {
     bool anyOverridden = false;
     /// RigExecBakedProgram::SetPublishWeightFields.
     bool publishWeightFields = true;
-
-    /// Registers \p input so an override can be placed on it, and records
-    /// what a notice would have to touch to invalidate what was captured.
-    template <class T>
-    void Register(RigExecBakedInput<T> *input, const SdfPathVector &walk) {
-        if (!input->head) {
-            return;
-        }
-        input->overrideIndex = int(overridden.size());
-        overridden.push_back(0);
-        // EVERY attribute on the resolution walk, not only the head one.
-        // RigExecBakedClassifyInput followed an authored connection chain
-        // and may have captured the value several hops upstream; an
-        // interactive override
-        // standing on one of those hops is an override on this input, and
-        // GetAttribute -- which is what the flag makes RigExecBakedRead
-        // use -- consults the generation's resolved values at every step of
-        // the same walk.
-        // Keyed by the head alone, such an override found no binding and was
-        // reported placeable with nothing placed.
-        for (const SdfPath &path : walk) {
-            overridableInputs[path].push_back(input->overrideIndex);
-        }
-        if (walk.empty()) {
-            overridableInputs[input->head.GetPath()].push_back(
-                input->overrideIndex);
-        }
-        prims.insert(input->head.GetPrim().GetPath());
-        named.insert(walk.begin(), walk.end());
-        // A chain-resolved input redoes the whole walk live every frame, so
-        // nothing about it was captured. A query was pinned to ONE attribute
-        // of the walk, so every other attribute on it decided that choice;
-        // with a walk of one there is no choice left to invalidate, and a
-        // value moving on it -- including being cleared, which drops the
-        // input back to the same fallback both paths use -- is answered by
-        // the query itself.
-        const bool live = input->resolvedAttr || (input->varying &&
-                                                  walk.size() == 1);
-        if (live) {
-            return;
-        }
-        rebuild.insert(walk.begin(), walk.end());
-    }
 };
+
+// ---------------------------------------------------------------------------
+// What committing an input records, and where it can be recorded.
+//
+// A committed input records two kinds of fact. Its override NUMBER is
+// order-bearing: numbers are handed out from one running counter, so the
+// order inputs are committed in IS the numbering the program carries, and
+// the entry of `overridableInputs` a number is appended to is ordered by it.
+// Everything else is order-free -- two counts that sum, and paths landing
+// in the sets of the invalidation index, where inserting a path a second
+// time is a no-op whenever it happens.
+//
+// RigExecBakedRecordBind and RigExecBakedRecordFold state both kinds once,
+// against a sink that receives them, and there are two sinks:
+//
+//  * RigExecBakedProgramSink writes straight into the program, numbering
+//    from `overridden.size()`. This is the serial commit, CommitBind's, one
+//    input at a time in program order.
+//  * RigExecBakedCommitShard gathers one CHUNK of a parallel pass into
+//    vectors, numbering from zero within the chunk. A chunk's first real
+//    number is the running counter at the phase's entry plus every number
+//    the chunks before it handed out -- a prefix sum, known only once every
+//    chunk has counted -- and RigExecBakedMergeCommitShards adds it.
+//
+// So a parallel commit cannot drift from the serial one: the rule is
+// written here once and only WHERE the facts land differs. Chunks are
+// contiguous runs of the program order and are merged in that order, which
+// is what makes the numbers, and each `overridableInputs` entry's order,
+// the serial ones exactly.
+// ---------------------------------------------------------------------------
+
+/// The serial sink: every fact straight into \p program.
+struct RigExecBakedProgramSink {
+    RigExecBakedProgramImpl *program = nullptr;
+
+    int Number()
+    {
+        const int index = int(program->overridden.size());
+        program->overridden.push_back(0);
+        return index;
+    }
+    void Overridable(const SdfPath &path, int index)
+    {
+        program->overridableInputs[path].push_back(index);
+    }
+    void Bound(bool varying)
+    {
+        ++program->boundInputs;
+        if (varying) ++program->varyingInputs;
+    }
+    void Prim(const SdfPath &path) { program->prims.insert(path); }
+    void Named(const SdfPath &path) { program->named.insert(path); }
+    void Rebuild(const SdfPath &path) { program->rebuild.insert(path); }
+    void Folded(const SdfPath &path) { program->folded.insert(path); }
+};
+
+/// The parallel sink: one chunk's facts, gathered on whichever thread runs
+/// the chunk and touching nothing shared.
+struct RigExecBakedCommitShard {
+    SdfPathVector prims, named, rebuild, folded;
+    /// (path, number RELATIVE to the chunk's first) per overridable walk
+    /// step, in the order the program sink would have appended them.
+    std::vector<std::pair<SdfPath, int>> overridable;
+    int numbered = 0;
+    size_t boundInputs = 0;
+    size_t varyingInputs = 0;
+
+    int Number() { return numbered++; }
+    void Overridable(const SdfPath &path, int index)
+    {
+        overridable.emplace_back(path, index);
+    }
+    void Bound(bool varying)
+    {
+        ++boundInputs;
+        if (varying) ++varyingInputs;
+    }
+    void Prim(const SdfPath &path) { prims.push_back(path); }
+    void Named(const SdfPath &path) { named.push_back(path); }
+    void Rebuild(const SdfPath &path) { rebuild.push_back(path); }
+    void Folded(const SdfPath &path) { folded.push_back(path); }
+
+    /// Sorts and dedups the four path vectors, and sorts `overridable` by
+    /// (path, number), so the merge inserts ascending runs. Run at the end
+    /// of the chunk, on its own thread: this is the part of the set
+    /// insertion that CAN be parallel.
+    void Seal();
+};
+
+/// Folds \p shards into \p program in chunk order, and returns each shard's
+/// first override number.
+///
+/// Shard k's numbers start where shard k-1's stop, and shard 0's where the
+/// program's running counter stands on entry -- this phase continues the
+/// numbering the phases before it started, it does not restart it. The
+/// caller adds shard k's first number to every input shard k numbered.
+std::vector<int> RigExecBakedMergeCommitShards(
+    RigExecBakedProgramImpl *program,
+    std::vector<RigExecBakedCommitShard> *shards);
+
+/// Registers \p input, read as \p name on \p prim through \p walk, into
+/// \p sink: the bound/varying counts, the invalidation index, and -- for an
+/// input with a head -- an override number and the paths an override on it
+/// can stand on. What CommitBind records, for either sink.
+template <class Sink, class T>
+void
+RigExecBakedRecordBind(Sink *sink, const UsdPrim &prim, const char *name,
+                       RigExecBakedInput<T> *input, const SdfPathVector &walk)
+{
+    if (prim && prim.GetAttribute(TfToken(name))) {
+        sink->Bound(input->varying);
+    }
+    if (prim) {
+        sink->Prim(prim.GetPath());
+        // Named even when absent: a resync that CREATES this property is
+        // an input appearing, and the bake captured the default it did
+        // not find.
+        sink->Named(prim.GetPath().AppendProperty(TfToken(name)));
+    }
+    // The registration proper: an input with no head has nothing an
+    // override could stand on, and no number.
+    if (!input->head) {
+        return;
+    }
+    input->overrideIndex = sink->Number();
+    // EVERY attribute on the resolution walk, not only the head one.
+    // RigExecBakedClassifyInput followed an authored connection chain and
+    // may have captured the value several hops upstream; an interactive
+    // override standing on one of those hops is an override on this input,
+    // and GetAttribute -- which is what the flag makes RigExecBakedRead use
+    // -- consults the generation's resolved values at every step of the
+    // same walk. Keyed by the head alone, such an override found no binding
+    // and was reported placeable with nothing placed.
+    for (const SdfPath &path : walk) {
+        sink->Overridable(path, input->overrideIndex);
+    }
+    if (walk.empty()) {
+        sink->Overridable(input->head.GetPath(), input->overrideIndex);
+    }
+    sink->Prim(input->head.GetPrim().GetPath());
+    for (const SdfPath &path : walk) {
+        sink->Named(path);
+    }
+    // A chain-resolved input redoes the whole walk live every frame, so
+    // nothing about it was captured. A query was pinned to ONE attribute of
+    // the walk, so every other attribute on it decided that choice; with a
+    // walk of one there is no choice left to invalidate, and a value moving
+    // on it -- including being cleared, which drops the input back to the
+    // same fallback both paths use -- is answered by the query itself.
+    const bool live = input->resolvedAttr || (input->varying &&
+                                              walk.size() == 1);
+    if (live) {
+        return;
+    }
+    for (const SdfPath &path : walk) {
+        sink->Rebuild(path);
+    }
+}
+
+/// Records \p name on \p prim as read for its VALUE into \p sink; see
+/// RigExecBakedBuildContext::Fold, which is this into the program.
+template <class Sink>
+void
+RigExecBakedRecordFold(Sink *sink, const UsdPrim &prim, const char *name)
+{
+    if (!prim) {
+        return;
+    }
+    const SdfPath path = prim.GetPath().AppendProperty(TfToken(name));
+    sink->Rebuild(path);
+    sink->Folded(path);
+    sink->Named(path);
+    sink->Prim(prim.GetPath());
+}
 
 // ---------------------------------------------------------------------------
 // The compiled epoch, in terms the program can name.
@@ -2752,10 +2985,12 @@ struct RigExecBakedBuildContext {
     /// structure digest already reads this stage from its own thread, so
     /// concurrent readers are not a new assumption here.
     ///
-    /// The caller must pass every result to CommitBind afterwards, ON ONE
-    /// THREAD and in program order. Skipping that leaves the input
-    /// unregistered -- no override index, nothing in the invalidation index
-    /// -- which is a silently wrong program rather than a failure.
+    /// The caller must commit every result afterwards: through CommitBind,
+    /// ON ONE THREAD and in program order, or through RigExecBakedRecordBind
+    /// into a RigExecBakedCommitShard per contiguous chunk of that order,
+    /// merged by RigExecBakedMergeCommitShards. Skipping that leaves the
+    /// input unregistered -- no override index, nothing in the invalidation
+    /// index -- which is a silently wrong program rather than a failure.
     template <class T>
     RigExecBakedInput<T> ResolveBind(const UsdPrim &prim, const char *name,
                                      T fallback, SdfPathVector *walk) const;
@@ -2764,12 +2999,14 @@ struct RigExecBakedBuildContext {
     /// override index.
     ///
     /// Order-bearing, and that is why it is separate rather than locked.
-    /// Register hands out `overrideIndex` from a running counter, so the
-    /// order these are committed in IS the numbering a program carries. Call
-    /// it in the same order the bindings appear in the program and a
-    /// parallel resolve produces a bake identical to a serial one, byte for
-    /// byte; call it in completion order and the program still works while
-    /// no two builds of one rig agree.
+    /// It hands out `overrideIndex` from a running counter, so the order
+    /// these are committed in IS the numbering a program carries. Call it in
+    /// the same order the bindings appear in the program and a parallel
+    /// resolve produces a bake identical to a serial one, byte for byte;
+    /// call it in completion order and the program still works while no two
+    /// builds of one rig agree. A loop with enough inputs to be worth it
+    /// commits through shards instead, which keeps the numbering by a prefix
+    /// sum rather than by order (see RigExecBakedRecordBind).
     template <class T>
     void CommitBind(const UsdPrim &prim, const char *name,
                     RigExecBakedInput<T> *input, const SdfPathVector &walk);
@@ -2827,17 +3064,17 @@ RigExecBakedBuildContext::ResolveBind(const UsdPrim &prim, const char *name,
     // drag as a spline knot (gizmoMath.SetAnimated), so the FIRST release on
     // a control creates the property spec -- a resync, which rebakes and
     // pins a fresh query -- and every release after it re-authors that same
-    // knot, which is changed-info only. Register() leaves a pinned-query
-    // input out of `rebuild` precisely because the query was supposed to
-    // answer such an edit, so nothing rebaked and the rig kept publishing
-    // the first drag's pose: the control moved under the preview and sprang
-    // back the moment the artist let go, until some other control's first
-    // release resynced and rebaked the program for it.
+    // knot, which is changed-info only. RigExecBakedRecordBind leaves a
+    // pinned-query input out of `rebuild` precisely because the query was
+    // supposed to answer such an edit, so nothing rebaked and the rig kept
+    // publishing the first drag's pose: the control moved under the preview
+    // and sprang back the moment the artist let go, until some other
+    // control's first release resynced and rebaked the program for it.
     //
     // Reading through the generation's resolved inputs is what the dynamic
     // path does for the same attribute, so the two still agree by
-    // construction, and `live` in Register() stays honest: the value really
-    // is re-read every frame now.
+    // construction, and `live` in RigExecBakedRecordBind stays honest: the
+    // value really is re-read every frame now.
     if (input.varying && input.query.IsValid() &&
         input.query.GetAttribute().HasSpline()) {
         input.query = UsdAttributeQuery();
@@ -2852,19 +3089,8 @@ RigExecBakedBuildContext::CommitBind(const UsdPrim &prim, const char *name,
                                      RigExecBakedInput<T> *input,
                                      const SdfPathVector &walk)
 {
-    RigExecBakedProgramImpl &B = *program;
-    if (prim && prim.GetAttribute(TfToken(name))) {
-        ++B.boundInputs;
-        if (input->varying) ++B.varyingInputs;
-    }
-    if (prim) {
-        B.prims.insert(prim.GetPath());
-        // Named even when absent: a resync that CREATES this property is
-        // an input appearing, and the bake captured the default it did
-        // not find.
-        B.named.insert(prim.GetPath().AppendProperty(TfToken(name)));
-    }
-    B.Register(input, walk);
+    RigExecBakedProgramSink sink{program};
+    RigExecBakedRecordBind(&sink, prim, name, input, walk);
 }
 
 // ---------------------------------------------------------------------------
@@ -3099,6 +3325,8 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///  * everything Build wrote and no run touches -- the slot tables, the
 ///    rests, the input bindings, the step graph, the clustering, the cones.
 ///    A run that changed one of those would be a run editing the program.
+///  * what only a NOTICE writes and no run reads: `valueEditSerial`/
+///    `editSerial` and the routing's `connectedSources` cache.
 ///  * what the PROLOGUE writes: `propertyResults`, `avarsDisturbed`,
 ///    `overridden`/`anyOverridden`/`folded`, `curvenetBindings`, and the
 ///    geometry prologue's `haveBase`/`baseDirty`/`lastBase`/`created`/
@@ -3107,7 +3335,9 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    by construction. Several are captured and restored anyway, because
 ///    they are cheap and putting the second pass back on exactly the first
 ///    pass's footing is what the mode is for.
-///  * the cone bookkeeping itself -- `closed`, `lastAvars`, `lastOverridden`,
+///  * the cone bookkeeping itself -- `closedSteps`, `closed`, `lastAvars`,
+///    `lastOverridden`, `edited`/`anyEdited` (the first pass consumes them
+///    and the forced second pass needs none),
 ///    `lastPropertyResults`, `lastHaveBase`, `lastTime`, `everRan`,
 ///    `lastProgramStamp`. The second pass is FORCED, so its closure differs
 ///    from the first's on purpose; comparing them would report the mode
@@ -3128,7 +3358,8 @@ void RigExecBakedDeclareInputDependencies(RigExecBakedProgramImpl *program);
 ///    pass starting from exactly the first's state -- but not compared.
 ///  * the RUN STATISTICS, which are restored rather than compared, because
 ///    the second pass is forced and so writes different ones by
-///    construction: `lastClosedClusters`, the clustering's `lastRunTimed`
+///    construction: `lastClosedClusters`, `lastClosedSteps`, the
+///    clustering's `lastRunTimed`
 ///    and each `RigExecBakedCluster`'s `readyUs`/`startUs`/`endUs`, and each
 ///    step's `startUs`/`endUs`. RigExecBakedRunStatistics takes all of them
 ///    before the second pass and puts them back after it, so that every
@@ -3256,6 +3487,7 @@ struct RigExecBakedRunStatistics {
     std::vector<ClusterTimes> clusters;
     std::vector<StepTimes> steps;
     size_t closedClusters = 0;
+    size_t closedSteps = 0;
     bool timed = false;
 };
 

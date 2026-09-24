@@ -87,7 +87,7 @@ def main():
     import _rigexec
     stage, pts = _Stage()
     angle = math.radians(40.0)
-    for mode in ("dynamic", "parity"):
+    for mode in ("reference", "parity"):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         _Check(rig.compile() is not False, "%s: compiles" % mode)
         rig.evaluation_mode = mode

@@ -2,8 +2,8 @@
 // RigExec compiled mover graph (spec §7.2). See moverGraph.h.
 //
 #include "moverGraph.h"
-#include "curvenetAdjuster.h"
 #include "parallel.h"
+#include "movers/moverRegistry.h"
 
 #include "rigExecMath/geometryKernels.h"
 #include "rigExecMath/envelope.h"
@@ -1132,44 +1132,15 @@ RigExecRevisionBinding::operator==(const RigExecRevisionBinding &o) const
 std::optional<RigExecRevisionOp>
 RigExecRevisionOpForSchema(const TfToken &schemaType, const TfToken &curveMode)
 {
-    if (schemaType == "RigExecMatrixMover") {
-        return RigExecRevisionOp::Matrix;
+    // Resolved by the mover's own TU (see movers/): most movers name a
+    // fixed op, the curve mover resolves its authored mode, and anything
+    // without a row revises no point chain.
+    const RigExecMoverHandler *handler =
+        RigExecFindMoverHandler(schemaType);
+    if (!handler) {
+        return std::nullopt;
     }
-    if (schemaType == "RigExecSkinMover") {
-        return RigExecRevisionOp::Skin;
-    }
-    if (schemaType == "RigExecBlendShapeMover") {
-        return RigExecRevisionOp::BlendShape;
-    }
-    if (schemaType == "RigExecVolumeCorrectMover") {
-        return RigExecRevisionOp::VolumeCorrect;
-    }
-    if (schemaType == "RigExecSmoothMover") {
-        return RigExecRevisionOp::Smooth;
-    }
-    if (schemaType == "RigExecLatticeMover") {
-        return RigExecRevisionOp::Lattice;
-    }
-    if (schemaType == "RigExecSurfaceMover") {
-        return RigExecRevisionOp::SurfaceProject;
-    }
-    if (schemaType == "RigExecCurvenetMover") {
-        return RigExecRevisionOp::Curvenet;
-    }
-    if (schemaType == "RigExecCurvenetAdjusterMover") {
-        return RigExecRevisionOp::CurvenetAdjuster;
-    }
-    if (schemaType == "RigExecCurveMover") {
-        // The curve mover's frozen signature branches on its authored mode.
-        if (curveMode == "emitGuidePoints") {
-            return RigExecRevisionOp::EmitGuidePoints;
-        }
-        if (curveMode == "wire") {
-            return RigExecRevisionOp::Wire;
-        }
-        return RigExecRevisionOp::Ribbon;
-    }
-    return std::nullopt;
+    return handler->resolveOp(curveMode);
 }
 
 std::shared_ptr<const RigExecProfileMoverBinding>
@@ -1426,16 +1397,6 @@ RigExecChainSnapshots::Lookup(
 
 namespace {
 
-SdfPathVector
-_Targets(const UsdPrim &prim, const char *rel)
-{
-    SdfPathVector targets;
-    if (const UsdRelationship r = prim.GetRelationship(TfToken(rel))) {
-        r.GetTargets(&targets);
-    }
-    return targets;
-}
-
 TfToken
 _Token(const UsdPrim &prim, const TfToken &attr, const TfToken &fallback)
 {
@@ -1444,14 +1405,6 @@ _Token(const UsdPrim &prim, const TfToken &attr, const TfToken &fallback)
         a.Get(&value);
     }
     return value;
-}
-
-// A PointBased prim binds to its .points property by the standard rule; an
-// exact property path is already canonical.
-SdfPath
-_PointsOf(const SdfPath &path)
-{
-    return path.IsPrimPath() ? path.AppendProperty(TfToken("points")) : path;
 }
 
 // Every scalar mover input consults the generation's resolved property set
@@ -1556,238 +1509,21 @@ RigExecResolveRevisionBinding(
     binding.moverPath = moverPrim.GetPath();
     binding.target = target;
 
-    const TfToken schemaType = moverPrim.GetTypeName();
-    const SdfPath ownerPath = target.GetPrimPath();
-
-    // A phase declared on the relationship that NAMES an input governs that
-    // input. Recorded against the exact property path the phase applies to,
-    // so the assembler's read of that path is what consults it.
-    auto phaseFor = [&moverPrim](const char *rel, const char *legacyAttr) {
-        RigExecReadPhase phase;
-        if (const UsdRelationship r = moverPrim.GetRelationship(TfToken(rel))) {
-            RigExecResolveReadPhase(r, legacyAttr, &phase, nullptr);
-        } else if (legacyAttr) {
-            // No relationship to hang metadata on, but the legacy attribute
-            // may still be authored.
-            if (const UsdAttribute a =
-                    moverPrim.GetAttribute(TfToken(legacyAttr))) {
-                RigExecResolveReadPhase(a, legacyAttr, &phase, nullptr);
-            }
-        }
-        return phase;
-    };
-
-    if (schemaType == "RigExecMatrixMover") {
-        // "final" binds the provider's frame-chain head instead of the
-        // provider itself; every other phase binds the provider (spec §12.1).
-        const SdfPathVector transforms = _Targets(moverPrim, "rigExec:transform");
-        SdfPath provider = transforms.empty() ? SdfPath() : transforms[0];
-        binding.transformPhase =
-            phaseFor("rigExec:transform", "rigExec:transformReadPhase");
-        if (binding.transformPhase.kind == RigExecReadPhaseKind::Final) {
-            const auto it = frameChainHeads.find(provider);
-            if (it != frameChainHeads.end()) {
-                provider = it->second;
-            }
-        }
-        binding.transform = provider;
-        const SdfPathVector spaces =
-            _Targets(moverPrim, "rigExec:transformSpace");
-        SdfPath space = spaces.empty() ? SdfPath() : spaces[0];
-        if (!space.IsEmpty() &&
-            binding.transformPhase.kind == RigExecReadPhaseKind::Final) {
-            const auto it = frameChainHeads.find(space);
-            if (it != frameChainHeads.end()) {
-                space = it->second;
-            }
-        }
-        binding.transformSpace = space;
-    } else if (schemaType == "RigExecSkinMover") {
-        // Every influence shares one declared phase, on rigExec:influences
-        // or the legacy attribute, and "final" binds each provider's
-        // frame-chain head exactly as the matrix mover does for its one.
-        binding.influences = _Targets(moverPrim, "rigExec:influences");
-        binding.transformPhase =
-            phaseFor("rigExec:influences", "rigExec:transformReadPhase");
-        if (binding.transformPhase.kind == RigExecReadPhaseKind::Final) {
-            for (SdfPath &provider : binding.influences) {
-                const auto it = frameChainHeads.find(provider);
-                if (it != frameChainHeads.end()) {
-                    provider = it->second;
-                }
-            }
-        }
-    } else if (schemaType == "RigExecBlendShapeMover") {
-        if (moverPrim.GetStage()->GetPrimAtPath(ownerPath).IsA<UsdGeomMesh>()) {
-            binding.topologyCounts = ownerPath.AppendProperty(TfToken("faceVertexCounts"));
-            binding.topologyIndices = ownerPath.AppendProperty(TfToken("faceVertexIndices"));
-        }
-        binding.blendInputs = _Targets(moverPrim, "rigExec:blendInputs");
-        std::sort(binding.blendInputs.begin(), binding.blendInputs.end());
-        for (const SdfPath &input : binding.blendInputs) {
-            const UsdPrim channel = moverPrim.GetStage()->GetPrimAtPath(input);
-            for (const SdfPath &samplePath : _Targets(channel, "rigExec:samples")) {
-                const UsdPrim sample = moverPrim.GetStage()->GetPrimAtPath(samplePath);
-                const SdfPathVector points = _Targets(sample, "rigExec:targetPoints");
-                const SdfPathVector shapes = _Targets(sample, "rigExec:blendShape");
-                // Exactly one of the two. Both authored is not a precedence
-                // question: two shapes that disagree with a silent winner is
-                // the worst of the three outcomes, so the sample is dropped
-                // here and compile reports it.
-                if (points.size() + shapes.size() != 1) continue;
-                RigExecReadPhase phase;
-                std::string error;
-                if (shapes.size() == 1) {
-                    // A sparse sample has no phased points property to read:
-                    // its offsets are authored data on a UsdSkelBlendShape,
-                    // not a chain result, so there is no "preceding" or
-                    // "final" revision of them to select.
-                    binding.blendSamples[input].push_back(
-                        {samplePath, SdfPath(), phase, shapes[0]});
-                    continue;
-                }
-                RigExecResolveReadPhase(
-                    sample.GetRelationship(TfToken("rigExec:targetPoints")),
-                    "rigExec:pointsReadPhase", &phase, &error);
-                binding.blendSamples[input].push_back(
-                    {samplePath, _PointsOf(points[0]), phase, SdfPath()});
-            }
-        }
-        binding.base = target;
-    } else if (schemaType == "RigExecVolumeCorrectMover") {
-        binding.base = target;
-    } else if (schemaType == "RigExecSmoothMover") {
-        binding.topologyCounts =
-            ownerPath.AppendProperty(TfToken("faceVertexCounts"));
-        binding.topologyIndices =
-            ownerPath.AppendProperty(TfToken("faceVertexIndices"));
-    } else if (schemaType == "RigExecLatticeMover") {
-        binding.base = target;
-        const SdfPathVector cages = _Targets(moverPrim, "rigExec:cage");
-        if (!cages.empty()) {
-            binding.cagePoints = _PointsOf(cages[0]);
-            const RigExecReadPhase phase =
-                phaseFor("rigExec:cage", "rigExec:cageReadPhase");
-            if (!phase.IsBase()) {
-                binding.phases[binding.cagePoints] = phase;
-            }
-        }
-    } else if (schemaType == "RigExecSurfaceMover") {
-        const SdfPathVector surfaces = _Targets(moverPrim, "rigExec:surface");
-        if (!surfaces.empty()) {
-            const SdfPath surfacePrim = surfaces[0].GetPrimPath();
-            binding.surfacePoints =
-                surfacePrim.AppendProperty(TfToken("points"));
-            const RigExecReadPhase phase =
-                phaseFor("rigExec:surface", "rigExec:surfaceReadPhase");
-            if (!phase.IsBase()) {
-                binding.phases[binding.surfacePoints] = phase;
-            }
-            binding.topologyCounts =
-                surfacePrim.AppendProperty(TfToken("faceVertexCounts"));
-            binding.topologyIndices =
-                surfacePrim.AppendProperty(TfToken("faceVertexIndices"));
-        }
-    } else if (schemaType == "RigExecCurvenetAdjusterMover") {
-        binding.base = target;
-        binding.curvenet = target.GetPrimPath();
-    } else if (schemaType == "RigExecCurvenetMover") {
-        // The Profile Mover reads the target's own topology to cut it, and
-        // its authored base points are the projection pose the cut is
-        // computed against (§4.1).
-        binding.base = target;
-        binding.topologyCounts =
-            ownerPath.AppendProperty(TfToken("faceVertexCounts"));
-        binding.topologyIndices =
-            ownerPath.AppendProperty(TfToken("faceVertexIndices"));
-        const SdfPathVector nets = _Targets(moverPrim, "rigExec:curvenet");
-        if (!nets.empty()) {
-            binding.curvenet = nets[0].GetPrimPath();
-            binding.curvenetPoints =
-                binding.curvenet.AppendProperty(TfToken("points"));
-            const RigExecReadPhase phase =
-                phaseFor("rigExec:curvenet", nullptr);
-            if (!phase.IsBase()) {
-                binding.phases[binding.curvenetPoints] = phase;
-            }
-        }
-    } else if (schemaType == "RigExecCurveMover") {
-        const SdfPathVector binds = _Targets(moverPrim, "rigExec:bindCoordinates");
-        if (!binds.empty()) {
-            binding.bindCoords = binds[0];
-        }
-        // The wire's driver: a NURBS curve prim, read at its declared phase
-        // (a curve deformed by its own chain reads "final").
-        const SdfPathVector curves = _Targets(moverPrim, "rigExec:driverCurve");
-        if (!curves.empty()) {
-            const SdfPath curvePrim = curves[0].GetPrimPath();
-            binding.driverCurvePoints =
-                curvePrim.AppendProperty(TfToken("points"));
-            binding.driverCurveOrder =
-                curvePrim.AppendProperty(TfToken("order"));
-            binding.driverCurveKnots =
-                curvePrim.AppendProperty(TfToken("knots"));
-            const RigExecReadPhase phase = phaseFor(
-                "rigExec:driverCurve", "rigExec:driverCurveReadPhase");
-            if (!phase.IsBase()) {
-                binding.phases[binding.driverCurvePoints] = phase;
-            }
-        }
-        // Or the wire's control points moved by matrix providers directly:
-        // one transform (or one for all) per unique control point, measured
-        // against its space. Carried as influences -- transforms first, then
-        // spaces -- so every path delivers them the way it delivers a skin's.
-        const SdfPathVector driverTransforms =
-            _Targets(moverPrim, "rigExec:driverTransforms");
-        if (!driverTransforms.empty()) {
-            binding.transformPhase = phaseFor("rigExec:driverTransforms",
-                                              "rigExec:transformReadPhase");
-            const auto provider = [&](SdfPath path) {
-                if (binding.transformPhase.kind ==
-                    RigExecReadPhaseKind::Final) {
-                    const auto it = frameChainHeads.find(path);
-                    if (it != frameChainHeads.end()) {
-                        path = it->second;
-                    }
-                }
-                return path;
-            };
-            for (const SdfPath &t : driverTransforms) {
-                binding.influences.push_back(provider(t));
-            }
-            const SdfPathVector spaces =
-                _Targets(moverPrim, "rigExec:driverTransformSpaces");
-            for (const SdfPath &s : spaces) {
-                binding.influences.push_back(provider(s));
-            }
-            const SdfPathVector baseTransforms =
-                _Targets(moverPrim, "rigExec:driverBaseTransforms");
-            for (const SdfPath &b : baseTransforms) {
-                binding.influences.push_back(provider(b));
-            }
-            for (const SdfPath &b :
-                     _Targets(moverPrim, "rigExec:driverBaseTransformSpaces")) {
-                binding.influences.push_back(provider(b));
-            }
-            binding.driverTransformCount = int(driverTransforms.size());
-            binding.driverSpaceCount = int(spaces.size());
-            binding.driverBaseTransformCount = int(baseTransforms.size());
-        }
-        const SdfPathVector frames = _Targets(moverPrim, "rigExec:driverFrames");
-        if (!frames.empty()) {
-            binding.driverFrames = frames[0];
-        }
-        if (!binding.bindCoords.IsEmpty()) {
-            const RigExecReadPhase phase =
-                phaseFor("rigExec:bindCoordinates", nullptr);
-            if (!phase.IsBase()) {
-                binding.phases[binding.bindCoords] = phase;
-            }
+    // Per-mover inputs, bound by the mover's own TU (see movers/). A
+    // type with no row, or a row with no binder, binds nothing here.
+    if (const RigExecMoverHandler *handler =
+            RigExecFindMoverHandler(moverPrim.GetTypeName())) {
+        if (handler->bind) {
+            const SdfPath ownerPath = target.GetPrimPath();
+            const RigExecMoverBindContext ctx{
+                moverPrim, target, ownerPath, frameChainHeads, &binding};
+            handler->bind(ctx);
         }
     }
 
     // Every point-chain mover may narrow its application with a weight object.
-    const SdfPathVector weights = _Targets(moverPrim, "rigExec:weightObject");
+    const SdfPathVector weights = RigExecRelationshipTargets(
+        moverPrim, "rigExec:weightObject");
     if (!weights.empty()) {
         binding.weightObject = weights[0];
     }
@@ -2308,7 +2044,13 @@ RigExecSumBlendChannels(
                     deltaData[i] += dLo + (dHi - dLo) * t;
                 }
             };
+            // Gated like every other launch site in this file: the frozen
+            // assembler calls this kernel too (frozenContext.cpp's
+            // blend-shape replica), and a frozen frame must run on its own
+            // thread alone. The serial branch computes the same bits, which
+            // is what makes the gate free to take.
             if (RigExecParallelEvaluationEnabled() &&
+                !RigExecFrozenSerialActive() &&
                 nPts >= RigExecGeometryParallelThreshold) {
                 WorkParallelForN(nPts, denseRange, RigExecGeometryGrainSize);
             } else {

@@ -2615,6 +2615,23 @@ TestAggregateSolverValueUpdates()
     CHECK(Near(middle(), GfVec3d(2, 1, 0)));
 }
 
+// Moves \p evaluator to the exec oracle when the session left it at Dynamic.
+//
+// The suites that call this count solverEvaluations in the WALK's meaning:
+// the batches this generation re-evaluated, so an unchanged pull reads zero.
+// In the program it is a Build-time constant (unified-program spec rule D4),
+// so their assertions hold only where the walk publishes. Dynamic may run the
+// program (RIGEXEC_DYNAMIC_RUNS_PROGRAM), so it is pinned; the parity check
+// publishes the oracle's generation and is left alone, so its entries keep
+// comparing the program against these rigs.
+static void
+PinSolverEvaluationsToTheWalk(RigExecRigEvaluator &evaluator)
+{
+    if (evaluator.GetEvaluationMode() == RigExecEvaluationMode::Dynamic) {
+        evaluator.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    }
+}
+
 static void
 TestDeepSolverDependencySchedule()
 {
@@ -2677,6 +2694,7 @@ TestDeepSolverDependencySchedule()
             .SetChildrenReorder(order);
     }
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    PinSolverEvaluationsToTheWalk(evaluator);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
@@ -2812,6 +2830,7 @@ TestSolverTransitiveConnectionInvalidation()
     const UsdAttribute stretch = ik.GetAttribute(TfToken("inputs:stretch"));
     stretch.SetConnections({relay.GetPath()});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    PinSolverEvaluationsToTheWalk(evaluator);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     CHECK(errors.empty());
@@ -2929,6 +2948,7 @@ TestConstraintSolverDependencySchedule()
                              TfToken("FollowEnd"), TfToken("IK"),
                              TfToken("DriveGoal"), TfToken("Source")});
     RigExecRigEvaluator evaluator(stage, SdfPath("/Asset/Rig"));
+    PinSolverEvaluationsToTheWalk(evaluator);
     std::vector<std::string> errors;
     CHECK(evaluator.Compile(&errors));
     const size_t epoch = evaluator.GetBindingEpochDigest();

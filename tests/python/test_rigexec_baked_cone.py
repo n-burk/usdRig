@@ -122,7 +122,7 @@ def TestParityReportsNoMismatch():
 
 
 def TestABakedDragIsBitIdenticalToAFreshRig():
-    """A long baked drag must answer as a dynamic rig that never saw one."""
+    """A long baked drag must answer as the exec oracle that never saw one."""
     _, dragged, controls = _Open("baked")
     dragged.evaluate(1.0)
     for name in _PROBES:
@@ -131,7 +131,7 @@ def TestABakedDragIsBitIdenticalToAFreshRig():
                 [(controls[name], "avars:rz", value)])
             baked = _Snapshot(dragged.evaluate(1.0))
 
-            _, fresh, freshControls = _Open("dynamic")
+            _, fresh, freshControls = _Open("reference")
             fresh.set_interactive_overrides(
                 [(freshControls[name], "avars:rz", value)])
             full = _Snapshot(fresh.evaluate(1.0))

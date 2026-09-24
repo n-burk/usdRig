@@ -92,7 +92,18 @@ add_library(rigExec SHARED
     libs/rigExec/solverKernels.cpp
     libs/rigExec/weightPackets.cpp
     libs/rigExec/curvenetWeightComputations.cpp
-    libs/rigExec/curvenetAdjuster.cpp
+    libs/rigExec/movers/moverRegistry.cpp
+    libs/rigExec/movers/matrixMover.cpp
+    libs/rigExec/movers/skinMover.cpp
+    libs/rigExec/movers/blendShapeMover.cpp
+    libs/rigExec/movers/smoothMover.cpp
+    libs/rigExec/movers/volumeCorrectMover.cpp
+    libs/rigExec/movers/latticeMover.cpp
+    libs/rigExec/movers/surfaceMover.cpp
+    libs/rigExec/movers/curveMover.cpp
+    libs/rigExec/movers/curvenetMover.cpp
+    libs/rigExec/movers/curvenetAdjusterMover.cpp
+    libs/rigExec/movers/mathMovers.cpp
     libs/rigExec/moverGraph.cpp
     libs/rigExec/tapSet.cpp
     libs/rigExec/rigEvaluator.cpp
@@ -353,6 +364,13 @@ add_test(NAME testRigExecConstraints COMMAND testRigExecConstraints)
 # only place the claim can be wrong. Opt-in, because the mode roughly doubles
 # a suite's runtime and only a suite whose generations come from the program
 # proves anything under it.
+#
+# Each of those two has a grain-zero twin, <name>Cones_grain0_serial and
+# <name>Cones_grain0_parallel, with RIGEXEC_BAKED_GRAIN_US=0: one step per
+# cluster. A live run closes per step whatever the grain, so the default
+# grain already checks the closure; grain zero is what dispatches that
+# closure one step per task, where a counter that missed an edge races, and
+# where no cluster-mate re-run can hide a read a step never declared.
 function(rigexec_add_baked_parity_test name)
     set(_args "${ARGN}")
     set(_require_bake OFF)
@@ -388,8 +406,19 @@ function(rigexec_add_baked_parity_test name)
                 PROPERTY ENVIRONMENT
                 "RIGEXEC_BAKED_VERIFY_CONES=1"
                 "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+            add_test(NAME ${name}Cones_grain0_${_schedule}
+                COMMAND ${name} ${_args})
+            set_tests_properties(${name}Cones_grain0_${_schedule} PROPERTIES
+                ENVIRONMENT "RIGEXEC_EVALUATION_MODE=parity"
+                FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+            set_property(TEST ${name}Cones_grain0_${_schedule} APPEND
+                PROPERTY ENVIRONMENT
+                "RIGEXEC_BAKED_VERIFY_CONES=1"
+                "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
+                "RIGEXEC_BAKED_GRAIN_US=0")
             if (_require_bake)
-                set_property(TEST ${name}Cones_${_schedule} APPEND
+                set_property(TEST ${name}Cones_${_schedule}
+                    ${name}Cones_grain0_${_schedule} APPEND
                     PROPERTY ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1")
             endif()
         endforeach()
@@ -540,6 +569,18 @@ foreach(_schedule serial parallel)
         PROPERTY ENVIRONMENT
         "RIGEXEC_BAKED_VERIFY_CONES=1"
         "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+    # And at grain zero, one step per cluster (see CONE_VERIFY above).
+    add_test(NAME testRigExecExampleParityCones_grain0_${_schedule}
+        COMMAND testRigExecExampleParity
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    set_tests_properties(testRigExecExampleParityCones_grain0_${_schedule}
+        PROPERTIES ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    set_property(TEST testRigExecExampleParityCones_grain0_${_schedule} APPEND
+        PROPERTY ENVIRONMENT
+        "RIGEXEC_BAKED_VERIFY_CONES=1"
+        "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
+        "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
 
 # The geometry operations that bake with no shipped rig to say so:
@@ -576,6 +617,21 @@ foreach(_schedule serial parallel)
         APPEND PROPERTY ENVIRONMENT
         "RIGEXEC_BAKED_VERIFY_CONES=1"
         "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+    # And at grain zero, one step per cluster (see CONE_VERIFY above).
+    add_test(NAME testRigExecGeometryOpsBakedParityCones_grain0_${_schedule}
+        COMMAND testRigExecGeometryOpsBakedParity
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/rigExecRibbonProbe.usda")
+    set_tests_properties(
+        testRigExecGeometryOpsBakedParityCones_grain0_${_schedule}
+        PROPERTIES ENVIRONMENT "RIGEXEC_BAKE_REQUIRED=1"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    set_property(
+        TEST testRigExecGeometryOpsBakedParityCones_grain0_${_schedule}
+        APPEND PROPERTY ENVIRONMENT
+        "RIGEXEC_BAKED_VERIFY_CONES=1"
+        "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
+        "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
 
 add_executable(testRigExecStandalone tests/testRigExecStandalone.cpp)
@@ -754,6 +810,24 @@ add_test(NAME testRigExecBakedAttributeEnvironment
 set_tests_properties(testRigExecBakedAttributeEnvironment PROPERTIES
     ENVIRONMENT "RIGEXEC_EVALUATION_MODE=dynamic")
 
+# What Dynamic dispatches to: the exec walk, or with
+# RIGEXEC_DYNAMIC_RUNS_PROGRAM the baked program wherever the epoch has one,
+# byte-identical to ExecReference and silent when it falls back. Registered
+# twice for the reason the entry above is: the variable is read once per
+# process. The suite asserts against the variable, so both entries run the
+# same checks and each states its own half. RIGEXEC_EVALUATION_MODE stays
+# unset in both -- the suite is about a mode nobody but the stage chose.
+add_executable(testRigExecDynamicDispatch tests/testRigExecDynamicDispatch.cpp)
+target_link_libraries(testRigExecDynamicDispatch PRIVATE rigExec)
+target_compile_definitions(testRigExecDynamicDispatch
+    PRIVATE ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecDynamicDispatch COMMAND testRigExecDynamicDispatch
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+add_test(NAME testRigExecDynamicDispatchProgram
+    COMMAND testRigExecDynamicDispatch "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+set_tests_properties(testRigExecDynamicDispatchProgram PROPERTIES
+    ENVIRONMENT "RIGEXEC_DYNAMIC_RUNS_PROGRAM=1")
+
 # The step graph behind the baked program: the edges, not the values.
 add_executable(testRigExecBakedSchedule tests/testRigExecBakedSchedule.cpp)
 target_link_libraries(testRigExecBakedSchedule PRIVATE rigExec)
@@ -776,6 +850,16 @@ foreach(_schedule serial parallel)
         FAIL_REGULAR_EXPRESSION "baked parity mismatch")
     set_property(TEST testRigExecBakedScheduleCones_${_schedule} APPEND
         PROPERTY ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}")
+    # And at grain zero, one step per cluster (see CONE_VERIFY above).
+    add_test(NAME testRigExecBakedScheduleCones_grain0_${_schedule}
+        COMMAND testRigExecBakedSchedule
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    set_tests_properties(testRigExecBakedScheduleCones_grain0_${_schedule}
+        PROPERTIES ENVIRONMENT "RIGEXEC_BAKED_VERIFY_CONES=1"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    set_property(TEST testRigExecBakedScheduleCones_grain0_${_schedule} APPEND
+        PROPERTY ENVIRONMENT "RIGEXEC_BAKED_SCHEDULE=${_schedule}"
+        "RIGEXEC_BAKED_GRAIN_US=0")
 endforeach()
 
 # The solver half of the baked program, on rigs the examples do not have:
@@ -858,7 +942,9 @@ rigexec_add_baked_parity_test(testRigExecVolumeWeights REQUIRE_BAKE
     CONE_VERIFY "${CMAKE_CURRENT_SOURCE_DIR}/examples")
 foreach(_entry testRigExecVolumeWeightsBakedParity
                testRigExecVolumeWeightsCones_serial
-               testRigExecVolumeWeightsCones_parallel)
+               testRigExecVolumeWeightsCones_parallel
+               testRigExecVolumeWeightsCones_grain0_serial
+               testRigExecVolumeWeightsCones_grain0_parallel)
     set_property(TEST ${_entry} APPEND PROPERTY ENVIRONMENT
         "RIGEXEC_TEST_BAKED_PATH=1")
 endforeach()
@@ -880,6 +966,12 @@ target_link_libraries(testRigExecSkinTopology PRIVATE rigExec)
 target_compile_definitions(testRigExecSkinTopology PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecSkinTopology COMMAND testRigExecSkinTopology)
+# Pinned to the exec oracle (RigExecEvaluationMode::ExecReference): what it
+# asserts is the exec walk's own skin layout handling, including the
+# skinTopologyFixed=false whole-array path, so it must keep running that walk
+# whatever the default mode comes to run.
+set_tests_properties(testRigExecSkinTopology PROPERTIES
+    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
 
 # The static input cache's three rules -- admission, typing, and the
 # worker-thread bypass -- asserted directly, because each one's failure mode
@@ -909,6 +1001,11 @@ target_compile_definitions(testRigExecEpochRests PRIVATE
     ${_rigexec_schema_resource_define})
 add_test(NAME testRigExecEpochRests COMMAND testRigExecEpochRests
     "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+# The plain entry is pinned to the exec oracle: it is the one that holds the
+# exec walk's rest handling to account, while the entries below hold the
+# program to it.
+set_tests_properties(testRigExecEpochRests PROPERTIES
+    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
 # And again under the parity check. A rest that moves on one path and not the
 # other is exactly what the comparator is for, and this is the suite that
 # moves rests on purpose.
@@ -948,7 +1045,9 @@ set_tests_properties(testRigExecParallelKernelsSerial PROPERTIES
 
 # One task per chain inside a dependency level: the same values as the serial
 # walk, the same diagnostics order, and the same classification. Run twice,
-# the second time down the serial branch.
+# the second time down the serial branch. Every entry is pinned to the exec
+# oracle, because the level-parallel chains are the exec walk's own and a
+# mode that answered from the program would never reach them.
 add_executable(testRigExecChainLevels tests/testRigExecChainLevels.cpp)
 target_link_libraries(testRigExecChainLevels PRIVATE rigExec work)
 target_compile_definitions(testRigExecChainLevels PRIVATE
@@ -957,6 +1056,8 @@ add_test(NAME testRigExecChainLevels COMMAND testRigExecChainLevels)
 add_test(NAME testRigExecChainLevelsSerial COMMAND testRigExecChainLevels)
 set_tests_properties(testRigExecChainLevelsSerial PROPERTIES
     ENVIRONMENT "RIGEXEC_ENABLE_PARALLEL_EVAL=0")
+set_property(TEST testRigExecChainLevels testRigExecChainLevelsSerial APPEND
+    PROPERTY ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
 # And again, repeatedly. The two guards that make the level-parallel walk
 # memory-safe -- the pre-created graph nodes and the static cache's owning
 # thread -- fail probabilistically when they are broken, not deterministically:
@@ -966,6 +1067,8 @@ set_tests_properties(testRigExecChainLevelsSerial PROPERTIES
 # than one CI run in twenty. The file costs well under a tenth of a second.
 add_test(NAME testRigExecChainLevelsRepeat
     COMMAND testRigExecChainLevels 20)
+set_tests_properties(testRigExecChainLevelsRepeat PROPERTIES
+    ENVIRONMENT "RIGEXEC_EVALUATION_MODE=reference")
 
 add_executable(testRigExecProfiler tests/testRigExecProfiler.cpp)
 target_link_libraries(testRigExecProfiler PRIVATE rigExec)
@@ -1072,6 +1175,17 @@ target_include_directories(benchCommitLag PRIVATE
 target_compile_definitions(benchCommitLag PRIVATE
     ${_rigexec_schema_resource_define} ${_rigexec_imaging_resource_define})
 
+# The edit-latency bench (docs/specs/unified-program.md section 3): one row
+# per edit tier on the biped -- drags, avar, non-avar, rest, folded,
+# structural and broken-stage edits -- each the median of the evaluates right
+# after the edit, split into settle / compile / bake / run with the program's
+# clusters and steps run. Prints numbers and asserts nothing, so it is built
+# but deliberately NOT registered with ctest.
+add_executable(benchEditLatency tests/benchEditLatency.cpp)
+target_link_libraries(benchEditLatency PRIVATE rigExec)
+target_compile_definitions(benchEditLatency PRIVATE
+    ${_rigexec_schema_resource_define})
+
 # benchPlayback: paced first-play plus unpaced replay on the biped -- the
 # SetTime + OnIdle tick the plugin runs per playback frame, with pulls,
 # hits/misses, and scheduler completions. Prints numbers and asserts
@@ -1098,6 +1212,34 @@ add_test(NAME testRigExecInteractive COMMAND testRigExecInteractive)
 # the natural home for the cone verifier, because an interactive override is
 # what makes two consecutive frames differ in one value and nothing else.
 rigexec_add_baked_parity_test(testRigExecInteractive REQUIRE_BAKE CONE_VERIFY)
+
+# Stage value edits routed to the per-frame inputs they reach instead of
+# bumping the program stamp (unified-program spec rules S2, S3). The plain
+# entry runs baked and compares each edited generation with a program built
+# fresh on the edited stage; the parity entries add the dynamic walk, and the
+# cone entries the forced run of everything the routed cone has to match.
+add_executable(testRigExecValueEdits tests/testRigExecValueEdits.cpp)
+target_link_libraries(testRigExecValueEdits PRIVATE rigExec)
+target_compile_definitions(testRigExecValueEdits PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecValueEdits COMMAND testRigExecValueEdits
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+rigexec_add_baked_parity_test(testRigExecValueEdits REQUIRE_BAKE CONE_VERIFY
+    "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+
+# Scoped cache clears (unified-program spec rules S5, S6): a notice drops
+# exactly the cached values it could have made stale. The plain entry runs
+# each case baked and dynamic and compares every edited generation with an
+# evaluator compiled fresh on the edited stage; the parity entries add the
+# dynamic walk and the cone verifier. Not REQUIRE_BAKE: the skin case connects
+# rigExec:skinningMethod, which the program refuses, so that case always runs
+# the dynamic walk -- which reads the same layout cache.
+add_executable(testRigExecScopedClears tests/testRigExecScopedClears.cpp)
+target_link_libraries(testRigExecScopedClears PRIVATE rigExec)
+target_compile_definitions(testRigExecScopedClears PRIVATE
+    ${_rigexec_schema_resource_define})
+add_test(NAME testRigExecScopedClears COMMAND testRigExecScopedClears)
+rigexec_add_baked_parity_test(testRigExecScopedClears CONE_VERIFY)
 
 add_executable(testRigExecDefaultSpaces tests/testRigExecDefaultSpaces.cpp)
 target_link_libraries(testRigExecDefaultSpaces PRIVATE rigExec)
@@ -1155,6 +1297,143 @@ target_compile_definitions(probeImagingPipeline PRIVATE ${_rigexec_schema_resour
 # package. A failed link is a compatibility gate, not a reason to change USD.
 add_executable(probeEsfCompatibility EXCLUDE_FROM_ALL tests/probeEsfCompatibility.cpp)
 target_link_libraries(probeEsfCompatibility PRIVATE exec esfUsd usd)
+
+# ---------------------------------------------------------------------------
+# The default-mode suites again, on the exec oracle.
+#
+# Each suite below builds evaluators without fixing the mode of its whole
+# process, so any evaluator it does not set explicitly starts in the process
+# default, which its plain entry runs as Dynamic. The <name>Reference entry
+# runs the same binary with RIGEXEC_EVALUATION_MODE=reference, so every such
+# evaluator is ExecReference instead: the exec-authoritative walk the
+# program is judged against. The two answer identically today; the entries
+# exist so that the oracle stays under every assertion these suites make
+# once Dynamic stops being that walk. An evaluator a test sets explicitly
+# keeps its own mode either way.
+#
+# The variant copies the plain entry's ENVIRONMENT, ENVIRONMENT_MODIFICATION
+# and FAIL_REGULAR_EXPRESSION, so it differs from it in the mode alone.
+#
+# Not here, with the reason:
+# * testRigExecChainLevels, testRigExecSkinTopology and the plain
+#   testRigExecEpochRests entry are pinned to the oracle already.
+# * testRigExecBakedAttribute asserts the precedence ladder itself -- what an
+#   evaluator nobody set starts in -- and its Environment entry is the one
+#   that covers the variable.
+# * testRigExecImagingFrameCache chooses the baked mode for its whole process
+#   before the first evaluator exists, so it has no default mode to pin.
+# * testRigExecExampleParity and testRigExecGeometryOpsBakedParity fix their
+#   own mode, and their entries above keep the variable unset.
+function(rigexec_add_reference_test name)
+    add_test(NAME ${name}Reference COMMAND ${name} ${ARGN})
+    set(_env "RIGEXEC_EVALUATION_MODE=reference")
+    get_test_property(${name} ENVIRONMENT _plain_env)
+    if (_plain_env)
+        list(APPEND _env ${_plain_env})
+    endif()
+    set_tests_properties(${name}Reference PROPERTIES ENVIRONMENT "${_env}")
+    get_test_property(${name} ENVIRONMENT_MODIFICATION _plain_modification)
+    if (_plain_modification)
+        set_tests_properties(${name}Reference PROPERTIES
+            ENVIRONMENT_MODIFICATION "${_plain_modification}")
+    endif()
+    get_test_property(${name} FAIL_REGULAR_EXPRESSION _plain_fail)
+    if (_plain_fail)
+        set_tests_properties(${name}Reference PROPERTIES
+            FAIL_REGULAR_EXPRESSION "${_plain_fail}")
+    endif()
+endfunction()
+foreach(_suite testRigExecBackgroundScheduler testRigExecConstraints
+               testRigExecCurvenetAdjuster testRigExecFrameCacheSparsity
+               testRigExecInteractive testRigExecPoseInterpolator)
+    rigexec_add_reference_test(${_suite})
+endforeach()
+
+# ---------------------------------------------------------------------------
+# The stage-edit suites again, under the digest gate's verifier.
+#
+# The notice handler asks the structure digest to recompute only for a
+# notice that could move it (unified-program spec section 4.1): one in or
+# above the rig, or on, under or above a prim the digest read outside it.
+# The <name>DigestGate entry runs the same test with
+# RIGEXEC_VERIFY_DIGEST_GATE=1, which recomputes the digest after every
+# notice the gate called neutral and aborts if it moved -- so each suite
+# that edits a stage on purpose also holds the gate to account for every
+# edit it makes. The variant copies the plain entry's ENVIRONMENT and
+# ENVIRONMENT_MODIFICATION, so it differs from it in the verifier alone.
+#
+# The command is passed in, not taken from the plain entry, because a
+# Python suite's entry runs the interpreter rather than a target.
+function(rigexec_add_digest_gate_test name)
+    add_test(NAME ${name}DigestGate COMMAND ${ARGN})
+    set(_env "RIGEXEC_VERIFY_DIGEST_GATE=1")
+    get_test_property(${name} ENVIRONMENT _plain_env)
+    if (_plain_env)
+        list(APPEND _env ${_plain_env})
+    endif()
+    set_tests_properties(${name}DigestGate PROPERTIES ENVIRONMENT "${_env}")
+    get_test_property(${name} ENVIRONMENT_MODIFICATION _plain_modification)
+    if (_plain_modification)
+        set_tests_properties(${name}DigestGate PROPERTIES
+            ENVIRONMENT_MODIFICATION "${_plain_modification}")
+    endif()
+endfunction()
+foreach(_suite testRigExecConstraints testRigExecInteractive)
+    rigexec_add_digest_gate_test(${_suite} ${_suite})
+endforeach()
+
+# ---------------------------------------------------------------------------
+# The stage-edit suites again, beside a shadow that clears the caches whole.
+#
+# A notice drops only the cached values it could have made stale
+# (unified-program spec rule S5). The cone verifier cannot check that: it
+# captures the program after the prologue, where a stale cache has already
+# been read. The <name>ScopedClears entry runs the same test with
+# RIGEXEC_VERIFY_SCOPED_CLEARS=1 instead, which gives every evaluator a shadow
+# whose notices drop the caches whole, evaluates it beside every generation,
+# and reports any difference between the two poses as a baked parity
+# mismatch (rule S6). The variant copies the plain entry's ENVIRONMENT and
+# ENVIRONMENT_MODIFICATION, so it differs from it in the shadow alone.
+function(rigexec_add_scoped_clear_test name)
+    add_test(NAME ${name}ScopedClears COMMAND ${ARGN})
+    set(_env "RIGEXEC_VERIFY_SCOPED_CLEARS=1")
+    get_test_property(${name} ENVIRONMENT _plain_env)
+    if (_plain_env)
+        list(APPEND _env ${_plain_env})
+    endif()
+    set_tests_properties(${name}ScopedClears PROPERTIES
+        ENVIRONMENT "${_env}"
+        FAIL_REGULAR_EXPRESSION "baked parity mismatch")
+    get_test_property(${name} ENVIRONMENT_MODIFICATION _plain_modification)
+    if (_plain_modification)
+        set_tests_properties(${name}ScopedClears PROPERTIES
+            ENVIRONMENT_MODIFICATION "${_plain_modification}")
+    endif()
+endfunction()
+foreach(_suite testRigExecInteractive testRigExecScopedClears
+               testRigExecSkinTopology)
+    rigexec_add_scoped_clear_test(${_suite} ${_suite})
+endforeach()
+foreach(_suite testRigExecBakedMode testRigExecValueEdits)
+    rigexec_add_scoped_clear_test(${_suite} ${_suite}
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+endforeach()
+foreach(_suite testRigExecEpochRests testRigExecNoAuthoring)
+    rigexec_add_digest_gate_test(${_suite} ${_suite}
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+endforeach()
+foreach(_suite testRigExecArm testRigExecBakedMode testRigExecBakedSchedule
+               testRigExecBinary
+               testRigExecFrameCacheCones_Verify testRigExecFrozenContext
+               testRigExecImaging testRigExecImagingPlayback
+               testRigExecNoAuthoring testRigExecRuntimeGeometry
+               testRigExecRuntimeLoader testRigExecRuntimePose
+               testRigExecRuntimeWeights testRigExecSolverBake
+               testRigExecSolverStacking testRigExecVolumeWeights
+               testRigExecWeightOverlay)
+    rigexec_add_reference_test(${_suite}
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+endforeach()
 
 endif()  # RIGEXEC_BUILD_TESTS
 
@@ -1275,6 +1554,12 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
     # which genuinely reaches every step through its propagation sets.
     add_test(NAME testRigExecBakedCone COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_baked_cone.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    # Evaluate entered with the GIL held, as Hydra's Render enters it through
+    # the imaging bridge, from a cold process: no hang, and the same poses as
+    # the binding's own GIL-releasing evaluate in every mode.
+    add_test(NAME testRigExecGil COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_gil.py"
         "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
     # The stacked biped -- rig, pose interpolators and sparse blend shapes
     # composed together -- through the program, at parity: the interpolator
@@ -1410,6 +1695,14 @@ if (RIGEXEC_BUILD_PYTHON AND RIGEXEC_BUILD_TESTS AND Python3_FOUND)
         set_property(TEST ${_python_test} APPEND PROPERTY ENVIRONMENT
             "RIGEXEC_USD_INSTALL=${USD_INSTALL_DIR}")
     endforeach()
+    rigexec_add_digest_gate_test(testRigExecStageEdits
+        ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_stage_edits.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
+    rigexec_add_scoped_clear_test(testRigExecStageEdits
+        ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_rigexec_stage_edits.py"
+        "${CMAKE_CURRENT_BINARY_DIR}/usd/rigExecSchema/resources")
 endif()
 
 # The usdNoodles suite: plain unittest modules inside the package, run from

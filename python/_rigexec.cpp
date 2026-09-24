@@ -536,6 +536,7 @@ _ModeName(rigExec::RigExecEvaluationMode mode)
     switch (mode) {
     case rigExec::RigExecEvaluationMode::Baked: return "baked";
     case rigExec::RigExecEvaluationMode::BakedWithParityCheck: return "parity";
+    case rigExec::RigExecEvaluationMode::ExecReference: return "reference";
     case rigExec::RigExecEvaluationMode::Dynamic: break;
     }
     return "dynamic";
@@ -563,10 +564,13 @@ _ParseMode(const std::string &name)
     if (name == "parity") {
         return rigExec::RigExecEvaluationMode::BakedWithParityCheck;
     }
+    if (name == "reference") {
+        return rigExec::RigExecEvaluationMode::ExecReference;
+    }
     if (name != "dynamic") {
         throw py::value_error(
-            "evaluation_mode must be 'dynamic', 'baked' or 'parity' (got '" +
-            name + "')");
+            "evaluation_mode must be 'dynamic', 'baked', 'parity' or "
+            "'reference' (got '" + name + "')");
     }
     return rigExec::RigExecEvaluationMode::Dynamic;
 }
@@ -854,6 +858,17 @@ PYBIND11_MODULE(_rigexec, m) {
         .def("evaluate", [](const _Rig &r, double time) { return r.Evaluate(time); },
              py::arg("time") = -1.0,
              "Evaluate one generation; negative time means the stage default.")
+        // Not API: the way a C++ host enters Evaluate, with the GIL held --
+        // Hydra's Render, called from Python, reaches it through the imaging
+        // bridge exactly so. Evaluate has to give the GIL up itself, and this
+        // entry point deliberately does not do it for it, so a test can hold
+        // Evaluate to that.
+        .def("_evaluate_holding_gil",
+             [](const _Rig &r, double time) {
+                 return r.evaluator->Evaluate(
+                     time < 0 ? UsdTimeCode::Default() : UsdTimeCode(time));
+             },
+             py::arg("time") = -1.0)
         .def_property("cpu_parity_mode",
             [](_Rig &r) { return r.evaluator->cpuParityMode; },
             [](_Rig &r, bool v) { r.evaluator->cpuParityMode = v; })
@@ -863,9 +878,11 @@ PYBIND11_MODULE(_rigexec, m) {
                 r.evaluator->SetEvaluationMode(_ParseMode(v));
             },
             "'dynamic' (OpenExec plus the pose walk), 'baked' (the flattened\n"
-            "epoch when the rig allows it, dynamic otherwise), or 'parity'\n"
+            "epoch when the rig allows it, dynamic otherwise), 'parity'\n"
             "(both, compared with exact equality; see\n"
-            "Pose.baked_parity_mismatches). Baked is a request: setting it\n"
+            "Pose.baked_parity_mismatches), or 'reference' (the exec-\n"
+            "authoritative walk alone, the oracle the other three are\n"
+            "judged against). Baked is a request: setting it\n"
             "can never change an answer, only how fast it arrives.\n"
             "Setting it also takes the decision away from the rig's own\n"
             "rigExec:baked for good; see evaluation_mode_source.")

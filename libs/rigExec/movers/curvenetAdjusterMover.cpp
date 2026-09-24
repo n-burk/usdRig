@@ -1,4 +1,16 @@
-#include "curvenetAdjuster.h"
+//
+// RigExecCurvenetAdjusterMover: everything about the curvenet-adjuster
+// mover (spec §4.1).
+//
+// An adjuster mover poses the knots of a RigExecCurvenet through
+// RigExecCurvenetAdjustment prims. The adjuster has no exec-side
+// computation: its packet is assembled directly by
+// RigExecAssembleCurvenetAdjusterParameters below. This TU owns that
+// assembler, its revision binder, its compile validator, and its
+// parity-oracle branch, and registers the row that points at them.
+//
+
+#include "moverRegistry.h"
 #include "rigExecMath/avarScale.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/usd/usd/primRange.h"
@@ -140,7 +152,8 @@ RigExecMoverParameters RigExecAssembleCurvenetAdjusterParameters(
     return p;
 }
 
-bool RigExecValidateCurvenetAdjuster(const UsdPrim &mover,
+namespace {
+bool _ValidateCurvenetAdjusterBinding(const UsdPrim &mover,
     const SdfPath &target,std::string *error) {
     auto p=RigExecAssembleCurvenetAdjusterParameters(mover,target,nullptr,UsdTimeCode::Default(),nullptr);
     // Disabled controls still need a valid topology and binding at compile.
@@ -158,4 +171,76 @@ bool RigExecValidateCurvenetAdjuster(const UsdPrim &mover,
     return RigExecApplyCurvenetAdjustments(&points,p.restPoints,p.topologyIndices,
         p.curvenetAdjustmentBasis,p.curvenetAdjustments,nullptr,error);
 }
+}  // namespace
+
+namespace {
+
+void
+_BindCurvenetAdjusterMover(const RigExecMoverBindContext &ctx)
+{
+    RigExecRevisionBinding &binding = *ctx.binding;
+    const SdfPath &target = ctx.target;
+    binding.base = target;
+    binding.curvenet = target.GetPrimPath();
+}
+
+bool
+_ValidateCurvenetAdjusterMover(
+    const RigExecMoverValidateContext &ctx, std::string *error)
+{
+    // The single-target generic rule runs first, so targets[0] is the
+    // one canonical target.
+    std::string inner;
+    if (!_ValidateCurvenetAdjusterBinding(
+            ctx.prim, ctx.targets[0], &inner)) {
+        *error = ctx.prim.GetPath().GetString() + ": " + inner;
+        return false;
+    }
+    return true;
+}
+
+RigExecOracleResult
+_OracleCurvenetAdjusterMover(const RigExecMoverOracleContext &ctx)
+{
+    const UsdPrim &prim = ctx.prim;
+    const SdfPath &moverPath = ctx.moverPath;
+    const SdfPath &target = ctx.target;
+    const UsdTimeCode time = ctx.time;
+    const RigExecResolvedInputs &resolved = ctx.resolved;
+    std::vector<std::string> *diagnostics = ctx.diagnostics;
+    VtVec3fArray &points = *ctx.points;
+    const auto p = RigExecAssembleCurvenetAdjusterParameters(
+        prim, target, nullptr, time, &resolved);
+    std::vector<GfVec3f> scratch(points.begin(), points.end());
+    std::string applyError;
+    if (!p.valid || !RigExecApplyCurvenetAdjustments(&scratch,
+            p.restPoints, p.topologyIndices, p.curvenetAdjustmentBasis,
+            p.curvenetAdjustments, nullptr, &applyError)) {
+        if (diagnostics) {
+            diagnostics->push_back(
+                "MoverFailed " + moverPath.GetString() + ": " + applyError);
+        }
+        return RigExecOracleResult::PassThrough;
+    }
+    std::copy(scratch.begin(), scratch.end(), points.begin());
+    return RigExecOracleResult::Blend;
+}
+
+RigExecMoverHandler
+_MakeHandler()
+{
+    RigExecMoverHandler handler(
+        "RigExecCurvenetAdjusterMover",
+        &RigExecFixedMoverOp<RigExecRevisionOp::CurvenetAdjuster>,
+        RigExecMoverDomain::Points);
+    handler.singleTarget = true;
+    handler.bind = &_BindCurvenetAdjusterMover;
+    handler.validate = &_ValidateCurvenetAdjusterMover;
+    handler.oracle = &_OracleCurvenetAdjusterMover;
+    return handler;
+}
+
+}  // namespace
+
+RIGEXEC_REGISTER_MOVER(_MakeHandler());
 } // namespace rigExec

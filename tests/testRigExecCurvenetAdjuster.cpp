@@ -159,7 +159,7 @@ static void TestARebuildKeepsTheCurvenetBind() {
     referenceStage->DefinePrim(SdfPath("/Asset/Rig/Controls/Spare"),
         TfToken("RigExecControl"));
     RigExecRigEvaluator reference(referenceStage,SdfPath("/Asset/Rig"));
-    reference.SetEvaluationMode(RigExecEvaluationMode::Dynamic);
+    reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
     CHECK(reference.Compile(&errors));
     const auto expected=reference.Evaluate(UsdTimeCode(1));
     CHECK(expected.valid);

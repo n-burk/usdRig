@@ -281,6 +281,7 @@ RigExecPlanSparseReuse(const RigExecOutputAffectedIndex &index,
 
 RigExecSparseExecution
 RigExecRunSparsePlan(const RigExecSparsePlan &plan,
+                     const std::vector<int> &clusterOrder,
                      RigExecClusterRunner runner)
 {
     RigExecSparseExecution execution;
@@ -288,24 +289,40 @@ RigExecRunSparsePlan(const RigExecSparsePlan &plan,
     if (plan.verdict == RigExecSparseVerdict::Miss || !runner) {
         return execution;
     }
+    // A runner executes one cluster against the slots its predecessors
+    // left, so a planned cluster has to run after every planned
+    // predecessor. Cluster ids number level-packing bins, not dependencies
+    // (a cluster may have a higher-numbered predecessor), so the walk is the
+    // program's topological order filtered to the plan -- never increasing
+    // id. The order is Build's, and an order that does not cover the plan
+    // (a foreign or cyclic clustering) runs nothing rather than a subset.
+    const size_t planBits = plan.clusters.words.size() * 64;
+    const auto planned = [&plan, planBits](int cluster) {
+        return cluster >= 0 && size_t(cluster) < planBits &&
+               plan.clusters.Test(cluster);
+    };
+    size_t covered = 0;
+    for (const int cluster : clusterOrder) {
+        if (planned(cluster)) {
+            ++covered;
+        }
+    }
+    if (covered != plan.clusters.Count()) {
+        return execution;
+    }
     // Hit executes the empty set and completes: zero work is the answer,
     // not an unevaluated frame.
     execution.completed = true;
-    // Increasing cluster order. A cone is closed under the cluster edges,
-    // so any order that respects them is a valid execution order (§5.1) --
-    // and a linear scan over a few dozen clusters costs nothing beside a
-    // cluster's own work.
-    const size_t clusterCount = plan.clusters.words.size() * 64;
-    for (size_t c = 0; c < clusterCount; ++c) {
-        if (!plan.clusters.Test(int(c))) {
+    for (const int cluster : clusterOrder) {
+        if (!planned(cluster)) {
             continue;
         }
-        if (!runner(int(c))) {
+        if (!runner(cluster)) {
             execution.completed = false;
             return execution;
         }
         ++execution.executed;
-        execution.executedClusters.push_back(int(c));
+        execution.executedClusters.push_back(cluster);
     }
     return execution;
 }

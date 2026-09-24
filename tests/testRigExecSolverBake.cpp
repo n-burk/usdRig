@@ -87,6 +87,9 @@ CheckParity(const char *what, const MakeStage &make,
 
     RigExecRigEvaluator reference(referenceStage, kRigPath);
     RigExecRigEvaluator baked(bakedStage, kRigPath);
+    // The oracle by name, so the comparison stays against the exec walk
+    // whatever the default mode comes to run.
+    reference.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
     std::vector<std::string> errors;
     if (!reference.Compile(&errors) || !baked.Compile(&errors)) {
         ++failures;

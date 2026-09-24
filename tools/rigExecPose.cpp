@@ -10,7 +10,8 @@
 //   rigExecPose <stage> [--rig <primPath>] [--frames 1001,1024,1048]
 //               [--joints] [--targets] [--joints-out <file.usda>]
 //               [--pose-out <file.txt>] [--repeat N]
-//               [--profile <file.trace>] [--mode dynamic|baked|parity]
+//               [--profile <file.trace>]
+//               [--mode dynamic|baked|parity|reference]
 //               [--guides] [--require-baked]
 //               [--drag <prim> <attr> <steps>]
 //
@@ -24,7 +25,9 @@
 // `uniform bool rigExec:baked` otherwise. The compile line reports the mode
 // that resulted and who chose it, so a run that expected the program and got
 // the dynamic path says so in its first three lines rather than in an
-// accounting total at the end.
+// accounting total at the end. `reference` is the exec-authoritative oracle
+// alone (RigExecEvaluationMode::ExecReference): it never builds a program,
+// so like dynamic it prints no bake reasons and no accounting.
 //
 // --guides re-enables the observational solver-guide request, which is off
 // by default here. pose.solverFrames is one of the domains the parity check
@@ -32,11 +35,12 @@
 // ctest built on this tool compares an empty map unless it asks for them.
 //
 // --require-baked turns a fallback into a failure: it sets
-// RIGEXEC_BAKE_REQUIRED for the evaluator, fails when a non-dynamic mode
-// finds the rig unbakeable, and fails when fewer generations came from the
-// program than frames were asked for. The second half is the one that
-// catches a silent fallback that is not a refusal -- an interactive override
-// the program cannot place, or a Run that handed the generation back.
+// RIGEXEC_BAKE_REQUIRED for the evaluator, fails when a mode that asks for
+// the program finds the rig unbakeable, and fails when fewer generations
+// came from the program than frames were asked for. The second half is the
+// one that catches a silent fallback that is not a refusal -- an
+// interactive override the program cannot place, or a Run that handed the
+// generation back.
 //
 // --profile records scoped phase timings (compile, property chains, pose
 // seed, each solver batch and constraint, the exec snapshot, each geometry
@@ -532,6 +536,7 @@ ModeName(rigExec::RigExecEvaluationMode mode)
     switch (mode) {
     case rigExec::RigExecEvaluationMode::Baked: return "baked";
     case rigExec::RigExecEvaluationMode::BakedWithParityCheck: return "parity";
+    case rigExec::RigExecEvaluationMode::ExecReference: return "reference";
     case rigExec::RigExecEvaluationMode::Dynamic: break;
     }
     return "dynamic";
@@ -958,7 +963,8 @@ main(int argc, char **argv)
             "usage: rigExecPose <stage> [--rig <primPath>] "
             "[--frames a,b,c] [--joints] [--targets] "
             "[--joints-out <file.usda>] [--pose-out <file.txt>] "
-            "[--profile <file.trace>] [--mode dynamic|baked|parity] "
+            "[--profile <file.trace>] "
+            "[--mode dynamic|baked|parity|reference] "
             "[--guides] [--require-baked] "
             "[--drag <prim> <attr> <steps>] "
             "[--verify-binary <file.rigexec>]\n");
@@ -1031,9 +1037,12 @@ main(int argc, char **argv)
                 mode = rigExec::RigExecEvaluationMode::Baked;
             } else if (value == "parity") {
                 mode = rigExec::RigExecEvaluationMode::BakedWithParityCheck;
+            } else if (value == "reference") {
+                mode = rigExec::RigExecEvaluationMode::ExecReference;
             } else {
                 std::printf("unknown mode: %s "
-                            "(dynamic | baked | parity)\n", value.c_str());
+                            "(dynamic | baked | parity | reference)\n",
+                            value.c_str());
                 return 2;
             }
         } else {
@@ -1123,9 +1132,17 @@ main(int argc, char **argv)
     const rigExec::RigExecEvaluationMode resolvedMode =
         evaluator.GetEvaluationMode();
     int status = 0;
-    // Only in a non-default mode: the reasons are the actionable half of a
-    // fallback, and printing them unasked would change every existing run.
-    if (resolvedMode != rigExec::RigExecEvaluationMode::Dynamic) {
+    // Only in a mode that asks for the program: the reasons are the
+    // actionable half of a fallback, and printing them unasked would change
+    // every existing run.
+    const bool wantsProgram =
+        rigExec::RigExecEvaluationModeWantsProgram(resolvedMode);
+    // The accounting below is wider: it is printed wherever the program
+    // answers, which includes Dynamic under RIGEXEC_DYNAMIC_RUNS_PROGRAM --
+    // a run that silently took the walk there is exactly what it is for.
+    const bool runsProgram = rigExec::RigExecEvaluationModeRunsProgram(
+        resolvedMode, evaluator.GetEvaluationModeSource());
+    if (wantsProgram) {
         std::vector<std::string> reasons;
         if (!evaluator.IsBakeable(&reasons)) {
             std::printf("  not bakeable; evaluating dynamically\n");
@@ -1280,10 +1297,11 @@ main(int argc, char **argv)
         }
     }
 
-    // The accounting, in every non-dynamic mode. A run that reports a mode
-    // it never took is the failure this tool used to print as success, and a
-    // human reading the output should see the same fact a ctest asserts.
-    if (resolvedMode != rigExec::RigExecEvaluationMode::Dynamic) {
+    // The accounting, in every mode that runs the program. A run that
+    // reports a mode it never took is the failure this tool used to print as
+    // success, and a human reading the output should see the same fact a
+    // ctest asserts.
+    if (runsProgram) {
         // frames.size() * repeat, which is frames.size() itself unless
         // --repeat asked for more: the line a reader has always seen.
         const size_t evaluated = frames.size() * size_t(repeat);
@@ -1384,7 +1402,7 @@ main(int argc, char **argv)
                         dragPrim.c_str(), dragAttr.c_str(), stepUs.size(),
                         median, sorted.empty() ? 0.0 : sorted.front(),
                         sorted.empty() ? 0.0 : sorted.back());
-            if (resolvedMode != rigExec::RigExecEvaluationMode::Dynamic) {
+            if (runsProgram) {
                 std::printf("    baked: %zu of %zu drag generation(s)\n",
                             evaluator.GetBakedGenerationCount() -
                                 generationsBefore,

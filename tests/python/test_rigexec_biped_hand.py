@@ -7,7 +7,7 @@ FkChains solved absolute. The chains now carry
 rigExec:startFramePolicy = "parent" (the compile derives the wrist from
 the joint hierarchy) and execute after the arm blends (Solvers order).
 
-Per evaluated file (Biped.usda, Biped_layered.usda), per mode (dynamic,
+Per evaluated file (Biped.usda, Biped_layered.usda), per mode (reference,
 baked):
 
   1. wrist FK ry=30 carries every left finger joint rigidly: each lands
@@ -195,7 +195,7 @@ def main():
     import rigexec
     rigexec.load_schema_plugin(sys.argv[1] if len(sys.argv) > 1 else None)
     for path in _FILES:
-        for mode in ("dynamic", "baked"):
+        for mode in ("reference", "baked"):
             _check_file(path, mode)
     print("OK: biped hand follows the wrist")
 

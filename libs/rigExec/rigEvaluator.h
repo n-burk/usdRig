@@ -23,6 +23,7 @@
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/tf/functionRef.h"
+#include "pxr/base/tf/hash.h"
 #include "pxr/base/tf/notice.h"
 #include "pxr/base/tf/weakBase.h"
 #include "pxr/base/vt/array.h"
@@ -275,11 +276,18 @@ enum class RigExecNoticeDisposition {
     /// property paths): the program already re-runs only their cone live,
     /// with no stamp bump. Retire exactly the patched avars' clusters.
     Patched,
-    /// A value edit the capture index missed: the program is still right
-    /// about its structure and its stamp was bumped, so the next
-    /// generation runs everything once. Retire affected clusters and
-    /// re-resolve.
+    /// A value edit the capture index missed and the program could not
+    /// route: the program is still right about its structure and its stamp
+    /// was bumped, so the next generation runs everything once. Retire
+    /// affected clusters and re-resolve.
     StampBumped,
+    /// Value edits routed without a stamp bump (RigExecBakedProgram::
+    /// ApplyValueEdits): the per-frame inputs they reached re-run their
+    /// cone once, and what else they name is read by value-compared sources
+    /// or by nothing. The paths are the notice's properties something in the
+    /// program reads; a property nothing reads is left out, and retires
+    /// nothing.
+    Edited,
     /// The notice hit the capture index: the program is stale and will be
     /// rebuilt, the epoch moves, and epoch-half eviction plus generation
     /// cancel stand.
@@ -293,6 +301,9 @@ public:
 
     /// Discovers joints and movers, validates targets, and prepares the
     /// exec tap set. Returns false with messages on validation failure.
+    ///
+    /// Always compiles: a failure the settle path memoized (see
+    /// _CompileUnlessKnownBroken) is forgotten, never replayed, here.
     bool Compile(std::vector<std::string> *errors = nullptr);
 
     /// Evaluates one complete generation at an explicit time.
@@ -316,7 +327,8 @@ public:
     /// runs dynamically while this mode asks for the program publishes one
     /// "baked parity mismatch: bake required, evaluated dynamically: <why>"
     /// diagnostic and counts it on RigExecRigPose::bakedParityMismatches.
-    /// It changes no evaluated value, and Dynamic ignores it entirely. Read
+    /// It changes no evaluated value, and the two modes that never ask for
+    /// the program, Dynamic and ExecReference, ignore it entirely. Read
     /// once per process, so a tool must setenv before the first evaluator.
     /// Calling this makes the caller the OWNER of the mode: the source
     /// below becomes Explicit and nothing weaker moves it again -- not the
@@ -421,6 +433,10 @@ public:
     /// occupancy says whether a drag paid for the re-read. A test that
     /// overrides an unrelated control reads this to see that it did not.
     size_t GetSkinTopologyCacheSize() const;
+    /// The same for the blend sample shapes: how many samples the cache is
+    /// holding an answer for, which a stage edit on one sample's shape
+    /// drops by one and an edit elsewhere leaves where it was.
+    size_t GetBlendSampleCacheSize() const;
 
     /// Values that stand in for authored attributes while they are set,
     /// with NOTHING authored: the manipulation path (spec: docs/superpowers/
@@ -467,6 +483,9 @@ public:
     /// tool, the Python bindings) sees the field exactly as before.
     void SetPublishWeightFields(bool publish) {
         _publishWeightFields = publish;
+        if (_scopedClearShadow) {
+            _scopedClearShadow->SetPublishWeightFields(publish);
+        }
     }
     bool GetPublishWeightFields() const { return _publishWeightFields; }
 
@@ -583,6 +602,9 @@ public:
     void SetSolverGuidesEnabled(bool enabled)
     {
         _solverGuidesEnabled = enabled;
+        if (_scopedClearShadow) {
+            _scopedClearShadow->SetSolverGuidesEnabled(enabled);
+        }
     }
 
     bool GetSolverGuidesEnabled() const
@@ -603,9 +625,11 @@ public:
     /// mutating anything: Patched (plus the property paths a patch would
     /// write, in \p patchedPaths) when the notice is nothing but
     /// patchable avar default values, Stale when it hits the capture
-    /// index, StampBumped for any other value edit, None when no program
-    /// stands. The notice handler branches on this same classification,
-    /// so the query and the mutation can never disagree.
+    /// index, Edited (plus the property paths the program reads, in
+    /// \p patchedPaths) when every value it carries can be routed,
+    /// StampBumped for any other value edit, None when no program stands.
+    /// The notice handler branches on this same classification, so the
+    /// query and the mutation can never disagree.
     RigExecNoticeDisposition ClassifyNoticeDisposition(
         const UsdNotice::ObjectsChanged &notice,
         std::vector<SdfPath> *patchedPaths = nullptr) const;
@@ -654,14 +678,6 @@ public:
     const UsdStageRefPtr &GetEvaluationStage() const { return _stage; }
 
 private:
-    bool _ValidateMatrixMover(
-        const UsdPrim &prim,
-        const RigExecMoverRecord &record,
-        std::string *error) const;
-    bool _ValidateSkinMover(
-        const UsdPrim &prim,
-        const RigExecMoverRecord &record,
-        std::string *error) const;
 
     VtVec3fArray _EvaluateChain(
         const SdfPath &target,
@@ -689,23 +705,6 @@ private:
         std::vector<float> *weights, std::string *error,
         const std::vector<GfVec3f> *currentPoints = nullptr) const;
 
-    /// Fills \p layout from the UsdSkelBlendShape at \p blendShapePath.
-    ///
-    /// Returns false to REFUSE the epoch cache -- the shape can move within
-    /// this epoch and must be read per frame. The admission rule is the one
-    /// the skin layout uses, minus the half that cannot arise: `offsets` and
-    /// `pointIndices` are declared `uniform`, so USD will not let them carry
-    /// time samples at all, which leaves an authored connection as the only
-    /// way the value can change under a standing epoch.
-    ///
-    /// A shape that is merely INVALID (offsets and indices of different
-    /// lengths, an index outside the mesh) is cached as invalid rather than
-    /// refused: it is a stable wrong answer, and re-reading it every frame to
-    /// reach the same conclusion is the cost this cache exists to avoid.
-    bool _ResolveBlendSampleLayout(
-        const SdfPath &blendShapePath, size_t pointCount,
-        RigExecBlendSampleLayout *layout) const;
-
     /// The volumetric half of _ResolveWeights: sphere, plane, curve, and
     /// the combine that folds them.
     bool _ResolveVolumeWeights(
@@ -731,6 +730,30 @@ private:
     /// for no reason other than the order of two statements. Idempotent: the
     /// dynamic generation calls it again and it does nothing.
     bool _SettleEpoch(std::vector<std::string> *diagnostics);
+
+    /// The whole of Compile but for forgetting the failure memo: what the
+    /// settle path runs, so that its own compiles can be memoized.
+    bool _CompileEpoch(std::vector<std::string> *errors);
+
+    /// The settle path's compile. A compile that failed is answered from
+    /// _failedCompile, without compiling, for as long as its key matches:
+    /// its errors are appended to \p diagnostics as the compile appended
+    /// them, and false is returned. Otherwise it compiles, and memoizes a
+    /// failure or forgets the memo on success.
+    ///
+    /// While the stage stays broken the compile's TF_WARNs therefore reach
+    /// the host once, on the compile that failed, and the program build and
+    /// attempt counters stand still; the pose diagnostics repeat every frame
+    /// exactly as a real compile would write them.
+    bool _CompileUnlessKnownBroken(std::vector<std::string> *diagnostics);
+
+    /// Whether _failedCompile holds a failure of the stage and mode this
+    /// compile would read now.
+    bool _FailedCompileMemoMatches() const;
+    /// Whether _bakeBail still answers for this epoch and stage.
+    bool _BakeBailMemoMatches() const {
+        return _bakeBail.valid && _bakeBail.stageEditSerial == _stageEditSerial;
+    }
 
     /// The dynamic generation: OpenExec plus the in-memory pose walk. This
     /// is Evaluate's whole body when the mode is Dynamic, the fallback
@@ -761,7 +784,153 @@ private:
     void _RebuildBakedProgram(
         std::unique_ptr<RigExecBakedProgram> outgoing = nullptr);
 
-    size_t _ComputeStructureDigest() const;
+    /// The structure digest in three segments: the discovered output sets
+    /// (joints, controls, volume guides, pose interpolators), the solver
+    /// wiring, and the mover wiring. Each segment's bytes are a pure function
+    /// of the composed stage and of nothing another segment emits -- its own
+    /// string, its own weight-object visiting set, its own profile region --
+    /// so the three can run on three tasks, and the digest is the hash of
+    /// their concatenation in this order, byte for byte the text one serial
+    /// walk over all three emits. The Solvers segment is never split further:
+    /// its cycle markers name the prim the walk was on when it closed a
+    /// cycle, so its bytes depend on walk order within it.
+    enum _DigestSegment : unsigned {
+        _DigestOutputSets = 1u << 0,
+        _DigestSolvers = 1u << 1,
+        _DigestMovers = 1u << 2,
+        _DigestAllSegments = 7u,
+        /// Not a segment: the Solvers segment reads every attribute from
+        /// the stage each time it needs one, instead of through its
+        /// per-call read memo. The bytes are the same either way; this is
+        /// what RIGEXEC_VERIFY_DIGEST_MEMO checks that against.
+        _DigestUnmemoizedReads = 1u << 3,
+    };
+    static constexpr size_t _DigestSegmentCount = 3;
+    /// The prims one digest read outside the rig's namespace (unified-program
+    /// spec §4.1, the prim-granular gate): relationship and connection
+    /// targets, missing ones included, the prims read through them -- mover
+    /// target gprims, weight objects, blend inputs and samples, pose-input
+    /// providers -- and the ancestors walked above a prim.
+    ///
+    /// Two kinds, because what the digest reads of a walked ancestor is less
+    /// than what it reads of a prim it looked at: an ancestor contributes its
+    /// validity, type name and own properties and nothing below it, so an
+    /// edit under an ancestor can only reach the digest through a prim the
+    /// walk started from, which is in \c read. Keeping the two apart is what
+    /// leaves an edit elsewhere under a shared ancestor -- a material beside
+    /// the rig, under the asset root the ancestor chains all pass through --
+    /// out of the gate.
+    /// What one digest provably hashed, recorded so that an edit which
+    /// changes one of these things can be known to move the digest without
+    /// recomputing it (unified-program spec §7 EP2a, rule T-e). Each entry
+    /// is recorded where the digest writes it, so a change to it changes
+    /// the digest's text at that place.
+    struct _CertainFootprint {
+        /// Composed targets of a relationship the digest wrote out, and
+        /// whether every place that wrote it sorted them first: a reorder
+        /// moves the digest only through a place that did not.
+        struct Targets {
+            SdfPathVector targets;
+            bool sorted = true;
+        };
+        /// The value and time-sample count of a solver's
+        /// rigExec:jointElements, both of which the digest writes.
+        struct JointElements {
+            VtIntArray values;
+            size_t samples = 0;
+        };
+        /// Prims under the rig whose PATH the digest writes because of their
+        /// type -- the discovered joints, controls, volume weights and pose
+        /// interpolators, and every aggregate solver -- with that type.
+        /// Ordered, so the ones below a resynced prim are one range.
+        std::map<SdfPath, TfToken> prims;
+        /// A property as its owning prim and its name, which is how the
+        /// digest reaches one: keyed this way, recording it builds no
+        /// property path.
+        struct PropertyKey {
+            SdfPath prim;
+            TfToken name;
+            bool operator==(const PropertyKey &other) const {
+                return prim == other.prim && name == other.name;
+            }
+        };
+        struct PropertyKeyHash {
+            size_t operator()(const PropertyKey &key) const {
+                return TfHash::Combine(key.prim, key.name);
+            }
+        };
+        /// Every existing relationship the digest wrote the targets of.
+        std::unordered_map<PropertyKey, Targets, PropertyKeyHash> targets;
+        /// Keyed by the solver prim.
+        std::unordered_map<SdfPath, JointElements, SdfPath::Hash>
+            jointElements;
+        /// The prims of the pose-input closures: the digest writes every
+        /// attribute one of them has, with its connection sources.
+        std::unordered_set<SdfPath, SdfPath::Hash> closurePrims;
+        /// The connected attributes among those, with their sources. An
+        /// attribute of a closure prim that is not here was unconnected.
+        std::unordered_map<SdfPath, SdfPathVector, SdfPath::Hash>
+            closureConnections;
+    };
+    struct _DigestFootprint {
+        /// Prims the digest looked at: an edit on, under or above one is
+        /// suspect.
+        std::unordered_set<SdfPath, SdfPath::Hash> read;
+        /// Prims the digest only walked through as an ancestor: an edit on
+        /// or above one is suspect.
+        std::unordered_set<SdfPath, SdfPath::Hash> ancestors;
+        _CertainFootprint certain;
+    };
+    /// The committed footprint of the digest in _structureDigest, in the
+    /// form the notice gate asks it: \c read as recorded, and \c covered,
+    /// every recorded prim of either kind plus every ancestor of one, so
+    /// "on or above a recorded prim" is one lookup of the notice's prim.
+    /// \c certain is each segment's certain footprint, as recorded.
+    struct _DigestGate {
+        bool valid = false;
+        std::unordered_set<SdfPath, SdfPath::Hash> read;
+        std::unordered_set<SdfPath, SdfPath::Hash> covered;
+        _CertainFootprint certain[_DigestSegmentCount];
+    };
+    /// The text of the selected \p segments, concatenated in segment order.
+    /// With \p footprint, also the prims outside the rig the segments read,
+    /// and what they provably hashed.
+    std::string _ComputeStructureDigest(
+        unsigned segments, _DigestFootprint *footprint = nullptr) const;
+    /// The gate form of the three segments' footprints, which it takes the
+    /// certain footprints out of.
+    static _DigestGate _MakeDigestGate(
+        _DigestFootprint (&parts)[_DigestSegmentCount]);
+    /// Notes the paths of a digest-suspect \p notice that could make the
+    /// edit certainly structural, for _EditIsCertainlyStructural to judge at
+    /// the next settle.
+    void _NoteCertainStructuralCandidates(
+        const UsdNotice::ObjectsChanged &notice);
+    /// Whether the edits since the last settle certainly moved the digest:
+    /// a candidate path whose state now differs from what the committed
+    /// certain footprint recorded for it. False when there is no committed
+    /// footprint or when the candidates overflowed.
+    bool _EditIsCertainlyStructural() const;
+    /// Whether \p notice could move the structure digest: the prim-granular
+    /// gate of spec §4.1, read against _digestGate. Without a committed
+    /// footprint every notice is suspect.
+    bool _NoticeIsDigestSuspect(const UsdNotice::ObjectsChanged &notice) const;
+    /// RIGEXEC_VERIFY_DIGEST_GATE=1: recomputes the digest after a notice
+    /// the gate called neutral and fails fatally if it moved.
+    void _VerifyNeutralNotice(const UsdNotice::ObjectsChanged &notice) const;
+    /// Hashes the three segment texts, concatenated, into the epoch digest.
+    /// Under RIGEXEC_VERIFY_DIGEST_SPLIT=1 it first recomputes the whole
+    /// digest serially on this thread and fails fatally unless that text
+    /// equals the concatenation. Under RIGEXEC_VERIFY_DIGEST_MEMO=1 it
+    /// recomputes the Solvers segment with _DigestUnmemoizedReads and fails
+    /// fatally unless that text equals the memoized one.
+    size_t _JoinStructureDigest(
+        const std::string (&parts)[_DigestSegmentCount]) const;
+    /// The whole digest, for the settle path: the three segments on three
+    /// tasks under a scoped dispatcher (serially with
+    /// RIGEXEC_ENABLE_PARALLEL_EVAL=0), then joined. With \p gate, also the
+    /// gate form of what they read.
+    size_t _SettleStructureDigest(_DigestGate *gate = nullptr) const;
     void _OnObjectsChanged(const UsdNotice::ObjectsChanged &notice,
                            const UsdStageWeakPtr &sender);
     /// Derives rigExec:startFrame targets from the joint hierarchy for
@@ -788,8 +957,11 @@ private:
     /// inside _EvaluateDynamic, and a baked frame reaches none of them --
     /// so preparing them at Compile builds an exec network the session then
     /// never asks a question of. Set only when the session asked for the
-    /// program outright (Baked); Dynamic needs them on the next frame and
-    /// Parity pulls both paths every frame, so both keep preparing eagerly.
+    /// program outright (Baked), or ran Dynamic on the program
+    /// (RigExecEvaluationModeRunsProgram). The walk needs them on the next
+    /// frame wherever it is the answer -- Dynamic without the program,
+    /// ExecReference -- and Parity pulls both paths every frame, so those
+    /// keep preparing eagerly.
     ///
     /// What this moves, and what it does not: the three requests below are
     /// deferred, and only those. The rest request is not -- the program's
@@ -803,6 +975,11 @@ private:
     /// cannot be prepared fails the compile; deferred, it fails the first
     /// dynamic generation instead, with a diagnostic on the pose. A rig
     /// that bakes never reaches either.
+    ///
+    /// The exec warm-up goes with them: a deferred epoch's compile warms no
+    /// network, because what it still prepares asks for a few providers
+    /// only. The first realization therefore compiles most of the network
+    /// itself, and the DeferredExecPrep scope carries that cost.
     bool _execPrepDeferred = false;
     /// Prepares what _execPrepDeferred left, once. False, with \p pose told
     /// why, when a request will not prepare.
@@ -811,6 +988,13 @@ private:
     /// it: _RefreshAttributeEvaluationMode runs at the tail of Compile, and
     /// the deferral decision is made well before that.
     RigExecEvaluationMode _PeekEvaluationMode() const;
+    /// Whether this evaluator's mode builds and runs the program; see
+    /// RigExecEvaluationModeRunsProgram. The gates that REPORT a fallback
+    /// ask RigExecEvaluationModeWantsProgram instead.
+    bool _ModeRunsProgram() const {
+        return RigExecEvaluationModeRunsProgram(_evaluationMode,
+                                                _evaluationModeSource);
+    }
     std::unique_ptr<RigExecTapSet> _taps;
     /// Observational solver-guide taps in their own prepared request: a
     /// failing or unused aggregate solver degrades guide drawing with a
@@ -923,9 +1107,21 @@ private:
             index.clear();
         }
     };
-    /// Each dependency level evaluates once. Earlier aggregate and joint
-    /// outputs are supplied as overrides, so downstream requests reuse them.
+    /// One aggregate solver's step in the pose walk. Earlier aggregate and
+    /// joint outputs are supplied as overrides, so downstream requests reuse
+    /// them.
+    ///
+    /// A batch is still ONE solver and one pose step -- the baked walk, the
+    /// level audit and the solver-input index all read it that way -- but it
+    /// need not own the exec request it is evaluated by. Adjacent solvers of
+    /// one ready level that cannot observe each other's overrides share their
+    /// LEADER's request (see "one exec request per run" in Compile): the
+    /// leader owns the tap set, the request cache and the snapshot for all
+    /// of them. A follower holds none of those: only its tap id in the
+    /// leader's set, and, like every batch, its own input fingerprint and
+    /// dirty flag (see `cache`).
     struct _SolverBatch {
+        /// Null on a follower: its tap lives in the leader's set.
         std::unique_ptr<RigExecTapSet> taps;
         std::map<SdfPath, RigExecTapId> solvers;
         std::set<SdfPath> dependencies;
@@ -938,9 +1134,28 @@ private:
         /// the batch pushes no computeRestFrame override at all.
         std::map<SdfPath, SdfPath> restInputs;
         size_t level = 0;
+        /// The batch whose request evaluates this one: its own index unless
+        /// it is a follower. A follower's pose step always comes after its
+        /// leader's, with only the leader's other followers between them.
+        size_t leader = 0;
+        /// On a leader, the followers riding its request, in pose-walk
+        /// order. Empty on a follower and on a leader that evaluates alone.
+        std::vector<size_t> followers;
+        /// Per SOLVER, on every batch: the time-keyed LRU of this solver's
+        /// own tail, and whether an edit reached what it reads. On a batch
+        /// that evaluates alone this is also its request's cache. In a shared
+        /// request it is the solver's input fingerprint: the request
+        /// re-resolves when any member misses, but only the members that
+        /// missed count as re-solved, exactly as they did when each had a
+        /// request of its own (the incremental-evaluation counter the suite
+        /// reads, RigExecRigPose::solverEvaluations).
         _SnapshotCache cache;
-        RigExecSnapshot snapshot;
         bool dirty = true;
+        /// Leader-only: the shared request's cache, keyed by the whole
+        /// merged tail. Cleared by any edit that reaches any member.
+        _SnapshotCache requestCache;
+        /// Leader-only: what the request last resolved to.
+        RigExecSnapshot snapshot;
     };
     std::vector<_SolverBatch> _solverBatches;
     std::map<SdfPath, std::vector<std::pair<SdfPath, int>>> _solverJoints;
@@ -959,6 +1174,27 @@ private:
     /// Authored input prim -> batches reading it. Override-only Exec requests
     /// do not re-arm repeated value-invalidation callbacks in this USD build.
     std::map<SdfPath, std::set<size_t>> _solverInputBatches;
+    /// True while _solverInputBatches does not describe _solverBatches.
+    ///
+    /// The index exists for one reader, the notice handler, and routes an
+    /// edit into batch.dirty and batch.cache, which only _EvaluateDynamic's
+    /// pose walk reads; a baked frame never does. So a deferred epoch (see
+    /// _execPrepDeferred) commits its batches without it, and
+    /// _RealizeDeferredExecPrep builds it on the way into the first dynamic
+    /// generation. Until then the handler cannot say which batches an edit
+    /// reached, so it says all of them -- which loses nothing, because a
+    /// batch computes nothing to cache before that same realization.
+    ///
+    /// Set and cleared only where _solverBatches is committed and where the
+    /// index is realized, so whichever epoch's batches stand, their index
+    /// state stands with them.
+    bool _solverInputIndexAbsent = false;
+    /// What the deferred build needs from the compile and cannot read back
+    /// off the stage without re-walking every pose closure: each solver's
+    /// provider closure and the attributes that closure read. Held only while
+    /// _solverInputIndexAbsent, and released by the build.
+    struct _SolverInputIndexInputs;
+    std::unique_ptr<_SolverInputIndexInputs> _solverInputIndexInputs;
     /// Interleaves dependency-ready aggregate batches with the authored
     /// constraint walk. Frame inputs to solvers consume the current pose.
     struct _PoseStep {
@@ -971,9 +1207,8 @@ private:
     std::unique_ptr<RigExecTapSet> _firstFramePoseTaps;
     _SnapshotCache _firstFramePoseCache;
     bool _firstFramePoseDirty = true;
-    /// Authoritative snapshot (full exec network) cache. Vetoes a hit when
-    /// _authSnapshotDirty, which the stage-notice handler sets on any edit.
-    _SnapshotCache _authSnapshotCache;
+    /// Vetoes a hit in _authSnapTimeKeyed. The stage-notice handler and every
+    /// compile set it; the next stored authoritative snapshot clears it.
     bool _authSnapshotDirty = true;
     /// Time-keyed authoritative snapshot cache. jointOverrides is a pure
     /// function of (epoch, time), so a repeat evaluation of the same frame
@@ -993,6 +1228,26 @@ private:
     std::unique_ptr<RigExecTapSet> _restTaps;
     std::map<SdfPath, RigExecTapId> _restTapIds;
     std::map<SdfPath, RigExecPointFrame> _epochRestFrames;
+    /// The rest gate (_NoteRestEdits). The epoch's rest paths are every
+    /// _RestInputNames() property of every key of _restTapIds, which is
+    /// every provider and every provider ancestor the rests read, so the
+    /// set is kept as that map and the name list rather than spelled out.
+    /// A notice that resyncs or changes one of those paths, or resyncs a
+    /// prim at or above a provider, adds the providers it reached here and
+    /// marks the epoch's rest frames stale. A rest name changed on a prim
+    /// that is not a key but has keys under it -- an inherited rest-frame
+    /// publisher the type list does not name -- marks them stale and adds
+    /// nothing. Nothing else does either. The commit clears both.
+    ///
+    /// The providers whose rest channels _SettleEpoch has to re-classify
+    /// (_EpochRestsMightVary), consumed by the next settle.
+    std::set<SdfPath> _restEditedProviders;
+    /// _epochRestFrames no longer holds what the stage says. Consumed by
+    /// the one reader of their values, the dynamic walk, at the head of
+    /// _EvaluateDynamic; inline in _SettleEpoch when the epoch has no
+    /// program, which is where the re-pull always used to be. A failed
+    /// re-pull leaves it set.
+    bool _epochRestFramesStale = false;
     /// The time the epoch's rests were pulled at, and the time the first-frame-pose
     /// request is warmed at: the stage's start time code, always a real
     /// frame rather than Default (see Compile).
@@ -1164,7 +1419,7 @@ private:
     RigExecResolvedInputs _resolvedInputs;
     /// Authored inputs that cannot answer differently until the stage
     /// changes, held across generations; see RigExecStaticInputCache. Every
-    /// notice clears it, and so does a change of interactive overrides.
+    /// notice drops the entries it reaches (_ClearValueCaches).
     RigExecStaticInputCache _staticInputs;
     /// Uncommitted manipulation values; see SetInteractiveOverrides.
     std::vector<RigExecValueOverride> _interactiveOverrides;
@@ -1232,8 +1487,9 @@ private:
     ///
     /// Lives here for the same reason the curvenet bindings do: it is epoch
     /// state, not a value, and it must not outlive the evaluator that read
-    /// the stage it came from. Cleared by every change notice, by every
-    /// interactive-override change, and by the commit of a new epoch.
+    /// the stage it came from. Cleared by a change notice that reaches a
+    /// layout input (_ClearValueCaches), by an interactive-override change
+    /// that can reach one, and by the commit of a new epoch.
     RigExecSkinTopologyCache _skinTopologies;
     /// Every property whose value can reach a cached skin layout: each skin
     /// mover's layout attributes, plus every attribute upstream of one of
@@ -1256,8 +1512,48 @@ private:
     bool _OverridesReachSkinLayout(
         const std::vector<RigExecValueOverride> &overrides) const;
     /// Per-epoch blend sample shapes, keyed by the RigExecBlendSample prim.
-    /// Same lifetime and same clearing rule as _skinTopologies above.
+    /// Same lifetime as _skinTopologies above; a notice drops a shape only
+    /// where it reaches the sample, its blend shape or the points its
+    /// layout was checked against (_BlendSampleSources).
     RigExecBlendSampleCache _blendSampleShapes;
+    /// What each cached blend sample shape was read from: the sample prim,
+    /// the UsdSkelBlendShape prim it names, and the points property of the
+    /// chain it is applied to, whose length the layout was range-checked
+    /// against. Derived from _graphChains, so it is rebuilt lazily after
+    /// every commit (_blendSampleSourcesValid).
+    struct _BlendSampleSource {
+        SdfPath sample;
+        SdfPath blendShape;
+        SdfPath points;
+    };
+    std::vector<_BlendSampleSource> _blendSampleSources;
+    bool _blendSampleSourcesValid = false;
+
+    /// Drops what \p notice could have made stale in the value caches that
+    /// outlive a generation -- the static inputs, the property chain
+    /// bindings, the skin layouts, the blend sample shapes and the live
+    /// graphs' pushed base points -- and nothing else (spec rule S5).
+    void _ClearValueCaches(const UsdNotice::ObjectsChanged &notice,
+                           bool avarValuesOnly);
+    /// The same caches dropped whole, as every notice used to drop them.
+    /// What a shadow evaluator runs (RIGEXEC_VERIFY_SCOPED_CLEARS), and what
+    /// a notice at the root, on a resolved asset or inside a prototype runs.
+    void _ClearValueCachesWholesale(bool avarValuesOnly);
+    /// Set on the shadow evaluator RIGEXEC_VERIFY_SCOPED_CLEARS builds: its
+    /// notices take _ClearValueCachesWholesale, never the scoped path.
+    bool _wholesaleValueClears = false;
+    /// The shadow itself (spec rule S6): an evaluator of the same rig on the
+    /// same stage, told everything a caller tells this one, evaluated at
+    /// every time this one is and compared with it pose for pose. Null
+    /// unless the variable is set, and always null on the shadow.
+    std::unique_ptr<RigExecRigEvaluator> _scopedClearShadow;
+    /// Builds the shadow when the variable asks for one and there is none.
+    void _EnsureScopedClearShadow();
+    /// Evaluates the shadow at \p time and appends to \p pose every way
+    /// the two disagree, counted on bakedParityMismatches.
+    void _VerifyScopedClears(UsdTimeCode time, RigExecRigPose *pose);
+    /// Evaluate's body; Evaluate adds the shadow comparison around it.
+    RigExecRigPose _EvaluateGeneration(UsdTimeCode time);
     /// One transform-valued input to a pose-domain constraint.
     ///
     /// RigExec providers publish computePointFrame and are therefore tapped;
@@ -1339,10 +1635,11 @@ private:
     /// value type, each mover's prim and weight-object targets, and a pinned
     /// UsdAttributeQuery for every input the revision loop reads by value.
     ///
-    /// Dropped on every notice, beside _staticInputs and for the same reason
-    /// -- a query caches where a value comes from, and only a notice can move
-    /// that -- and again at the end of Compile, because a recompile may have
-    /// replaced the chains the entries describe.
+    /// A notice marks stale only the chains it reaches (_ClearValueCaches),
+    /// and the next run rebinds those alone -- a query caches where a value
+    /// comes from, and only a notice can move that. Dropped whole at the end
+    /// of Compile, because a recompile may have replaced the chains the
+    /// entries describe.
     std::unique_ptr<RigExecPropertyChainBindings> _propertyChainBindings;
 
     /// Evaluates every property chain at \p time.
@@ -1502,10 +1799,16 @@ private:
     bool _NoticeNamesTheBakedAttribute(
         const UsdNotice::ObjectsChanged &notice) const;
     /// Re-pulls the epoch's rest frames after a stage edit no recompile
-    /// covered. Returns false when the request could not produce them,
-    /// which is what an incomplete per-frame rest tap used to mean.
+    /// covered, and clears _epochRestFramesStale. Returns false when the
+    /// request could not produce them, which is what an incomplete per-frame
+    /// rest tap used to mean, and leaves the flag set.
     bool _RefreshEpochRestFrames();
-    bool _EpochRestsMightVary() const;
+    /// Whether any of \p providers has a rest channel that can no longer be
+    /// held as an epoch constant.
+    bool _EpochRestsMightVary(const std::set<SdfPath> &providers) const;
+    /// The rest gate: records which epoch rest paths \p notice reached (see
+    /// _restEditedProviders).
+    void _NoteRestEdits(const UsdNotice::ObjectsChanged &notice);
 
     /// Providers whose base frame comes from their own USD transform rather
     /// than a computePointFrame tap: a plain Xform has no such computation.
@@ -1612,6 +1915,31 @@ private:
     /// first, and production pays nothing to collect strings nobody reads.
     /// Cleared wherever _bakeRefused is, for the same reason.
     std::vector<std::string> _bakeRefusalReasons;
+    /// The program gave a generation back for a cause only the dynamic walk
+    /// can answer (RigExecBakedBail::Step or ::Publish), and was dropped. A
+    /// StageFrames bail is never memoized: the program answers it itself and
+    /// stays.
+    ///
+    /// A bail is a property of what the program was built from, the way a
+    /// refusal is: a rig left mid-edit -- a blend that publishes fewer frames
+    /// than it names joints -- bails on every frame of the epoch, and a
+    /// rebuild only to be given the same generation back costs a whole Bake
+    /// per frame. So the lazy build in Evaluate is not asked again while the
+    /// key still matches, and the walk answers.
+    ///
+    /// Keyed on the stage edit serial as well as the epoch: with the program
+    /// gone no notice can be classified against its capture index, and the
+    /// edit that finishes the rig may be a value no digest reads. Any notice
+    /// is therefore one more chance, at the cost of one build per edit
+    /// rather than one per frame. Cleared wherever _bakeRefused is. The time
+    /// is not part of the key, so a rig that bails on some frames only is
+    /// answered by the walk for the rest of the key's life -- the same
+    /// answer, a slower path.
+    struct _BakeBailMemo {
+        bool valid = false;
+        uint64_t stageEditSerial = 0;
+    };
+    _BakeBailMemo _bakeBail;
     size_t _bakedProgramBuilds = 0;
     size_t _bakedProgramBuildAttempts = 0;
     size_t _bakedGenerations = 0;
@@ -1620,8 +1948,45 @@ private:
         RigExecEvaluationModeSource::Default;
 
     size_t _structureDigest = 0;
+    /// What the digest in _structureDigest read outside the rig, which is
+    /// what decides whether a notice sets _structureDirty. Committed with
+    /// the digest at the end of Compile and again by every settle whose
+    /// recomputed digest came out equal; invalid from the head of a Compile
+    /// until its digest is joined, so a notice that arrives in between is
+    /// suspect exactly as every notice was before the gate.
+    _DigestGate _digestGate;
+    /// Paths of the digest-suspect notices since the last settle that could
+    /// make the edit certainly structural (_NoteCertainStructuralCandidates),
+    /// judged against _digestGate by the next settle and dropped wherever
+    /// _structureDirty is cleared or the gate is. Past a bound the list
+    /// stops growing and the flag says the edit is not judged at all.
+    std::vector<SdfPath> _certainCandidates;
+    bool _certainCandidatesOverflowed = false;
     /// See GetStageEditSerial.
     uint64_t _stageEditSerial = 0;
+    /// The last settle-path compile, when it failed.
+    ///
+    /// A compile's outcome is a function of the composed stage and of the
+    /// mode, so the key is both: every notice bumps _stageEditSerial, and
+    /// the mode is what decides whether the dynamic-only preparations run
+    /// -- and so whether they can fail -- while SetEvaluationMode moves it
+    /// with no notice at all. The mode is the peeked one plus its source,
+    /// the pair Compile itself reads. Forgotten by the public Compile, by
+    /// SetEvaluationMode and by _RefreshAttributeEvaluationMode, each of
+    /// which asks the question again, and by a compile that succeeds.
+    ///
+    /// \c errors is what the compile appended and nothing else: the
+    /// settle's "structural recompilation failed" is the caller's line, and
+    /// it adds it on a replay as it did the first time.
+    struct _FailedCompileMemo {
+        bool valid = false;
+        uint64_t stageEditSerial = 0;
+        RigExecEvaluationMode mode = RigExecEvaluationMode::Dynamic;
+        RigExecEvaluationModeSource modeSource =
+            RigExecEvaluationModeSource::Default;
+        std::vector<std::string> errors;
+    };
+    _FailedCompileMemo _failedCompile;
     /// The last notice's disposition and patched paths. Written by the
     /// notice handler on its own thread; read by the registry's notice
     /// adapter on the same thread (USD delivers notices synchronously),

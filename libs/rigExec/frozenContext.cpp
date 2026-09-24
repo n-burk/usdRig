@@ -10,6 +10,7 @@
 #include "tapSet.h"
 #include "weightPackets.h"
 #include "frameCacheSparsity.h"
+#include "movers/moverRegistry.h"
 
 #include "rigExecMath/curvenet.h"
 #include "rigExecMath/geometryKernels.h"
@@ -1540,9 +1541,7 @@ _ChainIsFinite(const GfMatrix4d &m)
 bool
 _IsChainMathMover(const TfToken &schemaType)
 {
-    return schemaType == "RigExecFloatMathMover" ||
-           schemaType == "RigExecVec3fMathMover" ||
-           schemaType == "RigExecMatrixMathMover";
+    return RigExecIsPropertyMover(schemaType);
 }
 
 struct _ChainMoverDesc {
@@ -3666,10 +3665,11 @@ RigExecFrozenPurityAudit()
 //    ladder), so it is replicated below (_FrozenPublishGeometry) for the
 //    gated subset (no curvenet adjusters).
 //  * Shared kernels (skin, derived, solvers, constraints) are pure per-point
-//    math over worker-owned buffers, and their four WorkParallelForN launch
-//    sites in moverGraph.cpp take the serial variant inside a frozen run
-//    (the RigExecFrozenSerialActive hook, D4), so the only thread a frozen
-//    frame ever runs on is its own.
+//    math over worker-owned buffers, and their five WorkParallelForN launch
+//    sites in moverGraph.cpp (the blend-channel sum among them, which the
+//    frozen blend-shape assembler below calls) take the serial variant
+//    inside a frozen run (the RigExecFrozenSerialActive hook, D4), so the
+//    only thread a frozen frame ever runs on is its own.
 //  * TfToken/SdfPath/VtValue copies on the worker touch only their own
 //    atomic refcounts and the process-global immutable-after-load tables
 //    under brief internal locks -- the same operations the live path
@@ -3863,6 +3863,7 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.clustering = src.clustering;
     D.clusterCounters.reset();
     D.cones = src.cones;
+    D.closedSteps = src.closedSteps;
     D.closed = src.closed;
     D.lastAvars = src.lastAvars;
     D.lastPropertyResults = src.lastPropertyResults;
@@ -3872,7 +3873,16 @@ _CloneImpl(const RigExecBakedProgramImpl &src, RigExecBakedProgramImpl *dst)
     D.everRan = src.everRan;
     D.programStamp = src.programStamp;
     D.lastProgramStamp = src.lastProgramStamp;
+    // Pending value edits travel with the stamps: a clone first run at the
+    // source's lastTime -- a rewarm after a generation the live program did
+    // not answer -- is the run that owes them, and time alone would not
+    // dirty the steps they reached.
+    D.edited = src.edited;
+    D.anyEdited = src.anyEdited;
+    D.valueEditSerial = src.valueEditSerial;
+    D.editSerial = src.editSerial;
     D.lastClosedClusters = src.lastClosedClusters;
+    D.lastClosedSteps = src.lastClosedSteps;
     D.solverOverrideRounds = src.solverOverrideRounds;
     D.solverEvaluations = src.solverEvaluations;
     D.jointSlots = src.jointSlots;
@@ -4159,6 +4169,15 @@ RigExecFreezeProgram(const RigExecRigEvaluator &evaluator,
     return true;
 }
 
+bool
+RigExecFrozenSnapshotOwesLiveEdits(const RigExecFrozenProgram &base,
+                                   const RigExecBakedProgram &live)
+{
+    const RigExecBakedProgramImpl &L = live.GetStepGraph();
+    return L.valueEditSerial != base.program.valueEditSerial ||
+           L.programStamp != base.program.programStamp;
+}
+
 uint64_t
 RigExecFrozenAvarRegionDigest(const RigExecBakedProgram &program)
 {
@@ -4303,6 +4322,29 @@ RigExecPatchFrozenAvarConstants(const RigExecFrozenProgram &base,
     P.promotedAvars = L.promotedAvars;
     P.varyingInputs = L.varyingInputs;
     P.avarConstants = L.avarConstants;
+    // And every value edit routed since the snapshot was taken or last
+    // patched, added to the copy's own pending ones: the copy's first run
+    // owes them all. Asked of the per-index edit counts, not of the live
+    // program's pending flags, because a live run consumes those -- an edit
+    // the live program has already answered is one the snapshot's history
+    // has still never seen.
+    if (L.valueEditSerial != S.valueEditSerial) {
+        P.edited.resize(std::max(P.edited.size(), L.editSerial.size()), 0);
+        for (size_t i = 0; i < L.editSerial.size(); ++i) {
+            if (L.editSerial[i] > S.valueEditSerial) {
+                P.edited[i] = 1;
+                P.anyEdited = true;
+            }
+        }
+        P.valueEditSerial = L.valueEditSerial;
+        P.editSerial = L.editSerial;
+    }
+    // And a stamp bumped since: a notice the index could not place, which
+    // the live program answered by running whole once. The copy owes the
+    // same run -- its stamp moves past the one its last run recorded.
+    if (L.programStamp != S.programStamp) {
+        P.programStamp = L.programStamp;
+    }
     // The epoch's side-tables, unchanged by a constant patch.
     snapshot->jointSolverBinding = base.jointSolverBinding;
     snapshot->guideTapsPresent = base.guideTapsPresent;
@@ -6333,7 +6375,10 @@ _FrozenStepBody(_FrozenWorker *worker, RigExecBakedStep *step,
 // serial executor INLINED rather than dispatched by environment -- sources
 // in program order, the real closure, skips, then the closed set serially.
 // No calibration, no step timing, no trace intervals: the worker shares the
-// timing statics with nothing and reports no trace.
+// timing statics with nothing and reports no trace. It skips by CLUSTER, not
+// by the live executors' step closure: every step of a cluster that holds a
+// closed step runs, which is a superset of the closure and so the same
+// answer -- a clean step re-run reads what it read last run.
 bool
 _FrozenRunSteps(_FrozenWorker *worker,
                const std::map<SdfPath, size_t> &index,
@@ -6866,8 +6911,9 @@ RigExecRunPartialCone(
     RigExecSparsePlan sparsePlan;
     sparsePlan.verdict = RigExecSparseVerdict::Partial;
     sparsePlan.clusters = planClusters;
-    const RigExecSparseExecution execution =
-        RigExecRunSparsePlan(sparsePlan, RigExecMakeClusterRunner(rebind));
+    const RigExecSparseExecution execution = RigExecRunSparsePlan(
+        sparsePlan, B.clustering.topologicalOrder,
+        RigExecMakeClusterRunner(rebind));
     if (!execution.completed) {
         return result;
     }

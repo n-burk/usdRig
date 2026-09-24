@@ -36,8 +36,10 @@
 #include "pxr/usd/usd/prim.h"
 #include "pxr/usd/usd/timeCode.h"
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -162,8 +164,13 @@ bool RigExecResolveReadPhase(
 ///     and an entry keyed by path alone would serve whichever came first to
 ///     both. A single-keyed inputs:enabled made the pose at a frame depend
 ///     on which time codes the same evaluator had evaluated before it;
-///   * invalidation: the owner clears the whole cache on every stage notice,
-///     so an edit reaches the very next read. It also clears it when
+///   * invalidation: the owner drops, on every stage notice, every entry the
+///     notice could have moved -- the changed property itself, everything
+///     at or under a resynced or changed prim, and the whole cache for a
+///     change at the root, to a resolved asset or inside a prototype -- so
+///     an edit reaches the very next read. A notice reports a composed
+///     change at every stage path that depends on the edited spec, which is
+///     what makes the entry's own path the right key. It also clears it when
 ///     interactive overrides are set AND when they are cleared, which is
 ///     defence in depth and not a correctness requirement: an attribute
 ///     override is written into the generation's resolved inputs before
@@ -191,6 +198,30 @@ public:
         // that owns it here so a read from a worker (a parallel chain walk)
         // bypasses it instead of racing on it.
         _owner = std::this_thread::get_id();
+    }
+
+    /// Forgets the entry for \p path alone: a changed-info notice on one
+    /// property. Takes ownership for the calling thread exactly as Clear()
+    /// does, because the thread that handles notices is the one that reads.
+    void Erase(const SdfPath &path) {
+        _entries.erase(path);
+        _owner = std::this_thread::get_id();
+    }
+
+    /// Forgets every entry at or under any of \p prefixes: a resync, or a
+    /// change on a prim, reaches every property beneath it. One pass over
+    /// the entries for all of them. Re-stamps the owner as Clear() does.
+    void ErasePrefixes(const std::vector<SdfPath> &prefixes) {
+        _owner = std::this_thread::get_id();
+        if (prefixes.empty()) {
+            return;
+        }
+        for (auto it = _entries.begin(); it != _entries.end();) {
+            const bool under = std::any_of(
+                prefixes.begin(), prefixes.end(),
+                [&it](const SdfPath &p) { return it->first.HasPrefix(p); });
+            it = under ? _entries.erase(it) : std::next(it);
+        }
     }
 
     /// Reads \p attribute at \p time through the cache.
@@ -814,6 +845,20 @@ public:
         }
         _entries.clear();
     }
+    /// Clear() for the one sample \p sample: its shape is dropped as an
+    /// answer and kept as a candidate, so a re-read that finds the same
+    /// arrays hands back the same pointer.
+    void Erase(const SdfPath &sample) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        const auto found = _entries.find(sample);
+        if (found == _entries.end()) {
+            return;
+        }
+        if (found->second) {
+            _candidates[sample] = std::move(found->second);
+        }
+        _entries.erase(found);
+    }
     size_t GetSize() const {
         std::lock_guard<std::mutex> lock(_mutex);
         return _entries.size();
@@ -846,7 +891,7 @@ std::optional<RigExecRevisionOp> RigExecRevisionOpForSchema(
 
 /// Assembles a matrix mover's parameter packet.
 ///
-/// Peer of _BuildMatrixMoverParameters in moverKernels.cpp, but built from
+/// Peer of _BuildMatrixMoverParameters in movers/matrixMover.cpp, but built from
 /// values rather than from a VdfContext: \p transform and \p weights are the
 /// already-evaluated results of the providers named by the revision binding,
 /// pulled through a tap set on the authored stage. A null transform fails the
@@ -886,6 +931,22 @@ RigExecMoverParameters RigExecAssembleSkinParameters(
     const std::shared_ptr<const RigExecSkinTopology> *resolvedTopology =
         nullptr);
 
+/// Assembles a curvenet-adjuster mover parameter packet.
+///
+/// The adjustment commands this mover poses, resolved against the target
+/// curvenet rest points and spline indices. See
+/// movers/curvenetAdjusterMover.cpp.
+RigExecMoverParameters RigExecAssembleCurvenetAdjusterParameters(
+    const UsdPrim &mover,
+    const SdfPath &target,
+    const RigExecWeightPacket *weights,
+    UsdTimeCode time,
+    const RigExecResolvedInputs *resolved);
+
+/// The adjustment prims a curvenet-adjuster mover poses, in canonical
+/// order: the rigExec:adjustments targets plus any nested
+/// RigExecCurvenetAdjustment descendants.
+std::vector<SdfPath> RigExecCurvenetAdjustmentPaths(const UsdPrim &mover);
 /// Derives a mover's status from its packet (spec §6.6): disabled and failed
 /// movers both pass their preceding revision through, and a failure records the
 /// first bad canonical address.
@@ -1242,7 +1303,7 @@ bool RigExecSumBlendChannels(
 
 /// Assembles any revision's parameter packet without a derived stage.
 ///
-/// Peer of the _Build*MoverParameters family in moverKernels.cpp. Static inputs
+/// Peer of the _Build*MoverParameters family in movers/. Static inputs
 /// (strength, divisions, mode, topology, cage and bind arrays) are read from the
 /// authored stage through \p binding; dynamic ones arrive in \p values.
 /// \p time is the evaluation time for every static scene read the packet

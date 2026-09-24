@@ -122,7 +122,7 @@ def main():
            "a point 4 cm off the curve binds at 4 cm: %g"
            % binds[10 + 21 * 2][1])
 
-    for mode in ("dynamic", "parity"):
+    for mode in ("reference", "parity"):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
         rig.evaluation_mode = mode
@@ -166,7 +166,7 @@ def main():
     weight.GetAttribute("rigExec:defaultWeight").Set(0.0)
     stage.GetPrimAtPath("/Asset/Rig/Movers/grid_wire").GetRelationship(
         "rigExec:weightObject").SetTargets([weight.GetPath()])
-    for mode in ("dynamic", "parity"):
+    for mode in ("reference", "parity"):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
         rig.evaluation_mode = mode
@@ -187,7 +187,7 @@ def main():
     bind_prim = stage.GetPrimAtPath("/Asset/Rig/Curves/wire_bind")
     bind_prim.GetAttribute("rigExec:bindCoordinates").Set(Vt.Vec2fArray(
         [Gf.Vec2f(*binds[k]) for k in sorted(sparse)]))
-    for mode in ("dynamic", "parity"):
+    for mode in ("reference", "parity"):
         rig = _rigexec.Rig(stage, "/Asset/Rig")
         rig.compile()
         rig.evaluation_mode = mode

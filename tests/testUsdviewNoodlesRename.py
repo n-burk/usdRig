@@ -63,6 +63,16 @@ def testUsdviewInputFunction(appController):
 
     stage = appController._dataModel.stage
     nodeId = "/World"
+
+    # The editor opens on an empty canvas (GraphView.loadStage); prims become
+    # nodes through 'A' on a prim-tree selection, as they do for a user.
+    from pxr import Sdf
+    selection = appController._dataModel.selection
+    selection.clearPrims()
+    selection.addPrim(stage.GetPrimAtPath(Sdf.Path(nodeId)))
+    _pump(app, 10)
+    view.addNodesFromPrimTreeSelection()
+    _pump(app, 40)
     assert nodeId in view.nodes, sorted(view.nodes)
 
     # Aim at the title: the top of the node, horizontally centred.

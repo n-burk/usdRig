@@ -538,13 +538,14 @@ TestPlanTimeRule()
     CHECK(SetIs(moved.clusters, {4}));
 }
 
-// Execution runs the plan's clusters in order and counts them: hits run
-// zero, partials run their strict subset, misses run nothing, and a runner
-// that hands the generation back stops the run.
+// Execution runs the plan's clusters in the program's topological order and
+// counts them: hits run zero, partials run their strict subset, misses run
+// nothing, and a runner that hands the generation back stops the run.
 void
 TestRunSparsePlan()
 {
     const RigExecBakedProgramImpl program = MakeDiamond(false);
+    const std::vector<int> &order = program.clustering.topologicalOrder;
     RigExecOutputAffectedIndex index;
     index.Build(program, 7);
     index.MapControl("/Ctl/A", {1});
@@ -560,7 +561,7 @@ TestRunSparsePlan()
     CHECK(partial.verdict == RigExecSparseVerdict::Partial);
     std::vector<int> ran;
     const RigExecSparseExecution done = RigExecRunSparsePlan(
-        partial, [&ran](int cluster) {
+        partial, order, [&ran](int cluster) {
             ran.push_back(cluster);
             return true;
         });
@@ -573,7 +574,7 @@ TestRunSparsePlan()
         index, nullptr, cached, 7, cached.inputs, noOverrides);
     ran.clear();
     const RigExecSparseExecution zero = RigExecRunSparsePlan(
-        hit, [&ran](int cluster) {
+        hit, order, [&ran](int cluster) {
             ran.push_back(cluster);
             return true;
         });
@@ -585,20 +586,20 @@ TestRunSparsePlan()
         index, nullptr, cached, 8, movedA, noOverrides);
     ran.clear();
     const RigExecSparseExecution none = RigExecRunSparsePlan(
-        miss, [&ran](int cluster) {
+        miss, order, [&ran](int cluster) {
             ran.push_back(cluster);
             return true;
         });
     CHECK(!none.completed);
     CHECK(none.executed == 0);
     CHECK(ran.empty());
-    CHECK(RigExecRunSparsePlan(partial, nullptr).executed == 0);
+    CHECK(RigExecRunSparsePlan(partial, order, nullptr).executed == 0);
 
     // The runner hands the generation back at cluster 3: cluster 1 ran and
     // the run reports incomplete, so the caller live-evals.
     ran.clear();
     const RigExecSparseExecution aborted = RigExecRunSparsePlan(
-        partial, [&ran](int cluster) {
+        partial, order, [&ran](int cluster) {
             if (cluster == 3) {
                 return false;
             }
@@ -608,6 +609,126 @@ TestRunSparsePlan()
     CHECK(!aborted.completed);
     CHECK(aborted.executed == 1);
     CHECK(ran == std::vector<int>({1}));
+
+    // An order that leaves out a planned cluster runs nothing: running a
+    // subset of the plan is never correct, so the caller live-evals.
+    ran.clear();
+    const RigExecSparseExecution uncovered = RigExecRunSparsePlan(
+        partial, std::vector<int>({1, 4}), [&ran](int cluster) {
+            ran.push_back(cluster);
+            return true;
+        });
+    CHECK(!uncovered.completed);
+    CHECK(uncovered.executed == 0);
+    CHECK(ran.empty());
+}
+
+// Cluster ids number level-packing bins, not dependencies: a cluster can
+// have a higher-numbered predecessor. Here 3 -> 0 -> 1 and 2 -> 1, so a walk
+// in increasing id would run 0 before 3 and 1 before 2 -- each against a
+// predecessor's slots from the retained frame, not this one. The plan runs
+// in the stored topological order instead, and the runner checks that every
+// planned predecessor of a cluster ran before it.
+//
+//   3 -> 0 -> 1
+//        2 -> 1
+//   4 (no edges)
+void
+TestRunSparsePlanRunsPredecessorsFirst()
+{
+    RigExecBakedProgramImpl program{};
+    program.clustering.clusters.resize(5);
+    const auto edge = [&program](int from, int to) {
+        program.clustering.clusters[size_t(from)].succs.push_back(to);
+        program.clustering.clusters[size_t(to)].preds.push_back(from);
+    };
+    edge(3, 0);
+    edge(0, 1);
+    edge(2, 1);
+    RigExecBakedBuildCones(&program);
+
+    // Build caches the order: every cluster once, each after its preds.
+    const std::vector<int> &order = program.clustering.topologicalOrder;
+    CHECK(order.size() == 5);
+    std::vector<int> position(5, -1);
+    for (size_t k = 0; k < order.size(); ++k) {
+        CHECK(order[k] >= 0 && order[k] < 5);
+        if (order[k] >= 0 && order[k] < 5) {
+            CHECK(position[size_t(order[k])] == -1);
+            position[size_t(order[k])] = int(k);
+        }
+    }
+    for (int c = 0; c < 5; ++c) {
+        for (const int pred : program.clustering.clusters[size_t(c)].preds) {
+            CHECK(position[size_t(pred)] < position[size_t(c)]);
+        }
+    }
+    CHECK(RigExecBakedClusterTopologicalOrder(program.clustering) == order);
+    CHECK(SetIs(program.cones.cone[3], {3, 0, 1}));
+
+    RigExecOutputAffectedIndex index;
+    index.Build(program, 7);
+    index.MapControl("/Ctl/A", {3});
+    index.MapControl("/Ctl/B", {2});
+    const RigExecRetainedFrameState cached = MakeRetained(
+        7, 5, UsdTimeCode(1.0), {{"/Ctl/A", 1.0}, {"/Ctl/B", 1.0}});
+    const std::vector<RigExecValueOverride> noOverrides;
+
+    // A fake runner: a cluster may run only once every predecessor the plan
+    // names has run. It counts the clusters that ran too early.
+    const auto runInOrder = [&program](const RigExecSparsePlan &plan,
+                                       const std::vector<int> &walk,
+                                       std::vector<int> *ran,
+                                       int *early) {
+        return RigExecRunSparsePlan(
+            plan, walk, [&program, &plan, ran, early](int cluster) {
+                for (const int pred :
+                     program.clustering.clusters[size_t(cluster)].preds) {
+                    if (plan.clusters.Test(pred) &&
+                        std::find(ran->begin(), ran->end(), pred) ==
+                            ran->end()) {
+                        ++*early;
+                    }
+                }
+                ran->push_back(cluster);
+                return true;
+            });
+    };
+
+    const RigExecSparsePlan movedA = RigExecPlanSparseReuse(
+        index, nullptr, cached, 7,
+        MakeInputs(UsdTimeCode(1.0), {{"/Ctl/A", 2.0}, {"/Ctl/B", 1.0}}),
+        noOverrides);
+    CHECK(movedA.verdict == RigExecSparseVerdict::Partial);
+    CHECK(SetIs(movedA.clusters, {0, 1, 3}));
+    std::vector<int> ran;
+    int early = 0;
+    const RigExecSparseExecution a = runInOrder(movedA, order, &ran, &early);
+    CHECK(a.completed);
+    CHECK(a.executed == 3);
+    CHECK(early == 0);
+    CHECK(ran == std::vector<int>({3, 0, 1}));
+    CHECK(a.executedClusters == ran);
+
+    // The runner does catch the old walk: increasing id runs 0 before 3.
+    ran.clear();
+    early = 0;
+    runInOrder(movedA, std::vector<int>({0, 1, 2, 3, 4}), &ran, &early);
+    CHECK(early > 0);
+
+    const RigExecSparsePlan movedBoth = RigExecPlanSparseReuse(
+        index, nullptr, cached, 7,
+        MakeInputs(UsdTimeCode(1.0), {{"/Ctl/A", 2.0}, {"/Ctl/B", 2.0}}),
+        noOverrides);
+    CHECK(SetIs(movedBoth.clusters, {0, 1, 2, 3}));
+    ran.clear();
+    early = 0;
+    const RigExecSparseExecution both =
+        runInOrder(movedBoth, order, &ran, &early);
+    CHECK(both.completed);
+    CHECK(both.executed == 4);
+    CHECK(early == 0);
+    CHECK(ran.size() == 4 && ran.back() == 1);
 }
 
 // The cache's sparsity hooks: retained handles publish and serve beside the
@@ -1207,6 +1328,7 @@ main()
     TestPlanSparseReuse();
     TestPlanTimeRule();
     TestRunSparsePlan();
+    TestRunSparsePlanRunsPredecessorsFirst();
     TestRetainedPublishAndEpochEviction();
     TestCandidateIndex();
     TestUnionToleratesMismatchedWidths();

@@ -8,6 +8,20 @@
 
 namespace rigExec {
 
+namespace {
+
+std::vector<std::vector<int>> _IndexSeeds(
+    const RigExecBakedProgramImpl &program);
+
+// The seed clusters of the per-frame inputs \p path is overridable on,
+// placed as SetOverrides places an attribute override there: refused
+// (empty) when the path is folded or exec-typed, or feeds no input.
+std::vector<int> _OverridablePathSeeds(
+    const RigExecBakedProgramImpl &program,
+    const std::vector<std::vector<int>> &indexSeeds, const SdfPath &path);
+
+}  // namespace
+
 RigExecBakedClusterSet
 RigExecIntersectClusterSets(const RigExecBakedClusterSet &dirty,
                             const RigExecBakedClusterSet &affecting)
@@ -198,6 +212,34 @@ RigExecOutputAffectedIndex::Build(const RigExecBakedProgramImpl &program,
         }
         admit(RigExecControlIdForPath(prim.GetPath()),
               tableAt(program.cones.constraintArrayClusters, i));
+    }
+    // Overridable inputs: every property an input's walk reads, the path a
+    // stage value edit on it names (unified-program spec rule S7). An edit
+    // there re-runs exactly what an override on it would -- the steps that
+    // declare the input, or the provider compose its avar lands in -- so it
+    // is seeded exactly as the override is. A path one of whose inputs is
+    // re-read by the provider ladder instead stays foreign: what a moved
+    // ladder dirties is decided by the values the prologue recomposes, which
+    // no seed names. So does a path that seeds nothing.
+    const std::vector<std::vector<int>> indexSeeds = _IndexSeeds(program);
+    for (const auto &[path, indices] : program.overridableInputs) {
+        bool seedable = !indices.empty();
+        for (const int index : indices) {
+            const uint8_t route =
+                index >= 0 && size_t(index) < program.cones.editRoute.size()
+                    ? program.cones.editRoute[size_t(index)]
+                    : 0;
+            seedable = seedable && route != 0 &&
+                       (route & kEditRouteLadder) == 0;
+        }
+        if (!seedable) {
+            continue;
+        }
+        const std::vector<int> seeds =
+            _OverridablePathSeeds(program, indexSeeds, path);
+        if (!seeds.empty()) {
+            admit(RigExecControlIdForPath(path), seeds);
+        }
     }
 }
 
@@ -426,8 +468,68 @@ RigExecOverrideSeeds(const RigExecBakedProgramImpl &program,
     if (override.attribute.IsEmpty()) {
         return {};
     }
-    const SdfPath path =
-        override.prim.AppendProperty(override.attribute);
+    return _OverridablePathSeeds(
+        program, _IndexSeeds(program),
+        override.prim.AppendProperty(override.attribute));
+}
+
+namespace {
+
+// Override index -> the clusters a change to that input dirties, for every
+// index at once: the clusters of the steps that declare it (bakedSchedule's
+// override rule -- a step whose overrideInputs carry a flagged index dirties
+// its cluster), and the compose cluster of the avar binding behind it (the
+// input block writes an overridden avar into the dense table, and the
+// per-provider value comparison dirties its compose cluster). Matched by
+// index, not by head path, so an override standing on a walk hop resolves
+// to the same provider as one on the head. Flat slot / 11, as in Build; a
+// seedless provider contributes nothing.
+std::vector<std::vector<int>>
+_IndexSeeds(const RigExecBakedProgramImpl &program)
+{
+    // Grown to the largest index seen rather than sized from `overridden`,
+    // so the table answers for whatever numbers the steps and bindings
+    // carry.
+    std::vector<std::vector<int>> table(program.overridden.size());
+    const auto add = [&table](int index, int cluster) {
+        if (index < 0) {
+            return;
+        }
+        if (size_t(index) >= table.size()) {
+            table.resize(size_t(index) + 1);
+        }
+        table[size_t(index)].push_back(cluster);
+    };
+    const size_t clusters = program.clustering.clusters.size();
+    for (const RigExecBakedStep &step : program.steps) {
+        if (step.cluster < 0 || size_t(step.cluster) >= clusters) {
+            continue;
+        }
+        for (const int input : step.overrideInputs) {
+            add(input, step.cluster);
+        }
+    }
+    for (const auto *bindings :
+         {&program.avarBindings, &program.avarConstantBindings}) {
+        for (const auto &binding : *bindings) {
+            const size_t provider = binding.slot / 11;
+            if (provider >= program.cones.avarCluster.size()) {
+                continue;
+            }
+            const int cluster = program.cones.avarCluster[provider];
+            if (cluster >= 0 && size_t(cluster) < clusters) {
+                add(binding.input.overrideIndex, cluster);
+            }
+        }
+    }
+    return table;
+}
+
+std::vector<int>
+_OverridablePathSeeds(const RigExecBakedProgramImpl &program,
+                      const std::vector<std::vector<int>> &indexSeeds,
+                      const SdfPath &path)
+{
     if (program.folded.count(path) ||
         program.execTypedArrayInputs.count(path)) {
         return {};
@@ -436,53 +538,16 @@ RigExecOverrideSeeds(const RigExecBakedProgramImpl &program,
     if (found == program.overridableInputs.end()) {
         return {};
     }
-    std::set<int> wanted(found->second.begin(), found->second.end());
-    if (wanted.empty()) {
-        return {};
-    }
-    // The steps the executor dirties for these indices (bakedSchedule's
-    // override rule): a step whose overrideInputs carry a flagged index
-    // dirties its cluster, so those clusters are the override's seeds.
     std::set<int> seeds;
-    const size_t clusters = program.clustering.clusters.size();
-    for (const RigExecBakedStep &step : program.steps) {
-        for (const int input : step.overrideInputs) {
-            if (wanted.count(input)) {
-                if (step.cluster >= 0 &&
-                    size_t(step.cluster) < clusters) {
-                    seeds.insert(step.cluster);
-                }
-                break;
-            }
+    for (const int index : found->second) {
+        if (index >= 0 && size_t(index) < indexSeeds.size()) {
+            seeds.insert(indexSeeds[size_t(index)].begin(),
+                         indexSeeds[size_t(index)].end());
         }
     }
-    // The avar bindings behind the same indices (the input block writes
-    // an overridden avar into the dense table, and the per-provider
-    // value comparison dirties its compose cluster). Matched by index,
-    // not by head path, so an override standing on a walk hop resolves
-    // to the same provider as one on the head. Flat slot / 11, as in
-    // Build; a seedless provider contributes nothing (the override
-    // stays foreign, never admitted seedless).
-    const auto bindSeeds =
-        [&](const std::vector<RigExecBakedProgramImpl::AvarBinding>
-                &bindings) {
-            for (const auto &binding : bindings) {
-                if (!wanted.count(binding.input.overrideIndex)) {
-                    continue;
-                }
-                const size_t provider = binding.slot / 11;
-                if (provider < program.cones.avarCluster.size()) {
-                    const int cluster =
-                        program.cones.avarCluster[provider];
-                    if (cluster >= 0 && size_t(cluster) < clusters) {
-                        seeds.insert(cluster);
-                    }
-                }
-            }
-        };
-    bindSeeds(program.avarBindings);
-    bindSeeds(program.avarConstantBindings);
     return std::vector<int>(seeds.begin(), seeds.end());
 }
+
+}  // namespace
 
 }  // namespace rigExec

@@ -1210,6 +1210,9 @@ TestFallbackVerdictUnderStack(bool ikLast)
 
     RigExecRigEvaluator dynamicRig(dynamicStage, kRigPath);
     RigExecRigEvaluator bakedRig(bakedStage, kRigPath);
+    // The verdict is judged against the exec walk itself, not against
+    // whatever the default mode runs.
+    dynamicRig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
     std::vector<std::string> errors;
     CHECK(dynamicRig.Compile(&errors));
     CHECK(bakedRig.Compile(&errors));

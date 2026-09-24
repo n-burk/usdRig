@@ -34,6 +34,7 @@
 #include "pxr/usd/usd/attribute.h"
 #include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/usd/prim.h"
+#include "pxr/usd/usd/relationship.h"
 #include "pxr/usd/usd/stage.h"
 
 #include <cstdio>
@@ -656,6 +657,341 @@ TestAnOverrideElsewhereLeavesTheRestsAlone(const std::string &examplesDir)
                  rig.Evaluate(UsdTimeCode(kFrames[1])));
 }
 
+// A rest pull that fails fails the compile, wherever the pull ran.
+//
+// A baked compile pulls its epoch rests on the exec lane, beside its commit
+// and its bake, and only learns the verdict at the rest join behind the bake
+// -- by which time the epoch is committed and a program may have been built
+// from it. The failure has to come out exactly as it did when the pull ran
+// ahead of the commit: Compile false with the same error, no program, and a
+// rig that is not compiled, so the next evaluate asks again instead of
+// running the program of an epoch whose rests it never got.
+//
+// The pull is made to fail by aiming a constraint at a RigExecControl that
+// is inactive: it is still a frame provider by type, so it is seeded into
+// the rest request, and exec cannot compute a rest frame for it. A baked
+// epoch reaches the rest pull with nothing else failing first (a dynamic one
+// trips earlier, on the pose-provider prepare). Both a cold compile and a
+// recompile over a good epoch are checked, the second because it is the one
+// with a previous epoch's prepared requests to retire while the pull runs;
+// then the edit is taken back, and the rig has to come back to exactly what
+// a fresh evaluator gives.
+void
+TestARestPullThatFailsBehindTheBakeFailsTheCompile(
+    const std::string &examplesDir)
+{
+    const std::string path = examplesDir + "/08_AimEyes.usda";
+    const SdfPath rigPath("/EyesAsset/Rig");
+    const SdfPath aim("/EyesAsset/Rig/Movers/Pose/AimL");
+    const SdfPath ghost("/EyesAsset/Rig/Controls/Ghost");
+    const UsdTimeCode frame(1016.0);
+    const auto aimAtAnInactiveControl = [&](const UsdStageRefPtr &stage) {
+        EditInSession(stage);
+        UsdPrim control = stage->DefinePrim(ghost, TfToken("RigExecControl"));
+        CHECK(control);
+        control.SetActive(false);
+        const UsdRelationship target =
+            stage->GetPrimAtPath(aim).GetRelationship(
+                TfToken("rigExec:aimTarget"));
+        CHECK(target);
+        CHECK(target.SetTargets({ghost}));
+    };
+    const auto failedOnRests = [](const std::vector<std::string> &errors) {
+        for (const std::string &error : errors) {
+            if (error.find("failed to evaluate the rig's rest frames") !=
+                std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Cold: the first compile of the evaluator is the failing one.
+    {
+        UsdStageRefPtr stage = UsdStage::Open(path);
+        CHECK(stage);
+        if (!stage) return;
+        aimAtAnInactiveControl(stage);
+        RigExecRigEvaluator rig(stage, rigPath);
+        rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+        std::vector<std::string> errors;
+        CHECK(!rig.Compile(&errors));
+        CHECK(failedOnRests(errors));
+        CHECK(rig.GetBakedProgram() == nullptr);
+        CHECK(!rig.Evaluate(frame).valid);
+        CHECK(rig.GetBakedProgram() == nullptr);
+    }
+
+    // What the rig has to come back to once the edit is gone.
+    UsdStageRefPtr referenceStage = UsdStage::Open(path);
+    CHECK(referenceStage);
+    if (!referenceStage) return;
+    RigExecRigEvaluator reference(referenceStage, rigPath);
+    reference.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> referenceErrors;
+    CHECK(reference.Compile(&referenceErrors));
+    const RigExecRigPose expected = reference.Evaluate(frame);
+    CHECK(expected.valid);
+    CHECK(reference.GetBakedProgram() != nullptr);
+
+    // Warm: a good epoch, with its program, then the failing recompile.
+    UsdStageRefPtr stage = UsdStage::Open(path);
+    CHECK(stage);
+    if (!stage) return;
+    RigExecRigEvaluator rig(stage, rigPath);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    CHECK(rig.GetEpochRestFrameCount() > 0);
+    ComparePoses("before the failing edit", expected, rig.Evaluate(frame));
+    CHECK(rig.GetBakedProgram() != nullptr);
+
+    aimAtAnInactiveControl(stage);
+    errors.clear();
+    CHECK(!rig.Compile(&errors));
+    CHECK(failedOnRests(errors));
+    CHECK(rig.GetBakedProgram() == nullptr);
+    // Not compiled, so the evaluate compiles again, fails again, and hands
+    // back nothing rather than a pose from the withdrawn program.
+    CHECK(!rig.Evaluate(frame).valid);
+    CHECK(rig.GetBakedProgram() == nullptr);
+
+    stage->GetSessionLayer()->Clear();
+    errors.clear();
+    CHECK(rig.Compile(&errors));
+    CHECK(rig.GetEpochRestFrameCount() > 0);
+    ComparePoses("after the failing edit was taken back", expected,
+                 rig.Evaluate(frame));
+    CHECK(rig.GetBakedProgram() != nullptr);
+}
+
+// Opens the tail, applies \p edit, and evaluates \p kFrames in \p mode.
+std::vector<RigExecRigPose>
+RunInMode(const std::string &examplesDir, const _Edit &edit,
+          RigExecEvaluationMode mode)
+{
+    std::vector<RigExecRigPose> poses;
+    UsdStageRefPtr stage = UsdStage::Open(StagePath(examplesDir));
+    CHECK(stage);
+    if (!stage) return poses;
+    if (edit) edit(stage);
+    RigExecRigEvaluator rig(stage, kRig);
+    rig.SetEvaluationMode(mode);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    for (double frame : kFrames) {
+        poses.push_back(rig.Evaluate(UsdTimeCode(frame)));
+        CHECK(poses.back().valid);
+    }
+    return poses;
+}
+
+// A rest VALUE edited after the compile, in the session layer, on \p prim.
+//
+// The digest reads no rest value, so nothing recompiles, and the epoch keeps
+// its rest frames as constants: only their values are wrong. The program
+// answers the frames right after the edit from its own rebuilt rests, which
+// is why the epoch's frames are left stale for as long as it does; the exec
+// oracle is their one reader, so when the rig is next asked for the oracle,
+// the oracle has to re-pull and read the edited rest -- not the one the
+// epoch pulled at the compile. Both halves are compared with the same value
+// authored before a fresh compile, in the same mode.
+//
+// \p prim is the joint itself, and a RigExec ancestor of it, whose rest
+// reaches the joint through the namespace-ancestor input of its rest frame.
+void
+CheckARestValueEditAfterCompile(const std::string &examplesDir,
+                                const SdfPath &prim, const std::string &what)
+{
+    const TfToken restRx("rest:rx");
+    const double value = 15.0;
+    const _Edit author = [&](const UsdStageRefPtr &stage) {
+        EditInSession(stage);
+        const UsdPrim target = stage->GetPrimAtPath(prim);
+        CHECK(target);
+        if (!target) return;
+        UsdAttribute attribute = target.GetAttribute(restRx);
+        if (!attribute) {
+            attribute =
+                target.CreateAttribute(restRx, SdfValueTypeNames->Double);
+        }
+        CHECK(attribute.Set(value));
+    };
+    const std::vector<RigExecRigPose> bakedReference =
+        RunInMode(examplesDir, author, RigExecEvaluationMode::Baked);
+    const std::vector<RigExecRigPose> oracleReference =
+        RunInMode(examplesDir, author, RigExecEvaluationMode::ExecReference);
+    if (bakedReference.size() != kFrames.size() ||
+        oracleReference.size() != kFrames.size()) {
+        return;
+    }
+
+    UsdStageRefPtr stage = UsdStage::Open(StagePath(examplesDir));
+    CHECK(stage);
+    if (!stage) return;
+    RigExecRigEvaluator rig(stage, kRig);
+    rig.SetEvaluationMode(RigExecEvaluationMode::Baked);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    const size_t digest = rig.GetBindingEpochDigest();
+    const size_t epochRests = rig.GetEpochRestFrameCount();
+    CHECK(epochRests > 0);
+    std::vector<RigExecRigPose> before;
+    for (double frame : kFrames) {
+        before.push_back(rig.Evaluate(UsdTimeCode(frame)));
+        CHECK(before.back().valid);
+    }
+    CHECK(rig.GetBakedProgram() != nullptr);
+
+    author(stage);
+    for (size_t i = 0; i < kFrames.size(); ++i) {
+        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(kFrames[i]));
+        CHECK(pose.valid);
+        for (const std::string &diagnostic : pose.diagnostics) {
+            CHECK(diagnostic.find("epoch rebuilt") == std::string::npos);
+        }
+        ComparePoses(what + ", baked, frame " +
+                         std::to_string(int(kFrames[i])),
+                     bakedReference[i], pose);
+    }
+    // A value edit: the same epoch, still holding its rests as constants.
+    CHECK(rig.GetBindingEpochDigest() == digest);
+    CHECK(rig.GetEpochRestFrameCount() == epochRests);
+
+    rig.SetEvaluationMode(RigExecEvaluationMode::ExecReference);
+    for (size_t i = 0; i < kFrames.size(); ++i) {
+        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(kFrames[i]));
+        CHECK(pose.valid);
+        ComparePoses(what + ", oracle, frame " +
+                         std::to_string(int(kFrames[i])),
+                     oracleReference[i], pose);
+    }
+    CHECK(rig.GetBindingEpochDigest() == digest);
+
+    // And the edit moved the rig, or both halves could agree on the pose
+    // the epoch had before it.
+    bool moved = false;
+    for (const auto &[path, matrix] : oracleReference[0].jointMatricesFinal) {
+        const auto found = before[0].jointMatricesFinal.find(path);
+        if (found == before[0].jointMatricesFinal.end() ||
+            found->second != matrix) {
+            moved = true;
+        }
+    }
+    CHECK(moved);
+}
+
+// The same rest VALUE edit, with the program kept for the whole epoch and
+// the oracle run beside it on every frame: BakedWithParityCheck.
+//
+// The program stands, so the settle does not re-pull the epoch's rests; the
+// dynamic walk the mode runs after the program is their one reader and has
+// to re-pull them itself, before it reads them. A walk that read the rests
+// the epoch pulled at the compile would publish the pre-edit pose and count
+// the program's (correct) answer as a parity mismatch. Compared with the
+// same value authored before a fresh compile, in the same mode.
+void
+CheckARestValueEditUnderTheParityCheck(const std::string &examplesDir,
+                                       const SdfPath &prim,
+                                       const std::string &what)
+{
+    const TfToken restRx("rest:rx");
+    const double value = 15.0;
+    const _Edit author = [&](const UsdStageRefPtr &stage) {
+        EditInSession(stage);
+        const UsdPrim target = stage->GetPrimAtPath(prim);
+        CHECK(target);
+        if (!target) return;
+        UsdAttribute attribute = target.GetAttribute(restRx);
+        if (!attribute) {
+            attribute =
+                target.CreateAttribute(restRx, SdfValueTypeNames->Double);
+        }
+        CHECK(attribute.Set(value));
+    };
+    const RigExecEvaluationMode mode =
+        RigExecEvaluationMode::BakedWithParityCheck;
+    const std::vector<RigExecRigPose> reference =
+        RunInMode(examplesDir, author, mode);
+    if (reference.size() != kFrames.size()) {
+        return;
+    }
+
+    UsdStageRefPtr stage = UsdStage::Open(StagePath(examplesDir));
+    CHECK(stage);
+    if (!stage) return;
+    RigExecRigEvaluator rig(stage, kRig);
+    rig.SetEvaluationMode(mode);
+    std::vector<std::string> errors;
+    CHECK(rig.Compile(&errors));
+    const size_t digest = rig.GetBindingEpochDigest();
+    const size_t epochRests = rig.GetEpochRestFrameCount();
+    CHECK(epochRests > 0);
+    std::vector<RigExecRigPose> before;
+    for (double frame : kFrames) {
+        before.push_back(rig.Evaluate(UsdTimeCode(frame)));
+        CHECK(before.back().valid);
+        CHECK(before.back().bakedParityMismatches == 0);
+    }
+    CHECK(rig.GetBakedProgram() != nullptr);
+
+    author(stage);
+    for (size_t i = 0; i < kFrames.size(); ++i) {
+        const RigExecRigPose pose = rig.Evaluate(UsdTimeCode(kFrames[i]));
+        CHECK(pose.valid);
+        CHECK(pose.bakedParityMismatches == 0);
+        for (const std::string &diagnostic : pose.diagnostics) {
+            CHECK(diagnostic.find("epoch rebuilt") == std::string::npos);
+        }
+        // Still the program's epoch: the oracle ran beside it, not instead.
+        CHECK(rig.GetBakedProgram() != nullptr);
+        ComparePoses(what + ", parity check, frame " +
+                         std::to_string(int(kFrames[i])),
+                     reference[i], pose);
+    }
+    CHECK(rig.GetBindingEpochDigest() == digest);
+    CHECK(rig.GetEpochRestFrameCount() == epochRests);
+
+    bool moved = false;
+    for (const auto &[path, matrix] : reference[0].jointMatricesFinal) {
+        const auto found = before[0].jointMatricesFinal.find(path);
+        if (found == before[0].jointMatricesFinal.end() ||
+            found->second != matrix) {
+            moved = true;
+        }
+    }
+    CHECK(moved);
+}
+
+void
+TestARestValueEditAfterCompileReachesTheOracle(const std::string &examplesDir)
+{
+    CheckARestValueEditAfterCompile(examplesDir, kJoint,
+                                    "a rest:rx edit after Compile");
+}
+
+void
+TestARestValueEditAfterCompileReachesTheParityOracle(
+    const std::string &examplesDir)
+{
+    CheckARestValueEditUnderTheParityCheck(examplesDir, kJoint,
+                                           "a rest:rx edit after Compile");
+}
+
+void
+TestARestValueEditOnAnAncestorReachesTheOracle(const std::string &examplesDir)
+{
+    CheckARestValueEditAfterCompile(examplesDir, kJoint.GetParentPath(),
+                                    "a rest:rx edit on an ancestor");
+}
+
+void
+TestARestValueEditOnAnAncestorReachesTheParityOracle(
+    const std::string &examplesDir)
+{
+    CheckARestValueEditUnderTheParityCheck(examplesDir, kJoint.GetParentPath(),
+                                           "a rest:rx edit on an ancestor");
+}
 
 std::string
 SchemaResourceDir(const std::string &examplesDir)
@@ -695,6 +1031,11 @@ main(int argc, char **argv)
     TestAPropertyChainOnARestRefusesTheEpochPath(examplesDir);
     TestAnInteractiveOverrideOnARestIsFollowed(examplesDir);
     TestAnOverrideElsewhereLeavesTheRestsAlone(examplesDir);
+    TestARestPullThatFailsBehindTheBakeFailsTheCompile(examplesDir);
+    TestARestValueEditAfterCompileReachesTheOracle(examplesDir);
+    TestARestValueEditOnAnAncestorReachesTheOracle(examplesDir);
+    TestARestValueEditAfterCompileReachesTheParityOracle(examplesDir);
+    TestARestValueEditOnAnAncestorReachesTheParityOracle(examplesDir);
 
     if (failures) {
         std::printf("%d FAILURE(S)\n", failures);

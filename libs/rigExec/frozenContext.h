@@ -348,10 +348,22 @@ std::vector<uint64_t> RigExecConstantRegionsForPaths(
 /// carries the stage-edit serial instead).
 uint64_t RigExecFrameCacheEpochDigest(const RigExecRigEvaluator &evaluator);
 
+/// True when \p live has routed a stage value edit to an input, or bumped
+/// its program stamp, since \p base was frozen from it or last patched.
+/// Neither moves the avar region, so a session that keeps its snapshot on
+/// an unchanged RigExecFrozenAvarRegionDigest asks this too: the snapshot's
+/// history predates the edit, and a job cloned from it would skip the steps
+/// the edit reached. RigExecPatchFrozenAvarConstants carries both.
+bool RigExecFrozenSnapshotOwesLiveEdits(const RigExecFrozenProgram &base,
+                                        const RigExecBakedProgram &live);
+
 /// Carries \p live's patched avar region onto a copy of \p base, for a
 /// session whose snapshot still pins the program it was cloned from.
 /// Copy-on-write: \p base is never mutated, so jobs already holding it run
 /// on, and \p out pins the same epoch and history with the new constants.
+/// The copy also owes every value edit and stamp bump \p live has taken
+/// since \p base (RigExecFrozenSnapshotOwesLiveEdits): its first run
+/// re-runs the steps those edits reached, or everything after a bump.
 /// Answers false, having left \p out untouched, when the two programs are
 /// not the same shape (different binding counts -- a rebuild, not a patch).
 /// UI thread only: it reads the live program.
@@ -801,7 +813,7 @@ bool RigExecSampleFrameInputsWithBurstCache(
 /// in frozenContext.cpp for the frozen code paths' isolation argument.
 ///
 /// SERIAL DISCIPLINE (D4): the shared skin kernels consult
-/// RigExecFrozenSerialActive at their four launch sites (moverGraph.cpp)
+/// RigExecFrozenSerialActive at their five launch sites (moverGraph.cpp)
 /// and take their serial variant inside a frozen run, so a background job
 /// never dispatches TBB work past the host's own scheduling. The serial
 /// and parallel variants compute byte-identical numbers by the kernels'

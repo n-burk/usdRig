@@ -1484,10 +1484,12 @@ unspecified, an unknown skinning method. The design that keeps both facts:
   that can start earlier than the revision could.
   This needs the pose steps' levels at the moment of the cut, which is why Build runs
   `RigExecBakedBuildStepEdges` + `RigExecBakedAssignStepCosts` over the pose half BEFORE
-  `RigExecBakedBuildGeometrySteps`, and again from `RigExecBakedBuildSchedule` once the geometry
-  steps exist. The second sweep clears and re-derives every edge, so running it twice produces
-  exactly the graph running it once would have; it is sound because a geometry step never precedes
-  a pose step. `RIGEXEC_BAKED_CHUNK_ALWAYS=1` skips the rule, which is what lets the chunk
+  `RigExecBakedBuildGeometrySteps`, and `RigExecBakedBuildSchedule` then EXTENDS that same sweep
+  over the geometry steps once they exist (the `RigExecBakedEdgeSweep` keeps the writer/reader
+  interval tables alive between the two halves; 2026-09-23, it used to clear and re-derive every
+  edge in a second full sweep). The extension is sound only while the geometry builder appends
+  steps and never edits an earlier step's declared ranges; a geometry step never precedes a pose
+  step. `RIGEXEC_BAKED_CHUNK_ALWAYS=1` skips the rule, which is what lets the chunk
   fixtures in `tests/testRigExecBakedSchedule.cpp` exercise a cut revision on a rig that would not
   otherwise be cut.
 * **`RevisionChunk(c, r, k)`** is SPECULATIVE [S20][P2]: it reads `RevisionPacket(c, r)`, the

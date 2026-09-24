@@ -27,6 +27,7 @@
 #include "bakedSchedule.h"
 #include "frameExtraction.h"
 #include "moverGraph.h"
+#include "movers/moverRegistry.h"
 #include "parallel.h"
 #include "rigEvaluator.h"
 #include "types.h"
@@ -34,6 +35,9 @@
 #include "rigExecMath/pointFrame.h"
 
 #include "pxr/base/gf/math.h"
+#include "pxr/base/tf/getenv.h"
+#include "pxr/base/tf/stringUtils.h"
+#include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/loops.h"
 #include "pxr/base/gf/rotation.h"
 #include "pxr/usd/sdf/types.h"
@@ -723,6 +727,11 @@ size_t RigExecBakedProgram::GetVaryingInputCount() const {
     return _impl->varyingInputs;
 }
 
+void RigExecBakedProgram::ReleaseStageReferences() {
+    _impl->stage.Reset();
+    _impl->resolveBlendSample = nullptr;
+}
+
 void RigExecBakedProgram::AdoptGeometryStateFrom(
     RigExecBakedProgram &previous) {
     RigExecBakedProgramImpl &B = *_impl;
@@ -785,6 +794,13 @@ void RigExecBakedProgram::AdoptGeometryStateFrom(
         // writes one entry per influence slot of the NEW binding.
         if (source->influences.size() == destination->influences.size()) {
             destination->influences = std::move(source->influences);
+            // And the fold's verdict on that table, which is a function of
+            // the table alone. The fold is a step like any other, so the
+            // first run of the new program skips it when nothing it reads
+            // moved -- a blend shape's fold reads nothing at all -- and a
+            // table that came across without its verdict would leave the
+            // fuse reading the `false` a fresh revision starts at.
+            destination->influencesValid = source->influencesValid;
         }
         // The last run's envelope scalar belongs to the cached result the
         // same way the packet does: a node whose `ran` survives a rebuild
@@ -929,11 +945,28 @@ RigExecBakedProgram::IsInvalidatedBy(
     // not one named attribute that was judged. The prim-level info that
     // arrives for every ancestor of an edit (an `over` being created above
     // it) is not that, and is exactly what must not rebuild.
+    static const TfToken kDefault("default");
+    static const TfToken kTimeSamples("timeSamples");
+    static const TfToken kSpline("spline");
     for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
         if (B.rebuild.count(path) ||
             (path.IsPropertyPath() &&
              B.xformPrims.count(path.GetPrimPath()))) {
             return true;
+        }
+        // Anything but a value on a property the bake asked about by name:
+        // a connection or a target retargeted, or metadata that changes how
+        // the value is read. The walk the bake recorded for that property
+        // -- and with it which upstream hops a later value edit is routed
+        // through (ApplyValueEdits) -- may no longer be the walk the frame
+        // takes, and only a rebuild records the new one.
+        if (path.IsPropertyPath() && B.named.count(path)) {
+            for (const TfToken &field : notice.GetChangedFields(path)) {
+                if (field != kDefault && field != kTimeSamples &&
+                    field != kSpline) {
+                    return true;
+                }
+            }
         }
     }
     // A resync names a subtree whose composition changed: properties can have
@@ -1138,6 +1171,207 @@ void
 RigExecBakedProgram::BumpProgramStamp()
 {
     ++_impl->programStamp;
+}
+
+namespace {
+
+// The attributes a resolved-input reader can reach through connections; see
+// `connectedSources`. Every authored attribute of every resolvedRoutedPrims
+// prim is a walk head, and every connection target is followed on -- all of
+// them, where the reader follows only a single one: a reader that stops at
+// two connections reads the attribute's own value instead, which is on a
+// routed prim already, so the extra targets only report more.
+const std::set<SdfPath> &
+_ConnectedSources(const RigExecBakedProgramImpl &B)
+{
+    if (B.connectedSourcesFilled &&
+        B.connectedSourcesStamp == B.programStamp) {
+        return B.connectedSources;
+    }
+    B.connectedSources.clear();
+    B.connectedSourcesStamp = B.programStamp;
+    B.connectedSourcesFilled = true;
+    if (!B.stage) {
+        return B.connectedSources;
+    }
+    std::vector<UsdAttribute> pending;
+    for (const SdfPath &path : B.resolvedRoutedPrims) {
+        const UsdPrim prim = B.stage->GetPrimAtPath(path);
+        if (!prim) {
+            continue;
+        }
+        for (const UsdAttribute &attribute : prim.GetAuthoredAttributes()) {
+            if (attribute.HasAuthoredConnections()) {
+                pending.push_back(attribute);
+            }
+        }
+    }
+    SdfPathVector connections;
+    while (!pending.empty()) {
+        const UsdAttribute attribute = std::move(pending.back());
+        pending.pop_back();
+        connections.clear();
+        attribute.GetConnections(&connections);
+        for (const SdfPath &target : connections) {
+            if (!B.connectedSources.insert(target).second ||
+                !target.IsPropertyPath()) {
+                continue;
+            }
+            const UsdAttribute next = B.stage->GetAttributeAtPath(target);
+            if (next && next.HasAuthoredConnections()) {
+                pending.push_back(next);
+            }
+        }
+    }
+    return B.connectedSources;
+}
+
+// Decides where a stage VALUE edit lands in the program without writing
+// anything, so the dry run and ApplyValueEdits share every check by
+// construction. The caller has already asked IsInvalidatedBy, so no path
+// here is one whose value the bake captured.
+//
+// Fills \p indices with the override numbers of the per-frame inputs the
+// notice reached, and \p readPaths with every property path it names that
+// something in the program can read -- the edited inputs, the properties of
+// a prim read through the generation's resolved inputs, the sources those
+// reads reach through connections, and the properties of a prim a
+// value-compared source reads whole. A property that is none of these is
+// read by nothing, and is in neither list. Returns false when the
+// notice holds anything that can only be answered by running the whole
+// program once (a stamp bump).
+bool
+_RouteValueEdits(const RigExecBakedProgramImpl &B,
+                 const UsdNotice::ObjectsChanged &notice,
+                 std::vector<int> *indices, std::vector<SdfPath> *readPaths)
+{
+    // Every resync still runs the program whole: which retained query or
+    // cached binding a spec appearing or going away leaves stale is not
+    // indexed per path.
+    if (!notice.GetResyncedPaths().empty() ||
+        !notice.GetResolvedAssetPathsResyncedPaths().empty()) {
+        return false;
+    }
+    static const TfToken kDefault("default");
+    static const TfToken kTimeSamples("timeSamples");
+    static const TfToken kSpline("spline");
+    // A prim some source of the program reads as a whole rather than by
+    // property name: the Xforms accepted for composing to the identity, a
+    // prim whose reads all go through the resolved inputs (a property-chain
+    // mover, a geometry mover, a weight object), and every prim the bake
+    // read from or an ancestor of one -- a transform read relative to the
+    // asset root sees every Xform above the prim.
+    const auto readWhole = [&B](const SdfPath &prim) {
+        if (B.xformPrims.count(prim) || B.resolvedRoutedPrims.count(prim)) {
+            return true;
+        }
+        const auto below = B.prims.lower_bound(prim);
+        return below != B.prims.end() && below->HasPrefix(prim);
+    };
+    std::vector<int> decided;
+    std::vector<SdfPath> read;
+    for (const SdfPath &path : notice.GetChangedInfoOnlyPaths()) {
+        const std::vector<TfToken> fields = notice.GetChangedFields(path);
+        // Layer metadata: the time codes, the frame rate -- read by every
+        // time conversion and indexed nowhere.
+        if (path.IsAbsoluteRootPath()) {
+            return false;
+        }
+        if (!path.IsPropertyPath()) {
+            // The empty info every ancestor of an edited spec reports moves
+            // nothing. Prim metadata on a prim nothing reads moves nothing
+            // either; on one the program reads, it is not a value the index
+            // can place.
+            if (fields.empty() || !readWhole(path.GetPrimPath())) {
+                continue;
+            }
+            return false;
+        }
+        for (const TfToken &field : fields) {
+            if (field != kDefault && field != kTimeSamples &&
+                field != kSpline) {
+                return false;
+            }
+        }
+        const auto found = B.overridableInputs.find(path);
+        if (found != B.overridableInputs.end()) {
+            // A per-frame input, on its head or on an upstream hop of its
+            // walk: routed exactly where a drag on it would be, provided
+            // every input the path feeds has a reader that re-reads it.
+            for (const int index : found->second) {
+                if (index < 0 || size_t(index) >= B.cones.editRoute.size() ||
+                    !B.cones.editRoute[size_t(index)]) {
+                    return false;
+                }
+                decided.push_back(index);
+            }
+            read.push_back(path);
+            continue;
+        }
+        const SdfPath prim = path.GetPrimPath();
+        // Read through the resolved inputs, which the prologue rebuilds
+        // every run: the property chains compare their results, and the
+        // geometry movers and weight objects are assembled by sources that
+        // compare what they assembled.
+        if (B.resolvedRoutedPrims.count(prim)) {
+            read.push_back(path);
+            continue;
+        }
+        // Asked about by name and not an input a step declares: a reader
+        // the index cannot name, so the whole program answers it.
+        if (B.named.count(path)) {
+            return false;
+        }
+        // Not read by name at all. A source that reads its prim whole -- a
+        // stage transform, a chain's base points -- re-reads it every run
+        // and compares by value, and so does a resolved-input reader whose
+        // connection reaches the property, so the program owes either
+        // nothing; the frame cache still does, and the path is reported for
+        // that.
+        if (readWhole(prim) || (!B.resolvedRoutedPrims.empty() &&
+                                _ConnectedSources(B).count(path))) {
+            read.push_back(path);
+        }
+    }
+    if (indices) {
+        *indices = std::move(decided);
+    }
+    if (readPaths) {
+        *readPaths = std::move(read);
+    }
+    return true;
+}
+
+}  // namespace
+
+bool
+RigExecBakedProgram::DryRunValueEdits(
+    const UsdNotice::ObjectsChanged &notice,
+    std::vector<SdfPath> *readPaths) const
+{
+    return _RouteValueEdits(*_impl, notice, nullptr, readPaths);
+}
+
+bool
+RigExecBakedProgram::ApplyValueEdits(const UsdNotice::ObjectsChanged &notice)
+{
+    RigExecBakedProgramImpl &B = *_impl;
+    std::vector<int> indices;
+    if (!_RouteValueEdits(B, notice, &indices, nullptr)) {
+        return false;
+    }
+    if (indices.empty()) {
+        return true;
+    }
+    B.edited.resize(B.overridden.size(), 0);
+    B.editSerial.resize(B.overridden.size(), 0);
+    ++B.valueEditSerial;
+    for (const int index : indices) {
+        B.edited[size_t(index)] = 1;
+        B.editSerial[size_t(index)] = B.valueEditSerial;
+    }
+    B.anyEdited = true;
+    return true;
 }
 
 namespace {
@@ -1422,6 +1656,207 @@ RigExecBakedProgram::SetOverrides(
     return placeable;
 }
 
+namespace {
+
+// ---------------------------------------------------------------------------
+// RIGEXEC_BAKED_PROGRAM_DIGEST: a fingerprint of what Build produced.
+//
+// The parts of Build that resolve in parallel promise a program identical to
+// a serial Build's, byte for byte -- the same override numbering, the same
+// invalidation index, the same bound constants. Nothing in a frame's OUTPUT
+// can check that promise: two numberings that differ still pose the rig the
+// same, and a path missing from `named` shows up only on the edit that
+// should have rebuilt. So the tables are hashed here, table by table, and a
+// run with RIGEXEC_ENABLE_PARALLEL_EVAL=0 (or a build from before a change)
+// must print the same lines. One line per table rather than one hash, so a
+// mismatch names the table it is in.
+// ---------------------------------------------------------------------------
+
+bool
+_ProgramDigestRequested()
+{
+    static const bool requested =
+        TfGetenvBool("RIGEXEC_BAKED_PROGRAM_DIGEST", false);
+    return requested;
+}
+
+// FNV-1a over the serialized bytes, plus a count of what was hashed.
+struct _DigestTable {
+    uint64_t hash = 1469598103934665603ull;
+    size_t count = 0;
+
+    void Bytes(const void *data, size_t size)
+    {
+        const unsigned char *p = static_cast<const unsigned char *>(data);
+        for (size_t i = 0; i < size; ++i) {
+            hash ^= p[i];
+            hash *= 1099511628211ull;
+        }
+    }
+    void Str(const std::string &s)
+    {
+        const uint64_t n = s.size();
+        Bytes(&n, sizeof(n));
+        Bytes(s.data(), s.size());
+    }
+    void Path(const SdfPath &p) { Str(p.GetString()); }
+    void Int(int64_t v) { Bytes(&v, sizeof(v)); }
+    void Double(double v) { Bytes(&v, sizeof(v)); }
+    void Matrix(const GfMatrix4d &m)
+    {
+        Bytes(m.GetArray(), sizeof(double) * 16);
+    }
+    void Value(double v) { Double(v); }
+    void Value(bool v) { Int(v ? 1 : 0); }
+    void Value(const TfToken &v) { Str(v.GetString()); }
+    void Value(const GfMatrix4d &v) { Matrix(v); }
+    template <class T>
+    void Input(const RigExecBakedInput<T> &input)
+    {
+        Value(input.constant);
+        Path(input.query.IsValid() ? input.query.GetAttribute().GetPath()
+                                   : SdfPath());
+        Path(input.resolvedAttr ? input.resolvedAttr.GetPath() : SdfPath());
+        Path(input.head ? input.head.GetPath() : SdfPath());
+        Int(input.varying ? 1 : 0);
+        Int(input.overrideIndex);
+    }
+    void PathSet(const std::set<SdfPath> &paths)
+    {
+        for (const SdfPath &p : paths) {
+            Path(p);
+        }
+        count = paths.size();
+    }
+};
+
+void
+_PrintProgramDigest(const RigExecBakedProgramImpl &B)
+{
+    std::vector<std::pair<const char *, _DigestTable>> tables;
+    const auto table = [&tables](const char *name) -> _DigestTable & {
+        tables.emplace_back(name, _DigestTable());
+        return tables.back().second;
+    };
+    table("rebuild").PathSet(B.rebuild);
+    table("named").PathSet(B.named);
+    table("prims").PathSet(B.prims);
+    table("xformPrims").PathSet(B.xformPrims);
+    table("folded").PathSet(B.folded);
+    table("resolvedRoutedPrims").PathSet(B.resolvedRoutedPrims);
+    table("execTypedArrayInputs").PathSet(B.execTypedArrayInputs);
+    {
+        _DigestTable &t = table("overridden");
+        for (char c : B.overridden) {
+            t.Int(c);
+        }
+        t.count = B.overridden.size();
+    }
+    {
+        _DigestTable &t = table("overridableInputs");
+        for (const auto &[path, indices] : B.overridableInputs) {
+            t.Path(path);
+            t.Int(int64_t(indices.size()));
+            for (int index : indices) {
+                t.Int(index);
+            }
+        }
+        t.count = B.overridableInputs.size();
+    }
+    {
+        _DigestTable &t = table("inputCounts");
+        t.Int(int64_t(B.boundInputs));
+        t.Int(int64_t(B.varyingInputs));
+        t.count = 2;
+    }
+    {
+        _DigestTable &t = table("slots");
+        for (size_t i = 0; i < B.paths.size(); ++i) {
+            t.Path(B.paths[i]);
+            t.Int(int64_t(B.slotKind[i]));
+            t.Int(B.parent[i]);
+            t.Int(B.propParent[i]);
+        }
+        for (int slot : B.xformSlots) {
+            t.Int(slot);
+        }
+        t.count = B.paths.size();
+    }
+    {
+        _DigestTable &t = table("ladders");
+        for (const RigExecBakedProgramImpl::Ladder &ladder : B.ladders) {
+            t.Input(ladder.posedSpace);
+            t.Input(ladder.restSpace);
+            t.Input(ladder.defaultSpace);
+            t.Input(ladder.rotationOrder);
+            for (int c = 0; c < 6; ++c) {
+                t.Input(ladder.restAvars[c]);
+                t.Input(ladder.defaultAvars[c]);
+            }
+        }
+        t.Int(B.ladderVarying ? 1 : 0);
+        for (int index : B.ladderOverrides) {
+            t.Int(index);
+        }
+        for (char c : B.restChainVaries) {
+            t.Int(c);
+        }
+        t.count = B.ladders.size();
+    }
+    {
+        _DigestTable &t = table("ladderComposed");
+        for (size_t i = 0; i < B.restM.size(); ++i) {
+            t.Matrix(B.restM[i]);
+            t.Matrix(B.selfD[i]);
+            t.Matrix(B.parentDinv[i]);
+            t.Matrix(B.posedAuthoredM[i]);
+            t.Int(B.posedAuthored[i]);
+            t.Str(B.rotOrder[i].GetString());
+        }
+        t.count = B.restM.size();
+    }
+    {
+        _DigestTable &t = table("avarTable");
+        for (double v : B.avarConstants) {
+            t.Double(v);
+        }
+        for (const auto *bindings :
+             {&B.avarBindings, &B.avarConstantBindings}) {
+            t.Int(int64_t(bindings->size()));
+            for (const RigExecBakedProgramImpl::AvarBinding &b : *bindings) {
+                t.Int(int64_t(b.slot));
+                t.Input(b.input);
+            }
+        }
+        for (const auto &[path, index] : B.patchableAvars) {
+            t.Path(path);
+            t.Int(int64_t(index));
+        }
+        t.count = B.avarConstants.size();
+    }
+    {
+        _DigestTable &t = table("schedule");
+        t.Str(RigExecBakedScheduleReport(B));
+        t.count = B.steps.size();
+    }
+    _DigestTable total;
+    std::string out;
+    for (const auto &[name, t] : tables) {
+        total.Str(name);
+        total.Int(int64_t(t.count));
+        total.Bytes(&t.hash, sizeof(t.hash));
+        out += TfStringPrintf(
+            "RIGEXEC_BAKED_PROGRAM_DIGEST %-22s n=%-6zu %016llx\n", name,
+            t.count, static_cast<unsigned long long>(t.hash));
+    }
+    out += TfStringPrintf(
+        "RIGEXEC_BAKED_PROGRAM_DIGEST %-22s        %016llx\n", "total",
+        static_cast<unsigned long long>(total.hash));
+    std::fwrite(out.data(), 1, out.size(), stderr);
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Build.
 // ---------------------------------------------------------------------------
@@ -1436,14 +1871,71 @@ RigExecBakedBuildContext::Refuse(const std::string &what, const SdfPath &where)
 void
 RigExecBakedBuildContext::Fold(const UsdPrim &prim, const char *name)
 {
-    if (!prim) {
-        return;
+    RigExecBakedProgramSink sink{program};
+    RigExecBakedRecordFold(&sink, prim, name);
+}
+
+void
+RigExecBakedCommitShard::Seal()
+{
+    for (SdfPathVector *paths : {&prims, &named, &rebuild, &folded}) {
+        std::sort(paths->begin(), paths->end());
+        paths->erase(std::unique(paths->begin(), paths->end()),
+                     paths->end());
     }
-    const SdfPath path = prim.GetPath().AppendProperty(TfToken(name));
-    program->rebuild.insert(path);
-    program->folded.insert(path);
-    program->named.insert(path);
-    program->prims.insert(prim.GetPath());
+    // Not deduplicated: one input names each walk step once (the walk
+    // stops at the first attribute it revisits), so an equal pair is two
+    // inputs and both numbers belong in the entry.
+    std::sort(overridable.begin(), overridable.end());
+}
+
+std::vector<int>
+RigExecBakedMergeCommitShards(RigExecBakedProgramImpl *program,
+                              std::vector<RigExecBakedCommitShard> *shards)
+{
+    RigExecBakedProgramImpl &B = *program;
+    std::vector<int> first(shards->size(), 0);
+    int next = int(B.overridden.size());
+    for (size_t k = 0; k < shards->size(); ++k) {
+        first[k] = next;
+        next += (*shards)[k].numbered;
+        B.boundInputs += (*shards)[k].boundInputs;
+        B.varyingInputs += (*shards)[k].varyingInputs;
+    }
+    // Every flag starts clear, so growing the vector is the same as the
+    // serial commit's one push_back per number.
+    B.overridden.resize(size_t(next), 0);
+    // Each shard's paths are sorted, so each insert is hinted at the
+    // successor of the one before it -- constant time wherever the set
+    // holds nothing in between, a plain insert wherever it does. The hint
+    // only decides the cost, never the contents.
+    const auto insertSorted = [](std::set<SdfPath> *set,
+                                 const SdfPathVector &paths) {
+        auto hint = set->end();
+        for (const SdfPath &path : paths) {
+            hint = std::next(set->insert(hint, path));
+        }
+    };
+    for (RigExecBakedCommitShard &shard : *shards) {
+        insertSorted(&B.prims, shard.prims);
+        insertSorted(&B.named, shard.named);
+        insertSorted(&B.rebuild, shard.rebuild);
+        insertSorted(&B.folded, shard.folded);
+    }
+    // In chunk order and, inside a shard, by (path, number): every number
+    // shard k hands out is below every number shard k+1 does, and every
+    // number the phase hands out is above whatever an earlier phase put in
+    // an entry, so each entry grows in exactly the ascending order the
+    // serial commit appends in.
+    for (size_t k = 0; k < shards->size(); ++k) {
+        auto hint = B.overridableInputs.end();
+        for (const auto &[path, relative] : (*shards)[k].overridable) {
+            const auto it = B.overridableInputs.try_emplace(hint, path);
+            it->second.push_back(first[k] + relative);
+            hint = std::next(it);
+        }
+    }
+    return first;
 }
 
 void
@@ -1494,9 +1986,44 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // gap between Compile.Bake opening and the first Bake.* mark. Marking
     // it here costs the one branch per mark every other phase already pays.
     RigExecProfilePhases phases(&E._profiler, "compile");
-    phases.Next("Bake.IsBakeable");
-    if (!IsBakeable(E, reasons)) {
-        return nullptr;
+    // The bakeability walk runs as a task beside the start of the bake --
+    // the entry block, the dense provider slots and the ladder's parallel
+    // resolve -- and is joined before the first thing that COMMITS anything
+    // the refusal would have prevented: the ladder commit, which hands out
+    // override indices. It can, because it reads only the evaluator's
+    // compiled tables and the stage, and so do those three: none of them
+    // writes anything but the program under construction and `ctx`, which
+    // are discarded whole on a refusal.
+    //
+    // The two write their refusals to separate vectors, merged in program
+    // order at the join. `ctx.reasons` is what `refuse()` appends to, and the
+    // dense slots refuse; sharing one vector with the walk would interleave
+    // the two lists and race. On a refusal the walk's reasons alone are
+    // handed back, which is what running it first used to return.
+    //
+    // Inline where a task is not allowed or not worth it: with parallel
+    // evaluation off, inside a frozen run, and on an evaluator that has not
+    // compiled, whose tables the slots below have no business reading.
+    const bool bakeableBeside = E._compiled &&
+                                RigExecParallelEvaluationEnabled() &&
+                                !RigExecFrozenSerialActive();
+    bool bakeable = true;
+    std::vector<std::string> bakeableReasons;
+    std::vector<std::string> buildReasons;
+    // Declared after everything the task writes, so an exit from anywhere
+    // below destroys the dispatcher, which joins it, before those die.
+    WorkDispatcher bakeableLane;
+    if (bakeableBeside) {
+        bakeableLane.Run([&E, &bakeable, &bakeableReasons] {
+            RigExecProfileScope scope(&E._profiler, "Bake.IsBakeable",
+                                      "compile");
+            bakeable = IsBakeable(E, &bakeableReasons);
+        });
+    } else {
+        phases.Next("Bake.IsBakeable");
+        if (!IsBakeable(E, reasons)) {
+            return nullptr;
+        }
     }
     auto impl = std::make_unique<RigExecBakedProgramImpl>();
     RigExecBakedProgramImpl &B = *impl;
@@ -1551,14 +2078,15 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         return evaluator->_ResolveWeights(weightPath, count, time, weights,
                                           error, current);
     };
-    // The reader a sparse blend sample's shape resolves through, on a cache
-    // miss: the evaluator's own, so the program and the dynamic walk admit
+    // The reader a sparse blend sample shape resolves through, on a cache
+    // miss: the shared resolver, so the program and the dynamic walk admit
     // and refuse exactly the same shapes.
-    B.resolveBlendSample = [evaluator](const SdfPath &blendShape,
-                                       size_t pointCount,
-                                       RigExecBlendSampleLayout *layout) {
-        return evaluator->_ResolveBlendSampleLayout(blendShape, pointCount,
-                                                    layout);
+    B.resolveBlendSample = [stage = B.stage](
+                                 const SdfPath &blendShape,
+                                 size_t pointCount,
+                                 RigExecBlendSampleLayout *layout) {
+        return RigExecResolveBlendSampleLayout(stage, blendShape, pointCount,
+                                               layout);
     };
     for (const RigExecValueOverride &override : E._falloffLutOverrides) {
         if (override.value.IsHolding<RigExecFalloffLut>()) {
@@ -1572,7 +2100,9 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     ctx.stage = B.stage;
     ctx.capture = UsdTimeCode::Default();
     ctx.probe = _ProbeTime(B.stage);
-    ctx.reasons = reasons;
+    // Until the bakeability task is joined, this build's own refusals go to
+    // a vector of their own; see the head of Build.
+    ctx.reasons = bakeableBeside && reasons ? &buildReasons : reasons;
     // Every property a chain writes. An input resolving through one of these
     // cannot be captured, because the chain recomputes it every generation.
     for (const auto &[target, revisions] : E._propertyChains) {
@@ -1591,9 +2121,6 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // of the same bodies; naming them keeps both sides reading alike.
     auto refuse = [&](const std::string &what, const SdfPath &where) {
         ctx.Refuse(what, where);
-    };
-    auto fold = [&](const UsdPrim &prim, const char *name) {
-        ctx.Fold(prim, name);
     };
     auto slotOf = [&](const SdfPath &path) { return ctx.SlotOf(path); };
 
@@ -1707,10 +2234,19 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // the resolve half moves to a parallel pass. The three space bindings
     // are matrices, the rotation order a token and the twelve avars
     // doubles, so ResolveBind's typed result is kept typed rather than
-    // forced into one array -- each paired with the walk CommitBind needs,
-    // same as _AvarResolution.
+    // forced into one array -- each paired with its walk, same as
+    // _AvarResolution.
+    //
+    // The commit's order-free half runs in the same pass: each chunk of
+    // slots records its folds and bindings into a shard of its own (see
+    // RigExecBakedRecordBind), in the slot-then-channel order the serial
+    // commit used, and the shards are merged in chunk order after the
+    // bakeability join. Recording before the join is safe because a shard
+    // is scratch -- nothing reaches the program until the merge, and a
+    // refused rig never merges.
+    RigExecProfilePhases bindPhases(&E._profiler, "compile");
+    bindPhases.Next("Bake.ladder.resolve");
     struct _LadderResolution {
-        UsdPrim prim;
         RigExecBakedInput<GfMatrix4d> posedSpace;
         SdfPathVector posedSpaceWalk;
         RigExecBakedInput<GfMatrix4d> restSpace;
@@ -1725,43 +2261,126 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         SdfPathVector defaultAvarWalks[6];
     };
     std::vector<_LadderResolution> ladderResolved(static_cast<size_t>(N));
-    const auto resolveLadderSlots = [&](size_t begin, size_t end) {
-        for (size_t i = begin; i < end; ++i) {
-            // An xform-derived slot binds no ladder -- its rest frame is
-            // the identity outright, below -- so there is nothing here for
-            // it to resolve.
-            if (B.slotKind[i] != RigExecBakedSlotKind::FirstFramePose) {
-                continue;
+    // A chunk is a run of consecutive slots. Its size decides only how the
+    // work is cut, never what the merge produces, so it is tuned for cost
+    // alone: large enough that a shard's sort has something to amortize,
+    // small enough to spread a character's few hundred slots over the pool.
+    const size_t commitChunkSlots = 8;
+    const size_t commitChunks =
+        (size_t(N) + commitChunkSlots - 1) / commitChunkSlots;
+    std::vector<RigExecBakedCommitShard> ladderShards(commitChunks);
+    const auto resolveLadderChunks = [&](size_t beginChunk,
+                                         size_t endChunk) {
+        for (size_t k = beginChunk; k < endChunk; ++k) {
+            RigExecBakedCommitShard &shard = ladderShards[k];
+            const size_t end =
+                std::min(size_t(N), (k + 1) * commitChunkSlots);
+            for (size_t i = k * commitChunkSlots; i < end; ++i) {
+                // An xform-derived slot binds no ladder -- its rest frame
+                // is the identity outright, below -- so there is nothing
+                // here for it to resolve.
+                if (B.slotKind[i] != RigExecBakedSlotKind::FirstFramePose) {
+                    continue;
+                }
+                const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
+                _LadderResolution &out = ladderResolved[i];
+                out.posedSpace = ctx.ResolveBind(prim, "posed:space",
+                                                 GfMatrix4d(1.0),
+                                                 &out.posedSpaceWalk);
+                out.restSpace = ctx.ResolveBind(prim, "rest:space",
+                                                GfMatrix4d(1.0),
+                                                &out.restSpaceWalk);
+                out.defaultSpace = ctx.ResolveBind(prim, "default:space",
+                                                   GfMatrix4d(1.0),
+                                                   &out.defaultSpaceWalk);
+                out.rotationOrder = ctx.ResolveBind(
+                    prim, "avars:rotationOrder", TfToken("XYZ"),
+                    &out.rotationOrderWalk);
+                for (int c = 0; c < 6; ++c) {
+                    out.restAvars[c] = ctx.ResolveBind(
+                        prim, kRestAvars[c], 0.0, &out.restAvarWalks[c]);
+                    out.defaultAvars[c] = ctx.ResolveBind(
+                        prim, kDefaultAvars[c], 0.0,
+                        &out.defaultAvarWalks[c]);
+                }
+                shard.Prim(B.paths[i]);
+                // The space EXPRESSIONS stay FOLDED. Bakeability accepted
+                // them because they are unauthored and unconnected, which
+                // is a statement about the SHAPE of the compose --
+                // authoring one replaces the ladder rather than moving a
+                // value in it -- so an edit to one must rebuild the program
+                // and a drag on one must fall back.
+                for (const char *name : {"parent:space", "parent:defaultSpace",
+                                         "avars:defaultSpace",
+                                         "posed:defaultSpace"}) {
+                    RigExecBakedRecordFold(&shard, prim, name);
+                }
+                // Recorded in the posedSpace/restSpace/defaultSpace/
+                // rotationOrder/avar sequence the serial commit bound them
+                // in: the shard numbers in recording order, so this is the
+                // order the override indices come out in.
+                RigExecBakedRecordBind(&shard, prim, "posed:space",
+                                       &out.posedSpace, out.posedSpaceWalk);
+                RigExecBakedRecordBind(&shard, prim, "rest:space",
+                                       &out.restSpace, out.restSpaceWalk);
+                RigExecBakedRecordBind(&shard, prim, "default:space",
+                                       &out.defaultSpace,
+                                       out.defaultSpaceWalk);
+                RigExecBakedRecordBind(&shard, prim, "avars:rotationOrder",
+                                       &out.rotationOrder,
+                                       out.rotationOrderWalk);
+                for (int c = 0; c < 6; ++c) {
+                    RigExecBakedRecordBind(&shard, prim, kRestAvars[c],
+                                           &out.restAvars[c],
+                                           out.restAvarWalks[c]);
+                    RigExecBakedRecordBind(&shard, prim, kDefaultAvars[c],
+                                           &out.defaultAvars[c],
+                                           out.defaultAvarWalks[c]);
+                }
             }
-            const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
-            _LadderResolution &out = ladderResolved[i];
-            out.prim = prim;
-            out.posedSpace = ctx.ResolveBind(prim, "posed:space",
-                                             GfMatrix4d(1.0),
-                                             &out.posedSpaceWalk);
-            out.restSpace = ctx.ResolveBind(prim, "rest:space",
-                                            GfMatrix4d(1.0),
-                                            &out.restSpaceWalk);
-            out.defaultSpace = ctx.ResolveBind(prim, "default:space",
-                                               GfMatrix4d(1.0),
-                                               &out.defaultSpaceWalk);
-            out.rotationOrder = ctx.ResolveBind(prim, "avars:rotationOrder",
-                                                TfToken("XYZ"),
-                                                &out.rotationOrderWalk);
-            for (int c = 0; c < 6; ++c) {
-                out.restAvars[c] = ctx.ResolveBind(
-                    prim, kRestAvars[c], 0.0, &out.restAvarWalks[c]);
-                out.defaultAvars[c] = ctx.ResolveBind(
-                    prim, kDefaultAvars[c], 0.0, &out.defaultAvarWalks[c]);
-            }
+            shard.Seal();
         }
     };
     if (RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
-        N > 1) {
-        WorkParallelForN(size_t(N), resolveLadderSlots);
+        commitChunks > 1) {
+        WorkParallelForN(commitChunks, resolveLadderChunks);
     } else {
-        resolveLadderSlots(0, size_t(N));
+        resolveLadderChunks(0, commitChunks);
     }
+    // The bakeability join, here because everything above only read, and
+    // the commit below is the first step a refused rig must not take (see
+    // the head of Build).
+    if (bakeableBeside) {
+        {
+            RigExecProfileScope join(&E._profiler, "Bake.IsBakeableJoin",
+                                     "compile");
+            bakeableLane.Wait();
+        }
+        if (!bakeable) {
+            if (reasons) {
+                reasons->insert(reasons->end(), bakeableReasons.begin(),
+                                bakeableReasons.end());
+            }
+            return nullptr;
+        }
+        // The walk passed, so it added nothing; what the slots refused
+        // follows it, in the order a serial Build appends them.
+        if (reasons) {
+            reasons->insert(reasons->end(), buildReasons.begin(),
+                            buildReasons.end());
+        }
+        ctx.reasons = reasons;
+    }
+    bindPhases.Next("Bake.ladder.commit");
+    // The order-bearing half, serial: the merge hands each chunk its first
+    // override number, which every input the chunk numbered is moved up by.
+    const std::vector<int> ladderFirst =
+        RigExecBakedMergeCommitShards(&B, &ladderShards);
+    const auto renumber = [](auto *input, int first) {
+        if (input->overrideIndex >= 0) {
+            input->overrideIndex += first;
+        }
+    };
     for (int i = 0; i < N; ++i) {
         if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
             // An xform-derived slot has no rest chain and no default-space
@@ -1791,45 +2410,21 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
             continue;
         }
         _LadderResolution &out = ladderResolved[size_t(i)];
-        const UsdPrim &prim = out.prim;
-        B.prims.insert(B.paths[i]);
-        // The space EXPRESSIONS stay FOLDED. Bakeability accepted them
-        // because they are unauthored and unconnected, which is a statement
-        // about the SHAPE of the compose -- authoring one replaces the
-        // ladder rather than moving a value in it -- so an edit to one must
-        // rebuild the program and a drag on one must fall back. Fold
-        // mutates `program->rebuild`/`folded`/`named`/`prims`, so it stays
-        // here, serial, rather than moving into the resolve pass above.
-        for (const char *name : {"parent:space", "parent:defaultSpace",
-                                 "avars:defaultSpace",
-                                 "posed:defaultSpace"}) {
-            fold(prim, name);
-        }
+        const int first = ladderFirst[size_t(i) / commitChunkSlots];
         RigExecBakedProgramImpl::Ladder &ladder = B.ladders[size_t(i)];
-        // Committing in slot order, and within a slot in the same
-        // posedSpace/restSpace/defaultSpace/rotationOrder/avar sequence the
-        // un-parallelized loop bound them in, is what makes a parallel
-        // Build hand out the same override indices a serial one would --
-        // CommitBind is where Register numbers them, see ResolveBind
-        // /CommitBind above.
-        ctx.CommitBind(prim, "posed:space", &out.posedSpace,
-                       out.posedSpaceWalk);
-        ladder.posedSpace = out.posedSpace;
-        ctx.CommitBind(prim, "rest:space", &out.restSpace, out.restSpaceWalk);
-        ladder.restSpace = out.restSpace;
-        ctx.CommitBind(prim, "default:space", &out.defaultSpace,
-                       out.defaultSpaceWalk);
-        ladder.defaultSpace = out.defaultSpace;
-        ctx.CommitBind(prim, "avars:rotationOrder", &out.rotationOrder,
-                       out.rotationOrderWalk);
-        ladder.rotationOrder = out.rotationOrder;
+        renumber(&out.posedSpace, first);
+        ladder.posedSpace = std::move(out.posedSpace);
+        renumber(&out.restSpace, first);
+        ladder.restSpace = std::move(out.restSpace);
+        renumber(&out.defaultSpace, first);
+        ladder.defaultSpace = std::move(out.defaultSpace);
+        renumber(&out.rotationOrder, first);
+        ladder.rotationOrder = std::move(out.rotationOrder);
         for (int c = 0; c < 6; ++c) {
-            ctx.CommitBind(prim, kRestAvars[c], &out.restAvars[c],
-                           out.restAvarWalks[c]);
-            ladder.restAvars[c] = out.restAvars[c];
-            ctx.CommitBind(prim, kDefaultAvars[c], &out.defaultAvars[c],
-                           out.defaultAvarWalks[c]);
-            ladder.defaultAvars[c] = out.defaultAvars[c];
+            renumber(&out.restAvars[c], first);
+            ladder.restAvars[c] = std::move(out.restAvars[c]);
+            renumber(&out.defaultAvars[c], first);
+            ladder.defaultAvars[c] = std::move(out.defaultAvars[c]);
         }
     }
     // What a frame may have to re-resolve, and where a drag on one lands.
@@ -1837,6 +2432,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // re-pulls every rest the moment any one of them can move (rigEvaluator
     // .cpp's newRestsMightVary), and a chain's answer depends on its
     // ancestors in any case.
+    bindPhases.Next("Bake.ladder.varies_and_compose");
     const auto noteLadderInput = [&B](const auto &input) {
         if (input.varying) {
             B.ladderVarying = true;
@@ -1887,6 +2483,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // the prologue calls. Nothing is captured that the frame path cannot
     // re-resolve, which is what makes the two agree by construction.
     RigExecBakedComposeLadder(&B, capture, /* trackMoves = */ false);
+    bindPhases.Close();
     // The comparison buffers the per-frame recompose dirties against, sized
     // only for a ladder that can actually move. Seeded with what Build just
     // composed: the first run dirties every pose cluster outright, so what
@@ -1913,62 +2510,86 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     B.avarConstants.assign(size_t(N) * 11, 0.0);
     // Eleven channels on every provider, each an independent read of the
     // composed stage, and on a character this is one of the two loops Build
-    // spends most of its time in. Resolved across threads and committed on
-    // this one: the commit is what hands out override indices, so doing it
-    // here in slot-then-channel order is what keeps the program a parallel
-    // Build produces identical to a serial one. See ResolveBind/CommitBind.
+    // spends most of its time in. Resolved across threads, and the commit's
+    // order-free half recorded there too, into one shard per chunk of slots
+    // exactly as the ladder above does; what stays on this thread is what
+    // only the program order can decide -- the override numbers, by the
+    // merge's prefix sum, and the positions in the two binding lists.
     struct _AvarResolution {
-        UsdPrim prim;
         RigExecBakedInput<double> input;
         SdfPathVector walk;
+        /// The avar's own property, and whether a registered constant was
+        /// captured from it and nowhere else -- decided in the parallel
+        /// pass, which already holds the prim, so the serial one only
+        /// files it.
+        SdfPath property;
+        bool patchable = false;
     };
+    bindPhases.Next("Bake.input_table.resolve");
     std::vector<_AvarResolution> resolved(size_t(N) * 11);
-    const auto resolveSlots = [&](size_t begin, size_t end) {
-        for (size_t i = begin; i < end; ++i) {
-            // An xform-derived slot binds no avars -- its pose is the
-            // stage's -- so the bound/varying counts and the overridable set
-            // stay exactly what the RigExec providers alone make them.
-            if (B.slotKind[i] != RigExecBakedSlotKind::FirstFramePose) {
-                continue;
+    std::vector<RigExecBakedCommitShard> avarShards(commitChunks);
+    const auto resolveChunks = [&](size_t beginChunk, size_t endChunk) {
+        for (size_t k = beginChunk; k < endChunk; ++k) {
+            RigExecBakedCommitShard &shard = avarShards[k];
+            const size_t end =
+                std::min(size_t(N), (k + 1) * commitChunkSlots);
+            for (size_t i = k * commitChunkSlots; i < end; ++i) {
+                // An xform-derived slot binds no avars -- its pose is the
+                // stage's -- so the bound/varying counts and the
+                // overridable set stay exactly what the RigExec providers
+                // alone make them.
+                if (B.slotKind[i] != RigExecBakedSlotKind::FirstFramePose) {
+                    continue;
+                }
+                const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
+                for (int c = 0; c < 11; ++c) {
+                    _AvarResolution &out = resolved[i * 11 + size_t(c)];
+                    out.input = ctx.ResolveBind(
+                        prim, RigExecBakedAvarNames[c],
+                        RigExecBakedAvarDefaults[c], &out.walk);
+                    RigExecBakedRecordBind(&shard, prim,
+                                           RigExecBakedAvarNames[c],
+                                           &out.input, out.walk);
+                    if (out.input.varying || out.input.overrideIndex < 0) {
+                        continue;
+                    }
+                    // Patchable only when the value came from the attribute
+                    // itself. A walk longer than one captured it upstream,
+                    // through a connection, and an edit on the head would
+                    // not be the value the slot holds.
+                    out.property = prim.GetPath().AppendProperty(
+                        TfToken(RigExecBakedAvarNames[c]));
+                    out.patchable = out.walk.size() <= 1 && out.input.head &&
+                                    out.input.head.GetPath() == out.property;
+                }
             }
-            const UsdPrim prim = B.stage->GetPrimAtPath(B.paths[i]);
-            for (int c = 0; c < 11; ++c) {
-                _AvarResolution &out = resolved[i * 11 + size_t(c)];
-                out.prim = prim;
-                out.input = ctx.ResolveBind(prim, RigExecBakedAvarNames[c],
-                                            RigExecBakedAvarDefaults[c],
-                                            &out.walk);
-            }
+            shard.Seal();
         }
     };
     if (RigExecParallelEvaluationEnabled() && !RigExecFrozenSerialActive() &&
-        N > 1) {
-        WorkParallelForN(size_t(N), resolveSlots);
+        commitChunks > 1) {
+        WorkParallelForN(commitChunks, resolveChunks);
     } else {
-        resolveSlots(0, size_t(N));
+        resolveChunks(0, commitChunks);
     }
+    bindPhases.Next("Bake.input_table.commit");
+    const std::vector<int> avarFirst =
+        RigExecBakedMergeCommitShards(&B, &avarShards);
     for (int i = 0; i < N; ++i) {
         if (B.slotKind[size_t(i)] != RigExecBakedSlotKind::FirstFramePose) {
             continue;
         }
+        const int first = avarFirst[size_t(i) / commitChunkSlots];
         for (int c = 0; c < 11; ++c) {
             const size_t slot = size_t(i) * 11 + size_t(c);
             _AvarResolution &out = resolved[slot];
-            ctx.CommitBind(out.prim, RigExecBakedAvarNames[c], &out.input,
-                           out.walk);
+            renumber(&out.input, first);
             B.avarConstants[slot] = out.input.constant;
             if (out.input.varying) {
                 B.avarBindings.push_back({slot, std::move(out.input)});
             } else if (out.input.overrideIndex >= 0) {
-                // Patchable only when the value came from the attribute
-                // itself. A walk longer than one captured it upstream,
-                // through a connection, and an edit on the head would not be
-                // the value the slot holds.
-                const SdfPath property = out.prim.GetPath().AppendProperty(
-                    TfToken(RigExecBakedAvarNames[c]));
-                if (out.walk.size() <= 1 && out.input.head &&
-                    out.input.head.GetPath() == property) {
-                    B.patchableAvars[property] =
+                if (out.patchable) {
+                    B.patchableAvars[out.property] =
                         B.avarConstantBindings.size();
                 }
                 B.avarConstantBindings.push_back({slot, std::move(out.input)});
@@ -1976,6 +2597,7 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
         }
     }
     B.avars = B.avarConstants;
+    bindPhases.Close();
 
     phases.Next("Bake.the_walk");
     // ---- the walk ------------------------------------------------------------
@@ -2357,49 +2979,43 @@ RigExecBakedProgram::Build(RigExecRigEvaluator *evaluator,
     // straight line's pieces in the straight line's order, and the edges
     // between them follow from the slot ranges each piece declares. Built
     // once here, so that a frame costs the graph nothing.
+    //
+    // Its parts are marked one level down, under the phase this one opened,
+    // so the trace says which of them the graph's time goes to.
+    RigExecProfilePhases graphPhases(&E._profiler, "compile");
+    graphPhases.Next("Bake.the_step_graph.pose_steps");
     RigExecBakedBuildPoseSteps(&B);
     // Between the two halves, which is where a weight object belongs in
     // program order: its placement comes from the pose walk and its packet is
     // what a revision assembles against.
+    graphPhases.Next("Bake.the_step_graph.weight_steps");
     RigExecBakedBuildWeightSteps(&B);
     // The pose half's edges and levels, settled BEFORE the geometry half is
     // built. A skin revision is cut into chunks only where the chunks' joints
     // land at different levels (§6), and that question cannot be asked until
-    // the ProviderMatrix steps have levels -- so the sweep runs here, over
-    // the pose steps alone, and again inside RigExecBakedBuildSchedule once
-    // the geometry steps exist. A geometry step never precedes a pose step,
-    // so the levels this pass assigns are the levels the final graph holds.
-    RigExecBakedBuildStepEdges(&B);
+    // the ProviderMatrix steps have levels -- so the sweep starts here, over
+    // the pose steps alone, and RigExecBakedBuildSchedule extends the same
+    // sweep over the geometry steps once they exist. The extension never
+    // revisits a step it has passed (RigExecBakedEdgeSweep), so the levels
+    // this pass assigns are the levels the final graph holds by
+    // construction, and the partition cannot have been cut from a level the
+    // graph no longer has -- which is what used to have to be checked after
+    // a second, full sweep.
+    graphPhases.Next("Bake.the_step_graph.pose_edges");
+    RigExecBakedEdgeSweep sweep;
+    RigExecBakedBuildStepEdges(&B, &sweep);
     RigExecBakedAssignStepCosts(&B);
-    // The levels the partition is about to read, kept so that the sentence
-    // above is CHECKED and not merely written down. Nothing else can catch
-    // its violation: the cut decision and the record of the cut decision
-    // (GeomRevision::partitionReady*) are derived from one another, so a
-    // partition cut from levels the final graph no longer holds still agrees
-    // with itself and tests/testRigExecBakedSchedule still passes. What
-    // would have moved is this vector -- a pose step given a geometry
-    // predecessor is a pose step pushed down a level -- so it is compared
-    // after the second sweep instead.
-    std::vector<int> poseLevels;
-    poseLevels.reserve(B.steps.size());
-    for (const RigExecBakedStep &step : B.steps) {
-        poseLevels.push_back(step.level);
-    }
+    graphPhases.Next("Bake.the_step_graph.geometry_steps");
     RigExecBakedBuildGeometrySteps(&B);
-    RigExecBakedBuildSchedule(&B);
-    for (size_t i = 0; i < poseLevels.size(); ++i) {
-        if (!TF_VERIFY(B.steps[i].level == poseLevels[i],
-                       "rigExec: pose step %zu (%s) moved from level %d to "
-                       "%d when the geometry steps were added; the vertex "
-                       "partition was cut from the level it no longer has",
-                       i, RigExecBakedStepKindName(B.steps[i].kind),
-                       poseLevels[i], B.steps[i].level)) {
-            break;
-        }
-    }
+    // RigExecBakedBuildSchedule marks its own parts.
+    graphPhases.Close();
+    RigExecBakedBuildSchedule(&B, &sweep);
     if (RigExecBakedScheduleReportRequested()) {
         const std::string report = RigExecBakedScheduleReport(B);
         std::fwrite(report.data(), 1, report.size(), stderr);
+    }
+    if (_ProgramDigestRequested()) {
+        _PrintProgramDigest(B);
     }
     return std::unique_ptr<RigExecBakedProgram>(
         new RigExecBakedProgram(std::move(impl)));
@@ -2419,6 +3035,7 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     RigExecBakedProgramImpl &B = *_impl;
     RigExecRigEvaluator &E = *B.evaluator;
     RIGEXEC_PROFILE_SCOPE_CAT(*B.profiler, "Baked", "baked");
+    _lastBail = RigExecBakedBail::None;
 
     // Two clock reads per phase, and only when asked: the profiler's scopes
     // take three mutexes apiece and cost more than the prologue they would
@@ -2453,7 +3070,9 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
     // dynamic path has none.
     //
     // False means a target's transform could not be resolved at all, which
-    // is the one thing the dynamic walk gives the generation back for here.
+    // is the one thing the dynamic walk gives the generation back for here
+    // -- and gives it back invalid, so a false here ends the frame with the
+    // pose as the walk would leave it (see the bail below).
     const auto stageFrames = [&B, &E, time, pose]() {
         if (B.xformSlots.empty() && B.nativeSources.empty() &&
             B.deltaBasePaths.empty()) {
@@ -2604,14 +3223,33 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         RigExecBakedRunInputs(&B, time);
         RigExecBakedRunSolverSources(&B, time);
         stageFramesOk = stageFrames();
-        constraintArrays();
-        RigExecBakedRunGeometryPrologue(&B, time, pose);
+        if (stageFramesOk) {
+            constraintArrays();
+            RigExecBakedRunGeometryPrologue(&B, time, pose);
+        }
     }
     if (!stageFramesOk) {
-        // The dynamic walk gives the generation back at the same point and
-        // pushes the same line; the caller drops this pose and re-runs it
-        // there, so the diagnostic above is its rehearsal and not a second
-        // copy.
+        // The dynamic walk gives the generation back at the same point, with
+        // the same line, having published nothing but what the property
+        // chains moved. So this pose is its answer as it stands: the
+        // settle's lines, the chains' lines and the target's, the chains'
+        // results, and valid left false. The geometry prologue did not run,
+        // and that is the walk's state too -- it builds no mover graph, and
+        // reports none as created, for a generation it gave back.
+        for (const auto &[target, value] : B.propertyResults) {
+            pose->movedProperties.emplace_hint(pose->movedProperties.end(),
+                                               target, value);
+        }
+        // The region did not run, but the prologue above has already moved
+        // the per-run state the next closure compares against -- the ribbon
+        // points it swapped, the ladder moves it recorded -- so the next run
+        // cannot trust a cone. It is owed one run of everything, which is
+        // what a notice the index could not place asks for. Owed once: a
+        // stamp already ahead of the last completed run's is still owed.
+        if (B.programStamp == B.lastProgramStamp) {
+            ++B.programStamp;
+        }
+        _lastBail = RigExecBakedBail::StageFrames;
         return false;
     }
     if (measuring) {
@@ -2712,9 +3350,11 @@ RigExecBakedProgram::Run(UsdTimeCode time, RigExecRigPose *pose)
         // program, cache and all, and the dynamic fallback emits its own
         // lines because it re-resolves every bind against the evaluator's
         // still-empty cache.
+        _lastBail = RigExecBakedBail::Step;
         return false;
     }
     if (!RigExecBakedPublishPose(&B, pose)) {
+        _lastBail = RigExecBakedBail::Publish;
         return false;  // the dynamic fallback needs exec
     }
     // Where every volume weight ended up, as the VolumePlacements step left
