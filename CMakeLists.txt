@@ -1079,6 +1079,11 @@ add_test(NAME testRigExecProfiler COMMAND testRigExecProfiler)
 add_executable(benchPathLookup tests/benchPathLookup.cpp)
 target_link_libraries(benchPathLookup PRIVATE rigExec)
 
+# Scratch: which USD reads stop scaling across threads (see the file header).
+# Prints numbers, asserts nothing, not registered with ctest.
+add_executable(benchStageReads tests/benchStageReads.cpp)
+target_link_libraries(benchStageReads PRIVATE rigExec)
+
 # Stream 0 (per-frame caching plan): the frame-store, frozen-context and
 # scheduler skeletons. The tests assert the final key/fence semantics plus
 # the documented empty-impl behavior; Streams A-C replace the stub halves.

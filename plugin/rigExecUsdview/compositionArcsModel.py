@@ -42,6 +42,7 @@
 # this makes drift impossible rather than merely unlikely.
 #
 import math
+import os
 
 from pxr import Pcp, Sdf, Tf, Usd
 
@@ -764,7 +765,7 @@ class _TargetedArc(_Arc):
     @classmethod
     def _NewItem(cls, values):
         internal = values.get("source") == "internal"
-        asset = "" if internal else (values.get("assetPath") or "").strip()
+        asset = "" if internal else _AssetPathFrom(values)
         target = _ParsePrimPath(values.get("primPath"), "Target prim",
                                 allowEmpty=not internal)
         return cls._Item(asset, target, _LayerOffsetFrom(values))
@@ -857,6 +858,48 @@ def _SublayersTransitively(layer, target, seen=None):
         if child == target or _SublayersTransitively(child, target, seen):
             return True
     return False
+
+
+def AnchoredAssetPath(layer, assetPath):
+    """
+    `assetPath` as the flows author it: relative to `layer`'s own file
+    (`./rig.usda`, `../shared/hand.usda`) whenever it can be.
+
+    A file browser hands back an absolute path, and authoring that
+    verbatim pins the arc to one machine's disk -- the asset stops
+    composing the moment the directory is moved, copied or opened from
+    another checkout. A relative path moves with the layers it joins.
+
+    Spelled with a leading `./` rather than bare: `rig.usda` is a
+    SEARCH path to Ar, which may resolve somewhere other than beside the
+    layer, while `./rig.usda` is anchored to it. The repo's own layers
+    use the same spelling.
+
+    Left as given when there is nothing to anchor to (an anonymous or
+    unsaved layer), when the path is not an absolute file path (already
+    relative, a search path, a URI, an anonymous identifier), or when no
+    relative form exists (another drive on Windows).
+    """
+    assetPath = (assetPath or "").strip()
+    if not assetPath or layer is None or layer.anonymous:
+        return assetPath
+    anchor = layer.realPath
+    if not anchor or "://" in assetPath or not os.path.isabs(assetPath):
+        return assetPath
+    try:
+        relative = os.path.relpath(os.path.normpath(assetPath),
+                                   os.path.dirname(os.path.normpath(anchor)))
+    except ValueError:
+        return assetPath
+    relative = relative.replace(os.sep, "/")
+    if relative.startswith("../"):
+        return relative
+    return "./" + relative
+
+
+def _AssetPathFrom(values):
+    """The asset field anchored to the layer being authored into."""
+    return AnchoredAssetPath(values.get("layer"), values.get("assetPath"))
 
 
 def _ResolveAgainst(layer, assetPath):
@@ -1193,7 +1236,9 @@ class SublayerArc(_Arc):
         others = list(layer.subLayerPaths) if layer is not None else []
         if _Editing(context):
             del others[context.editRow.index]
-        if assetPath in others:
+        # Compared as it would be authored, so picking a file that is
+        # already listed as ./rig.usda is caught as the duplicate it is.
+        if _AssetPathFrom(values) in others:
             raise ArcError("%s already sublayers %s"
                            % (layer.GetDisplayName(), assetPath))
         resolved = _ResolveAgainst(layer, assetPath)
@@ -1218,7 +1263,10 @@ class SublayerArc(_Arc):
 
     @classmethod
     def _Apply(cls, layer, primPath, values):
-        assetPath = (values.get("assetPath") or "").strip()
+        # Anchored to the chosen layer, not to `layer`: the preview runs
+        # this against an anonymous scratch layer with no file to be
+        # relative to.
+        assetPath = _AssetPathFrom(values)
         index = 0 if values.get("position") == "prepend" else len(
             layer.subLayerPaths)
         layer.subLayerPaths.insert(index, assetPath)
@@ -1236,7 +1284,7 @@ class SublayerArc(_Arc):
     @classmethod
     def _ApplyEdit(cls, layer, primPath, values, row):
         layerOpinionsModel.SetSublayer(
-            layer, row.index, (values.get("assetPath") or "").strip(),
+            layer, row.index, _AssetPathFrom(values),
             _LayerOffsetFrom(values))
 
 

@@ -34,6 +34,7 @@
 # thing to author and a dialog that forbids it is wrong.
 #
 import difflib
+import os
 
 from pxr import Tf
 from pxr.Usdviewq.qt import QtCore, QtGui, QtWidgets
@@ -96,10 +97,17 @@ def _SmallLabel(text):
 
 
 class _AssetField(QtWidgets.QWidget):
-    """A line edit with a Browse button, for asset paths."""
+    """
+    A line edit with a Browse button, for asset paths.
 
-    def __init__(self, onChanged, parent=None):
+    `anchorLayer` returns the layer being authored into. A browsed file
+    is shown relative to it -- the path the arc will actually carry, see
+    model.AnchoredAssetPath -- and the browser opens beside it.
+    """
+
+    def __init__(self, onChanged, anchorLayer, parent=None):
         super(_AssetField, self).__init__(parent)
+        self._anchorLayer = anchorLayer
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._edit = QtWidgets.QLineEdit()
@@ -115,11 +123,15 @@ class _AssetField(QtWidgets.QWidget):
         layout.addWidget(browse)
 
     def _Browse(self):
+        layer = self._anchorLayer()
+        start = ""
+        if layer is not None and not layer.anonymous and layer.realPath:
+            start = os.path.dirname(layer.realPath)
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Choose a layer", "",
+            self, "Choose a layer", start,
             "USD layers (*.usd *.usda *.usdc *.usdz);;All files (*)")
         if path:
-            self._edit.setText(path)
+            self._edit.setText(model.AnchoredAssetPath(layer, path))
 
     def text(self):
         return self._edit.text()
@@ -351,7 +363,8 @@ class CompositionArcDialog(QtWidgets.QDialog):
             combo.currentIndexChanged.connect(lambda *_: onChanged())
             return combo
         if field.kind == model.ASSET:
-            widget = _AssetField(lambda *_: onChanged())
+            widget = _AssetField(lambda *_: onChanged(),
+                                 lambda: self._values.get("layer"))
             widget.setText(self._values.get(field.key) or "")
             return widget
         if field.kind == model.CHOICE:

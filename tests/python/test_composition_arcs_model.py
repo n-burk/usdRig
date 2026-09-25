@@ -9,7 +9,9 @@ Everything here runs on in-memory layers -- no Qt, no usdview.
 
 Usage: test_composition_arcs_model.py
 """
+import os
 import sys
+import tempfile
 
 # Sibling module: this script's own directory is sys.path[0]. It must run
 # before the pxr import so pxr resolves from the configured USD install.
@@ -1624,6 +1626,73 @@ def TestDefaultPrimIsReadAsAPath():
            "a layer with no defaultPrim still lists its prims")
 
 
+def TestBrowsedAssetsAreAuthoredRelative():
+    """
+    A file browser hands back an absolute path; the flows author it
+    relative to the layer it goes into, so the arc survives the files
+    moving together. Needs real files -- an anonymous layer has no
+    directory to be relative to.
+    """
+    with tempfile.TemporaryDirectory(prefix="rigexec-arcs-") as directory:
+        shots = os.path.join(directory, "shots")
+        assets = os.path.join(directory, "assets")
+        os.makedirs(shots)
+        os.makedirs(assets)
+        hand = Sdf.Layer.CreateNew(os.path.join(assets, "hand.usda"))
+        hand.ImportFromString('''#usda 1.0
+(
+    defaultPrim = "Hand"
+)
+
+def Xform "Hand"
+{
+    def Xform "Finger"
+    {
+    }
+}
+''')
+        hand.Save()
+        extra = Sdf.Layer.CreateNew(os.path.join(shots, "extra.usda"))
+        extra.Save()
+        root = Sdf.Layer.CreateNew(os.path.join(shots, "shot.usda"))
+        root.ImportFromString('#usda 1.0\n\ndef Xform "Rig"\n{\n}\n')
+        root.Save()
+        stage = Usd.Stage.Open(root)
+        context = _Context(stage, "/Rig")
+
+        values = {"layer": root, "source": "external",
+                  "assetPath": hand.realPath, "primPath": "",
+                  "offset": "0", "scale": "1", "position": "prepend"}
+        _Check("@../assets/hand.usda@"
+               in arcs.ReferenceArc.Preview(context, values),
+               "the preview shows the relative path")
+        arcs.ReferenceArc.Author(context, values)
+        refs = list(root.GetPrimAtPath("/Rig").referenceList.prependedItems)
+        _Check([r.assetPath for r in refs] == ["../assets/hand.usda"],
+               "the reference is authored relative: %s" % refs)
+        _Check(bool(stage.GetPrimAtPath("/Rig/Finger")),
+               "and it still composes")
+
+        sublayer = {"layer": root, "assetPath": extra.realPath,
+                    "offset": "0", "scale": "1", "position": "prepend"}
+        arcs.SublayerArc.Author(context, sublayer)
+        _Check(list(root.subLayerPaths) == ["./extra.usda"],
+               "a sibling sublayer is ./-anchored, not a search path: %s"
+               % list(root.subLayerPaths))
+        _Raises(lambda: arcs.SublayerArc.Author(context, sublayer),
+                "browsing to it again is the duplicate it is")
+
+        _Check(arcs.AnchoredAssetPath(root, "./a/b.usda") == "./a/b.usda",
+               "a path that is already relative is left alone")
+        _Check(arcs.AnchoredAssetPath(root, "usdGeom/schema.usda")
+               == "usdGeom/schema.usda", "so is a search path")
+        anonymous = Sdf.Layer.CreateAnonymous("anon.usda")
+        _Check(arcs.AnchoredAssetPath(anonymous, hand.realPath)
+               == hand.realPath,
+               "with no file to anchor to, the absolute path is kept")
+        del stage, root, hand, extra
+
+
 def main():
     groups = [
         ("authoring layers are the local stack",
@@ -1705,6 +1774,8 @@ def main():
         ("layer prim paths read the layer",
          TestLayerPrimPathsReadsTheLayerNotAStage),
         ("defaultPrim is read as a path", TestDefaultPrimIsReadAsAPath),
+        ("browsed assets are authored relative",
+         TestBrowsedAssetsAreAuthoredRelative),
     ]
     for name, fn in groups:
         fn()
