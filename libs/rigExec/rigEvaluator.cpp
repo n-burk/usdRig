@@ -4,6 +4,7 @@
 #include "rigEvaluator.h"
 #include "curvenetWeightComputations.h"
 #include "parallel.h"
+#include "pathText.h"
 #include "movers/moverRegistry.h"
 
 #include "frameExtraction.h"
@@ -22,6 +23,7 @@
 #include "pxr/base/work/detachedTask.h"
 #include "pxr/base/work/dispatcher.h"
 #include "pxr/base/work/loops.h"
+#include "pxr/base/work/threadLimits.h"
 #include "pxr/base/work/withScopedParallelism.h"
 #include "pxr/base/ts/spline.h"
 #include "pxr/base/tf/diagnostic.h"
@@ -1878,6 +1880,21 @@ _PoseInputGraph::_Reach(uint32_t prim, uint32_t stamp,
     }
 }
 
+// A PoseInfoPrefetch round (_PoseInputGraph::Extend) is spread across the
+// pool only when it holds at least this many attribute reads, counting a
+// prim listed whole as _kPoseInfoReadsPerListedPrim of them (a RigExec joint
+// or control carries 30 to 45 attributes). MEASURED, rounds by task count,
+// the first one listing prims whole and the rest reading named attributes:
+//   puppetA  84, 12, 22, 10, 20, 10, 12, 2, 2
+//   biped    312, 24, 42, 18, 28, 10, 12, 2, 2
+// Every round used to be forked, and all but the first hold a few
+// microseconds of reads each. With this floor, cold compiles, medians of 8:
+// puppetA 3.91 -> 3.66 ms, biped 5.46 -> 5.28 ms. Keeping the first round on
+// one thread too is worse (4.96 / 8.19 ms): beside the digest and the exec
+// lane a lone reader runs at about half its unshared speed.
+constexpr size_t _kPoseInfoReadsPerListedPrim = 32;
+constexpr size_t _kPoseInfoParallelMinReads = 256;
+
 void
 _PoseInputGraph::Extend(
     const UsdStageRefPtr &stage, const std::vector<SdfPath> &seeds,
@@ -1946,7 +1963,18 @@ _PoseInputGraph::Extend(
                     }
                 }
             };
-            if (parallel && tasks.size() > 1) {
+            // Only a round with enough reads in it goes to the pool. After
+            // the first, which lists every seed prim whole, a round is the
+            // handful of attributes the last one's connections named -- two
+            // to forty cheap reads -- and the fork and join cost more than
+            // the reads they spread (see _kPoseInfoParallelMinReads).
+            size_t roundReads = 0;
+            for (const _Task &task : tasks) {
+                roundReads += (task.all ? _kPoseInfoReadsPerListedPrim : 0) +
+                              task.attrs.size();
+            }
+            if (parallel && tasks.size() > 1 &&
+                roundReads >= _kPoseInfoParallelMinReads) {
                 WorkParallelForN(tasks.size(), readTasks);
             } else {
                 readTasks(0, tasks.size());
@@ -3209,6 +3237,30 @@ RigExecRigEvaluator::_OnObjectsChanged(
     }
 }
 
+namespace {
+
+// Every path the structure digest writes is spelled through one of these
+// (see pathText.h).
+using _PathText = RigExecPathText;
+
+// The Solvers digest's prefetch (see _ComputeStructureDigest) runs on more
+// than one lane only with at least this many prims to read, and gives every
+// lane at least this many. One prim is a few tens of microseconds of reads,
+// so below the floor the fork and join cost more than the reads they spread.
+constexpr size_t _kDigestPrefetchParallelMin = 16;
+constexpr size_t _kDigestPrefetchPerLane = 4;
+// Its width beside compile (_DigestBesideCompile). MEASURED, cold compiles,
+// ms of prefetch by lanes:
+//   puppetA  1 / 2 / 3 / 4 / pool:       14.6 / 8.2 / 7.0 / 4.9 / 3.4
+//   biped    1 / 2 / 4 / 8 / 16 / 32:    24.6 / 20.0 / 12.2 / 12.5 / 12.7 / 12.9
+// DiscoverValidate on the compiling thread stays flat up to 4 lanes and is
+// ~1 ms slower with the whole pool. The biped stops scaling at 4: USD reads
+// beside compile's own share something that serializes them (one lane runs
+// at half the speed it does with nothing beside it).
+constexpr size_t _kDigestPrefetchLanesBesideCompile = 4;
+
+}  // namespace
+
 std::string
 RigExecRigEvaluator::_ComputeStructureDigest(
     unsigned segments, _DigestFootprint *footprint) const
@@ -3228,6 +3280,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     // -- so a segment emits the same bytes whether it runs alone or beside
     // the other two in one call.
     std::string digest;
+    // Every path this call writes is spelled through here (see _PathText).
+    _PathText pathText;
 
     const bool profileDigest = _profiler.IsEnabled();
     uint64_t digestRegionStart =
@@ -3297,10 +3351,12 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         }
     };
 
-    auto appendRelTargets =
-        [this, &digest, &noteRead, &noteTargets](
-            const UsdPrim &prim, const char *name, bool sorted) {
-        const TfToken nameToken(name);
+    // Named by token where the caller already holds one -- the solver loop
+    // walks a prim's relationships and has each one's name -- and by string
+    // literal everywhere else, which interns the token on every call.
+    auto appendRelTargetsNamed =
+        [this, &digest, &noteRead, &noteTargets, &pathText](
+            const UsdPrim &prim, const TfToken &nameToken, bool sorted) {
         SdfPathVector targets;
         if (UsdRelationship rel = prim.GetRelationship(nameToken)) {
             rel.GetTargets(&targets);
@@ -3312,14 +3368,19 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         if (sorted) {
             std::sort(targets.begin(), targets.end());
         }
-        digest += name;
+        digest += nameToken.GetString();
         digest += '=';
         for (const SdfPath &t : targets) {
-            digest += t.GetString();
+            digest += pathText(t);
             digest += ',';
         }
         digest += '|';
         return targets;
+    };
+    auto appendRelTargets = [&appendRelTargetsNamed](const UsdPrim &prim,
+                                                     const char *name,
+                                                     bool sorted) {
+        return appendRelTargetsNamed(prim, TfToken(name), sorted);
     };
     // A read phase decides WHICH revision of an input a mover consumes, which
     // is compiled wiring, not a value -- so editing one has to re-epoch
@@ -3366,7 +3427,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += '|';
     };
     auto appendAttributeBinding =
-        [this, &digest, &noteRead](const UsdPrim &prim, const char *name) {
+        [this, &digest, &noteRead, &pathText](const UsdPrim &prim,
+                                              const char *name) {
         const UsdAttribute attr = prim.GetAttribute(TfToken(name));
         digest += name;
         digest += "@sources=";
@@ -3374,12 +3436,17 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         std::function<void(const UsdAttribute &)> append =
             [&](const UsdAttribute &a) {
             if (!a || !visiting.insert(a.GetPath()).second) {
-                digest += a ? "cycle:" + a.GetPath().GetString()
-                            : std::string("missing");
+                if (a) {
+                    digest += "cycle:";
+                    digest += pathText(a.GetPath());
+                } else {
+                    digest += "missing";
+                }
                 digest += ',';
                 return;
             }
-            digest += a.GetPath().GetString() + ":" +
+            digest += pathText(a.GetPath());
+            digest += ":" +
                       a.GetTypeName().GetAsToken().GetString() + ":samples:" +
                       std::to_string(a.GetNumTimeSamples()) + "->";
             const SdfPathVector sources = _AuthoredConnections(a);
@@ -3388,7 +3455,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 const UsdAttribute sourceAttr =
                     _stage->GetAttributeAtPath(source);
                 if (!sourceAttr) {
-                    digest += "missing:" + source.GetString() + ",";
+                    digest += "missing:";
+                    digest += pathText(source);
+                    digest += ',';
                 } else {
                     append(sourceAttr);
                 }
@@ -3398,23 +3467,22 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         append(attr);
         digest += '|';
     };
-    auto appendFrameBindingIdentity =
-        [this, &digest, &noteRead, &noteTargets](const UsdPrim &prim,
-                                                 const char *name) {
-        const TfToken nameToken(name);
+    auto appendFrameBindingIdentityNamed =
+        [this, &digest, &noteRead, &noteTargets, &pathText](
+            const UsdPrim &prim, const TfToken &nameToken) {
         SdfPathVector targets;
         if (const UsdRelationship rel = prim.GetRelationship(nameToken)) {
             rel.GetTargets(&targets);
             noteTargets(prim, nameToken, targets, false);
         }
-        digest += name;
+        digest += nameToken.GetString();
         digest += "@bindings=";
         for (const SdfPath &target : targets) {
             noteRead(target);
             const UsdPrim provider =
                 _stage->GetPrimAtPath(target.GetPrimPath());
             const TfToken type = provider ? provider.GetTypeName() : TfToken();
-            digest += target.GetString();
+            digest += pathText(target);
             digest += ':';
             digest += type.GetString();
             digest += ':';
@@ -3428,6 +3496,11 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             digest += ',';
         }
         digest += '|';
+    };
+    auto appendFrameBindingIdentity =
+        [&appendFrameBindingIdentityNamed](const UsdPrim &prim,
+                                           const char *name) {
+        appendFrameBindingIdentityNamed(prim, TfToken(name));
     };
 
     // Weight-object descriptor shape is epoch identity (spec §4.1):
@@ -3529,7 +3602,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             const UsdAttribute points =
                 _stage->GetAttributeAtPath(pointsPath);
             digest += "rigExec:curveSource=";
-            digest += pointsPath.GetString();
+            digest += pathText(pointsPath);
             digest += ':';
             digest += points
                 ? points.GetTypeName().GetAsToken().GetString()
@@ -3572,7 +3645,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         digest += "rigExec:inputWeights=";
         for (const SdfPath &t : inputs) {
             noteRead(t);
-            digest += t.GetString();
+            digest += pathText(t);
             digest += ',';
         }
         digest += '|';
@@ -3603,7 +3676,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         static const TfToken kInterpolatorType("RigExecPoseInterpolator");
         for (const SdfPath &jointPath : _DiscoverJointOutputs(_stage, _rigPath)) {
             notePrim(jointPath, kJointType);
-            digest += jointPath.GetString();
+            digest += pathText(jointPath);
             digest += ',';
         }
         digest += '|';
@@ -3615,7 +3688,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // the guide would never appear.
         for (const SdfPath &controlPath : _DiscoverControls(_stage, _rigPath)) {
             notePrim(controlPath, kControlType);
-            digest += controlPath.GetString();
+            digest += pathText(controlPath);
             digest += ',';
         }
         digest += '|';
@@ -3631,7 +3704,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 notePrim(volumePath,
                          _stage->GetPrimAtPath(volumePath).GetTypeName());
             }
-            digest += volumePath.GetString();
+            digest += pathText(volumePath);
             digest += '|';
             appendWeightObject(volumePath);
         }
@@ -3656,7 +3729,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
              _DiscoverPoseInterpolators(_stage, _rigPath)) {
             const UsdPrim interpolator = _stage->GetPrimAtPath(interpolatorPath);
             notePrim(interpolatorPath, kInterpolatorType);
-            digest += interpolatorPath.GetString();
+            digest += pathText(interpolatorPath);
             digest += '|';
             appendRelTargets(interpolator, "rigExec:driver", false);
             for (const char *name : {"rigExec:kernel", "rigExec:twistAxis",
@@ -3724,6 +3797,12 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     struct _DigestHop {
         std::vector<SdfPath> own;     // this prim's attributes, sorted
         std::set<SdfPath> depends;    // prims this one reads
+        /// Set by the prefetch below and nowhere else: the attributeText of
+        /// every path in \c own, concatenated in \c own's order, and whether
+        /// any of them has a connection source.
+        bool prefetched = false;
+        bool anyConnected = false;
+        std::string ownText;
     };
     std::unordered_map<SdfPath, _DigestHop, SdfPath::Hash> digestHops;
     // THE READ MEMO: what this segment knows about one attribute path.
@@ -3751,8 +3830,48 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     const bool memoizeReads = !(segments & _DigestUnmemoizedReads);
     std::unordered_map<SdfPath, _DigestAttribute, SdfPath::Hash>
         digestAttributes;
+    // The three facts of one attribute, and the text an attribute is written
+    // out as. One definition of each, shared by the walk and by the prefetch
+    // below, so the two cannot spell an attribute differently.
+    const auto readOf = [](const UsdAttribute &attribute) {
+        _DigestAttribute read;
+        read.exists = static_cast<bool>(attribute);
+        if (read.exists) {
+            read.typeName = attribute.GetTypeName().GetAsToken();
+        }
+        read.sources = _AuthoredConnections(attribute);
+        return read;
+    };
+    const auto entryOf = [](_PathText &text, const SdfPath &path,
+                            const _DigestAttribute &attribute) {
+        std::string entry = text(path);
+        entry += ':';
+        entry += attribute.exists ? attribute.typeName.GetString()
+                                  : std::string("missing");
+        entry += "->";
+        for (const SdfPath &source : attribute.sources) {
+            entry += text(source);
+            entry += ',';
+        }
+        entry += '|';
+        return entry;
+    };
+    // THE PREFETCH: one hop's worth of reads for each prim of the rig and
+    // each of its ancestors, made in parallel before the walk starts and
+    // adopted by hopFor the first time the walk asks for that prim. See the
+    // prefetch itself, above the solver loop.
+    struct _DigestPrefetched {
+        _DigestHop hop;
+        /// Parallel to hop.own.
+        std::vector<_DigestAttribute> reads;
+        std::vector<std::string> texts;
+        bool isProvider = false;
+        SdfPath frameParent;
+    };
+    std::vector<_DigestPrefetched> prefetched;
+    std::unordered_map<SdfPath, size_t, SdfPath::Hash> prefetchedIndex;
     const auto rememberAttribute =
-        [memoizeReads, &digestAttributes, footprint](
+        [memoizeReads, &digestAttributes, footprint, &readOf](
             SdfPath path, const UsdAttribute &attribute)
             -> const _DigestAttribute & {
         if (memoizeReads) {
@@ -3761,12 +3880,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 return found->second;
             }
         }
-        _DigestAttribute read;
-        read.exists = static_cast<bool>(attribute);
-        if (read.exists) {
-            read.typeName = attribute.GetTypeName().GetAsToken();
-        }
-        read.sources = _AuthoredConnections(attribute);
+        _DigestAttribute read = readOf(attribute);
         // Every attribute read here is written out with its sources, so a
         // connected one goes into the certain footprint as it stands.
         if (footprint && !read.sources.empty()) {
@@ -3792,7 +3906,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         [this, &digest, &solverInputTokens, &connectionText,
          &providerClosureTokens, &digestHops, memoizeReads,
          &rememberAttribute, &readAttribute, footprint, &noteRead,
-         &noteAncestor](const UsdPrim &prim) {
+         &noteAncestor, &pathText, &entryOf, &prefetched, &prefetchedIndex,
+         &digestAttributes](const UsdPrim &prim) {
         const SdfPath primPath = prim ? prim.GetPath() : SdfPath();
         const auto cached = solverInputTokens.find(primPath);
         if (cached != solverInputTokens.end()) {
@@ -3826,24 +3941,16 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // contributes a marker naming the path instead; Compile reports the
         // cycle itself, and the marker still makes introducing or removing
         // one change the digest.
-        const auto attributeText = [&connectionText, &readAttribute](
+        const auto attributeText = [&connectionText, &readAttribute,
+                                    &pathText, &entryOf](
                                        const SdfPath &path)
             -> const std::string & {
             auto text = connectionText.find(path);
             if (text == connectionText.end()) {
-                const _DigestAttribute &attribute = readAttribute(path);
-                std::string entry = path.GetString();
-                entry += ':';
-                entry += attribute.exists
-                    ? attribute.typeName.GetString()
-                    : std::string("missing");
-                entry += "->";
-                for (const SdfPath &source : attribute.sources) {
-                    entry += source.GetString();
-                    entry += ',';
-                }
-                entry += '|';
-                text = connectionText.emplace(path, std::move(entry)).first;
+                text = connectionText
+                           .emplace(path, entryOf(pathText, path,
+                                                  readAttribute(path)))
+                           .first;
             }
             return text->second;
         };
@@ -3861,7 +3968,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // above (10.4 s of 11 at 400 joints). The pose schedule still uses
         // it, unchanged; only the digest reads this instead.
         const auto hopFor = [&digestHops, &rememberAttribute, footprint,
-                             &noteRead, &noteAncestor](
+                             &noteRead, &noteAncestor, &prefetched,
+                             &prefetchedIndex, &digestAttributes,
+                             &connectionText](
                                 const UsdPrim &provider)
             -> const _DigestHop & {
             const SdfPath key = provider.GetPath();
@@ -3873,34 +3982,67 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             if (footprint) {
                 footprint->certain.closurePrims.insert(key);
             }
-            const TfToken type = provider.GetTypeName();
-            const bool isProvider = type == "RigExecJoint" ||
-                                    type == "RigExecControl" ||
-                                    _IsVolumeWeightType(type);
-            const UsdPrim frameParent =
-                isProvider ? _NamespaceFrameProvider(provider) : UsdPrim();
-            for (const UsdAttribute &attribute : provider.GetAttributes()) {
-                hop.own.push_back(attribute.GetPath());
-                const _DigestAttribute &read =
-                    rememberAttribute(hop.own.back(), attribute);
-                for (const SdfPath &source : read.sources) {
-                    if (source.GetPrimPath() != key) {
-                        hop.depends.insert(source.GetPrimPath());
+            bool isProvider = false;
+            SdfPath frameParent;
+            const auto ready = prefetchedIndex.find(key);
+            if (ready != prefetchedIndex.end()) {
+                // Adopted rather than read: the facts and texts the branch
+                // below and attributeText would have made, already made. A
+                // path the walk reached earlier through a connection keeps
+                // the entry it has, which is the same one; a path it had not
+                // goes into the certain footprint here, as rememberAttribute
+                // would have put it there on its first read.
+                _DigestPrefetched &made = prefetched[ready->second];
+                for (size_t i = 0; i < made.hop.own.size(); ++i) {
+                    const SdfPath &path = made.hop.own[i];
+                    const auto [read, inserted] = digestAttributes.try_emplace(
+                        path, std::move(made.reads[i]));
+                    if (inserted && footprint &&
+                        !read->second.sources.empty()) {
+                        footprint->certain.closureConnections
+                            .insert_or_assign(path, read->second.sources);
+                    }
+                    connectionText.try_emplace(path, std::move(made.texts[i]));
+                }
+                hop = std::move(made.hop);
+                isProvider = made.isProvider;
+                frameParent = made.frameParent;
+            } else {
+                const TfToken type = provider.GetTypeName();
+                isProvider = type == "RigExecJoint" ||
+                             type == "RigExecControl" ||
+                             _IsVolumeWeightType(type);
+                if (isProvider) {
+                    if (const UsdPrim above =
+                            _NamespaceFrameProvider(provider)) {
+                        frameParent = above.GetPath();
                     }
                 }
-                if (!isProvider || !frameParent) {
-                    continue;
+                for (const UsdAttribute &attribute :
+                     provider.GetAttributes()) {
+                    hop.own.push_back(attribute.GetPath());
+                    const _DigestAttribute &read =
+                        rememberAttribute(hop.own.back(), attribute);
+                    for (const SdfPath &source : read.sources) {
+                        if (source.GetPrimPath() != key) {
+                            hop.depends.insert(source.GetPrimPath());
+                        }
+                    }
+                    if (!isProvider || frameParent.IsEmpty()) {
+                        continue;
+                    }
+                    // The fallback rules that leave this prim: each of them
+                    // reads the namespace frame provider, whose token
+                    // carries its own continuation of the chain.
+                    const TfToken &name = attribute.GetName();
+                    if (name == "parent:space" ||
+                        name == "parent:defaultSpace" ||
+                        name == "default:space") {
+                        hop.depends.insert(frameParent);
+                    }
                 }
-                // The fallback rules that leave this prim: each of them
-                // reads the namespace frame provider, whose token carries
-                // its own continuation of the chain.
-                const TfToken &name = attribute.GetName();
-                if (name == "parent:space" || name == "parent:defaultSpace" ||
-                    name == "default:space") {
-                    hop.depends.insert(frameParent.GetPath());
-                }
+                std::sort(hop.own.begin(), hop.own.end());
             }
-            std::sort(hop.own.begin(), hop.own.end());
             // Footprint: every prim this hop leads to, and the ancestors the
             // namespace frame search walked through to find the provider it
             // falls back to (all of them, to the root, when it found none).
@@ -3909,10 +4051,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                     noteRead(input);
                 }
                 if (isProvider) {
-                    const SdfPath stop = frameParent ? frameParent.GetPath()
-                                                     : SdfPath();
                     for (SdfPath above = key.GetParentPath();
-                         !above.IsEmpty() && above != stop &&
+                         !above.IsEmpty() && above != frameParent &&
                          !above.IsAbsoluteRootPath();
                          above = above.GetParentPath()) {
                         noteAncestor(above);
@@ -3941,7 +4081,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 const UsdPrim provider = _stage->GetPrimAtPath(path);
                 if (!provider) {
                     providerClosureTokens.emplace(
-                        path, "missingProvider:" + path.GetString() + "|");
+                        path, "missingProvider:" + pathText(path) + "|");
                     continue;
                 }
                 const _DigestHop &hop = hopFor(provider);
@@ -3972,10 +4112,16 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 // std::sets: already in path order and unique, which is
                 // what makes the token independent of the order anything
                 // was discovered in.
-                std::string text = path.GetString();
+                std::string text = pathText(path);
                 text += '{';
-                for (const SdfPath &attribute : hop.own) {
-                    text += attributeText(attribute);
+                if (hop.prefetched) {
+                    // The same entries attributeText hands back for these
+                    // paths, concatenated in the same order, once.
+                    text += hop.ownText;
+                } else {
+                    for (const SdfPath &attribute : hop.own) {
+                        text += attributeText(attribute);
+                    }
                 }
                 for (const SdfPath &input : depends) {
                     const auto ready = providerClosureTokens.find(input);
@@ -3983,7 +4129,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                         text += ready->second;
                     } else {
                         // Still on the walk: this edge closes a cycle.
-                        text += "cycle@" + input.GetString() + "|";
+                        text += "cycle@";
+                        text += pathText(input);
+                        text += '|';
                     }
                 }
                 text += '}';
@@ -4001,8 +4149,17 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // which by now already holds the prim's own attributes (the walk
         // above ran hopFor on it) and most of what they connect to. The
         // solver cache keeps the stage-reading original.
+        std::string block;
         std::set<SdfPath> connectionInputs;
-        if (prim) {
+        const _DigestHop *ownHop =
+            prim && memoizeReads ? &hopFor(prim) : nullptr;
+        if (ownHop && ownHop->prefetched && !ownHop->anyConnected) {
+            // No attribute of the prim has a source, so the closure below
+            // would be exactly its own attributes, in the order the set
+            // keeps them -- which is the order hop.own is sorted in, and so
+            // the order its concatenated text is already in.
+            block = ownHop->ownText;
+        } else if (prim) {
             std::vector<SdfPath> pending;
             if (memoizeReads) {
                 pending = hopFor(prim).own;
@@ -4024,7 +4181,6 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 pending.insert(pending.end(), sources.begin(), sources.end());
             }
         }
-        std::string block;
         for (const SdfPath &path : connectionInputs) {
             block += attributeText(path);
         }
@@ -4070,7 +4226,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     std::unordered_map<SdfPath, std::string, SdfPath::Hash> ancestorChainTokens;
     const auto ancestorChainToken =
         [this, &digest, &ancestorChainTokens, &appendSolverInputConnections,
-         &noteAncestor](const SdfPath &start)
+         &noteAncestor, &pathText](const SdfPath &start)
             -> const std::string & {
         static const std::string kRoot;
         // Walk up to the first path already known (or the root), noting the
@@ -4089,7 +4245,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             const SdfPath &path = *it;
             noteAncestor(path);
             const UsdPrim ancestor = _stage->GetPrimAtPath(path);
-            std::string block = path.GetString();
+            std::string block = pathText(path);
             block += ':';
             block += ancestor ? ancestor.GetTypeName().GetString()
                               : std::string("missing");
@@ -4116,6 +4272,178 @@ RigExecRigEvaluator::_ComputeStructureDigest(
     };
     const UsdPrim rig = (segments & _DigestSolvers)
         ? _stage->GetPrimAtPath(_rigPath) : UsdPrim();
+    // THE PREFETCH, which is how this segment is split. The walk below stays
+    // one serial walk, and must: a cycle marker names the prim the walk was
+    // on when it closed the cycle, so the bytes depend on its order. What it
+    // spends its time on is not ordered, though. Most of the segment was one
+    // hop's worth of reads per prim -- its attributes, their type names and
+    // connection sources, its namespace frame provider -- and the text those
+    // attributes are written out as, and every piece of that is a pure
+    // function of one prim and the composed stage.
+    //
+    // So it is all made here, up front, in parallel, for exactly the prims
+    // the walk will ask hopFor about. The walk runs a pose-input closure from
+    // every aggregate solver and from every ancestor of every target of one
+    // of its relationships (ancestorChainToken), and a closure goes wherever
+    // a hop's depends lead. So the prefetch seeds with those, then follows
+    // depends a level at a time: each level is read in parallel, and what
+    // its hops depend on and nobody has read yet is the next level. A prim
+    // the walk never reaches is never read -- which matters on a rig like
+    // the biped, whose walk reaches 227 of its 611 prims. Each result sits in
+    // its own slot until hopFor adopts it, in walk order; a path that names
+    // no prim is left to the walk, which writes it as a missing provider.
+    //
+    // Off with the read memo: the unmemoized walk exists to check the memo
+    // against, and a prefetch is a memo.
+    if (rig && memoizeReads) {
+        // Recorded by hand, nested inside the Digest.Solvers region: this
+        // is a const method, and the scope macro wants a mutable profiler.
+        const uint64_t prefetchStart =
+            profileDigest ? RigExecProfiler::NowUs() : 0;
+        std::vector<UsdPrim> prims;
+        std::vector<UsdPrim> level;
+        const auto enqueue = [&prefetchedIndex, &prims,
+                              &level](const UsdPrim &prim) {
+            if (prim &&
+                prefetchedIndex.emplace(prim.GetPath(), prims.size() +
+                                                            level.size())
+                    .second) {
+                level.push_back(prim);
+            }
+        };
+        // The seeds, in the walk's own traversal: the same predicate, the
+        // same relationships, the same composed targets.
+        for (const UsdPrim &solver : UsdPrimRange(rig)) {
+            if (!_IsAggregateSolverType(solver.GetTypeName())) {
+                continue;
+            }
+            enqueue(solver);
+            for (const UsdRelationship &rel : solver.GetRelationships()) {
+                SdfPathVector targets;
+                rel.GetTargets(&targets);
+                for (const SdfPath &target : targets) {
+                    for (SdfPath path = target.GetPrimPath();
+                         !path.IsEmpty() && !path.IsAbsoluteRootPath();
+                         path = path.GetParentPath()) {
+                        if (!prefetchedIndex.count(path)) {
+                            enqueue(_stage->GetPrimAtPath(path));
+                        }
+                    }
+                }
+            }
+        }
+        const auto prefetch = [&prims, &prefetched, &readOf, &entryOf](
+                                  size_t begin, size_t lane, size_t lanes) {
+            // A memo per lane: _PathText is never shared between threads.
+            _PathText laneText;
+            std::vector<std::pair<SdfPath, _DigestAttribute>> reads;
+            for (size_t i = begin + lane; i < prims.size(); i += lanes) {
+                const UsdPrim &provider = prims[i];
+                const SdfPath &key = provider.GetPath();
+                _DigestPrefetched &made = prefetched[i];
+                // hopFor's rules, verbatim: see its uncached branch.
+                const TfToken type = provider.GetTypeName();
+                made.isProvider = type == "RigExecJoint" ||
+                                  type == "RigExecControl" ||
+                                  _IsVolumeWeightType(type);
+                if (made.isProvider) {
+                    if (const UsdPrim above =
+                            _NamespaceFrameProvider(provider)) {
+                        made.frameParent = above.GetPath();
+                    }
+                }
+                reads.clear();
+                for (const UsdAttribute &attribute :
+                     provider.GetAttributes()) {
+                    _DigestAttribute read = readOf(attribute);
+                    for (const SdfPath &source : read.sources) {
+                        if (source.GetPrimPath() != key) {
+                            made.hop.depends.insert(source.GetPrimPath());
+                        }
+                    }
+                    if (made.isProvider && !made.frameParent.IsEmpty()) {
+                        const TfToken &name = attribute.GetName();
+                        if (name == "parent:space" ||
+                            name == "parent:defaultSpace" ||
+                            name == "default:space") {
+                            made.hop.depends.insert(made.frameParent);
+                        }
+                    }
+                    reads.emplace_back(attribute.GetPath(), std::move(read));
+                }
+                std::sort(reads.begin(), reads.end(),
+                          [](const auto &a, const auto &b) {
+                              return a.first < b.first;
+                          });
+                made.hop.own.reserve(reads.size());
+                made.reads.reserve(reads.size());
+                made.texts.reserve(reads.size());
+                for (auto &[path, read] : reads) {
+                    std::string entry = entryOf(laneText, path, read);
+                    made.hop.ownText += entry;
+                    made.hop.anyConnected =
+                        made.hop.anyConnected || !read.sources.empty();
+                    made.hop.own.push_back(path);
+                    made.reads.push_back(std::move(read));
+                    made.texts.push_back(std::move(entry));
+                }
+                made.hop.prefetched = true;
+            }
+        };
+        // How wide. Beside compile, a few lanes: compile's own thread is
+        // reading the same prims at the same time, and USD reads slow each
+        // other down -- MEASURED on puppetA, the whole pool took the prefetch
+        // from 4.9 ms to 3.4 ms and added 1.1 ms to DiscoverValidate on the
+        // compiling thread, which is on compile's critical path where the
+        // digest is not. Alone, as the settle path runs it, it is the whole
+        // wait, so the whole pool. Strided rather than blocked, because the
+        // heavy prims (joints and controls, with their dozens of attributes)
+        // sit together in the traversal.
+        const size_t widest =
+            !RigExecParallelEvaluationEnabled()
+                ? 1
+                : (segments & _DigestBesideCompile)
+                      ? _kDigestPrefetchLanesBesideCompile
+                      : WorkGetConcurrencyLimit();
+        while (!level.empty()) {
+            const size_t begin = prims.size();
+            prims.insert(prims.end(), level.begin(), level.end());
+            level.clear();
+            prefetched.resize(prims.size());
+            const size_t count = prims.size() - begin;
+            const size_t lanes =
+                count < _kDigestPrefetchParallelMin
+                    ? 1
+                    : std::max<size_t>(
+                          1, std::min(widest,
+                                      count / _kDigestPrefetchPerLane));
+            if (lanes > 1) {
+                WorkDispatcher dispatcher;
+                for (size_t lane = 1; lane < lanes; ++lane) {
+                    dispatcher.Run([&prefetch, begin, lane, lanes]() {
+                        prefetch(begin, lane, lanes);
+                    });
+                }
+                prefetch(begin, 0, lanes);
+                dispatcher.Wait();
+            } else {
+                prefetch(begin, 0, 1);
+            }
+            // The next level: whatever this one depends on that nothing has
+            // read yet, in the order its hops name them.
+            for (size_t i = begin; i < prims.size(); ++i) {
+                for (const SdfPath &input : prefetched[i].hop.depends) {
+                    if (!prefetchedIndex.count(input)) {
+                        enqueue(_stage->GetPrimAtPath(input));
+                    }
+                }
+            }
+        }
+        if (profileDigest) {
+            _profiler.Record("Digest.Solvers.Prefetch", "compile",
+                             prefetchStart, RigExecProfiler::NowUs());
+        }
+    }
     if (rig) {
         // Recursive over the composed rig subtree (not GetChildren):
         // solvers live wherever the author put them, so every scope's
@@ -4131,10 +4459,16 @@ RigExecRigEvaluator::_ComputeStructureDigest(
         // and starts a new epoch -- which is the only reason a reordered
         // stack cannot keep a stale schedule. Do not "optimize" this into a
         // sorted set or a path-keyed map.
+        static const TfToken kJointsRel("rigExec:joints");
+        static const TfToken kJointElements("rigExec:jointElements");
+        static const TfToken kCount("rigExec:count");
+        static const TfToken kWeights("rigExec:weights");
+        static const TfToken kSampleCount("rigExec:sampleCount");
+        static const TfToken kVolumeWeights("rigExec:volumeWeights");
         for (const UsdPrim &solver : UsdPrimRange(rig)) {
             SdfPathVector joints;
             if (const UsdRelationship rel =
-                    solver.GetRelationship(TfToken("rigExec:joints"))) {
+                    solver.GetRelationship(kJointsRel)) {
                 rel.GetTargets(&joints);
             }
             // The joint discovery of the OutputSets segment reads these same
@@ -4155,10 +4489,9 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 notePrim(solver.GetPath(), solver.GetTypeName());
             }
             if (!joints.empty()) {
-                static const TfToken kJointsRel("rigExec:joints");
                 noteTargets(solver, kJointsRel, joints, false);
             }
-            digest += solver.GetPath().GetString();
+            digest += pathText(solver.GetPath());
             digest += '|';
             digest += solver.GetTypeName().GetString();
             digest += '|';
@@ -4168,24 +4501,23 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             if (isAggregate) {
                 appendSolverInputConnections(solver);
                 for (const UsdRelationship &rel : solver.GetRelationships()) {
-                    const std::string name = rel.GetName().GetString();
+                    const TfToken &name = rel.GetName();
                     const SdfPathVector targets =
-                        appendRelTargets(solver, name.c_str(), false);
-                    appendFrameBindingIdentity(solver, name.c_str());
+                        appendRelTargetsNamed(solver, name, false);
+                    appendFrameBindingIdentityNamed(solver, name);
                     for (const SdfPath &target : targets) {
                         digest += ancestorChainToken(target.GetPrimPath());
                     }
                 }
             }
             for (const SdfPath &j : joints) {
-                digest += j.GetString();
+                digest += pathText(j);
                 digest += ',';
             }
             // Element remap is structural: it changes which frame each
             // joint self-extracts. Parallel to joints, so not sorted.
             digest += '|';
-            const UsdAttribute jeAttr =
-                solver.GetAttribute(TfToken("rigExec:jointElements"));
+            const UsdAttribute jeAttr = solver.GetAttribute(kJointElements);
             VtIntArray jointElements;
             if (jeAttr) {
                 jeAttr.Get(&jointElements);
@@ -4219,10 +4551,8 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 // so the token joins the digest or no recompile follows.
                 appendToken(solver, "rigExec:startFramePolicy");
             } else if (stype == "RigExecTwistDistribution") {
-                const UsdAttribute ca =
-                    solver.GetAttribute(TfToken("rigExec:count"));
-                const UsdAttribute wa =
-                    solver.GetAttribute(TfToken("rigExec:weights"));
+                const UsdAttribute ca = solver.GetAttribute(kCount);
+                const UsdAttribute wa = solver.GetAttribute(kWeights);
                 int cnt = 1;
                 if (ca) {
                     ca.Get(&cnt);
@@ -4246,8 +4576,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                           std::to_string(wa ? wa.GetNumTimeSamples() : 0) +
                           ",";
             } else if (stype == "RigExecRibbon") {
-                const UsdAttribute a =
-                    solver.GetAttribute(TfToken("rigExec:sampleCount"));
+                const UsdAttribute a = solver.GetAttribute(kSampleCount);
                 int sc = 5;
                 if (a) {
                     a.Get(&sc);
@@ -4268,8 +4597,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
                 // whose length Compile() validates; hash the length and
                 // the sample presence so an edit that breaks the parallel
                 // shape (or samples the attribute) re-runs that check.
-                const UsdAttribute wa =
-                    solver.GetAttribute(TfToken("rigExec:volumeWeights"));
+                const UsdAttribute wa = solver.GetAttribute(kVolumeWeights);
                 VtFloatArray w;
                 if (wa) {
                     wa.Get(&w);
@@ -4294,7 +4622,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             if (!moves) {
                 continue;
             }
-            digest += prim.GetPath().GetString();
+            digest += pathText(prim.GetPath());
             digest += '|';
             digest += prim.GetTypeName().GetString();
             digest += '|';
@@ -4307,7 +4635,7 @@ RigExecRigEvaluator::_ComputeStructureDigest(
             for (const SdfPath &t : targets) {
                 noteRead(t);
                 const SdfPath canonical = t;
-                digest += canonical.GetString();
+                digest += pathText(canonical);
                 digest += ',';
                 // Derived synthesis identity (spec §7.6 revised): whether
                 // a written points target's gprim authors the derived
@@ -5275,8 +5603,8 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     const auto computeDigestPart = [this, &digestParts,
                                     &digestFootprints](size_t i) {
         if (_stage) {
-            digestParts[i] =
-                _ComputeStructureDigest(1u << i, &digestFootprints[i]);
+            digestParts[i] = _ComputeStructureDigest(
+                (1u << i) | _DigestBesideCompile, &digestFootprints[i]);
         }
     };
     for (const size_t i : {size_t(1), size_t(2), size_t(0)}) {
@@ -5399,192 +5727,29 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
         _DiscoverControls(_stage, _rigPath);
     std::vector<SdfPath> newVolumeWeightPaths =
         _DiscoverVolumeWeights(_stage, _rigPath);
-
-    // Pose interpolators, discovered and SOLVED here. Solving is the whole
-    // reason this is compile-time work: inverting the matrix of every pose's
-    // kernel value at every other pose is a constant of the authored data,
-    // and doing it per frame would be inverting the same matrix 326 times a
-    // second to be handed the same answer.
-    std::vector<_PoseInterpolator> newPoseInterpolators;
-    {
-        std::string interpolatorError;
-        if (!_CompilePoseInterpolators(newJointPaths, newControlPaths,
-                                       &newPoseInterpolators, errors,
-                                       &interpolatorError)) {
-            reportError(interpolatorError);
-            return false;
-        }
-    }
-
-    // Transform-authority validation (host-durability redesign).
-    //
-    // Neither condition can FAIL a compile, and both are reported rather
-    // than fixed: the rig still evaluates exactly right, because the
-    // evaluator reads rest:space and the avars and nothing else. What
-    // breaks is the BOUNDS -- a provider's computed extent bakes its posed
-    // frame into asset-relative space, which is only the whole story while
-    // nothing else contributes a transform between the asset root and the
-    // provider. Refusing to compile over a framing inaccuracy would be
-    // wildly out of proportion; saying nothing would leave an author
-    // wondering why one control frames to the wrong place.
-    {
-        const SdfPath assetRoot = _rigPath.GetParentPath();
-        auto warn = [errors](const std::string &message) {
-            // Both channels on purpose: TF_WARN is what a host surfaces to
-            // the author, and the errors vector is what a test can read.
-            // Compile still returns true.
-            if (errors) {
-                errors->push_back("warning: " + message);
-            }
-            TF_WARN("%s", message.c_str());
-        };
-        // Resolving a prim's purpose walks up the namespace to the first
-        // authored opinion, and this pass asks for it once per provider and
-        // then again for every descendant of every provider -- so a joint
-        // deep in a chain is resolved once per ancestor provider. Purpose is
-        // a pure function of the composed stage, which does not change while
-        // a compile runs, so resolve each prim once.
-        std::unordered_map<SdfPath, TfToken, SdfPath::Hash> purposeCache;
-        const auto resolvedPurpose = [&purposeCache](const UsdPrim &prim) {
-            auto it = purposeCache.find(prim.GetPath());
-            if (it == purposeCache.end()) {
-                it = purposeCache.emplace(
-                    prim.GetPath(),
-                    UsdGeomImageable(prim).ComputePurpose()).first;
-            }
-            return it->second;
-        };
-        // Every Boundable provider, aggregate solvers included: they
-        // inherit Boundable/Xformable too, so an authored op on one is
-        // applied by BBoxCache to an already-baked extent while the guide
-        // it draws ignores it entirely.
-        std::vector<SdfPath> providers = newJointPaths;
-        providers.insert(providers.end(), newControlPaths.begin(),
-                         newControlPaths.end());
-        providers.insert(providers.end(), newVolumeWeightPaths.begin(),
-                         newVolumeWeightPaths.end());
-        {
-            for (const UsdPrim &solver :
-                 _DiscoverAggregateSolvers(_stage, _rigPath)) {
-                providers.push_back(solver.GetPath());
-            }
-        }
-        for (const SdfPath &providerPath : providers) {
-            const UsdPrim prim = _stage->GetPrimAtPath(providerPath);
-            if (!prim) {
-                continue;
-            }
-            // xformOps arrive on every provider now that RigExecXformable
-            // inherits UsdGeomBoundable, but they are NOT a transform
-            // authority: rest:space plus the avars are the only one (the
-            // Ir alignment). An authored op is a second one that nothing
-            // reads, so the prim moves in a stock UsdGeom traversal while
-            // the rig ignores it entirely.
-            if (const UsdGeomXformable xformable = UsdGeomXformable(prim)) {
-                bool resetsStack = false;
-                if (!xformable.GetOrderedXformOps(&resetsStack).empty()) {
-                    warn(prim.GetTypeName().GetString() + " " +
-                         providerPath.GetString() +
-                         " authors xformOps, which are not a transform "
-                         "authority for a RigExec provider (rest:space and "
-                         "the avars are); the ops are ignored by evaluation "
-                         "and are not in the computed extent");
-                }
-            }
-            // An Xformable BETWEEN the asset root and the provider used to
-            // warn here, because its transform was dropped. It is now
-            // composed at evaluation, by _ComposeInterveningXforms, so there
-            // is nothing left to report: placing a rig -- or one leg of an
-            // assembly -- under an Xform inside the asset is a supported
-            // shape, and warning ten times per compile about a configuration
-            // that works is noise nobody can act on.
-            //
-            // The check above it stays. An op authored on the PROVIDER is
-            // still not a transform authority, which is a different claim
-            // and still true.
-
-            // Hoisted out of the walk: the provider's own purpose is the
-            // same for every one of its descendants.
-            const TfToken providerPurpose = resolvedPurpose(prim);
-
-            // A provider's extent covers the guides beneath it, and only
-            // those. Authored geometry parented under one is invisible to
-            // it -- and to every ancestor, because UsdGeomBBoxCache stops
-            // descending at a Boundable -- so the gprim silently drops out
-            // of every bounding box in the scene.
-            for (const UsdPrim &descendant : UsdPrimRange(prim)) {
-                if (descendant == prim) {
-                    continue;
-                }
-                // A provider nested under a provider with a DIFFERENT
-                // resolved purpose is dropped from the ancestor's extent
-                // on purpose: one extent carries one purpose, and the
-                // bounding-box cache files it under the ancestor's. Nobody
-                // reading the namespace would guess that, so say it.
-                if (descendant.IsA<UsdGeomImageable>()) {
-                    const TfToken descendantPurpose =
-                        resolvedPurpose(descendant);
-                    if (!descendantPurpose.IsEmpty() &&
-                        !providerPurpose.IsEmpty() &&
-                        descendantPurpose != providerPurpose &&
-                        TfStringStartsWith(
-                            descendant.GetTypeName().GetString(),
-                            "RigExec")) {
-                        warn(descendant.GetTypeName().GetString() + " " +
-                             descendant.GetPath().GetString() +
-                             " has purpose '" +
-                             descendantPurpose.GetString() +
-                             "' but is nested under " +
-                             providerPath.GetString() + " whose purpose is '" +
-                             providerPurpose.GetString() +
-                             "'; one extent carries one purpose, so this "
-                             "provider is excluded from its ancestor's "
-                             "bounds");
-                    }
-                }
-                if (descendant.IsA<UsdGeomGprim>()) {
-                    warn("gprim " + descendant.GetPath().GetString() +
-                         " is parented under RigExec provider " +
-                         providerPath.GetString() +
-                         "; a provider's computed extent covers only the "
-                         "guides beneath it, and bounds stop descending at "
-                         "a Boundable, so this geometry is absent from "
-                         "every bounding box that should contain it");
-                }
-            }
-        }
-    }
-
-    std::vector<SdfPath> solverArrayPaths;
-    std::map<SdfPath, SdfPath> newRibbonDriverPoints;
-    compileBlocks.Next("DiscoverValidate.AggregateProviders");
     // Every aggregate frame provider, wherever the author placed it: their
     // computePointFrameArray results are published (and drawn as guides by
-    // the imaging chain, like OpenExec's IrJointScope guides).
-    for (const UsdPrim &child :
-         _DiscoverAggregateSolvers(_stage, _rigPath)) {
-        solverArrayPaths.push_back(child.GetPath());
-        // A ribbon's driver-curve points, resolved to the exact native
-        // attribute. This replaces the compiler's last authoring pass:
-        // the resolution is compiled state (rewiring the relationship is
-        // structural, and the epoch digest already treats it that way),
-        // and the values ride in as exec overrides at evaluation time.
-        if (child.GetTypeName() == "RigExecRibbon") {
-            SdfPathVector curves;
-            if (const UsdRelationship rel = child.GetRelationship(
-                    TfToken("rigExec:driverCurve"))) {
-                rel.GetTargets(&curves);
-            }
-            if (!curves.empty()) {
-                newRibbonDriverPoints[child.GetPath()] =
-                    curves[0].IsPrimPath()
-                        ? curves[0].AppendProperty(TfToken("points"))
-                        : curves[0];
-            }
-        }
+    // the imaging chain, like OpenExec's IrJointScope guides). Discovered
+    // here, with the other providers, because it is the last thing the exec
+    // lane below needs before it can start.
+    const std::vector<UsdPrim> aggregateSolvers =
+        _DiscoverAggregateSolvers(_stage, _rigPath);
+    std::vector<SdfPath> solverArrayPaths;
+    solverArrayPaths.reserve(aggregateSolvers.size());
+    for (const UsdPrim &solver : aggregateSolvers) {
+        solverArrayPaths.push_back(solver.GetPath());
     }
 
     compileBlocks.Next("DiscoverValidate.WarmupDispatch");
+    // Dispatched as early as its inputs allow: straight after the providers
+    // are discovered, ahead of the pose-interpolator solve and the
+    // transform-authority pass, which read the stage and author nothing. The
+    // lane task is compile's critical path in both kinds of epoch -- the
+    // warm-up and the solver-request preparations behind it in an eager
+    // one, the guides in a deferred one -- so every millisecond it starts
+    // earlier is one off the compile. MEASURED on puppetA: those two passes
+    // are ~1.9 ms that used to sit in front of the dispatch.
+    //
     // Warm the shared exec network, off the critical path, in an epoch that
     // prepares its requests here.
     //
@@ -5633,13 +5798,14 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     //
     // WHERE the join sits is a scheduling choice, not a data one: as late as
     // the first real exec call, so the lane task's tail overlaps as much
-    // compiling-thread work as it can. A dynamic epoch prepares its solver
-    // batches the moment they are built, so it joins before them. A baked
-    // epoch defers every one of those preparations (deferExecPrep) and first
-    // needs the lane back at the connected-pose prepares, or failing those
-    // just ahead of the commit, which publishes the guides the lane
-    // prepared; the solver schedule, the provider seed and closure and the
-    // rest-channel scan all run beside the lane task.
+    // compiling-thread work as it can. Both kinds of epoch run the solver
+    // schedule, the provider seed and closure, the solver-input index and the
+    // rest-channel scan beside the lane task. A dynamic epoch then joins for
+    // its solver-request and connected-pose preparations
+    // (PrepareRequests.SolverBatches). A baked epoch defers the solver
+    // requests (deferExecPrep) and needs the lane back there only for a
+    // connected-pose prepare, or failing that just ahead of the commit,
+    // which publishes the guides the lane prepared.
     //
     // Every object a lane task touches is declared here, ahead of both
     // dispatchers, so that it outlives them: a dispatcher's destructor waits,
@@ -5777,6 +5943,182 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                "exec call while a compile lane task owns exec");
         return call();
     };
+
+    compileBlocks.Next("DiscoverValidate.Providers");
+
+    // Pose interpolators, discovered and SOLVED here. Solving is the whole
+    // reason this is compile-time work: inverting the matrix of every pose's
+    // kernel value at every other pose is a constant of the authored data,
+    // and doing it per frame would be inverting the same matrix 326 times a
+    // second to be handed the same answer.
+    std::vector<_PoseInterpolator> newPoseInterpolators;
+    {
+        std::string interpolatorError;
+        if (!_CompilePoseInterpolators(newJointPaths, newControlPaths,
+                                       &newPoseInterpolators, errors,
+                                       &interpolatorError)) {
+            reportError(interpolatorError);
+            return false;
+        }
+    }
+
+    // Transform-authority validation (host-durability redesign).
+    //
+    // Neither condition can FAIL a compile, and both are reported rather
+    // than fixed: the rig still evaluates exactly right, because the
+    // evaluator reads rest:space and the avars and nothing else. What
+    // breaks is the BOUNDS -- a provider's computed extent bakes its posed
+    // frame into asset-relative space, which is only the whole story while
+    // nothing else contributes a transform between the asset root and the
+    // provider. Refusing to compile over a framing inaccuracy would be
+    // wildly out of proportion; saying nothing would leave an author
+    // wondering why one control frames to the wrong place.
+    {
+        const SdfPath assetRoot = _rigPath.GetParentPath();
+        auto warn = [errors](const std::string &message) {
+            // Both channels on purpose: TF_WARN is what a host surfaces to
+            // the author, and the errors vector is what a test can read.
+            // Compile still returns true.
+            if (errors) {
+                errors->push_back("warning: " + message);
+            }
+            TF_WARN("%s", message.c_str());
+        };
+        // Resolving a prim's purpose walks up the namespace to the first
+        // authored opinion, and this pass asks for it once per provider and
+        // then again for every descendant of every provider -- so a joint
+        // deep in a chain is resolved once per ancestor provider. Purpose is
+        // a pure function of the composed stage, which does not change while
+        // a compile runs, so resolve each prim once.
+        std::unordered_map<SdfPath, TfToken, SdfPath::Hash> purposeCache;
+        const auto resolvedPurpose = [&purposeCache](const UsdPrim &prim) {
+            auto it = purposeCache.find(prim.GetPath());
+            if (it == purposeCache.end()) {
+                it = purposeCache.emplace(
+                    prim.GetPath(),
+                    UsdGeomImageable(prim).ComputePurpose()).first;
+            }
+            return it->second;
+        };
+        // Every Boundable provider, aggregate solvers included: they
+        // inherit Boundable/Xformable too, so an authored op on one is
+        // applied by BBoxCache to an already-baked extent while the guide
+        // it draws ignores it entirely.
+        std::vector<SdfPath> providers = newJointPaths;
+        providers.insert(providers.end(), newControlPaths.begin(),
+                         newControlPaths.end());
+        providers.insert(providers.end(), newVolumeWeightPaths.begin(),
+                         newVolumeWeightPaths.end());
+        providers.insert(providers.end(), solverArrayPaths.begin(),
+                         solverArrayPaths.end());
+        for (const SdfPath &providerPath : providers) {
+            const UsdPrim prim = _stage->GetPrimAtPath(providerPath);
+            if (!prim) {
+                continue;
+            }
+            // xformOps arrive on every provider now that RigExecXformable
+            // inherits UsdGeomBoundable, but they are NOT a transform
+            // authority: rest:space plus the avars are the only one (the
+            // Ir alignment). An authored op is a second one that nothing
+            // reads, so the prim moves in a stock UsdGeom traversal while
+            // the rig ignores it entirely.
+            if (const UsdGeomXformable xformable = UsdGeomXformable(prim)) {
+                bool resetsStack = false;
+                if (!xformable.GetOrderedXformOps(&resetsStack).empty()) {
+                    warn(prim.GetTypeName().GetString() + " " +
+                         providerPath.GetString() +
+                         " authors xformOps, which are not a transform "
+                         "authority for a RigExec provider (rest:space and "
+                         "the avars are); the ops are ignored by evaluation "
+                         "and are not in the computed extent");
+                }
+            }
+            // An Xformable BETWEEN the asset root and the provider used to
+            // warn here, because its transform was dropped. It is now
+            // composed at evaluation, by _ComposeInterveningXforms, so there
+            // is nothing left to report: placing a rig -- or one leg of an
+            // assembly -- under an Xform inside the asset is a supported
+            // shape, and warning ten times per compile about a configuration
+            // that works is noise nobody can act on.
+            //
+            // The check above it stays. An op authored on the PROVIDER is
+            // still not a transform authority, which is a different claim
+            // and still true.
+
+            // Hoisted out of the walk: the provider's own purpose is the
+            // same for every one of its descendants.
+            const TfToken providerPurpose = resolvedPurpose(prim);
+
+            // A provider's extent covers the guides beneath it, and only
+            // those. Authored geometry parented under one is invisible to
+            // it -- and to every ancestor, because UsdGeomBBoxCache stops
+            // descending at a Boundable -- so the gprim silently drops out
+            // of every bounding box in the scene.
+            for (const UsdPrim &descendant : UsdPrimRange(prim)) {
+                if (descendant == prim) {
+                    continue;
+                }
+                // A provider nested under a provider with a DIFFERENT
+                // resolved purpose is dropped from the ancestor's extent
+                // on purpose: one extent carries one purpose, and the
+                // bounding-box cache files it under the ancestor's. Nobody
+                // reading the namespace would guess that, so say it.
+                if (descendant.IsA<UsdGeomImageable>()) {
+                    const TfToken descendantPurpose =
+                        resolvedPurpose(descendant);
+                    if (!descendantPurpose.IsEmpty() &&
+                        !providerPurpose.IsEmpty() &&
+                        descendantPurpose != providerPurpose &&
+                        TfStringStartsWith(
+                            descendant.GetTypeName().GetString(),
+                            "RigExec")) {
+                        warn(descendant.GetTypeName().GetString() + " " +
+                             descendant.GetPath().GetString() +
+                             " has purpose '" +
+                             descendantPurpose.GetString() +
+                             "' but is nested under " +
+                             providerPath.GetString() + " whose purpose is '" +
+                             providerPurpose.GetString() +
+                             "'; one extent carries one purpose, so this "
+                             "provider is excluded from its ancestor's "
+                             "bounds");
+                    }
+                }
+                if (descendant.IsA<UsdGeomGprim>()) {
+                    warn("gprim " + descendant.GetPath().GetString() +
+                         " is parented under RigExec provider " +
+                         providerPath.GetString() +
+                         "; a provider's computed extent covers only the "
+                         "guides beneath it, and bounds stop descending at "
+                         "a Boundable, so this geometry is absent from "
+                         "every bounding box that should contain it");
+                }
+            }
+        }
+    }
+
+    std::map<SdfPath, SdfPath> newRibbonDriverPoints;
+    compileBlocks.Next("DiscoverValidate.AggregateProviders");
+    for (const UsdPrim &child : aggregateSolvers) {
+        // A ribbon's driver-curve points, resolved to the exact native
+        // attribute. This replaces the compiler's last authoring pass:
+        // the resolution is compiled state (rewiring the relationship is
+        // structural, and the epoch digest already treats it that way),
+        // and the values ride in as exec overrides at evaluation time.
+        if (child.GetTypeName() == "RigExecRibbon") {
+            SdfPathVector curves;
+            if (const UsdRelationship rel = child.GetRelationship(
+                    TfToken("rigExec:driverCurve"))) {
+                rel.GetTargets(&curves);
+            }
+            if (!curves.empty()) {
+                newRibbonDriverPoints[child.GetPath()] =
+                    curves[0].IsPrimPath()
+                        ? curves[0].AppendProperty(TfToken("points"))
+                        : curves[0];
+            }
+        }
+    }
 
     compileBlocks.Next("DiscoverValidate.MoverDiscovery");
     // Mover discovery: reverse-sibling post-order walk of the composed Movers
@@ -6232,8 +6574,12 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
             // channel property is now checked against what the operator
             // actually honors.
             if (orderHandler) {
-                const std::string who = record.schemaType.GetString() + " " +
-                                        prim.GetPath().GetString();
+                // Spelled only when a message needs it: this runs for every
+                // mover, and almost none of them has anything to report.
+                const auto who = [&record, &prim]() {
+                    return record.schemaType.GetString() + " " +
+                           prim.GetPath().GetAsString();
+                };
                 const auto authored = [&prim](const char *name) {
                     const UsdAttribute a = prim.GetAttribute(TfToken(name));
                     return a && a.HasAuthoredValue();
@@ -6244,7 +6590,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                 // of the schema, so an authored opinion would compose as a
                 // custom property and be ignored.
                 if (authored("inputs:weight")) {
-                    reportError(who +
+                    reportError(who() +
                                 " authors inputs:weight, which a constraint no"
                                 " longer has; the envelope is now"
                                 " inputs:defaultWeight");
@@ -6257,7 +6603,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                      {"inputs:affectX", "inputs:affectY", "inputs:affectZ"}) {
                     if (authored(legacyMask)) {
                         reportError(
-                            who + " authors " + legacyMask +
+                            who() + " authors " + legacyMask +
                             ", which named a different channel on every"
                             " operator; use the group-qualified spelling"
                             " (inputs:affectTranslation*, affectRotation* or"
@@ -6297,7 +6643,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                         continue;
                     }
                     reportError(
-                        who + " authors " + channel.name + ", which it does "
+                        who() + " authors " + channel.name + ", which it does "
                         "not honor; the operator writes a different channel "
                         "group" +
                         (orderHandler->offsetGroup == _ChannelGroup::None &&
@@ -6309,7 +6655,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
 
                 if (authored("rigExec:rotationOrder") &&
                     !orderHandler->usesRotationOrder) {
-                    reportError(who +
+                    reportError(who() +
                                 " authors rigExec:rotationOrder, which it does"
                                 " not honor; only the operators that compose a"
                                 " rotation read it");
@@ -6337,7 +6683,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                                                     TfToken("scale")};
                         if (value != expected) {
                             reportError(
-                                who +
+                                who() +
                                 " authors a non-default rigExec:preserve;"
                                 " only [\"origin\", \"scale\"] is"
                                 " implemented, which is the orientation-only"
@@ -6567,8 +6913,10 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     // this validation, the consumed-solver relaxation, the solver DAG and the
     // stack ordinal -- and it is a full UsdPrimRange over the rig each time
     // (critique: "_DiscoverAggregateSolvers is already walked three times").
-    const std::vector<UsdPrim> orderedSolvers =
-        _DiscoverAggregateSolvers(_stage, _rigPath);
+    // It is now walked once, with the providers, ahead of the exec lane's
+    // dispatch; nothing compile does authors to the stage after the derived
+    // start frames, so that walk is still the stage's answer here.
+    const std::vector<UsdPrim> &orderedSolvers = aggregateSolvers;
     // Solver -> its position in the SOLVER STACK ORDINAL: the reverse of the
     // composed pre-order of the whole rig, which is _GetMoverExecutionOrder's
     // rule (see the comment at its definition) applied to the solver set
@@ -8942,13 +9290,10 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     for (const auto &[provider, tap] : newFirstFramePoseFrames) seedPaths.push_back(provider);
     for (const SdfPath &provider : seedPaths) poseProviderClosure(provider);
     compileBlocks.Next("SolverSchedule.SolverBatches");
-    // A dynamic epoch prepares each solver batch as the loop below builds it,
-    // so it needs the exec lane from here. A baked one prepares none of them
-    // and joins later, where it first needs the lane back (see the exec lane
-    // at the warm-up's dispatch).
-    if (!deferExecPrep) {
-        joinExecLane();
-    }
+    // Neither kind of epoch needs the exec lane here. The loop below BUILDS
+    // the solver requests; a dynamic epoch prepares them only once the
+    // schedule stands, in PrepareRequests.SolverBatches, and a baked one
+    // never does (see the exec lane at the warm-up's dispatch).
     // ---- one exec request per run of a level --------------------------------
     //
     // Every exec request costs a fixed ~50-60 us before it computes anything
@@ -9118,18 +9463,19 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     constexpr size_t noRequest = std::numeric_limits<size_t>::max();
     size_t openRequest = noRequest;
     std::vector<_RequestFacts> openMembers;
-    // Prepared when the run closes rather than as each solver is built,
-    // because a follower adds its tap to the leader's set.
-    const auto closeRequest = [&]() -> bool {
-        if (openRequest == noRequest) return true;
-        _SolverBatch &leader = newSolverBatches[openRequest];
+    // Every request the loop closes, by its leader's index, in the order the
+    // loop closes them: the order a dynamic epoch prepares them in, once the
+    // schedule stands (PrepareRequests.SolverBatches). A request is complete
+    // when its run closes, because a follower adds its tap to the leader's
+    // set; nothing between here and that preparation reads a prepared one.
+    std::vector<size_t> closedRequests;
+    const auto closeRequest = [&]() {
+        if (openRequest == noRequest) return;
+        if (!deferExecPrep) {
+            closedRequests.push_back(openRequest);
+        }
         openRequest = noRequest;
         openMembers.clear();
-        return deferExecPrep ? true : execCall([&]() {
-            RIGEXEC_PROFILE_SCOPE_CAT(
-                _profiler, "TapPrepare solverBatch", "compile");
-            return leader.taps->Prepare();
-        });
     };
     size_t scheduledPose = 0;
     size_t poseLevel = 0;
@@ -9154,11 +9500,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
             if (constraintStep != constraintIndices.end()) {
                 // A constraint ends the run: nothing after it may share a
                 // request built before it ran.
-                if (!closeRequest()) {
-                    reportError("failed to prepare solver dependency level");
-                    restorePreviousEpoch();
-                    return false;
-                }
+                closeRequest();
                 newPoseSteps.push_back({false, constraintStep->second});
                 continue;
             }
@@ -9235,11 +9577,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
                 leader.followers.push_back(batchIndex);
                 openMembers.push_back(std::move(facts));
             } else {
-                if (!closeRequest()) {
-                    reportError("failed to prepare solver dependency level");
-                    restorePreviousEpoch();
-                    return false;
-                }
+                closeRequest();
                 batch.taps = std::make_unique<RigExecTapSet>(_stage);
                 batch.solvers[path] = batch.taps->Add(
                     RigExecValueAddress::Prim(path, _computePointFrameArray));
@@ -9256,11 +9594,7 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
             newSolverBatches.push_back(std::move(batch));
         }
         // The level ends the run as well.
-        if (!closeRequest()) {
-            reportError("failed to prepare solver dependency level");
-            restorePreviousEpoch();
-            return false;
-        }
+        closeRequest();
         scheduledPose += readyPose.size();
         std::vector<SdfPath> next;
         for (const SdfPath &path : readyPose) {
@@ -9446,6 +9780,8 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
     compileBlocks.Close();
     stampCompileRegion("Compile.SolverSchedule");
     compileBlocks.Next("PrepareRequests.ConnectedPoseTaps");
+    // Built here and prepared below, with the solver requests, once there is
+    // no stage work left to do beside the exec lane.
     std::map<SdfPath, std::set<SdfPath>> newPoseProviderInputs;
     std::map<SdfPath, std::unique_ptr<RigExecTapSet>> newConnectedPoseTaps;
     for (const auto &[provider, info] : newPoseInputInfo) {
@@ -9454,19 +9790,6 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
         if (info.connectedPose && !newJointBinding.count(provider)) {
             auto taps = std::make_unique<RigExecTapSet>(_stage);
             taps->Add(RigExecValueAddress::Prim(provider, _computePointFrame));
-            // A baked epoch's first exec call, when the rig has a connected
-            // pose provider at all; later iterations find the lane joined.
-            joinExecLane();
-            const bool connectedPrepared = execCall([&]() {
-                RIGEXEC_PROFILE_SCOPE_CAT(
-                    _profiler, "TapPrepare connected", "compile");
-                return taps->Prepare();
-            });
-            if (!connectedPrepared) {
-                reportError("failed to prepare connected pose provider " + provider.GetString());
-                restorePreviousEpoch();
-                return false;
-            }
             newConnectedPoseTaps[provider] = std::move(taps);
         }
     }
@@ -9538,6 +9861,52 @@ RigExecRigEvaluator::_CompileEpoch(std::vector<std::string> *errors)
             newFirstFramePoseRests[provider] = newFirstFramePoseTaps->Add(address);
         } else {
             newRestTapIds[provider] = newRestTaps->Add(address);
+        }
+    }
+
+    compileBlocks.Next("PrepareRequests.SolverBatches");
+    // THE FIRST EXEC CALLS OF AN EAGER EPOCH, and the lane join in front of
+    // them. Everything above this point is stage reading and bookkeeping --
+    // building the solver requests, the solver-input index, the frame
+    // chains, the provider seeds, the rest-channel scan -- and all of it
+    // used to sit behind the join, with the warm-up's tail idling the
+    // compiling thread in front of it. Now it runs beside the warm-up, and
+    // the join waits only for what is left of it.
+    //
+    // The preparations themselves are the ones the loop used to make as it
+    // went, in the order it made them: the solver requests in closing
+    // order, then the connected providers in path order, exactly as before.
+    // The one thing the move changes is precedence between two failures: a
+    // rig whose pose steps close a cycle AND whose requests would not
+    // prepare now reports the cycle, which the schedule finds first.
+    //
+    // A baked epoch prepares no solver request, and needs the lane here only
+    // for a connected provider.
+    if (!deferExecPrep || !newConnectedPoseTaps.empty()) {
+        joinExecLane();
+    }
+    for (const size_t request : closedRequests) {
+        const bool prepared = execCall([&]() {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "TapPrepare solverBatch", "compile");
+            return newSolverBatches[request].taps->Prepare();
+        });
+        if (!prepared) {
+            reportError("failed to prepare solver dependency level");
+            restorePreviousEpoch();
+            return false;
+        }
+    }
+    for (const auto &[provider, taps] : newConnectedPoseTaps) {
+        const bool connectedPrepared = execCall([&]() {
+            RIGEXEC_PROFILE_SCOPE_CAT(
+                _profiler, "TapPrepare connected", "compile");
+            return taps->Prepare();
+        });
+        if (!connectedPrepared) {
+            reportError("failed to prepare connected pose provider " + provider.GetString());
+            restorePreviousEpoch();
+            return false;
         }
     }
 
@@ -10352,7 +10721,9 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     std::vector<float> *weights, std::string *error,
     const std::vector<GfVec3f> *currentPoints) const
 {
-    const std::string who = prim.GetPath().GetString();
+    // Spelled only when an error needs it: this runs every time a volume
+    // weight is resolved, and a resolve that succeeds reports nothing.
+    const auto who = [&prim]() { return prim.GetPath().GetAsString(); };
     const TfToken typeName = prim.GetTypeName();
 
     // The composed field folds its inputs; it measures nothing itself.
@@ -10383,7 +10754,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
         } else if (modeName == "overlay") {
             mode = RigExecWeightCombine::Overlay;
         } else {
-            *error = who + ": unknown rigExec:combineMode " +
+            *error = who() + ": unknown rigExec:combineMode " +
                      modeName.GetString();
             return false;
         }
@@ -10401,7 +10772,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
             fields.push_back(std::move(field));
         }
         if (!RigExecCombineWeightFields(mode, fields, count, weights)) {
-            *error = who + ": combine inputs disagree on element count";
+            *error = who() + ": combine inputs disagree on element count";
             return false;
         }
         const float strength = _ResolvedRead(
@@ -10424,7 +10795,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     // the drift frameExtraction.h was created to prevent.
     const auto matrixIt = _volumeWeightMatrices.find(prim.GetPath());
     if (matrixIt == _volumeWeightMatrices.end()) {
-        *error = who + ": no resolved placement for this volume weight";
+        *error = who() + ": no resolved placement for this volume weight";
         return false;
     }
     // Scale and shear are removed so the field matches the rigid guide a
@@ -10433,7 +10804,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     GfMatrix4d rigid = matrixIt->second.RemoveScaleShear();
     const double det = rigid.GetDeterminant();
     if (!std::isfinite(det) || std::abs(det) < 1e-12) {
-        *error = who + ": degenerate volume placement";
+        *error = who() + ": degenerate volume placement";
         return false;
     }
     GfMatrix4d worldToLocal = rigid.GetInverse();
@@ -10446,7 +10817,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     }
     if (samplePhase == "current") {
         if (!currentPoints) {
-            *error = who +
+            *error = who() +
                      ": rigExec:samplePhase is `current` but no in-flight "
                      "points were supplied";
             return false;
@@ -10459,16 +10830,16 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
                                &samplePoints) &&
             !_ReadTargetPoints(prim, "rigExec:weightTarget", time,
                                &samplePoints)) {
-            *error = who + ": could not read the points to sample";
+            *error = who() + ": could not read the points to sample";
             return false;
         }
     } else {
-        *error = who + ": unknown rigExec:samplePhase " +
+        *error = who() + ": unknown rigExec:samplePhase " +
                  samplePhase.GetString();
         return false;
     }
     if (samplePoints.size() != count) {
-        *error = who + ": sampled point count does not match the target";
+        *error = who() + ": sampled point count does not match the target";
         return false;
     }
 
@@ -10491,7 +10862,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
         const int axisIndex =
             axis == "x" ? 0 : (axis == "y" ? 1 : (axis == "z" ? 2 : -1));
         if (axisIndex < 0) {
-            *error = who + ": unknown rigExec:planeAxis " + axis.GetString();
+            *error = who() + ": unknown rigExec:planeAxis " + axis.GetString();
             return false;
         }
         // Bounded clips the field to the in-plane rectangle. Mirrors
@@ -10510,7 +10881,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
             extent.extentV = readFloat("inputs:extentV", 1.0f);
             for (const float e : {extent.extentU, extent.extentV}) {
                 if (!std::isfinite(e) || e <= 0.0f) {
-                    *error = who +
+                    *error = who() +
                              ": inputs:extentU/V must be finite and positive "
                              "when rigExec:planeBounds is `bounded`";
                     return false;
@@ -10518,7 +10889,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
             }
             extentPtr = &extent;
         } else if (boundsMode != "unbounded") {
-            *error = who + ": unknown rigExec:planeBounds " +
+            *error = who() + ": unknown rigExec:planeBounds " +
                      boundsMode.GetString();
             return false;
         }
@@ -10534,7 +10905,7 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
     const float sz = readFloat("inputs:scaleZ", 1.0f);
     for (float s : {sx, sy, sz}) {
         if (!std::isfinite(s) || s <= 0.0f) {
-            *error = who + ": inputs:scaleX/Y/Z must be finite and positive";
+            *error = who() + ": inputs:scaleX/Y/Z must be finite and positive";
             return false;
         }
     }
@@ -10551,14 +10922,14 @@ RigExecRigEvaluator::_ResolveVolumeWeights(
         std::vector<GfVec3f> curvePoints;
         if (!_ReadTargetPoints(prim, "rigExec:curve", time, &curvePoints) ||
             curvePoints.empty()) {
-            *error = who + ": rigExec:curve must name exactly one points source";
+            *error = who() + ": rigExec:curve must name exactly one points source";
             return false;
         }
         RigExecCurveWeightField(
             samplePoints, curvePoints, worldToLocal, params, weights);
         return true;
     }
-    *error = who + ": not a volumetric weight object";
+    *error = who() + ": not a volumetric weight object";
     return false;
 }
 

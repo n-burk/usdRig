@@ -791,9 +791,11 @@ private:
     /// string, its own weight-object visiting set, its own profile region --
     /// so the three can run on three tasks, and the digest is the hash of
     /// their concatenation in this order, byte for byte the text one serial
-    /// walk over all three emits. The Solvers segment is never split further:
-    /// its cycle markers name the prim the walk was on when it closed a
-    /// cycle, so its bytes depend on walk order within it.
+    /// walk over all three emits. The Solvers segment's WALK is never split
+    /// further: its cycle markers name the prim the walk was on when it
+    /// closed a cycle, so its bytes depend on walk order within it. Its
+    /// reads are: they are prefetched per prim, in parallel, ahead of the
+    /// walk, which then only assembles them.
     enum _DigestSegment : unsigned {
         _DigestOutputSets = 1u << 0,
         _DigestSolvers = 1u << 1,
@@ -804,6 +806,11 @@ private:
         /// per-call read memo. The bytes are the same either way; this is
         /// what RIGEXEC_VERIFY_DIGEST_MEMO checks that against.
         _DigestUnmemoizedReads = 1u << 3,
+        /// Not a segment either: the call runs beside compile's own readers
+        /// of the stage, so the Solvers segment's read prefetch keeps to a
+        /// few lanes rather than the whole pool. It changes where the reads
+        /// run and nothing about the bytes.
+        _DigestBesideCompile = 1u << 4,
     };
     static constexpr size_t _DigestSegmentCount = 3;
     /// The prims one digest read outside the rig's namespace (unified-program

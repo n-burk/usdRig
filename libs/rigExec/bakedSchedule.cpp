@@ -6,6 +6,7 @@
 #include "bakedSchedule.h"
 
 #include "parallel.h"
+#include "pathText.h"
 #include "profiler.h"
 
 #include "pxr/base/tf/diagnostic.h"
@@ -832,7 +833,7 @@ SortRanges(std::vector<RigExecBakedSlotRange> *ranges)
 
 namespace {
 std::string StepLabel(const RigExecBakedProgramImpl &B,
-                      const RigExecBakedStep &step);
+                      const RigExecBakedStep &step, RigExecPathText &text);
 }  // namespace
 
 void
@@ -933,11 +934,15 @@ RigExecBakedBuildStepEdges(RigExecBakedProgramImpl *program,
     // step's list, extended by this pass, is the list one sweep over the
     // whole program would have built: every step this pass adds is later
     // than every successor the earlier pass recorded.
+    // One memo for the sweep: most steps name a path under a handful of
+    // prims, and SdfPath::GetString() would take a process-wide lock for
+    // each of them (see pathText.h).
+    RigExecPathText pathText;
     for (int index = first; index < int(B.steps.size()); ++index) {
         RigExecBakedStep &step = B.steps[size_t(index)];
         step.succs.clear();
         step.label = std::string(RigExecBakedStepKindName(step.kind)) + " " +
-                     StepLabel(B, step);
+                     StepLabel(B, step, pathText);
     }
     for (int index = first; index < int(B.steps.size()); ++index) {
         for (const int pred : B.steps[size_t(index)].preds) {
@@ -2286,7 +2291,8 @@ RigExecBakedStepTimingReport(RigExecBakedProgramImpl *program)
 namespace {
 
 std::string
-StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step)
+StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step,
+          RigExecPathText &text)
 {
     const auto revisionOf = [&B](int id) -> const
         RigExecBakedProgramImpl::GeomRevision & {
@@ -2295,10 +2301,10 @@ StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step)
     };
     switch (step.kind) {
     case RigExecBakedStepKind::ComposeSubtree:
-        return B.paths[size_t(B.composeGroups[size_t(step.object)].begin)]
-            .GetString();
+        return text(
+            B.paths[size_t(B.composeGroups[size_t(step.object)].begin)]);
     case RigExecBakedStepKind::Solve:
-        return B.solvers[size_t(step.object)].path.GetString();
+        return text(B.solvers[size_t(step.object)].path);
     case RigExecBakedStepKind::SolverCommit:
     case RigExecBakedStepKind::Constraint:
     case RigExecBakedStepKind::CommitDelta:
@@ -2307,31 +2313,29 @@ StepLabel(const RigExecBakedProgramImpl &B, const RigExecBakedStep &step)
         const RigExecBakedCommit &commit = B.commits[size_t(step.object)];
         return commit.moverPath.IsEmpty()
                    ? "batch " + std::to_string(step.object)
-                   : commit.moverPath.GetString();
+                   : text(commit.moverPath);
     }
     case RigExecBakedStepKind::ProviderMatrix:
-        return B.paths[size_t(step.object)].GetString() +
+        return text(B.paths[size_t(step.object)]) +
                (step.part ? " final" : " base");
     case RigExecBakedStepKind::SnapshotFinals:
         return "every provider";
     case RigExecBakedStepKind::PoseInterpolator:
-        return B.poseInterpolators[size_t(step.object)].path.GetString();
+        return text(B.poseInterpolators[size_t(step.object)].path);
     case RigExecBakedStepKind::VolumePlacements:
         return "every volume weight";
     case RigExecBakedStepKind::WeightPacket:
-        return B.weightObjects[size_t(step.object)].path.GetString();
+        return text(B.weightObjects[size_t(step.object)].path);
     case RigExecBakedStepKind::InfluenceFold:
     case RigExecBakedStepKind::RevisionStatic:
     case RigExecBakedStepKind::RevisionChunk:
     case RigExecBakedStepKind::RevisionFuse:
-        return revisionOf(step.object).moverPath.GetString();
+        return text(revisionOf(step.object).moverPath);
     case RigExecBakedStepKind::ChainStatus:
-        return B.chains[size_t(step.object)].target.GetString();
+        return text(B.chains[size_t(step.object)].target);
     case RigExecBakedStepKind::Derived: {
         const auto &[chain, derived] = B.derivedIndex[size_t(step.object)];
-        return B.chains[size_t(chain)]
-            .derived[size_t(derived)]
-            .target.GetString();
+        return text(B.chains[size_t(chain)].derived[size_t(derived)].target);
     }
     }
     return std::string();

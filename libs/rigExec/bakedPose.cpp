@@ -2401,7 +2401,9 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
         record();
         return;
     }
-    const std::string mover = commit->moverPath.GetString();
+    // Spelled only for a diagnostic: this runs on every commit of every
+    // frame, and a commit that propagates cleanly reports nothing.
+    const auto mover = [commit]() { return commit->moverPath.GetAsString(); };
     for (size_t k = 0; k < commit->propagate.size(); ++k) {
         const auto outcome = RigExecBakedPropagateOutcome(commit->outcome[k]);
         if (outcome == RigExecBakedPropagateOutcome::Staged ||
@@ -2419,18 +2421,18 @@ FinishCommit(RigExecBakedProgramImpl *program, RigExecBakedStep *step,
             return;
         case RigExecBakedPropagateOutcome::UnusableDescendant:
             step->diagnostics.push_back(
-                mover + " could not propagate its pose revision through " +
+                mover() + " could not propagate its pose revision through " +
                 B.paths[size_t(commit->propagate[k].first)].GetString() +
                 "; constraint passed through");
             break;
         case RigExecBakedPropagateOutcome::SingularDelta:
             step->diagnostics.push_back(
-                mover + " produced a singular hierarchy delta; constraint "
+                mover() + " produced a singular hierarchy delta; constraint "
                 "passed through");
             break;
         default:
             step->diagnostics.push_back(
-                mover + " produced an invalid descendant frame for " +
+                mover() + " produced an invalid descendant frame for " +
                 B.paths[size_t(commit->propagate[k].first)].GetString() +
                 "; constraint passed through");
             break;
